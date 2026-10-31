@@ -414,10 +414,10 @@ reason = "Scope carve-out bounding cnsprd.1; a permission, not an obligation."
 
 [[exempt]]
 corpus-id = "cnsprd"
-text = "Where the output has a content digest, the consumer binds to it under\nexplicit-binding-over-ambient-context, with size only supplementary; an unreadable required input fails\nunder check-fails-closed-on-unreadable."
-reason = "Cross-reference to the explicit-binding-over-ambient-context (expbnd) and check-fails-closed-on-unreadable (chkfcl) rules, which own binding and failure handling; this rule's obligation is the ordering in cnsprd.1 and cnsprd.2."
+text = "an unreadable required input fails\nunder check-fails-closed-on-unreadable."
+reason = "Cross-reference to the check-fails-closed-on-unreadable (chkfcl) rule, which owns failure on an absent or unusable required input; no obligation of its own."
 
 [[exempt]]
 corpus-id = "cnsprd"
-text = "A per-call hook cannot see sibling calls, so this ordering rests\non the author."
+text = "A per-call hook cannot see sibling calls, so this ordering rests\non the caller."
 reason = "Scope note on enforcement: states why a per-call hook cannot enforce cnsprd.1; no obligation of its own."

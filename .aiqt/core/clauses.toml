@@ -5981,8 +5981,8 @@ corpus-id = "cnsprd"
 source-path = ".aiqt/core/rules/integ-consumer-follows-its-producer.md"
 start-line = 13
 end-line = 15
-canonical-text = "A call that consumes another operation's output is issued only after the production it needs, including\nasynchronous work that production started, is observed complete, within one message and across\nmessages."
-source-digest = "2d1371247ade237c2c8f7c3d8c4e6ddc388edf9d786358a09fbfd9dabb9cf5d2"
+canonical-text = "A call that consumes another operation's output is issued only after the production it needs, including\nasynchronous work needed for that output, is observed complete, within one message and across\nmessages."
+source-digest = "74953e6518c0ee9d3c86299c7c725f533bcbb841e6539e6506ef8e495eeb82c5"
 
 [[clause]]
 clause-id = "cnsprd.2"
@@ -5991,4 +5991,13 @@ source-path = ".aiqt/core/rules/integ-consumer-follows-its-producer.md"
 start-line = 15
 end-line = 15
 canonical-text = "A delay or a presence test is not the ordering."
-source-digest = "2d1371247ade237c2c8f7c3d8c4e6ddc388edf9d786358a09fbfd9dabb9cf5d2"
+source-digest = "74953e6518c0ee9d3c86299c7c725f533bcbb841e6539e6506ef8e495eeb82c5"
+
+[[clause]]
+clause-id = "cnsprd.3"
+corpus-id = "cnsprd"
+source-path = ".aiqt/core/rules/integ-consumer-follows-its-producer.md"
+start-line = 18
+end-line = 19
+canonical-text = "Where the output has a content digest, the consumer binds to it under\nexplicit-binding-over-ambient-context, with size only supplementary;"
+source-digest = "74953e6518c0ee9d3c86299c7c725f533bcbb841e6539e6506ef8e495eeb82c5"
