@@ -461,6 +461,11 @@ ALLOWLIST = (
     ("tools/check_python_floor.py", "_rule_reverts", "code", 1,
      "self-test mutant: exec_module of a copy of this gate's own source with one rule removed"
      " from RULES; no external input"),
+    ("tools/check_python_launcher_isolation.py", "_load_mutant", "code", 1,
+     "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
+     " with one reviewed whole-line substitution from its fixed LAUNCHER_MUTANTS table, or the"
+     " unmutated copy as the control, written under the self-test's temporary directory; no"
+     " external input"),
     ("tools/check_python_host_pin.py", "_copy", "code", 1,
      "self-test mutant loader: exec_module of a copy, written under the self-test's temporary"
      " directory, of this gate's own source (read from __file__) with reviewed literal"
