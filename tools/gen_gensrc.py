@@ -243,7 +243,10 @@ def _canonical_target(target, kind, where):
     """Return the canonical POSIX-relative spelling of `target`, raising ValueError (naming `where`) if
     it is not already in that clean form. Rejects a backslash (a Windows separator), an absolute path, a
     '.' or '..' segment, a './' prefix, and redundant separators ('//'). A trailing '/' is allowed ONLY
-    on a tree target (it is the tree marker); on a file or block target it is rejected. Callers
+    on a tree target (it is the tree marker); on a file or block target it is rejected. A .working
+    component is rejected too: the OPF store tree is owned by the OPF deny hook, so this registry never
+    registers a store path. An OPF declared view lies outside .working (TODO.md, docs/STATUS.md) and is not
+    checked here (this tool does not read the OPF manifests), so a generator declaring one is accepted. Callers
     deduplicate on the SLASH-STRIPPED canonical body, so a file 'X' and a tree 'X/', and 'X' and './X',
     all collide."""
     if "\\" in target:
@@ -259,6 +262,10 @@ def _canonical_target(target, kind, where):
     if any(seg in ("", ".", "..") for seg in body.split("/")):
         raise ValueError("{}: target {!r} must be a clean POSIX-relative path (no './' prefix, '..', "
                          "or redundant '/')".format(where, target))
+    if ".working" in body.split("/"):
+        raise ValueError("{}: target {!r} has a .working component: an OPF store path is owned by the OPF deny "
+                         "hook (opf/enforcement/claude/pretooluse_deny.py), never by this registry"
+                         .format(where, target))
     return target
 
 
@@ -794,6 +801,15 @@ _DEEP_READS = {
 }
 
 
+# The OPF boundary (case t): a target with a .working component is an OPF store path, owned by the OPF deny
+# hook, and must fail closed (exit 2) so the registry never registers a store path.
+_FAKE_OPF_WORKING = '''# self-test: a target inside an OPF .working store
+GENSRC_OUTPUTS = (
+    {"target": "x/.working/TODO.md", "kind": "file",
+     "sources": ("src.txt",), "regenerate": "x"},
+)
+'''
+
 def _build_from(base, filename, text):
     """A synthetic repo whose only generator is `filename` carrying `text`, with the source it names and
     an empty .aiqt/ so reconcile can write the registry."""
@@ -1059,6 +1075,15 @@ def self_test_main():
                 failures.append("parser overflow: {} expected exit 2 naming {!r}, got {}".format(
                     label, _DEEP_CAUSE, rc))
 
+        # (t) The OPF boundary: a target with a .working component fails closed (exit 2) NAMING the component
+        #     and the target, so an unrelated exit 2 cannot pass this case; the OPF deny hook owns the store
+        #     tree, so the registry never registers a store path.
+        opfdir = tmp / "opfworking"
+        _build_from(opfdir, "gen_selftestopf.py", _FAKE_OPF_WORKING)
+        rc, err = run_stderr(opfdir, check=True)
+        if rc != 2 or ".working component" not in err or "x/.working/TODO.md" not in err:
+            failures.append("a .working target (x/.working/TODO.md) expected exit 2 naming the .working "
+                            "component (OPF boundary), got {} ({!r})".format(rc, err.strip()))
         # .aiqt/ above the registry symlinked outside the root fails closed (exit 2) in --check and write mode
         # with the registry there untouched; symlinked inside the root, it is read and the registry rewritten.
         failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _build_from(
@@ -1091,9 +1116,10 @@ def self_test_main():
           "computed or doubly bound roster, a self-declared scope, and every other binding of the roster or a "
           "name it uses) fails closed (exit 2); a roster name read through __doc__ or __name__, bound after the "
           "roster, or a dunder, a utf-7 cookie hiding a rebinding, a leading BOM and non-UTF-8 bytes fail closed "
-          "(exit 2), while a utf-8 cookie generates; and a parser stack overflow (a chain of 200,000 unary minus "
+          "(exit 2), while a utf-8 cookie generates; a parser stack overflow (a chain of 200,000 unary minus "
           "signs as tools/gen_hooks.py or another generator, a RecursionError injected into every parse and a "
-          "MemoryError into the byte parse alone) fails closed (exit 2) naming its cause"
+          "MemoryError into the byte parse alone) fails closed (exit 2) naming its cause; and a target with a "
+          ".working component (an OPF store path) fails closed (exit 2)"
           + note)
     return 0
 
