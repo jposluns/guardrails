@@ -2487,7 +2487,7 @@ def _census_mapping_check(root):
         result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
                                 capture_output=True, timeout=TIMEOUT * 4)
         err = result.stderr.decode("utf-8", "replace")
-        held = re.match(r"census-held (\d+)\n", err)
+        held = re.match(r"census-held (\d+)\n", err, re.ASCII)
         want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
                          + ": OSError(5, 'injected census read failure')")
         if result.returncode != 2 or not want or want not in err or "Traceback" in err:

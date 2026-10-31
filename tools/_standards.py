@@ -137,7 +137,9 @@ class Manifest:
                     "{}: field 'url' must be an https:// URL with a host".format(path.name))
         self.url = url
         try:
-            self.id_pattern = re.compile(_req_str(data, "id-pattern", path))
+            # ASCII: in a str pattern \d otherwise matches every Unicode digit, so "^CWE-\d+$" would
+            # fully match CWE- followed by Arabic-Indic or fullwidth digits.
+            self.id_pattern = re.compile(_req_str(data, "id-pattern", path), re.ASCII)
         except re.error as exc:
             raise ManifestError("{}: id-pattern is not a valid regex: {}".format(path.name, exc))
         rows = data.get("id")

@@ -346,7 +346,7 @@ def parse_iso_date(value: str) -> datetime.date | None:
     malformed-but-present field (a finding, under fail-loud semantics) from an
     absent one (a legitimate skip).
     """
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value, re.ASCII):
         return None
     try:
         return datetime.date.fromisoformat(value)
