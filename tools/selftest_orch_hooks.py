@@ -13463,6 +13463,36 @@ def _main_isolated(report_path=None):
               _verdict(bg("cat > a <<'A'\nit's\nA\njob &\ncat > b <<'B'\nit's\nB", rib=False)), "deny")
         check("trunc/fg-comment-shift-detach-denies",
               _verdict(bg('echo "$(echo "a" "b # ")" & job # "', rib=False)), "deny")
+        # A quoted here-document body a shell runs is code whatever spelling feeds it to the shell, and its
+        # bare `&` backgrounds a job in real bash. These bodies carry a bare `&` and NO apostrophe, so the
+        # scan reads the command to its end and the end-only lift (a body with a provable delimiter) would
+        # allow them; the consumer narrowing reads each body as code because its owner is not one simple
+        # cat, tee or git write, so they deny. Each row allows if the lift ignores the body's consumer.
+        check("trunc/fg-quoted-heredoc-shellfed-bare-amp-denies",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "bash <<'EOF'\nsleep 30 &\nEOF", "cat <<'EOF' | sh\nsleep 30 &\nEOF",
+                  "sh -s <<'EOF'\nsleep 30 &\nEOF", "dash <<'EOF'\nsleep 30 &\nEOF",
+                  "zsh <<'EOF'\nsleep 30 &\nEOF", "ksh <<'EOF'\nsleep 30 &\nEOF",
+                  "/bin/bash <<'EOF'\nsleep 30 &\nEOF", "env bash <<'EOF'\nsleep 30 &\nEOF",
+                  "cat <<'EOF' | while read l; do eval \"$l\"; done\nsleep 30 &\nEOF",
+                  "<<'EOF' bash\nsleep 30 &\nEOF", "bash \\\n<<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 11)
+        # The allowlisted consumers, with a bare `&` and no apostrophe in the body, still allow: one simple
+        # cat, tee or git command that writes the body to a file or its own output, and the commit-message
+        # form, none of which runs the body. Each row denies if the consumer check rejects the owner.
+        check("trunc/fg-quoted-heredoc-shellfed-allowlist-allows",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "cat <<'EOF'\nFix A & B\nEOF", "cat > /abs/f <<'EOF'\nFix A & B\nEOF",
+                  "tee /abs/f <<'EOF'\nFix A & B\nEOF", "git hash-object --stdin <<'EOF'\nFix A & B\nEOF",
+                  "git commit -m \"$(cat <<'EOF'\nFix A & B\nEOF\n)\"")],
+              ["allow"] * 5)
+        # NAMED COST (over-refusal restored): a quoted body read by a non-shell filter that is not cat, tee
+        # or git runs nothing, yet its bare `&` now denies, because the narrowing proves non-execution only
+        # for the allowlisted owners. Each row allows if the lift reads any body with a provable end.
+        check("trunc/fg-quoted-heredoc-nonshell-filter-overrefuses",
+              [_verdict(bg(v, rib=False)) for v in (
+                  "grep x <<'EOF'\nsleep 30 &\nEOF", "sort <<'EOF'\nsleep 30 &\nEOF")],
+              ["deny"] * 2)
         # Where the lexer refuses the command (an unquoted here-document, an open quote, a process
         # substitution, a here-string) the scan alone decides: its detach and open quote deny, and a
         # command it reads with no bare `&` allows.
