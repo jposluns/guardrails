@@ -22276,16 +22276,19 @@ def _orch_pending_haystack(reg, root):
     forge a row via the id-colon match). Returns None when no surface is declared or it is
     unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
     than demoting it to a definite actionable; FIX 1 DENIES the stop on that cannot-evaluate below the loop
-    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block."""
+    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block. The surface is
+    read by _orch_record_surface_read, so a FIFO, a device or a directory there is unreadable at once
+    rather than stalling the hook, and a file longer than _ORCH_BARRIER_MAX_BYTES is unreadable too,
+    since a truncated record could hide a decision row."""
     rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
     declared = _orch_path(root, rec.get("pending_decisions"))
     if not declared:
         return None
-    try:
-        with open(declared, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
+    data, detail = _orch_record_surface_read(declared)
+    if detail is not None or len(data) > _ORCH_BARRIER_MAX_BYTES:
         return None
+    # the newline translation a text-mode open applies, so a row after a CR or CRLF still starts a line
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _orch_attestation_refs(reg, root, staleness):
@@ -31528,20 +31531,113 @@ def _orch_resume_audit_findings(status, reg, root):
     return findings
 
 
+def _orch_record_value_kind(value):
+    """The kind of a registry value in plain words, for a cannot-evaluate finding: an empty string, null,
+    a boolean (tested before a number, since a JSON boolean is a Python int), a number, a list or an
+    object; never a Python type name."""
+    if isinstance(value, str):
+        return "an empty string" if not value else "a string"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "a list"
+    return "an object" if isinstance(value, dict) else "a value of another kind"
+
+
+def _orch_record_unusable(key, value):
+    """The finding for a record key that is present with a value _orch_path refuses. It names the key
+    and the value's kind, never the value itself, so a large value stays out of the text."""
+    return ("the registry declares record.{} with an unusable value ({}), not a non-empty path string: "
+            "cannot-evaluate".format(key, _orch_record_value_kind(value)))
+
+
+def _orch_record_block(reg):
+    """(record table, finding or None). An absent record block is ({}, None): nothing is declared. A
+    record block that is present and not a table (a list, a string, a number, a boolean or null) is
+    ({}, a cannot-evaluate finding naming the block and its kind), so it never reads as nothing to check."""
+    if "record" not in reg:
+        return ({}, None)
+    rec = reg["record"]
+    if isinstance(rec, dict):
+        return (rec, None)
+    return ({}, "the registry declares the record block as {}, not a table, so no record surface can be "
+                "probed: cannot-evaluate".format(_orch_record_value_kind(rec)))
+
+
+def _orch_record_surface_read(path):
+    """Read a declared record surface without waiting for a FIFO writer and without reading past the
+    bound: (data, None) with at most _ORCH_BARRIER_MAX_BYTES + 1 bytes, or (None, detail). The open is
+    os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead
+    of waiting for one; the opened descriptor is fstat'ed and anything not a regular file (a FIFO, a
+    device, a directory) is (None, "not a regular file") without a read; a UNIX socket fails the open
+    (ENXIO). The read asks for at most _ORCH_BARRIER_MAX_BYTES + 1 bytes in all, so a caller tells a file
+    longer than the bound by len(data) > _ORCH_BARRIER_MAX_BYTES and decides what that means for its
+    surface. A failed open (a missing file, a NUL character in the path), read or close is (None, its
+    text). The descriptor is closed exactly once on every path. Not bounded here: the path lookup can
+    stall on a hung mount, and a regular file on a stalled filesystem can stall the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:  # ValueError: a path with a NUL character
+        return (None, str(exc))
+    chunks, total, detail = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            detail = "not a regular file"
+        else:
+            while total <= _ORCH_BARRIER_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except OSError as exc:
+        detail = str(exc)
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            detail = detail or str(exc)
+    if detail is not None:
+        return (None, detail)
+    return (b"".join(chunks), None)
+
+
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
-    finding strings; empty means the recorded state matches observed reality."""
+    finding strings; empty means the recorded state matches observed reality. A record block that is
+    present and not a table is one cannot-evaluate finding (_orch_record_block). Each of handoff,
+    findings and pending_decisions that is present in the record with a value _orch_path refuses (an
+    empty string, null, a number, a boolean, a list or an object) is a cannot-evaluate finding naming the
+    key and the value's kind; an absent key is undeclared. Each declared surface is read by
+    _orch_record_surface_read: a FIFO, a device, a directory or anything else not a regular file is a
+    finding without a read, and no read takes more than _ORCH_BARRIER_MAX_BYTES + 1 bytes. A handoff
+    longer than the bound is a finding, since its Branch and Gate lines are parsed and a truncated handoff
+    cannot be judged; the findings register's content is parsed by _orch_merge_pending_findings, which
+    makes a longer register a finding there; pending_decisions is only required to be readable here, so a
+    longer regular file is no finding from this probe."""
     findings = []
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    rec, block_finding = _orch_record_block(reg)
+    if block_finding is not None:
+        findings.append(block_finding)
+    for key in ("handoff", "findings", "pending_decisions"):
+        if key in rec and _orch_path(root, rec[key]) is None:
+            findings.append(_orch_record_unusable(key, rec[key]))
     handoff_path = _orch_path(root, rec.get("handoff"))
     if handoff_path:
-        try:
-            with open(handoff_path, "r", encoding="utf-8", errors="replace") as fh:
-                handoff = fh.read()
-        except OSError as exc:
+        data, detail = _orch_record_surface_read(handoff_path)
+        if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+            detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+        if detail is not None:
             findings.append("declared handoff unreadable ({}): cannot-evaluate, the barrier holds"
-                            .format(exc))
+                            .format(detail))
             handoff = ""
+        else:
+            handoff = data.decode("utf-8", errors="replace")
         m = re.search(r"^Branch:\s*(\S+)\s*$", handoff, re.MULTILINE)
         if m:
             actual = _head_branch(root)
@@ -31563,12 +31659,10 @@ def _orch_resume_probes(reg, root):
     for key in ("findings", "pending_decisions"):
         path = _orch_path(root, rec.get(key))
         if path:
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    fh.read()
-            except OSError as exc:
+            _data, detail = _orch_record_surface_read(path)
+            if detail is not None:
                 findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
-                                .format(key, exc))
+                                .format(key, detail))
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     if lease:
         path = _orch_path(root, lease.get("path"))
@@ -31603,16 +31697,21 @@ def _orch_resume_probes(reg, root):
 def _orch_merge_pending_findings(reg, root):
     """The cheap in-hook layer of the record-drift check: an OPEN merge_pending row whose pr:N ref
     already has first-parent merge evidence is a divergence finding. tools/check_record_drift.py is
-    the authoritative gate; this probe only feeds the resume audit."""
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    the authoritative gate; this probe only feeds the resume audit. A record block that is not a table
+    and an unusable findings value are reported once, by _orch_resume_probes; here they declare nothing.
+    The register is read by _orch_record_surface_read; one that is not a regular file, cannot be read,
+    or is longer than _ORCH_BARRIER_MAX_BYTES is a cannot-evaluate finding, since a truncated register
+    could hide a merge_pending row."""
+    rec = _orch_record_block(reg)[0]
     path = _orch_path(root, rec.get("findings"))
     if not path:
         return []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError as exc:
-        return ["declared findings register unreadable ({}): cannot-evaluate".format(exc)]
+    data, detail = _orch_record_surface_read(path)
+    if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+        detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+    if detail is not None:
+        return ["declared findings register unreadable ({}): cannot-evaluate".format(detail)]
+    text = data.decode("utf-8", errors="replace")
     prs = set()
     for line in text.splitlines():
         if "merge_pending" in line:
