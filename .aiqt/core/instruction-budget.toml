@@ -87,12 +87,19 @@
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
 #                        it. When a queued fold lands, record its measured cost here against the 559-unit
 #                        estimate.
+#                        Raised 134991 -> 135248 on 2026-11-01 when session-resume-from-handoff gained its
+#                        sentence on reading a memory store's index before dispatching work and holding when
+#                        the memory path is missing or does not resolve to that store (sesres.3): measured
+#                        PACK 134422 -> 134679, rule files 117926 -> 118183 (+257 units); managed block 360
+#                        and file headers 16136 unchanged. The raise is exactly the measured delta, under the
+#                        maintainer's rule of 2026-10-31 for folds, so the headroom over measured PACK stays
+#                        569 units.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 134991
+ratchet = 135248
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

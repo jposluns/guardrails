@@ -31306,7 +31306,7 @@ def _orch_resume_probes(reg, root):
             if not sha or not sha.startswith(m.group(1)):
                 findings.append("handoff gate marker cites commit {} but HEAD is {}".format(
                     m.group(1), sha[:12] or "unreadable"))
-    for key in ("findings", "pending_decisions"):
+    for key in ("findings", "pending_decisions", "memory_index"):
         path = _orch_path(root, rec.get(key))
         if path:
             try:
@@ -31315,6 +31315,7 @@ def _orch_resume_probes(reg, root):
             except OSError as exc:
                 findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
                                 .format(key, exc))
+    findings.extend(_orch_memory_findings(rec, root))
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     if lease:
         path = _orch_path(root, lease.get("path"))
@@ -31343,6 +31344,40 @@ def _orch_resume_probes(reg, root):
     findings.extend(_orch_merge_pending_findings(reg, root))
     findings.extend(_orch_validate_attestations(reg, root))
     findings.extend(_orch_pending_artefact_findings(root))
+    return findings
+
+
+def _orch_memory_findings(rec, root):
+    """The memory-path probe of the resume audit. Where the registry's record block declares memory (the
+    path the session reads its project memory from) and memory_store (the store that path must reach), both
+    must resolve to directories and to the SAME directory by device and inode, so a link that is missing,
+    dangling or aimed elsewhere is a finding. An empty store is not a finding (a correctly linked new store
+    is empty); a store whose content did not come back, such as an unmounted mount point that still matches
+    by identity, is caught only through a declared memory_index, which the record-surface loop must read.
+    Declaring neither key removes the probe; declaring one alone is a finding."""
+    memory = _orch_path(root, rec.get("memory"))
+    store = _orch_path(root, rec.get("memory_store"))
+    if not memory and not store:
+        return []
+    if not memory or not store:
+        return ["the registry declares only one of record.memory and record.memory_store; declare both or "
+                "neither: cannot-evaluate"]
+    findings = []
+    ids = {}
+    for key, path in (("memory", memory), ("memory_store", store)):
+        try:
+            st = os.stat(path)
+        except OSError as exc:
+            findings.append("declared {} path {} cannot be resolved ({}): cannot-evaluate"
+                            .format(key, path, exc))
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            findings.append("declared {} path {} is not a directory: cannot-evaluate".format(key, path))
+            continue
+        ids[key] = (st.st_dev, st.st_ino)
+    if len(ids) == 2 and ids["memory"] != ids["memory_store"]:
+        findings.append("memory path {} resolves to {} but the declared store is {}"
+                        .format(memory, os.path.realpath(memory), store))
     return findings
 
 

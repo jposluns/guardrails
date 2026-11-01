@@ -11389,6 +11389,93 @@ def _oracle_defines_alias(calls):
                for argv in calls for i in range(len(argv)))
 
 
+def _resume_memory_cases(tmp):
+    """Component 5, the memory-path probe of the resume audit. A declared memory path that is a plain
+    directory, a dangling link, a link aimed elsewhere or a regular file, a link into a store whose declared
+    index is absent, and a declaration naming only one of memory and memory_store are each a finding, red
+    when _orch_resume_probes neither calls the probe nor reads memory_index. A link into an empty store with
+    no index declared, a store whose declared index exists, and a registry declaring no memory key stay
+    silent (the first-launch and no-store cases must not fire)."""
+    base = tmp / "resumemem"
+    base.mkdir()
+
+    def build(name, memory=True, store=True, index=False):
+        f = Fixture(base, name)
+        f.store = f.root / "store"
+        f.store.mkdir()
+        f.memory = f.root / "memory"
+        f.index = f.store / "INDEX.md"
+        reg_path = f.root / ".aiqt" / "orchestration.local.json"
+        f.reg = json.loads(reg_path.read_text(encoding="utf-8"))
+        if memory:
+            f.reg["record"]["memory"] = str(f.memory)
+        if store:
+            f.reg["record"]["memory_store"] = str(f.store)
+        if index:
+            f.reg["record"]["memory_index"] = str(f.index)
+        reg_path.write_text(json.dumps(f.reg), encoding="utf-8")
+        return f
+
+    def probes(f):
+        return aiqt_hooks._orch_resume_probes(f.reg, str(f.root))
+
+    pd = build("plaindir")
+    pd.memory.mkdir()
+    check("resume/memory-plain-dir-finding",
+          any(str(pd.memory) in fi and str(pd.store) in fi for fi in probes(pd)), True)
+    dl = build("dangling")
+    os.symlink(str(dl.root / "gone"), str(dl.memory))
+    check("resume/memory-dangling-link-finding",
+          any("cannot be resolved" in fi and str(dl.memory) in fi for fi in probes(dl)), True)
+    el = build("elsewhere")
+    (el.root / "other").mkdir()
+    os.symlink(str(el.root / "other"), str(el.memory))
+    check("resume/memory-link-elsewhere-finding",
+          any(str(el.root / "other") in fi and str(el.store) in fi for fi in probes(el)), True)
+    rf = build("regularfile")
+    rf.memory.write_text("", encoding="utf-8")
+    check("resume/memory-not-directory-finding",
+          any("is not a directory" in fi and str(rf.memory) in fi for fi in probes(rf)), True)
+    # the store's mount did not come back: the link resolves to the (empty) mount point, identities match,
+    # and only the declared index tells the empty point from the store
+    ix = build("indexabsent", index=True)
+    os.symlink(str(ix.store), str(ix.memory))
+    check("resume/memory-index-absent-finding",
+          any("memory_index unreadable" in fi for fi in probes(ix)), True)
+    ix.index.write_text("index\n", encoding="utf-8")
+    check("resume/memory-index-present-silent", probes(ix), [])
+    so = build("storeonly", memory=False)
+    check("resume/memory-store-only-finding",
+          any("declare both or neither" in fi for fi in probes(so)), True)
+    mo = build("memoryonly", store=False)
+    mo.memory.mkdir()
+    check("resume/memory-memory-only-finding",
+          any("declare both or neither" in fi for fi in probes(mo)), True)
+    fl = build("firstlaunch")
+    os.symlink(str(fl.store), str(fl.memory))
+    check("resume/memory-linked-empty-store-silent", (os.listdir(str(fl.store)), probes(fl)), ([], []))
+    nk = build("nokeys", memory=False, store=False)
+    check("resume/memory-undeclared-silent", probes(nk), [])
+
+    # end to end: the SessionStart audit warns and arms on the finding, and once the link is fixed both the
+    # audit and the finding list tools/orch_doctor.py --resume-audit writes from are clean
+    ee = build("endtoend")
+    ee.memory.mkdir()
+    ee_bar_path = Path(aiqt_hooks._orch_state_dir_for_root(str(ee.root))) / "resume-barrier.json"
+    ee_res = aiqt_hooks.orch_resume_audit(ee.payload("SessionStart"))
+    ee_bar = json.loads(ee_bar_path.read_text(encoding="utf-8"))
+    check("resume/memory-audit-warns-and-arms",
+          (_verdict(ee_res), ee_bar.get("active"),
+           any(str(ee.store) in fi for fi in ee_bar.get("findings") or [])), ("warn", True, True))
+    ee.memory.rmdir()
+    os.symlink(str(ee.store), str(ee.memory))
+    ee_res = aiqt_hooks.orch_resume_audit(ee.payload("SessionStart"))
+    ee_bar = json.loads(ee_bar_path.read_text(encoding="utf-8"))
+    check("resume/memory-fixed-audit-clears", (_verdict(ee_res), ee_bar.get("active")), ("allow", False))
+    check("resume/memory-fixed-doctor-list-empty",
+          aiqt_hooks._orch_resume_audit_findings("ok", ee.reg, str(ee.root)), [])
+
+
 def _gitalias_oracle_cases(tmp):
     """Differential oracle for the git-alias guards: for each corpus command, run real bash with a recording
     git fixture, then compare whether the argv git received defines an alias against each guard's verdict, and
@@ -15388,6 +15475,7 @@ def _main_isolated(report_path=None):
               _verdict(aiqt_hooks.orch_resume_barrier(r.payload(
                   "PreToolUse", "Write", {"file_path": str(r.findings),
                                           "content": "x"}))), "allow")
+        _resume_memory_cases(tmp)
 
         # ROUND 14, ATOMIC BARRIER WRITE: an armed barrier is seeded and a json.dump seam writes the first
         # ten characters of the barrier object, flushes, then raises ENOSPC. For an arming audit (a branch
