@@ -5292,6 +5292,10 @@ def _deadline_shape_rerun_failures():
     return out
 
 
+# What a countdown bounded by the test's own monotonic reads may differ by beyond them: setitimer's and
+# getitimer's microsecond rounding, and the microseconds between a window's clock read and its setitimer.
+_ITIMER_SLACK = 1e-3
+
 _DEADLINE_PAYLOAD = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                 "tool_input": {"command": "git status"}, "cwd": "/"})
 
@@ -5434,19 +5438,36 @@ def _deadline_restore_failures():
                    "delivered once and resume its period, got exit {}, fired {!r}, timer {!r}".format(
                        code, fired, after))
 
+    # The inner call's body reads the inner window's countdown, then sleeps far past any host stall, so
+    # only a deadline ends it: a sleep that returns means the outer deadline did not end the inner call, and
+    # a countdown that comes due after the outer window's means the inner window outlives it. Both hold
+    # whatever the host stalls, where a wall-clock bound on the whole run cannot tell a stall from either.
     outer = aiqt_hooks._DeadlineWindow(0.3)
-    began = time.monotonic()
+    seen, slept = [], []
+
+    def outlives(_data):
+        seen.append((time.monotonic(), signal.getitimer(signal.ITIMER_REAL)))
+        time.sleep(60.0)
+        slept.append(True)
+        return (0, None, None)
+
+    began = entered = time.monotonic()
     try:
         with outer:
-            with _stub_handler("diff_source_pretool", _sleeper(1.5)):
+            entered = time.monotonic()
+            with _stub_handler("diff_source_pretool", outlives):
                 caught = "returned {}".format(_main_run("diff_source_pretool")[0])
     except aiqt_hooks._HookDeadline as exc:
         caught = "outer" if exc.args[:1] == (outer,) else "another window"
     used = time.monotonic() - began
-    if (caught != "outer" or used >= 1.0 or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
+    # The outer countdown, armed before `entered`, has at most 0.3 s less the time since then left.
+    if (caught != "outer" or slept or len(seen) != 1
+            or not 0.0 < seen[0][1][0] <= 0.3 - (seen[0][0] - entered) + _ITIMER_SLACK
+            or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
             or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
-                   "the timer as found, got {} after {:.2f}s".format(caught, used))
+                   "the timer as found, got {} after {:.2f}s, inner countdown {!r}, sleep returned {}".format(
+                       caught, used, seen, bool(slept)))
     with aiqt_hooks._DeadlineWindow(5.0):
         with _stub_handler("diff_source_pretool", _sleeper(1.0)):
             code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
@@ -6909,19 +6930,35 @@ def _deadline_restore_fault_failures():
         fired.append(signum)
 
     def state():
-        return signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        """The disposition and timer, with the monotonic reads just before and just after them."""
+        began = time.monotonic()
+        seen = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        return seen, (began, time.monotonic())
 
-    def caller_back(handler, timer):
-        return handler is caller_alarm and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0
+    def ran_on(value, seconds, armed, read):
+        """A countdown of `seconds` armed between the reads `armed`, read as `value` between the reads
+        `read`, has run on by no less than the time from the end of the arming to the start of the read and
+        no more than the time from its start to the end of the read, so a host stall moves both bounds."""
+        return (seconds - (read[1] - armed[0]) - _ITIMER_SLACK <= value
+                <= seconds - (read[0] - armed[1]) + _ITIMER_SLACK)
 
-    def outer_back(handler, timer, outer):
-        return getattr(handler, "__self__", None) is outer and timer[1] == 0.0 and 599.0 < timer[0] <= 600.0
+    def caller_back(seen, read, armed, due):
+        # The caller's first expiry is 0.05 s after its arming when due, 30 s otherwise, then every 30 s.
+        handler, timer = seen
+        return (handler is caller_alarm and timer[1] == 30.0
+                and ran_on(timer[0], 30.05 if due else 30.0, armed, read))
 
-    def unchanged(before, after):
-        """The same disposition and timer, the countdown only run on (by less than 10 ms), not re-armed."""
+    def outer_back(seen, read, outer, armed):
+        handler, timer = seen
+        return (getattr(handler, "__self__", None) is outer and timer[1] == 0.0
+                and ran_on(timer[0], 600.0, armed, read))
+
+    def unchanged(before, before_read, after, after_read):
+        """The same disposition and timer, the countdown only run on by the time between the reads, not
+        re-armed."""
         (handler, (value, interval)), (handler_after, (value_after, interval_after)) = before, after
         return (handler == handler_after and interval == interval_after
-                and (value == value_after == 0.0 or 0.0 <= value - value_after < 0.01))
+                and (value == value_after == 0.0 or ran_on(value_after, value, before_read, after_read)))
 
     def wait_pending():
         waited = time.monotonic() + 1.0
@@ -6943,15 +6980,19 @@ def _deadline_restore_fault_failures():
             fired.clear()
             signal.signal(signal.SIGALRM, caller_alarm)
             signal.setitimer(signal.ITIMER_REAL, 0)
+            armed = (time.monotonic(),)
             if due or not nested:
                 signal.setitimer(signal.ITIMER_REAL, 0.05 if due else 30.0, 30.0)
+            armed += (time.monotonic(),)
             outer = aiqt_hooks._DeadlineWindow(600.0) if nested else contextlib.nullcontext()
             inner = aiqt_hooks._DeadlineWindow(0.2 if scenario == "expired" else 5.0)
             tracer, at = _window_tracer(inner, (lambda frame: frame.f_code is give_back, wait_pending))
             faulty = _FaultySignal(name, matches, times, after=after)
-            inside = armed_at_return = None
+            inside = inside_read = armed_at_return = None
+            outer_armed = (time.monotonic(),)
             try:
                 with outer:
+                    outer_armed += (time.monotonic(),)
                     try:
                         with inner:
                             aiqt_hooks.signal = faulty
@@ -6962,7 +7003,7 @@ def _deadline_restore_fault_failures():
                         sys.settrace(None)
                         aiqt_hooks.signal = signal
                         armed_at_return = inner.armed
-                        inside = state()
+                        inside, inside_read = state()
             except signal.ItimerError as exc:
                 escaped = str(exc)
             except aiqt_hooks._HookDeadline as exc:
@@ -6974,9 +7015,9 @@ def _deadline_restore_fault_failures():
             finally:
                 sys.settrace(None)
                 aiqt_hooks.signal = signal
-            first = state()
+            first, first_read = state()
             inner._give_back()
-            later, count = state(), len(fired)
+            (later, later_read), count = state(), len(fired)
             broken = getattr(inner, "broken", False) is True
             problems = []
             if scenario == "expired" and not at:
@@ -6986,23 +7027,28 @@ def _deadline_restore_fault_failures():
             if armed_at_return or inner.armed or broken != (times == 2) or (nested and outer.armed):
                 problems.append("inner armed {} at return from the with statement, broken {}".format(
                     armed_at_return, getattr(inner, "broken", None)))
-            if not unchanged(first, later):
-                problems.append("a later _give_back changed {!r} to {!r}".format(first, later))
+            if not unchanged(first, first_read, later, later_read):
+                problems.append("a later _give_back changed {!r} to {!r} in {:.6f}s".format(
+                    first, later, later_read[1] - first_read[0]))
             if due:
                 want_escaped = "the outer deadline" if nested and times == 1 else want
                 want_count = 0 if times == 2 and not nested else 1
-                if escaped != want_escaped or count != want_count or not caller_back(*first):
-                    problems.append("escaped {!r}, deliveries {}, state {!r}".format(escaped, count, first))
+                if (escaped != want_escaped or count != want_count
+                        or not caller_back(first, first_read, armed, due)):
+                    problems.append("escaped {!r}, deliveries {}, state {!r} {:.6f}s after the caller's "
+                                    "arming".format(escaped, count, first, first_read[1] - armed[0]))
             else:
                 if escaped != want or count:
                     problems.append("escaped {!r}, deliveries {}".format(escaped, count))
                 if nested:
-                    if times == 1 and not outer_back(*inside, outer):
-                        problems.append("inside the outer window {!r}".format(inside))
+                    if times == 1 and not outer_back(inside, inside_read, outer, outer_armed):
+                        problems.append("inside the outer window {!r} {:.6f}s after its arming".format(
+                            inside, inside_read[1] - outer_armed[0]))
                     if first != (caller_alarm, (0.0, 0.0)):
                         problems.append("after the outer window {!r}".format(first))
-                elif times == 1 and not caller_back(*first):
-                    problems.append("caller left {!r}".format(first))
+                elif times == 1 and not caller_back(first, first_read, armed, due):
+                    problems.append("caller left {!r} {:.6f}s after its arming".format(
+                        first, first_read[1] - armed[0]))
             if problems:
                 out.append("{} {}".format(case, "; ".join(problems)))
     finally:
