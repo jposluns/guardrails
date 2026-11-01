@@ -77,8 +77,9 @@
 # probe makes all 12 reads (11 re-reads) and exits 2 (before the probe read the associated pull
 # requests, each of the three was refused at once, exit 1).
 # Report-once (no --wait) never returns 0 for a non-terminal run.
-# Once the rev resolves, the first output line is "COMMIT: " and the full id of the commit every read
-# below is of (see the resolution below).
+# Once the rev resolves, the first output line is "COMMIT: " and the full id of the commit the caller's
+# rev resolved to, the commit whose runs (or, under --match-tree, whose tree) are checked; other reads
+# can name other commits (--match-tree reads candidate commits through the API). See the resolution below.
 set -uo pipefail
 
 # Resolve whatever rev was given (short SHA, branch, tag, HEAD~1) to a FULL 40-character
@@ -227,19 +228,38 @@ if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ] && [ "$REQUIRE_BASE_SET" -ne 1 ]; then
 fi
 # Every commit id the script is given, the positional rev or the --head value, becomes SHA here and
 # nowhere else. An id that does not name exactly one commit in this checkout is refused (exit 2, cannot
-# evaluate): when the ids of more than one object start with a short id, git refuses it as ambiguous,
-# and the refusal says so. A unique short id can still name the wrong commit (one typed, or extended
-# from memory, that happens to match another commit), which nothing here can tell, so the full id used
-# is printed as the first output line, for the caller to compare with the commit it meant. A commit
-# absent from this checkout, a full 40-character id included, does not resolve and is refused the same
-# way: this script reads only commits present locally (it reads the committer date below).
+# evaluate). git asks for a commit here (the ^{commit} suffix), so a short id that starts the id of one
+# commit and the ids of objects of other types (blobs, trees) is read as that commit, not refused. A hex
+# rev that is also a branch or tag name names that ref's commit, never a commit whose id starts with it
+# (git's own rule). A unique short id can still name the wrong commit (one typed, or extended from
+# memory, that happens to match another commit), which nothing here can tell, so the full id used is
+# printed as the first output line, for the caller to compare with the commit it meant. A commit absent
+# from this checkout, a full 40-character id included, does not resolve and is refused the same way: the
+# caller's rev is resolved only against this checkout's objects (its committer date is read below).
+# When the rev is refused and begins with four or more hex digits, alone or followed by a ~ or ^ suffix,
+# the refusal names its cause from the objects whose ids start with those digits: more than one that
+# peels to a commit (a commit, or a tag of one) is ambiguous; one or more objects, none of which peels to
+# a commit, means no commit id starts with them; anything else does not resolve.
 if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
-  if [[ "$SHA_IN" =~ ^[0123456789abcdefABCDEF]{4,}$ ]] &&
-      [[ "$(git rev-parse --disambiguate="$SHA_IN" 2>/dev/null)" == *$'\n'* ]]; then
-    printf 'ERROR: cannot evaluate: %s is ambiguous: the ids of more than one object in this repository start with it, so it names no single commit; give a longer or the full commit id.\n' "${SHA_IN}" >&2
-  else
-    printf 'ERROR: cannot evaluate: %s does not resolve to a commit in this repository.\n' "${SHA_IN}" >&2
+  REV_CAUSE="does not resolve to a commit in this repository."
+  if [[ "$SHA_IN" =~ ^([0123456789abcdefABCDEF]{4,})([~^].*)?$ ]]; then
+    REV_PREFIX="${BASH_REMATCH[1]}"
+    mapfile -t REV_CANDIDATES < <(git rev-parse --disambiguate="$REV_PREFIX" 2>/dev/null)
+    REV_COMMITS=0
+    if [ "${#REV_CANDIDATES[@]}" -ne 0 ]; then
+      while IFS= read -r candidate_type; do
+        if [ "$candidate_type" = "commit" ]; then
+          REV_COMMITS=$((REV_COMMITS + 1))
+        fi
+      done < <(printf '%s^{commit}\n' "${REV_CANDIDATES[@]}" | git cat-file --batch-check='%(objecttype)' 2>/dev/null)
+    fi
+    if [ "$REV_COMMITS" -gt 1 ]; then
+      REV_CAUSE="is ambiguous: the ids of more than one commit (or tag of a commit) in this repository start with ${REV_PREFIX}, so it names no single commit; give a longer or the full commit id."
+    elif [ "$REV_COMMITS" -eq 0 ] && [ "${#REV_CANDIDATES[@]}" -ne 0 ]; then
+      REV_CAUSE="does not resolve to a commit in this repository: no commit id starts with ${REV_PREFIX}, only the ids of objects of other types."
+    fi
   fi
+  printf 'ERROR: cannot evaluate: %s %s\n' "${SHA_IN}" "$REV_CAUSE" >&2
   exit 2
 fi
 printf 'COMMIT: %s\n' "$SHA"

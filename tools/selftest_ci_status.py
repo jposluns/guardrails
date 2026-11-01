@@ -612,8 +612,9 @@ class Fixture:
     def ambiguous_commits(self):
         # Two commit objects beside HEAD whose ids share their first four hex digits, the shortest
         # prefix git reads as a short id. The ids are computed here in the repository's own object
-        # format until two share a prefix (65,537 distinct prefixes cannot all differ), then written
-        # with git, which must return the same ids. Returns the shared prefix and the written ids.
+        # format until two share a prefix (65,537 ids cannot all have different four-digit prefixes, as
+        # only 65,536 exist), then written with git, which must return the same ids. Returns the shared
+        # prefix and the written ids.
         def git(*args, stdin=None):
             return subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + list(args),
                                   input=stdin, check=True, capture_output=True, text=True,
@@ -634,6 +635,40 @@ class Fixture:
             seen[oid[:4]] = body
         written = [git("hash-object", "-t", "commit", "-w", "--stdin", stdin=body) for body in bodies]
         return written[0][:4], written
+
+    def prefix_pair(self, kinds):
+        # Two objects of the given kinds ("commit" or "blob") whose ids share a four-digit prefix that
+        # no object already in the repository has, computed as ambiguous_commits does and then written
+        # with git. Returns the shared prefix and the written ids, in the order of kinds.
+        def git(*args, stdin=None):
+            return subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + list(args),
+                                  input=stdin, check=True, capture_output=True, text=True,
+                                  timeout=30, env=self.base_env).stdout.strip()
+        object_format = git("rev-parse", "--show-object-format")
+        tree = git("rev-parse", "HEAD^{tree}")
+        parent = git("rev-parse", "HEAD")
+        taken = {line[:4] for line in git("cat-file", "--batch-all-objects",
+                                          "--batch-check=%(objectname)").splitlines()}
+        seen = [{}, {}]
+        for index in range(1 << 20):
+            for slot, kind in enumerate(kinds):
+                if kind == "commit":
+                    body = ("tree {}\nparent {}\nauthor Selftest <selftest@example.invalid> {} +0000\n"
+                            "committer Selftest <selftest@example.invalid> {} +0000\n\npair {} {}\n"
+                            ).format(tree, parent, COMMIT_TIME, COMMIT_TIME, slot, index)
+                else:
+                    body = "pair {} {}\n".format(slot, index)
+                raw = body.encode("utf-8")
+                prefix = hashlib.new(object_format, b"%s %d\0" % (kind.encode("ascii"), len(raw))
+                                     + raw).hexdigest()[:4]
+                other = seen[1 - slot]
+                if prefix not in taken and prefix in other:
+                    bodies = [other[prefix], body] if slot == 1 else [body, other[prefix]]
+                    written = [git("hash-object", "-t", kinds[number], "-w", "--stdin",
+                                   stdin=bodies[number]) for number in (0, 1)]
+                    return written[0][:4], written
+                seen[slot].setdefault(prefix, body)
+        raise RuntimeError("no shared prefix found")
 
     def gh_reads(self, prefix):
         # How many gh calls of the last invocation read an endpoint of the fixture repository starting
@@ -1679,6 +1714,78 @@ def _run_checks():
         printed.append((rc, output.splitlines()[:1], " of {} was found".format(head_sha) in output))
         check("ci/rev-short-id-prints-full-id", printed,
               [(0, ["COMMIT: " + head_sha], 1), (1, ["COMMIT: " + head_sha], True)])
+
+        # An ambiguous short id followed by a suffix (~0, ^{commit}) is refused as ambiguous, naming
+        # the short id, not as a rev that does not resolve.
+        suffixed = []
+        for suffix in ("~0", "^{commit}"):
+            for rev, extra in ((prefix + suffix, ()), (None, ("--match-tree", "--head", prefix + suffix))):
+                rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                    extra_args=extra, tree=tree_listing([], {}))
+                suffixed.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                 "ERROR: cannot evaluate: {}{} is ambiguous: the ids of more than one "
+                                 "commit (or tag of a commit) in this repository start with {}, so it "
+                                 "names no single commit".format(prefix, suffix, prefix) in output,
+                                 "does not resolve" in output))
+        check("ci/rev-ambiguous-suffixed-id-refused", suffixed, [(2, True, False, True, False)] * 4)
+
+        # A short id that only objects of other types (here two blobs) start with names no commit: it
+        # is refused (exit 2) with that cause, and no advice to give a longer id.
+        blob_prefix, blobs = fixture.prefix_pair(("blob", "blob"))
+        no_commit = [(len(set(blobs)), all(oid.startswith(blob_prefix) for oid in blobs))]
+        for rev, extra in ((blob_prefix, ()), (None, ("--match-tree", "--head", blob_prefix)),
+                           (blob_prefix + "~0", ())):
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                extra_args=extra, tree=tree_listing([], {}))
+            no_commit.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                              "ERROR: cannot evaluate: {} does not resolve to a commit in this "
+                              "repository: no commit id starts with {}, only the ids of objects of "
+                              "other types.".format(rev or blob_prefix, blob_prefix) in output,
+                              "ambiguous: the ids" in output, "longer" in output))
+        check("ci/rev-prefix-of-no-commit-refused", no_commit,
+              [(2, True)] + [(2, True, False, True, False, False)] * 3)
+
+        # A short id that one commit and one blob start with reads as that commit (git asks for a
+        # commit), positionally and through --head, bare and with a suffix.
+        mixed_prefix, mixed = fixture.prefix_pair(("commit", "blob"))
+        mixed_reads = [(mixed[0] != mixed[1], all(oid.startswith(mixed_prefix) for oid in mixed))]
+        for rev, extra in ((None, ("--match-tree", "--head", mixed_prefix)),
+                           (None, ("--match-tree", "--head", mixed_prefix + "~0"))):
+            rc, output, _calls = fixture.invoke([], rev=rev, extra_args=extra, tree=tree_listing([], {}))
+            mixed_reads.append((rc, output.splitlines()[:1]))
+        rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=mixed_prefix)
+        mixed_reads.append((output.splitlines()[:1],
+                            fixture.gh_reads("actions/runs?head_sha={}&".format(mixed[0])) >= 1))
+        check("ci/rev-commit-and-blob-prefix-reads-commit", mixed_reads,
+              [(True, True), (1, ["COMMIT: " + mixed[0]]), (1, ["COMMIT: " + mixed[0]]),
+               (["COMMIT: " + mixed[0]], True)])
+
+        # A hex rev that is also a branch name names the branch's commit, not the commit whose id it
+        # starts (git's own rule); the COMMIT: line shows which.
+        hidden = written[0]
+        branch = hidden[:8]
+        subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE + ["branch", branch, head_sha],
+                       check=True, capture_output=True, timeout=30, env=fixture.base_env)
+        try:
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=branch)
+        finally:
+            subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE + ["branch", "-D", branch],
+                           check=True, capture_output=True, timeout=30, env=fixture.base_env)
+        check("ci/rev-hex-branch-names-branch-commit",
+              (hidden != head_sha, rc, output.splitlines()[:1]), (True, 0, ["COMMIT: " + head_sha]))
+
+        # The COMMIT: line is the first output line under --wait too, and it is printed before a
+        # refusal that comes after the resolution (here no origin remote, exit 2).
+        commit_first = []
+        rc, output, calls = fixture.invoke([[page([success_a, success_b])]] * 6, wait=True,
+                                           rev=head_sha[:8])
+        commit_first.append((rc, output.splitlines()[:1]))
+        rc, output, calls = fixture.invoke([[page([success_a, success_b])]], rev=head_sha[:8],
+                                           git_remote=("", 2))
+        commit_first.append((rc, output.splitlines()[:1], calls,
+                             "ERROR: cannot evaluate: this checkout has no origin remote" in output))
+        check("ci/rev-commit-line-first-under-wait-and-later-refusal", commit_first,
+              [(0, ["COMMIT: " + head_sha]), (2, ["COMMIT: " + head_sha], 0, True)])
 
         if program is None:
             harness_error("ci/jq-step-direct-cases", "no jq program was extracted")
