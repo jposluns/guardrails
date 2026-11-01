@@ -910,11 +910,13 @@ def _init_route_violations(source):
 def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
     """Plain `opf init` on homes generation 2 (spec 4.2), driven in process with both tooling gates
     raised inside each vector (SUPPORTED_HOMES 2, SUPPORTED_SPEC_VERSION at IMPORTED_SPEC_VERSION) and
-    restored in a finally. The homes .gitignore inspection refuses the fixture's GIT_CONFIG_GLOBAL and
-    GIT_CONFIG_SYSTEM overrides, so those two are unset around each raised vector. The last vector
-    pins the shipped constants: the payload names, their order and their bytes are the ones the
-    per-document builders (build_manifest, build_counters, build_version, build_worklog and
-    build_index) produced before the shared bootstrap builder."""
+    restored in a finally. While they are raised, the spec 16.1 runtime check of a verb run through
+    opf.main reads the declaration the raised build ships (opf._running_build_declaration), not the
+    installed one, which declares the shipped constants. The homes .gitignore inspection refuses the
+    fixture's GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM overrides, so those two are unset around each
+    raised vector. The last vector pins the shipped constants: the payload names, their order and
+    their bytes are the ones the per-document builders (build_manifest, build_counters,
+    build_version, build_worklog and build_index) produced before the shared bootstrap builder."""
     import tomllib
     from unittest import mock
     import _opf_check
@@ -936,7 +938,8 @@ def _gen2_cli_vectors(check, make_git, git_call, fd_capture, inert):
         _opf_store.SUPPORTED_HOMES = 2
         _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
         try:
-            yield
+            with opf._running_build_declaration():
+                yield
         finally:
             _opf_store.SUPPORTED_HOMES, _opf_store.SUPPORTED_SPEC_VERSION = saved
             for key, value in env.items():
