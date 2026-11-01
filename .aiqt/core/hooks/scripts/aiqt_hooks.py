@@ -6078,7 +6078,9 @@ _CAB_GIT_DASH_VERBS = frozenset(("merge", "cherry-pick", "rebase", "revert"))
 _CAB_PICK_FLAGS = {"cherry-pick": frozenset("nersx"), "revert": frozenset("ners")}
 _CAB_PICK_VALUE_FLAGS = frozenset("mX")
 _CAB_PICK_MODES = frozenset(("quit", "continue", "abort", "skip"))
-# The help words their option reader takes before any '--': git prints the usage and replays nothing.
+# The help words, passed over where this reading takes one as a whole word before any '--': git prints the
+# usage and replays nothing, but the reading can take a help word from a comment, a here-document body or
+# de-quoted text that git never receives, so a help word drops no revision read before or after it.
 _CAB_PICK_HELP = frozenset(("-h", "--help"))
 _CAB_PICK_COMMON = {name: False for name in (
     "no-commit", "commit", "edit", "no-edit", "signoff", "no-signoff", "no-mainline", "rerere-autoupdate",
@@ -6827,7 +6829,11 @@ def _cab_pick_revs(verb, args):
     drops it and the revision reader still reads the words after it). Every other option word refuses the
     stage (why), since git hands it to the revision reader, where it may name or select the commits replayed
     (--all, --branches, --no-merges, -1). A '-' operand is the previous branch (@{-1}); with --quit,
-    --continue, --abort or --skip, or -h or --help before any '--', git takes no revision."""
+    --continue, --abort or --skip git takes no revision. A -h or --help read as a whole word before any '--'
+    is passed over and drops no revision: git prints its usage and replays nothing, but this reading can take
+    a help word from a comment, a here-document body or de-quoted text that git never receives, so every
+    revision read before or after one still counts (a bare help call reads none; a help word beside a
+    revision whose message holds the token is an over-denial)."""
     flags, long_names = _CAB_PICK_FLAGS[verb], _CAB_PICK_LONG[verb]
     revs, j, ended, dashed = [], 0, False, False
     while j < len(args):
@@ -6840,7 +6846,7 @@ def _cab_pick_revs(verb, args):
         elif word == "--end-of-options":
             ended = True
         elif word in _CAB_PICK_HELP and not dashed:
-            return [], None
+            pass
         elif word == "--":
             dashed = True
         elif word.startswith("--"):

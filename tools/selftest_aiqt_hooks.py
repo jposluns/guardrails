@@ -2512,8 +2512,8 @@ def _test_coauthor_replay(failures, base):
     away that lands nothing and must allow. Each row is decided again under a flip that restores the drop
     or misreading it pins (a revision holding a blank dropped, one past the length bound or starting with '-'
     dropped, the --stdin text split at blanks or its '-' lines dropped, an unknown git cherry-pick option word
-    skipped, a git rebase option read with no value, --root read as <upstream>), where the deny vector must
-    allow and the twin still allow."""
+    skipped, a help word dropping every revision read, a git rebase option read with no value, --root read as
+    <upstream>), where the deny vector must allow and the twin still allow."""
     root = base / "replay"
     root.mkdir(parents=True, exist_ok=True)
     land_env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
@@ -2524,7 +2524,9 @@ def _test_coauthor_replay(failures, base):
     def fixture():
         """A fresh repository on main (init, add m), whose branches and refs (none with an upstream) hold
         the token message (plain-dirty, -dirty, nb<U+00A0>dirty: 'add d') or a clean one (plain-clean,
-        -clean, nb<U+00A0>clean: 'add c'), each branched from init."""
+        -clean, nb<U+00A0>clean: 'add c'), each branched from init; two further branches from main hold one
+        commit whose SUBJECT holds the token (subject-dirty, which a git revert reads and replays) or a
+        clean one (subject-clean), each off main so no read that walks main or HEAD sees the token."""
         seq[0] += 1
         repo = root / "r{}".format(seq[0])
         repo.mkdir()
@@ -2543,6 +2545,13 @@ def _test_coauthor_replay(failures, base):
         (repo / "m.txt").write_text("m\n", encoding="utf-8")
         _git(repo, "add", "m.txt")
         _git(repo, "commit", "-q", "-m", "add m", env_identity=True)
+        for kind, subject, fname in (("dirty", "add s " + _CAB_UC + ": Claude <c@x>", "s.txt"),
+                                     ("clean", "add t", "t.txt")):
+            _git(repo, "checkout", "-q", "-b", "subject-" + kind, "main")
+            (repo / fname).write_text(kind + "\n", encoding="utf-8")
+            _git(repo, "add", fname)
+            _git(repo, "commit", "-q", "-m", subject, env_identity=True)
+        _git(repo, "checkout", "-q", "main")
         return repo
 
     def lands(command):
@@ -2594,6 +2603,18 @@ def _test_coauthor_replay(failures, base):
             return ["HEAD"], walk, why
         return revs, walk, why
 
+    def help_drops_all(verb, args):
+        """The drop restored: a -h or --help word before any '--' returns no revisions at all, so a help
+        word this reading takes from a comment, a here-document body or de-quoted text that git never
+        receives (git runs the command and replays) drops every revision read."""
+        dashed = False
+        for word in args:
+            if word == "--":
+                dashed = True
+            elif word in aiqt_hooks._CAB_PICK_HELP and not dashed:
+                return [], None
+        return pick_of(verb, args)
+
     blank = dropping(lambda rev: re.search(r"\s", rev))
     stdin_split = {"_cab_stdin_lines": split_stdin}
     long_rev = "~0" * 520
@@ -2636,6 +2657,39 @@ def _test_coauthor_replay(failures, base):
          {"_CAB_REBASE_VALUE_LONG": (), "_CAB_REBASE_VALUE_FLAGS": frozenset()}),
         ("cab-replay-rebase-root", "git rebase -f --root plain-dirty", "git rebase -f --root plain-clean",
          {"_cab_replay_revs": root_as_upstream}),
+        # A help word only the hook reads (a # comment kept as words, a here-document body, de-quoted text):
+        # real git never receives it, runs the replay and lands the token, so a help word must drop no
+        # revision already read or read after it. The flip restores the drop of every revision.
+        ("cab-replay-help-comment", "git cherry-pick plain-dirty # -h",
+         "git cherry-pick plain-clean # -h", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-word", "git cherry-pick plain-dirty #see -h",
+         "git cherry-pick plain-clean #see -h", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-long", "git cherry-pick plain-dirty # --help",
+         "git cherry-pick plain-clean # --help", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-tab", "git cherry-pick plain-dirty\t# -h",
+         "git cherry-pick plain-clean\t# -h", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-redirect", "git cherry-pick plain-dirty 2>&1 >/dev/null # -h",
+         "git cherry-pick plain-clean 2>&1 >/dev/null # -h", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-newline", "git cherry-pick plain-dirty # -h\necho done",
+         "git cherry-pick plain-clean # -h\necho done", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-continued", "git cherry-pick plain-dirty \\\n # -h",
+         "git cherry-pick plain-clean \\\n # -h", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-chdir", "git -C . cherry-pick plain-dirty # -h",
+         "git -C . cherry-pick plain-clean # -h", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-range", "git cherry-pick main..plain-dirty # -h",
+         "git cherry-pick main..plain-clean # -h", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-comment-quote", "git cherry-pick plain-dirty # it's -h",
+         "git cherry-pick plain-clean # it's -h", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-heredoc", "git cherry-pick plain-dirty <<EOF # -h\nbody\nEOF",
+         "git cherry-pick plain-clean <<EOF # -h\nbody\nEOF", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-quoted-target", "git cherry-pick plain-dirty 2>\"e -h\" # it's",
+         "git cherry-pick plain-clean 2>\"e -h\" # it's", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-quoted-target-heredoc", "git cherry-pick plain-dirty 2>\"e -h\" <<EOF\nit's\nEOF",
+         "git cherry-pick plain-clean 2>\"e -h\" <<EOF\nit's\nEOF", {"_cab_pick_revs": help_drops_all}),
+        ("cab-replay-help-revert-subject",
+         "git checkout -q subject-dirty\ngit revert --no-edit subject-dirty # -h",
+         "git checkout -q subject-clean\ngit revert --no-edit subject-clean # -h",
+         {"_cab_pick_revs": help_drops_all}),
     )
     for label, deny, twin, flip in rows:
         if not lands(deny):
@@ -2673,14 +2727,20 @@ def _test_coauthor_replay(failures, base):
         aiqt_hooks._CAB_GIT_TIMEOUT = saved
     if got != "deny":
         failures.append("(cab-replay-timeout) a replay read that does not finish must deny, got {}".format(got))
-    # -h or --help before any '--' is taken by git cherry-pick's or revert's own option reader, which prints
-    # the usage and replays nothing: the help form lands nothing ungated and allows, its neighbour lands the
-    # token and denies, and with the help words read as revision-reader options (the flip) the help form denies.
-    for label, help_form, neighbour in (
-            ("cab-replay-help-short", "git cherry-pick -h", "git cherry-pick -x plain-dirty"),
-            ("cab-replay-help-revert", "git revert -h", "git cherry-pick -x plain-dirty"),
-            ("cab-replay-help-long", "git cherry-pick --help", "git cherry-pick --ff plain-dirty"),
-            ("cab-replay-help-after", "git cherry-pick plain-dirty -h", "git cherry-pick plain-dirty -x")):
+    # Every help form lands nothing ungated (git prints the usage, or the manual, and replays nothing) and
+    # its neighbour lands the token. A help word drops no revision, so only the bare forms, where no revision
+    # is read at all, allow; a help word beside a revision whose message holds the token still denies, an
+    # over-denial disclosed in the residue. With the help words read as revision-reader options (the flip)
+    # every help form denies.
+    for label, help_form, neighbour, want in (
+            ("cab-replay-help-short", "git cherry-pick -h", "git cherry-pick -x plain-dirty", "allow"),
+            ("cab-replay-help-revert", "git revert -h", "git cherry-pick -x plain-dirty", "allow"),
+            ("cab-replay-help-long", "git cherry-pick --help", "git cherry-pick --ff plain-dirty", "allow"),
+            ("cab-replay-help-revert-long", "git revert --help", "git cherry-pick -x plain-dirty", "allow"),
+            ("cab-replay-help-after", "git cherry-pick plain-dirty -h", "git cherry-pick plain-dirty -x", "deny"),
+            ("cab-replay-help-before", "git cherry-pick -h plain-dirty", "git cherry-pick -x plain-dirty", "deny"),
+            ("cab-replay-help-long-after", "git cherry-pick plain-dirty --help", "git cherry-pick plain-dirty -x",
+             "deny")):
         if lands(help_form) or not lands(neighbour):
             failures.append("({}) {!r} must land nothing and {!r} the token when run ungated".format(
                 label, help_form, neighbour))
@@ -2691,9 +2751,9 @@ def _test_coauthor_replay(failures, base):
             flipped = decision(help_form)
         finally:
             aiqt_hooks._CAB_PICK_HELP = saved
-        if got != ("allow", "deny") or flipped != "deny":
-            failures.append("({}) expected allow for {!r} and deny for {!r}, and deny for the first with the help "
-                            "words unread, got {} and {}".format(label, help_form, neighbour, got, flipped))
+        if got != (want, "deny") or flipped != "deny":
+            failures.append("({}) expected {} for {!r} and deny for {!r}, and deny for the first with the help "
+                            "words unread, got {} and {}".format(label, want, help_form, neighbour, got, flipped))
     # The revision-walk options git hands to its revision reader stay refused, disclosed as over-denials: with
     # the token message the form lands it ungated, and with the clean one it lands none; both deny.
     for option in ("--no-merges", "--reverse", "--topo-order", "--no-walk", "-1"):
