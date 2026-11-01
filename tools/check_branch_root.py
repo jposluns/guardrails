@@ -6,9 +6,9 @@ supplied explicitly or defaults to HEAD. A merge-base exit status of 0 means roo
 ORPHANED, and every other status is cannot-evaluate. A rooted candidate that restores, at a path it
 changes from any merge base, the exact blob a first-parent commit of the protected line replaced
 within the REVERT_WINDOW commits ending at that merge base (following the line's exact renames
-within that window; or, at a path it adds or changes, the exact nonempty blob such a commit replaced
-at another path it removes or changes, other than that path's merge-base blob, so a rename, an
-overwrite or a copy beside new content that puts old content back is caught) is REVERTS, unless
+within that window to the newest name; or, at a path it adds, the exact nonempty blob such a commit
+replaced at a path it removes, other than that path's merge-base blob, so a rename that puts old
+content back is caught) is REVERTS, unless
 merging it into the
 protected tip (git merge-tree --write-tree) leaves that path, and every path the protected line renamed
 it to, as the tip has it without a conflict (a mode-only difference counts only where it restores the
@@ -311,29 +311,41 @@ def _matched(touches, image):
 
 
 def _moved(records, touches):
-    """(destination, source) for each path the head adds or changes whose blob equals a window pre-image
-    blob of another path the head removes or changes, other than the blob that source had at the base
-    and other than the empty blob: the head moved content the line replaced at the source to the
-    destination, whether it removed the source or put new content there, and whether the destination is
-    new or overwritten. Pairs are made on exact blobs, not by git's rename detection, so no rename limit
-    or similarity threshold applies."""
+    """(destination, source) for each path the head adds whose blob equals a window pre-image blob of a
+    path the head removes, other than the blob that source had at the base and other than the empty
+    blob: the head moved the source and put back content the line replaced there. Pairs are made on
+    exact blobs, not by git's rename detection, so no rename limit or similarity threshold applies. A
+    path the head changes in place is neither a source nor a destination: a new file beside an edited
+    one often holds the edited file's old content for a legitimate reason (a licence header, a version
+    string, a generated file), and exact blobs cannot tell that from a move."""
+    removed = {path: pre for _c, path, pre, post in records if post is None and path in touches}
     sources = {}
-    for _c, source, pre, _post in records:
-        for _commit, old in touches.get(source, ()):
+    for source, pre in removed.items():
+        for _commit, old in touches[source]:
             if old is not None and _blob(old) != _blob(pre) and _blob(old) not in _EMPTY_BLOBS:
                 sources.setdefault(_blob(old), set()).add(source)
-    return sorted((path, source) for _c, path, _pre, post in records if post is not None
-                  for source in sources.get(_blob(post), ()) if source != path)
+    return sorted((path, source) for _c, path, pre, post in records if pre is None and post is not None
+                  for source in sources.get(_blob(post), ()))
 
 
 def _window_renames(root, base, window):
     """{commit: [(source, destination)]}: the exact renames each of the window first-parent commits
-    ending at base made against its first parent."""
-    renames = {}
-    for commit, pair, _pre, _post in _raw_records(root, *_WINDOW_RENAME_ARGS, "-n", str(window), base, "--"):
+    ending at base made against its first parent. A listing without base as its first commit is
+    cannot-evaluate, as for _window_touches, so a git that prints nothing cannot drop the renames."""
+    renames, commits = {}, []
+    records = _raw_records(root, *_WINDOW_RENAME_ARGS, "-n", str(window), base, "--", commits=commits)
+    _window_listed(commits, base)
+    for commit, pair, _pre, _post in records:
         if isinstance(pair, tuple):
             renames.setdefault(commit, []).append(pair)
     return renames
+
+
+def _followed(follow, pairs):
+    """follow, {old name: {newest name}}, with the exact renames pairs of one window commit applied, the
+    walk going newest first. A source maps to the name its destination reached, not to the destination
+    as well, so a name the content only passed through, or left again, gains no older history."""
+    return {**follow, **{source: follow.get(destination, {destination}) for source, destination in pairs}}
 
 
 def _revert_findings(root, base, head_sha, window):
@@ -341,10 +353,12 @@ def _revert_findings(root, base, head_sha, window):
     pre-image blob of a commit in the window (file modes are not compared, but see _matched); undone lists
     the window commits on that path from base back to that commit, newest first, and restored holds that
     pre-image. A deletion matches an add (an absent pre-image). Where a window commit renamed a path
-    exactly, the commits older than it on the old name count on the new name too, so a restore at a path
-    the line renamed is found. A path the head adds or changes is also judged against the window of each
-    other changed path that _moved pairs it with, and is reported under its own name. A path is dropped
-    when the Reverts trailers of the commits in base..head together name every commit it undoes."""
+    exactly, the commits older than it on the old name count on the newest name that content reached
+    too, so a restore at a path the line renamed is found, while a name the content passed through or
+    left is credited with none of it. A path the head adds is also judged against the window of each
+    path the head removes that _moved pairs it with, and is reported under its own name. A path is
+    dropped when the Reverts trailers of the commits in base..head together name every commit it
+    undoes."""
     records = _raw_records(
         root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", base, head_sha, "--")
     changed = {path: post for _c, path, _pre, post in records}
@@ -354,8 +368,7 @@ def _revert_findings(root, base, head_sha, window):
     touches, follow, current = {}, {}, None
     for commit, path, pre, _post in _window_touches(root, base, window):
         if commit != current:
-            for source, destination in renames.get(current, ()):
-                follow.setdefault(source, set()).update({destination} | follow.get(destination, set()))
+            follow = _followed(follow, renames.get(current, ()))
             current = commit
         for name in sorted({path} | follow.get(path, set())):
             if name in changed:
@@ -911,10 +924,18 @@ def _revert_vectors(temp, failures, case):
             failures.append("{}: expected exit {}, got {}".format(label, want, got))
 
     # R18: a git that exits 0 with an empty window log, or with one that does not list the base, leaves
-    # nothing to judge: cannot-evaluate, never a pass.
+    # nothing to judge: cannot-evaluate, never a pass. The same holds where only the exact-rename
+    # listing comes back empty.
     judged("R18 empty window log", faked("log", lambda _out: b""), 2)
     judged("R18 window log without the base",
            faked("log", lambda out: out.replace(c2.encode(), b"f" * len(c2))), 2)
+
+    def renames_empty(root, *args, **kwargs):
+        probe = real_git(root, *args, **kwargs)
+        if "-M100%" in args:
+            return subprocess.CompletedProcess(probe.args, 0, b"", b"")
+        return probe
+    judged("R18 empty rename listing", renames_empty, 2)
 
     # R19: a raw record with a non-ASCII or otherwise malformed mode or object id is cannot-evaluate.
     def record(mode, oid):
@@ -1045,47 +1066,66 @@ def _revert_vectors(temp, failures, case):
     found("R28 move of the merge-base content", ref("r28t-main", s3), ref("r28t", _plumb_commit(
         repo, {b"c.txt": a_v1, b"fill.txt": b"1\n"}, (s3,), "branch renames a to c")), set(), 2)
 
-    # R29: on the R28 history the head moves line 3's old content without a plain rename: it deletes
-    # a.txt and overwrites fill.txt with it, or writes it to c.txt and new content to a.txt. Both are
-    # found at the path that holds it. Writing that content over fill.txt while a.txt stays, rewriting
-    # a.txt beside an unrelated add, or copying a.txt's merge-base content beside a rewrite is no
-    # finding. In a second history the line filled an empty a.txt, and an empty file the head deletes,
-    # overwrites or adds beside it is never paired: an empty file matches by coincidence.
-    for label, files, want in (
-            ("R29 head deletes and overwrites", {b"fill.txt": a_v1}, {b"fill.txt"}),
-            ("R29 head moves beside new content",
-             {b"a.txt": b"fresh\n", b"c.txt": a_v1, b"fill.txt": b"1\n"}, {b"c.txt"}),
-            ("R29 overwrite with the source kept", {b"a.txt": a_v2, b"fill.txt": a_v1}, set()),
-            ("R29 rewrite beside an unrelated add",
-             {b"a.txt": b"fresh\n", b"n.txt": b"n\n", b"fill.txt": b"1\n"}, set()),
-            ("R29 copy of the base content beside a rewrite",
-             {b"a.txt": b"fresh\n", b"c.txt": a_v2, b"fill.txt": b"1\n"}, set())):
+    # R29: only a path the head removes is paired with a path it adds. On the R28 history, writing line
+    # 3's old content over fill.txt while a.txt stays, or rewriting a.txt beside an unrelated add, is no
+    # finding. In a second history the line edits files that a new file beside them legitimately copies
+    # in their old form: a package's licence header, a version string, an ignore file, a generated file.
+    # The head edits each again and adds the copies, which is no finding. In a third history the line
+    # filled an empty a.txt, and an empty file the head adds as it deletes a.txt is never paired: an
+    # empty file matches by coincidence.
+    for label, files in (("R29 overwrite with the source kept", {b"a.txt": a_v2, b"fill.txt": a_v1}),
+                         ("R29 rewrite beside an unrelated add",
+                          {b"a.txt": b"fresh\n", b"n.txt": b"n\n", b"fill.txt": b"1\n"})):
         found(label, s_main, ref("r29-" + label[4:].replace(" ", "-"), _plumb_commit(
-            repo, files, (s2,), label)), want, 2)
+            repo, files, (s2,), label)), set(), 2)
+    header = b"# Licensed under the Apache License 2.0\n"
+    y_old = {b"p/__init__.py": header, b"svc1/VERSION": b"1.0.0\n", b"d1/.gitignore": b"*.pyc\n",
+             b"gen/a.json": b'{"n": 1}\n'}
+    y0 = _plumb_commit(repo, y_old, (), "copies root")
+    y_line = {b"p/__init__.py": header + b"import os\n", b"svc1/VERSION": b"1.1.0\n",
+              b"d1/.gitignore": b"*.pyc\nbuild/\n", b"gen/a.json": b'{"n": 2}\n'}
+    y1 = _plumb_commit(repo, y_line, (y0,), "main edits each file")
+    y_main = ref("r29k-main", y1)
+    for label, files in (
+            ("R29 new packages with the old licence header",
+             {b"p/__init__.py": header + b"import sys\n", b"q/__init__.py": header,
+              b"r/__init__.py": header, b"s/__init__.py": header}),
+            ("R29 new version files beside a bump",
+             {b"svc1/VERSION": b"1.2.0\n", b"svc2/VERSION": b"1.0.0\n", b"docs/min.txt": b"1.0.0\n"}),
+            ("R29 new ignore file beside an edit",
+             {b"d1/.gitignore": b"*.pyc\ndist/\n", b"d2/.gitignore": b"*.pyc\n"}),
+            ("R29 new generated file beside a regeneration",
+             {b"gen/a.json": b'{"n": 3}\n', b"gen/b.json": b'{"n": 1}\n'})):
+        found(label, y_main, ref("r29k-" + label[4:].replace(" ", "-"), _plumb_commit(
+            repo, {**y_line, **files}, (y1,), label)), set(), 2)
     z0 = _plumb_commit(repo, {b"a.txt": b"", b"fill.txt": b"0\n"}, (), "empty root")
     z1 = _plumb_commit(repo, {b"a.txt": b"", b"fill.txt": b"1\n"}, (z0,), "empty filler")
     z2 = _plumb_commit(repo, {b"a.txt": a_v2, b"fill.txt": b"1\n"}, (z1,), "main fills a")
-    z_main = ref("r29z-main", z2)
-    for label, files in (("R29 empty overwrite", {b"fill.txt": b""}),
-                         ("R29 empty add beside a rewrite",
-                          {b"a.txt": b"fresh\n", b"n.txt": b"", b"fill.txt": b"1\n"}),
-                         ("R29 empty move", {b"n.txt": b"", b"fill.txt": b"1\n"})):
-        found(label, z_main, ref("r29z-" + label[10:].replace(" ", "-"), _plumb_commit(
-            repo, files, (z2,), label)), set(), 2)
+    found("R29 empty move", ref("r29z-main", z2), ref("r29z-empty-move", _plumb_commit(
+        repo, {b"n.txt": b"", b"fill.txt": b"1\n"}, (z2,), "branch moves a to an empty n")), set(), 2)
 
     # R30: on the R28 history the line then renames a.txt to b.txt, so a window of 3 holds the rename
     # and the line 3 edit but not the add. A branch that puts line 3 back in b.txt is found only by
     # following the rename; moving b.txt on, or back to a.txt, with line 3 put back is found as well,
-    # and rewriting b.txt with new content is no finding.
+    # the latter at a.txt from its own history, and rewriting b.txt with new content is no finding.
+    # Where the line renames b.txt on to c.txt, or back to a.txt, the older history follows only to the
+    # newest name: line 3 put back in c.txt is found, and a b.txt the branch adds with it is not.
     s4 = _plumb_commit(repo, {b"b.txt": a_v2, b"fill.txt": b"1\n"}, (s2,), "main renames a to b")
-    s4_main = ref("r30-main", s4)
-    for label, files, want in (
-            ("R30 restore at a path the line renamed", {b"b.txt": a_v1}, {b"b.txt"}),
-            ("R30 line rename then head move", {b"c.txt": a_v1}, {b"b.txt", b"c.txt"}),
-            ("R30 line rename then head move back", {b"a.txt": a_v1}, {b"a.txt", b"b.txt"}),
-            ("R30 rewrite at a path the line renamed", {b"b.txt": b"fresh\n"}, set())):
-        found(label, s4_main, ref("r30-" + label[4:].replace(" ", "-"), _plumb_commit(
-            repo, {**files, b"fill.txt": b"1\n"}, (s4,), label)), want, 3)
+    s5 = _plumb_commit(repo, {b"c.txt": a_v2, b"fill.txt": b"1\n"}, (s4,), "main renames b to c")
+    s6 = _plumb_commit(repo, {b"a.txt": a_v2, b"fill.txt": b"1\n"}, (s4,), "main renames b back to a")
+    for label, tip, files, want in (
+            ("R30 restore at a path the line renamed", s4, {b"b.txt": a_v1}, {b"b.txt"}),
+            ("R30 line rename then head move", s4, {b"c.txt": a_v1}, {b"b.txt", b"c.txt"}),
+            ("R30 line rename then head move back", s4, {b"a.txt": a_v1}, {b"a.txt", b"b.txt"}),
+            ("R30 rewrite at a path the line renamed", s4, {b"b.txt": b"fresh\n"}, set()),
+            ("R30 restore at the end of a rename chain", s5, {b"c.txt": a_v1}, {b"c.txt"}),
+            ("R30 old content at the middle of a rename chain", s5, {b"b.txt": a_v1, b"c.txt": a_v2},
+             set()),
+            ("R30 old content at a name the line renamed back", s6, {b"a.txt": a_v2, b"b.txt": a_v1},
+             set())):
+        head = _plumb_commit(repo, {**files, b"fill.txt": b"1\n"}, (tip,), label)
+        found(label, ref("r30-main-" + tip[:12], tip), ref("r30-" + label[4:].replace(" ", "-"), head),
+              want, 3)
 
     # R12: a shallow clone whose history ends inside the window is cannot-evaluate.
     shallow = temp / "r12-shallow"
@@ -1107,7 +1147,7 @@ def _mutant_vector(failures):
     """Each mutant of the revert check, applied by replacing module attributes, must turn every named
     R vector red in a nested self-test run."""
     real_findings, real_touches, real_records = _revert_findings, _window_touches, _raw_records
-    real_merge, real_moved = _merge_result, _moved
+    real_merge = _merge_result
 
     def tip_anchored(root, _base, head_sha, window):
         return real_findings(root, _resolve_commit(root, "refs/heads/protected", "protected"),
@@ -1170,24 +1210,52 @@ def _mutant_vector(failures):
         return sorted((path, source) for _c, path, pre, post in records if pre is None and post is not None
                       for source in sources.get(_blob(post), ()))
 
-    def removed_to_added_only(records, touches):
-        added = {path for _c, path, pre, _post in records if pre is None}
-        removed = {path for _c, path, _pre, post in records if post is None}
-        return [(path, source) for path, source in real_moved(records, touches)
-                if path in added and source in removed]
+    def changed_paths_paired(records, touches):
+        sources = {}
+        for _c, source, pre, _post in records:
+            for _commit, old in touches.get(source, ()):
+                if old is not None and _blob(old) != _blob(pre) and _blob(old) not in _EMPTY_BLOBS:
+                    sources.setdefault(_blob(old), set()).add(source)
+        return sorted((path, source) for _c, path, _pre, post in records if post is not None
+                      for source in sources.get(_blob(post), ()) if source != path)
 
+    def any_history_restored(touches, _image):
+        return (tuple(commit for commit, _pre in touches), ()) if touches else None
+
+    def renames_unlisted(root, base, window):
+        renames = {}
+        for commit, pair, _pre, _post in _raw_records(root, *_WINDOW_RENAME_ARGS, "-n", str(window), base,
+                                                      "--"):
+            if isinstance(pair, tuple):
+                renames.setdefault(commit, []).append(pair)
+        return renames
+
+    def every_chain_name(follow, pairs):
+        return {**follow, **{source: {destination} | follow.get(destination, set())
+                             for source, destination in pairs}}
+
+    line_renamed = ("R28 head renames and restores", "R30 restore at a path the line renamed",
+                    "R30 line rename then head move", "R30 line rename then head move back",
+                    "R30 restore at the end of a rename chain")
     for label, injected, vector in (
-            ("check removed", {"_revert_findings": lambda *_a: []}, "R1 "),
-            ("anchored on the protected tip", {"_revert_findings": tip_anchored}, "R10 window anchored"),
-            ("post-images compared", {"_window_touches": post_images}, "R1 "),
-            ("absence ignored", {"_window_touches": absence_ignored}, "R1 "),
+            ("check removed", {"_revert_findings": lambda *_a: []},
+             ("R1 ", "R18 empty rename listing") + line_renamed),
+            ("anchored on the protected tip", {"_revert_findings": tip_anchored},
+             ("R10 window anchored",) + line_renamed),
+            ("post-images compared", {"_window_touches": post_images}, ("R1 ",) + line_renamed),
+            ("absence ignored", {"_window_touches": absence_ignored},
+             ("R1 ", "R30 line rename then head move", "R30 line rename then head move back")),
             ("any trailer accepted", {"_allowed": lambda _undone, named: bool(named)}, "R9 "),
-            ("window one wider", {"_window_touches": lambda r, b, w: real_touches(r, b, w + 1)}, "R10 "),
-            ("window one narrower", {"_window_touches": lambda r, b, w: real_touches(r, b, w - 1)}, "R10 "),
-            ("parsed without -z", {"_raw_records": without_z}, "R11 "),
+            ("window one wider", {"_window_touches": lambda r, b, w: real_touches(r, b, w + 1)},
+             ("R10 ", "R28 head renames and restores", "R28 head renames only", "R29 empty move")),
+            ("window one narrower", {"_window_touches": lambda r, b, w: real_touches(r, b, w - 1)},
+             ("R10 ", "R30 restore at the end of a rename chain")),
+            ("parsed without -z", {"_raw_records": without_z},
+             ("R11 ", "R30 restore at a path the line renamed", "R30 line rename then head move",
+              "R30 restore at the end of a rename chain")),
             ("--diff-merges=first-parent dropped", {"_WINDOW_LOG_ARGS": tuple(
                 arg for arg in _WINDOW_LOG_ARGS if arg != "--diff-merges=first-parent")}, "R13 "),
-            ("file mode compared with the blob", {"_blob": lambda image: image}, "R15 "),
+            ("file mode compared with the blob", {"_blob": lambda image: image}, ("R15 ", "R29 empty move")),
             ("least-lag merge base only", {"_union_findings": least_lag_only}, "R16 "),
             ("merge-result filter skipped", {"_settled": lambda _r, _b, _p, _h, findings: (
                 [(path, undone) for path, undone, _restored in findings], ())}, ("R17 ", "R20 ", "R21 ")),
@@ -1196,21 +1264,35 @@ def _mutant_vector(failures):
             ("renamed paths not followed", {"_renamed": lambda _r, _b, _p: {}}, "R26 "),
             ("merge rename config unpinned", {"_MERGE_CONFIG": ()}, "R27 "),
             ("head's own moves not paired", {"_moved": lambda _records, _touches: []},
-             "R28 head renames and restores"),
+             ("R28 head renames and restores", "R30 line rename then head move")),
             ("merge-base content paired as a move", {"_moved": base_content_paired},
-             "R28 move of the merge-base content"),
-            ("only a removed path paired with an added one", {"_moved": removed_to_added_only},
-             ("R29 head deletes and overwrites", "R29 head moves beside new content")),
-            ("empty blob paired", {"_EMPTY_BLOBS": frozenset()},
-             ("R29 empty overwrite", "R29 empty add beside a rewrite", "R29 empty move")),
+             ("R28 move of the merge-base content", "R29 empty move")),
+            ("changed paths paired as moves", {"_moved": changed_paths_paired},
+             ("R29 new packages with the old licence header", "R29 new version files beside a bump",
+              "R29 new ignore file beside an edit", "R29 new generated file beside a regeneration")),
+            ("empty blob paired", {"_EMPTY_BLOBS": frozenset()}, "R29 empty move"),
+            ("any window history read as a restore", {"_matched": any_history_restored},
+             ("R1 ", "R7 ", "R25 ", "R28 head renames and restores", "R28 head renames only",
+              "R28 move of the merge-base content", "R29 overwrite with the source kept",
+              "R29 rewrite beside an unrelated add", "R29 new packages with the old licence header",
+              "R29 new version files beside a bump", "R29 new ignore file beside an edit",
+              "R29 new generated file beside a regeneration", "R29 empty move",
+              "R30 rewrite at a path the line renamed", "R30 old content at the middle of a rename chain",
+              "R30 old content at a name the line renamed back")),
             ("line renames not followed", {"_window_renames": lambda _r, _b, _w: {}},
-             "R30 restore at a path the line renamed"),
+             ("R18 empty rename listing", "R30 restore at a path the line renamed",
+              "R30 line rename then head move", "R30 restore at the end of a rename chain")),
+            ("every name on a rename chain followed", {"_followed": every_chain_name},
+             ("R30 old content at the middle of a rename chain",
+              "R30 old content at a name the line renamed back")),
+            ("rename listing unchecked", {"_window_renames": renames_unlisted}, "R18 empty rename listing"),
             ("head image in place of the merge result",
              {"_merge_result": lambda _r, _p, head_sha: (head_sha, frozenset())}, "R20 "),
             ("merge conflicts ignored", {"_merge_result": conflicts_ignored}, "R22 "),
             ("merge-tree failure read as a clean merge", {"_merge_result": failure_as_clean}, "R23 "),
             ("findings kept per base, not per path", {"_union_findings": per_base_entries}, "R24 "),
-            ("window listing unchecked", {"_window_listed": lambda _commits, _base: None}, "R18 "),
+            ("window listing unchecked", {"_window_listed": lambda _commits, _base: None},
+             ("R18 empty window log", "R18 window log without the base", "R18 empty rename listing")),
             ("record bytes decoded unchecked", {"_image": decoded_unchecked}, "R19 ")):
         saved = {name: value for name, value in globals().items() if name in injected}
         missing = sorted(name for name in injected if name not in saved)
