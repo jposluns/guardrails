@@ -647,8 +647,8 @@ discrimination already rests on a positive assertion.
 A fix to code that sorts text into verdicts, such as a lint, parser, pattern matcher, or guard over command
 text, is tested on cases sibling to the reported input, derived from the specification or other authoritative
 source that defines its input forms. The cases cover the outcomes the fix changes and those it preserves at
-the boundaries it affects. The tests of changed outcomes fail with the fix reverted; tests of preserved
-outcomes need not, since they exist to catch a fix that wrongly moves a sibling's verdict.
+the boundaries it affects. The tests of changed outcomes are observed to fail with the fix reverted; tests of
+preserved outcomes need not, since they exist to catch a fix that wrongly moves a sibling's verdict.
 
 ## Preserve compatibility or provide a migration path
 
