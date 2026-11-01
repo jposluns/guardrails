@@ -726,6 +726,17 @@ CONFIG_EXCLUSIONS = {
             "Real-checkout archives intentionally retain caller trust configuration.",
         ("tools/check_release_delta.py", "--self-test"):
             "Real-checkout archives intentionally retain caller trust configuration.",
+        ("tools/check_python_floor.py",):
+            "A bare launch is the real gate over this checkout, whose tracked-file listing (git"
+            " ls-files) drops the GIT_* environment and pins PATH but deliberately keeps the"
+            " caller's on-disk configuration (where safe.directory trust for the checkout lives),"
+            " so a malformed caller home fails it closed (exit 2) by design; it stays in the"
+            " combined and system lanes.",
+        ("tools/check_child_status_coverage.py",):
+            "A bare launch is the real gate over this checkout, whose entry point enumeration is"
+            " tools/check_python_floor.py's tracked-file listing, which deliberately keeps the"
+            " caller's on-disk configuration, so a malformed caller home fails it closed (exit 2)"
+            " by design; it stays in the combined and system lanes.",
     },
 }
 
