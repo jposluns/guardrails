@@ -87,12 +87,16 @@
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
 #                        it. When a queued fold lands, record its measured cost here against the 559-unit
 #                        estimate.
+#                        Raised 134991 -> 135317 on 2026-11-01 when verifier-delivery-completeness gained its
+#                        sentence that the agreed evidence and the verdict are read from the whole saved delivery,
+#                        never from lines a pattern filter selects from it (vrfdlv.14): rule files 117926 ->
+#                        118252 (+326 units); managed block 360 and file headers 16136 unchanged.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 134991
+ratchet = 135317
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

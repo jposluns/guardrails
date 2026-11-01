@@ -17,6 +17,10 @@ for, or both. A delivery lacking that agreed evidence, or truncated, empty, or e
 verdict, never a pass, a vote, or a finding-free result.
 A capture piped through a truncating sink is a degraded delivery, not a verdict, even if its retained
 prefix looks complete.
+The agreed evidence and the verdict are read from the whole saved delivery, through to its end: lines a
+pattern filter selects from it or from a copy of it, such as a grep, an addressed sed or an awk pattern,
+even one run over the whole file, show what matched, never that the delivery holds no other verdict or
+failure line.
 Completeness is never inferred from output length, volume, or a reported problem's absence: a run cut
 off before its verdict is indistinguishable from a clean one judged by silence or size. A delivery
 failing this test is re-dispatched and contributes nothing; it alone does not justify reducing the
