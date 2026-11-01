@@ -20,6 +20,14 @@ validated (a deferred coverage gap). Non-nestable nesting IS detected (slice-2):
 <form>, and an interactive element (<a>/<button>) inside another interactive element, both of which the
 parser accepts as well-balanced but which break rendering/behaviour. Download-artifact checksums are
 tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
+
+Link-preview head block (site/ only): every site/*.html page, hand-maintained and generated alike, except
+the pages HEAD_TAG_EXEMPT names with their reasons, goes through gen_site._validate_head_tags, the one
+shared check, with that page's own URL (gen_site.page_url). The page set is read from the site/
+directory listing, so a new page is covered without editing a list; an unreadable listing or page fails
+closed (exit 2), and a *.html entry that is a symbolic link or not a regular file is a finding. This gate
+runs it because the CI workflow and tools/run_all_checks.sh both run this gate; gen_site.py --check
+runs in neither directly. Pages in subdirectories of site/ and the opf/site/ root are not checked for it.
 """
 import sys
 
@@ -43,6 +51,7 @@ from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+import gen_site  # noqa: E402  the link-preview head block and its one shared per-page check
 
 EN, EM = "–", "—"
 # Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a
@@ -89,6 +98,13 @@ AUTOCLOSERS = {
 # an interactive element (<a>/<button>) may not contain another interactive element. These nest silently
 # in the parser (well-balanced) but break rendering/behaviour, so open/close balance never catches them.
 INTERACTIVE = {"a", "button"}
+# The coverage root whose top-level pages carry the link-preview head block (tools/card/TAGS.md), and the
+# pages in it that do not, each with its reason. This is the one place a page is exempted.
+HEAD_TAG_ROOT = "site"
+HEAD_TAG_EXEMPT = {
+    "404.html": "a noindex page: it is served for any missing path, so it has no URL of its own to name "
+                "as canonical, and it is not meant to be indexed or shared",
+}
 
 
 class Page(HTMLParser):
@@ -262,6 +278,43 @@ def logo_findings(pages):
     return out
 
 
+def head_tag_findings(site, subdir):
+    """Findings for the link-preview head block over every top-level *.html page of `site` (named
+    `subdir` in messages) except HEAD_TAG_EXEMPT, each through gen_site._validate_head_tags with the
+    page's own URL. Returns (findings, error); error is set when the listing or a page cannot be read,
+    and the caller fails closed (exit 2) on it."""
+    try:
+        with os.scandir(site) as listing:
+            entries = sorted(listing, key=lambda e: e.name)
+    except OSError as exc:
+        return [], "cannot list {}/ for the head tag check ({})".format(subdir, exc)
+    findings = []
+    for entry in entries:
+        if not entry.name.endswith(".html") or entry.name in HEAD_TAG_EXEMPT:
+            continue
+        rel = "{}/{}".format(subdir, entry.name)
+        try:
+            regular = not entry.is_symlink() and entry.is_file(follow_symlinks=False)
+        except OSError as exc:
+            return [], "cannot stat {} ({})".format(rel, exc)
+        if not regular:
+            findings.append("{}: is a symbolic link or not a regular file; its head tags cannot be checked"
+                            .format(rel))
+            continue
+        try:
+            text = Path(entry.path).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            findings.append("{}: could not read as UTF-8 for the head tag check".format(rel))
+            continue
+        except OSError as exc:
+            return [], "cannot read {} ({})".format(rel, exc)
+        try:
+            gen_site._validate_head_tags(text, gen_site.page_url(rel), rel)
+        except gen_site.SchemaError as exc:
+            findings.append(str(exc))
+    return findings, None
+
+
 def _self_test():
     good = '<a class="logo" href="/">L</a>'
     bad = '<a class="logo" href="/">L&trade;</a>'
@@ -339,13 +392,63 @@ def _self_test():
         if quiet(run, Path(d2)) != 0:
             failures.append("coverage: neither root present did not pass clean")
 
+    # Link-preview head block over a site/ listing: every top-level page but the exempt 404 goes through
+    # gen_site's shared check, so a clean set passes, a hand-maintained page missing a tag and a new page
+    # with no block are each a finding naming the page, and an unreadable listing fails closed.
+    def page_with(url, drop=None):
+        tags = [t.format(url=url) for t in gen_site.HEAD_TAG_BLOCK if t != drop]
+        return ("<!doctype html><html><head><title>t</title>\n" + "\n".join(tags)
+                + "\n</head><body><p>x</p></body></html>")
+    twitter_card = '<meta name="twitter:card" content="summary_large_image">'
+    head_cases = 0
+    with tempfile.TemporaryDirectory() as d3:
+        r3 = Path(d3)
+        s3 = r3 / "site"
+        s3.mkdir()
+        (s3 / "index.html").write_text(page_with(gen_site.SITE_BASE_URL), encoding="utf-8")
+        (s3 / "mappings.html").write_text(page_with(gen_site.SITE_BASE_URL + "mappings"), encoding="utf-8")
+        (s3 / "404.html").write_text('<!doctype html><html><head><title>t</title><meta name="robots" '
+                                     'content="noindex"></head><body><p>x</p></body></html>', encoding="utf-8")
+        head_cases += 1
+        got = head_tag_findings(s3, "site")
+        if got != ([], None):
+            failures.append("head tags: a clean page set with the exempt 404 did not pass, got {}".format(got))
+        head_cases += 1
+        if quiet(_scan_root, r3, "site") != 0:
+            failures.append("head tags: a clean site/ tree did not pass the gate")
+        (s3 / "mappings.html").write_text(
+            page_with(gen_site.SITE_BASE_URL + "mappings", drop=twitter_card), encoding="utf-8")
+        head_cases += 1
+        got, err = head_tag_findings(s3, "site")
+        if err or len(got) != 1 or not got[0].startswith("site/mappings.html: ") or "twitter:card" not in got[0]:
+            failures.append("head tags: a hand-maintained page missing twitter:card was not named, got {} {}"
+                            .format(got, err))
+        head_cases += 1
+        if quiet(_scan_root, r3, "site") != 1:
+            failures.append("head tags: a hand-maintained page missing a tag did not fail the gate")
+        (s3 / "mappings.html").write_text(page_with(gen_site.SITE_BASE_URL + "mappings"), encoding="utf-8")
+        (s3 / "newpage.html").write_text("<!doctype html><html><head><title>t</title></head><body></body></html>",
+                                         encoding="utf-8")
+        head_cases += 1
+        got, err = head_tag_findings(s3, "site")
+        if err or len(got) != 1 or not got[0].startswith("site/newpage.html: "):
+            failures.append("head tags: a new page without the block was not named, got {} {}".format(got, err))
+        (s3 / "newpage.html").unlink()
+        head_cases += 1
+        got, err = head_tag_findings(s3 / "absent", "site")
+        if got or not err:
+            failures.append("head tags: an unreadable listing did not fail closed, got {} {}".format(got, err))
+        head_cases += 1
+        if quiet(_scan_root, r3, "site") != 0:
+            failures.append("head tags: the restored clean site/ tree did not pass the gate")
+
     if failures:
         print("SELF-TEST FAIL:")
         for x in failures:
             print("  - " + x)
         return 1
-    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + coverage-root legs)".format(
-        len(cases), len(host_cases)))
+    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + coverage-root legs + {} "
+          "head tag cases)".format(len(cases), len(host_cases), head_cases))
     return 0
 
 
@@ -451,13 +554,19 @@ def _scan_root(root, subdir):
     # Logo consistency (M-04): the header logo block is duplicated per page (no page generator yet), so it
     # must stay byte-identical on every page that carries it; an outlier is drift.
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
+    if subdir == HEAD_TAG_ROOT:
+        head_findings, error = head_tag_findings(site, subdir)
+        if error:
+            print("error: {}; fail-closed".format(error), file=sys.stderr)
+            return 2
+        findings.extend(head_findings)
     if findings:
         print("FAIL: {} {}/ site-integrity issue(s)".format(len(findings), subdir))
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: {}/ dashes, links, anchors, titles, unique ids, and tag structure all check out"
-          .format(subdir))
+    print("PASS: {}/ dashes, links, anchors, titles, unique ids, and tag structure{} all check out"
+          .format(subdir, ", and the link-preview head block" if subdir == HEAD_TAG_ROOT else ""))
     return 0
 
 

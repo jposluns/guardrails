@@ -183,8 +183,10 @@ FIELD_TO_TOKEN = {
 # The link-preview tag block every published page's head carries, in order, exactly once each. The
 # og:title/og:description/twitter text and the card image are SITE-WIDE (the shell hardcodes them);
 # only the canonical href and og:url vary, and both must be the page's OWN URL. `{url}` marks those
-# two slots. Validated per rendered page by _validate_head_tags, so a shell or frontmatter edit that
-# drops a tag, duplicates one, or points a page at another page's canonical fails closed.
+# two slots. _validate_head_tags checks every page this generator renders, the page
+# gen_enforcement_register composes, and (through tools/check_site.py) every published site/*.html page,
+# hand-maintained ones included, so an edit that drops a tag, duplicates one, moves one out of the head,
+# reorders the block, or points a page at another page's canonical fails closed.
 SITE_BASE_URL = "https://aiqt.ai/"
 HEAD_TAG_BLOCK = (
     '<link rel="canonical" href="{url}">',
@@ -208,27 +210,6 @@ HEAD_TAG_BLOCK = (
     '<meta name="twitter:image:alt" content="AIQT.ai: Rules your AI follows. Controls that catch '
     'what slips.">',
 )
-# The identifying opener of each block tag, for the duplicate check: a page must carry each exactly
-# once WHATEVER its value, so a leftover tag with a different value (e.g. a second og:title) is a
-# duplicate finding, not an invisible extra.
-HEAD_TAG_OPENERS = (
-    '<link rel="canonical"',
-    '<meta property="og:type"',
-    '<meta property="og:site_name"',
-    '<meta property="og:url"',
-    '<meta property="og:title"',
-    '<meta property="og:description"',
-    '<meta property="og:image"',
-    '<meta property="og:image:type"',
-    '<meta property="og:image:width"',
-    '<meta property="og:image:height"',
-    '<meta property="og:image:alt"',
-    '<meta name="twitter:card"',
-    '<meta name="twitter:title"',
-    '<meta name="twitter:description"',
-    '<meta name="twitter:image"',
-    '<meta name="twitter:image:alt"',
-)
 
 
 def page_url(target_rel):
@@ -239,27 +220,159 @@ def page_url(target_rel):
     return SITE_BASE_URL if stem == "index" else SITE_BASE_URL + stem
 
 
-def _validate_head_tags(page, url, target_rel):
-    """Validate a RENDERED page carries the link-preview tag block exactly: every tag of the block
-    present exactly once with the page's own URL in the canonical href and og:url slots, and no second
-    occurrence of any block tag under a different value (a leftover or duplicated tag). A canonical or
-    og:url carrying ANOTHER page's URL fails here as a missing own-URL tag. `og:image` is checked with
-    a trailing space before its closer so the `og:image:*` openers never count toward it."""
+class _HeadTagCollector(HTMLParser):
+    """Record the page's `<head>` start tags, where its head ends (an explicit `</head>` or a `<body>`
+    start), and every `<link>`/`<meta>` element carrying a link-preview key, in document order, with
+    that key, its value attribute (a link's href, a meta's content), whether it sits inside the head,
+    and its line. A link's key is ("link", "canonical") when its whitespace-separated rel tokens include
+    `canonical`; a meta's keys are ("meta", <value>) for its `property` value and its `name` value, so a
+    `name="og:title"` meta still collides with the block's `property="og:title"`. Key values compare
+    lowercased, so a case variant of a block tag counts as a second occurrence. `keys` limits recording
+    to those keys (None records every key). An element carrying a duplicate attribute is an error: a
+    browser keeps the first and this parser the last, so they would disagree on the tag's value."""
+
+    def __init__(self, keys):
+        super().__init__(convert_charrefs=True)
+        self.keys = keys
+        self.heads = 0
+        self.in_head = False
+        self.head_ended = False
+        self.body_seen = False
+        self.found = []    # (key, value, in_head, line)
+        self.errors = []
+
+    def handle_starttag(self, tag, attrs):
+        line = self.getpos()[0]
+        if tag == "head":
+            self.heads += 1
+            if self.body_seen:
+                self.errors.append("line {}: <head> starts after <body>".format(line))
+            elif self.heads == 1:
+                self.in_head = True
+            return
+        if tag == "body":
+            self.body_seen = True
+            if self.in_head:
+                self.in_head = False
+                self.head_ended = True
+            return
+        if tag not in ("link", "meta"):
+            return
+        names = [k.lower() for k, _v in attrs]
+        values = {k.lower(): (v or "") for k, v in attrs}
+        keys = []
+        if tag == "link":
+            if "canonical" in values.get("rel", "").lower().split():
+                keys.append(("link", "canonical"))
+            value = values.get("href")
+        else:
+            for attr in ("property", "name"):
+                if attr in values:
+                    key = ("meta", values[attr].strip().lower())
+                    if key not in keys:
+                        keys.append(key)
+            value = values.get("content")
+        keys = [k for k in keys if self.keys is None or k in self.keys]
+        if not keys:
+            return
+        if len(set(names)) != len(names):
+            dup = next(n for n in names if names.count(n) > 1)
+            self.errors.append(
+                "line {}: a <{}> carrying a link-preview key has a duplicate {!r} attribute"
+                .format(line, tag, dup))
+            return
+        for key in keys:
+            self.found.append((key, value, self.in_head, line))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "head" and self.in_head:
+            self.in_head = False
+            self.head_ended = True
+
+
+def _key_text(key):
+    """A block key as the attribute that names it, for messages: rel="canonical" or "og:title"."""
+    return 'rel="canonical"' if key == ("link", "canonical") else '"{}"'.format(key[1])
+
+
+def _head_block_spec(url):
+    """(key, value, markup) for each HEAD_TAG_BLOCK tag, in block order, with `url` in the `{url}` slots.
+    Read from the block's own markup by the same collector the page check uses, so the block constant
+    stays the single statement of what a page must carry."""
+    spec = []
     for tag in HEAD_TAG_BLOCK:
         own = tag.format(url=url)
-        c = page.count(own)
-        if c != 1:
+        collector = _HeadTagCollector(None)
+        collector.feed(own)
+        collector.close()
+        if len(collector.found) != 1 or collector.errors:
+            raise SchemaError("internal: HEAD_TAG_BLOCK entry {!r} does not carry exactly one key"
+                              .format(own))
+        key, value, _in_head, _line = collector.found[0]
+        spec.append((key, value, own))
+    if len({key for key, _v, _o in spec}) != len(spec):
+        raise SchemaError("internal: HEAD_TAG_BLOCK names one key twice")
+    return spec
+
+
+def _validate_head_tags(page, url, target_rel):
+    """Validate that a page's head carries the link-preview tag block exactly, by parsing the page
+    (html.parser, character references decoded). The page must have exactly one `<head>` start tag, and
+    that head must end (at `</head>` or a `<body>` start) before the document does. For each tag of
+    HEAD_TAG_BLOCK, keyed by a link's rel="canonical" or a meta's property or name value (compared
+    lowercased): exactly one `<link>`/`<meta>` element in the whole page carries that key, whatever its
+    value; that element sits inside the head; its value (a link's href, a meta's content) equals the
+    block's value exactly, with `url` (the page's own URL) in the canonical href and og:url slots; and
+    the block's tags appear in HEAD_TAG_BLOCK's order. So a second element with a block tag's key fails
+    whatever its value and wherever it sits, a canonical or og:url naming another page fails as a wrong
+    value, and a block tag in the body fails as outside the head. A page the parser rejects, a page with
+    no head or more than one, a head that never ends, or a keyed element carrying a duplicate attribute
+    fails too; every failure names `target_rel`. Not established: that the block's tags are adjacent
+    (other head elements may sit between them), anything about elements carrying none of the block's
+    keys, attributes beyond the key and the value, and tag-like text inside comments, `<script>` or
+    `<style>` (not elements, so neither counted nor flagged)."""
+    spec = _head_block_spec(url)
+    collector = _HeadTagCollector({key for key, _v, _o in spec})
+    try:
+        collector.feed(page)
+        collector.close()
+    except (ValueError, AssertionError) as exc:
+        raise SchemaError("{}: cannot parse the page to check its head tags: {}".format(target_rel, exc))
+    if collector.errors:
+        raise SchemaError("{}: {}".format(target_rel, collector.errors[0]))
+    if collector.heads != 1:
+        raise SchemaError("{}: page must have exactly one <head>, found {}"
+                          .format(target_rel, collector.heads))
+    if not collector.head_ended:
+        raise SchemaError("{}: <head> never ends (no </head> or <body>)".format(target_rel))
+    positions = {}
+    for index, (key, value, in_head, line) in enumerate(collector.found):
+        positions.setdefault(key, []).append((index, value, in_head, line))
+    previous = None
+    for key, value, own in spec:
+        hits = positions.get(key, [])
+        if len(hits) != 1:
             raise SchemaError(
-                "{}: head must carry exactly one {!r} (its own URL is {}), found {}"
-                .format(target_rel, own, url, c))
-    for opener in HEAD_TAG_OPENERS:
-        # `og:image` and `twitter:image` are prefixes of their `:type`/`:width`/`:alt` siblings; count
-        # only the exact attribute by including the closing quote-space boundary.
-        c = page.count(opener + " ")
-        if c != 1:
+                "{}: page must carry exactly one element keyed {} (block tag {!r}), found {}{}"
+                .format(target_rel, _key_text(key), own, len(hits),
+                        " at lines " + ", ".join(str(h[3]) for h in hits) if hits else ""))
+        index, got, in_head, line = hits[0]
+        if not in_head:
+            raise SchemaError("{}:{}: block tag keyed {} sits outside <head>"
+                              .format(target_rel, line, _key_text(key)))
+        if got != value:
             raise SchemaError(
-                "{}: head must carry exactly one tag opening {!r}, found {}"
-                .format(target_rel, opener, c))
+                "{}:{}: block tag keyed {} carries {!r}, expected exactly {!r} (its own URL is {})"
+                .format(target_rel, line, _key_text(key), got, value, url))
+        if previous is not None and index < previous[0]:
+            raise SchemaError(
+                "{}:{}: block tag keyed {} comes before {} (line {}); the block's order is "
+                "HEAD_TAG_BLOCK's".format(target_rel, line, _key_text(key), _key_text(previous[1]),
+                                          previous[2]))
+        previous = (index, key, line)
 
 # Sidebar active-link map: slug -> the exact href the shell's `<a>` carries. A frontmatter
 # `sidebar-active` naming a slug outside this map is a SchemaError, so a typo cannot silently produce
@@ -1374,15 +1487,24 @@ def _self_test():
         failures.append("token sink ok shell: unexpected SchemaError: {}".format(exc))
 
     # ---- Link-preview head block validation ------------------------------------------------------
-    # The rendered-page guard: every tag of HEAD_TAG_BLOCK exactly once with the page's own URL in the
-    # canonical and og:url slots, and no second occurrence of any block tag under another value.
+    # The page guard parses the head: every tag of HEAD_TAG_BLOCK keyed exactly once in the whole page,
+    # inside <head>, with exactly the block's value (the page's own URL in the canonical and og:url
+    # slots), in the block's order; a second element with a block key fails whatever its value.
     _own_url = SITE_BASE_URL + "rules"
-    ok_head = "<head>" + "\n".join(t.format(url=_own_url) for t in HEAD_TAG_BLOCK) + "</head>"
-    case_count += 1
-    try:
-        _validate_head_tags(ok_head, _own_url, "site/rules.html")
-    except SchemaError as exc:
-        failures.append("head block baseline: unexpected SchemaError: {}".format(exc))
+    ok_tags = [t.format(url=_own_url) for t in HEAD_TAG_BLOCK]
+    ok_head = "<head>" + "\n".join(ok_tags) + "</head>"
+    for label, page in (("head block baseline", ok_head),
+                        ("head block in a full page", "<!doctype html><html><head><title>t</title>"
+                         + "\n".join(ok_tags) + "</head><body><p>x</p></body></html>"),
+                        ("head block closed by body", "<head>" + "\n".join(ok_tags) + "<body></body>"),
+                        ("head block other head links", ok_head.replace(
+                            "<head>", '<head><link rel="stylesheet" href="/s.css"><meta name="viewport" '
+                            'content="w">'))):
+        case_count += 1
+        try:
+            _validate_head_tags(page, _own_url, "site/rules.html")
+        except SchemaError as exc:
+            failures.append("{}: unexpected SchemaError: {}".format(label, exc))
     # A page missing any one tag of the block fails (every tag exercised).
     for tag in HEAD_TAG_BLOCK:
         _expect_raises(
@@ -1391,27 +1513,74 @@ def _self_test():
                 ok_head.replace(t.format(url=_own_url), "", 1), _own_url, "site/rules.html"),
             SchemaError, "exactly one")
     # A page carrying a duplicate of a block tag fails: an identical second copy, and a second copy
-    # under a DIFFERENT value (a leftover old tag), which only the opener count can see.
-    _expect_raises(
-        "head duplicate tag same value",
-        lambda: _validate_head_tags(
-            ok_head + '<meta name="twitter:card" content="summary_large_image">',
-            _own_url, "site/rules.html"),
-        SchemaError, "exactly one")
-    _expect_raises(
-        "head duplicate tag different value",
-        lambda: _validate_head_tags(
-            ok_head + '<meta property="og:title" content="another title">',
-            _own_url, "site/rules.html"),
-        SchemaError, "exactly one tag opening")
-    # A page carrying another page's canonical (its own og:url intact) fails.
+    # under a DIFFERENT value (a leftover old tag), after the head or inside it beside the required tag,
+    # in either attribute order, under a case variant of the key, or under name= instead of property=.
+    _og_title = '<meta property="og:title" content="AIQT.ai - Rules your AI follows">'
+    for label, page in (
+            ("head duplicate tag same value",
+             ok_head + '<meta name="twitter:card" content="summary_large_image">'),
+            ("head duplicate tag different value",
+             ok_head + '<meta property="og:title" content="another title">'),
+            ("head duplicate tag different value in head",
+             ok_head.replace(_og_title, _og_title + '<meta content="another title" property="og:title">')),
+            ("head duplicate tag before the required one",
+             ok_head.replace(_og_title, '<meta property="og:title" content="another title">' + _og_title)),
+            ("head duplicate tag case variant",
+             ok_head.replace(_og_title, _og_title + '<META PROPERTY="OG:TITLE" CONTENT="another">')),
+            ("head duplicate tag under name",
+             ok_head.replace(_og_title, _og_title + '<meta name="og:title" content="another">')),
+            ("head duplicate canonical other rel tokens",
+             ok_head.replace("</head>", '<link rel="Canonical alternate" href="https://x.test/"></head>'))):
+        _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
+                       SchemaError, "exactly one element keyed")
+    # A page carrying another page's canonical (its own og:url intact) fails as a wrong value.
     _expect_raises(
         "head foreign canonical",
         lambda: _validate_head_tags(
             ok_head.replace('<link rel="canonical" href="{}">'.format(_own_url),
                             '<link rel="canonical" href="{}about">'.format(SITE_BASE_URL), 1),
             _own_url, "site/rules.html"),
-        SchemaError, "exactly one")
+        SchemaError, "expected exactly")
+    # A block tag with the right key but a changed value fails.
+    _expect_raises(
+        "head changed value",
+        lambda: _validate_head_tags(ok_head.replace('content="1200"', 'content="1201"'),
+                                    _own_url, "site/rules.html"),
+        SchemaError, "expected exactly")
+    # A block tag moved out of the head into the body fails (the last tag, so order alone cannot see it).
+    _last = ok_tags[-1]
+    _expect_raises(
+        "head tag outside head",
+        lambda: _validate_head_tags(
+            ok_head.replace("\n" + _last, "", 1) + "<body>" + _last + "</body>",
+            _own_url, "site/rules.html"),
+        SchemaError, "outside <head>")
+    # The block reordered (og:url and og:title swapped) fails.
+    _expect_raises(
+        "head block reordered",
+        lambda: _validate_head_tags(
+            ok_head.replace(ok_tags[3] + "\n" + ok_tags[4], ok_tags[4] + "\n" + ok_tags[3], 1),
+            _own_url, "site/rules.html"),
+        SchemaError, "the block's order")
+    # A head-less page, a page with two heads, a head that never ends, and a keyed element with a
+    # duplicate attribute each fail, naming the page.
+    for label, page, needle in (
+            ("head absent", "\n".join(ok_tags), "site/rules.html: page must have exactly one <head>, found 0"),
+            ("head twice", ok_head + "<head></head>", "site/rules.html: page must have exactly one <head>, found 2"),
+            ("head never ends", "<head>" + "\n".join(ok_tags), "site/rules.html: <head> never ends"),
+            ("head after body", "<body></body>" + ok_head, "site/rules.html: line 1: <head> starts after <body>"),
+            ("head keyed duplicate attribute",
+             ok_head.replace(_og_title, '<meta property="og:title" content="x" content="'
+                             'AIQT.ai - Rules your AI follows">'), "duplicate 'content' attribute")):
+        _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
+                       SchemaError, needle)
+    # A commented-out copy of a block tag is not an element, so it neither counts nor fails.
+    case_count += 1
+    try:
+        _validate_head_tags(ok_head.replace("</head>", "<!-- " + _og_title + " --></head>"),
+                            _own_url, "site/rules.html")
+    except SchemaError as exc:
+        failures.append("head commented copy: unexpected SchemaError: {}".format(exc))
     # page_url derivation: the home page is the bare site root; every other page is its stem.
     case_count += 1
     if page_url("site/index.html") != SITE_BASE_URL:
@@ -1497,12 +1666,16 @@ def _self_test():
         td2 = Path(td2)
         (td2 / "docs").mkdir()
         (td2 / "site").mkdir()
-        # The fixture shell carries the full link-preview tag block (the 14 fixed tags inserted beside
-        # the shell's canonical and og:url placeholder lines), so main()'s per-page head validation has
-        # a complete head to accept.
-        head_fixed = "".join(t for t in HEAD_TAG_BLOCK if "{url}" not in t)
+        # The fixture shell carries the full link-preview tag block in its order (the shell's canonical
+        # and og:url placeholder lines moved into their block slots), so main()'s per-page head
+        # validation has a complete head to accept.
+        head_block = "".join(t.format(url="{{canonical}}" if 'rel="canonical"' in t else "{{og_url}}")
+                             for t in HEAD_TAG_BLOCK)
+        shell_no_block = (nav_base
+                          .replace('<link rel="canonical" href="{{canonical}}">', "", 1)
+                          .replace('<meta property="og:url" content="{{og_url}}">', "", 1))
         (td2 / "docs" / "_shell.html").write_text(
-            nav_base.replace("</head>", head_fixed + "</head>"), encoding="utf-8")
+            shell_no_block.replace("</head>", head_block + "</head>"), encoding="utf-8")
         # Populate every docs/*.md source the live GENSRC_OUTPUTS declares, so this baseline exercises
         # the real registry and stays valid as pages are migrated in (a hardcoded single source would
         # fail closed on the next declared-but-absent page). Each source's canonical and og-url carry
@@ -1537,7 +1710,7 @@ def _self_test():
         (td2 / first_src).write_text(_fm_for(first_tgt) + "hello\n", encoding="utf-8")
         # A shell missing one tag of the block fails closed end-to-end (exit 2) for every page.
         (td2 / "docs" / "_shell.html").write_text(
-            nav_base.replace("</head>", head_fixed.replace(
+            shell_no_block.replace("</head>", head_block.replace(
                 '<meta name="twitter:card" content="summary_large_image">', '', 1) + "</head>"),
             encoding="utf-8")
         case_count += 1
@@ -1545,14 +1718,14 @@ def _self_test():
             failures.append("shell missing block tag: expected exit 2")
         # A shell carrying a duplicate block tag fails closed end-to-end (exit 2).
         (td2 / "docs" / "_shell.html").write_text(
-            nav_base.replace("</head>", head_fixed
+            shell_no_block.replace("</head>", head_block
                              + '<meta property="og:type" content="website">' + "</head>"),
             encoding="utf-8")
         case_count += 1
         if _run_main(td2, ["--check"]) != 2:
             failures.append("shell duplicate block tag: expected exit 2")
         (td2 / "docs" / "_shell.html").write_text(
-            nav_base.replace("</head>", head_fixed + "</head>"), encoding="utf-8")
+            shell_no_block.replace("</head>", head_block + "</head>"), encoding="utf-8")
         # Underscore-prefixed stray (no prefix exemption for .md).
         stray_u = td2 / "docs" / "_stray.md"
         stray_u.write_text(frontmatter + "x\n", encoding="utf-8")

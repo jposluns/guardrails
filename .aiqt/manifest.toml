@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a81b1d7f44a9a6faca14268936952fd9b7585419ca8286279533372a57a8840e"
+tree-sha256 = "87f9acc9d834707f0468d7a1f98e884a26075cda10ad93ac6fc43772e7963744"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3426,8 +3426,8 @@ sha256 = "44ae9d88638f5a962b7826a6c1e713f9fa143ac16eb7329f57af404fb94e00dc"
 
 [[sources]]
 path = "tools/card/TAGS.md"
-bytes = 1945
-sha256 = "2891d04055506c20d02ec4078dc0fd6882ec76af01e79af32e9736800d3a4b09"
+bytes = 2069
+sha256 = "5304b0f0e208e8857b4ad329c7f43dc9fd20986f8b25cdcacc87420f61019599"
 
 [[sources]]
 path = "tools/card/card-safe.png"
@@ -3706,8 +3706,8 @@ sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 22339
-sha256 = "e8b76e12aea5b311603589c8da51cd343988e61d847e13a0215c866cd497dd56"
+bytes = 28833
+sha256 = "02fbeedc02779072c94ec2d1b3162c35ec525acb1dbdff5c8f5ddd679c4fbbf0"
 
 [[sources]]
 path = "tools/check_site_versions.py"
@@ -3871,8 +3871,8 @@ sha256 = "5765bfa41902a4d9455c44b1ad0ddba692333fed3ff2c6704230cd1dc360d46b"
 
 [[sources]]
 path = "tools/gen_site.py"
-bytes = 88297
-sha256 = "733f47f62939153ceba4526da29cd4b79d856209c925f31e075e855c85a8e110"
+bytes = 98733
+sha256 = "c1a9209ecfdf5b1c4d7ca297705bf75236b57329d2fd439980c564d905866fc3"
 
 [[sources]]
 path = "tools/gen_skill.py"
