@@ -31,7 +31,9 @@ jobs:
       # history-reading check need not change the template. persist-credentials false keeps the job
       # token out of the checkout's git config, so no later step can read it from there; nothing after
       # the checkout fetches or pushes. Each action is pinned to a full commit SHA, because a tag is a
-      # label its owner can move; the trailing comment names the tag the SHA was resolved from.
+      # label its owner can move; the trailing comment names the tag the SHA was resolved from. The
+      # pack's self-test checks only that each ref is 40 lowercase hex digits, so a branch or tag whose
+      # name is 40 hex digits would pass it as a SHA; that residual is not closed.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0

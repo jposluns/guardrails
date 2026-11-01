@@ -588,7 +588,7 @@ _SHIPPED_RECIPE = "enforcement/ci/opf-ci.sh"
 # The released digests of those two files (bare-hex sha256), generated and drift-gated: editing either file
 # without regenerating fails tools/gen_secret_patterns.py --check in CI. Never hand-edit this region.
 # BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with tools/gen_secret_patterns.py)
-_SHIPPED_TEMPLATE_SHA256 = '06e3aee534c802b45779b151fc0a04ca862c45fdffb6f298e8be04a80cfd35b6'
+_SHIPPED_TEMPLATE_SHA256 = 'd97892bf16d11085bec6985a2ec5aa9aa9f4a6c904f1995de095b130b6729735'
 _SHIPPED_RECIPE_SHA256 = 'f630855b4c96918e3e4e7e87cf8f4811c186e8ab59b6890be042b9631a70020c'
 # END generated OPF CI floor digests
 # Spec 14.1 check 4 requires that "CI asserts store presence and identity". The shipped recipe asserts
