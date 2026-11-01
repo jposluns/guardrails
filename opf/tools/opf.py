@@ -32,7 +32,8 @@ repository whose store was removed cannot pass CI vacuously). `opf doctor --stor
 instead compares the store identity (the committed `.opf.toml` target and the SHA-256 of the machine store's
 `init.toml`) with the values pinned in `.github/opf-store-identity.toml` at the product root (`schema = 1`,
 `target`, `init_sha256`): 0 both match, 1 a value differs or a `.opf.local.toml` override is present, 2 any
-value absent, malformed, unreadable or unresolvable. Doctor is read-only; its
+value absent, malformed, unreadable or unresolvable, which outranks 1 (the override included). Doctor is
+read-only; its
 observation gather is the caller-side git seam validate_store itself never touches. `upgrade` is a
 recognized verb, but this tooling defines no store upgrade: `opf upgrade` refuses every argument list on
 every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
@@ -17031,8 +17032,9 @@ def _cmd_doctor(rest):
     SHA-256 of the machine store's init.toml against the values pinned in .github/opf-store-identity.toml at
     the product root, a fixed path no argument selects. It exits 0 when both match, 1 when a readable value
     differs or a .opf.local.toml override is present, and 2 when any required value is absent, malformed,
-    unreadable or unresolvable. It needs a store by construction, so --require-store beside it, or the flag
-    given twice, is a usage error (exit 2)."""
+    unreadable or unresolvable; every input is evaluated first, and 2 outranks 1, the override included. It
+    needs a store by construction, so --require-store beside it, or the flag given twice, is a usage error
+    (exit 2)."""
     root = None
     require_store = False
     store_identity = False
@@ -22066,6 +22068,15 @@ def _cli_self_test():
                     with open(os.path.join(prod, ".opf.local.toml"), "w", encoding="utf-8") as fh:
                         fh.write('[store]\ntarget = "dir:{}"\n'.format(store))
                     run("override present", prod, EXIT_FINDING, ".opf.local.toml is present")
+                    # Cannot-evaluate outranks the override: every other input is still evaluated.
+                    for label, kwargs in (("pointer absent", {}), ("init.toml missing", {"init_bytes": None}),
+                                          ("pointer unparseable", {"pointer": "not toml {{\n"})):
+                        prod, store, mdir = build(**kwargs)
+                        if label == "pointer absent":
+                            os.unlink(os.path.join(prod, ".opf.toml"))
+                        with open(os.path.join(prod, ".opf.local.toml"), "w", encoding="utf-8") as fh:
+                            fh.write('[store]\ntarget = "dir:{}"\n'.format(store))
+                        run("override present, " + label, prod, EXIT_MALFORMED, "store identity: CANNOT")
                     prod, store, mdir = build(pointer="not toml {{\n")
                     run("malformed pointer", prod, EXIT_MALFORMED)
                     prod, store, mdir = build(pointer="[store]\ntarget = 5\n")

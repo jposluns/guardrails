@@ -1471,9 +1471,10 @@ def _parse_identity(data):
 def _read_identity_inputs(product_root_fd):
     """Read the product-root inputs through the held descriptor, no-follow: the pinned expectation, the
     presence of the local override, and the committed pointer's decoded [store].target string. Returns
-    (expected_target, expected_digest, override_present, pointer_target), override_present short-circuiting
-    with pointer_target None. StoreError when a required input is absent, malformed or unreadable, or when the
-    override cannot be inspected: a missing input never compares equal."""
+    (expected_target, expected_digest, override_present, pointer_target). The committed pointer is read
+    whether or not an override is present, so an override never hides a pointer that cannot be evaluated.
+    StoreError when a required input is absent, malformed or unreadable, or when the override cannot be
+    inspected: a missing input never compares equal."""
     raw = _read_store_bytes_contained(product_root_fd, IDENTITY_REL)
     if raw is None:
         raise StoreError("{} is absent: no expected store identity is pinned".format(IDENTITY_REL))
@@ -1483,10 +1484,9 @@ def _read_identity_inputs(product_root_fd):
     except (_journal.JournalError, OSError) as exc:
         _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         raise StoreError("cannot inspect {} ({})".format(LOCAL_POINTER_REL, exc))
-    if override is not None:
-        # Any entry under that name (a file, a link, a directory) is an override shape, refused uninspected:
-        # the identity is the COMMITTED pointer's, and an override would substitute its own target for it.
-        return expected_target, expected_digest, True, None
+    # Any entry under that name (a file, a link, a directory) is an override shape, refused uninspected:
+    # the identity is the COMMITTED pointer's, and an override would substitute its own target for it.
+    override_present = override is not None
     pointer = _read_toml_contained(product_root_fd, POINTER_REL)
     if pointer is None:
         raise StoreError("{} is absent: the identity names the committed pointer's target, and default "
@@ -1494,19 +1494,28 @@ def _read_identity_inputs(product_root_fd):
     store = pointer.get("store")
     if not isinstance(store, dict) or type(store.get("target")) is not str:
         raise StoreError("{} has no string [store].target".format(POINTER_REL))
-    return expected_target, expected_digest, False, store["target"]
+    return expected_target, expected_digest, override_present, store["target"]
 
 
-def _read_init_digest(res):
-    """The SHA-256 hex digest of the raw bytes of the RESOLVED machine store's init.toml, read no-follow,
-    singly-linked and capped beneath the store root. StoreError when it is absent or unreadable."""
-    relpath = "{}/{}".format(res.machine_rel, INIT_NAME)
+def _read_committed_init_digest(target, product_root):
+    """Resolve the committed pointer's target string to its store root the way resolve_store resolves a
+    committed pointer (never the override, never default discovery), discover the single machine store
+    through that store-root descriptor, and hash init.toml beneath the SAME descriptor, so a store root
+    swapped by path after discovery is never the one hashed. Returns (machine_rel, digest): the SHA-256 hex
+    digest of the raw bytes of init.toml, read no-follow, singly-linked and capped. StoreError when the
+    target does not resolve to exactly one machine store, or init.toml is absent or unreadable."""
+    store_root = _target_store_root(classify_target(target), product_root)
     try:
-        store_root_fd = _open_store_root_fd(res.store_root, True)
+        store_root_fd = _open_store_root_fd(store_root, True)
     except OSError as exc:
         _journal._fd_release_fault(exc)    # the no-follow walk's close: raised as itself, never a cannot-evaluate
-        raise StoreError("cannot open store root {} ({})".format(res.store_root, exc))
+        raise StoreError("cannot open store root {} ({})".format(store_root, exc))
     try:
+        status, machine_dir, detail = discover_machine_store(store_root_fd, store_root)
+        if status != "one":
+            raise StoreError("pointer resolves to {} but {}".format(store_root, detail))
+        machine_rel = "{}/{}".format(WORKING_DIRNAME, machine_dir)
+        relpath = "{}/{}".format(machine_rel, INIT_NAME)
         data = _read_store_bytes_contained(store_root_fd, relpath)
     finally:
         inflight = _journal._in_flight_in(sys._getframe())
@@ -1517,8 +1526,8 @@ def _read_init_digest(res):
         except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
             _journal._yield_close_exceptions(inflight, [exc])
     if data is None:
-        raise StoreError("{} is absent at {}".format(relpath, res.store_root))
-    return hashlib.sha256(data).hexdigest()
+        raise StoreError("{} is absent at {}".format(relpath, store_root))
+    return machine_rel, hashlib.sha256(data).hexdigest()
 
 
 def check_store_identity(product_root):
@@ -1526,15 +1535,20 @@ def check_store_identity(product_root):
     completion check 4; the identity of OPF-IMPLEMENTATION-PROMPT.md open point 18). Never raises for an
     expected outcome; returns a StoreIdentity, graded by identity_exit_code.
 
-    In order: the expectation file is read and strictly validated; a present `.opf.local.toml` is a mismatch
-    (an override must not stand in for the committed pointer) and one that cannot be inspected is
-    cannot-evaluate; `.opf.toml`'s decoded [store].target is compared with the pinned target exactly, with no
-    normalization; resolve_store must report RESOLVED through the committed pointer (default discovery is not
-    a substitute) at the target it reads; and the raw bytes of the machine store's init.toml are hashed and
-    compared with the pinned digest. Any value absent, malformed, unreadable or unresolvable is
-    CANNOT-EVALUATE, which outranks a differing value. Residual (disclosed): the pointer is read here and
-    again by resolve_store, so a pointer rewritten between the two reads is caught only when the two parse to
-    different targets."""
+    Every input is evaluated before any verdict: the expectation file is read and strictly validated; a
+    `.opf.local.toml` that cannot be inspected is cannot-evaluate; `.opf.toml`'s decoded [store].target is
+    compared with the pinned target exactly, with no normalization; that target must resolve to a single
+    machine store as a committed pointer does (default discovery and the override are never a substitute);
+    and the raw bytes of the machine store's init.toml are hashed and compared with the pinned digest. Any
+    value absent, malformed, unreadable or unresolvable is CANNOT-EVALUATE, which outranks every difference,
+    a present `.opf.local.toml` included. Only when every input evaluates is a present override a mismatch
+    (an override must not stand in for the committed pointer), beside any differing value.
+
+    The pointer is read once, through the held product-root descriptor, and init.toml is read beneath the
+    store-root descriptor discovery ran through. Residual (disclosed): the store root is opened by a no-follow
+    walk of its path, and the machine directory and init.toml are found by name beneath the held store-root
+    descriptor, so a product root swapped by path after its descriptor opened, or a rename inside the store
+    between discovery and the read, is not detected."""
     product_root = Path(product_root)
     notes = []
     try:
@@ -1561,36 +1575,23 @@ def check_store_identity(product_root):
             raise                       # raised only with nothing in flight here
         except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
             _journal._yield_close_exceptions(inflight, [exc])
-    if override:
-        return StoreIdentity(IDENTITY_MISMATCH, ["{} is present: an override must not substitute for the "
-                                                 "committed pointer {}".format(LOCAL_POINTER_REL, POINTER_REL)])
     target_ok = target == expected_target
     notes.append("target: {} (pinned {}, committed {})".format(
         "match" if target_ok else "DIFFERS", _safe_display(expected_target), _safe_display(target)))
-    res = resolve_store(product_root)
-    if res.status != RESOLVED or res.pointer_source != "committed":
-        notes.append("store: not resolved through the committed pointer ({}, source {}): {}".format(
-            res.status, res.pointer_source, res.detail))
-        return StoreIdentity(CANNOT_EVALUATE, notes)
+    if override:
+        notes.append("{} is present: an override must not substitute for the committed pointer {}".format(
+            LOCAL_POINTER_REL, POINTER_REL))
     try:
-        named = classify_target(target)
-    except StoreError as exc:
-        _journal._fd_release_fault(exc)
-        notes.append("store: the committed target no longer classifies ({})".format(exc))
-        return StoreIdentity(CANNOT_EVALUATE, notes)
-    if res.target is None or (res.target.kind, res.target.value) != (named.kind, named.value):
-        notes.append("store: {} changed between its two reads (fail-closed)".format(POINTER_REL))
-        return StoreIdentity(CANNOT_EVALUATE, notes)
-    try:
-        digest = _read_init_digest(res)
+        machine_rel, digest = _read_committed_init_digest(target, product_root)
     except StoreError as exc:
         _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
         notes.append("init_sha256: {}".format(exc))
         return StoreIdentity(CANNOT_EVALUATE, notes)
     digest_ok = digest == expected_digest
     notes.append("init_sha256: {} (pinned {}, {}/{} {})".format(
-        "match" if digest_ok else "DIFFERS", expected_digest, res.machine_rel, INIT_NAME, digest))
-    return StoreIdentity(IDENTITY_MATCH if target_ok and digest_ok else IDENTITY_MISMATCH, notes)
+        "match" if digest_ok else "DIFFERS", expected_digest, machine_rel, INIT_NAME, digest))
+    return StoreIdentity(IDENTITY_MATCH if target_ok and digest_ok and not override else IDENTITY_MISMATCH,
+                         notes)
 
 
 # --- SemVer and base_compat helpers (spec 9.1) -------------------------------------------------------
@@ -5548,6 +5549,41 @@ def self_test():
             check("identity-override-uninspectable", id_says(prod, "cannot inspect {}".format(LOCAL_POINTER_REL)))
         finally:
             _journal._lstat_contained = real_lstat
+        # A present override never hides an input that cannot be evaluated: every other input is still read,
+        # and cannot-evaluate outranks the override's mismatch.
+        prod, store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        os.unlink(str(prod / POINTER_REL))
+        check("identity-override-pointer-absent", id_says(prod, "default discovery is not a substitute"))
+        prod, store, _mdir = id_fixture(init=None)
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        check("identity-override-init-missing", id_code(prod) == 2)
+        prod, store, _mdir = id_fixture(pointer_text="not toml {{\n")
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        check("identity-override-pointer-unparseable", id_code(prod) == 2)
+        prod, store, _mdir = id_fixture(pin_target="dir:{}".format(base / "elsewhere"))
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        got = _guard(lambda: check_store_identity(prod))
+        check("identity-override-with-differing-target",
+              got != "RAISED" and got.status == IDENTITY_MISMATCH
+              and any(n.startswith("target: DIFFERS") for n in got.notes)
+              and any(LOCAL_POINTER_REL in n for n in got.notes))
+        # init.toml is read beneath the store root discovery ran through: a store root swapped by path right
+        # after discovery, for one whose init.toml matches the pin, is never the one hashed.
+        prod, store, _mdir = id_fixture(init=id_init + b"#\n")
+        _prod2, swap_in, _mdir2 = id_fixture()
+        real_discover = discover_machine_store
+
+        def discover_then_swap(store_root_fd, store_root):
+            found = real_discover(store_root_fd, store_root)
+            os.rename(str(store), str(base / "identity-swapped-out"))
+            os.rename(str(swap_in), str(store))
+            return found
+        globals()["discover_machine_store"] = discover_then_swap
+        try:
+            check("identity-store-root-swapped-after-discovery", id_code(prod) == 1)
+        finally:
+            globals()["discover_machine_store"] = real_discover
         # The committed pointer: malformed, or absent while a default store is discoverable, is
         # cannot-evaluate (default discovery never stands in for the committed pointer).
         for label, text in (("unparseable", "not toml {{\n"), ("no-target", '[store]\nother = "x"\n'),
