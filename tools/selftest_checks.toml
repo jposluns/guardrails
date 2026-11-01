@@ -4479,4 +4479,5 @@ expected-check-ids = [
   "pinned-exempt/changed-bytes-exit-2",
   "pinned-exempt/unlisted-png-exit-2",
   "pinned-exempt/missing-listed-path-exit-2",
+  "pinned-exempt/symlinked-listed-path-exit-2",
 ]

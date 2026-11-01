@@ -689,7 +689,7 @@ tools/aiqt_corpus.py text eol=lf
 tools/audit_reference.py text eol=lf
 tools/card/TAGS.md text eol=lf
 tools/card/card-safe.png binary
-tools/card/card.html binary
+tools/card/card.html text eol=lf
 tools/card/compare.png binary
 tools/card/illustration.svg text eol=lf
 tools/card/platforms.png binary

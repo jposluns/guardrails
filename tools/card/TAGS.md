@@ -30,5 +30,6 @@
 ## Sources
 
 The card image is site/images/aiqt-card.png, with the SHA-256 recorded above. Its sources are card.html
-and illustration.svg in this folder. Every published page carries the tag block above, with canonical and
-og:url set to that page's own URL.
+and illustration.svg in this folder. Every page tools/gen_site.py generates carries the tag block above,
+with canonical and og:url set to that page's own URL. site/404.html is a noindex page that tools/gen_site.py
+does not generate, and it does not carry the block.

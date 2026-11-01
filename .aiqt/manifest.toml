@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c1317bfda38972b242a3d8e81c3db2367bd1ffc97673684068e9cca139d226ad"
+tree-sha256 = "a81b1d7f44a9a6faca14268936952fd9b7585419ca8286279533372a57a8840e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 21158
-sha256 = "31df61963b4429767f2c728729e64bdffe28b9a685ad3eaed5ac52a33d7bb4f0"
+bytes = 21134
+sha256 = "0eac1f8c9d6c5a9f039f6543ed2b0d3cdc5b968db291379a0642de0107b8ab07"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -2276,8 +2276,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 44923
-sha256 = "f05a019d8c75f505bb09e9a3edac10449eed7d575aed35d3bad3d17b6d907f11"
+bytes = 44928
+sha256 = "85ce2c023385907997224d8e91a5891b653d59c61cde3494e47649fd9d7d4836"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -3426,8 +3426,8 @@ sha256 = "44ae9d88638f5a962b7826a6c1e713f9fa143ac16eb7329f57af404fb94e00dc"
 
 [[sources]]
 path = "tools/card/TAGS.md"
-bytes = 1820
-sha256 = "60d49f9d0ed02c6a640ddb1e1b3862a9705a803aa902de71b1326a62b11abfba"
+bytes = 1945
+sha256 = "2891d04055506c20d02ec4078dc0fd6882ec76af01e79af32e9736800d3a4b09"
 
 [[sources]]
 path = "tools/card/card-safe.png"
@@ -3436,8 +3436,8 @@ sha256 = "f44c06dbbe037ca343ba21fecff167d793711db80e48a518a57b2814b8692a26"
 
 [[sources]]
 path = "tools/card/card.html"
-bytes = 3392
-sha256 = "73b4e3f822c72881a9c63328870398389b0733d76f0f660d32cc90f4e652c28b"
+bytes = 3393
+sha256 = "0ada264e948c9bd8fc2b32061a3185569adbf799ea7783d0ec9c8064b6a56088"
 
 [[sources]]
 path = "tools/card/compare.png"
@@ -3561,8 +3561,8 @@ sha256 = "07ae345c9a00855f6f2ad3cfef14e1bece69ed0852a53d2d9656cf8abaa8942e"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 201206
-sha256 = "7e22eec4f6985f96924d607e997e221ca2e9fb9456cf115bc32a9922ed6b034e"
+bytes = 204295
+sha256 = "a92fb2a167f5ea3565fc40cb6f0437d628994f928ed46e4ae572e9870dd64a8d"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -3951,8 +3951,8 @@ sha256 = "f555e9d55542dabb78cdc9552222bba966cedc8a09c3c1cdb5816306dba71d4d"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 187635
-sha256 = "3d917e28d0c63b2ca803c11ee7e4147682d43d22c0f0a3134f7129ea1c25d6b3"
+bytes = 187683
+sha256 = "034052b0f081233b26f189c16805d4ca6e043eca288c67d9407a61c7b368b0a5"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
