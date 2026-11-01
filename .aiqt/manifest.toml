@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "357d985a765b04428640b97e315711f27d84fc90dae40d782026953d237d8664"
+tree-sha256 = "b8988db0b057d8ae9f5076d2df44ddac358815503d3214fbae3961e6467e3175"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 530056
-sha256 = "976c7249756c049a8afe2d6744b29a69f385db84d939c9b9a350b0671d6f9781"
+bytes = 530541
+sha256 = "4fe7b7c24765c3ad979b2415dcc1159c255b4dddb539cc2646de1249d919daf8"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
