@@ -18,25 +18,38 @@ an ordered item (`1. text`), a line indented with spaces exactly to the text of 
 continuation line above it, and prose. Inline text is read by the CommonMark 0.31.2 rules: a
 backslash escapes ASCII punctuation, a code span closes only on a backtick run of exactly its
 opening length, and an inline comment is `<!-->`, `<!--->` or `<!--` through the next `-->` on its
-line. A backtick run that nothing on its line closes carries a code span onto the next line when
-that line is indented or prose, and is literal text when the next line ends the paragraph. Heading,
-ordered item, continuation and prose text must open with a letter, a digit that starts no list
-marker, `(`, a quote, a backtick or an option name; must not begin with an entry or field name and
-a colon once emphasis, code and escape marks are removed; and must not open with letters that could
-begin such a name followed by a character reference or a format character (Unicode category Cf).
-That text, and a field line, must hold no raw HTML outside a code span; a field value is checked
-for nothing else, apart from the refusals below that apply to every line. Every other line cannot
-evaluate: a blockquote, a bullet item other than a field line, an ordered item marked other than
-`<digits>. `, a table row, a setext underline or thematic break, an HTML line, an indented line
-that continues no item, a fence or comment opener indented by spaces or tabs at any width (a
-backtick run with another backtick later on its line is inline code, not an opener), text after the
-end of a comment that opens its line, a `<!--` that does not close on its line (refused as raw
-HTML), a code span carried into a line that does not close it, two backtick runs on one line that
-nothing on it closes, a backtick run left open above a `<digits>. ` line, an entry heading whose
-name holds a character reference or format character, and a carriage return or other control
-character. An entry ends at the next heading that is not an entry heading; prose and ordered items
-end no entry. An Owner, Ownership, Disposition or Successor field line after that end and before
-the next entry, or before the first entry, belongs to no entry and is refused. Lines and `TODO.md`
+line. A backtick run that nothing on its line closes, on a line other than a heading, carries a
+code span onto the next line when that line is indented, prose, or an ordered item other than
+`1. ` with text (the one item a reader starts a list on below a paragraph), and is literal text
+when the next line ends the paragraph. Heading, ordered item, continuation and prose text must open
+with a letter, a digit that starts no list marker, `(`, a quote, a backtick or an option name; must
+not begin with an entry or field name, spaces or tabs, and a colon, either once emphasis, code and
+escape marks are removed or as a reader renders it (a character reference decoded as the vendored
+marko decodes it: a decimal number of up to seven digits, a hexadecimal one of up to six or a name
+of up to 32 characters, ended by `;`, read by Python's `html.unescape`; an escaped character and a
+closed code span's content kept literal); and must not open with letters that could begin such a
+name (a prefix of one, or a whole one and spaces or tabs) followed, once rendered, by a format
+character (Unicode category Cf). A character reference is so refused only where its decoded
+character completes such a name: `S&amp;P` and `Split&nbsp;decisions` are read, and two spellings a
+reader renders alike are judged alike. A name spelled with a look-alike a reader does show (a
+combining mark, a no-break or other non-ASCII space, a full-width colon) is read as that text, not
+as the name. That text, and a field line, must hold no raw HTML outside a code span; a field value
+is checked for nothing else, apart from the refusals below that apply to every line. Every other
+line cannot evaluate: a blockquote, a bullet item other than a field line, an ordered item marked
+other than `<digits>. `, a table row, a setext underline or thematic break, an HTML line, an
+indented line that continues no item, a fence or comment opener indented by spaces or tabs at any
+width (a backtick run with another backtick later on its line is inline code, not an opener), text
+after the end of a comment that opens its line, a `<!--` that does not close on its line (refused
+as raw HTML, although a reader shows it as literal text unless a later line of the paragraph closes
+it), a code span carried into a line that does not close it, two backtick runs on one line that
+nothing on it closes above a line that continues the paragraph (refused although a reader may
+render them, as the check carries one run), a backtick run left open above an ordered item that
+continues the paragraph (also inside a list, where a reader may start a sibling item instead), an
+entry heading whose name holds a character reference the vendored marko decodes or a format
+character, and a carriage return or other control character. An entry ends at the next heading that
+is not an entry heading; prose and ordered items end no entry. An Owner, Ownership, Disposition or
+Successor field line after that end and before the next entry, or before the first entry, belongs
+to no entry and is refused. Lines and `TODO.md`
 table rows inside a fenced code block, or inside an HTML comment that opens its line, are not read;
 such a comment ends on the first line holding `-->`, so `<!-->` and `<!--->` end it on their own
 line. An inline comment hides no later line. A field's value is read from its first line only.
