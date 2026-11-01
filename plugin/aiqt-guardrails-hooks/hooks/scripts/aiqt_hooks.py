@@ -31306,7 +31306,7 @@ def _orch_resume_probes(reg, root):
             if not sha or not sha.startswith(m.group(1)):
                 findings.append("handoff gate marker cites commit {} but HEAD is {}".format(
                     m.group(1), sha[:12] or "unreadable"))
-    for key in ("findings", "pending_decisions", "memory_index"):
+    for key in ("findings", "pending_decisions"):
         path = _orch_path(root, rec.get(key))
         if path:
             try:
@@ -31315,6 +31315,7 @@ def _orch_resume_probes(reg, root):
             except OSError as exc:
                 findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
                                 .format(key, exc))
+    findings.extend(_orch_memory_index_findings(rec, root))
     findings.extend(_orch_memory_findings(rec, root))
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     if lease:
@@ -31353,21 +31354,28 @@ def _orch_memory_findings(rec, root):
     must resolve to directories and to the SAME directory by device and inode, so a link that is missing,
     dangling or aimed elsewhere is a finding. An empty store is not a finding (a correctly linked new store
     is empty); a store whose content did not come back, such as an unmounted mount point that still matches
-    by identity, is caught only through a declared memory_index, which the record-surface loop must read.
-    Declaring neither key removes the probe; declaring one alone is a finding."""
-    memory = _orch_path(root, rec.get("memory"))
-    store = _orch_path(root, rec.get("memory_store"))
-    if not memory and not store:
+    by identity, is caught only through a declared memory_index, which _orch_memory_index_findings reads.
+    A key absent from the record is undeclared, and leaving out both keys removes the probe; a key that is
+    present with a value _orch_path refuses (an empty string, null, or any other non-string) is a finding
+    naming the key, never read as absent; declaring one alone is a finding."""
+    present = [key for key in ("memory", "memory_store") if key in rec]
+    if not present:
         return []
-    if not memory or not store:
+    unusable = [_orch_memory_unusable(key, rec[key]) for key in present
+                if _orch_path(root, rec[key]) is None]
+    if unusable:
+        return unusable
+    if len(present) == 1:
         return ["the registry declares only one of record.memory and record.memory_store; declare both or "
                 "neither: cannot-evaluate"]
+    memory = _orch_path(root, rec["memory"])
+    store = _orch_path(root, rec["memory_store"])
     findings = []
     ids = {}
     for key, path in (("memory", memory), ("memory_store", store)):
         try:
             st = os.stat(path)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:  # ValueError: a path with a NUL character
             findings.append("declared {} path {} cannot be resolved ({}): cannot-evaluate"
                             .format(key, path, exc))
             continue
@@ -31379,6 +31387,61 @@ def _orch_memory_findings(rec, root):
         findings.append("memory path {} resolves to {} but the declared store is {}"
                         .format(memory, os.path.realpath(memory), store))
     return findings
+
+
+def _orch_memory_unusable(key, value):
+    """The finding for a memory key that is present in the record with a value _orch_path refuses. It
+    names the key and the value's kind, never the value itself, so a large value stays out of the text."""
+    kind = ("an empty string" if isinstance(value, str) else "null" if value is None
+            else "a {} value".format(type(value).__name__))
+    return ("the registry declares record.{} with an unusable value ({}), not a non-empty path string: "
+            "cannot-evaluate".format(key, kind))
+
+
+def _orch_memory_index_findings(rec, root):
+    """The memory-index read of the resume audit. An absent memory_index key is undeclared; a present key
+    with a value _orch_path refuses is a finding naming it. The index is read the way _orch_barrier_read
+    reads the barrier: os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer
+    opens at once instead of waiting for one; the opened descriptor is fstat'ed and anything not a regular
+    file (a FIFO, a device, a directory) is a finding without a read; the read asks for at most
+    _ORCH_BARRIER_MAX_BYTES + 1 bytes in all and a longer index is a finding. The descriptor is closed
+    exactly once on every path. A missing or unreadable index (a NUL character in the path included) is a
+    finding too; every finding is cannot-evaluate. The content is not parsed: a readable index within the
+    bound is the evidence that the store came back."""
+    if "memory_index" not in rec:
+        return []
+    path = _orch_path(root, rec["memory_index"])
+    if path is None:
+        return [_orch_memory_unusable("memory_index", rec["memory_index"])]
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:  # ValueError: a path with a NUL character
+        detail = str(exc)
+    else:
+        detail = None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                detail = "not a regular file"
+            else:
+                total = 0
+                while total <= _ORCH_BARRIER_MAX_BYTES:
+                    chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                if total > _ORCH_BARRIER_MAX_BYTES:
+                    detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+        except OSError as exc:
+            detail = str(exc)
+        finally:
+            try:
+                os.close(fd)  # once: after a failed close the descriptor number may already be reused
+            except OSError as exc:
+                detail = detail or str(exc)
+    if detail is None:
+        return []
+    return ["declared record surface memory_index unreadable ({}): cannot-evaluate".format(detail)]
 
 
 def _orch_merge_pending_findings(reg, root):

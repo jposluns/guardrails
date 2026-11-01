@@ -11389,13 +11389,25 @@ def _oracle_defines_alias(calls):
                for argv in calls for i in range(len(argv)))
 
 
+# Run in a child by the memory-index FIFO row: the hooks directory, the registry JSON and the repository
+# root; print the resume-probe findings as one JSON line.
+_RESUME_INDEX_CHILD = (
+    "import json, sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import aiqt_hooks\n"
+    "print(json.dumps(aiqt_hooks._orch_resume_probes(json.loads(sys.argv[2]), sys.argv[3])))\n")
+
+
 def _resume_memory_cases(tmp):
     """Component 5, the memory-path probe of the resume audit. A declared memory path that is a plain
     directory, a dangling link, a link aimed elsewhere or a regular file, a link into a store whose declared
     index is absent, and a declaration naming only one of memory and memory_store are each a finding, red
     when _orch_resume_probes neither calls the probe nor reads memory_index. A link into an empty store with
     no index declared, a store whose declared index exists, and a registry declaring no memory key stay
-    silent (the first-launch and no-store cases must not fire)."""
+    silent (the first-launch and no-store cases must not fire). A memory key present with an empty or
+    non-string value is a finding naming that key, never the undeclared case; an index that is a FIFO (run
+    in a child with a timeout), a directory or one byte over the barrier's bound is a finding, and an index
+    one byte under or exactly at the bound stays silent."""
     base = tmp / "resumemem"
     base.mkdir()
 
@@ -11456,6 +11468,62 @@ def _resume_memory_cases(tmp):
     check("resume/memory-linked-empty-store-silent", (os.listdir(str(fl.store)), probes(fl)), ([], []))
     nk = build("nokeys", memory=False, store=False)
     check("resume/memory-undeclared-silent", probes(nk), [])
+
+    # a key present with a value _orch_path refuses is a finding naming that key, never the absent case
+    def unusable(f, key):
+        return [fi for fi in probes(f) if "record.{} with an unusable value".format(key) in fi]
+    ev = build("emptymemory", store=False)
+    ev.reg["record"]["memory"] = ""
+    check("resume/memory-empty-value-finding",
+          (len(unusable(ev, "memory")), any("declare both or neither" in fi for fi in probes(ev))), (1, False))
+    ns = build("nonstringstore")
+    os.symlink(str(ns.store), str(ns.memory))
+    ns.reg["record"]["memory_store"] = 7
+    check("resume/memory-store-non-string-finding", len(unusable(ns, "memory_store")), 1)
+    ei = build("emptyindex")
+    os.symlink(str(ei.store), str(ei.memory))
+    ei.reg["record"]["memory_index"] = ""
+    check("resume/memory-index-empty-value-finding", len(unusable(ei, "memory_index")), 1)
+    nul = build("nulmemory")
+    nul.reg["record"]["memory"] = str(nul.memory) + "\x00x"
+    check("resume/memory-nul-path-finding",
+          any("cannot be resolved" in fi and "memory" in fi for fi in probes(nul)), True)
+
+    # the index is opened without waiting and read only when it is a regular file within the barrier's
+    # bound; the FIFO row runs in a child with a timeout, so a blocking open fails the row, not this run
+    def index_finding(f, reason):
+        return any("memory_index unreadable ({})".format(reason) in fi for fi in probes(f))
+    ff = build("indexfifo", index=True)
+    os.symlink(str(ff.store), str(ff.memory))
+    os.mkfifo(str(ff.index))
+    hooks_dir = os.path.dirname(os.path.abspath(aiqt_hooks.__file__))
+    try:
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", _RESUME_INDEX_CHILD, hooks_dir,
+                            json.dumps(ff.reg), str(ff.root)], capture_output=True, text=True, timeout=30)
+        fifo_row = json.loads(p.stdout)
+    except subprocess.TimeoutExpired:
+        fifo_row = "child timed out"
+    except ValueError:
+        fifo_row = "child exit {}: {}".format(p.returncode, p.stderr.strip()[-200:])
+    fifo_ok = isinstance(fifo_row, list) and any("memory_index unreadable (not a regular file)" in fi
+                                                 for fi in fifo_row)
+    check("resume/memory-index-fifo-finding", fifo_ok or fifo_row, True)
+    di = build("indexdir", index=True)
+    os.symlink(str(di.store), str(di.memory))
+    di.index.mkdir()
+    check("resume/memory-index-directory-finding", index_finding(di, "not a regular file"), True)
+    bound = aiqt_hooks._ORCH_BARRIER_MAX_BYTES
+    bi = build("indexbound", index=True)
+    os.symlink(str(bi.store), str(bi.memory))
+    rows = []
+    for size in (bound - 1, bound, bound + 1):
+        bi.index.write_bytes(b"x" * size)
+        rows.append(probes(bi))
+    over = ["declared record surface memory_index unreadable (larger than the {}-byte bound): "
+            "cannot-evaluate".format(bound)]
+    check("resume/memory-index-under-bound-silent", rows[0], [])
+    check("resume/memory-index-at-bound-silent", rows[1], [])
+    check("resume/memory-index-over-bound-finding", rows[2], over)
 
     # end to end: the SessionStart audit warns and arms on the finding, and once the link is fixed both the
     # audit and the finding list tools/orch_doctor.py --resume-audit writes from are clean

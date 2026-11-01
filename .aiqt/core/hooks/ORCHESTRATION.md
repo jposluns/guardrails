@@ -296,10 +296,16 @@ The three memory keys under `record` feed the resume audit's memory-path probe: 
 the session reads its project memory from, `memory_store` is the store that path must reach, and
 `memory_index` is an index file inside that store. Where both `memory` and `memory_store` are declared,
 the audit stats each (following links) and reports a finding when either cannot be resolved or is not a
-directory, or when the two differ in device and inode; declaring only one of them is a finding too. An
-empty store is not a finding, so a correctly linked new store stays silent. `memory_index` is read like
-the other record surfaces, and a missing or unreadable index is a cannot-evaluate finding; it is the
-only probe that tells a store whose mount did not come back (an empty mount point with the same
+directory, or when the two differ in device and inode; declaring only one of them is a finding too. A
+key that is absent from `record` is undeclared: leaving out both `memory` and `memory_store` removes
+the identity probe, and leaving out `memory_index` removes the index read. A key that is present with a
+value that is not a non-empty string (an empty string, `null`, a number, a boolean, a list or an
+object) is never read as absent: for each of the three keys it is a cannot-evaluate finding that names
+the key. An empty store is not a finding, so a correctly linked new store stays silent. `memory_index`
+is opened without waiting, so a FIFO with no writer does not hold up the audit, and an index that is
+missing, unreadable, not a regular file (a FIFO, a device or a directory, which is never read) or
+larger than 65536 bytes (the resume barrier's bound; the read stops one byte past it) is a
+cannot-evaluate finding; it is the only probe that tells a store whose mount did not come back (an empty mount point with the same
 identity) from the store itself, so declare it once the store has an index. Declare these keys only in
 `.aiqt/orchestration.local.json`, since a committed registry fires on every seat that has no store, and
 as absolute paths: a relative path, a leading `~` included, is joined onto the repository root and is
