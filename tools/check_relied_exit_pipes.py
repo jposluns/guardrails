@@ -131,14 +131,18 @@ Exit convention (matches the repo's gates):
      -T/--pty-late, -S/--shell), whose exit propagation is not a verified premise of this gate, a
      declared NAME inside a command substitution in an AND-OR list ended by '&', a closing word or
      ')' with no open construct (in a case arm, a ')' with no subshell of the arm open, or an arm or
-     case ended with one still open) while a relied stage, or a declared name hidden in a
+     case ended with one still open) or a case header or pattern this gate cannot read (a '(' in a
+     pattern that is neither its optional opening paren nor glued after ? * + @ or !, or a separator
+     inside a pattern) while a relied stage, or a declared name hidden in a
      substitution, is pending in the list (the list's end cannot be placed), a declared command
      whose subcommand sits
      behind option words, a declared NAME inside a subshell, brace group, loop body or function body
      (one-line definitions and non-brace bodies included: constructs whose execution time or shell
      this gate does not model; the name counts even where it is only another command's argument data,
-     a disclosed over-refusal; a subshell inside a case arm counts: the pattern's own ')' ends the
-     pattern, and the arm's '(' and ')' open and close subshells), a function definition whose body
+     a disclosed over-refusal; a subshell inside a case arm counts: a pattern's parens open no
+     subshell, an extglob group's parens nest inside the pattern and only the ')' at nesting zero ends
+     it, a reserved word in a pattern is pattern text, never a block word, and the arm's '(' and ')'
+     open and close subshells), a function definition whose body
      is not a compound form this gate models in a file that mentions a declared command (a disclosed over-refusal: such a body's
      execution cannot be attributed), or a grouped or compound pipeline producer (a subshell, brace
      group, or loop piped onward) in a file that mentions a declared command. Declared identity in
@@ -193,6 +197,14 @@ RESERVED_SKIP = frozenset(("if", "then", "else", "elif", "do", "while", "until",
                            "select", "{", "}", "!", "coproc"))
 BLOCK_OPEN = frozenset(("if", "while", "until", "for", "case", "select", "{"))
 BLOCK_CLOSE = frozenset(("fi", "done", "esac", "}"))
+# The characters that make a '(' glued after them in a case pattern an extglob group (?( *( +( @( !( ).
+EXTGLOB_LEADS = "?*+@!"
+# What makes the end of an AND-OR list unplaceable, by the reason _case_paren_step, _close_case or the
+# block walk gives.
+UNPLACED_TRIGGERS = {
+    "close": "a closing word or ')' with nothing open",
+    "open": "an arm or esac reached with a subshell still open",
+    "pattern": "a case header or pattern this gate cannot read"}
 PIPE_SEPS = ("|", "|&")
 MAX_SUBST_DEPTH = 20
 # Commands that hand their argument words to another execution environment: a declared command among
@@ -1195,34 +1207,95 @@ def _ends_case_arm(seg, nxt):
             and nxt.sep_after in (";", "&"))
 
 
-def _case_paren_step(case_stack, paren_depth, sep, arm_end):
-    """The subshell depth after one separator, and whether a ')' or an arm end found a subshell it
-    cannot place. case_stack holds one [state, floor] per open case statement, innermost last: state
-    'pattern' while a pattern is read (from the case word, and after each ;; ;& or ;;&), 'arm' after the
-    pattern's ')', and floor the subshell depth the case opened at. In a pattern '(' is the pattern's
-    optional opening paren and ')' ends the pattern, so neither moves the depth. Outside every case,
-    and in an arm, '(' opens a subshell and ')' closes one; a ')' with no subshell open above the floor
-    has nothing to close, and an arm ended with a subshell still open leaves its depth unknown, so
-    each is unplaceable (the depth falls back to the floor)."""
+def _case_word(top, w, plain):
+    """True when the walk word w, read with top the innermost open case statement (None outside every
+    case), is case syntax or pattern text rather than a word the block walk reads: the subject word and
+    'in' after the case word, and every word of a pattern. bash reads no reserved word in a pattern
+    (fi) if) done) and x|fi) are patterns) except a plain esac at a pattern's start, which closes the
+    case (after a '|' or the optional '(' it is a pattern too); False hands that esac to the walk."""
+    if top is None or top[0] == "arm":
+        return False
+    if top[0] == "header":
+        # The word after the subject is 'in' in any bash that parses the case, so its spelling is not
+        # checked (an unresolved subject before it can leave its plainness unknown).
+        if top[3] and w == "in":
+            top[0] = "pattern"
+        top[3] = True
+        return True
+    if top[3] and top[2] == 0 and w == "esac" and plain:
+        return False
+    top[3] = False
+    return True
+
+
+def _close_case(case_stack, paren_depth):
+    """The subshell depth after an esac closes the innermost case, and why its end cannot be placed
+    (None when it can): a case closed with a subshell of its arm still open leaves the depth unknown,
+    so the depth falls back to the floor the case opened at."""
+    floor = case_stack.pop()[1]
+    if paren_depth != floor:
+        return floor, "open"
+    return paren_depth, None
+
+
+def _case_paren_step(case_stack, paren_depth, seg, arm_end):
+    """The subshell depth after one segment's separator, and why a ')', an arm end or a pattern cannot
+    be placed (None when it can: 'close' for a ')' with nothing open, 'open' for an arm ended with a
+    subshell still open, 'pattern' for a case header or pattern this reader cannot read soundly).
+    case_stack holds one [state, floor, nest, start] per open case statement, innermost last: state
+    'header' from the case word to its 'in', 'pattern' while a pattern is read (after 'in' and after
+    each ;; ;& or ;;&) and 'arm' after the pattern's ')'; floor the subshell depth the case opened at;
+    nest the parens open inside the current pattern; start whether the pattern has no text yet (in the
+    header, whether the subject word was read). In a pattern no paren moves the depth: an optional '('
+    at the start opens nothing, a '(' glued after ? * + @ or ! opens an extglob group (and any '(' inside
+    a group nests), each ')' closes the innermost group, and only the ')' at nest zero ends the
+    pattern. Any other '(' or ')' there, or a separator inside a pattern, is a form bash refuses or this
+    reader cannot read, so it is unplaceable. Outside every case, and in an arm, '(' opens a subshell and
+    ')' closes one; a ')' with no subshell open above the floor has nothing to close, and an arm ended
+    with a subshell still open leaves its depth unknown, so each is unplaceable (the depth falls back to
+    the floor)."""
+    sep = seg.sep_after
     top = case_stack[-1] if case_stack else None
+    if top is not None and top[0] == "header":
+        return paren_depth, (None if sep == "" else "pattern")
     if top is not None and top[0] == "pattern":
-        if sep == ")":
-            top[0] = "arm"
-        return paren_depth, False
+        if sep == "(":
+            if top[3] and top[2] == 0:
+                top[3] = False
+            elif top[2] or (seg.raw or "")[-1:] in EXTGLOB_LEADS:
+                top[2] += 1
+            else:
+                return paren_depth, "pattern"
+        elif sep == ")":
+            if top[2]:
+                top[2] -= 1
+            else:
+                top[0] = "arm"
+                if top[3]:
+                    return paren_depth, "pattern"
+        elif sep == "|":
+            if top[3]:
+                return paren_depth, "pattern"
+        elif top[2] or not top[3]:
+            top[2] = 0
+            return paren_depth, "pattern"
+        return paren_depth, None
     floor = top[1] if top is not None else 0
-    unplaced = False
+    unplaced = None
     if sep == "(":
         paren_depth += 1
     elif sep == ")":
         if paren_depth > floor:
             paren_depth -= 1
         else:
-            unplaced = True
+            unplaced = "close"
     if top is not None and arm_end:
         if paren_depth != floor:
-            unplaced = True
+            unplaced = "open"
             paren_depth = floor
         top[0] = "pattern"
+        top[2] = 0
+        top[3] = True
     return paren_depth, unplaced
 
 
@@ -1535,7 +1608,7 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
         # neither opens nor closes a block here.
         words = argv
         word_base = 0
-        unbalanced = False
+        unbalanced = None
         if argv[:1] == ["function"] and plain_at(0, "function"):
             func_pending = True
             words = argv[2:]
@@ -1549,22 +1622,22 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                           and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", argv[0] or "") is not None
                           and plain_at(0, argv[0]))
         for j, w in enumerate(words, start=word_base):
+            # A case's subject, its 'in' and every pattern word are never block words (fi) is a pattern).
+            if _case_word(case_stack[-1] if case_stack else None, w, plain_at(j, w)):
+                continue
             if w in BLOCK_OPEN and plain_at(j, w):
                 blocks.append("func" if func_pending else w)
                 func_pending = False
                 if w == "case":
-                    case_stack.append(["pattern", paren_depth])
+                    case_stack.append(["header", paren_depth, 0, False])
             elif w in BLOCK_CLOSE and plain_at(j, w):
                 if blocks:
                     blocks.pop()
                 else:
-                    unbalanced = True
+                    unbalanced = unbalanced or "close"
                 if w == "esac" and case_stack:
-                    # A case closed with a subshell of its arm still open leaves the depth unknown.
-                    floor = case_stack.pop()[1]
-                    if paren_depth != floor:
-                        unbalanced = True
-                        paren_depth = floor
+                    paren_depth, why = _close_case(case_stack, paren_depth)
+                    unbalanced = unbalanced or why
             elif (w in RESERVED_SKIP and plain_at(j, w)) or ENV_ASSIGN_RE.match(w):
                 continue
             else:
@@ -1594,13 +1667,14 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
         # at the depth it closes. '(' opens a part of the list and never ends it. An arm of a case ends
         # at ;; ;& or ;;&, which the lexer splits into a ';' and an empty ';' or '&' record.
         arm_end = _ends_case_arm(seg, kept[idx + 1] if idx + 1 < len(kept) else None)
-        next_paren, unplaced = _case_paren_step(case_stack, paren_depth, seg.sep_after, arm_end)
-        if unplaced:
-            unbalanced = True
+        next_paren, unplaced = _case_paren_step(case_stack, paren_depth, seg, arm_end)
+        unbalanced = unbalanced or unplaced
         if unbalanced and any(e[1] or e[5] for e in bg_unit):
-            raise GateError("{}:{}: binding {!r}: a closing word or ')' with no open construct leaves "
-                            "the end of the AND-OR list holding a declared command unplaceable; cannot "
-                            "evaluate".format(rel, line_of(abs_off), binding["id"]))
+            raise GateError("{}:{}: binding {!r}: {} leaves the end of the AND-OR list holding {} "
+                            "unplaceable; cannot evaluate".format(
+                                rel, line_of(abs_off), binding["id"], UNPLACED_TRIGGERS[unbalanced],
+                                "a relied stage" if any(e[1] for e in bg_unit)
+                                else "a declared name hidden in a command substitution"))
         list_depth = len(blocks) + paren_depth
         if seg.sep_after == "&":
             # '&' backgrounds the whole AND-OR list at its own depth, every compound part in it
@@ -2019,18 +2093,21 @@ def run(root):
 # whole-context lex fallback and the locate refusal by mutants of their own helpers (the locate
 # refusal forced through readings flattened into one), and scan_file's pre-open layer is called
 # directly. A case that cannot run (no tempdir, no symlink or FIFO support, permission checks
-# bypassed) is a NAMED failure, never a skip. The launcher and background cases R142..R168d (exit 1;
+# bypassed) is a NAMED failure, never a skip. The launcher and background cases R142..R170f (exit 1;
 # the range has gaps: no R149, R158 or R160; every finding needle asserted, each re-run under the
-# never-report mutant), the waiting-setsid and launcher refusals (C47..C50, R146, R155b, X20..X32,
-# exit 2 with their own needle), the refusal of a declared name in a command substitution in a list
-# ended by '&' (X33a, X33b), the refusal of a close that cannot be placed (X34a..X34c), the refusal
-# of a declared command in a subshell inside a case arm (X35a..X35c) and the controls C51..C64
-# (exit 0) each come with a flip, and each launcher mutant (setsid dropped
+# never-report mutant), the waiting-setsid and launcher refusals (C47..C50, R146, R155b, X20..X32),
+# the refusal of a declared name in a command substitution in a list ended by '&' (X33a, X33b), the
+# refusals of a close that cannot be placed (X34a..X34c), of a declared command in a subshell inside
+# a case arm (X35a..X35c), of an arm or esac reached with a subshell still open (X36a..X36c) and of a
+# case pattern this reader cannot read (X37) (exit 2, each with its own needle) and the controls
+# C51..C65 (exit 0) must hold. The waiting forms C47..C50 and the controls C51..C64 each also come
+# with a flip case, and each launcher mutant (setsid dropped
 # from LAUNCHERS, a wait-blind or 'w'-anywhere setsid reader, exact-only long options, pipefail
 # clearing every kind, a single-stage background unit, '&&' as a boundary, -u dropped from the
 # systemd-run value table, the value-word safeguard removed, setsid as a wrapper, parens not tracked
-# inside a case, every ';' read as an arm end, no arm end read) must stop its named case from
-# holding.
+# inside a case, every ';' read as an arm end, no arm end read, no paren nesting in a case pattern,
+# reserved words in a pattern read as block words, an arm or esac with a subshell open not flagged,
+# a '(' glued after a letter read as a group) must stop its named case from holding.
 
 def _run_quiet(root):
     import io
@@ -3630,11 +3707,12 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                                     "fail-closed exit 2 with the configuration-symlink check's own "
                                     "diagnostic, got {}".format(rc))
 
-            # --- launcher and background findings: R142..R168d (exit 1, each needle asserted; no
+            # --- launcher and background findings: R142..R170f (exit 1, each needle asserted; no
             # R149, R158 or R160), the waiting-setsid and launcher refusals C47..C50, R146, R155b and
             # X20..X32, the substitution-in-a-backgrounded-list refusals X33a/X33b, the unplaced-close
-            # refusals X34a..X34c, the case-arm subshell refusals X35a..X35c (exit 2, each asserting
-            # its own needle), the controls C51..C64 (exit 0) and every flip ---
+            # refusals X34a..X34c, the case-arm subshell refusals X35a..X35c, the open-subshell
+            # refusals X36a..X36c, the unreadable-pattern refusal X37 (exit 2, each asserting its own
+            # needle), the controls C51..C65 (exit 0) and every flip ---
             n_launch = "without a wait option, so the launcher can report its own status"
             n_ignore = "with --ignore-failure, so the launcher ignores the command's exit status"
             n_bg = "is in a list ended by '&'"
@@ -3644,7 +3722,13 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
             n_classify = "option words this gate cannot classify"
             n_value = "option value word spells a declared command"
             n_subst_bg = "inside a command substitution in an AND-OR list ended by '&'"
-            n_unplaced = "with no open construct leaves the end of the AND-OR list"
+            n_unplaced = ("a closing word or ')' with nothing open leaves the end of the AND-OR list "
+                          "holding a relied stage")
+            n_open = ("an arm or esac reached with a subshell still open leaves the end of the AND-OR "
+                      "list holding a relied stage")
+            n_open_subst = ("a subshell still open leaves the end of the AND-OR list holding a declared "
+                            "name hidden in a command substitution")
+            n_pattern = "a case header or pattern this gate cannot read"
             pfx = "tool write\n"
             launch_cases = [
                 ("R142", "setsid tool write\n", 1, [n_launch]),
@@ -3683,19 +3767,37 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("R166c", "case x in x) tool write;; esac &\n", 1, [n_bg]),
                 # A blank or comment line after && keeps the list going to the '&'.
                 ("R167", "tool write &&\n\n# c\necho ok &\n", 1, [n_bg]),
-                # In a case arm the pattern's ')' ends the pattern, and a subshell's '(' and ')' are a
+                # In a case arm the pattern's last ')' ends the pattern, and a subshell's '(' and ')' are a
                 # part of the arm's list, so the '&' still reaches the earlier stage.
                 ("R168a", "case x in x) tool write && ( echo ) & ;; esac\n", 1, [n_bg]),
                 ("R168b", "case x in x) tool write || ( echo ) && echo & ;; esac\n", 1, [n_bg]),
                 ("R168c", "case x in\n  x)\n    tool write &&\n      ( echo ) &\n    ;;\nesac\n", 1,
                  [n_bg]),
                 ("R168d", "case x in x) echo; tool write && ( echo ) & ;; esac\n", 1, [n_bg]),
+                # An extglob group's parens nest inside the pattern: only the ')' at nest zero ends it.
+                ("R169a", "shopt -s extglob\ntool write && case x in @(a|b)) echo ;; esac &\n", 1,
+                 [n_bg]),
+                ("R169b", "shopt -s extglob\ntool write && case x in x) echo ;; @(a|@(b|c))) echo ;; "
+                 "esac &\n", 1, [n_bg]),
+                # A reserved word in a pattern is pattern text, never a block word.
+                ("R170a", "tool write && case x in x) echo ;; fi) echo ;; esac &\n", 1, [n_bg]),
+                ("R170b", "tool write && case x in x) echo ;; if) echo ;; esac &\n", 1, [n_bg]),
+                ("R170c", "tool write && case x in x) echo ;; then) echo ;; esac &\n", 1, [n_bg]),
+                ("R170d", "tool write && case x in x) echo ;; do) echo ;; esac &\n", 1, [n_bg]),
+                ("R170e", "tool write && case x in x) echo ;; done) echo ;; esac &\n", 1, [n_bg]),
+                ("R170f", "tool write && case x in x) echo ;; x|fi) echo ;; esac &\n", 1, [n_bg]),
                 ("X33a", "x=$(tool write) &\n", 2, [n_subst_bg]),
                 ("X33b", "echo \"$(tool write)\" &\n", 2, [n_subst_bg]),
                 # A close with nothing open leaves the pending list's end unplaceable.
                 ("X34a", "tool write && fi &\n", 2, [n_unplaced]),
                 ("X34b", "tool write && ) &\n", 2, [n_unplaced]),
                 ("X34c", "case x in x) tool write && ) & ;; esac\n", 2, [n_unplaced]),
+                # An arm or esac reached with a subshell still open leaves the depth unknown.
+                ("X36a", "case x in x) tool write && ( echo ;; esac\n", 2, [n_open]),
+                ("X36b", "case x in x) tool write && ( echo\nesac\n", 2, [n_open]),
+                ("X36c", "x=$(tool write) && case x in x) ( echo ;; esac\n", 2, [n_open_subst]),
+                # A '(' in a pattern that opens no extglob group is a form bash refuses.
+                ("X37", "tool write && case x in a(b)) echo ;; esac &\n", 2, [n_pattern]),
                 # A waiting setsid is cannot-evaluate: its exit propagation is not a verified premise.
                 ("R146", "setsid -w tool write | tail -1\n", 2, [n_setsid_w]),
                 ("R155b", "setsid -w tool write &\n", 2, [n_setsid_w]),
@@ -3748,6 +3850,8 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C63", "case x in x) tool write; ( echo ) & ;; esac\n", 0, []),
                 # A pattern's optional '(' after ;; opens no subshell.
                 ("C64", pfx + "case x in x) echo ;; (tool) echo ;; esac\n", 0, []),
+                # An extglob pattern's own ')' is not a close with nothing open.
+                ("C65", "shopt -s extglob\ncase x in x) tool write ;; @(a|b)) echo ;; esac\n", 0, []),
                 # Flips: each control or waiting form, changed by one edit, must reach its finding.
                 ("C47-flip", "setsid tool write\n", 1, [n_launch]),
                 ("C48-flip-fork", "setsid --fork tool write\n", 1, [n_launch]),
@@ -3807,10 +3911,25 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
 
             real_case_paren_step = this._case_paren_step
 
-            def _case_parens_untracked(case_stack, paren_depth, sep, arm_end):
+            def _case_parens_untracked(case_stack, paren_depth, seg, arm_end):
                 if case_stack:
-                    return paren_depth, False
-                return real_case_paren_step(case_stack, paren_depth, sep, arm_end)
+                    return paren_depth, None
+                return real_case_paren_step(case_stack, paren_depth, seg, arm_end)
+
+            def _pattern_nest_dropped(case_stack, paren_depth, seg, arm_end):
+                if case_stack and case_stack[-1][0] == "pattern":
+                    case_stack[-1][2] = 0
+                return real_case_paren_step(case_stack, paren_depth, seg, arm_end)
+
+            def _arm_end_unguarded(case_stack, paren_depth, seg, arm_end):
+                if arm_end and case_stack and case_stack[-1][0] == "arm":
+                    paren_depth = case_stack[-1][1]
+                return real_case_paren_step(case_stack, paren_depth, seg, arm_end)
+
+            real_case_word = this._case_word
+
+            def _reserved_patterns_walked(top, w, plain):
+                return real_case_word(top, w, plain) and w not in RESERVED_SKIP | BLOCK_CLOSE
 
             def _e1_every_kind(pending, events):
                 ordered = sorted(events)
@@ -3839,6 +3958,16 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("every ';' read as an arm end",
                  {"_ends_case_arm": lambda seg, nxt: seg.sep_after == ";"}, ["R168d"]),
                 ("no arm end read", {"_ends_case_arm": lambda seg, nxt: False}, ["C64"]),
+                ("no paren nesting in a case pattern", {"_case_paren_step": _pattern_nest_dropped},
+                 ["R169a", "R169b", "C65"]),
+                ("reserved words in a pattern read as block words",
+                 {"_case_word": _reserved_patterns_walked}, ["R170a", "R170b", "R170e", "R170f"]),
+                ("an arm ended with a subshell open not flagged",
+                 {"_case_paren_step": _arm_end_unguarded}, ["X36a", "X36c"]),
+                ("an esac with a subshell open not flagged",
+                 {"_close_case": lambda case_stack, paren_depth: (case_stack.pop()[1], None)}, ["X36b"]),
+                ("a '(' glued after a letter read as a group", {"EXTGLOB_LEADS": EXTGLOB_LEADS + "a"},
+                 ["X37"]),
             ]
             by_name = {name: (expected, needles) for name, _b, expected, needles in launch_cases}
             for label, patches, names in launch_mutants:
@@ -3930,10 +4059,11 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "FIFO surfaces and configurations, .git/__pycache__ directories, symlinks AND regular "
           "files refused rather than pruned, and scan_file's own pre-open regular-file layer) each "
           "fail closed printing the diagnostic of their OWN check, asserted by a substring no other "
-          "check prints; the launcher and background cases R142-R168d (no R149, R158 or R160), the "
+          "check prints; the launcher and background cases R142-R170f (no R149, R158 or R160), the "
           "waiting-setsid and launcher refusals C47-C50, R146, R155b and X20-X32, the "
           "substitution-in-a-backgrounded-list refusals X33a and X33b, the unplaced-close refusals "
-          "X34a-X34c, the case-arm subshell refusals X35a-X35c, the controls C51-C64 and every flip "
+          "X34a-X34c, the case-arm subshell refusals X35a-X35c, the open-subshell refusals "
+          "X36a-X36c, the unreadable-pattern refusal X37, the controls C51-C65 and every flip "
           "hold, and each launcher mutant is caught")
     return 0
 
