@@ -519,10 +519,10 @@ second option turns bash's noexec back off, so the script would run); `python3 -
 ONE script that is an EXISTING REGULAR FILE resolving outside every declared directory and outside
 `/dev` and `/proc` (so `/dev/stdin`, `/dev/fd/N` and `/proc/self/fd/N` are refused) and NOT resolving
 inside a Python standard-library directory (a stdlib program used as the reader, such as `cProfile`,
-`pydoc`, `timeit`, `code` or `pickle`, would run the file or a stdin program handed to it; `runpy` is a
-frozen module whose spec names no file, yet a `runpy.py` file still sits in the standard-library
-directory; no enumeration of these stays true across versions, so the refusal is by standard-library
-containment), BOTH only when the effective working directory is itself outside every
+`pydoc`, `timeit`, `code` or `pickle`, would run the file or a stdin program handed to it; `runpy` loads
+frozen (its `__spec__.origin` is `frozen`), yet its spec and `__file__` still name a `runpy.py` in the
+standard-library directory, as does `__spec__.loader_state.filename`; no enumeration of these stays true
+across versions, so the refusal is by standard-library containment), BOTH only when the effective working directory is itself outside every
 declared directory (a copy run from inside one can source or import a deliverable by a relative path,
 the same way the git form guards its working directory); and `cd` to one literal absolute directory
 outside the declared directories (the session's exit from a declared cwd). The reader or script the python/shell
@@ -534,8 +534,12 @@ ANSI-C `$'...'` quote, `xargs`, `find`, or any unlisted word is simply not on th
 A command the lexer cannot read (an unquoted heredoc, a here-string, a process substitution, an
 unbalanced quote) has no segments to match and denies whole while in scope. A nested shell `-c` body is
 classified recursively through the wrapper spellings it reads (a bare or path-qualified shell word;
-`NAME=value` prefixes and the `env`, `command`, `nohup` and `timeout` wrappers, peeled repeatedly; the
-shell's options before the body, where `-c` counts only as a letter of a single-dash option cluster,
+`NAME=value` prefixes and the `env`, `command`, `nohup` and `timeout` wrappers, peeled repeatedly
+(`env`'s `-u`/`--unset` and `-C`/`--chdir` take their value in both the separate `--unset VALUE` and
+attached `-uVALUE`/`--unset=VALUE` spellings, and `timeout`'s `-k`/`-s`/`--kill-after`/`--signal` take
+theirs, so a value is never read as the command word; `env`'s `-S`/`--split-string`, whose value is
+itself a command line, is split off and classified as a nested command rather than read as a `-c` body);
+the shell's options before the body, where `-c` counts only as a letter of a single-dash option cluster,
 each `o` or `O` letter of a cluster takes the next word, `--rcfile` and `--init-file` take the next word,
 and other long options are flags; and `eval`), so a declared directory a quote splice hides from the
 raw text is still reached; a relative `cd`/`pushd` while CDPATH is set (assigned in the command as a
@@ -562,7 +566,9 @@ hashlib/pathlib/json snippet, `python -m json.tool` or `-m tokenize`, `sed`, `aw
 `stat`, `cmp`, `od`, `xxd`, `realpath`, `tar -tf`, a coreutils hash tool with a glob operand
 (`sha256sum <dir>/*`, an unquoted glob is opaque), `git diff --no-index` with an option outside its
 registered grammar (`--color`, `--word-diff`), a patch tool other than `git apply` (`patch -p1`,
-`git am`), a reader behind a wrapper (`timeout`, `command`, `env`), a reader whose command word carries
+`git am`), a reader behind a wrapper (`timeout`, `command`, `env`), `command -v`/`-V` before a `-c` shell
+(the wrapper peel reaches the `-c` body and classifies it, though `command -v`/`-V` then only prints the
+operand's name and runs nothing), a reader whose command word carries
 an option outside the tool's registered grammar, and a `python3 -I` reader script that resolves inside
 a Python standard-library directory (even a benign one) since stdlib programs run their argument. A
 `cd` INTO a declared directory is not an allowlisted move, so `cd <dir>; ls` denies; and the shell and

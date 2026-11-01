@@ -15618,14 +15618,26 @@ def _main_isolated(report_path=None):
                           ("nrd/c-eo-pipefail-denies", "-eo pipefail")):
             check(cid, nrd_got("bash {} -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(opts, tmp),
                                run_cwd=outd), DENY_RAN)
-        # --- wrappers before a -c shell: an assignment prefix, command, timeout, nohup, a nested env ---
+        # --- wrappers before a -c shell: an assignment prefix, command, timeout, nohup, a nested env, and
+        # env's value-taking options in their SEPARATE-value long spellings (--unset VALUE, --chdir VALUE),
+        # which the peel must consume so the value is not mistaken for the command word (the attached
+        # -uVALUE/--unset=VALUE spellings are single tokens already peeled; the short -u/-C likewise) ---
         for cid, wrap in (("nrd/c-assign-prefix-denies", "FOO=1"),
                           ("nrd/c-command-denies", "command"),
                           ("nrd/c-timeout-denies", "timeout 5"),
                           ("nrd/c-nohup-denies", "nohup"),
-                          ("nrd/c-env-env-denies", "env env")):
+                          ("nrd/c-env-env-denies", "env env"),
+                          ("nrd/c-env-unset-denies", "env --unset FOO"),
+                          ("nrd/c-env-chdir-denies", "env --chdir " + outd)):
             check(cid, nrd_got("{} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(wrap, tmp),
                                run_cwd=outd), DENY_RAN)
+        # env -S/--split-string carries a whole command line as its value; it is split off and classified
+        # as a nested command (env runs it as its own command line). The attached -S spelling is the form
+        # this host's env splits, and env collapses the double-quote splice the way the shell lexer does,
+        # so the declared directory the splice hides from the raw text is reached.
+        check("nrd/c-env-split-string-denies",
+              nrd_got("env -S'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp), run_cwd=outd),
+              DENY_RAN)
         # --- CDPATH assigned by read behind an assignment prefix or command, and by mapfile/readarray ---
         for cid, setter in (("nrd/cdpath-ifs-read-denies", "IFS= read -r CDPATH"),
                             ("nrd/cdpath-command-read-denies", "command read -r CDPATH"),
@@ -15910,14 +15922,21 @@ def _main_isolated(report_path=None):
             check(cid, _flip_verdict("_nrd_shell_c_operand", _nrd_prev_c_operand,
                                      "bash {} -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(opts, tmp)),
                   "allow")
-        # no wrapper peeling (the command word is argv[0]) lets the wrapped -c spellings through
+        # no wrapper peeling (the command word is argv[0]) lets the wrapped -c spellings through, the env
+        # --unset/--chdir separate-value forms among them (the value would be read as the command word)
         for cid, wrap in (("nrd/flip-c-assign-prefix-allows", "FOO=1"),
                           ("nrd/flip-c-command-allows", "command"),
                           ("nrd/flip-c-timeout-allows", "timeout 5"),
-                          ("nrd/flip-c-nohup-allows", "nohup")):
+                          ("nrd/flip-c-nohup-allows", "nohup"),
+                          ("nrd/flip-c-env-unset-allows", "env --unset FOO"),
+                          ("nrd/flip-c-env-chdir-allows", "env --chdir " + outd)):
             check(cid, _flip_verdict("_nrd_c_peel", lambda argv, oq: 0,
                                      "{} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(wrap, tmp)),
                   "allow")
+        # flipping the env -S classifier hides the command line the -S value carries
+        check("nrd/flip-c-env-split-string-allows",
+              _flip_verdict("_nrd_env_split_cmd", lambda seg: None,
+                            "env -S'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp)), "allow")
         # no prefix or command peeling for the CDPATH builtins, and read as the only reader word
         for cid, setter in (("nrd/flip-cdpath-ifs-read-allows", "IFS= read -r CDPATH"),
                             ("nrd/flip-cdpath-command-read-allows", "command read -r CDPATH")):

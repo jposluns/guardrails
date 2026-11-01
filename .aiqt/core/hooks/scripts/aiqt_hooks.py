@@ -23819,8 +23819,8 @@ _NRD_GIT_DIFF_OPTS = frozenset(("--no-index", "--stat", "--numstat", "--shortsta
 # The Python standard library directories, resolved from the running interpreter. A python reader
 # script that resolves INSIDE one of these is not a user-authored reader: the standard library carries
 # programs that RUN a file or a stdin program handed to them (cProfile, profile, trace, pdb, doctest,
-# pydoc, timeit, code, pickle and more; runpy is a frozen module, so its spec names no file, yet a runpy.py
-# file still sits in the standard library directory), so no enumeration of
+# pydoc, timeit, code, pickle and more; runpy loads frozen (its spec origin is "frozen"), yet its spec and
+# __file__ still name a runpy.py in the standard library directory, as does loader_state.filename), so no enumeration of
 # them stays complete or true across versions. A command reaches the reader shape only when it is
 # already in scope of a declared directory, so refusing every stdlib script as the reader denies, by
 # construction, the `python3 -I <stdlib program> <deliverable>` and stdin-fed forms that would run the
@@ -24385,9 +24385,12 @@ _NRD_C_WRAPPERS = frozenset(("env", "command", "nohup", "timeout"))
 
 def _nrd_c_peel(argv, oq):
     """The index of the effective command word of a segment after its NAME=value prefixes and the
-    _NRD_C_WRAPPERS words (env with its options, -u/-C values and assignments; command with its
-    options; nohup; timeout with its options and duration), peeled repeatedly; None when a peeled word
-    or option is opaque. The index may equal len(argv) (no command word left)."""
+    _NRD_C_WRAPPERS words (env with its options: -u/--unset and -C/--chdir take their value in both the
+    separate -u VALUE and attached -uVALUE/--unset=VALUE spellings, other env options and assignments are
+    single tokens; command with its options; nohup; timeout with its options and duration), peeled
+    repeatedly; None when a peeled word or option is opaque. env's -S/--split-string, whose value is a
+    whole command line rather than a -c body, is read separately by _nrd_env_split_cmd. The index may
+    equal len(argv) (no command word left)."""
     i = 0
     while i < len(argv):
         if oq[i]:
@@ -24407,7 +24410,7 @@ def _nrd_c_peel(argv, oq):
             if tok == "--":
                 i += 1
                 break
-            if word == "env" and tok in ("-u", "-C"):
+            if word == "env" and tok in ("-u", "--unset", "-C", "--chdir"):
                 i += 2
                 continue
             if word == "timeout" and tok in ("-k", "-s", "--kill-after", "--signal"):
@@ -24537,6 +24540,61 @@ def _nrd_shell_c_prior_body(seg):
     if not has_c or j >= len(argv) or oq[j]:
         return None
     return argv[j]
+
+
+def _nrd_env_split_cmd(seg):
+    """The command-line string carried by env's -S/--split-string option, for recursive classification
+    (env runs that value as a command line of its own, so a declared directory a quote splice hides from
+    the raw text is reached through it), else None. NAME=value prefixes and the command, nohup and
+    timeout wrappers are peeled to reach an env word (the spellings _nrd_c_peel reads); env's value is
+    read in all four spellings (-S VALUE, -SVALUE, --split-string VALUE, --split-string=VALUE). The value
+    is lexed with the shell lexer when it is scope-scanned, a deny-biased reading that does not reproduce
+    env's own -S splitting; an opaque token yields None."""
+    argv = seg.argv
+    if not argv:
+        return None
+    oq = seg.argv_opaque
+    i = 0
+    while i < len(argv):
+        if oq[i]:
+            return None
+        tok = argv[i]
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        word = tok.rsplit("/", 1)[-1]
+        if word not in _NRD_C_WRAPPERS:
+            return None
+        i += 1
+        while i < len(argv):
+            if oq[i]:
+                return None
+            tok = argv[i]
+            if tok == "--":
+                i += 1
+                break
+            if word == "env":
+                if tok in ("-S", "--split-string"):
+                    if i + 1 >= len(argv) or oq[i + 1]:
+                        return None
+                    return argv[i + 1]
+                if tok.startswith("-S") and len(tok) > 2:
+                    return tok[2:]
+                if tok.startswith("--split-string="):
+                    return tok[len("--split-string="):]
+                if tok in ("-u", "--unset", "-C", "--chdir"):
+                    i += 2
+                    continue
+            if word == "timeout" and tok in ("-k", "-s", "--kill-after", "--signal"):
+                i += 2
+                continue
+            if (tok.startswith("-") and tok != "-") or (word == "env" and _ENV_ASSIGN_RE.match(tok)):
+                i += 1
+                continue
+            break
+        if word == "timeout":
+            i += 1
+    return None
 
 
 # The builtins that assign the variables their operands name (read's names, mapfile's or readarray's
@@ -24762,6 +24820,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
             prior = _nrd_shell_c_prior_body(seg)
             if prior is not None and prior != body and _depth < _NRD_MAX_C_DEPTH:
                 sub = _nrd_scope_scan(prior, walk_cwd, dirs, _depth + 1)
+                if sub is not None:
+                    return sub
+            esplit = _nrd_env_split_cmd(seg)
+            if esplit is not None and esplit not in (body, prior) and _depth < _NRD_MAX_C_DEPTH:
+                sub = _nrd_scope_scan(esplit, walk_cwd, dirs, _depth + 1)
                 if sub is not None:
                     return sub
             if not scope and (any(_nrd_match(tok, walk_cwd, dirs) is True for tok in seg.argv)
