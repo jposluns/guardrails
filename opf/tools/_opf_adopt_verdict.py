@@ -13,7 +13,11 @@ Input: the product root and nothing else (no transcript, no claim, no run id: th
   render-check    `opf render --check --root ROOT`
 
 The receipt core is read ONCE per run by this module and those bytes are what both receipt-core and
-event-chain grade.
+event-chain grade. The bundle verification below also runs ONCE per run, inside the first of those two
+legs that runs, and every file this module reads for the run (receipt core, events and the digest-only
+plan, approval and planning inventory) is attested against its parsed inventory rows before it is graded,
+recorded as graded or digested: bytes that fail attestation are cannot-evaluate, never reported as graded
+and never a finding (a swapped receipt core that would fail the schema included).
 The event files are the ones the import completion evaluator accepts (_opf_import_complete._event_files):
 every event-shaped name the bundle inventories list must be present, every one present must be listed,
 each spelled event-<NNNN>.toml of its number, numbered contiguously from event-0001.toml; a gap, a
@@ -35,12 +39,15 @@ exactly the int 0 or 1 are CANNOT_EVALUATE. Any exception outside a leg ends mai
 
 Verdict (exactly one, printed as canonical JSON with the deciding leg, the sha256 of each bundle file
 the scorer itself read with the legs that graded those exact bytes (an empty graded_by marks a file read
-only for its digest, which no leg grades), and each digest-only file that could not be read, with why):
+only for its digest, which no leg grades), and in unread_inputs each digest-only file that is absent (a
+finding), could not be read, or whose bytes the bundle inventory does not attest (cannot-evaluate), with
+its outcome and why):
   NOT_ADOPTED        adopt-status is clean and lists no adoption run (exit 1)
-  INVALID            some leg reports a finding; the first such leg in the order above decides (exit 1)
+  INVALID            some leg reports a finding; the first such leg in the order above decides; with no
+                     leg finding, an absent digest-only input is INVALID decided by `unread-inputs` (exit 1)
   CANNOT_EVALUATE    some leg could not be read or run, or reported cannot-evaluate; the first such leg
-                     decides, never a pass; with every leg passing, an unread digest-only input
-                     (unread_inputs not empty) is CANNOT_EVALUATE decided by `unread-inputs` (exit 2)
+                     decides, never a pass; with every leg passing, any other unread_inputs row is
+                     CANNOT_EVALUATE decided by `unread-inputs` (exit 2)
   ADOPTED_AND_VALID  every leg passes for every listed run and every input was read (exit 0)
 
 A finding outranks a cannot-evaluate, since a finding is a definite failure; both are non-pass.
@@ -57,8 +64,11 @@ adopted store scores ADOPTED_AND_VALID or that a real render detects view drift.
 
 DISCLOSED RESIDUALS: the input digests cover the bundle files this module reads (receipt, outcome events
 and the bundle-root inventories, graded; plan, approval and planning inventory, digest only, graded by no
-leg here, and an unreadable one fails the verdict closed); the files the composed legs read on their own
-are not digested here. The legs run in this process, one after another, so a tree changed between legs is
+leg here, each held to its inventory row, and an unread or unattested one fails the verdict closed); the
+files the composed legs read on their own are not digested here. A cannot-evaluate event listing (a gap,
+or a misspelled, unlisted or listed-but-absent event file) ends the event-chain leg before any event is
+read, so a finding in another event of that run (a forged event_digest, a foreign run, a broken chain) is
+not reported: such a run scores CANNOT_EVALUATE, not INVALID (still never a pass). The legs run in this process, one after another, so a tree changed between legs is
 not detected. OPF-SPEC section 14 requires an outcome-event chain but does not say which outcome kind
 completes an adoption, and the shipped apply mints only the genesis `applied`; so COMPLETING_EVENT is
 `applied`, and a chain whose latest event is any other kind (a later `failed`, and equally a later
@@ -125,7 +135,8 @@ SPEC_IMPORT_RECORDS_EVENT = ("It MUST record the source's result in the adoption
                              "chain.")
 # Each leg's deadline in seconds, well above its run time over the self-test fixture (each leg under 2 s
 # there); a leg past it is cannot-evaluate.
-LEG_DEADLINE_SECONDS = {"adopt-status": 120, "adopt-complete": 300, "receipt-core": 60, "event-chain": 300,
+# The receipt-core leg runs the run's bundle verification first, so its deadline matches event-chain's.
+LEG_DEADLINE_SECONDS = {"adopt-status": 120, "adopt-complete": 300, "receipt-core": 300, "event-chain": 300,
                         "store-doctor": 300, "render-check": 300}
 _STATUS_RUN = re.compile(r"opf adopt status: adoption run (\S+): evidence bundle at ")
 
@@ -220,11 +231,34 @@ def _leg_complete(root, run_id):
     return outcome, "; ".join("{}: {}: {}".format(name, r.status, "; ".join(r.findings)) for name, r in bad)
 
 
-def _leg_receipt(core, run_id, read):
-    receipt = _parsed(_receipt_core(core), "the adoption receipt core")
+def _leg_receipt(root, core, run_id, read, bundle_memo):
+    """The receipt core graded only once the bundle inventory attests its bytes: bytes swapped after the
+    bundle verification are cannot-evaluate, never graded and never a finding."""
+    core = _receipt_core(core)
+    verified = _bundle_once(root, run_id, read, bundle_memo)
+    if isinstance(verified, _Leg):
+        raise _Leg(CANNOT, "the receipt core bytes cannot be attested: {}".format(verified.reason))
+    _attested(verified[1], apply.receipt_rel(run_id), core)
+    receipt = _parsed(core, "the adoption receipt core")
     _digested(read, apply.receipt_rel(run_id), core, "receipt-core")
     checked = schema.validate_receipt_core(receipt)
     return _graded(checked.status, checked.findings, "receipt core")
+
+
+def _bundle_once(root, run_id, read, memo):
+    """_verified_bundle's result for this run, or the _Leg it raised, computed once and shared by the legs
+    that attest bytes against it (`memo` holds it per run)."""
+    if "bundle" not in memo:
+        memo["bundle"] = _attempt(lambda: _verified_bundle(root, run_id, read))
+    return memo["bundle"]
+
+
+def _claim(rows, path, sha256):
+    """Record one inventory row; a path two rows claim is cannot-evaluate (verify_bundle refuses it first,
+    and this guard keeps the attestation map single-valued should that ever change)."""
+    if path in rows:
+        raise _Leg(CANNOT, "{} is claimed by two bundle inventory rows".format(path))
+    rows[path] = sha256
 
 
 def _verified_bundle(root, run_id, read):
@@ -250,9 +284,7 @@ def _verified_bundle(root, run_id, read):
             raise _Leg(CANNOT, "the adoption bundle inventory {}: {}".format(rel, "; ".join(checked.findings)))
         docs[rel] = doc if checked.status == store.VALID else None
         for row in doc["file"] if docs[rel] is not None else ():
-            if row["path"] in rows:
-                raise _Leg(CANNOT, "{} is claimed by two bundle inventory rows".format(row["path"]))
-            rows[row["path"]] = row["sha256"]
+            _claim(rows, row["path"], row["sha256"])
     return (verified, docs), rows
 
 
@@ -301,9 +333,12 @@ def _chain_unbound(events, run_id):
     return findings
 
 
-def _leg_events(root, root_fd, run_id, core, read):
+def _leg_events(root, root_fd, run_id, core, read, bundle_memo):
     core = _receipt_core(core)
-    bundle, rows = _verified_bundle(root, run_id, read)
+    verified = _bundle_once(root, run_id, read, bundle_memo)
+    if isinstance(verified, _Leg):
+        raise _Leg(verified.outcome, verified.reason)
+    bundle, rows = verified
     events = []
     for rel in _event_paths(root_fd, run_id, bundle):
         try:
@@ -312,9 +347,10 @@ def _leg_events(root, root_fd, run_id, core, read):
             raise _Leg(CANNOT, "{}: {}".format(rel, exc))
         if data is None:
             raise _Leg(CANNOT, "outcome event {} vanished after the bundle listing".format(rel))
-        data = _attested(rows, rel, _digested(read, rel, data, "event-chain"))
+        # Attested before it is recorded, so bytes this leg refuses are never reported as graded.
+        data = _digested(read, rel, _attested(rows, rel, data), "event-chain")
         events.append(_parsed(data, "outcome event " + rel))
-    _attested(rows, apply.receipt_rel(run_id), _digested(read, apply.receipt_rel(run_id), core, "event-chain"))
+    _digested(read, apply.receipt_rel(run_id), _attested(rows, apply.receipt_rel(run_id), core), "event-chain")
     chain = schema.validate_event_chain(events, "sha256:" + _sha256(core))
     if chain.status != store.VALID:
         return _graded(chain.status, chain.findings, "outcome-event chain")
@@ -385,12 +421,19 @@ def _attempt(call):
         return exc
 
 
-def _digest_only(root_fd, rel, read, unread):
-    """Digest `rel` with no grading leg, or report it in `unread` with why it could not be read; every
-    such input is required, so one in `unread` makes the verdict cannot-evaluate (_decide)."""
+def _digest_only(root_fd, rel, read, unread, verified):
+    """Digest `rel` with no grading leg once the run's verified bundle inventory (`verified`, from
+    _bundle_once) attests the bytes read, or report it in `unread` with its outcome and why: an absent file
+    is a finding; a read refusal, a bundle that did not verify, a missing row and another digest (a file
+    swapped after the bundle verification) are cannot-evaluate. Every such input is required (_decide)."""
     data = _attempt(lambda: _read_bundle(root_fd, rel))
+    if not isinstance(data, _Leg):
+        if isinstance(verified, _Leg):
+            data = _Leg(CANNOT, "{}: the bytes read here cannot be attested: {}".format(rel, verified.reason))
+        else:
+            data = _attempt(lambda: _attested(verified[1], rel, data))
     if isinstance(data, _Leg):
-        unread.append(dict(path=rel, reason=data.reason))
+        unread.append(dict(path=rel, outcome=data.outcome, reason=data.reason))
     else:
         _digested(read, rel, data)
 
@@ -418,13 +461,16 @@ def score(product_root):
             _run_leg("adopt-complete", legs, lambda: _leg_complete(root, run_id))
             # One read of the receipt core: both legs grade these bytes, and their digest is reported.
             core = _attempt(lambda: _read_bundle(root_fd, apply.receipt_rel(run_id)))
+            # One bundle verification per run: every file read here is attested against its rows.
+            bundle_memo = {}
             if "receipt-core" in LEGS:
-                _run_leg("receipt-core", legs, lambda: _leg_receipt(core, run_id, read))
+                _run_leg("receipt-core", legs, lambda: _leg_receipt(root, core, run_id, read, bundle_memo))
             if "event-chain" in LEGS:
-                _run_leg("event-chain", legs, lambda: _leg_events(root, root_fd, run_id, core, read))
+                _run_leg("event-chain", legs, lambda: _leg_events(root, root_fd, run_id, core, read, bundle_memo))
             # Read for their digests only; no leg here grades them (graded_by stays empty).
+            verified = bundle_memo.get("bundle", _Leg(CANNOT, "the bundle verification did not complete"))
             for rel in (apply.plan_rel(run_id), apply.approval_rel(run_id), apply.planning_inventory_rel(run_id)):
-                _digest_only(root_fd, rel, read, unread)
+                _digest_only(root_fd, rel, read, unread, verified)
     finally:
         if root_fd is not None:
             store._close_fd_exc_safe(root_fd)
@@ -435,12 +481,15 @@ def score(product_root):
 
 
 def _decide(legs, unread):
-    """(verdict, decided_by): the first finding leg, else the first cannot-evaluate leg, else an unread
-    required input (fail closed), else ADOPTED_AND_VALID."""
+    """(verdict, decided_by): the first finding leg, else an unread required input that is a finding (an
+    absent file), else the first cannot-evaluate leg, else any other unread required input (fail closed),
+    else ADOPTED_AND_VALID."""
     for outcome, verdict in ((FINDING, INVALID), (CANNOT, CANNOT_EVALUATE)):
         for leg in legs:
             if leg["outcome"] == outcome:
                 return verdict, leg["leg"]
+        if any(row["outcome"] == outcome for row in unread):
+            return verdict, "unread-inputs"
     if unread:
         return CANNOT_EVALUATE, "unread-inputs"
     return ADOPTED_AND_VALID, "all-legs"
@@ -585,6 +634,20 @@ def _second_event(kind):
     return mutate
 
 
+SPEC_PATH = Path(__file__).resolve().parent.parent / "spec" / "OPF-SPEC.md"
+
+
+def _spec_section(text, start, end):
+    """The whitespace-flattened spec text from the line opening with `start` to the next opening with
+    `end`; empty when `start` heads no line."""
+    lines = text.splitlines()
+    begin = next((i for i, line in enumerate(lines) if line.startswith(start)), None)
+    if begin is None:
+        return ""
+    stop = next((i for i in range(begin + 1, len(lines)) if lines[i].startswith(end)), len(lines))
+    return " ".join(" ".join(lines[begin:stop]).split())
+
+
 def self_test():
     """Fixtures under TemporaryDirectory. The completion fixture's store holds only its manifest, so the
     real store doctor and render engine are cannot-evaluate over it: the vectors that need those legs green
@@ -710,6 +773,10 @@ def self_test():
             decided(doc, INVALID if kind == "applied" else CANNOT_EVALUATE, "event-chain")
             for kind, doc in second.items()))
         flat_doc = " ".join((__doc__ or "").split())
+        spec_14_1 = _spec_section(SPEC_PATH.read_text(encoding="utf-8"), "### 14.1 ", "### 14.2 ")
+        check("spec-14-1-carries-import-event-sentence", SPEC_IMPORT_RECORDS_EVENT in spec_14_1)
+        check("spec-section-read-is-scoped-to-its-section", SPEC_IMPORT_RECORDS_EVENT not in _spec_section(
+            SPEC_PATH.read_text(encoding="utf-8"), "### 14.2 ", "### 14.3 "))
         check("residual-cites-spec-import-event-and-cannot",
               '"' + SPEC_IMPORT_RECORDS_EVENT + '"' in flat_doc
               and "every product root with a post-adoption outcome event, a completed import included, scores "
@@ -790,12 +857,15 @@ def self_test():
             return " ".join(leg["reason"] for leg in doc["legs"] if leg["leg"] == name)
 
         unattested = (here, "_attested", lambda rows, rel, data: data)
-        for label, both, swapped in (("event", False, (genesis_rel,)),
-                                     ("receipt-and-event", True, (genesis_rel, receipt_rel))):
+        for label, both, swapped, decider in (("event", False, (genesis_rel,), "event-chain"),
+                                              ("receipt-and-event", True, (genesis_rel, receipt_rel), "receipt-core")):
             swap = on + [(apply, "_read_live", swapping_read(both))]
             doc = case(_full_fixture, swap)
-            check("swapped-" + label + "-unattested-cannot", decided(doc, CANNOT_EVALUATE, "event-chain")
+            check("swapped-" + label + "-unattested-cannot", decided(doc, CANNOT_EVALUATE, decider)
                   and "not the bytes the bundle inventory attests" in leg_reason(doc, "event-chain"))
+            # Bytes a leg refused are never reported as graded by it (nor digested at all).
+            check("swapped-" + label + "-refused-bytes-not-reported", all(
+                digest_of(doc, rel) in ([], digest_of(green, rel)) for rel in swapped))
             flip = case(_full_fixture, swap + [unattested])
             check("flip-swapped-" + label + "-unbound-turns-green-on-unattested-digests",
                   flip["verdict"] == ADOPTED_AND_VALID and all(
@@ -808,6 +878,113 @@ def self_test():
         check("flip-receipt-without-row-unbound-chain-passes", any(
             leg["leg"] == "event-chain" and leg["outcome"] == PASS
             for leg in case(_full_fixture_then(_receipt_unlisted), on + [unattested])["legs"]))
+
+        # A swapped receipt core that would fail the schema is cannot-evaluate, never a receipt finding.
+        def bad_core_read(root_fd, rel):
+            fst, data = real_read(root_fd, rel)
+            if rel == receipt_rel and data is not None and sys._getframe(1).f_globals is vars(here):
+                return fst, reminted(data, schema=999)
+            return fst, data
+
+        bad_core = case(_full_fixture, on + [(apply, "_read_live", bad_core_read)])
+        check("swapped-schema-failing-receipt-cannot-not-graded", decided(bad_core, CANNOT_EVALUATE, "receipt-core")
+              and digest_of(bad_core, receipt_rel) == []
+              and "not the bytes the bundle inventory attests" in leg_reason(bad_core, "receipt-core"))
+        check("flip-swapped-schema-failing-receipt-unattested-invalid", decided(
+            case(_full_fixture, on + [(apply, "_read_live", bad_core_read), unattested]), INVALID, "receipt-core"))
+
+        # Each digest-only file is held to its inventory row: a swap after the verification, or a file no
+        # row lists, is cannot-evaluate and its unattested digest is not reported.
+        digest_only = (apply.plan_rel(complete._RUN), apply.approval_rel(complete._RUN),
+                       apply.planning_inventory_rel(complete._RUN))
+
+        def digest_only_swap(target):
+            def read(root_fd, rel):
+                fst, data = real_read(root_fd, rel)
+                if rel == target and data is not None and sys._getframe(1).f_globals is vars(here):
+                    return fst, data + b"# swapped after the bundle verification\n"
+                return fst, data
+            return read
+
+        def unattested_digest_only(root_fd, rel, read, unread, verified):
+            # The reading this guard replaced: the bytes read were digested with no inventory row check.
+            data = _attempt(lambda: _read_bundle(root_fd, rel))
+            if isinstance(data, _Leg):
+                unread.append(dict(path=rel, outcome=data.outcome, reason=data.reason))
+            else:
+                _digested(read, rel, data)
+
+        for rel in digest_only:
+            swap = on + [(apply, "_read_live", digest_only_swap(rel))]
+            doc = case(_full_fixture, swap)
+            check("swapped-digest-only-{}-cannot".format(rel.rsplit("/", 1)[-1]),
+                  decided(doc, CANNOT_EVALUATE, "unread-inputs") and digest_of(doc, rel) == []
+                  and [(r["path"], r["outcome"]) for r in doc["unread_inputs"]] == [(rel, CANNOT)]
+                  and "not the bytes the bundle inventory attests" in doc["unread_inputs"][0]["reason"])
+            flip = case(_full_fixture, swap + [(here, "_digest_only", unattested_digest_only)])
+            check("flip-swapped-digest-only-{}-unchecked-turns-green".format(rel.rsplit("/", 1)[-1]),
+                  flip["verdict"] == ADOPTED_AND_VALID and digest_of(flip, rel) != digest_of(green, rel))
+        real_verified = _verified_bundle
+        approval_rel = apply.approval_rel(complete._RUN)
+
+        def rowless_approval(root, run_id, read):
+            bundle, rows = real_verified(root, run_id, read)
+            return bundle, dict((p, d) for p, d in rows.items() if p != approval_rel)
+
+        rowless = case(_full_fixture, on + [(here, "_verified_bundle", rowless_approval)])
+        check("digest-only-without-inventory-row-cannot", decided(rowless, CANNOT_EVALUATE, "unread-inputs")
+              and [r["path"] for r in rowless["unread_inputs"]] == [approval_rel]
+              and "listed by no bundle inventory" in rowless["unread_inputs"][0]["reason"])
+        check("flip-digest-only-without-row-unchecked-turns-green", case(_full_fixture, on + [
+            (here, "_verified_bundle", rowless_approval),
+            (here, "_digest_only", unattested_digest_only)])["verdict"] == ADOPTED_AND_VALID)
+
+        # An absent digest-only file keeps its finding class: INVALID, decided by the unread input.
+        def absent_approval(root_fd, rel):
+            if rel == approval_rel and sys._getframe(1).f_globals is vars(here):
+                return real_read(root_fd, rel)[0], None
+            return real_read(root_fd, rel)
+
+        absent = case(_full_fixture, on + [(apply, "_read_live", absent_approval)])
+        check("absent-digest-only-file-finding", decided(absent, INVALID, "unread-inputs")
+              and [(r["path"], r["outcome"]) for r in absent["unread_inputs"]] == [(approval_rel, FINDING)])
+
+        real_decide = _decide
+
+        def classless(legs, unread_rows):
+            # The decision this guard replaced: every unread input was cannot-evaluate, whatever its class.
+            return real_decide(legs, [dict(row, outcome=CANNOT) for row in unread_rows])
+
+        check("flip-absent-digest-only-classless-cannot", decided(case(_full_fixture, on + [
+            (apply, "_read_live", absent_approval), (here, "_decide", classless)]), CANNOT_EVALUATE, "unread-inputs"))
+
+        # Two rows claiming one path: verify_bundle refuses that first, so it is stubbed here to hand back a
+        # second bundle-root inventory carrying the same rows.
+        real_verify = apply.verify_bundle
+
+        def doubled_inventory(root, run_id, inventory_bytes=None):
+            verified = real_verify(root, run_id, inventory_bytes=inventory_bytes)
+            base = apply.inventory_rel(run_id)
+            if inventory_bytes is not None:
+                inventory_bytes[base.rsplit("/", 1)[0] + "/inventory-copy.toml"] = inventory_bytes[base]
+            return verified
+
+        doubled = case(_full_fixture, on + [(apply, "verify_bundle", doubled_inventory)])
+        check("path-claimed-by-two-rows-cannot", decided(doubled, CANNOT_EVALUATE, "receipt-core")
+              and "claimed by two bundle inventory rows" in leg_reason(doubled, "event-chain"))
+
+        def last_row_wins(rows, path, sha256):
+            # With no guard, a second row silently overwrites the first.
+            rows[path] = sha256
+
+        check("flip-two-rows-unguarded-turns-green", case(_full_fixture, on + [
+            (apply, "verify_bundle", doubled_inventory), (here, "_claim", last_row_wins)])["verdict"]
+            == ADOPTED_AND_VALID)
+
+        # Disclosed: a cannot-evaluate event listing masks a finding in another event (never a pass).
+        masked = case(_full_fixture_then(lambda r: (_forged_digest(r), _misspelled(r))), on)
+        check("listing-cannot-masks-event-finding-disclosed", decided(masked, CANNOT_EVALUATE, "event-chain")
+              and "such a run scores CANNOT_EVALUATE, not INVALID" in " ".join((__doc__ or "").split()))
 
         check("cli-outcome-exact-int-only", [_cli_outcome(v) for v in (0, 1, False, True, 0.0, 2, None)]
               == [PASS, FINDING, CANNOT, CANNOT, CANNOT, CANNOT, CANNOT])
@@ -856,7 +1033,7 @@ def self_test():
             raised = True
         check("flip-score-alone-lets-exception-escape", raised)
 
-        def swallowing(root_fd, rel, read, unread):
+        def swallowing(root_fd, rel, read, unread, verified):
             # The reading this guard replaced: an unreadable digest-only file was dropped silently.
             data = _attempt(lambda: _read_bundle(root_fd, rel))
             if not isinstance(data, _Leg):
