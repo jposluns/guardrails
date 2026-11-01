@@ -15638,11 +15638,23 @@ def _main_isolated(monitor):
             got = _decision(brg, command, cwd=cwd)
             if got != "allow":
                 failures.append("{}: expected allow, got {}".format(label, got))
+        # The orphaned and unresolvable starts deny from the ancestry probe, so each names the probe's reason,
+        # not the reason of a form this guard cannot classify.
+        for label, command, fragment in (
+                ("(H33e) worktree add --detach on an orphaned start denies naming the missing merge base",
+                 "git -C {} worktree add /tmp/wt-h33e {} --detach".format(brr, br_orphan),
+                 "has no merge base with origin/HEAD"),
+                ("(H33f) worktree add --detach on an unresolvable start denies naming the unresolved start",
+                 "git -C {} worktree add --detach /tmp/wt-h33f no-such-ref-h33f".format(brr),
+                 "ancestry could not be evaluated (the branch start point")):
+            _h33_code, _h33_out, _h33_err = brg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                 "tool_input": {"command": command}, "cwd": brr})
+            _h33_got = _reduce_result(_h33_code, _h33_out)
+            _h33_reason = ((_h33_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _h33_got != "deny" or fragment not in _h33_reason:
+                failures.append("{}: expected deny naming {!r}, got {} {!r}".format(
+                    label, fragment, _h33_got, _h33_reason))
         for label, command in (
-                ("(H33e) worktree add --detach on an orphaned start denies",
-                 "git -C {} worktree add /tmp/wt-h33e {} --detach".format(brr, br_orphan)),
-                ("(H33f) worktree add --detach on an unresolvable start denies",
-                 "git -C {} worktree add --detach /tmp/wt-h33f no-such-ref-h33f".format(brr)),
                 ("(H33g) worktree add --orphan beside --detach still denies",
                  "git worktree add --detach --orphan /tmp/wt-h33g {}".format(br_tip)),
                 ("(H33h) worktree add --detach with a third operand denies",
@@ -15655,26 +15667,54 @@ def _main_isolated(monitor):
                  "git worktree add --det /tmp/wt-h33k {}".format(br_tip)),
                 ("(H33l) worktree add --detach=yes (valued) denies",
                  "git worktree add --detach=yes /tmp/wt-h33l {}".format(br_tip)),
-                ("(H33m) worktree add with --detach after -- (an operand) denies",
-                 "git worktree add -- /tmp/wt-h33m --detach"),
+                ("(H33m) worktree add -- <path> <rooted> --detach denies (a --detach after -- is a third "
+                 "operand, not the option)",
+                 "git worktree add -- /tmp/wt-h33m {} --detach".format(br_tip)),
                 ("(H33n) worktree add <path> <rooted> without --detach still denies",
                  "git worktree add /tmp/wt-h33n {}".format(br_tip)),
                 ("(H33o) worktree add --detach under a git alias denies",
                  "git -c alias.wa=worktree wa add --detach /tmp/wt-h33o {}".format(br_tip))):
             brexpect(label, command, "deny")
-        # Flip: a classifier that treats every detach form as unclassifiable again (the old deny) must
-        # turn each H33 allow vector red, so they test the detach branch and not some other allow.
+        # A --git-dir or GIT_DIR redirect names a repository this guard does not pin, so a detach under one
+        # allows with a note whatever its start, as the -b form does; the CI branch-root gate stays the backstop.
+        brexpect("(H33p) worktree add --detach on an orphaned start under --git-dir allows with a note",
+                 "git --git-dir={}/.git worktree add --detach /tmp/wt-h33p {}".format(brr, br_orphan),
+                 "allow-note")
+        brexpect("(H33q) worktree add --detach on an orphaned start under a GIT_DIR prefix allows with a note",
+                 "GIT_DIR={}/.git git worktree add --detach /tmp/wt-h33q {}".format(brr, br_orphan),
+                 "allow-note")
+        # Flip: the old classifier, which returned _ASK_START at the first detach token its walk met (so
+        # every detach form denied), must turn each H33 allow vector red, so they test the detach branch and
+        # not some other allow. It walks the arguments as the classifier does, so a d that is the value of
+        # -b (-bd, -b -d) stays a branch name; with no detach token met the classifier's own answer stands.
         _h33_saved = aiqt_hooks._worktree_creation_start
 
         def _h33_old_detach_deny(args):
-            head = list(args)
-            for k, tok in enumerate(head):
+            if not args or args[0] != "add":
+                return _h33_saved(args)
+            created = False
+            i = 1
+            while i < len(args):
+                tok = args[i]
                 if tok in aiqt_hooks._EOO_TOKENS:
-                    head = head[:k]
-                    break
-            if any(t == "--detach" or (t.startswith("-") and not t.startswith("--") and "d" in t[1:])
-                   for t in head):
-                return aiqt_hooks._ASK_START
+                    break                               # the rest are operands
+                if tok.startswith("--") and len(tok) > 2:
+                    if tok in aiqt_hooks._CLEAN_LONG_BOOLEANS:
+                        i += 1
+                        continue
+                    return aiqt_hooks._ASK_START        # --detach, and every other long option
+                if tok.startswith("-") and len(tok) > 1:
+                    chars = tok[1:]
+                    for j, ch in enumerate(chars):
+                        if ch in aiqt_hooks._CLEAN_SHORT_LETTERS:
+                            continue
+                        if ch in aiqt_hooks._WORKTREE_CREATE_SHORT and not created:
+                            created = True
+                            if not chars[j + 1:]:
+                                i += 1                  # separated value: -b NAME
+                            break
+                        return aiqt_hooks._ASK_START    # -d, and every other short letter
+                i += 1
             return _h33_saved(args)
 
         aiqt_hooks._worktree_creation_start = _h33_old_detach_deny

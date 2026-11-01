@@ -14428,11 +14428,12 @@ def _worktree_creation_start(args):
     unresolvable commit-ish still denies). The detach option may stand anywhere among the
     options and operands, the operands may follow --, and it needs exactly one path and one
     commit-ish operand and no option but the valueless -q/-f/--quiet/--force; a detach with
-    -b/-B, with no commit-ish (git detaches at HEAD) or with an extra operand ASKs. A
-    --detach or -d after -- is an operand to git, not the option. `--orphan`, `--no-*`, and
-    any unknown, abbreviated (--det) or value-taking option ASK.
-    A bare `worktree add <path> [<commit-ish>]` with neither -b nor --detach ASKs: git may
-    create a branch there (one named after the path's last component, or a local tracking
+    -b/-B, with no commit-ish (git detaches at HEAD) or with an extra operand returns
+    _ASK_START, which branch_root denies. A --detach or -d after -- is an operand to git, not
+    the option. `--orphan`, `--no-*`, and any unknown, abbreviated (--det) or value-taking
+    option return _ASK_START (denied) too.
+    A bare `worktree add <path> [<commit-ish>]` with neither -b nor --detach returns
+    _ASK_START (denied): git may create a branch there (one named after the path's last component, or a local tracking
     branch when <commit-ish> names a branch found only on one remote) or check out an
     existing one, and which it does depends on refs this lexical classifier does not read.
     Recognized non-creation subcommands allow silently.
@@ -14671,7 +14672,9 @@ def branch_root(data):
     unclassifiable form and DENIES, not an allow). A 'git worktree add --detach|-d <path> <commit-ish>'
     (the detach option in any position before any '--', the operands optionally after it) creates no
     branch, so its commit-ish is probed as a -b start is, with the same -C and working-directory
-    handling: a rooted one ALLOWS, an orphaned or unresolvable one DENIES. A detach with a missing or extra operand or beside
+    handling: a rooted one ALLOWS, an orphaned or unresolvable one DENIES, and under a
+    '--git-dir=<repo>/.git' option or a 'GIT_DIR=...' prefix any start ALLOWS-WITH-NOTE, as the -b form
+    does (the --git-dir/GIT_DIR sentence below). A detach with a missing or extra operand or beside
     -b/-B, an --orphan, and a bare 'worktree add <path> [<commit-ish>]' (git may create a branch there)
     still DENY as forms this guard cannot classify (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
