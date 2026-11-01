@@ -130,13 +130,16 @@ Exit convention (matches the repo's gates):
      --wait) or a wait-claiming systemd-run option (--wait, --scope, -P/--pipe, -t/--pty,
      -T/--pty-late, -S/--shell), whose exit propagation is not a verified premise of this gate, a
      declared NAME inside a command substitution in an AND-OR list ended by '&', a closing word or
-     ')' with no open construct while a declared command's list is pending (the list's end cannot be
-     placed), a declared command whose subcommand sits
+     ')' with no open construct (in a case arm, a ')' with no subshell of the arm open, or an arm or
+     case ended with one still open) while a relied stage, or a declared name hidden in a
+     substitution, is pending in the list (the list's end cannot be placed), a declared command
+     whose subcommand sits
      behind option words, a declared NAME inside a subshell, brace group, loop body or function body
      (one-line definitions and non-brace bodies included: constructs whose execution time or shell
      this gate does not model; the name counts even where it is only another command's argument data,
-     a disclosed over-refusal), a function definition whose body is not a compound form this gate
-     models in a file that mentions a declared command (a disclosed over-refusal: such a body's
+     a disclosed over-refusal; a subshell inside a case arm counts: the pattern's own ')' ends the
+     pattern, and the arm's '(' and ')' open and close subshells), a function definition whose body
+     is not a compound form this gate models in a file that mentions a declared command (a disclosed over-refusal: such a body's
      execution cannot be attributed), or a grouped or compound pipeline producer (a subshell, brace
      group, or loop piped onward) in a file that mentions a declared command. Declared identity in
      raw text is matched QUOTE-TOLERANTLY (to""ol, 'to''ol', to\\ol still count): failing to prove
@@ -221,8 +224,9 @@ SYSTEMD_RUN_LONG_FLAG = frozenset((
 SYSTEMD_RUN_LONG_WAIT = frozenset(("wait", "scope", "pipe", "pty", "pty-late", "shell"))
 # Separators that keep an AND-OR list going. Every other separator but '(' ends the list at its own
 # nesting depth; a '&' there backgrounds every relied stage in that list, not only the last pipeline:
-# stages before a later subshell, brace group, if or case part, and stages inside an if or case part
-# (a declared command inside a subshell or brace group already refuses).
+# stages before a later subshell, brace group, if or case part, and stages inside an if or case part.
+# A declared command inside a subshell or brace group refuses instead, a subshell inside a case arm
+# included (_case_paren_step counts the arm's parens).
 LIST_JOINS = ("|", "|&", "&&", "||")
 # Characters that make a launcher word unreadable as text: an expansion or a glob can become an option.
 UNREADABLE_CHARS = "$`*?["
@@ -1184,6 +1188,44 @@ def _earliest_stop(unparsed_at, stop):
     return unparsed_at
 
 
+def _ends_case_arm(seg, nxt):
+    """True when seg's ';' is the first half of ;; ;& or ;;&: the lexer splits each into a ';' and an
+    empty ';' or '&' record straight after it (nxt, None at the end)."""
+    return (seg.sep_after == ";" and nxt is not None and not nxt.argv and not nxt.raw
+            and nxt.sep_after in (";", "&"))
+
+
+def _case_paren_step(case_stack, paren_depth, sep, arm_end):
+    """The subshell depth after one separator, and whether a ')' or an arm end found a subshell it
+    cannot place. case_stack holds one [state, floor] per open case statement, innermost last: state
+    'pattern' while a pattern is read (from the case word, and after each ;; ;& or ;;&), 'arm' after the
+    pattern's ')', and floor the subshell depth the case opened at. In a pattern '(' is the pattern's
+    optional opening paren and ')' ends the pattern, so neither moves the depth. Outside every case,
+    and in an arm, '(' opens a subshell and ')' closes one; a ')' with no subshell open above the floor
+    has nothing to close, and an arm ended with a subshell still open leaves its depth unknown, so
+    each is unplaceable (the depth falls back to the floor)."""
+    top = case_stack[-1] if case_stack else None
+    if top is not None and top[0] == "pattern":
+        if sep == ")":
+            top[0] = "arm"
+        return paren_depth, False
+    floor = top[1] if top is not None else 0
+    unplaced = False
+    if sep == "(":
+        paren_depth += 1
+    elif sep == ")":
+        if paren_depth > floor:
+            paren_depth -= 1
+        else:
+            unplaced = True
+    if top is not None and arm_end:
+        if paren_depth != floor:
+            unplaced = True
+            paren_depth = floor
+        top[0] = "pattern"
+    return paren_depth, unplaced
+
+
 def _scan_context(ctx, original_text, rel, binding, telemetry, events, pending, declared_re):
     """Scan one context. The shared lexer judges a command holding an uncertain '#' under BOTH
     readings of each one and returns the segments of every reading one reading after another, so
@@ -1285,7 +1327,7 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
 
     blocks = []        # the stack of open block kinds ('if', 'while', ..., '{', 'func')
     paren_depth = 0
-    case_depth = 0
+    case_stack = []    # one [state, floor] per open case statement (see _case_paren_step)
     func_pending = False
     prev_sep = ""
     run_stages = []  # (segment index, absolute offset, relied, basename, effective depth, opaque)
@@ -1511,14 +1553,18 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                 blocks.append("func" if func_pending else w)
                 func_pending = False
                 if w == "case":
-                    case_depth += 1
+                    case_stack.append(["pattern", paren_depth])
             elif w in BLOCK_CLOSE and plain_at(j, w):
                 if blocks:
                     blocks.pop()
                 else:
                     unbalanced = True
-                if w == "esac":
-                    case_depth = max(0, case_depth - 1)
+                if w == "esac" and case_stack:
+                    # A case closed with a subshell of its arm still open leaves the depth unknown.
+                    floor = case_stack.pop()[1]
+                    if paren_depth != floor:
+                        unbalanced = True
+                        paren_depth = floor
             elif (w in RESERVED_SKIP and plain_at(j, w)) or ENV_ASSIGN_RE.match(w):
                 continue
             else:
@@ -1545,8 +1591,11 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                 func_pending = False
         # The AND-OR list this separator belongs to sits at the depth after this segment's own block
         # words (a closing fi, esac or '}' hands the separator to the enclosing list), counting a ')'
-        # at the depth it closes. '(' opens a part of the list and never ends it.
-        if case_depth == 0 and seg.sep_after == ")" and paren_depth == 0:
+        # at the depth it closes. '(' opens a part of the list and never ends it. An arm of a case ends
+        # at ;; ;& or ;;&, which the lexer splits into a ';' and an empty ';' or '&' record.
+        arm_end = _ends_case_arm(seg, kept[idx + 1] if idx + 1 < len(kept) else None)
+        next_paren, unplaced = _case_paren_step(case_stack, paren_depth, seg.sep_after, arm_end)
+        if unplaced:
             unbalanced = True
         if unbalanced and any(e[1] or e[5] for e in bg_unit):
             raise GateError("{}:{}: binding {!r}: a closing word or ')' with no open construct leaves "
@@ -1574,13 +1623,8 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                 if e[4] >= list_depth:
                     e[4] = list_depth - 1
             bg_unit = [e for e in bg_unit if e[4] >= 0]
-        if case_depth == 0:
-            # Inside a case statement a ')' ends a pattern, not a subshell, so the paren separators are
-            # not depth boundaries there; case itself already holds the block depth above zero.
-            if seg.sep_after == "(":
-                paren_depth += 1
-            elif seg.sep_after == ")":
-                paren_depth = max(0, paren_depth - 1)
+        # The depth moves only now: the list this separator ends or joins is read at the depth before it.
+        paren_depth = next_paren
         if seg.argv or seg.sep_after:
             prev_sep = seg.sep_after
 
@@ -1975,13 +2019,18 @@ def run(root):
 # whole-context lex fallback and the locate refusal by mutants of their own helpers (the locate
 # refusal forced through readings flattened into one), and scan_file's pre-open layer is called
 # directly. A case that cannot run (no tempdir, no symlink or FIFO support, permission checks
-# bypassed) is a NAMED failure, never a skip. The launcher and background cases R142..R167 (exit 1,
-# every finding needle asserted, each re-run under the never-report mutant), the waiting-setsid and
-# launcher refusals (C47..C50, R146, R155b, X20..X34, exit 2 with their own needle) and the controls
-# C51..C62 (exit 0) each come with a flip, and each launcher mutant (setsid dropped from LAUNCHERS, a
-# wait-blind or 'w'-anywhere setsid reader, exact-only long options, pipefail clearing every kind, a
-# single-stage background unit, '&&' as a boundary, -u dropped from the systemd-run value table, the
-# value-word safeguard removed, setsid as a wrapper) must stop its named case from holding.
+# bypassed) is a NAMED failure, never a skip. The launcher and background cases R142..R168d (exit 1;
+# the range has gaps: no R149, R158 or R160; every finding needle asserted, each re-run under the
+# never-report mutant), the waiting-setsid and launcher refusals (C47..C50, R146, R155b, X20..X32,
+# exit 2 with their own needle), the refusal of a declared name in a command substitution in a list
+# ended by '&' (X33a, X33b), the refusal of a close that cannot be placed (X34a..X34c), the refusal
+# of a declared command in a subshell inside a case arm (X35a..X35c) and the controls C51..C64
+# (exit 0) each come with a flip, and each launcher mutant (setsid dropped
+# from LAUNCHERS, a wait-blind or 'w'-anywhere setsid reader, exact-only long options, pipefail
+# clearing every kind, a single-stage background unit, '&&' as a boundary, -u dropped from the
+# systemd-run value table, the value-word safeguard removed, setsid as a wrapper, parens not tracked
+# inside a case, every ';' read as an arm end, no arm end read) must stop its named case from
+# holding.
 
 def _run_quiet(root):
     import io
@@ -3581,9 +3630,11 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                                     "fail-closed exit 2 with the configuration-symlink check's own "
                                     "diagnostic, got {}".format(rc))
 
-            # --- launcher and background findings: R142..R167 (exit 1, each needle asserted), the
-            # waiting-setsid and launcher refusals C47..C50, R146, R155b and X20..X34 (exit 2, each
-            # asserting its own needle), the controls C51..C62 (exit 0) and every flip ---
+            # --- launcher and background findings: R142..R168d (exit 1, each needle asserted; no
+            # R149, R158 or R160), the waiting-setsid and launcher refusals C47..C50, R146, R155b and
+            # X20..X32, the substitution-in-a-backgrounded-list refusals X33a/X33b, the unplaced-close
+            # refusals X34a..X34c, the case-arm subshell refusals X35a..X35c (exit 2, each asserting
+            # its own needle), the controls C51..C64 (exit 0) and every flip ---
             n_launch = "without a wait option, so the launcher can report its own status"
             n_ignore = "with --ignore-failure, so the launcher ignores the command's exit status"
             n_bg = "is in a list ended by '&'"
@@ -3632,11 +3683,19 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("R166c", "case x in x) tool write;; esac &\n", 1, [n_bg]),
                 # A blank or comment line after && keeps the list going to the '&'.
                 ("R167", "tool write &&\n\n# c\necho ok &\n", 1, [n_bg]),
+                # In a case arm the pattern's ')' ends the pattern, and a subshell's '(' and ')' are a
+                # part of the arm's list, so the '&' still reaches the earlier stage.
+                ("R168a", "case x in x) tool write && ( echo ) & ;; esac\n", 1, [n_bg]),
+                ("R168b", "case x in x) tool write || ( echo ) && echo & ;; esac\n", 1, [n_bg]),
+                ("R168c", "case x in\n  x)\n    tool write &&\n      ( echo ) &\n    ;;\nesac\n", 1,
+                 [n_bg]),
+                ("R168d", "case x in x) echo; tool write && ( echo ) & ;; esac\n", 1, [n_bg]),
                 ("X33a", "x=$(tool write) &\n", 2, [n_subst_bg]),
                 ("X33b", "echo \"$(tool write)\" &\n", 2, [n_subst_bg]),
                 # A close with nothing open leaves the pending list's end unplaceable.
                 ("X34a", "tool write && fi &\n", 2, [n_unplaced]),
                 ("X34b", "tool write && ) &\n", 2, [n_unplaced]),
+                ("X34c", "case x in x) tool write && ) & ;; esac\n", 2, [n_unplaced]),
                 # A waiting setsid is cannot-evaluate: its exit propagation is not a verified premise.
                 ("R146", "setsid -w tool write | tail -1\n", 2, [n_setsid_w]),
                 ("R155b", "setsid -w tool write &\n", 2, [n_setsid_w]),
@@ -3668,6 +3727,10 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("X30", "systemd-run --frobnicate tool write\n", 2, [n_classify]),
                 ("X31", "( tool write ) &\n", 2, ["inside a subshell"]),
                 ("X32", "{ tool write; } &\n", 2, ["inside a brace group"]),
+                # A subshell inside a case arm refuses as one at top level does.
+                ("X35a", "case x in x) ( tool write ) ;; esac\n", 2, ["inside a subshell"]),
+                ("X35b", "case x in x) echo && ( tool write ) ;; esac\n", 2, ["inside a subshell"]),
+                ("X35c", "case x in x) ( tool write ) & ;; esac\n", 2, ["inside a subshell"]),
                 ("C51", "nohup tool write\n", 0, []),
                 ("C52", "tool write &> out.log\n", 0, []),
                 ("C53", "tool write && echo ok\n", 0, []),
@@ -3682,6 +3745,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C60", "tool write && { echo & }\n", 0, []),
                 ("C61", "if true; then tool write; echo b & fi\n", 0, []),
                 ("C62", "tool write; ( echo ok ) &\n", 0, []),
+                ("C63", "case x in x) tool write; ( echo ) & ;; esac\n", 0, []),
+                # A pattern's optional '(' after ;; opens no subshell.
+                ("C64", pfx + "case x in x) echo ;; (tool) echo ;; esac\n", 0, []),
                 # Flips: each control or waiting form, changed by one edit, must reach its finding.
                 ("C47-flip", "setsid tool write\n", 1, [n_launch]),
                 ("C48-flip-fork", "setsid --fork tool write\n", 1, [n_launch]),
@@ -3701,6 +3767,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C60-flip", "tool write && { echo; } &\n", 1, [n_bg]),
                 ("C61-flip", "if true; then tool write & fi\n", 1, [n_bg]),
                 ("C62-flip", "tool write && ( echo ok ) &\n", 1, [n_bg]),
+                ("C63-flip", "case x in x) tool write && ( echo ) & ;; esac\n", 1, [n_bg]),
+                ("C64-flip", pfx + "case x in x) echo ;; (y) ( tool ) ;; esac\n", 2,
+                 ["inside a subshell"]),
             ]
             launch_roots = {}
 
@@ -3736,6 +3805,13 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                     return j + 1, "wait"
                 return j, mode
 
+            real_case_paren_step = this._case_paren_step
+
+            def _case_parens_untracked(case_stack, paren_depth, sep, arm_end):
+                if case_stack:
+                    return paren_depth, False
+                return real_case_paren_step(case_stack, paren_depth, sep, arm_end)
+
             def _e1_every_kind(pending, events):
                 ordered = sorted(events)
                 return [r for r in pending if not (r["depth"] == 0 and _e1_exempt(ordered, r["offset"]))]
@@ -3758,6 +3834,11 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("setsid as a WRAPPERS entry",
                  {"WRAPPERS": WRAPPERS | {"setsid"}, "LAUNCHERS": LAUNCHERS - {"setsid"}},
                  ["R142", "C47"]),
+                ("parens not tracked inside a case", {"_case_paren_step": _case_parens_untracked},
+                 ["R168a", "R168b", "R168c", "R168d", "X34c", "X35a", "X35b", "X35c"]),
+                ("every ';' read as an arm end",
+                 {"_ends_case_arm": lambda seg, nxt: seg.sep_after == ";"}, ["R168d"]),
+                ("no arm end read", {"_ends_case_arm": lambda seg, nxt: False}, ["C64"]),
             ]
             by_name = {name: (expected, needles) for name, _b, expected, needles in launch_cases}
             for label, patches, names in launch_mutants:
@@ -3849,9 +3930,11 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "FIFO surfaces and configurations, .git/__pycache__ directories, symlinks AND regular "
           "files refused rather than pruned, and scan_file's own pre-open regular-file layer) each "
           "fail closed printing the diagnostic of their OWN check, asserted by a substring no other "
-          "check prints; the launcher and background cases R142-R167, the waiting-setsid and launcher "
-          "refusals C47-C50, R146, R155b and X20-X34, the controls C51-C62 and every flip hold, and "
-          "each launcher mutant is caught")
+          "check prints; the launcher and background cases R142-R168d (no R149, R158 or R160), the "
+          "waiting-setsid and launcher refusals C47-C50, R146, R155b and X20-X32, the "
+          "substitution-in-a-backgrounded-list refusals X33a and X33b, the unplaced-close refusals "
+          "X34a-X34c, the case-arm subshell refusals X35a-X35c, the controls C51-C64 and every flip "
+          "hold, and each launcher mutant is caught")
     return 0
 
 
