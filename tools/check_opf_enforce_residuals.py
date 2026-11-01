@@ -494,8 +494,13 @@ def _drop_last_row(tree):
 
 
 def _second_locator(tree, row):
-    """Declare the ci/opf-ci.sh anchor of `row` a locator in the header (with the row id and a reason)."""
-    doc = tomllib.loads((tree / REGISTER_REL).read_text(encoding="utf-8"))
+    """Declare the ci/opf-ci.sh anchor of `row` a locator in the header (with the row id and a reason). A
+    register that does not parse here is cannot-evaluate, as it is for the gate."""
+    path = tree / REGISTER_REL
+    try:
+        doc = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("%s does not parse (%s)" % (path, exc))
     anchor = [r for r in doc["residual"] if r["id"] == row][0]["anchors"]["ci/opf-ci.sh"]
     _edit(tree, REGISTER_REL, HEADER_LAST, HEADER_LAST + '# In the %s row the ci/opf-ci.sh anchor ("%s") is '
           'a locator, not a disclosure: a probe reason.\n' % (row, anchor))
@@ -532,6 +537,10 @@ def _vectors():
         "settings.opf.json", "settings.opf.json and " + LOCAL_SETTINGS))
     unnamed_grown = lists(unnamed={**UNNAMED_MEMBERS, LOCAL_SETTINGS: UNNAMED_MEMBERS[SETTINGS]})
     no_locator = edit(REGISTER_REL, LOCATOR_TAIL, "is\n# a disclosure, not a locator.")
+    second_locator = lambda tree: dict(locators=_second_locator(tree, "canonical-hand-edits"))
+    append = lambda tail: lambda tree: _write(tree, REGISTER_REL, (tree / REGISTER_REL).read_text(encoding="utf-8")
+                                              + tail)
+    nested = "x = " + "[" * 100000 + "]" * 100000 + "\n"
     return (
         ("clean", (lambda tree: None, "clean", ""),
          (drift, "finding", "is not present verbatim")),
@@ -624,7 +633,15 @@ def _vectors():
               lists(locators={LOCATOR_KEY: ("pull_request:", LOCATOR_ANCHORS[LOCATOR_KEY][1])})),) + clean),
         ("locator-only-row", (lambda tree: dict(locators=_second_locator(tree, LOCATOR_KEY[0])), "finding",
                               "every anchor of the row is a locator"),
-         (lambda tree: dict(locators=_second_locator(tree, "canonical-hand-edits")),) + clean),
+         (second_locator,) + clean),
+        # a register the locator declaration cannot parse (malformed, or nested past the recursion limit) is
+        # cannot-evaluate, named by the fixture's own path.
+        ("locator-register-unparseable", (seq(append("\n[[residual\n"), second_locator), "cannot",
+                                          "/%s does not parse" % (REGISTER_REL,)),
+         (seq(append("\n# [[residual\n"), second_locator),) + clean),
+        ("locator-register-too-deep", (seq(append("\n" + nested), second_locator), "cannot",
+                                       "/%s does not parse (maximum recursion depth" % (REGISTER_REL,)),
+         (seq(append("\n# " + nested), second_locator),) + clean),
         # rows: one per token, in order, with the closed row schema.
         ("row-order-swapped", (_swap_last_rows, "finding", "in that order"),
          (seq(_swap_last_rows, edit(ADOPT_REL, '"same-user-tampering",\n                         '
@@ -702,11 +719,12 @@ MODE_000 = frozenset(("member-mode-000", "register-mode-000"))
 
 
 def _observe(base, name, mutate):
-    """The status and text of the gate over a fresh fixture mutated by `mutate`."""
+    """The status and text of the gate over a fresh fixture mutated by `mutate` (a mutation that reads an
+    input it cannot parse is cannot-evaluate too)."""
     tree = _fixture(base, name)
-    overrides = mutate(tree)
-    overrides = overrides if isinstance(overrides, dict) else {}
     try:
+        overrides = mutate(tree)
+        overrides = overrides if isinstance(overrides, dict) else {}
         got = evaluate(tree, **overrides)
     except CannotEvaluate as exc:
         return "cannot", "CANNOT EVALUATE: %s" % (exc,)
