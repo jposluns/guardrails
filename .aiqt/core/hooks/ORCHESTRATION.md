@@ -497,8 +497,10 @@ DENIED unless EVERY lexed segment is a closed-allowlist read-only form with its 
 declared file only as a SOURCE (the path cp actually WRITES must resolve outside every declared
 directory and must not land under a `.git/hooks` directory or at an orchestration registry file this
 guard reads; a directory destination resolves to destination/basename and a `cp -r` merge lands inside
-the existing directory, both computed before the check, and `cp`'s link and target-directory spellings
-are off the grammar); `git apply` (with `--check`, `--stat`,
+the existing directory, both computed before the check; below a directory source every name in the
+source tree, read as it stands when the guard runs, is joined onto that target and judged the same way,
+so a recursive copy of a whole `.git` or `.aiqt` directory denies where its hook or registry file
+lands; and `cp`'s link and target-directory spellings are off the grammar); `git apply` (with `--check`, `--stat`,
 `--numstat`, `--summary`, the quiet/verbose flags, `-p<n>`, `--index`, `--cached`, `--3way`, `--reject`,
 `--recount`, `--allow-empty`, `--unidiff-zero` and the `--whitespace=`/`--directory=`/`--exclude=`/
 `--include=` value options) and `git diff --no-index` (with the report flags, `-U<n>` and a `--`
@@ -506,18 +508,21 @@ separator), BOTH only when the git process's effective working directory and eve
 OUTSIDE every declared directory (the only accepted global option is a literal `-C` to such a directory;
 a `-C`, `--git-dir` or `--work-tree` into a declared directory, or any other global option, denies,
 since git reads that directory's repository config and attributes before any operand) AND when neither
-the working directory nor any `-C` target was created or written in this SAME call (by an earlier `cp`,
-write redirect or `mkdir` segment) or holds a `.git` file or directory copied into it in this call
-(which would hand git a repository the command itself just built, with worker-controlled config such as
-`diff.external`); `bash -n` on
+the working directory nor any `-C` target is, or lies inside, a path created or written in this SAME
+call (by an earlier `cp`, write redirect or `mkdir` segment), and no `.git` file or directory written in
+this call sits in it or in any of its ancestors (git searches upward from a subdirectory for its
+repository, so either would hand git a repository the command itself just built, with worker-controlled
+config such as `diff.external`); both sides of that comparison are taken as written and through
+realpath, so an existing symlink alias of the written directory counts as the same directory; `bash -n` on
 EXACTLY one script operand with no other option and no `+`-prefixed token (a `+n`, `+o noexec` or a
 second option turns bash's noexec back off, so the script would run); `python3 -I`, or a shell, running
 ONE script that is an EXISTING REGULAR FILE resolving outside every declared directory and outside
 `/dev` and `/proc` (so `/dev/stdin`, `/dev/fd/N` and `/proc/self/fd/N` are refused) and NOT resolving
 inside a Python standard-library directory (a stdlib program used as the reader, such as `cProfile`,
-`pydoc`, `timeit`, `code` or `pickle`, would run the file or a stdin program handed to it; `runpy` is
-frozen and ships no file; no enumeration of these stays true across versions, so the refusal is by
-standard-library containment), BOTH only when the effective working directory is itself outside every
+`pydoc`, `timeit`, `code` or `pickle`, would run the file or a stdin program handed to it; `runpy` is a
+frozen module whose spec names no file, yet a `runpy.py` file still sits in the standard-library
+directory; no enumeration of these stays true across versions, so the refusal is by standard-library
+containment), BOTH only when the effective working directory is itself outside every
 declared directory (a copy run from inside one can source or import a deliverable by a relative path,
 the same way the git form guards its working directory); and `cd` to one literal absolute directory
 outside the declared directories (the session's exit from a declared cwd). The reader or script the python/shell
@@ -528,11 +533,15 @@ assignment prefix, wrapper, builtin, reserved word, substitution, backtick, glob
 ANSI-C `$'...'` quote, `xargs`, `find`, or any unlisted word is simply not on the allowlist and denies.
 A command the lexer cannot read (an unquoted heredoc, a here-string, a process substitution, an
 unbalanced quote) has no segments to match and denies whole while in scope. A nested shell `-c` body is
-classified recursively through its wrapper spellings (a bare or path-qualified shell word, an `env`
-prefix, shell options before `-c`, and `eval`), so a declared directory a quote splice hides from the
+classified recursively through the wrapper spellings it reads (a bare or path-qualified shell word;
+`NAME=value` prefixes and the `env`, `command`, `nohup` and `timeout` wrappers, peeled repeatedly; the
+shell's options before the body, where `-c` counts only as a letter of a single-dash option cluster,
+each `o` or `O` letter of a cluster takes the next word, `--rcfile` and `--init-file` take the next word,
+and other long options are flags; and `eval`), so a declared directory a quote splice hides from the
 raw text is still reached; a relative `cd`/`pushd` while CDPATH is set (assigned in the command as a
-`CDPATH=` prefix or export, a `printf -v CDPATH`, or a `read` into CDPATH, or inherited in the hook
-process's own environment) is unresolvable and puts the command in scope, since the cd may land in a
+`CDPATH=` prefix or export, a `printf -v CDPATH`, or a bare `CDPATH` operand of `read`, `mapfile` or
+`readarray`, each also behind `NAME=value` prefixes or `command`, or inherited in the hook process's own
+environment) is unresolvable and puts the command in scope, since the cd may land in a
 declared directory through a CDPATH entry; and a declared directory spelled inside an ANSI-C `$'...'`
 quote is read for scope from a decoded copy of the command. Each judged operand and each declared directory is
 compared both as written and through realpath, so a symlink into or out of a directory is caught either
@@ -563,7 +572,16 @@ read denies whole while in scope even where it would only print. `cp` into a dec
 even though `cp` runs nothing, and a one-call `cp` to a copy outside the directories FOLLOWED by running
 that copy (`cp ... && bash <copy>` or `cp ...; python3 -I <copy>`) denies alike, since the copy is not
 yet an existing regular file when the guard checks: neither the shell nor the python reader form can
-verify it, so both deny (consistent). The escape for each is the same: read the file with the Read tool,
+verify it, so both deny (consistent). A git command whose working directory or `-C` target is, or lies
+inside, a directory written in the same call denies even when no `.git` was copied into it (for
+example `cp -r <dir>/plain <out>/; git -C <out>/plain diff --no-index ...`), and so does one under any
+ancestor that received a `.git` in the same call even where a nearer repository would be found first.
+A `cp` whose directory source cannot be read whole or holds more than 20000 entries denies, as does a
+`cp` whose source is not a regular file and is, contains or lies inside a path an earlier segment of
+the same call wrote. Beside the nested `-c` body the shell reads, the token a looser reading takes as
+the body (the word after the first option whose letters include `c`, a long option such as `--norc`
+included) is classified too, so a `--rcfile` file name or a stray option word there can deny a call
+whose real body is an allowlisted read. The escape for each is the same: read the file with the Read tool,
 use an allowlisted reader, or hand the path to a reader script kept outside the declared directories
 (copy in one call, run the existing copy in the next).
 
@@ -573,15 +591,21 @@ in a shell variable assigned in an earlier call, a path built by concatenation o
 lexer reads as opaque, or a symlink or hard link made ELSEWHERE that points into a declared directory
 while the command names only the alias outside it. `bash -n` sources a `BASH_ENV` file set in an
 EARLIER call (an earlier-call variable the call text does not carry), the remaining disclosed path for
-the syntax-check form. The CDPATH and ANSI-C handling closes the in-call spellings: a relative `cd`
-with CDPATH set in THIS call (a `CDPATH=` prefix or export, a `printf -v CDPATH`, or a `read` into
-CDPATH) or inherited denies, and a declared directory spelled in an ANSI-C `$'...'` quote is read for
-scope; an inherited CDPATH is read from the hook process's OWN environment (the payload the hook runs
-under, which need not equal the Bash tool's interactive shell environment), and a CDPATH assigned in an
-EARLIER call is the same earlier-call-variable residual. The nested `-c` recursion covers a bare or
-path-qualified shell word, an `env` prefix, shell options before `-c`, and `eval`; a `-c` body reachable
-only behind an opaque expansion or a command substitution the lexer cannot read is the
-earlier-call-variable residual, not a classified body. A write destination is constrained only at a
+the syntax-check form. The CDPATH handling covers the in-call spellings listed above: a relative `cd`
+with CDPATH set in THIS call by a `CDPATH=` prefix or export, a `printf -v CDPATH`, or a bare `CDPATH`
+operand of `read`, `mapfile` or `readarray` (each also behind `NAME=value` prefixes or `command`), or
+inherited, denies; any OTHER in-call spelling that assigns CDPATH (for example `builtin read`) is not
+detected, so a relative `cd` after it is not put in scope. A declared directory spelled in an ANSI-C
+`$'...'` quote is read for scope. An inherited CDPATH is read from the hook process's OWN environment
+(the payload the hook runs under, which need not equal the Bash tool's interactive shell environment),
+and a CDPATH assigned in an EARLIER call is the same earlier-call-variable residual. The nested `-c`
+recursion reads only the wrapper spellings listed above; a `-c` body behind any other wrapper word (for
+example `exec`, `nice`, `setsid`, `stdbuf` or `sudo`), and a `-c` body reachable only behind
+an opaque expansion or a command substitution the lexer cannot read, is not classified, so a declared
+directory a quote splice hides inside such a body is not reached. The `cp` tree check reads each
+directory source as it stands when the guard runs; names an earlier segment of the same call adds
+without a tracked write (a `git apply`) are not seen. The same-call written-path comparison resolves
+symlinks as they stand when the guard runs. A write destination is constrained only at a
 `.git/hooks` directory and at the registry files
 this guard reads; any OTHER write target outside the declared directories (another file in a live
 checkout, a user dotfile, a PATH directory, a crontab) is unconstrained by this guard and left to the

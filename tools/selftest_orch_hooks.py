@@ -15241,6 +15241,26 @@ def _main_isolated(report_path=None):
         (nd_outside / "gd2").mkdir()
         (nd_outside / "cdp.txt").write_text(str(tmp) + "\n", encoding="utf-8")
         (nd.root / ".git" / "hooks").mkdir(parents=True, exist_ok=True)
+        # whole .git and .aiqt trees for the recursive-copy vectors: a hook and a registry file that a
+        # cp -r of the directory lands one level below its top-level target
+        (nd_staging / ".git" / "hooks").mkdir(exist_ok=True)
+        (nd_staging / ".git" / "hooks" / "post-checkout").write_text(_nrd_sh_mark, encoding="utf-8")
+        (nd_staging / ".aiqt").mkdir()
+        (nd_staging / ".aiqt" / "orchestration.local.json").write_text(
+            json.dumps({"version": 1}), encoding="utf-8")
+        # a second worker repository with the marker diff.external and a subdirectory, holding no hooks
+        # directory, so the copy itself is not refused and the git subdirectory check is what denies
+        subprocess.run(["git", "init", "-q", str(nd_staging / "repo2")],
+                       check=True, capture_output=True, cwd=str(tmp))
+        subprocess.run(["git", "-C", str(nd_staging / "repo2"), "config", "diff.external",
+                        str(nd_staging / "ext.sh")], check=True, capture_output=True)
+        shutil.rmtree(nd_staging / "repo2" / ".git" / "hooks", ignore_errors=True)
+        (nd_staging / "repo2" / "sub").mkdir()
+        (nd_staging / "repo2" / "sub" / "keep.txt").write_text("k\n", encoding="utf-8")
+        # a subdirectory of a directory a gitdir pointer is copied into, and an existing symlink alias of
+        # that directory (git searches upward; the written-path comparison resolves the alias)
+        (nd_outside / "gd2" / "sub").mkdir()
+        (nd_outside / "alias").symlink_to(nd_outside / "gd2")
         import cProfile as _nrd_cprofile
         _nrd_cprof = _nrd_cprofile.__file__
         _nrd_stdlib = os.path.dirname(os.__file__)
@@ -15589,6 +15609,54 @@ def _main_isolated(report_path=None):
         check("nrd/cdpath-read-denies",
               nrd_got("read -r CDPATH < {}/cdp.txt; cd nrd-stage; bash x.sh".format(outd),
                       run_cwd=outd), DENY_RAN)
+        # --- shell options before -c: long options (never read as -c; --rcfile and --init-file take a
+        # value) and a value-taking -o cluster, each before -c with a quote-spliced declared directory ---
+        for cid, opts in (("nrd/c-norc-denies", "--norc"),
+                          ("nrd/c-noprofile-denies", "--noprofile"),
+                          ("nrd/c-rcfile-denies", "--rcfile /dev/null"),
+                          ("nrd/c-init-file-denies", "--init-file /dev/null"),
+                          ("nrd/c-eo-pipefail-denies", "-eo pipefail")):
+            check(cid, nrd_got("bash {} -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(opts, tmp),
+                               run_cwd=outd), DENY_RAN)
+        # --- wrappers before a -c shell: an assignment prefix, command, timeout, nohup, a nested env ---
+        for cid, wrap in (("nrd/c-assign-prefix-denies", "FOO=1"),
+                          ("nrd/c-command-denies", "command"),
+                          ("nrd/c-timeout-denies", "timeout 5"),
+                          ("nrd/c-nohup-denies", "nohup"),
+                          ("nrd/c-env-env-denies", "env env")):
+            check(cid, nrd_got("{} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(wrap, tmp),
+                               run_cwd=outd), DENY_RAN)
+        # --- CDPATH assigned by read behind an assignment prefix or command, and by mapfile/readarray ---
+        for cid, setter in (("nrd/cdpath-ifs-read-denies", "IFS= read -r CDPATH"),
+                            ("nrd/cdpath-command-read-denies", "command read -r CDPATH"),
+                            ("nrd/cdpath-mapfile-denies", "mapfile -t CDPATH"),
+                            ("nrd/cdpath-readarray-denies", "readarray -t CDPATH")):
+            check(cid, nrd_got("{} < {}/cdp.txt; cd nrd-stage; bash x.sh".format(setter, outd),
+                               run_cwd=outd), DENY_RAN)
+        # --- a recursive copy of a whole .git or .aiqt directory: judged at every path it writes, so the
+        # hook or registry file one level below the top-level target denies (the call writes no marker;
+        # it lands a hook a later git command fires, or overwrites a registry) ---
+        check("nrd/cp-r-dotgit-tree-hook-denies",
+              nrd_got("cp -r {}/.git {}/hookrepo/".format(st, outd)), DENY_INERT)
+        check("nrd/cp-r-aiqt-tree-registry-denies",
+              nrd_got("cp -r {}/.aiqt {}/live/".format(st, outd)), DENY_INERT)
+        # --- a repository written in this call reached from its SUBDIRECTORY (git searches upward), and
+        # through an existing symlink alias of the written directory ---
+        check("nrd/git-C-dotgit-sub-denies",
+              nrd_got("cp {}/dotgit {}/gd2/.git; git -C {}/gd2/sub diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
+        check("nrd/cd-dotgit-sub-denies",
+              nrd_got("cp {}/dotgit {}/gd2/.git; cd {}/gd2/sub; git diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
+        check("nrd/git-C-cp-r-repo-sub-denies",
+              nrd_got("cp -r {}/repo2 {}/; git -C {}/repo2/sub diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
+        check("nrd/git-C-alias-written-denies",
+              nrd_got("cp {}/dotgit {}/alias/.git; git -C {}/gd2 diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
+        check("nrd/git-C-written-via-alias-denies",
+              nrd_got("cp {}/dotgit {}/gd2/.git; git -C {}/alias diff --no-index {}/a.txt {}/b.txt"
+                      .format(st, outd, outd, st, st)), DENY_RAN)
 
         # --- the out-of-repository working-directory layout ---
         # The staging directory sits outside the repository and the session cwd is inside it; the guard
@@ -15621,11 +15689,25 @@ def _main_isolated(report_path=None):
             finally:
                 setattr(aiqt_hooks, attr, real)
 
+        def _flip_verdict_pair(patches, cmd):
+            # patch SEVERAL real helpers at once (a form two readings each refuse), run, restore all
+            reals = [(attr, getattr(aiqt_hooks, attr)) for attr, _repl in patches]
+            try:
+                for attr, repl in patches:
+                    setattr(aiqt_hooks, attr, repl)
+                return _verdict(nrd(cmd))
+            finally:
+                for attr, real in reals:
+                    setattr(aiqt_hooks, attr, real)
+
+        # the looser -c reading is classified as well (so nothing it refused is allowed); a flip of the
+        # -c extraction removes it alongside
+        _nrd_no_prior = ("_nrd_shell_c_prior_body", lambda seg: None)
         # removing the nested -c recursion (the body is never classified) lets the quote-spliced body
         # through, since the outer raw text names no declared directory
         check("nrd/flip-nested-c-allows",
-              _flip_verdict("_nrd_shell_c_body", lambda seg: None,
-                            "bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)), "allow")
+              _flip_verdict_pair((("_nrd_shell_c_body", lambda seg: None), _nrd_no_prior),
+                                 "bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)), "allow")
         # restoring the old reader test (resolves-outside only, no existing-regular-file or /dev//proc
         # check) lets a program on /dev/stdin back in
         check("nrd/flip-py-dev-stdin-allows",
@@ -15760,12 +15842,121 @@ def _main_isolated(report_path=None):
                             "python3 -I {}/pydoc.py {}/x.py".format(_nrd_stdlib, st)), "allow")
         # restoring the old nested -c extraction (a bare shell word only) lets a wrapped -c through
         check("nrd/flip-c-wrapper-allows",
-              _flip_verdict("_nrd_shell_c_body", _nrd_old_shell_c_body,
-                            "env bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)), "allow")
+              _flip_verdict_pair((("_nrd_shell_c_body", _nrd_old_shell_c_body), _nrd_no_prior),
+                                 "env bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)), "allow")
         # restoring the old CDPATH detection (a NAME=value token only) lets printf -v CDPATH through
         check("nrd/flip-cdpath-printf-allows",
               _flip_verdict("_nrd_cdpath_set_in_command", _nrd_old_cdpath_set,
                             "printf -v CDPATH %s {}; cd nrd-stage; bash x.sh".format(tmp)), "allow")
+        # the same old helpers flip the other wrapper and CDPATH forms the earlier change closed
+        for cid, cmd in (("nrd/flip-c-path-shell-allows", "/bin/bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'"),
+                         ("nrd/flip-c-shopt-allows", "bash -O extglob -c 'cd {}/nrd-sta\"\"ge; bash x.sh'"),
+                         ("nrd/flip-c-eval-allows", "eval 'cd {}/nrd-sta\"\"ge; bash x.sh'")):
+            check(cid, _flip_verdict_pair((("_nrd_shell_c_body", _nrd_old_shell_c_body), _nrd_no_prior),
+                                          cmd.format(tmp)), "allow")
+        check("nrd/flip-cdpath-read-allows",
+              _flip_verdict("_nrd_cdpath_set_in_command", _nrd_old_cdpath_set,
+                            "read -r CDPATH < {}/cdp.txt; cd nrd-stage; bash x.sh".format(outd)),
+              "allow")
+        check("nrd/flip-cd-dotgit-chain-allows",
+              _flip_verdict("_nrd_git_dir_written", lambda git_cwd, written: False,
+                            "cp {}/dotgit {}/gd2/.git; cd {}/gd2; git diff --no-index {}/a.txt {}/b.txt"
+                            .format(st, outd, outd, st, st)), "allow")
+
+        # the cp -r .git chains are refused both by the copy's tree (it lands .git/hooks) and by the git
+        # same-call check; removing both lets them through
+        _nrd_no_written = (("_nrd_git_dir_written", lambda git_cwd, written: False),
+                           ("_nrd_cp_tree_targets", lambda sources, targets, eff, written: []))
+        check("nrd/flip-git-C-cp-r-git-chain-allows",
+              _flip_verdict_pair(_nrd_no_written,
+                                 "cp -r {}/.git {}/gd/; git -C {}/gd diff --no-index {}/a.txt {}/b.txt"
+                                 .format(st, outd, outd, st, st)), "allow")
+        check("nrd/flip-cd-cp-r-git-chain-allows",
+              _flip_verdict_pair(_nrd_no_written,
+                                 "cp -r {}/.git {}/gd/; cd {}/gd; git diff --no-index {}/a.txt {}/b.txt"
+                                 .format(st, outd, outd, st, st)), "allow")
+
+        def _nrd_prev_c_operand(argv, oq, j):
+            # the previous -c scan: stops at the first option token whose letters include c (so --norc
+            # and --rcfile read as -c) and takes no value for a -o letter inside a cluster
+            has_c = False
+            while j < len(argv):
+                if oq[j]:
+                    return None
+                tok = argv[j]
+                if tok == "--":
+                    j += 1
+                    break
+                if tok.startswith("-") and tok != "-":
+                    if "c" in tok[1:]:
+                        has_c = True
+                        j += 1
+                        break
+                    if tok in ("-O", "+O", "-o", "+o"):
+                        j += 2
+                        continue
+                    j += 1
+                    continue
+                break
+            if not has_c or j >= len(argv) or oq[j]:
+                return None
+            return argv[j]
+
+        # restoring the previous -c option scan lets the long-option and -eo spellings through
+        for cid, opts in (("nrd/flip-c-norc-allows", "--norc"),
+                          ("nrd/flip-c-rcfile-allows", "--rcfile /dev/null"),
+                          ("nrd/flip-c-init-file-allows", "--init-file /dev/null"),
+                          ("nrd/flip-c-eo-pipefail-allows", "-eo pipefail")):
+            check(cid, _flip_verdict("_nrd_shell_c_operand", _nrd_prev_c_operand,
+                                     "bash {} -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(opts, tmp)),
+                  "allow")
+        # no wrapper peeling (the command word is argv[0]) lets the wrapped -c spellings through
+        for cid, wrap in (("nrd/flip-c-assign-prefix-allows", "FOO=1"),
+                          ("nrd/flip-c-command-allows", "command"),
+                          ("nrd/flip-c-timeout-allows", "timeout 5"),
+                          ("nrd/flip-c-nohup-allows", "nohup")):
+            check(cid, _flip_verdict("_nrd_c_peel", lambda argv, oq: 0,
+                                     "{} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(wrap, tmp)),
+                  "allow")
+        # no prefix or command peeling for the CDPATH builtins, and read as the only reader word
+        for cid, setter in (("nrd/flip-cdpath-ifs-read-allows", "IFS= read -r CDPATH"),
+                            ("nrd/flip-cdpath-command-read-allows", "command read -r CDPATH")):
+            check(cid, _flip_verdict("_nrd_builtin_word", lambda argv: 0,
+                                     "{} < {}/cdp.txt; cd nrd-stage; bash x.sh".format(setter, outd)),
+                  "allow")
+        check("nrd/flip-cdpath-mapfile-allows",
+              _flip_verdict("_NRD_CDPATH_READ_WORDS", frozenset(("read",)),
+                            "mapfile -t CDPATH < {}/cdp.txt; cd nrd-stage; bash x.sh".format(outd)),
+              "allow")
+        # judging only the top-level cp target lets a whole .git or .aiqt tree land a hook or registry
+        check("nrd/flip-cp-r-dotgit-tree-allows",
+              _flip_verdict("_nrd_cp_tree_targets", lambda sources, targets, eff, written: [],
+                            "cp -r {}/.git {}/hookrepo/".format(st, outd)), "allow")
+        check("nrd/flip-cp-r-aiqt-tree-allows",
+              _flip_verdict("_nrd_cp_tree_targets", lambda sources, targets, eff, written: [],
+                            "cp -r {}/.aiqt {}/live/".format(st, outd)), "allow")
+
+        def _nrd_prev_git_dir_written(git_cwd, written):
+            # the previous same-call check: the directory itself or its own .git, compared as text
+            if not isinstance(git_cwd, str) or not git_cwd:
+                return False
+            dotgit = git_cwd + "/.git"
+            return any(w == git_cwd or w == dotgit or w.startswith(dotgit + "/") for w in written)
+
+        # restoring the previous same-call check lets the subdirectory and alias forms through
+        for cid, cmd in (
+                ("nrd/flip-git-C-dotgit-sub-allows",
+                 "cp {}/dotgit {}/gd2/.git; git -C {}/gd2/sub diff --no-index {}/a.txt {}/b.txt"),
+                ("nrd/flip-cd-dotgit-sub-allows",
+                 "cp {}/dotgit {}/gd2/.git; cd {}/gd2/sub; git diff --no-index {}/a.txt {}/b.txt"),
+                ("nrd/flip-git-C-cp-r-repo-sub-allows",
+                 "cp -r {}/repo2 {}/; git -C {}/repo2/sub diff --no-index {}/a.txt {}/b.txt"),
+                ("nrd/flip-git-C-alias-written-allows",
+                 "cp {}/dotgit {}/alias/.git; git -C {}/gd2 diff --no-index {}/a.txt {}/b.txt"),
+                ("nrd/flip-git-C-written-via-alias-allows",
+                 "cp {}/dotgit {}/gd2/.git; git -C {}/alias diff --no-index {}/a.txt {}/b.txt")):
+            check(cid, _flip_verdict("_nrd_git_dir_written", _nrd_prev_git_dir_written,
+                                     cmd.format(st, outd, outd, st, st)), "allow")
 
         # --- scope and fail-closed postures (unchanged contracts) ---
         check("nrd/failopen-nonbash", _verdict(aiqt_hooks.orch_deliverable_exec_guard(

@@ -23793,10 +23793,12 @@ _NRD_READ_FORMS.update({w: ("bctwz", "", ("--binary", "--check", "--tag", "--tex
                                           "--status", "--strict", "--warn", "--ignore-missing",
                                           "--zero"), ())
                         for w in _NRD_HASH_WORDS})
-# cp's registered options (shaped rule: the LAST operand must provably resolve outside every declared
-# directory, so the declared file is only ever a SOURCE). -l, -s, -t/--target-directory and every
-# other spelling are deliberately outside the grammar: a link made by cp would alias a deliverable
-# past later textual matching, and a -t form moves the destination out of the last-operand position.
+# cp's registered options (shaped rule: every path cp WRITES, computed by _nrd_cp_targets and, below a
+# directory source, _nrd_cp_tree_targets, must provably resolve outside every declared directory and
+# must not land under a .git/hooks directory or at a registry file, so the declared file is only ever
+# a SOURCE). -l, -s, -t/--target-directory and every other spelling are deliberately outside the
+# grammar: a link made by cp would alias a deliverable past later textual matching, and a -t form moves
+# the destination out of the last-operand position.
 _NRD_CP_FORM = ("ainpRrv", "", ("--archive", "--no-clobber", "--recursive", "--verbose"), ())
 # git's two allowlisted shapes: `git apply` (the sanctioned apply step: check, stat and the patch
 # controls that place or select hunks, none of which runs repository config or a worker program) and
@@ -23817,7 +23819,8 @@ _NRD_GIT_DIFF_OPTS = frozenset(("--no-index", "--stat", "--numstat", "--shortsta
 # The Python standard library directories, resolved from the running interpreter. A python reader
 # script that resolves INSIDE one of these is not a user-authored reader: the standard library carries
 # programs that RUN a file or a stdin program handed to them (cProfile, profile, trace, pdb, doctest,
-# pydoc, timeit, code, pickle and more; runpy is frozen and ships no file at all), so no enumeration of
+# pydoc, timeit, code, pickle and more; runpy is a frozen module, so its spec names no file, yet a runpy.py
+# file still sits in the standard library directory), so no enumeration of
 # them stays complete or true across versions. A command reaches the reader shape only when it is
 # already in scope of a declared directory, so refusing every stdlib script as the reader denies, by
 # construction, the `python3 -I <stdlib program> <deliverable>` and stdin-fed forms that would run the
@@ -24102,18 +24105,31 @@ def _nrd_git_diff_opt_ok(tok):
     return tok.startswith("-U") and len(tok) > 2 and tok[2:].isdigit()
 
 
+def _nrd_at_or_under(path, base):
+    """True when path is base or lies below it (both normalized absolute; base may be '/')."""
+    return path == base or path.startswith(base.rstrip("/") + "/")
+
+
 def _nrd_git_dir_written(git_cwd, written):
-    """True when a git working directory or -C target was itself created or written in this same call,
-    or holds a .git file or directory written in it in this call: git reads that directory's repository
+    """True when a git working directory or -C target is, or lies inside, a path created or written in
+    this same call, or when a .git file or directory written in this call sits in it or in ANY of its
+    ancestors (git searches upward from a subdirectory for its repository): git reads that repository's
     config and attributes (diff.external, a smudge filter) before any operand, so a repository the same
     command just built is worker-controlled. `written` holds the absolute paths the command's earlier
-    cp, redirect and mkdir segments create."""
+    cp, redirect and mkdir segments create. Both sides are compared in their lexical and realpath forms
+    (_nrd_forms), so an existing symlink alias of the written directory is the same directory."""
     if not isinstance(git_cwd, str) or not git_cwd:
         return False
-    dotgit = git_cwd + "/.git"
+    cwd_forms = _nrd_forms(git_cwd, None) or [git_cwd]
     for w in written:
-        if w == git_cwd or w == dotgit or w.startswith(dotgit + "/"):
-            return True
+        for wf in _nrd_forms(w, None) or [w]:
+            parts = wf.split("/")
+            dotgit_bases = ["/".join(parts[:k]) or "/" for k in range(1, len(parts)) if parts[k] == ".git"]
+            for g in cwd_forms:
+                if _nrd_at_or_under(g, wf):
+                    return True
+                if any(_nrd_at_or_under(g, base) for base in dotgit_bases):
+                    return True
     return False
 
 
@@ -24223,6 +24239,46 @@ def _nrd_cp_targets(operands, eff_cwd):
     return targets
 
 
+_NRD_CP_TREE_LIMIT = 20000  # entries read from cp source trees in one segment; beyond it the cp denies
+
+
+def _nrd_cp_tree_targets(sources, targets, eff_cwd, written):
+    """The paths a cp writes BELOW its top-level targets: for each source that is a directory now, its
+    target joined with every name in the source tree (os.walk of the source's realpath, links listed
+    but not followed), so a recursive copy of a whole .git or .aiqt directory is judged where its hook
+    or registry file lands, not only at the top. None (the caller denies) when a tree cannot be read
+    whole, holds more than _NRD_CP_TREE_LIMIT entries, or a source that is not a regular file is,
+    contains or lies inside a path an earlier segment of this same call wrote (its tree when cp runs
+    is not the tree read here). Changes another allowlisted segment makes without a tracked write (a
+    git apply in the same call) are not seen (disclosed residual)."""
+    out = []
+    count = 0
+    for src, tgt in zip(sources, targets):
+        s = _nrd_abs_join(src, eff_cwd)
+        if s is None or tgt is None:
+            return None
+        if not os.path.isfile(s) and any(_nrd_at_or_under(w, s) or _nrd_at_or_under(s, w)
+                                         for w in written):
+            return None
+        if not os.path.isdir(s):
+            continue
+        try:
+            top = os.path.realpath(s)
+        except (OSError, ValueError):
+            return None
+        failed = []
+        for dirpath, dirnames, filenames in os.walk(top, onerror=failed.append):
+            rel = os.path.relpath(dirpath, top)
+            for name in dirnames + filenames:
+                count += 1
+                if count > _NRD_CP_TREE_LIMIT:
+                    return None
+                out.append(os.path.normpath(os.path.join(tgt, rel, name)))
+        if failed:
+            return None
+    return out
+
+
 def _nrd_write_forbidden(path, eff_cwd):
     """True when a write destination (a computed cp target or a write-shaped redirect) lands under a
     .git/hooks directory or at an orchestration registry file this guard reads (_ORCH_REGISTRY_FILES),
@@ -24319,17 +24375,114 @@ def _nrd_ansi_c_spelling(command):
     return _NRD_ANSI_C_RE.sub(lambda m: _nrd_ansi_c_decode(m.group(1)), command)
 
 
-_NRD_SHELL_OPT_VALUE = frozenset(("-O", "+O", "-o", "+o"))
+# Shell long options that take the next word as their value (bash's startup-file options); every other
+# long option is a bare flag. In a short-option cluster each `o` or `O` letter takes the next word.
+_NRD_SHELL_LONG_VALUE = frozenset(("--rcfile", "--init-file"))
+# The command-word wrappers peeled before a nested -c shell or eval: NAME=value prefixes, then any of
+# these words with their own options (timeout also takes a duration operand).
+_NRD_C_WRAPPERS = frozenset(("env", "command", "nohup", "timeout"))
+
+
+def _nrd_c_peel(argv, oq):
+    """The index of the effective command word of a segment after its NAME=value prefixes and the
+    _NRD_C_WRAPPERS words (env with its options, -u/-C values and assignments; command with its
+    options; nohup; timeout with its options and duration), peeled repeatedly; None when a peeled word
+    or option is opaque. The index may equal len(argv) (no command word left)."""
+    i = 0
+    while i < len(argv):
+        if oq[i]:
+            return None
+        tok = argv[i]
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        word = tok.rsplit("/", 1)[-1]
+        if word not in _NRD_C_WRAPPERS:
+            break
+        i += 1
+        while i < len(argv):
+            if oq[i]:
+                return None
+            tok = argv[i]
+            if tok == "--":
+                i += 1
+                break
+            if word == "env" and tok in ("-u", "-C"):
+                i += 2
+                continue
+            if word == "timeout" and tok in ("-k", "-s", "--kill-after", "--signal"):
+                i += 2
+                continue
+            if (tok.startswith("-") and tok != "-") or (word == "env" and _ENV_ASSIGN_RE.match(tok)):
+                i += 1
+                continue
+            break
+        if word == "timeout":
+            i += 1                          # the duration operand
+    return i
+
+
+def _nrd_shell_c_operand(argv, oq, j):
+    """The -c command string of a shell word's arguments starting at index j, or None. Options are
+    scanned the way the shell reads them up to the first non-option word: -c counts only as a letter of
+    a SHORT-option cluster (one leading dash, so --norc or --rcfile never reads as -c); each `o` or `O`
+    letter of a cluster (-o, +O, -eo) takes the next word as its value; a long option in
+    _NRD_SHELL_LONG_VALUE takes the next word; `--` or a lone `-` ends the options. The body is the first
+    word after the options."""
+    has_c = False
+    while j < len(argv):
+        if oq[j]:
+            return None
+        tok = argv[j]
+        if tok in ("--", "-"):
+            j += 1
+            break
+        if tok.startswith("--"):
+            j += 2 if tok in _NRD_SHELL_LONG_VALUE else 1
+            continue
+        if len(tok) > 1 and tok[0] in "-+":
+            if tok[0] == "-" and "c" in tok[1:]:
+                has_c = True
+            j += 1 + sum(1 for ch in tok[1:] if ch in "oO")
+            continue
+        break
+    if not has_c or j >= len(argv) or oq[j]:
+        return None
+    return argv[j]
 
 
 def _nrd_shell_c_body(seg):
     """The decoded -c command string of a shell-invoking segment, for recursive classification; else
-    None. Covers a BARE or PATH-QUALIFIED shell word carrying -c (alone or in an option cluster), the
-    same behind an `env` prefix (its options and NAME=value assignments peeled), shell options that
-    take a value before -c (-O/+O shopt, -o/+o optname), and `eval` (its operands joined as the body),
-    so a declared directory a quote splice hides from the raw text is reached through any of these
-    wrapper spellings. The returned string is the inner body. An opaque option or body, or a shape this
-    cannot read, yields None."""
+    None. Covers a BARE or PATH-QUALIFIED shell word carrying -c in a short-option cluster, after any
+    shell options (_nrd_shell_c_operand: value-taking -o/-O clusters, --rcfile and --init-file values,
+    other long options), behind NAME=value prefixes and the env, command, nohup and timeout wrappers
+    (_nrd_c_peel, repeated), and `eval` (its operands joined as the body), so a declared directory a
+    quote splice hides from the raw text is reached through any of these wrapper spellings. The
+    returned string is the inner body. An opaque option or body, or a shape this cannot read, yields
+    None."""
+    argv = seg.argv
+    if not argv:
+        return None
+    oq = seg.argv_opaque
+    i = _nrd_c_peel(argv, oq)
+    if i is None or i >= len(argv) or oq[i]:
+        return None
+    word = argv[i].rsplit("/", 1)[-1]
+    if word == "eval":
+        if i + 1 >= len(argv) or any(oq[k] for k in range(i + 1, len(argv))):
+            return None
+        return " ".join(argv[i + 1:])
+    if word not in _NRD_SHELL_WORDS:
+        return None
+    return _nrd_shell_c_operand(argv, oq, i + 1)
+
+
+def _nrd_shell_c_prior_body(seg):
+    """The token a looser reading takes as the -c body, classified as well so that no form that reading
+    refused is now allowed: a bare, path-qualified or env-prefixed shell word, its option tokens scanned
+    up to the FIRST one whose letters include c (a long option included), the word after it; or eval's
+    operands. Where the shell itself reads that token as an option value or a script operand it is not
+    run, so classifying it only adds denials (disclosed over-deny)."""
     argv = seg.argv
     if not argv or seg.argv_opaque[0]:
         return None
@@ -24375,7 +24528,7 @@ def _nrd_shell_c_body(seg):
                 has_c = True
                 j += 1
                 break
-            if tok in _NRD_SHELL_OPT_VALUE:
+            if tok in ("-O", "+O", "-o", "+o"):
                 j += 2
                 continue
             j += 1
@@ -24386,20 +24539,44 @@ def _nrd_shell_c_body(seg):
     return argv[j]
 
 
+# The builtins that assign the variables their operands name (read's names, mapfile's or readarray's
+# array name); a bare CDPATH operand of one of these sets CDPATH.
+_NRD_CDPATH_READ_WORDS = frozenset(("read", "mapfile", "readarray"))
+
+
+def _nrd_builtin_word(argv):
+    """The index of a segment's command word after its NAME=value prefixes (IFS= read) and a `command`
+    wrapper with its options (command read), for the CDPATH assignment test; may equal len(argv)."""
+    k = 0
+    while k < len(argv):
+        if _ENV_ASSIGN_RE.match(argv[k]):
+            k += 1
+            continue
+        if argv[k].rsplit("/", 1)[-1] == "command":
+            k += 1
+            while k < len(argv) and argv[k].startswith("-") and argv[k] != "-":
+                k += 1
+            continue
+        break
+    return k
+
+
 def _nrd_cdpath_set_in_command(segments):
     """True when any segment assigns CDPATH, so a later relative cd may resolve through a CDPATH entry
     rather than the current directory: a `CDPATH=...` command prefix or an `export CDPATH=...` token, a
-    `printf -v CDPATH ...` (the -v target names the variable), or a `read ... CDPATH ...` (a bare
-    CDPATH among read's variable names). The printf and read builtins are matched by their bare command
-    word (basenamed)."""
+    `printf -v CDPATH ...` (the -v target names the variable), or a read, mapfile or readarray with a
+    bare CDPATH operand (_NRD_CDPATH_READ_WORDS). The printf and reader builtins are matched by their
+    command word (basenamed) after NAME=value prefixes and a `command` wrapper (_nrd_builtin_word)."""
     for seg in segments:
         argv = seg.argv
         for tok in argv:
             name, sep, _val = tok.partition("=")
             if sep and name.rstrip("+") == "CDPATH":
                 return True
-        if not argv:
+        w = _nrd_builtin_word(argv)
+        if w >= len(argv):
             continue
+        argv = argv[w:]
         word = argv[0].rsplit("/", 1)[-1]
         if word == "printf":
             k = 1
@@ -24413,7 +24590,7 @@ def _nrd_cdpath_set_in_command(segments):
                 if tok.startswith("-v") and len(tok) > 2 and tok[2:] == "CDPATH":
                     return True
                 k += 1
-        elif word == "read":
+        elif word in _NRD_CDPATH_READ_WORDS:
             if any(tok == "CDPATH" for tok in argv[1:]):
                 return True
     return False
@@ -24475,7 +24652,10 @@ def _nrd_segment_allowed(seg, eff_cwd, dirs, written):
         ok, operands = _nrd_options_ok(argv[1:], _NRD_CP_FORM)
         if ok and len(operands) >= 2:
             targets = _nrd_cp_targets(operands, eff_cwd)
-            if targets and all(t is not None and _nrd_match(t, None, dirs) is False
+            tree = _nrd_cp_tree_targets(operands[:-1], targets, eff_cwd, written)
+            if tree is not None:
+                targets = targets + tree
+            if targets and tree is not None and all(t is not None and _nrd_match(t, None, dirs) is False
                                and not _nrd_write_forbidden(t, None) for t in targets):
                 return (True, eff_cwd)
         return (False, eff_cwd)
@@ -24577,6 +24757,11 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
             body = _nrd_shell_c_body(seg)
             if body is not None and _depth < _NRD_MAX_C_DEPTH:
                 sub = _nrd_scope_scan(body, walk_cwd, dirs, _depth + 1)
+                if sub is not None:
+                    return sub
+            prior = _nrd_shell_c_prior_body(seg)
+            if prior is not None and prior != body and _depth < _NRD_MAX_C_DEPTH:
+                sub = _nrd_scope_scan(prior, walk_cwd, dirs, _depth + 1)
                 if sub is not None:
                     return sub
             if not scope and (any(_nrd_match(tok, walk_cwd, dirs) is True for tok in seg.argv)
