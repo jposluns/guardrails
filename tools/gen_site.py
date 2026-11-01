@@ -332,7 +332,7 @@ _BLANK = re.compile(r"^[ \t]*$")
 
 # Placeholder token: `{{name}}` where `name` is `[\w-]+`. Frontmatter substitution runs a single-pass
 # `re.sub` over the shell so a substituted value is never re-scanned for another token.
-_TOKEN_RE = re.compile(r"\{\{([\w-]+)\}\}")
+_TOKEN_RE = re.compile(r"\{\{([\w-]+)\}\}", re.ASCII)
 
 class _NavlinkCollector(HTMLParser):
     """Collect every `<a>` whose class list contains the `navlink` token, independent of attribute

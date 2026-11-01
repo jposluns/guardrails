@@ -97,7 +97,7 @@ EXPECTED_PUBLISHED_TOTAL = 944  # MITRE's published "Total Weaknesses" headline 
 EXPECTED_RETRIEVED = "2026-08-22"  # the vendored 4.20 snapshot's acquisition date (pin-after-observe)
 
 PROVENANCE_NAME = "cwe-provenance.json"
-CODE_RE = re.compile(r"^CWE-\d+$")
+CODE_RE = re.compile(r"^CWE-\d+$", re.ASCII)
 EN_DASH = "–"
 EM_DASH = "—"
 
@@ -336,12 +336,44 @@ def mapped_cwe_ids(root):
     referenced weaknesses and no complete non-commercial catalogue. Offline, stdlib + repo only."""
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import gen_rules  # noqa: E402  (the one frontmatter parser + full corpus validation)
+    rules = Path(root) / ".aiqt" / "core" / "rules"
+    try:
+        corpus = gen_rules.load_corpus(rules)
+    except UnicodeDecodeError as exc:
+        # The shared loader's decode error carries no path, so the source it stopped at is named here.
+        raise ImportError_("rule source {} is not UTF-8: {}".format(_undecodable_source(rules) or rules, exc))
+    except ValueError as exc:
+        # A malformed rule source (bad frontmatter, an integer in non-ASCII digits among them) is a
+        # refusal naming the file, so main exits 2 with a message instead of a traceback.
+        raise ImportError_("rule corpus {} rejected: {}".format(rules, exc))
+    except OSError as exc:
+        # A missing rules directory, or a subdirectory or source that cannot be listed or read, is a
+        # refusal naming that path, never a PermissionError or FileNotFoundError traceback.
+        raise ImportError_("rule corpus {} cannot be read: {}: {}".format(
+            rules, exc.filename or rules, exc.strerror or exc))
     ids = set()
-    for _src, fm, _rel in gen_rules.load_corpus(Path(root) / ".aiqt" / "core" / "rules"):
+    for _src, fm, _rel in corpus:
         for key in ("map-cwe-tight", "map-cwe-broad"):
             for cid in fm.get(key, []):
                 ids.add(cid)
     return ids
+
+
+def _undecodable_source(rules):
+    """The first rule source under rules, in the sorted order gen_rules.load_corpus reads them, that is
+    not UTF-8: every source before it decoded there, so it is the one the loader stopped at. None when
+    none is found now (the tree changed, or a source can no longer be read)."""
+    found = []
+    for dirpath, _dirs, filenames in os.walk(rules):
+        found.extend(Path(dirpath) / fn for fn in filenames if fn.endswith(".md"))
+    for src in sorted(found):
+        try:
+            src.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            return src
+        except OSError:
+            return None
+    return None
 
 
 def _close_fd_propagating(fd):
@@ -533,6 +565,11 @@ def self_test():
                                            min_elements=1))
     _expect_fail("unexpected zip member",
                  lambda: _extract_member(_zip_of({"wrong.xml": b"x"})))
+    # str.isdigit is true for any script's digits, so CODE_RE (ASCII) is what refuses these ids.
+    for digits in ("١٢", "１２"):
+        _expect_fail("non-ASCII digits {} in an id".format(ascii(digits)),
+                     lambda: _parse_weaknesses(_fixture(extra='<Weakness ID="' + digits
+                                                        + '" Name="X" Status="Draft"/>'), min_elements=1))
     # a transport failure in _https_get maps to a controlled ImportError_ (concise abort + exit 2 via
     # main()), never a raw URLError traceback. Monkeypatch urlopen to raise, expect the mapped abort.
     _orig_urlopen = urllib.request.urlopen
@@ -698,6 +735,75 @@ def self_test():
         (_stage / PROVENANCE_NAME).write_text(json.dumps(_prov), encoding="utf-8")
     finally:
         shutil.rmtree(_stage, ignore_errors=True)
+    # a malformed rule source (here an integer in Arabic-Indic digits) is a refusal naming the file, and
+    # main maps it to exit 2 with a message, never a ValueError traceback.
+    import contextlib
+    _rules_root = Path(tempfile.mkdtemp(prefix="aiqt-cwe-rules-"))
+    try:
+        _rules = _rules_root / ".aiqt" / "core" / "rules" / "security"
+        _rules.mkdir(parents=True)
+        (_rules / "bad-tier.md").write_text("---\ncorpus-id: abc123\ntier: ١٠\n---\nbody\n", encoding="utf-8")
+        try:
+            mapped_cwe_ids(_rules_root)
+        except ImportError_ as exc:
+            _expect("bad-tier.md" in str(exc) and "non-ASCII digits" in str(exc), str(exc))
+        else:
+            raise SystemExit("SELF-TEST FAIL: a malformed rule source should have been refused")
+        _err = io.StringIO()
+        with contextlib.redirect_stderr(_err):
+            _code = _main_with_render(lambda *_a, **_k: mapped_cwe_ids(_rules_root),
+                                      ["render", "--staging-dir", str(_rules_root),
+                                       "--output", str(_rules_root / "cwe.toml")])
+        _expect(_code == 2 and "bad-tier.md" in _err.getvalue(), (_code, _err.getvalue()))
+        print("  ok (fails closed): a malformed rule source names its file and exits 2")
+        (_rules / "bad-tier.md").unlink()
+        # a source that is not UTF-8, a source that cannot be read (a dangling link), an unlistable
+        # subdirectory and a missing rules directory are each a refusal naming that path, and main maps
+        # each to exit 2 with a message, never a decode, FileNotFoundError or PermissionError traceback.
+        def _refused(label, named):
+            try:
+                mapped_cwe_ids(_rules_root)
+            except ImportError_ as exc:
+                _expect(str(named) in str(exc), (label, str(exc)))
+            else:
+                raise SystemExit("SELF-TEST FAIL: {} should have been refused".format(label))
+            _err = io.StringIO()
+            with contextlib.redirect_stderr(_err):
+                _code = _main_with_render(lambda *_a, **_k: mapped_cwe_ids(_rules_root),
+                                          ["render", "--staging-dir", str(_rules_root),
+                                           "--output", str(_rules_root / "cwe.toml")])
+            _expect(_code == 2 and str(named) in _err.getvalue(), (label, _code, _err.getvalue()))
+            print("  ok (fails closed): {} names {} and exits 2".format(label, named.name))
+        # a valid source sorts first, so the refusal names the source the loader stopped at, not the first.
+        (_rules.parent / "aiqt").mkdir()
+        (_rules.parent / "aiqt" / "a-valid.md").write_text(
+            "---\ncorpus-id: selfc1\norigin: pack\nfamily: aiqt\ntier: 10\nfacet: QUALI\n"
+            "slug: import-cwe-selftest\n---\nbody\n", encoding="utf-8")
+        (_rules / "bad-bytes.md").write_bytes(b"---\ncorpus-id: abc123\nslug: \xff\n---\nbody\n")
+        _refused("a rule source that is not UTF-8", _rules / "bad-bytes.md")
+        (_rules / "bad-bytes.md").unlink()
+        (_rules / "gone.md").symlink_to(_rules / "no-such-target.md")
+        _refused("a rule source that cannot be read", _rules / "gone.md")
+        (_rules / "gone.md").unlink()
+        # where permissions do not bind (a privileged run), the listing is refused by patching os.scandir
+        # for that one path instead.
+        os.chmod(_rules, 0)
+        _real_scandir = os.scandir
+        def _refuse_scandir(target=".", _path=str(_rules)):
+            if os.fspath(target) == _path:
+                raise PermissionError(13, "listing refused", _path)
+            return _real_scandir(target)
+        if os.access(_rules, os.R_OK):
+            os.scandir = _refuse_scandir
+        try:
+            _refused("an unlistable rules subdirectory", _rules)
+        finally:
+            os.scandir = _real_scandir
+            os.chmod(_rules, 0o755)
+        shutil.rmtree(_rules_root / ".aiqt" / "core" / "rules")
+        _refused("a missing rules directory", _rules_root / ".aiqt" / "core" / "rules")
+    finally:
+        shutil.rmtree(_rules_root, ignore_errors=True)
     # #378 P1: the V1 / V2 close vectors for this tool's _close_fd_propagating copy, through the harness the
     # other inlined-helper tools share (tools/_close_selftest.py): one close, the released number never
     # touched again, each vector red under RECLOSE (the pre-P1 body) by REUSE alone.
@@ -713,6 +819,16 @@ def self_test():
         raise SystemExit("SELF-TEST FAIL: #378 close vectors: {}".format("; ".join(_close_failures)))
     print("  ok: {} #378 close-vector runs".format(_close_runs))
     print("SELF-TEST: PASS")
+
+
+def _main_with_render(fake, argv):
+    """main(argv) with render replaced by fake for the one call, restored after."""
+    global render
+    saved, render = render, fake
+    try:
+        return main(argv)
+    finally:
+        render = saved
 
 
 def _zip_of(members):
