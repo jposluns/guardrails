@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "542b751f169c2a63eb1cf8e221d81e4110eb53ca4514f16901c723acdd4085d5"
+tree-sha256 = "575ac92d610747c76a5cc1f2df30fb2dd132dc666143433e13e39d19c12bd7a0"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3501,8 +3501,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 79034
-sha256 = "c433e2cb6a5249455b04c45282d1cc3650909f1aefdb05cb3b38dd61a8e7dde3"
+bytes = 80037
+sha256 = "7372eab5f5ba3aa4d8b664ba3c9fe4113d5a7f81f1a5d852427a05b6ea3daeb9"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3531,8 +3531,8 @@ sha256 = "8fe9b1d1b5f81ae00c8451bb5a5d5bcc9577626b87cf8cca8516502e4e64f67b"
 
 [[sources]]
 path = "tools/check_instruction_budget.py"
-bytes = 223923
-sha256 = "b6d29b3bb4250cd9bd35833df072d4759fa029545dc145b76e598304c6c09361"
+bytes = 224926
+sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"

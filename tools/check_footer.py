@@ -734,7 +734,7 @@ def main():
 # threading's census and the runtime's live count of low-level _thread workers together, so a worker's
 # later fault is recorded instead of killed silently by the exit, and a thread or low-level worker still
 # running at the bound fails the verdict closed (exit 2). On Linux the settle also waits on the OS's own
-# thread list for this process (_os_threads_pending), which still shows a worker while the runtime clears
+# thread list for this process (_os_threads_state), which still shows a worker while the runtime clears
 # its thread state (its thread-local and context values' destructors run there, after the runtime's live
 # count and threading's census already dropped it), a faulthandler watchdog and a thread a C extension
 # starts. The verdict then ends the process with os._exit, so an
@@ -891,12 +891,6 @@ def _os_threads_state():
         return "OS thread list" if len(os.listdir(_TASK_DIR)) != 1 else None
     except OSError:
         return "OS thread list unreadable"
-
-
-def _os_threads_pending():
-    """True while the OS lists a thread of this process besides the calling one, and when that list
-    exists but cannot be read (fail-closed); False where the platform has no such list."""
-    return _os_threads_state() is not None
 
 
 def _pending_terms():
@@ -1351,13 +1345,15 @@ def _entry_wiring_failures():
     return failures
 
 
-# A failure carries the child's LOADED-CODE-FAULT lines, cut to this many characters, so it says why the
-# case failed without carrying an unbounded stream.
+# A failure whose child ran carries the child's LOADED-CODE-FAULT lines, cut to this many characters (the
+# " [cut]" suffix that then follows is outside the limit), so it says why the case failed without carrying
+# an unbounded stream.
 _FAULT_LINES_LIMIT = 600
 
 
 def _fault_lines(stderr):
-    """The child's LOADED-CODE-FAULT lines joined with " | " and cut to _FAULT_LINES_LIMIT characters."""
+    """The child's LOADED-CODE-FAULT lines joined with " | "; when longer than _FAULT_LINES_LIMIT
+    characters, the first _FAULT_LINES_LIMIT of them followed by " [cut]", which the limit excludes."""
     said = " | ".join(line for line in stderr.splitlines() if line.startswith(_FAULT_MARKER + ":"))
     if len(said) > _FAULT_LINES_LIMIT:
         said = said[:_FAULT_LINES_LIMIT] + " [cut]"
@@ -1383,19 +1379,22 @@ def _settle_report(stderr):
 
 
 # The clean finishing rows pass only when the settle sees the worker's teardown end within the probe's
-# bound, so a host that stalls that teardown past the bound cannot evaluate them. That is measured, never
-# assumed: a child that failed closed with the settle line as its only marker, the settle having reached
-# its bound with only the worker's own liveness terms pending (never an unreadable thread list), is named a
-# stall past the bound, cannot evaluate. It still fails, never a pass; a settle that stops waiting early
-# leaves the re-read after the flushes to fail it under that re-read's own marker, never named a stall.
+# bound, so a host that stalls that teardown past the bound fails them. Such a failure is named from what
+# the child reported, never assumed: a child that failed closed with the settle line as its only marker,
+# the settle having reached its bound with only the worker's own liveness terms pending (never an
+# unreadable thread list), gets a prefix saying the worker was still pending at the bound. A finishing
+# fixture that regressed into a worker that never ends reports exactly the same, so the prefix names both
+# causes and cannot tell them apart. Either way the row still fails, never a pass; a settle that stops
+# waiting early leaves the re-read after the flushes to fail it under that re-read's own marker, unprefixed.
 _FINISHING_LABELS = ("finishing-thread", "lowlevel-finishing", "lowlevel-local-finishing",
                      "runtime-count-return-finishing")
 _STALL_TERMS = ("thread census", "runtime count", "worker flag", "OS thread list")
 
 
 def _stall_name(label, code, stderr):
-    """A "cannot evaluate" prefix for a clean finishing row's child that failed closed only because the
-    worker's teardown outlasted the probe's settle bound (see _FINISHING_LABELS); "" otherwise."""
+    """A prefix for a clean finishing row's child that failed closed only because its worker was still
+    pending at the probe's settle bound, a host stall past the bound or a worker that no longer ends (see
+    _FINISHING_LABELS); "" otherwise. The row still fails."""
     if label not in _FINISHING_LABELS or code != 2:
         return ""
     terms, settled, bound = _settle_report(stderr)
@@ -1403,16 +1402,30 @@ def _stall_name(label, code, stderr):
     if (settled is None or bound is None or settled < bound or len(markers) != 1
             or not terms or any(term not in _STALL_TERMS for term in terms)):
         return ""
-    return ("cannot evaluate: the worker's teardown outlasted the probe's {:.3f}s settle bound on this host "
-            "(settled {:.3f}s, pending {}); ".format(bound, settled, ", ".join(terms)))
+    return ("worker still pending at the probe's {:.3f}s settle bound on this host (settled {:.3f}s, pending "
+            "{}), a host stall past the bound or a worker that no longer ends; this still fails: ".format(
+                bound, settled, ", ".join(terms)))
 
 
-# The settle names the term it still waited on: lowlevel-local-finishing's worker under a bound below its
-# teardown destructor's 0.3s sleep is still on the OS thread list at the bound, so the child must fail
-# closed naming that term (red when the settle line names no pending term).
+# The settle names the term it still waited on. The fixture's low-level worker has a thread-local value
+# whose destructor blocks on an event nothing ever sets, so that teardown stays on the OS thread list until
+# the probe's own exit, however long the host stalls before the settle; the fixture returns only once the
+# destructor has begun. Under a 0.1s bound the child must fail closed naming that term (red when the
+# settle line names no pending term).
 _SETTLE_NAMED_TERM = "OS thread list"
-_SETTLE_NAMED_ROW = ("settle-bound-named", dict((row[0], row[1]) for row in _FAULT_CHANNEL_CASES)[
-    "lowlevel-local-finishing"], 2, True, None, ("0.1",))
+_SETTLE_NAMED_FIXTURE = ("import _thread, threading\n"
+                         "entered = threading.Event()\n"
+                         "never = threading.Event()\n"
+                         "store = threading.local()\n"
+                         "class Held:\n"
+                         "    def __del__(self):\n"
+                         "        entered.set()\n"
+                         "        never.wait()\n"
+                         "def worker():\n"
+                         "    store.value = Held()\n"
+                         "_thread.start_new_thread(worker, ())\n"
+                         "entered.wait()\n")
+_SETTLE_NAMED_ROW = ("settle-bound-named", _SETTLE_NAMED_FIXTURE, 2, True, None, ("0.1",))
 
 
 def _fault_channel_vectors():
@@ -1453,7 +1466,7 @@ def _fault_channel_vectors():
                 failures.append("fault-channel/{}: fault marker {}; child said: {}".format(
                     label, "absent" if marked else "present", said))
             elif absent is not None and absent in child.stderr:
-                failures.append("fault-channel/{}: the atexit callback ran".format(label))
+                failures.append("fault-channel/{}: the atexit callback ran; child said: {}".format(label, said))
     failures.extend(_flush_window_failures())
     failures.extend(_entry_wiring_failures())
     return failures
