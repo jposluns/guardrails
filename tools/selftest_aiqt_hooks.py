@@ -5296,7 +5296,9 @@ class _WindowClocks:
     """Stand-ins for aiqt_hooks.time (`time`) and aiqt_hooks.signal (`signal`), each passing everything
     else to the module, that log in order each clock read a _DeadlineWindow makes, as ("read", the window,
     the value), and a time.monotonic read made just after each setitimer returns, as ("set", that read). A
-    setitimer that raises logs nothing, so the one that took or re-armed a timer is the next one logged."""
+    setitimer that raises logs nothing, but a stand-in that makes the call and raises once it has returned
+    (a _FaultySignal with `after`) leaves the entry; no case that logs through these stand-ins makes
+    setitimer fault that way, so in each the one that took or re-armed a timer is the next one logged."""
 
     class _Through:
         """A module with the functions given in place of its own."""
@@ -6996,7 +6998,10 @@ def _deadline_restore_fault_failures():
     expiry) is made to raise signal.ItimerError by a _FaultySignal installed inside the window, for a
     caller's periodic 30-second timer (unnested) and for a 600-second outer window (nested), raising on its
     first call ("once") and on its first two calls ("twice"). Each operation runs in the scenario
-    _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body ends; "expired", a 0.2-second
+    _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body sleeps 0.05 s, so that a restore
+    that counts the window's time twice, or not at all, is off by at least that much, while a host stall
+    inside the restore's gap widens the bounds by only the stall (_restored_countdown_bounds) and passes
+    such a restore only when it lasts about as long as the body; "expired", a 0.2-second
     window whose body ends while the first instruction of _give_back waits (up to 1 s, from an opcode trace
     stage) until the window's own expiry is pending, so the restore discards it; "due", the window's own
     expiry at a caller timer due 0.05 s in. Each case is checked at return from the with statement, before
@@ -7092,7 +7097,7 @@ def _deadline_restore_fault_failures():
                             aiqt_hooks.signal = faulty
                             if scenario == "expired":
                                 sys.settrace(tracer)
-                            time.sleep(1.0 if due else 0.0)
+                            time.sleep(1.0 if due else 0.05 if scenario == "plain" else 0.0)
                     finally:
                         sys.settrace(None)
                         aiqt_hooks.signal = clocks.signal
