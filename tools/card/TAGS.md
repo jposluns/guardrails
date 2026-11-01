@@ -4,7 +4,6 @@
 - og:description: Rules for your chat assistant, enforcement controls for your codebase.
 - og:image:alt: AIQT.ai: Rules your AI follows. Controls that catch what slips.
 - Image URL: https://aiqt.ai/images/aiqt-card.png
-- Download for review: https://card-review.auditthis.pages.dev/card-review/aiqt/card.png
 - card.png SHA-256: 83ef43f91fbd57daf2d9eb7fe0d1445bda17e8467b10a8bed6406c66c86e13bc (113729 bytes)
 
 ## Tag block for the page head
@@ -28,6 +27,8 @@
 <meta name="twitter:image:alt" content="AIQT.ai: Rules your AI follows. Controls that catch what slips.">
 ```
 
-## Instructions
+## Sources
 
-Instructions for the AIQT.ai agent: download card.png from the branch preview at https://card-review.auditthis.pages.dev/card-review/aiqt/card.png and verify that its SHA-256 equals the card.png SHA-256 recorded above (83ef43f91fbd57daf2d9eb7fe0d1445bda17e8467b10a8bed6406c66c86e13bc). Commit it to the AIQT.ai site as images/aiqt-card.png, so that it is served at https://aiqt.ai/images/aiqt-card.png. Add the tag block above to the head of every page, with canonical and og:url set to that page's own URL. After deployment, verify that https://aiqt.ai/images/aiqt-card.png returns HTTP 200 with Content-Type image/png and the same SHA-256. The sources for regeneration are card.html and illustration.svg in this folder, rendered by scripts/card/build-sibling-cards.js on the card-review branch of the auditthis.ai repository.
+The card image is site/images/aiqt-card.png, with the SHA-256 recorded above. Its sources are card.html
+and illustration.svg in this folder. Every published page carries the tag block above, with canonical and
+og:url set to that page's own URL.
