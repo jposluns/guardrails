@@ -553,15 +553,16 @@ class OpLockError(Exception):
     that acquisition had REMOVED before it failed, so a caller never words a refusal as having
     written nothing when it had: `recovered` (the stale records unlinked, in delete order),
     `recovered_operation` (the confirmed-dead holder's recorded operation, once the liveness gate
-    has passed) and `staging_removed` (the staging leftovers unlinked). It also reports
-    `created_removed`, each name the acquisition itself created and then unlinked (a publication's
-    retired staging name, a failed publication's cleanup, and the unwind's removal of its own new
-    records), so every unlink the acquisition performed is reported; the unwind's replacement error
-    and the forked-continuation refusal (_refuse_continuation) carry the same four reports. An
-    OpLockError raised before that body (acquire_operation's argument and host validation, and
-    _acquire_body's store-resolution refusal) carries none of them; no removal step runs before it.
-    An exception a signal handler raises where acquire_operation delivers a deferred signal is the
-    handler's own and carries none either."""
+    and the same-operation check have passed) and `staging_removed` (the staging leftovers
+    unlinked). It also reports `created_removed`, each name the acquisition itself created and
+    then unlinked (a publication's retired staging name, a failed publication's cleanup, and the
+    unwind's removal of its own new records), so every unlink the acquisition performed is
+    reported; the unwind's replacement error and the forked-continuation refusal
+    (_refuse_continuation) carry the same four reports. An OpLockError raised before that body
+    (acquire_operation's argument and host validation, and _acquire_body's store-resolution
+    refusal) carries none of them; no removal step runs before it. An exception a signal handler
+    raises where acquire_operation delivers a deferred signal is the handler's own and carries none
+    either."""
 
 
 class _UnlinkNotDurable(OpLockError):
@@ -2497,6 +2498,24 @@ def _recorded_operation(active_bytes):
     return tomllib.loads(active_bytes.decode("utf-8"))["operation"]
 
 
+def _require_same_operation(active_bytes, operation):
+    """Refuse (fail-closed) a recovery whose confirmed-dead holder recorded an operation other than
+    the acquiring `operation`, BEFORE any delete, so both of its records are kept. A leftover is
+    released only through the reconciliation of the operation that left it (spec section 5.7, and
+    section 8.8 item 1: a confirmed-dead leftover of another verb is refused, never released), and
+    this acquisition cannot reconcile another operation's journal work. Only the active record is
+    compared: the liveness gate has already refused a lone lease and a lease whose operation differs
+    from the active record's (_validate_recovery_lease), so a lease kept here names the same
+    operation. Returns the recorded operation."""
+    recorded = _recorded_operation(active_bytes)
+    if recorded != operation:
+        raise OpLockError("the stale operation record(s) were left by a confirmed-dead holder of the "
+                          "{!r} operation, not this {!r} operation; recovery releases only a leftover "
+                          "of the same operation, so they are kept for that operation's own "
+                          "reconciliation; refusing recovery (fail-closed)".format(recorded, operation))
+    return recorded
+
+
 def _tag_removals(exc, recovered, recovered_operation, staging_removed, created_removed):
     """Record on an acquisition's OpLockError what it had removed before failing (the names
     it had itself created and then unlinked included)."""
@@ -2521,15 +2540,17 @@ def acquire_operation(store_root, operation, holder=None, recover=False):
     journal's possibly-live-never-seized model over the owner identity the active record persists);
     a possibly-live, cross-host, or malformed holder, or a stale lease with no paired active record,
     is refused so a live holder whose records are exposed under a split anchor is never seized into
-    a two-holder state. Recovery also refuses an active record paired with a different machine
-    store that still exists (a sibling git worktree's), and deletes the lease before the active
-    record, so an interrupted recovery leaves only a lone active record that a later recovery can
-    clear. Returns an OpCapability whose `recovered` names the stale records this acquisition
-    cleared, in delete order (empty when it cleared none), `recovered_operation` the operation their
-    confirmed-dead holder recorded, `staging_removed` the staging leftovers it removed, and
-    `created_removed` the names it created and then unlinked itself (its publications' retired
-    staging names); raises OpLockError fail-closed on everything else. Which of those errors carry
-    the same four reports of what it had removed before it failed: every
+    a two-holder state. Recovery releases only a leftover of the SAME `operation`: a confirmed-dead
+    holder that recorded another operation is refused before any delete and both its records are
+    kept (_require_same_operation). Recovery also refuses an active record paired with a different
+    machine store that still exists (a sibling git worktree's), and deletes the lease before the
+    active record, so an interrupted recovery leaves only a lone active record that a later
+    recovery can clear. Returns an OpCapability whose `recovered` names the stale records this
+    acquisition cleared, in delete order (empty when it cleared none), `recovered_operation` the
+    operation their confirmed-dead holder recorded, `staging_removed` the staging leftovers it
+    removed, and `created_removed` the names it created and then unlinked itself (its publications'
+    retired staging names); raises OpLockError fail-closed on everything else. Which of those
+    errors carry the same four reports of what it had removed before it failed: every
     OpLockError raised by the protected body (_acquire_body, from the store-root open through the
     capability's build, the unwind's own removals included, and the unwind's replacement error)
     and the forked-continuation refusal (_refuse_continuation). The validation raises carry NONE:
@@ -2941,7 +2962,9 @@ def _acquire_body(store_root, operation, holder, recover, nodename, acquirer_pid
             rec_active_ident, rec_active_bytes, rec_lease_ident, rec_lease_bytes = \
                 _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease,
                                                machine_st, machine_path)
-            recovered_operation = _recorded_operation(rec_active_bytes)
+            # A confirmed-dead leftover of ANOTHER operation is refused here and kept (both records);
+            # only the acquiring operation's own leftover is released below.
+            recovered_operation = _require_same_operation(rec_active_bytes, operation)
             # Delete order: the verified LEASE first (its unlink is fsynced on the machine-store
             # directory inside _recover_stale), and ONLY THEN the active record. A crash or a failed
             # delete between the two leaves a LONE ACTIVE RECORD, which still carries the owner
@@ -4294,16 +4317,18 @@ def _st_reaped_child():
     return pid, data.decode("utf-8")
 
 
-def _st_write_active_owned(root, pid, pid_start, nodename, op_id, holder=None):
+def _st_write_active_owned(root, pid, pid_start, nodename, op_id, holder=None, operation="op"):
     """Write a stale active.toml carrying an [owner] identity directly (a crash artefact the
-    recovery gate reads). Returns the holder string it wrote, so a paired lease can match it."""
+    recovery gate reads), recording `operation` (by default "op", the operation the recovering
+    tests acquire, since recovery releases only a leftover of the same operation). Returns the
+    holder string it wrote, so a paired lease can match it."""
     if holder is None:
         holder = "opf:{}:{}".format(nodename, pid)
     lines = (
         'schema = {}'.format(_ACTIVE_SCHEMA),
         'op_id = "{}"'.format(op_id),
         'holder = "{}"'.format(holder),
-        'operation = "recovered-op"',
+        'operation = "{}"'.format(operation),
         'acquired_at = "2026-01-01T00:00:00Z"',
         '',
         '[owner]',
@@ -4332,11 +4357,12 @@ def _st_machine_store_lines(root):
             '')
 
 
-def _st_write_lease_owned(root, holder):
-    """Write a stale lease.toml naming `holder` (a crash artefact paired with the active record)."""
+def _st_write_lease_owned(root, holder, operation="op"):
+    """Write a stale lease.toml naming `holder` and `operation` (a crash artefact paired with the
+    active record)."""
     with open(_st_lease_path(root), "w", encoding="utf-8") as fh:
-        fh.write('schema = 1\nholder = "{}"\noperation = "recovered-op"\n'
-                 'acquired_at = "2026-01-01T00:00:00Z"\n'.format(holder))
+        fh.write('schema = 1\nholder = "{}"\noperation = "{}"\n'
+                 'acquired_at = "2026-01-01T00:00:00Z"\n'.format(holder, operation))
 
 
 def _t_c1_common_dir_authority(d, env):
@@ -4579,7 +4605,9 @@ def _t_x6_removal_reports(d, env):
     contended one that fails before any removal, report no stale-record, recorded-operation or
     staging-leftover removal (created_removed still names an ordinary acquisition's
     retirement of its own two publication staging names, T-x7, and is empty on the contended
-    refusal, which fails before any publication)."""
+    refusal, which fails before any publication). A confirmed-dead holder of ANOTHER operation is
+    refused before any delete, naming that operation, reporting no removal, and keeping both
+    records byte for byte (spec 8.8 item 1); recovery as that same operation then clears them."""
     root = _st_git_store(d, "repo", env)
     cap = acquire_operation(root, "op")
     release_operation(cap)
@@ -4590,6 +4618,26 @@ def _t_x6_removal_reports(d, env):
     active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
     node = os.uname().nodename
     dead_pid, dead_start = _st_reaped_child()
+    holder = _st_write_active_owned(root, dead_pid, dead_start, node, op_id="x6-other-op-id",
+                                    operation="recovered-op")
+    _st_write_lease_owned(root, holder=holder, operation="recovered-op")
+    kept = (Path(active).read_bytes(), Path(_st_lease_path(root)).read_bytes())
+    other = None
+    try:
+        acquire_operation(root, "op", recover=True)
+    except OpLockError as exc:
+        other = exc
+    assert other is not None, "a confirmed-dead holder of another operation is never released"
+    assert "holder of the 'recovered-op' operation, not this 'op' operation" in str(other), other
+    assert (getattr(other, "recovered", None), getattr(other, "recovered_operation", 0),
+            getattr(other, "staging_removed", None), getattr(other, "created_removed", None)) \
+        == ((), None, (), ()), "the cross-operation refusal reports no removal at all"
+    assert (Path(active).read_bytes(), Path(_st_lease_path(root)).read_bytes()) == kept, \
+        "both records of the other operation are kept byte for byte"
+    cap = acquire_operation(root, "recovered-op", recover=True)
+    release_operation(cap)
+    assert (cap.recovered, cap.recovered_operation) == (("lease", "active record"), "recovered-op"), \
+        "recovery as the recorded operation itself releases its leftover"
     holder = _st_write_active_owned(root, dead_pid, dead_start, node, op_id="x6-op-id")
     _st_write_lease_owned(root, holder=holder)
     staging = _staging_name(_opf_check.LEASE_NAME)
@@ -4612,7 +4660,7 @@ def _t_x6_removal_reports(d, env):
     assert failed is not None, "the synthetic publication failure must refuse"
     assert getattr(failed, "recovered", None) == ("lease", "active record"), \
         "the failure reports the stale records it removed"
-    assert failed.recovered_operation == "recovered-op", failed.recovered_operation
+    assert failed.recovered_operation == "op", failed.recovered_operation
     assert failed.staging_removed == ("lease staging leftover " + staging,), failed.staging_removed
     assert not os.path.exists(_st_lease_path(root)) and not os.path.exists(active), \
         "the confirmed-dead records were removed before the failure"
@@ -4621,7 +4669,7 @@ def _t_x6_removal_reports(d, env):
     cap = acquire_operation(root, "op", recover=True)
     release_operation(cap)
     assert (cap.recovered, cap.recovered_operation, cap.staging_removed) == (
-        ("active record",), "recovered-op", ()), (cap.recovered, cap.recovered_operation)
+        ("active record",), "op", ()), (cap.recovered, cap.recovered_operation)
     live = acquire_operation(root, "op")
     contended = None
     try:
@@ -4699,7 +4747,7 @@ def _t_x7_every_unlink_reported(d, env):
         mod._handoff = saved_handoff
     assert refused is not None and "forked continuation" in str(refused), refused
     assert (getattr(refused, "recovered", None), getattr(refused, "recovered_operation", None)) \
-        == (("lease", "active record"), "recovered-op"), \
+        == (("lease", "active record"), "op"), \
         "the continuation refusal carries the confirmed-dead records the acquisition removed"
     assert getattr(refused, "staging_removed", None) == () \
         and len(getattr(refused, "created_removed", ())) == 2, refused
@@ -5545,7 +5593,7 @@ def _t_d1_swap_after_liveness_gate(d, env):
 
     mod._require_holder_confirmed_dead = _wrapped_gate
     try:
-        _st_expect_refusal(acquire_operation, root, "op2", recover=True, needle="never seized")
+        _st_expect_refusal(acquire_operation, root, "op", recover=True, needle="never seized")
     finally:
         mod._require_holder_confirmed_dead = saved_gate
     assert os.path.exists(active) and os.path.exists(lease), \
@@ -5939,13 +5987,14 @@ def _t_fd_census_pairs(d, env):
 def _st_crash_acquire(root):
     """A REAL crashed holder: a forked child acquires the lock at `root` and exits WITHOUT
     releasing, and the parent reaps it, so both records are left behind with a confirmed-dead
-    owner (the kernel drops the child's flock at exit)."""
+    owner (the kernel drops the child's flock at exit). It holds operation "op", the operation the
+    recovering tests acquire, since recovery releases only a leftover of the same operation."""
     sys.stdout.flush()
     sys.stderr.flush()
     pid = os.fork()
     if pid == 0:
         try:
-            acquire_operation(root, "crashed-op")
+            acquire_operation(root, "op")
             os._exit(0)                   # no release: the crash leaves both records
         except BaseException:
             os._exit(3)
@@ -7167,7 +7216,7 @@ def _st_recovery_scenario(root, gone_machine_path):
 
     def prepare():
         lines = ("schema = {}".format(_ACTIVE_SCHEMA), 'op_id = "stale-op-id"',
-                 'holder = "{}"'.format(holder), 'operation = "recovered-op"',
+                 'holder = "{}"'.format(holder), 'operation = "op"',
                  'acquired_at = "2026-01-01T00:00:00Z"', "", "[owner]",
                  "pid = {}".format(dead_pid), "uid = {}".format(os.getuid()),
                  'nodename = "{}"'.format(node), 'session = "stale-op-id"',
@@ -7354,7 +7403,7 @@ def _t_f5_4_body(d, env):
         if pid == 0:                      # (a) the crashing holder
             try:
                 os.umask(mask)
-                acquire_operation(root, "crashed-op")
+                acquire_operation(root, "op")
                 os.kill(os.getpid(), signal.SIGKILL)
             except BaseException:
                 pass
