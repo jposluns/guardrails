@@ -45,6 +45,7 @@
 #   - Bypass: git commit --no-verify skips the hook, and the same user can remove the stub or edit this
 #     file. A core.hooksPath set later, in any configuration scope, makes git stop running the stub,
 #     silently.
+#   - Canonical hand edits: a hand-written canonical, self-consistent record passes both checks.
 #   - Operations git commits without running any pre-commit hook: cherry-pick, revert, rebase (and
 #     pull --rebase), am, and a merge that commits without stopping for a conflict (git merge or git
 #     pull; git runs pre-merge-commit there, which the pack does not install). Each records a commit
