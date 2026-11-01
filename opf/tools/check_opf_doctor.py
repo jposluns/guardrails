@@ -989,9 +989,15 @@ def _self_test_isolated():
             # and its item line is read with the "- " as spaces, so every key of the step sits at indent
             # 8 whichever key comes first. Exactly one step has the key uses: actions/checkout@, and no
             # other line names actions/checkout in any case (a flow mapping, a quoted key or a deeper
-            # uses: fails closed); that step has exactly one with: key, and the persist-credentials
-            # mentions inside that with: block are exactly the one line persist-credentials: false (the
-            # line under env:, beside a later true, or in another step does not count).
+            # uses: fails closed); no line of that step holds a quote or a backslash, so a quoted or
+            # escaped key and a quoted value running over several lines fail closed; that step has
+            # exactly one with: key; every line of that with: block is a key of lowercase letters,
+            # digits and hyphens at indent 10, then ": " and a value, so a line that continues another
+            # key's value (the closing line of a flow collection) or a key in another case fails
+            # closed; and the persist-credentials mentions inside that block are exactly the one line
+            # persist-credentials: false (the line under env:, beside a later true, or in another step
+            # does not count). The property reads lines, not YAML: any spelling outside these shapes
+            # fails closed rather than being interpreted.
             def _wf_checkout_drops_token(text):
                 lines = text.split("\n")
                 steps, step = [], None
@@ -1007,12 +1013,20 @@ def _self_test_isolated():
                 if len(checkouts) != 1 or sum("actions/checkout" in ln.lower() for ln in lines) != 1:
                     return False
                 body = checkouts[0]
+                if any(c in ln for ln in body for c in "\"'\\"):
+                    return False
                 keys = [i for i, ln in enumerate(body) if not ln.startswith("         ")]
                 withs = [i for i in keys if body[i] == "        with:"]
                 if len(withs) != 1:
                     return False
                 end = next((i for i in keys if i > withs[0]), len(body))
-                return ([ln for ln in body[withs[0] + 1:end] if "persist-credentials" in ln]
+                block = body[withs[0] + 1:end]
+                for ln in block:
+                    key, colon, value = ln[len("          "):].partition(": ")
+                    if not (ln.startswith("          ") and colon and value and key[:1].isalpha()
+                            and all(c in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in key)):
+                        return False
+                return ([ln for ln in block if "persist-credentials" in ln]
                         == ["          persist-credentials: false"])
 
             expect("workflow-checkout-persist-credentials-false",
@@ -1032,7 +1046,21 @@ def _self_test_isolated():
                     ("false-then-true", _WORKFLOW_CANONICAL.replace(
                         wf_persist, wf_persist + wf_persist[:-5] + "true")),
                     ("second-checkout-flow-mapping", _WORKFLOW_CANONICAL.replace(
-                        wf_step, "      - {uses: actions/checkout@v4}\n" + wf_step))):
+                        wf_step, "      - {uses: actions/checkout@v4}\n" + wf_step)),
+                    ("multi-line-quoted-value", _WORKFLOW_CANONICAL.replace(
+                        "          fetch-depth: 0" + wf_persist,
+                        '          fetch-depth: "0' + wf_persist + '\n          "')),
+                    ("quoted-name-across-with", _WORKFLOW_CANONICAL.replace(
+                        "\n        with:\n          fetch-depth: 0" + wf_persist,
+                        '\n        name: "Check out\n        with:\n          fetch-depth: 0' + wf_persist
+                        + '\n        "')),
+                    ("escaped-key", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + '\n          "persist\\x2dcredentials": true')),
+                    ("other-case-key", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + "\n          Persist-Credentials: true")),
+                    ("flow-sequence-value", _WORKFLOW_CANONICAL.replace(
+                        "          fetch-depth: 0" + wf_persist,
+                        "          fetch-depth: [" + wf_persist + "\n          ]"))):
                 expect("workflow-checkout-persist-credentials-mutant-reds-{}".format(wf_label),
                        (wf_mutant != _WORKFLOW_CANONICAL, _wf_checkout_drops_token(wf_mutant)), (True, False))
             # The property holds whichever key the checkout step lists first: a sole checkout step spelled
@@ -1052,12 +1080,14 @@ def _self_test_isolated():
             # its owner can move, and a short SHA is a prefix that can become ambiguous. Every effective
             # line that mentions uses must be a uses: key whose value is owner/repo@ followed by 40
             # lowercase hex digits, optionally trailed by " # " and the tag it was resolved from; a uses
-            # in any other spelling (a flow mapping, a quoted key) fails closed, and a text with no uses:
-            # at all proves nothing.
+            # in any other spelling or case (a flow mapping, a quoted key, Uses:) fails closed, and a text
+            # with no uses: at all proves nothing. Residual, not closed: the property checks the shape
+            # of the ref only, so a branch or tag whose name is 40 hex digits passes it as a SHA; the
+            # template's comment and the gate's residue say so.
             def _wf_actions_pinned(text):
                 found = 0
                 for ln in text.split("\n"):
-                    if "uses" not in ln:
+                    if "uses" not in ln.lower():
                         continue
                     body = ln.lstrip(" ")
                     if body.startswith("- "):
@@ -1088,6 +1118,12 @@ def _self_test_isolated():
             wf_mutant = _WORKFLOW_CANONICAL.replace(
                 wf_step, "      - {uses: actions/github-script@" + "0" * 40 + "}\n" + wf_step)
             expect("workflow-actions-pinned-mutant-reds-flow-mapping",
+                   (wf_mutant != _WORKFLOW_CANONICAL, _wf_actions_pinned(wf_mutant)), (True, False))
+            wf_mutant = _WORKFLOW_CANONICAL.replace(wf_step, "      - Uses: actions/github-script@v7\n" + wf_step)
+            expect("workflow-actions-pinned-mutant-reds-other-case-key",
+                   (wf_mutant != _WORKFLOW_CANONICAL, _wf_actions_pinned(wf_mutant)), (True, False))
+            wf_mutant = "\n".join(ln for ln in _WORKFLOW_CANONICAL.split("\n") if "uses: " not in ln)
+            expect("workflow-actions-pinned-mutant-reds-no-uses",
                    (wf_mutant != _WORKFLOW_CANONICAL, _wf_actions_pinned(wf_mutant)), (True, False))
 
             # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
