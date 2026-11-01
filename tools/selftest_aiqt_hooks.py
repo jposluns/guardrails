@@ -5608,26 +5608,52 @@ class _Clocked(_Later):
         return value
 
 
-def _caller_countdown_bounds(holder, reads, started, finished):
+class _TimedSignal:
+    """A stand-in for aiqt_hooks.signal: the signal module, with each setitimer call kept, in order, in
+    `calls` as (its arguments, the time.monotonic read just before it, the one just after it)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        return getattr(signal, name)
+
+    def setitimer(self, *args):
+        before = time.monotonic()
+        try:
+            return signal.setitimer(*args)
+        finally:
+            self.calls.append((args, before, time.monotonic()))
+
+
+def _countdown_within(low, high, countdown):
+    """Whether countdown is inside the bound (low, high] that _caller_countdown_bounds gives."""
+    return low < countdown <= high
+
+
+def _caller_countdown_bounds(holder, reads, armed, started, finished):
     """(low, high, problem) for the countdown of a caller's 30-second timer, armed between the time.monotonic
     reads started[0] and started[1] and read back by getitimer between finished[0] and finished[1], under the
     elapsed-aware restore of holder, the window that borrowed it (aiqt_hooks.time a _Clocked whose reads are
-    `reads`): the countdown is right when low < countdown <= high, and problem is "" unless what holder
-    recorded at its take is itself out of bounds. A holder that took nothing leaves the timer running from
-    the arming to the read. One that took it re-arms it with the countdown its take read (holder._timer[0])
-    less the time from its take's clock read (holder._began) to its restore's (the last of reads), and the
-    timer runs from that re-arm, after the restore's read, to the getitimer. setitimer rounds a countdown up
-    to the microsecond and getitimer reads one rounded down, so a bound moves by at most the one microsecond
-    a reading loses; each end is derived for its own side, and nothing else is allowed for, so a run the
-    host slows anywhere moves both ends with it, while a restore that loses or gains time falls outside."""
+    `reads`, aiqt_hooks.signal a _TimedSignal whose setitimer calls are `armed`): the countdown is right when
+    _countdown_within(low, high, countdown), and problem is "" unless what holder recorded at its take is
+    itself out of bounds. A holder that took nothing leaves the timer running from the arming to the read.
+    One that took it re-arms it, with the last setitimer call, at the countdown its take read
+    (holder._timer[0]) less the time from its take's clock read (holder._began) to its restore's (the last of
+    reads); the bound is that countdown less the time from the re-arm to the getitimer, as the clock reads
+    either side of each of those two calls bracket it, so it is only as wide as the two calls take, and a
+    stall anywhere between them moves both ends together. setitimer rounds a countdown up to the microsecond
+    and getitimer reads one rounded down, so the low end allows the microsecond the read loses and, after a
+    re-arm, the high end the microsecond setitimer adds (the 30-second arming is exact)."""
     if holder._began is None:
         return 30.0 - (finished[1] - started[0]) - 1e-6, 30.0 - (finished[0] - started[1]), ""
     taken, began, restored = holder._timer[0], holder._began, reads[-1]
     problem = ""
-    if not 30.0 - (restored - started[0]) - 1e-6 < taken <= 30.0 - (began - started[1]):
+    if not _countdown_within(30.0 - (restored - started[0]) - 1e-6, 30.0 - (began - started[1]), taken):
         problem = "the take read {!r}, outside the countdown between its clock reads".format(taken)
     left = taken - (restored - began)
-    return left - (finished[1] - restored) - 1e-6, left + 1e-6, problem
+    _args, before, after = armed[-1]
+    return left - (finished[1] - before) - 1e-6, left - (finished[0] - after) + 1e-6, problem
 
 
 def _window_codes():
@@ -5954,6 +5980,7 @@ def _deadline_defer_failures():
         counted = [0]
         signal.signal(signal.SIGALRM, counting)
         clock = aiqt_hooks.time = _Clocked(0.0)
+        timed = aiqt_hooks.signal = _TimedSignal()
         started = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
         started += (time.monotonic(),)
@@ -6029,13 +6056,15 @@ def _deadline_defer_failures():
                            else "the window's deadline" if exc.args[:1] == (window,) else "another deadline")
             except BaseException as exc:
                 escaped = type(exc).__name__
+            handler = signal.getsignal(signal.SIGALRM)
             finished = (time.monotonic(),)
-            final = (signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL))
+            final = (handler, signal.getitimer(signal.ITIMER_REAL))
             finished += (time.monotonic(),)
         finally:
             stop()
             sys.settrace(None)
             aiqt_hooks.time = time
+            aiqt_hooks.signal = signal
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             for signum, handler in saved.items():
@@ -6058,9 +6087,9 @@ def _deadline_defer_failures():
         # With no expiry due, the caller's countdown is the one it would have reached by the read, however
         # long the host took over the run (_caller_countdown_bounds).
         low, high, countdown = (0.0, 30.0, "") if fired else _caller_countdown_bounds(
-            outer if nested else window, clock.reads, started, finished)
-        if not (handler is counting and timer[1] == 30.0 and 0 < timer[0] <= 30.0 and low < timer[0] <= high
-                and not countdown):
+            outer if nested else window, clock.reads, timed.calls, started, finished)
+        if not (handler is counting and timer[1] == 30.0 and 0 < timer[0] <= 30.0
+                and _countdown_within(low, high, timer[0]) and not countdown):
             problems.append("caller left {!r} with {!r}, want a countdown in ({!r}, {!r}]{}".format(
                 handler, timer, low, high, countdown and "; " + countdown))
         if calls != ([signal.SIGALRM] if fired else []):
@@ -6099,55 +6128,80 @@ def _deadline_defer_failures():
     finally:
         sys.settrace(None)
         aiqt_hooks.time = time
+        aiqt_hooks.signal = signal
     return out
 
 
 def _deadline_defer_countdown_failures():
     """(dl-defer-countdown) The caller's countdown bound the dl-defer rows apply (_caller_countdown_bounds)
     accepts a correct restore in a run that takes over a second, which a fixed lower bound of 29 seconds
-    refused, and refuses a restore that loses or gains the window's time. A 5-second window under a caller
-    with a counting SIGALRM handler and a periodic 30-second timer, with 0.9 seconds slept before the window
-    and 0.6 seconds in its body: the caller's timer comes back under 29 seconds and inside the bound, with no
-    delivery and the window closed. The bound refuses that countdown plus the time the window counted as
-    used (a restore that did not subtract it) and minus it (one that subtracted it twice), and each end is
-    checked one microsecond inside, exactly at and one microsecond outside."""
+    refused, and is narrow enough to refuse that countdown moved by the window's time either way, the
+    countdown errors a restore that did not subtract the window's time or subtracted it twice would make. A
+    5-second window under a caller with a counting SIGALRM handler and a periodic 30-second timer, with 0.9
+    seconds slept before the window and 0.6 seconds in its body: the caller's timer comes back under 29
+    seconds and inside the bound, with no delivery and the window closed. A run whose bound is not narrower
+    than the window's time cannot tell those apart; such a run is not judged, and the vector takes another
+    (at most 3 in all), judges the narrowest run that can tell them apart, and fails, naming each run's
+    bound, when none can. The edge checks put each end, one microsecond inside, exactly at and one
+    microsecond outside, through _countdown_within, the check the dl-defer rows make."""
     out = []
     calls = []
 
     def counting(signum, frame):
         calls.append(signum)
 
-    window = aiqt_hooks._DeadlineWindow(5.0)
-    clock = aiqt_hooks.time = _Clocked(0.0)
-    try:
-        signal.signal(signal.SIGALRM, counting)
-        started = (time.monotonic(),)
-        signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
-        started += (time.monotonic(),)
-        time.sleep(0.9)
-        with window:
-            time.sleep(0.6)
-        finished = (time.monotonic(),)
-        handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
-        finished += (time.monotonic(),)
-    finally:
-        aiqt_hooks.time = time
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    low, high, problem = _caller_countdown_bounds(window, clock.reads, started, finished)
-    used = clock.reads[-1] - window._began if window._began is not None else 0.0
+    def attempt():
+        calls.clear()
+        window = aiqt_hooks._DeadlineWindow(5.0)
+        clock = aiqt_hooks.time = _Clocked(0.0)
+        timed = aiqt_hooks.signal = _TimedSignal()
+        try:
+            signal.signal(signal.SIGALRM, counting)
+            started = (time.monotonic(),)
+            signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+            started += (time.monotonic(),)
+            time.sleep(0.9)
+            with window:
+                time.sleep(0.6)
+            handler = signal.getsignal(signal.SIGALRM)
+            finished = (time.monotonic(),)
+            timer = signal.getitimer(signal.ITIMER_REAL)
+            finished += (time.monotonic(),)
+        finally:
+            aiqt_hooks.time = time
+            aiqt_hooks.signal = signal
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        low, high, problem = _caller_countdown_bounds(window, clock.reads, timed.calls, started, finished)
+        used = clock.reads[-1] - window._began if window._began is not None else 0.0
+        return window, handler, timer, low, high, problem, used, len(calls)
+
+    runs = []
+    while len(runs) < 3 and not any(run[4] - run[3] < run[6] for run in runs):
+        runs.append(attempt())
+    telling = [run for run in runs if run[4] - run[3] < run[6]]
     problems = []
-    if not (handler is counting and timer[1] == 30.0 and timer[0] < 29.0 and low < timer[0] <= high
-            and not problem and calls == [] and not window.armed and not window.broken):
-        problems.append("a correct restore in a run of over a second must come back under 29 seconds and inside "
-                        "the bound, got {!r} with {!r}, bound ({!r}, {!r}]{}, caller deliveries {}".format(
-                            handler, timer, low, high, problem and "; " + problem, len(calls)))
-    elif not (used >= 0.6 and not low < timer[0] + used <= high and not low < timer[0] - used <= high):
-        problems.append("the bound ({!r}, {!r}] must refuse the countdown {!r} moved by the window's {!r} seconds "
-                        "either way".format(low, high, timer[0], used))
+    if not telling:
+        problems.append("none of {} runs could tell a correct restore from one off by the window's time (a bound "
+                        "not narrower than it): {}".format(len(runs), "; ".join(
+                            "bound ({!r}, {!r}] against {!r} seconds".format(run[3], run[4], run[6])
+                            for run in runs)))
+        low, high = runs[-1][3:5]
+    else:
+        window, handler, timer, low, high, problem, used, delivered = min(telling, key=lambda run: run[4] - run[3])
+        if not (handler is counting and timer[1] == 30.0 and timer[0] < 29.0
+                and _countdown_within(low, high, timer[0]) and not problem and delivered == 0
+                and not window.armed and not window.broken):
+            problems.append("a correct restore in a run of over a second must come back under 29 seconds and "
+                            "inside the bound, got {!r} with {!r}, bound ({!r}, {!r}]{}, caller deliveries "
+                            "{}".format(handler, timer, low, high, problem and "; " + problem, delivered))
+        elif not (used >= 0.6 and not _countdown_within(low, high, timer[0] + used)
+                  and not _countdown_within(low, high, timer[0] - used)):
+            problems.append("the bound ({!r}, {!r}] must refuse the countdown {!r} moved by the window's {!r} "
+                            "seconds either way".format(low, high, timer[0], used))
     edges = [(low - 1e-6, False), (low, False), (low + 1e-6, True),
              (high - 1e-6, True), (high, True), (high + 1e-6, False)]
-    wrong = [value for value, want in edges if (low < value <= high) != want]
+    wrong = [value for value, want in edges if _countdown_within(low, high, value) != want]
     if wrong:
         problems.append("the bound ({!r}, {!r}] must hold just inside each end and the high end itself, and "
                         "refuse the low end itself and just outside each, got wrong {!r}".format(low, high, wrong))
