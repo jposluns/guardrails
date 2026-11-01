@@ -5,7 +5,9 @@ The protected ref is supplied explicitly or derived from origin/HEAD. The candid
 supplied explicitly or defaults to HEAD. A merge-base exit status of 0 means rooted, 1 means
 ORPHANED, and every other status is cannot-evaluate. A rooted candidate that restores, at a path it
 changes from any merge base, the exact blob a first-parent commit of the protected line replaced
-within the REVERT_WINDOW commits ending at that merge base is REVERTS, unless merging it into the
+within the REVERT_WINDOW commits ending at that merge base (or, at a path it adds, the exact blob
+such a commit replaced at a path it removes, other than that path's merge-base blob, so a rename
+that puts old content back is caught) is REVERTS, unless merging it into the
 protected tip (git merge-tree --write-tree) leaves that path, and every path the protected line renamed
 it to, as the tip has it without a conflict (a mode-only difference counts only where it restores the
 replaced image), or a commit in base..head carries a "Reverts: <full sha>" trailer naming every such
@@ -281,16 +283,48 @@ def _allowed(undone, named):
     return all(commit in named for commit in undone)
 
 
+def _matched(touches, image):
+    """(undone, restored) where image's blob equals the pre-image blob of one of touches, the window's
+    (commit, pre) records on one path, newest first; else None. undone runs from the newest record back to
+    the match. Where the newest blob match differs from image in mode only, the walk goes on to an older
+    pre-image equal to the whole image, so a mode the line changed before a content round trip is found."""
+    undone, matched = [], None
+    for commit, pre in touches:
+        undone.append(commit)
+        if _blob(pre) != _blob(image):
+            continue
+        if matched is None or pre == image:
+            matched = (len(undone), pre)
+        if pre == image:
+            break
+    return None if matched is None else (tuple(undone[:matched[0]]), (matched[1],))
+
+
+def _moved(records, touches):
+    """(destination, source) for each path the head adds whose blob equals a window pre-image blob of a
+    path the head removes, other than the blob that source had at the base: the head moved the source
+    and put back content the line replaced there. Pairs are made on exact blobs, not by git's rename
+    detection, so no rename limit or similarity threshold applies."""
+    removed = {path: pre for _c, path, pre, post in records if post is None and path in touches}
+    sources = {}
+    for source, pre in removed.items():
+        for _commit, old in touches[source]:
+            if old is not None and _blob(old) != _blob(pre):
+                sources.setdefault(_blob(old), set()).add(source)
+    return sorted((path, source) for _c, path, pre, post in records if pre is None and post is not None
+                  for source in sources.get(_blob(post), ()))
+
+
 def _revert_findings(root, base, head_sha, window):
     """(path, undone, restored) for each path the head changes from base whose head blob equals the
-    pre-image blob of a commit in the window (file modes are not compared); undone lists the window
-    commits on that path from base back to that commit, newest first, and restored holds that pre-image.
-    Where the newest blob match differs from the head in mode only, the walk goes on to an older pre-image
-    equal to the head's whole image, so a mode the line changed before a content round trip is found. A
-    deletion matches an add (an absent pre-image). Paths whose undone commits all carry a Reverts trailer
-    are dropped."""
-    changed = {path: post for _c, path, _pre, post in _raw_records(
-        root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", base, head_sha, "--")}
+    pre-image blob of a commit in the window (file modes are not compared, but see _matched); undone lists
+    the window commits on that path from base back to that commit, newest first, and restored holds that
+    pre-image. A deletion matches an add (an absent pre-image). A path the head adds is also judged
+    against the window of each path the head removes that _moved pairs it with, and is reported under its
+    own name. Paths whose undone commits all carry a Reverts trailer are dropped."""
+    records = _raw_records(
+        root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", base, head_sha, "--")
+    changed = {path: post for _c, path, _pre, post in records}
     if not changed:
         return []
     touches = {}
@@ -298,18 +332,10 @@ def _revert_findings(root, base, head_sha, window):
         if path in changed:
             touches.setdefault(path, []).append((commit, pre))
     findings = []
-    for path in sorted(touches):
-        undone, matched = [], None
-        for commit, pre in touches[path]:
-            undone.append(commit)
-            if _blob(pre) != _blob(changed[path]):
-                continue
-            if matched is None or pre == changed[path]:
-                matched = (len(undone), pre)
-            if pre == changed[path]:
-                break
-        if matched is not None:
-            findings.append((path, tuple(undone[:matched[0]]), (matched[1],)))
+    for path, source in [(path, path) for path in sorted(touches)] + _moved(records, touches):
+        found = _matched(touches[source], changed[path])
+        if found is not None:
+            findings.append((path,) + found)
     if findings:
         named = _reverts_named(root, base, head_sha)
         findings = [finding for finding in findings if not _allowed(finding[1], named)]
@@ -615,7 +641,7 @@ def _plumb_commit(root, files, parents, message, modes=None):
 
 
 def _revert_vectors(temp, failures, case):
-    """R1-R27: the revert check. One repository holds every history; each case names its own refs."""
+    """R1-R28: the revert check. One repository holds every history; each case names its own refs."""
     def ref(name, sha):
         _fixture_git(repo, "update-ref", "refs/heads/" + name, sha)
         return "refs/heads/" + name
@@ -972,6 +998,24 @@ def _revert_vectors(temp, failures, case):
         _fixture_git(repo, "config", "--unset", "merge.directoryRenames")
         _fixture_git(repo, "config", "--unset", "merge.renames")
 
+    # R28: the line edits line 3 of a.txt, and a branch cut there renames a.txt to c.txt and puts line 3
+    # back. With a window of 2 the commit that added a.txt is outside it, so the deletion of a.txt matches
+    # nothing and c.txt has no history: only pairing the head's own move finds the revert, at c.txt. A
+    # move that keeps the merge-base content is no finding, even where the line held that content before
+    # a round trip inside the window.
+    s0 = _plumb_commit(repo, {b"a.txt": a_v1, b"fill.txt": b"0\n"}, (), "move root")
+    s1 = _plumb_commit(repo, {b"a.txt": a_v1, b"fill.txt": b"1\n"}, (s0,), "move filler")
+    s2 = _plumb_commit(repo, {b"a.txt": a_v2, b"fill.txt": b"1\n"}, (s1,), "main edits a line 3")
+    s_main = ref("r28-main", s2)
+    found("R28 head renames and restores", s_main, ref("r28", _plumb_commit(
+        repo, {b"c.txt": a_v1, b"fill.txt": b"1\n"}, (s2,), "branch renames a to c, puts line 3 back")),
+        {b"c.txt"}, 2)
+    found("R28 head renames only", s_main, ref("r28m", _plumb_commit(
+        repo, {b"c.txt": a_v2, b"fill.txt": b"1\n"}, (s2,), "branch renames a to c")), set(), 2)
+    s3 = _plumb_commit(repo, {b"a.txt": a_v1, b"fill.txt": b"1\n"}, (s2,), "main puts line 3 back")
+    found("R28 move of the merge-base content", ref("r28t-main", s3), ref("r28t", _plumb_commit(
+        repo, {b"c.txt": a_v1, b"fill.txt": b"1\n"}, (s3,), "branch renames a to c")), set(), 2)
+
     # R12: a shallow clone whose history ends inside the window is cannot-evaluate.
     shallow = temp / "r12-shallow"
     try:
@@ -1046,6 +1090,15 @@ def _mutant_vector(failures):
             findings.extend(finding for finding in found if finding not in findings)
         return sorted(findings), anchors
 
+    def base_content_paired(records, touches):
+        sources = {}
+        for _c, path, _pre, post in records:
+            for _commit, old in touches.get(path, ()) if post is None else ():
+                if old is not None:
+                    sources.setdefault(_blob(old), set()).add(path)
+        return sorted((path, source) for _c, path, pre, post in records if pre is None and post is not None
+                      for source in sources.get(_blob(post), ()))
+
     for label, injected, vector in (
             ("check removed", {"_revert_findings": lambda *_a: []}, "R1 "),
             ("anchored on the protected tip", {"_revert_findings": tip_anchored}, "R10 window anchored"),
@@ -1065,6 +1118,10 @@ def _mutant_vector(failures):
              {"_undoes": lambda tip, merged, _restored: _blob(merged) != _blob(tip)}, "R25 mode-only"),
             ("renamed paths not followed", {"_renamed": lambda _r, _b, _p: {}}, "R26 "),
             ("merge rename config unpinned", {"_MERGE_CONFIG": ()}, "R27 "),
+            ("head's own moves not paired", {"_moved": lambda _records, _touches: []},
+             "R28 head renames and restores"),
+            ("merge-base content paired as a move", {"_moved": base_content_paired},
+             "R28 move of the merge-base content"),
             ("head image in place of the merge result",
              {"_merge_result": lambda _r, _p, head_sha: (head_sha, frozenset())}, "R20 "),
             ("merge conflicts ignored", {"_merge_result": conflicts_ignored}, "R22 "),
@@ -1372,7 +1429,7 @@ def self_test(_vectors=True):
                "default-root/cwd-unavailable")
     print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
           "(both cannot-evaluate) outcomes; verdicts are asserted by exit code; an unbuildable V10 or V11 "
-          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R27 cover the revert "
+          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R28 cover the revert "
           "check and each listed mutant of it turns every R vector it names red")
     return 0
 
