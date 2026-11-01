@@ -13,11 +13,17 @@ Input: the product root and nothing else (no transcript, no claim, no run id: th
   render-check    `opf render --check --root ROOT`
 
 The receipt core is read ONCE per run by this module and those bytes are what both receipt-core and
-event-chain grade. The bundle verification below also runs ONCE per run, inside the first of those two
-legs that runs, and every file this module reads for the run (receipt core, events and the digest-only
+event-chain grade. The bundle verification below is started at most once per run, inside the first of
+those two legs that runs, and the later leg shares its outcome: its result, the finding or cannot-evaluate
+it raised, or, when a deadline or another exception ended it in the first leg, a cannot-evaluate that is
+never retried. Every file this module reads for the run (receipt core, events and the digest-only
 plan, approval and planning inventory) is attested against its parsed inventory rows before it is graded,
 recorded as graded or digested: bytes that fail attestation are cannot-evaluate, never reported as graded
-and never a finding (a swapped receipt core that would fail the schema included).
+and never a finding (a swapped receipt core that would fail the schema included). A file absent at this
+module's read is judged by that verification on every read path (receipt core, events, digest-only
+files): verify_bundle grades a listed file missing at its own read INVALID, so with no passing
+verification the absence takes the verification's outcome, and after a verification that passed the
+file changed between the two reads (or no inventory lists it), which is cannot-evaluate.
 The event files are the ones the import completion evaluator accepts (_opf_import_complete._event_files):
 every event-shaped name the bundle inventories list must be present, every one present must be listed,
 each spelled event-<NNNN>.toml of its number, numbered contiguously from event-0001.toml; a gap, a
@@ -38,13 +44,16 @@ leg raising any BaseException (a SystemExit from opf.main included), and a CLI l
 exactly the int 0 or 1 are CANNOT_EVALUATE. Any exception outside a leg ends main() at exit 2.
 
 Verdict (exactly one, printed as canonical JSON with the deciding leg, the sha256 of each bundle file
-the scorer itself read with the legs that graded those exact bytes (an empty graded_by marks a file read
-only for its digest, which no leg grades), and in unread_inputs each digest-only file that is absent (a
-finding), could not be read, or whose bytes the bundle inventory does not attest (cannot-evaluate), with
-its outcome and why):
+the scorer itself read with the legs that graded those exact bytes (a bundle-root inventory is credited
+to each leg that received the passing bundle verification; an empty graded_by marks a file read only for
+its digest, which no leg grades, or an inventory whose verification did not pass), and in unread_inputs
+each digest-only file that is absent (a finding when the bundle verification found one, otherwise
+cannot-evaluate), could not be read, or whose bytes the bundle inventory does not attest
+(cannot-evaluate), with its outcome and why):
   NOT_ADOPTED        adopt-status is clean and lists no adoption run (exit 1)
   INVALID            some leg reports a finding; the first such leg in the order above decides; with no
-                     leg finding, an absent digest-only input is INVALID decided by `unread-inputs` (exit 1)
+                     leg finding, a digest-only input absent with a bundle verification finding is INVALID
+                     decided by `unread-inputs` (exit 1)
   CANNOT_EVALUATE    some leg could not be read or run, or reported cannot-evaluate; the first such leg
                      decides, never a pass; with every leg passing, any other unread_inputs row is
                      CANNOT_EVALUATE decided by `unread-inputs` (exit 2)
@@ -66,9 +75,12 @@ DISCLOSED RESIDUALS: the input digests cover the bundle files this module reads 
 and the bundle-root inventories, graded; plan, approval and planning inventory, digest only, graded by no
 leg here, each held to its inventory row, and an unread or unattested one fails the verdict closed); the
 files the composed legs read on their own are not digested here. A cannot-evaluate event listing (a gap,
-or a misspelled, unlisted or listed-but-absent event file) ends the event-chain leg before any event is
-read, so a finding in another event of that run (a forged event_digest, a foreign run, a broken chain) is
-not reported: such a run scores CANNOT_EVALUATE, not INVALID (still never a pass). The legs run in this process, one after another, so a tree changed between legs is
+or a misspelled or unlisted event file, or a listed event file that vanished after a bundle verification
+that passed) ends the event-chain leg before any event is read, so a finding in another event of that run
+(a forged event_digest, a foreign run, a broken chain) is not reported: with no finding in another leg,
+such a run scores CANNOT_EVALUATE, not INVALID (still never a pass). A listed event file already absent
+when the bundle verification reads it is instead that verification's finding, which event-chain reports
+(INVALID). The legs run in this process, one after another, so a tree changed between legs is
 not detected. OPF-SPEC section 14 requires an outcome-event chain but does not say which outcome kind
 completes an adoption, and the shipped apply mints only the genesis `applied`; so COMPLETING_EVENT is
 `applied`, and a chain whose latest event is any other kind (a later `failed`, and equally a later
@@ -181,13 +193,34 @@ def _leg_status(root):
 
 
 def _read_bundle(root_fd, rel):
-    """The live bytes at `rel`; absence raises a finding, a read refusal cannot."""
+    """The live bytes at `rel`, or None when it is absent (graded by _absent against the bundle
+    verification); a read refusal cannot."""
     try:
         _fst, data = apply._read_live(root_fd, rel)
     except apply.AdoptApplyError as exc:
         raise _Leg(CANNOT, "{}: {}".format(rel, exc))
+    return data
+
+
+def _absent(rel, verified):
+    """The outcome of `rel` absent at this module's read, judged by the run's bundle verification
+    (`verified`, from _bundle_once). verify_bundle itself grades a listed file missing at its own read
+    INVALID, so with no passing verification the absence takes the verification's outcome; after a
+    verification that passed, the file changed between that verification and this read (or no inventory
+    lists it), which is cannot-evaluate, never a finding."""
+    if isinstance(verified, _Leg):
+        return _Leg(verified.outcome, "{} is absent and the bundle verification did not pass: {}".format(
+            rel, verified.reason))
+    if rel in verified[1]:
+        return _Leg(CANNOT, "{} is absent at this read though the bundle verification found it present; the "
+                            "file changed between the two reads".format(rel))
+    return _Leg(CANNOT, "{} is absent and listed by no bundle inventory".format(rel))
+
+
+def _present(rel, data, verified):
+    """`data` read at `rel`, or the outcome its absence takes (_absent)."""
     if data is None:
-        raise _Leg(FINDING, "{} is absent".format(rel))
+        raise _absent(rel, verified)
     return data
 
 
@@ -203,7 +236,7 @@ def _digested(read, rel, data, leg=None):
 
 
 def _receipt_core(core):
-    """The receipt core bytes read once for this run, or the outcome that read ended in."""
+    """The receipt core bytes read once for this run (None when absent), or the outcome that read ended in."""
     if isinstance(core, _Leg):
         raise _Leg(core.outcome, core.reason)
     return core
@@ -235,7 +268,8 @@ def _leg_receipt(root, core, run_id, read, bundle_memo):
     """The receipt core graded only once the bundle inventory attests its bytes: bytes swapped after the
     bundle verification are cannot-evaluate, never graded and never a finding."""
     core = _receipt_core(core)
-    verified = _bundle_once(root, run_id, read, bundle_memo)
+    verified = _bundle_once(root, run_id, read, bundle_memo, "receipt-core")
+    core = _present(apply.receipt_rel(run_id), core, verified)
     if isinstance(verified, _Leg):
         raise _Leg(CANNOT, "the receipt core bytes cannot be attested: {}".format(verified.reason))
     _attested(verified[1], apply.receipt_rel(run_id), core)
@@ -245,12 +279,27 @@ def _leg_receipt(root, core, run_id, read, bundle_memo):
     return _graded(checked.status, checked.findings, "receipt core")
 
 
-def _bundle_once(root, run_id, read, memo):
-    """_verified_bundle's result for this run, or the _Leg it raised, computed once and shared by the legs
-    that attest bytes against it (`memo` holds it per run)."""
+def _bundle_once(root, run_id, read, memo, leg):
+    """_verified_bundle's result for this run, or the _Leg it raised, shared by the legs that attest bytes
+    against it (`memo` holds it per run). The verification is started at most once: a cannot-evaluate
+    stands in the memo before it starts, so a deadline or another exception that ends it there (and ends
+    the leg that started it) leaves that terminal state for every later leg instead of a second run. `leg`
+    is credited with the inventories only when it receives a verification that passed."""
     if "bundle" not in memo:
+        memo["bundle"] = _Leg(CANNOT, "the bundle verification the {} leg started did not complete (a "
+                                      "deadline or an exception ended it) and is not run again".format(leg))
         memo["bundle"] = _attempt(lambda: _verified_bundle(root, run_id, read))
-    return memo["bundle"]
+    verified = memo["bundle"]
+    if not isinstance(verified, _Leg):
+        _credit(read, verified[0][1], leg)
+    return verified
+
+
+def _credit(read, rels, leg):
+    """Record `leg` among the legs that graded the bundle inventories at `rels` (already digested)."""
+    for rel in rels:
+        if leg not in read[rel]["graded_by"]:
+            read[rel]["graded_by"].append(leg)
 
 
 def _claim(rows, path, sha256):
@@ -263,16 +312,17 @@ def _claim(rows, path, sha256):
 
 def _verified_bundle(root, run_id, read):
     """((verification, parsed inventories), {path: row sha256}) of the run's bundle: the bundle-root
-    inventories are parsed from the exact bytes the bundle verification read (each digested as graded
-    here). A bundle the verification grades INVALID is a finding; an inventory that cannot evaluate, a
-    verification that cannot and a path two rows claim are cannot-evaluate."""
+    inventories are parsed from the exact bytes the bundle verification read (each digested here; the legs
+    that receive the passing result are credited by _bundle_once). A bundle the verification grades
+    INVALID is a finding; an inventory that cannot evaluate, a verification that cannot and a path two rows
+    claim are cannot-evaluate."""
     raw = {}
     try:
         verified = apply.verify_bundle(root, run_id, inventory_bytes=raw)
     except apply.AdoptApplyError as exc:
         raise _Leg(CANNOT, "adoption evidence bundle: {}".format(exc))
     for rel in sorted(raw):
-        _digested(read, rel, raw[rel], "event-chain")
+        _digested(read, rel, raw[rel])
     if verified.status != store.VALID:
         raise _Leg(FINDING if verified.status == store.INVALID else CANNOT,
                    "adoption evidence bundle: {}: {}".format(verified.status, "; ".join(verified.findings)))
@@ -335,18 +385,14 @@ def _chain_unbound(events, run_id):
 
 def _leg_events(root, root_fd, run_id, core, read, bundle_memo):
     core = _receipt_core(core)
-    verified = _bundle_once(root, run_id, read, bundle_memo)
+    verified = _bundle_once(root, run_id, read, bundle_memo, "event-chain")
     if isinstance(verified, _Leg):
         raise _Leg(verified.outcome, verified.reason)
+    core = _present(apply.receipt_rel(run_id), core, verified)
     bundle, rows = verified
     events = []
     for rel in _event_paths(root_fd, run_id, bundle):
-        try:
-            _fst, data = apply._read_live(root_fd, rel)
-        except apply.AdoptApplyError as exc:
-            raise _Leg(CANNOT, "{}: {}".format(rel, exc))
-        if data is None:
-            raise _Leg(CANNOT, "outcome event {} vanished after the bundle listing".format(rel))
+        data = _present(rel, _read_bundle(root_fd, rel), verified)
         # Attested before it is recorded, so bytes this leg refuses are never reported as graded.
         data = _digested(read, rel, _attested(rows, rel, data), "event-chain")
         events.append(_parsed(data, "outcome event " + rel))
@@ -424,9 +470,10 @@ def _attempt(call):
 def _digest_only(root_fd, rel, read, unread, verified):
     """Digest `rel` with no grading leg once the run's verified bundle inventory (`verified`, from
     _bundle_once) attests the bytes read, or report it in `unread` with its outcome and why: an absent file
-    is a finding; a read refusal, a bundle that did not verify, a missing row and another digest (a file
-    swapped after the bundle verification) are cannot-evaluate. Every such input is required (_decide)."""
-    data = _attempt(lambda: _read_bundle(root_fd, rel))
+    takes the outcome _absent gives it (a finding only when the bundle verification found one); a read
+    refusal, a bundle that did not verify, a missing row and another digest (a file swapped after the
+    bundle verification) are cannot-evaluate. Every such input is required (_decide)."""
+    data = _attempt(lambda: _present(rel, _read_bundle(root_fd, rel), verified))
     if not isinstance(data, _Leg):
         if isinstance(verified, _Leg):
             data = _Leg(CANNOT, "{}: the bytes read here cannot be attested: {}".format(rel, verified.reason))
@@ -461,7 +508,8 @@ def score(product_root):
             _run_leg("adopt-complete", legs, lambda: _leg_complete(root, run_id))
             # One read of the receipt core: both legs grade these bytes, and their digest is reported.
             core = _attempt(lambda: _read_bundle(root_fd, apply.receipt_rel(run_id)))
-            # One bundle verification per run: every file read here is attested against its rows.
+            # At most one bundle verification per run, its result or terminal failure shared by both legs:
+            # every file read here is attested against its rows.
             bundle_memo = {}
             if "receipt-core" in LEGS:
                 _run_leg("receipt-core", legs, lambda: _leg_receipt(root, core, run_id, read, bundle_memo))
@@ -813,7 +861,7 @@ def self_test():
             i["graded_by"] == [] for i in green["inputs"] if i["path"] in (
                 apply.plan_rel(complete._RUN), apply.approval_rel(complete._RUN),
                 apply.planning_inventory_rel(complete._RUN))) and any(
-            i["path"] == apply.inventory_rel(complete._RUN) and i["graded_by"] == ["event-chain"]
+            i["path"] == apply.inventory_rel(complete._RUN) and i["graded_by"] == ["event-chain", "receipt-core"]
             for i in green["inputs"]))
 
         # The bundle verification reads every payload through its own descriptors, never _read_live, so a
@@ -939,15 +987,69 @@ def self_test():
             (here, "_verified_bundle", rowless_approval),
             (here, "_digest_only", unattested_digest_only)])["verdict"] == ADOPTED_AND_VALID)
 
-        # An absent digest-only file keeps its finding class: INVALID, decided by the unread input.
-        def absent_approval(root_fd, rel):
-            if rel == approval_rel and sys._getframe(1).f_globals is vars(here):
-                return real_read(root_fd, rel)[0], None
-            return real_read(root_fd, rel)
+        # A file absent at this module's read is judged by the bundle verification. Gone only after a
+        # verification that found it present, it changed between the two reads: cannot-evaluate on every
+        # read path (a digest-only file, an outcome event, the receipt core), never a finding.
+        def absent_at_read(target):
+            def read(root_fd, rel):
+                if rel == target and sys._getframe(1).f_globals is vars(here):
+                    return real_read(root_fd, rel)[0], None
+                return real_read(root_fd, rel)
+            return read
 
-        absent = case(_full_fixture, on + [(apply, "_read_live", absent_approval)])
-        check("absent-digest-only-file-finding", decided(absent, INVALID, "unread-inputs")
-              and [(r["path"], r["outcome"]) for r in absent["unread_inputs"]] == [(approval_rel, FINDING)])
+        def absent_is_finding(rel, verified):
+            # The rule this guard replaced: an absent file was a finding whatever the verification saw.
+            return _Leg(FINDING, "{} is absent".format(rel))
+
+        def absent_is_race(rel, verified):
+            # The opposite misreading: every absence a race, even one the verification itself found.
+            return _Leg(CANNOT, "{} is absent".format(rel))
+
+        for label, target, decider in (("digest-only-file", approval_rel, "unread-inputs"),
+                                       ("event", genesis_rel, "event-chain"),
+                                       ("receipt-core", receipt_rel, "receipt-core")):
+            vanish = on + [(apply, "_read_live", absent_at_read(target))]
+            doc = case(_full_fixture, vanish)
+            why = leg_reason(doc, decider) + " ".join(r["reason"] for r in doc["unread_inputs"])
+            check("vanished-" + label + "-after-verification-cannot", decided(doc, CANNOT_EVALUATE, decider)
+                  and digest_of(doc, target) == [] and "found it present" in why
+                  and all(r["outcome"] == CANNOT for r in doc["unread_inputs"]))
+            check("flip-vanished-" + label + "-absence-as-finding-invalid",
+                  decided(case(_full_fixture, vanish + [(here, "_absent", absent_is_finding)]), INVALID, decider))
+
+        # A listed file already missing when the bundle verification reads it is that verification's own
+        # finding: INVALID, and the digest-only row keeps the finding class. The completion leg runs its own
+        # verification first, so the file is removed just before this module's verification only.
+        real_verify = apply.verify_bundle
+
+        def removing_verify(root, run_id, inventory_bytes=None):
+            if sys._getframe(1).f_globals is vars(here):
+                os.unlink(os.path.join(root, *approval_rel.split("/")))
+            return real_verify(root, run_id, inventory_bytes=inventory_bytes)
+
+        inventory_rel = apply.inventory_rel(complete._RUN)
+
+        def credited(doc):
+            return [i["graded_by"] for i in doc["inputs"] if i["path"] == inventory_rel]
+
+        def outcome_of(doc, rel):
+            return [r["outcome"] for r in doc["unread_inputs"] if r["path"] == rel]
+
+        # The other digest-only files are unattested (cannot-evaluate) once the verification fails.
+        missing = on + [(apply, "verify_bundle", removing_verify)]
+        doc = case(_full_fixture, missing)
+        check("digest-only-file-missing-at-verification-invalid", decided(doc, INVALID, "event-chain")
+              and outcome_of(doc, approval_rel) == [FINDING]
+              and all(r["outcome"] == CANNOT for r in doc["unread_inputs"] if r["path"] != approval_rel)
+              and "is missing" in leg_reason(doc, "event-chain") and credited(doc) == [[]])
+        check("flip-missing-digest-only-as-race-cannot-row", outcome_of(case(
+            _full_fixture, missing + [(here, "_absent", absent_is_race)]), approval_rel) == [CANNOT])
+        # With no event-chain leg to carry the verification's finding, the digest-only row decides.
+        unchained = missing + [(here, "LEGS", without_chain)]
+        check("digest-only-file-missing-at-verification-row-decides-invalid",
+              decided(case(_full_fixture, unchained), INVALID, "unread-inputs"))
+        check("flip-missing-digest-only-as-race-cannot", decided(case(
+            _full_fixture, unchained + [(here, "_absent", absent_is_race)]), CANNOT_EVALUATE, "receipt-core"))
 
         real_decide = _decide
 
@@ -955,12 +1057,69 @@ def self_test():
             # The decision this guard replaced: every unread input was cannot-evaluate, whatever its class.
             return real_decide(legs, [dict(row, outcome=CANNOT) for row in unread_rows])
 
-        check("flip-absent-digest-only-classless-cannot", decided(case(_full_fixture, on + [
-            (apply, "_read_live", absent_approval), (here, "_decide", classless)]), CANNOT_EVALUATE, "unread-inputs"))
+        check("flip-missing-digest-only-classless-cannot", decided(case(
+            _full_fixture, unchained + [(here, "_decide", classless)]), CANNOT_EVALUATE, "receipt-core"))
+
+        # The bundle verification is started at most once per run: a deadline or an exception that ends it
+        # in receipt-core is shared by event-chain as cannot-evaluate, never run again, and receipt-core
+        # keeps deciding with its own reason.
+        calls = dict(n=0)
+
+        def sleep_past():
+            import time
+            time.sleep(1.5)
+
+        def raise_oserror():
+            raise OSError("injected for the self-test")
+
+        def interrupted(fault):
+            def verify(root, run_id, read):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    fault()
+                return real_verified(root, run_id, read)
+            return verify
+
+        def retrying_once(root, run_id, read, memo, leg):
+            # The memo this guard replaced: only a returned result or a raised _Leg was kept, so a deadline
+            # or another exception left it empty and the next leg ran the verification again.
+            if "bundle" not in memo:
+                memo["bundle"] = _attempt(lambda: _verified_bundle(root, run_id, read))
+            if not isinstance(memo["bundle"], _Leg):
+                _credit(read, memo["bundle"][0][1], leg)
+            return memo["bundle"]
+
+        def counted(fault, patches):
+            calls["n"] = 0
+            doc = case(_full_fixture, on + patches + [(here, "_verified_bundle", interrupted(fault))])
+            return doc, calls["n"]
+
+        quick = [(here, "LEG_DEADLINE_SECONDS", dict(LEG_DEADLINE_SECONDS, **{"receipt-core": 0.2}))]
+        for label, fault, patches, said in (("deadline", sleep_past, quick, "deadline"),
+                                            ("oserror", raise_oserror, [], "OSError")):
+            doc, n = counted(fault, patches)
+            check("verification-ended-by-" + label + "-runs-once-shared", n == 1
+                  and decided(doc, CANNOT_EVALUATE, "receipt-core") and said in leg_reason(doc, "receipt-core")
+                  and "is not run again" in leg_reason(doc, "event-chain")
+                  and all(r["outcome"] == CANNOT for r in doc["unread_inputs"]))
+            doc, n = counted(fault, patches + [(here, "_bundle_once", retrying_once)])
+            check("flip-verification-ended-by-" + label + "-retried-runs-twice", n == 2
+                  and decided(doc, CANNOT_EVALUATE, "receipt-core"))
+
+        # The inventories are credited to each leg that received the passing verification, and only to it.
+        real_credit = _credit
+        event_chain_only = (here, "_credit", lambda read, rels, leg: real_credit(read, rels, "event-chain"))
+        receipt_only = on + [(here, "LEGS", without_chain)]
+        check("inventory-credited-to-receipt-core-alone", credited(case(_full_fixture, receipt_only))
+              == [["receipt-core"]])
+        check("inventory-credited-to-both-legs", credited(case(_full_fixture, on)) == [["event-chain", "receipt-core"]])
+        check("flip-inventory-credited-to-event-chain-receipt-core-alone-red", credited(case(
+            _full_fixture, receipt_only + [event_chain_only])) == [["event-chain"]])
+        check("flip-inventory-credited-to-event-chain-both-legs-red", credited(case(
+            _full_fixture, on + [event_chain_only])) == [["event-chain"]])
 
         # Two rows claiming one path: verify_bundle refuses that first, so it is stubbed here to hand back a
         # second bundle-root inventory carrying the same rows.
-        real_verify = apply.verify_bundle
 
         def doubled_inventory(root, run_id, inventory_bytes=None):
             verified = real_verify(root, run_id, inventory_bytes=inventory_bytes)
