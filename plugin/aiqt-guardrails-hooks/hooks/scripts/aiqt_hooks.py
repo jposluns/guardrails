@@ -36534,9 +36534,10 @@ class _DeadlineWindow:
 
     def _take(self):
         """The take, run with every maskable signal blocked, in the order the class docstring gives. The
-        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
-        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
-        back, with the disposition, before the exception goes on."""
+        clock is read just before the take, so the take itself counts as time the window used. That does
+        not keep the restore from being late: _give_back says by how much a caller timer can come back late.
+        Anything that raises once the timer is taken gives it back, with the disposition, before the
+        exception goes on."""
         handler = signal.getsignal(signal.SIGALRM)
         began = time.monotonic()
         timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
@@ -36558,8 +36559,12 @@ class _DeadlineWindow:
 
     def _give_back(self):
         """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
-        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
-        due expiry queued last. `armed` is False when it returns or raises."""
+        operation through _twice, the clock read once to decide whether the caller's timer came due and what
+        it has left, and a due expiry queued last. setitimer counts the countdown from the moment the re-arm
+        runs, so a caller timer comes back late by the time between that clock read and the re-arm (normally
+        microseconds; a stall of the process in between adds its whole length) plus up to a microsecond from
+        setitimer rounding up; a relative re-arm computed before it runs cannot avoid this. `armed` is False
+        when it returns or raises."""
         self._live = False
         if not self.armed:
             return
