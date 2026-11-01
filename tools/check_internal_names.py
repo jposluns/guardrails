@@ -113,7 +113,12 @@ applies (the archive-size bound on a read that stops one byte past it, the parse
 file exactly, and every member read in full under zipfile's CRC and header checks; nothing is extracted to
 disk). A .zip that fails it CANNOT BE EVALUATED and fails closed at exit 2, named with the leak gate's
 reason. A .zip that passes is scanned when it decodes as UTF-8 and is otherwise skipped as binary, the only
-non-UTF-8 tracked file the role rule skips. Any other non-UTF-8 tracked file whatever its suffix (a
+non-UTF-8 tracked file the role rule skips. Every tracked file whose suffix is TRACKED_PNG_SUFFIX (.png, in
+lower case only) goes through the PNG rule, verify_png (stated beside TRACKED_PNG_SUFFIX): a .png it refuses
+(malformed, truncated, over a size, chunk-count or inflate bound) CANNOT BE EVALUATED and fails closed at exit
+2, named with its reason, and in a .png it accepts the text of every textual chunk and every chunk it cannot
+classify is scanned as a text file's text is, the pixel data and standard non-text ancillary chunks unread.
+Any other non-UTF-8 tracked file whatever its suffix (a
 malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
 tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
 the way an unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed
@@ -122,7 +127,8 @@ failed or empty listing) the rule cannot run and the gate exits 2.
 WHAT THE ROLE RULE CANNOT SEE: an untracked or git-ignored file (outside the scoped scan), a generated
 output that is not committed and is not handed to it as a tracked file (a built release archive, a rendered
 site that is not checked in), the content of a tracked .zip's members, which the archive rule reads in
-memory to verify the archive but this rule never scans (the leak gate scans them), a staged change that
+memory to verify the archive but this rule never scans (the leak gate scans them), text drawn in a tracked
+.png's pixels or held in a chunk the PNG rule skips (see TRACKED_PNG_SUFFIX), a staged change that
 differs from the working-tree copy (it reads the working tree), and the word split or encoded (an HTML
 entity, a zero-width character) so the plain pattern does not match.
 
@@ -151,7 +157,12 @@ its exact size and one byte above too, and an accepted archive that decodes as U
 signature-prefixed .zip that is not an archive, valid UTF-8 or not, a .zip with one member failing its CRC, a
 .zip of bytes ahead of an empty archive's end record, the archive with the bound one byte under its size,
 and the archive followed by bytes past the bound each exit 2 named with the leak gate's reason, and the
-archive deleted from the working tree exits 2 as absent). The self-test exits 0 only when
+archive deleted from the working tree exits 2 as absent), and that the PNG rule accepts a clean minimal
+.png and refuses (exit 2) a bad signature, a bad CRC, a truncated chunk, a missing IEND, bytes after IEND,
+IHDR out of place and a zTXt over the inflate bound, finds the role name in tEXt, zTXt, compressed iTXt and
+an unclassified chunk, leaves a .PNG and a .gif unevaluable, and holds each bound at both ends, each of its
+ten listed vectors paired with a copy of the gate with that check removed that turns it red. The self-test
+exits 0 only when
 every case ran and passed; 1 when any case failed (it also prints the cases it did not run); otherwise, when
 it skipped a case, 3. It never exits 0 after a skip. Skip reasons it prints include, as examples rather than
 a complete set:
@@ -183,6 +194,7 @@ import stat
 import subprocess
 import tomllib
 import zipfile
+import zlib
 from pathlib import Path
 
 # Import the sibling modules WITHOUT placing this script's own directory AHEAD of the stdlib on sys.path.
@@ -198,12 +210,39 @@ import check_leaks  # noqa: E402  reuse the leak gate's normalization + structur
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 SKIP_NAMES = {"internal-name-hashes.txt", "check_internal_names.py", "check_leaks.py", "leak-hashes.txt"}
 TEXT_SUFFIXES = check_leaks.TEXT_SUFFIXES
-# The suffix of the one binary format the repository tracks, the ZIP archive (the committed skill archives
-# under site/downloads/). Every tracked file under it goes through the leak gate's archive rule
+# The suffix of the ZIP archive, one of the two binary formats the role rule evaluates (the committed skill
+# archives under site/downloads/). Every tracked file under it goes through the leak gate's archive rule
 # (check_leaks.verify_archive) whether or not its bytes decode as UTF-8, so the suffix only selects the rule:
 # a file the rule refuses cannot be evaluated, and only a file it accepts can be skipped as binary. A
-# tracked file in any other binary format cannot be evaluated until a rule for it is added here.
+# tracked file in any binary format other than these two cannot be evaluated until a rule for it is added here.
 TRACKED_ARCHIVE_SUFFIX = ".zip"
+# The suffix of the PNG image, the other binary format the role rule evaluates (a site link-preview card),
+# matched exactly: ".PNG", ".gif" and every other binary suffix still cannot be evaluated. Every tracked file
+# under it goes through verify_png whether or not its bytes decode as UTF-8, and it holds the ZIP rule's
+# posture: anything the rule cannot read in full cannot be evaluated (exit 2), never skipped. The read stops
+# one byte past MAX_PNG_FILE_SIZE and a file over it is refused; then the 8-byte signature is required and
+# every chunk is walked, at most MAX_PNG_CHUNKS of them, each length within the bytes left, each CRC checked,
+# a 13-byte IHDR first and only there, an empty IEND last with nothing after it, every chunk type four ASCII
+# letters. In a file the rule accepts, the text of every textual chunk (tEXt, zTXt, iTXt, and the iCCP profile
+# name and profile) and of every chunk it cannot classify as pixel or standard non-text ancillary data (eXIf,
+# sPLT and any unknown type, read as Latin-1) is scanned by the role rule exactly as a text file's text is, a
+# hit being a finding (exit 1). zTXt, compressed iTXt and the iCCP profile are inflated under one
+# MAX_PNG_INFLATED_SIZE budget per file, each inflate asking for at most one byte past what is left of it; over
+# the budget, a corrupt stream, a stream that does not end or bytes after its end cannot be evaluated, and so
+# can a textual chunk missing a separator, naming a compression method other than zlib, or holding iTXt text
+# that is not valid UTF-8. The pixel chunks and the standard non-text ancillary chunks (_PNG_SKIPPED) are not
+# read. RESIDUAL: pixels are not read, so text drawn in the image is not seen; nor is text placed inside a
+# skipped chunk's bytes (after the end of the IDAT zlib stream, or in a standard ancillary chunk's data), text
+# in an encoding that is not ASCII-compatible (UTF-16 inside eXIf or an ICC profile), or a word split or
+# encoded, as in a text file. IHDR's field values and the pixel stream are not validated.
+TRACKED_PNG_SUFFIX = ".png"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAX_PNG_FILE_SIZE = 8 * 1024 * 1024  # a link-preview card is well under 1 MiB
+MAX_PNG_CHUNKS = 10000  # an encoder splitting IDAT at 8 KiB needs about 1000 at the size bound
+MAX_PNG_INFLATED_SIZE = 1024 * 1024  # inflated text per file, all compressed chunks together
+_PNG_SKIPPED = frozenset((b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"cHRM", b"gAMA", b"sBIT", b"sRGB",
+                          b"cICP", b"mDCV", b"cLLI", b"bKGD", b"hIST", b"pHYs", b"tIME", b"acTL", b"fcTL",
+                          b"fdAT"))
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
@@ -739,6 +778,120 @@ def tracked_files(root):
     return sorted(rels)
 
 
+def _png_inflate(data, budget, where):
+    """Inflate one zlib stream from a PNG chunk, asking for at most `budget` + 1 bytes so the output is
+    bounded before it is held. More than `budget` bytes, a corrupt stream, a stream that does not end and
+    bytes after its end each raise CannotEvaluate naming the chunk."""
+    inflater = zlib.decompressobj()
+    try:
+        out = inflater.decompress(data, budget + 1)
+    except zlib.error as exc:
+        raise check_leaks.CannotEvaluate("compressed text cannot be inflated: {}".format(exc), where)
+    if len(out) > budget:
+        raise check_leaks.CannotEvaluate("compressed text inflates past MAX_PNG_INFLATED_SIZE ({}) for the "
+                                         "file; the rest was not inflated".format(MAX_PNG_INFLATED_SIZE), where)
+    if not inflater.eof or inflater.unused_data:
+        raise check_leaks.CannotEvaluate("compressed text is not one complete zlib stream with nothing after "
+                                         "it", where)
+    return out
+
+
+def _png_fields(body, count, where):
+    """`body` cut at its first `count` NUL separators into count + 1 fields; a missing separator raises
+    CannotEvaluate naming the chunk."""
+    fields = body.split(b"\x00", count)
+    if len(fields) != count + 1:
+        raise check_leaks.CannotEvaluate("a NUL separator the chunk type requires is missing", where)
+    return fields
+
+
+def png_sections(data):
+    """The PNG rule (see TRACKED_PNG_SUFFIX) over a file's bytes: returns [(where, text)], one entry for
+    each chunk whose text the role rule scans, `where` naming the chunk by position and type; raises
+    CannotEvaluate with the first refusal (naming the chunk when one chunk is the cause)."""
+    if len(data) > MAX_PNG_FILE_SIZE:
+        raise check_leaks.CannotEvaluate("a PNG image of more than MAX_PNG_FILE_SIZE ({}) bytes; the read "
+                                         "stopped at {} bytes and the rest was not read".format(
+                                             MAX_PNG_FILE_SIZE, len(data)))
+    if data[:8] != PNG_SIGNATURE:
+        raise check_leaks.CannotEvaluate("the first 8 bytes are not the PNG signature")
+    sections, pos, count, inflated, ended = [], 8, 0, 0, False
+    while pos < len(data):
+        count += 1
+        where = "chunk {}".format(count)
+        if count > MAX_PNG_CHUNKS:
+            raise check_leaks.CannotEvaluate("more than MAX_PNG_CHUNKS ({}) chunks; the rest was not "
+                                             "read".format(MAX_PNG_CHUNKS), where)
+        left = len(data) - pos - 12
+        if left < 0:
+            raise check_leaks.CannotEvaluate("truncated chunk: {} byte(s) left, fewer than a chunk's 12-byte "
+                                             "frame".format(len(data) - pos), where)
+        length = int.from_bytes(data[pos:pos + 4], "big")
+        if length > left:
+            raise check_leaks.CannotEvaluate("truncated chunk: its length {} is over the {} byte(s) "
+                                             "left".format(length, left), where)
+        ctype = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        stored_crc = int.from_bytes(data[pos + 8 + length:pos + 12 + length], "big")
+        pos += 12 + length
+        if not ctype.isalpha():
+            raise check_leaks.CannotEvaluate("the chunk type is not four ASCII letters", where)
+        where = "chunk {} {}".format(count, ctype.decode("ascii"))
+        if zlib.crc32(ctype + body) != stored_crc:
+            raise check_leaks.CannotEvaluate("CRC mismatch", where)
+        if (count == 1) != (ctype == b"IHDR"):
+            raise check_leaks.CannotEvaluate("IHDR must be the first chunk and only there", where)
+        if ctype == b"IHDR" and length != 13:
+            raise check_leaks.CannotEvaluate("IHDR holds {} bytes, not 13".format(length), where)
+        if ctype == b"IEND":
+            if length:
+                raise check_leaks.CannotEvaluate("IEND holds {} bytes, not none".format(length), where)
+            ended = True
+            break
+        if ctype in _PNG_SKIPPED:
+            continue
+        if ctype == b"tEXt":
+            sections.append((where, body.decode("latin-1").replace("\x00", "\n")))
+        elif ctype in (b"zTXt", b"iCCP"):
+            keyword, packed = _png_fields(body, 1, where)
+            if packed[:1] != b"\x00":
+                raise check_leaks.CannotEvaluate("compression method is not zlib (0)", where)
+            text = _png_inflate(packed[1:], MAX_PNG_INFLATED_SIZE - inflated, where)
+            inflated += len(text)
+            sections.append((where, keyword.decode("latin-1") + "\n" + text.decode("latin-1")))
+        elif ctype == b"iTXt":
+            keyword, rest = _png_fields(body, 1, where)
+            if rest[:2] not in (b"\x00\x00", b"\x01\x00"):
+                raise check_leaks.CannotEvaluate("compression flag and method are not 0 0 or 1 0", where)
+            language, translated, text = _png_fields(rest[2:], 2, where)
+            if rest[:1] == b"\x01":
+                text = _png_inflate(text, MAX_PNG_INFLATED_SIZE - inflated, where)
+                inflated += len(text)
+            try:
+                parts = (keyword.decode("latin-1"), language.decode("latin-1"), translated.decode("utf-8"),
+                         text.decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise check_leaks.CannotEvaluate("iTXt text is not valid UTF-8: {}".format(exc), where)
+            sections.append((where, "\n".join(parts)))
+        else:
+            sections.append((where, body.decode("latin-1")))
+    if not ended:
+        raise check_leaks.CannotEvaluate("no IEND chunk: the image ends after {} chunk(s)".format(count))
+    if pos != len(data):
+        raise check_leaks.CannotEvaluate("{} byte(s) after IEND".format(len(data) - pos))
+    return sections
+
+
+def verify_png(path):
+    """The PNG rule for a tracked file: its bytes read through one descriptor, stopping one byte past
+    MAX_PNG_FILE_SIZE so a file that grows after the caller's presence check is never read past the bound,
+    then png_sections. Raises CannotEvaluate or, on a read error, OSError. It makes no stat probe: the
+    caller classifies the path before the open (an open of a FIFO blocks)."""
+    with path.open("rb") as handle:
+        data = handle.read(MAX_PNG_FILE_SIZE + 1)
+    return png_sections(data)
+
+
 def scan_role_text(text):
     """(line, label) role-name and review-round label findings in `text`. A line carrying an `internal-allow`
     marker is exempt; the marker exempts that line only, never the rest of the file."""
@@ -756,13 +909,31 @@ def scan_tracked_roles(root, relpaths):
     TRACKED_ARCHIVE_SUFFIX goes through check_leaks.verify_archive, the leak gate's archive rule, whether or
     not its bytes decode as UTF-8: one the rule refuses is unevaluable, named with the leak gate's reason (and
     the member, when one member is the cause); one it accepts is scanned when its bytes decode as UTF-8 and is
-    otherwise skipped as binary. Any other file that is not valid UTF-8, whatever its suffix, and a tracked
-    path absent from the working tree are unevaluable too. A tracked path that is present but not a regular
-    file raises OSError (exit 2) through _present, before any open, and so does a read error."""
+    otherwise skipped as binary. A file whose suffix is TRACKED_PNG_SUFFIX goes through verify_png whether or
+    not its bytes decode as UTF-8: one it refuses is unevaluable, named with its reason (and the chunk, when
+    one chunk is the cause); in one it accepts, the text of each chunk it returns is scanned as a text file's
+    text is, a finding naming the chunk and the line within its text. Any other file that is not valid UTF-8,
+    whatever its suffix, and a tracked path absent from the working tree are unevaluable too. A tracked path
+    that is present but not a regular file raises OSError (exit 2) through _present, before any open, and so
+    does a read error."""
     findings, unevaluable = [], []
     cannot = "; the role-name and review-round label rule cannot evaluate it"
     for rel in relpaths:
         path = root / rel
+        if path.suffix == TRACKED_PNG_SUFFIX:
+            try:
+                sections = verify_png(path) if _present(path) else None
+            except check_leaks.CannotEvaluate as exc:
+                unevaluable.append("{}: tracked .png fails the PNG rule ({}{}){}".format(
+                    rel, "" if exc.member is None else exc.member + ": ", exc, cannot))
+                continue
+            if sections is None:
+                unevaluable.append("{}: tracked file is absent from the working tree{}".format(rel, cannot))
+                continue
+            for where, text in sections:
+                for number, label in scan_role_text(text):
+                    findings.append("{}:{}:{}: {}".format(rel, where, number, label))
+            continue
         try:
             if path.suffix != TRACKED_ARCHIVE_SUFFIX:
                 text = _read_present_text(path)
@@ -2590,6 +2761,175 @@ def _self_test(caller_env=None):
                   not by_bytes and any("docs/c.md" in f for f in by_text), (by_bytes, by_text))
         finally:
             shutil.rmtree(sufx, ignore_errors=True)
+
+        # 32. DISCRIMINATING (the PNG rule, verify_png, applies to every tracked .png and to no other
+        #     suffix): each vector below is a tracked file run through scan_tracked_roles, and each of the
+        #     first ten is paired with a flip, a scratch copy of this gate with that vector's check removed
+        #     (loaded through _load_ratchet_mutant, each mutated source text required to occur exactly
+        #     once; the anchors are concatenated so they do not match themselves), which must give the
+        #     vector a verdict other than the expected one. The three bounds are then checked one unit
+        #     inside, exactly at and one unit outside, and the real gate on a fixture git repository exits
+        #     0 on a clean tracked .png, 1 on one whose tEXt carries the role name and 2 on a .PNG.
+        import struct
+
+        def png_chunk(ctype, body):
+            return struct.pack(">I", len(body)) + ctype + body + struct.pack(">I", zlib.crc32(ctype + body))
+
+        png_head = PNG_SIGNATURE + png_chunk(b"IHDR", struct.pack(">IIBBBBB", 1, 1, 8, 0, 0, 0, 0))
+        png_idat = png_chunk(b"IDAT", zlib.compress(b"\x00\x00"))
+        png_iend = png_chunk(b"IEND", b"")
+        clean_png = png_head + png_idat + png_iend
+        role_text = b"Signed off by the Architect."  # internal-allow
+        plain_text = b"A link-preview card."
+
+        def png_with(*chunks):
+            return png_head + b"".join(png_chunk(ctype, body) for ctype, body in chunks) + png_idat + png_iend
+
+        bomb = zlib.compress(b"\x00" * (MAX_PNG_INFLATED_SIZE + 4096), 9)
+        role = "internal role name"
+        rule = ": tracked .png fails the PNG rule ("
+        not_utf8 = ": tracked file is not valid UTF-8"
+        pngdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-png-"))
+        try:
+            this = sys.modules[__name__]
+
+            def tracked_verdict(module, name, data):
+                (pngdir / name).write_bytes(data)
+                try:
+                    found, unevaluable = module.scan_tracked_roles(pngdir, [name])
+                except Exception as exc:  # a mutant may fail another way; that is a verdict too
+                    return "error: {}: {}".format(type(exc).__name__, exc)
+                finally:
+                    (pngdir / name).unlink()
+                return "\n".join(unevaluable + found) or "clean"
+
+            def png_holds(expect, got):
+                return got == expect if expect == "clean" else (expect in got and "\n" not in got)
+
+            gate_source = Path(__file__).resolve().read_text(encoding="utf-8")
+            mdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-png-mutant-"))
+            try:
+                for check_id, flip_id, relname, data, expect, mutations in (
+                        ("png/clean-minimal", "png/clean-minimal-flip", "card.png", clean_png, "clean",
+                         (("if path.suffix == " + "TRACKED_PNG_SUFFIX:", "if False:"),)),
+                        ("png/bad-signature", "png/bad-signature-flip", "card.png",
+                         b"\x89PNG\r\n\x1a\x0b" + clean_png[8:],
+                         "card.png" + rule + "the first 8 bytes are not the PNG signature)",
+                         (("if data[:8] != " + "PNG_SIGNATURE:", "if False:"),)),
+                        ("png/bad-crc", "png/bad-crc-flip", "card.png",
+                         clean_png[:-1] + bytes([clean_png[-1] ^ 1]),
+                         "card.png" + rule + "chunk 3 IEND: CRC mismatch)",
+                         (("if zlib.crc32(ctype + body) != " + "stored_crc:", "if False:"),)),
+                        ("png/truncated-chunk", "png/truncated-chunk-flip", "card.png", png_head + png_idat[:-3],
+                         "card.png" + rule + "chunk 2: truncated chunk: its length",
+                         (("if length > " + "left:", "if False:"),)),
+                        ("png/missing-iend", "png/missing-iend-flip", "card.png", png_head + png_idat,
+                         "card.png" + rule + "no IEND chunk: the image ends after 2 chunk(s))",
+                         (("if not " + "ended:", "if False:"),)),
+                        ("png/trailing-after-iend", "png/trailing-after-iend-flip", "card.png", clean_png + b"\x00",
+                         "card.png" + rule + "1 byte(s) after IEND)",
+                         (("if pos != " + "len(data):", "if False:"),)),
+                        ("png/text-chunk-finding", "png/text-chunk-finding-flip", "card.png",
+                         png_with((b"tEXt", b"Comment\x00" + role_text)),
+                         "card.png:chunk 2 tEXt:2: " + role,
+                         (('sections.append((where, body.decode("latin-1").' + 'replace("\\x00", "\\n")))',
+                           "pass"),)),
+                        ("png/ztxt-chunk-finding", "png/ztxt-chunk-finding-flip", "card.png",
+                         png_with((b"zTXt", b"Comment\x00\x00" + zlib.compress(role_text))),
+                         "card.png:chunk 2 zTXt:2: " + role,
+                         (('sections.append((where, keyword.decode("latin-1") + "\\n" + ' + 'text.decode("latin-1")))',
+                           "pass"),)),
+                        ("png/decompression-bomb", "png/decompression-bomb-flip", "card.png",
+                         png_with((b"zTXt", b"Comment\x00\x00" + bomb)),
+                         "card.png" + rule + "chunk 2 zTXt: compressed text inflates past MAX_PNG_INFLATED_SIZE",
+                         (("out = inflater.decompress(data, " + "budget + 1)", "out = inflater.decompress(data)"),
+                          ("if len(out) > " + "budget:", "if False:"))),
+                        ("png/non-png-binary-refused", "png/non-png-binary-refused-flip", "card.PNG", clean_png,
+                         "card.PNG" + not_utf8,
+                         (("if path.suffix == " + "TRACKED_PNG_SUFFIX:",
+                           "if path.suffix.lower() == " + "TRACKED_PNG_SUFFIX:"),))):
+                    got = tracked_verdict(this, relname, data)
+                    held = png_holds(expect, got)
+                    if relname == "card.PNG":
+                        gif = tracked_verdict(this, "card.gif", clean_png)
+                        held = held and gif == "card.gif" + not_utf8 + "; the role-name and review-round " \
+                            "label rule cannot evaluate it"
+                    check(check_id, held, (expect, got))
+                    source, faults = gate_source, []
+                    for anchor, replacement in mutations:
+                        if source.count(anchor) != 1:
+                            faults.append("anchor {!r} occurs {} times".format(anchor, source.count(anchor)))
+                        source = source.replace(anchor, replacement)
+                    flipped = None
+                    if not faults:
+                        module = _load_ratchet_mutant(source, mdir, flip_id[4:].replace("-", "_"))
+                        flipped = tracked_verdict(module, relname, data)
+                        if (flipped == expect) if expect == "clean" else (expect in flipped):
+                            faults.append("the vector still holds with its check removed")
+                    check(flip_id, not faults, (faults, flipped))
+            finally:
+                shutil.rmtree(mdir, ignore_errors=True)
+            for check_id, relname, data, expect in (
+                    ("png/ihdr-first-required", "card.png", PNG_SIGNATURE + png_idat + png_head[8:] + png_iend,
+                     "card.png" + rule + "chunk 1 IDAT: IHDR must be the first chunk and only there)"),
+                    ("png/itxt-compressed-finding", "card.png",
+                     png_with((b"iTXt", b"Comment\x00\x01\x00en\x00\x00" + zlib.compress(role_text))),
+                     "card.png:chunk 2 iTXt:4: " + role),
+                    ("png/unclassified-chunk-scanned", "card.png", png_with((b"eXIf", b"MM\x00*" + role_text)),
+                     "card.png:chunk 2 eXIf:1: " + role)):
+                got = tracked_verdict(this, relname, data)
+                check(check_id, png_holds(expect, got), (expect, got))
+
+            # The three bounds, each patched around a vector's exact measure: one unit above and at it the
+            # vector passes, one unit below it the vector cannot be evaluated, named with that bound.
+            ztxt_clean = png_with((b"zTXt", b"Comment\x00\x00" + zlib.compress(plain_text)))
+            for check_id, bound, measure, data, reason in (
+                    ("png/file-size-bound-ends", "MAX_PNG_FILE_SIZE", len(clean_png), clean_png,
+                     "a PNG image of more than MAX_PNG_FILE_SIZE ({}) bytes; the read stopped at {} bytes".format(
+                         len(clean_png) - 1, len(clean_png))),
+                    ("png/chunk-count-bound-ends", "MAX_PNG_CHUNKS", 3, clean_png,
+                     "chunk 3: more than MAX_PNG_CHUNKS (2) chunks"),
+                    ("png/inflate-bound-ends", "MAX_PNG_INFLATED_SIZE", len(plain_text), ztxt_clean,
+                     "chunk 2 zTXt: compressed text inflates past MAX_PNG_INFLATED_SIZE ({})".format(
+                         len(plain_text) - 1))):
+                saved, seen = getattr(this, bound), []
+                try:
+                    for value in (measure + 1, measure, measure - 1):
+                        setattr(this, bound, value)
+                        seen.append(tracked_verdict(this, "card.png", data))
+                finally:
+                    setattr(this, bound, saved)
+                check(check_id, seen[:2] == ["clean", "clean"] and "card.png" + rule + reason in seen[2],
+                      (bound, seen))
+
+            pngrepo = tmp / "png-repo"
+            (pngrepo / ".aiqt").mkdir(parents=True)
+            (pngrepo / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                             encoding="utf-8")
+            (pngrepo / "card.png").write_bytes(clean_png)
+            wired = []
+            for name, content, want_rc, want in (
+                    ("card.png", clean_png, 0, "PASS"),
+                    ("hit.png", png_with((b"tEXt", b"Comment\x00" + role_text)), 1,
+                     "hit.png:chunk 2 tEXt:2: " + role),
+                    ("card.PNG", clean_png, 2, "card.PNG" + not_utf8)):
+                (pngrepo / name).write_bytes(content)
+                steps = (["init", "-q"],) if name == "card.png" else ()
+                for args in steps + (["add", "--", name],):
+                    step = subprocess.run(["git", "-C", str(pngrepo)] + args, capture_output=True, text=True,
+                                          env=_git_fixture_env.git_fixture_env(), timeout=60)
+                    if step.returncode != 0:
+                        wired.append("git {} failed: {!r}".format(args[0], step.stderr))
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    rc = run_gate(pngrepo)
+                report = out.getvalue() + err.getvalue()
+                if rc != want_rc or want not in report:
+                    wired.append("{}: expected exit {} with {!r}, got rc={} {!r}".format(
+                        name, want_rc, want, rc, report))
+            check("png/wired-gate-exit-codes", not wired, wired)
+        finally:
+            shutil.rmtree(pngdir, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2729,7 +3069,12 @@ def _self_test(caller_env=None):
           "comparison the gate makes) while one more label above the "
           "regenerated baseline still fails, and fails closed loud on a missing shipped manifest, "
           "an absent listed path, a non-UTF-8 listed text file and a baseline entry for a non-shipped "
-          "path.")
+          "path; and the PNG rule passes a clean minimal tracked .png, refuses (exit 2) a bad signature, "
+          "a bad CRC, a truncated chunk, a missing IEND, bytes after IEND, IHDR out of place and a zTXt "
+          "inflating past its bound, reports the role name in a tEXt, zTXt, compressed iTXt and "
+          "unclassified chunk as a finding (exit 1), still cannot evaluate a .PNG or a .gif, holds the "
+          "file-size, chunk-count and inflate bounds one unit inside, at and outside, and each of its ten "
+          "paired checks, removed in a copy of the gate, turns its vector red.")
     return 0
 
 
