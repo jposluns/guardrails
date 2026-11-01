@@ -11457,7 +11457,9 @@ def _gitalias_oracle_cases(tmp):
 # can be loaded in its place), reads the registry JSON in argv[2] and either runs the resume probes over
 # the root in argv[3] and prints their findings as one JSON line, or, with argv[4] "doctor", runs
 # tools/orch_doctor.py --resume-audit rooted at argv[3] and prints its exit code and output, or, with
-# argv[4] "haystack", prints the stop path's pending-decisions haystack as one JSON line.
+# argv[4] "haystack", prints the stop path's pending-decisions haystack as one JSON line, or, with argv[4]
+# "hold", builds the stop decision's context from live state rooted at argv[3] and prints the decision's
+# verdict and disposition rows as one JSON line.
 _RECORD_SURFACE_CHILD = (
     "import importlib.util, json, sys\n"
     "from pathlib import Path\n"
@@ -11475,12 +11477,17 @@ _RECORD_SURFACE_CHILD = (
     "    print(json.dumps(orch_doctor.main()))\n"
     "elif sys.argv[4:5] == ['haystack']:\n"
     "    print(json.dumps(hooks._orch_pending_haystack(reg, sys.argv[3])))\n"
+    "elif sys.argv[4:5] == ['hold']:\n"
+    "    data = {'hook_event_name': 'Stop', 'cwd': sys.argv[3], 'session_id': 's1'}\n"
+    "    ctx = hooks._orch_build_ctx(reg, sys.argv[3], 'stop', data, record_checkpoint=False)[0]\n"
+    "    verdict, _reason, disposition = hooks.decide_yield(ctx)\n"
+    "    print(json.dumps([verdict, [list(d) for d in disposition]]))\n"
     "else:\n"
     "    print(json.dumps(hooks._orch_resume_probes(reg, sys.argv[3])))\n")
 
 
 def _record_surface_child(hooks_file, root, reg, mode=None):
-    """Run _RECORD_SURFACE_CHILD (mode None, "doctor" or "haystack") in a new session under a 1 GiB
+    """Run _RECORD_SURFACE_CHILD (mode None, "doctor", "haystack" or "hold") in a new session under a 1 GiB
     address-space limit and a 20 s wall clock, killing its whole process group at the end: (timed out,
     exit code, stdout lines)."""
     import resource
@@ -11490,8 +11497,8 @@ def _record_surface_child(hooks_file, root, reg, mode=None):
     argv = [sys.executable, "-I", "-B", "-c", _RECORD_SURFACE_CHILD, str(hooks_file), str(reg_path), str(root)]
     if mode == "doctor":
         argv += ["doctor", str(Path(__file__).resolve().parent)]
-    elif mode == "haystack":
-        argv += ["haystack"]
+    elif mode in ("haystack", "hold"):
+        argv += [mode]
 
     def _limit():
         resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
@@ -11688,20 +11695,48 @@ def _record_surface_cases(tmp, hooks=aiqt_hooks, hooks_file=None):
           (timed_out, code, lines[-1:] == ["1"],
            any("declared record surface findings unreadable (not a regular file)" in ln for ln in lines)),
           (False, 0, True, True))
-    # The stop path's pending-decisions haystack is None (a human-decision item is held as cannot-evaluate)
-    # for a surface it cannot read in full: a FIFO with no writer and /dev/zero, in a child under a timeout
-    # and a memory limit, a directory, and a file longer than the bound. A file at or under the bound is
-    # read whole, with the line endings a text-mode open gives.
+    # The stop path's pending-decisions haystack is None for a surface it cannot read in full, and the stop
+    # decision built from live state then holds a human-decision item as cannot-evaluate: a FIFO with no
+    # writer, /dev/null (a device that ends under the bound, so only the regular-file check refuses it),
+    # /dev/zero (a device that never ends), a directory, and a file longer than the bound whose first line
+    # is the item's decision row. Each runs in a child under a timeout and a memory limit.
+    held = ["DENY", [["cannot_evaluate", "H-1", "cannot-evaluate", "pending surface unreadable; held"]]]
     for kind, cid in (("fifo", "stop/pending-decisions-fifo-holds"),
                       ("device", "stop/pending-decisions-device-holds"),
-                      ("directory", "stop/pending-decisions-directory-holds")):
-        root, reg = fixture("haystack-" + kind)
-        reg["record"]["pending_decisions"] = special(root, kind)
-        timed_out, code, lines = _record_surface_child(hooks_file, root, reg, mode="haystack")
-        check(cid, (timed_out, code, lines[-1:]), (False, 0, ["null"]))
+                      ("endless-device", "stop/pending-decisions-endless-device-holds"),
+                      ("directory", "stop/pending-decisions-directory-holds"),
+                      ("over", "stop/pending-decisions-size-over-bound-holds")):
+        f = Fixture(base, "hold-" + kind)
+        f.set_items([item("H-1", blocker={"kind": "human-decision", "ref": "D-1"})])
+        reg = json.loads((f.root / ".aiqt" / "orchestration.local.json").read_text(encoding="utf-8"))
+        if kind == "device":
+            reg["record"]["pending_decisions"] = "/dev/null"
+        elif kind == "endless-device":
+            reg["record"]["pending_decisions"] = special(f.root, "device")
+        elif kind == "over":
+            row = b"| D-1 | a |\n"
+            f.pending.write_bytes(row + b"x" * (bound + 1 - len(row)))
+        else:
+            reg["record"]["pending_decisions"] = special(f.root, kind)
+        got = []
+        for mode in ("haystack", "hold"):
+            timed_out, code, lines = _record_surface_child(hooks_file, f.root, reg, mode=mode)
+            out = json.loads(lines[-1]) if (code == 0 and lines) else lines[-1:]
+            if mode == "haystack" and isinstance(out, str):
+                out = "{} characters read".format(len(out))  # a read haystack is named by its length only
+            got.append((timed_out, code, out))
+        check(cid, got, [(False, 0, None), (False, 0, held)])
+    # The control: the same item over a readable surface holding its decision row is blocked, not held.
+    f = Fixture(base, "hold-control")
+    f.set_items([item("H-1", blocker={"kind": "human-decision", "ref": "D-1"})])
+    f.pending.write_bytes(b"| D-1 | a |\n")
+    reg = json.loads((f.root / ".aiqt" / "orchestration.local.json").read_text(encoding="utf-8"))
+    timed_out, code, lines = _record_surface_child(hooks_file, f.root, reg, mode="hold")
+    check("stop/pending-decisions-row-read-blocks",
+          (timed_out, code, json.loads(lines[-1]) if (code == 0 and lines) else lines[-1:]),
+          (False, 0, ["ALLOW", [["blocked", "H-1", "human-decision", "D-1"]]]))
     for label, offset, cid in (("under", -1, "stop/pending-decisions-size-under-bound-read"),
-                               ("at", 0, "stop/pending-decisions-size-at-bound-read"),
-                               ("over", 1, "stop/pending-decisions-size-over-bound-holds")):
+                               ("at", 0, "stop/pending-decisions-size-at-bound-read")):
         root, reg = fixture("haystack-size-" + label)
         (root / "pending_decisions.md").write_bytes(b"x" * (bound + offset))
         got = hooks._orch_pending_haystack(reg, str(root))
@@ -11710,6 +11745,30 @@ def _record_surface_cases(tmp, hooks=aiqt_hooks, hooks_file=None):
     (root / "pending_decisions.md").write_bytes(b"| D-1 | a |\r\n| D-2 | b |\rD-3: c\n")
     check("stop/pending-decisions-line-endings-read", hooks._orch_pending_haystack(reg, str(root)),
           "| D-1 | a |\n| D-2 | b |\nD-3: c\n")
+    # A handoff and a findings register with bare-CR or CRLF line endings give the findings their LF forms
+    # give, as a text-mode read did: the handoff's Branch and Gate lines follow a CR, and the findings
+    # register's open row on a merged pull request is not joined to its merge_pending row.
+    f = Fixture(base, "line-endings")
+    f._git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+           "commit", "-q", "--allow-empty", "-m", "first (#9)")
+    f._git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+           "commit", "-q", "--allow-empty", "-m", "second (#7)")
+    reg = json.loads((f.root / ".aiqt" / "orchestration.local.json").read_text(encoding="utf-8"))
+    handoff_lf = b"# Handoff\nBranch: other-branch\nGate: green @ 0000000\n"
+    findings_lf = b"# Findings\n| F-1 | open | pr:9 |\n| F-2 | merge_pending | pr:7 |\n"
+    for surface, text, cid in (
+            (f.handoff, handoff_lf, "resume-surface/handoff-line-endings-same-findings"),
+            (f.findings, findings_lf, "resume-surface/findings-line-endings-same-findings")):
+        got = []
+        for eol in (b"\n", b"\r\n", b"\r"):
+            surface.write_bytes(text.replace(b"\n", eol))
+            got.append(hooks._orch_resume_probes(reg, str(f.root)))
+        surface.write_bytes(b"")
+        starts = (("handoff names branch other-branch but HEAD is on main",
+                   "handoff gate marker cites commit 0000000 but HEAD is ") if surface == f.handoff
+                  else ("findings row still merge_pending on pr:7 ",))
+        want = [fi for fi in got[0] if fi.startswith(starts)]
+        check(cid, (len(want), got[1] == got[0], got[2] == got[0]), (len(starts), True, True))
 
 
 def main(report_path=None):

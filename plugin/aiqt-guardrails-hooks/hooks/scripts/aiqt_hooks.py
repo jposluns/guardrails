@@ -22287,8 +22287,7 @@ def _orch_pending_haystack(reg, root):
     data, detail = _orch_record_surface_read(declared)
     if detail is not None or len(data) > _ORCH_BARRIER_MAX_BYTES:
         return None
-    # the newline translation a text-mode open applies, so a row after a CR or CRLF still starts a line
-    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    return _orch_record_surface_text(data)
 
 
 def _orch_attestation_refs(reg, root, staleness):
@@ -31607,6 +31606,14 @@ def _orch_record_surface_read(path):
     return (b"".join(chunks), None)
 
 
+def _orch_record_surface_text(data):
+    """Decode the bytes _orch_record_surface_read gave for a record surface (handoff, findings or
+    pending_decisions) with the newline translation a text-mode open applies: a CRLF and then a lone CR
+    each become LF, so a Branch or Gate line, a findings row or a decision row after a CR still starts a
+    line. The bound is judged on the bytes, before this."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
     finding strings; empty means the recorded state matches observed reality. A record block that is
@@ -31637,7 +31644,7 @@ def _orch_resume_probes(reg, root):
                             .format(detail))
             handoff = ""
         else:
-            handoff = data.decode("utf-8", errors="replace")
+            handoff = _orch_record_surface_text(data)
         m = re.search(r"^Branch:\s*(\S+)\s*$", handoff, re.MULTILINE)
         if m:
             actual = _head_branch(root)
@@ -31711,7 +31718,7 @@ def _orch_merge_pending_findings(reg, root):
         detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
     if detail is not None:
         return ["declared findings register unreadable ({}): cannot-evaluate".format(detail)]
-    text = data.decode("utf-8", errors="replace")
+    text = _orch_record_surface_text(data)
     prs = set()
     for line in text.splitlines():
         if "merge_pending" in line:
