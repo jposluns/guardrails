@@ -33,5 +33,12 @@ The card image is site/images/aiqt-card.png, with the SHA-256 recorded above. It
 and illustration.svg in this folder. Every published site/*.html page except site/404.html carries the tag
 block above in its head, in this order, with canonical and og:url set to that page's own URL. That covers
 the pages tools/gen_site.py generates and the hand-maintained ones. tools/check_site.py checks every such
-page when AIQT_SITE_HOST is unset or names aiqt.ai, and skips the check under any other site host.
+page when AIQT_SITE_HOST is unset, empty or names aiqt.ai (or www.aiqt.ai), and under any other site host
+skips the check and prints a line saying so; a value that is not a plain host name (a port, a trailing
+dot, or a character a host name cannot hold) is refused.
 site/404.html is a noindex page, so it does not carry the block.
+
+Each tag must write its key exactly as the block above does: `rel="canonical"` in lower case, and each
+og: or twitter: property or name value in the same case with no surrounding whitespace. This is stricter
+than HTML for rel, whose tokens compare case-insensitively, so a `rel="Canonical"` a browser would honour
+fails the check.

@@ -236,10 +236,18 @@ class _HeadTagCollector(HTMLParser):
     browser's tree builder ends it: at `</head>`, at a `<body>` start or a `</body>`, `</html>` or
     `</br>` end tag, at the first start tag that is not one of HEAD_ELEMENTS, or at the first text that
     is not HTML whitespace (comments and the raw-text contents of `<script>`, `<style>` and `<title>` do
-    not end it; neither does anything inside a `<template>`). Where an element sits is None inside the
-    head, otherwise "outside <head>", or "inside <template> in <head>"/"inside <noscript> in <head>" for
-    one wrapped in those in the head (a template's contents are not in the document, and a browser running scripts
-    reads a noscript's contents as text). A link's key is ("link", "canonical") when one of its
+    not end it; neither does anything inside a `<template>`). It never ends later than a browser's would,
+    but may end sooner, so a block after that point fails as outside the head where a browser would still
+    read it in the head: the start tags `<noframes>`, `<basefont>`, `<bgsound>` and `<html>` end it here
+    and not in a browser, as does text inside a `<noscript>` (raw text to a browser running scripts), and
+    `</head>`, `<body>`, `</body>`, `</html>` or `</br>` end it here even inside raw text a self-closing
+    `<script/>`, `<style/>` or `<title/>` opened. A raw-text element opened that way stays open, as a
+    browser keeps it, up to its matching end tag: html.parser reports the tags inside it, but a browser
+    reads them as text. Where an element sits is None inside the
+    head, otherwise "outside <head>", "inside the raw text of <script> in <head>" (or of `<style>` or
+    `<title>`) for one read while such raw text is open, or "inside <template> in <head>"/"inside
+    <noscript> in <head>" for one wrapped in those in the head (a template's contents are not in the
+    document, and a browser running scripts reads a noscript's contents as text). A link's key is ("link", "canonical") when one of its
     whitespace-separated rel tokens is `canonical`; a meta's keys are ("meta", <value>) for its
     `property` value and its `name` value, so a `name="og:title"` meta still collides with the block's
     `property="og:title"`. Key values compare stripped and lowercased, so a case variant of a block tag
@@ -323,6 +331,10 @@ class _HeadTagCollector(HTMLParser):
             return
         if not self.in_head:
             place = "outside <head>"
+        elif self.raw_text:
+            # Only a self-closing <script/>, <style/> or <title/> lets a tag through here: a browser ignores
+            # the slash and reads everything up to the matching end tag as text, so this is not an element.
+            place = "inside the raw text of <{}> in <head>".format(self.raw_text)
         elif self.wrappers:
             place = "inside <{}> in <head>".format("template" if "template" in self.wrappers else "noscript")
         else:
@@ -392,20 +404,26 @@ def _validate_head_tags(page, url, target_rel):
     that head must end (at `</head>` or a `<body>` start) before the document does. For each tag of
     HEAD_TAG_BLOCK, keyed by a link's rel="canonical" or a meta's property or name value (compared
     stripped and lowercased): exactly one `<link>`/`<meta>` element in the whole page carries that key,
-    whatever its value; that element sits directly in the head, which ends where a browser's tree
-    builder ends it (see _HeadTagCollector), not inside a `<template>` or `<noscript>` there; it writes
-    its key exactly as the block does (no case change, no surrounding whitespace); its value (a link's
+    whatever its value; that element sits directly in the head, which ends no later than a browser's
+    tree builder ends it and in a few named cases sooner (see _HeadTagCollector), not inside a
+    `<template>` or `<noscript>` there nor inside raw text a self-closing `<script/>`, `<style/>` or
+    `<title/>` left open (such a tag still counts toward "exactly one", so a hidden copy beside the real
+    one fails as a duplicate, which is stricter than a browser); it writes
+    its key exactly as the block does (no case change, no surrounding whitespace; for a link, its rel
+    token written `canonical` in lower case, which is stricter than HTML, where rel tokens compare
+    ASCII case-insensitively); its value (a link's
     href, a meta's content) equals the block's value exactly, with `url` (the page's own URL) in the
     canonical href and og:url slots; and the block's tags appear in HEAD_TAG_BLOCK's order. So a second
     element with a block tag's key fails whatever its value and wherever it sits, a canonical or og:url
-    naming another page fails as a wrong value, and a block tag after the point where a browser ends the
-    head (`</head>`, `<body>`, a start tag that is not a head element, or text that is not whitespace)
+    naming another page fails as a wrong value, and a block tag after the point where the collector ends
+    the head (`</head>`, `<body>`, a start tag that is not a head element, or text that is not whitespace)
     fails as outside the head. A page the parser rejects, a page with no head or more than one, a head
     that never ends, or a keyed element carrying a duplicate attribute fails too; every failure names
     `target_rel`. Not established: that the block's tags are adjacent (other head elements may sit
     between them), anything about elements carrying none of the block's keys, whether a meta's key sits
     in `property` or `name`, attributes beyond the key and the value, and tag-like text inside comments,
-    `<script>`, `<style>` or `<title>` (not elements, so neither counted nor flagged)."""
+    `<script>`, `<style>` or `<title>` (not elements, so neither counted nor flagged, except a keyed tag
+    inside raw text a self-closing one left open, which counts and fails as misplaced)."""
     spec = _head_block_spec(url)
     collector = _HeadTagCollector({s[0] for s in spec})
     try:
@@ -1663,7 +1681,9 @@ def _self_test():
             ("head ended by stray text", ok_head.replace(_og_title, "stray text " + _og_title)),
             ("head ended by an img", ok_head.replace(_og_title, '<img src="/x.png" alt="x">' + _og_title)),
             ("head ended by svg around og:title", ok_head.replace(_og_title, "<svg>" + _og_title + "</svg>")),
-            ("head ended by an end body tag", ok_head.replace(_og_title, "</body>" + _og_title))):
+            ("head ended by an end body tag", ok_head.replace(_og_title, "</body>" + _og_title)),
+            ("head ended by an end html tag", ok_head.replace(_og_title, "</html>" + _og_title)),
+            ("head ended by an end br tag", ok_head.replace(_og_title, "</br>" + _og_title))):
         _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
                        SchemaError, "sits outside <head>")
     # Whitespace, comments, and the raw-text contents of title, script and style do not end the head,
@@ -1676,6 +1696,26 @@ def _self_test():
             _own_url, "site/rules.html")
     except SchemaError as exc:
         failures.append("head whitespace and comments: unexpected SchemaError: {}".format(exc))
+    # The raw-text contents of title, script and style alone, each holding tag-like text, do not end it.
+    case_count += 1
+    try:
+        _validate_head_tags(ok_head.replace(
+            _og_title, "<title>a <div> title</title><script>if (a < b) {}</script><style>p > a {}</style>"
+            + _og_title), _own_url, "site/rules.html")
+    except SchemaError as exc:
+        failures.append("head raw-text contents: unexpected SchemaError: {}".format(exc))
+    # A browser ignores the slash on <script/>, <style/> and <title/>, so everything up to the matching
+    # end tag is raw text: a block hidden there is not in the head, and fails at its first tag.
+    for label, opener in (("head block hidden after <script/>", '<script src="/theme.js"/>'),
+                          ("head block hidden after <style/>", "<style/>"),
+                          ("head block hidden after <title/>", "<title/>")):
+        raw_tag = opener[1:].split()[0].rstrip("/>")
+        _expect_raises(
+            label,
+            lambda o=opener, t=raw_tag: _validate_head_tags(
+                ok_head.replace("<head>", "<head>" + o, 1).replace("</head>", "</{}></head>".format(t), 1),
+                _own_url, "site/rules.html"),
+            SchemaError, "sits inside the raw text of <{}> in <head>".format(raw_tag))
     # The tag that counts must write the block's key exactly: a case variant or a padded key fails.
     for label, page, needle in (
             ("head key case variant", ok_head.replace('property="og:title"', 'property="OG:Title"'),
@@ -1917,8 +1957,15 @@ def _self_test():
 
             target_rel = _declared_md_sources()[0][1]
             refusal = "{}/ is a symbolic link; refusing".format(SITE_DIR)
+            # These legs need the page an earlier leg generated; when generation failed (a failure already
+            # recorded above), say so rather than crash before the failure list is printed.
+            legs = ("outside", "in-root")
+            if not (td2 / target_rel).is_file():
+                failures.append("site/ symlinked: {} was not generated, so its legs could not run"
+                                .format(target_rel))
+                legs = ()
             with tempfile.TemporaryDirectory() as outside_td:
-                for where in ("outside", "in-root"):
+                for where in legs:
                     held = Path(outside_td) / SITE_DIR if where == "outside" else td2 / "shared" / SITE_DIR
                     held.parent.mkdir(exist_ok=True)
                     shutil.move(str(td2 / SITE_DIR), str(held))
