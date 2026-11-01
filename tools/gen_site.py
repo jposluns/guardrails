@@ -180,13 +180,14 @@ FIELD_TO_TOKEN = {
     "og-url": ("{{og_url}}", "attr"),
 }
 
-# The link-preview tag block every published page's head carries, in order, exactly once each. The
+# The link-preview tag block every published page's head carries except site/404.html (the pages
+# tools/check_site.py's HEAD_TAG_EXEMPT names, which are not checked), in order, exactly once each. The
 # og:title/og:description/twitter text and the card image are SITE-WIDE (the shell hardcodes them);
 # only the canonical href and og:url vary, and both must be the page's OWN URL. `{url}` marks those
 # two slots. _validate_head_tags checks every page this generator renders, the page
-# gen_enforcement_register composes, and (through tools/check_site.py) every published site/*.html page,
-# hand-maintained ones included, so an edit that drops a tag, duplicates one, moves one out of the head,
-# reorders the block, or points a page at another page's canonical fails closed.
+# gen_enforcement_register composes, and (through tools/check_site.py) every published site/*.html page
+# except site/404.html, hand-maintained ones included, so an edit that drops a tag, duplicates one, moves
+# one out of the head, reorders the block, or points a page at another page's canonical fails closed.
 SITE_BASE_URL = "https://aiqt.ai/"
 HEAD_TAG_BLOCK = (
     '<link rel="canonical" href="{url}">',
@@ -220,26 +221,50 @@ def page_url(target_rel):
     return SITE_BASE_URL if stem == "index" else SITE_BASE_URL + stem
 
 
+# The elements a browser's tree builder keeps in the head; any other start tag inside the head ends it.
+HEAD_ELEMENTS = frozenset(("base", "link", "meta", "noscript", "script", "style", "template", "title"))
+# Head elements whose contents are raw text, not markup.
+HEAD_RAW_TEXT = frozenset(("script", "style", "title"))
+# HTML's whitespace characters; any other text inside the head ends it.
+HTML_WHITESPACE = " \t\n\f\r"
+
+
 class _HeadTagCollector(HTMLParser):
-    """Record the page's `<head>` start tags, where its head ends (an explicit `</head>` or a `<body>`
-    start), and every `<link>`/`<meta>` element carrying a link-preview key, in document order, with
-    that key, its value attribute (a link's href, a meta's content), whether it sits inside the head,
-    and its line. A link's key is ("link", "canonical") when its whitespace-separated rel tokens include
-    `canonical`; a meta's keys are ("meta", <value>) for its `property` value and its `name` value, so a
-    `name="og:title"` meta still collides with the block's `property="og:title"`. Key values compare
-    lowercased, so a case variant of a block tag counts as a second occurrence. `keys` limits recording
-    to those keys (None records every key). An element carrying a duplicate attribute is an error: a
-    browser keeps the first and this parser the last, so they would disagree on the tag's value."""
+    """Record the page's `<head>` start tags, where its head ends, and every `<link>`/`<meta>` element
+    carrying a link-preview key, in document order, with that key, its value attribute (a link's href, a
+    meta's content), where it sits, its line, and the key exactly as written. The head ends where a
+    browser's tree builder ends it: at `</head>`, at a `<body>` start or a `</body>`, `</html>` or
+    `</br>` end tag, at the first start tag that is not one of HEAD_ELEMENTS, or at the first text that
+    is not HTML whitespace (comments and the raw-text contents of `<script>`, `<style>` and `<title>` do
+    not end it; neither does anything inside a `<template>`). Where an element sits is None inside the
+    head, otherwise "outside <head>", or "inside <template> in <head>"/"inside <noscript> in <head>" for
+    one wrapped in those in the head (a template's contents are not in the document, and a browser running scripts
+    reads a noscript's contents as text). A link's key is ("link", "canonical") when one of its
+    whitespace-separated rel tokens is `canonical`; a meta's keys are ("meta", <value>) for its
+    `property` value and its `name` value, so a `name="og:title"` meta still collides with the block's
+    `property="og:title"`. Key values compare stripped and lowercased, so a case variant of a block tag
+    counts as a second occurrence; the written forms behind each key are kept so the check can require
+    the block's exact key on the tag that counts. `keys` limits recording to those keys (None records
+    every key). An element carrying a duplicate attribute is an error: a browser keeps the first and
+    this parser the last, so they would disagree on the tag's value."""
 
     def __init__(self, keys):
         super().__init__(convert_charrefs=True)
         self.keys = keys
         self.heads = 0
-        self.in_head = False
+        self.head_open = False  # between the head's start and its explicit end (`</head>` or `<body>`)
+        self.in_head = False    # inside the head as a browser builds it (may end before the explicit end)
         self.head_ended = False
         self.body_seen = False
-        self.found = []    # (key, value, in_head, line)
+        self.raw_text = None    # the open raw-text head element, while inside one
+        self.wrappers = []      # the open <template>/<noscript> elements inside the head
+        self.found = []    # (key, value, place, line, written keys)
         self.errors = []
+
+    def _end_head(self):
+        self.in_head = False
+        self.raw_text = None
+        self.wrappers = []
 
     def handle_starttag(self, tag, attrs):
         line = self.getpos()[0]
@@ -248,22 +273,36 @@ class _HeadTagCollector(HTMLParser):
             if self.body_seen:
                 self.errors.append("line {}: <head> starts after <body>".format(line))
             elif self.heads == 1:
-                self.in_head = True
+                self.head_open = self.in_head = True
             return
         if tag == "body":
             self.body_seen = True
-            if self.in_head:
-                self.in_head = False
+            if self.head_open:
+                self.head_open = False
                 self.head_ended = True
+                self._end_head()
             return
+        if self.in_head and not self.raw_text:
+            if "template" not in self.wrappers:
+                if tag not in HEAD_ELEMENTS:
+                    self._end_head()
+                    return
+                if tag in HEAD_RAW_TEXT:
+                    self.raw_text = tag
+            if tag in ("template", "noscript"):
+                self.wrappers.append(tag)
         if tag not in ("link", "meta"):
             return
         names = [k.lower() for k, _v in attrs]
         values = {k.lower(): (v or "") for k, v in attrs}
         keys = []
+        written = {}
         if tag == "link":
-            if "canonical" in values.get("rel", "").lower().split():
-                keys.append(("link", "canonical"))
+            for token in values.get("rel", "").split():
+                if token.lower() == "canonical":
+                    if ("link", "canonical") not in keys:
+                        keys.append(("link", "canonical"))
+                    written.setdefault(("link", "canonical"), []).append(token)
             value = values.get("href")
         else:
             for attr in ("property", "name"):
@@ -271,6 +310,7 @@ class _HeadTagCollector(HTMLParser):
                     key = ("meta", values[attr].strip().lower())
                     if key not in keys:
                         keys.append(key)
+                    written.setdefault(key, []).append(values[attr])
             value = values.get("content")
         keys = [k for k in keys if self.keys is None or k in self.keys]
         if not keys:
@@ -281,16 +321,43 @@ class _HeadTagCollector(HTMLParser):
                 "line {}: a <{}> carrying a link-preview key has a duplicate {!r} attribute"
                 .format(line, tag, dup))
             return
+        if not self.in_head:
+            place = "outside <head>"
+        elif self.wrappers:
+            place = "inside <{}> in <head>".format("template" if "template" in self.wrappers else "noscript")
+        else:
+            place = None
         for key in keys:
-            self.found.append((key, value, self.in_head, line))
+            self.found.append((key, value, place, line, tuple(written[key])))
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
-        if tag == "head" and self.in_head:
-            self.in_head = False
+        if tag == "head" and self.head_open:
+            self.head_open = False
             self.head_ended = True
+            self._end_head()
+            return
+        if not self.in_head:
+            return
+        if self.raw_text:
+            if tag == self.raw_text:
+                self.raw_text = None
+            return
+        if tag in ("template", "noscript") and tag in self.wrappers:
+            while self.wrappers.pop() != tag:
+                pass
+            return
+        if "template" in self.wrappers:
+            return
+        if tag in ("body", "html", "br"):
+            self._end_head()
+
+    def handle_data(self, data):
+        if self.in_head and not self.raw_text and "template" not in self.wrappers \
+                and data.strip(HTML_WHITESPACE):
+            self._end_head()
 
 
 def _key_text(key):
@@ -299,21 +366,22 @@ def _key_text(key):
 
 
 def _head_block_spec(url):
-    """(key, value, markup) for each HEAD_TAG_BLOCK tag, in block order, with `url` in the `{url}` slots.
-    Read from the block's own markup by the same collector the page check uses, so the block constant
-    stays the single statement of what a page must carry."""
+    """(key, exact key, value, markup) for each HEAD_TAG_BLOCK tag, in block order, with `url` in the
+    `{url}` slots; the exact key is the key as the block writes it. Read from the block's own markup by
+    the same collector the page check uses, so the block constant stays the single statement of what a
+    page must carry."""
     spec = []
     for tag in HEAD_TAG_BLOCK:
         own = tag.format(url=url)
         collector = _HeadTagCollector(None)
         collector.feed(own)
         collector.close()
-        if len(collector.found) != 1 or collector.errors:
+        if len(collector.found) != 1 or collector.errors or len(collector.found[0][4]) != 1:
             raise SchemaError("internal: HEAD_TAG_BLOCK entry {!r} does not carry exactly one key"
                               .format(own))
-        key, value, _in_head, _line = collector.found[0]
-        spec.append((key, value, own))
-    if len({key for key, _v, _o in spec}) != len(spec):
+        key, value, _place, _line, written = collector.found[0]
+        spec.append((key, written[0], value, own))
+    if len({s[0] for s in spec}) != len(spec):
         raise SchemaError("internal: HEAD_TAG_BLOCK names one key twice")
     return spec
 
@@ -323,19 +391,23 @@ def _validate_head_tags(page, url, target_rel):
     (html.parser, character references decoded). The page must have exactly one `<head>` start tag, and
     that head must end (at `</head>` or a `<body>` start) before the document does. For each tag of
     HEAD_TAG_BLOCK, keyed by a link's rel="canonical" or a meta's property or name value (compared
-    lowercased): exactly one `<link>`/`<meta>` element in the whole page carries that key, whatever its
-    value; that element sits inside the head; its value (a link's href, a meta's content) equals the
-    block's value exactly, with `url` (the page's own URL) in the canonical href and og:url slots; and
-    the block's tags appear in HEAD_TAG_BLOCK's order. So a second element with a block tag's key fails
-    whatever its value and wherever it sits, a canonical or og:url naming another page fails as a wrong
-    value, and a block tag in the body fails as outside the head. A page the parser rejects, a page with
-    no head or more than one, a head that never ends, or a keyed element carrying a duplicate attribute
-    fails too; every failure names `target_rel`. Not established: that the block's tags are adjacent
-    (other head elements may sit between them), anything about elements carrying none of the block's
-    keys, attributes beyond the key and the value, and tag-like text inside comments, `<script>` or
-    `<style>` (not elements, so neither counted nor flagged)."""
+    stripped and lowercased): exactly one `<link>`/`<meta>` element in the whole page carries that key,
+    whatever its value; that element sits directly in the head, which ends where a browser's tree
+    builder ends it (see _HeadTagCollector), not inside a `<template>` or `<noscript>` there; it writes
+    its key exactly as the block does (no case change, no surrounding whitespace); its value (a link's
+    href, a meta's content) equals the block's value exactly, with `url` (the page's own URL) in the
+    canonical href and og:url slots; and the block's tags appear in HEAD_TAG_BLOCK's order. So a second
+    element with a block tag's key fails whatever its value and wherever it sits, a canonical or og:url
+    naming another page fails as a wrong value, and a block tag after the point where a browser ends the
+    head (`</head>`, `<body>`, a start tag that is not a head element, or text that is not whitespace)
+    fails as outside the head. A page the parser rejects, a page with no head or more than one, a head
+    that never ends, or a keyed element carrying a duplicate attribute fails too; every failure names
+    `target_rel`. Not established: that the block's tags are adjacent (other head elements may sit
+    between them), anything about elements carrying none of the block's keys, whether a meta's key sits
+    in `property` or `name`, attributes beyond the key and the value, and tag-like text inside comments,
+    `<script>`, `<style>` or `<title>` (not elements, so neither counted nor flagged)."""
     spec = _head_block_spec(url)
-    collector = _HeadTagCollector({key for key, _v, _o in spec})
+    collector = _HeadTagCollector({s[0] for s in spec})
     try:
         collector.feed(page)
         collector.close()
@@ -349,20 +421,23 @@ def _validate_head_tags(page, url, target_rel):
     if not collector.head_ended:
         raise SchemaError("{}: <head> never ends (no </head> or <body>)".format(target_rel))
     positions = {}
-    for index, (key, value, in_head, line) in enumerate(collector.found):
-        positions.setdefault(key, []).append((index, value, in_head, line))
+    for index, (key, value, place, line, written) in enumerate(collector.found):
+        positions.setdefault(key, []).append((index, value, place, line, written))
     previous = None
-    for key, value, own in spec:
+    for key, exact, value, own in spec:
         hits = positions.get(key, [])
         if len(hits) != 1:
             raise SchemaError(
                 "{}: page must carry exactly one element keyed {} (block tag {!r}), found {}{}"
                 .format(target_rel, _key_text(key), own, len(hits),
                         " at lines " + ", ".join(str(h[3]) for h in hits) if hits else ""))
-        index, got, in_head, line = hits[0]
-        if not in_head:
-            raise SchemaError("{}:{}: block tag keyed {} sits outside <head>"
-                              .format(target_rel, line, _key_text(key)))
+        index, got, place, line, written = hits[0]
+        if place is not None:
+            raise SchemaError("{}:{}: block tag keyed {} sits {}".format(target_rel, line, _key_text(key),
+                                                                         place))
+        if exact not in written:
+            raise SchemaError("{}:{}: block tag keyed {} writes its key as {!r}, expected exactly {!r}"
+                              .format(target_rel, line, _key_text(key), written[0], exact))
         if got != value:
             raise SchemaError(
                 "{}:{}: block tag keyed {} carries {!r}, expected exactly {!r} (its own URL is {})"
@@ -1581,6 +1656,49 @@ def _self_test():
                             _own_url, "site/rules.html")
     except SchemaError as exc:
         failures.append("head commented copy: unexpected SchemaError: {}".format(exc))
+    # The head ends where a browser ends it: at a start tag that is not a head element, or at text that
+    # is not whitespace, so a block tag after either (or wrapped in svg) fails as outside the head.
+    for label, page in (
+            ("head ended by a div", ok_head.replace(_og_title, "<div></div>" + _og_title)),
+            ("head ended by stray text", ok_head.replace(_og_title, "stray text " + _og_title)),
+            ("head ended by an img", ok_head.replace(_og_title, '<img src="/x.png" alt="x">' + _og_title)),
+            ("head ended by svg around og:title", ok_head.replace(_og_title, "<svg>" + _og_title + "</svg>")),
+            ("head ended by an end body tag", ok_head.replace(_og_title, "</body>" + _og_title))):
+        _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
+                       SchemaError, "sits outside <head>")
+    # Whitespace, comments, and the raw-text contents of title, script and style do not end the head,
+    # nor does anything inside a template.
+    case_count += 1
+    try:
+        _validate_head_tags(ok_head.replace(
+            _og_title, " \t\n<!-- <div>x</div> --><title>a <b> title</title><script>if (a < b) {}</script>"
+            "<style>p > a {}</style><template><div>x</div></template>\n" + _og_title),
+            _own_url, "site/rules.html")
+    except SchemaError as exc:
+        failures.append("head whitespace and comments: unexpected SchemaError: {}".format(exc))
+    # The tag that counts must write the block's key exactly: a case variant or a padded key fails.
+    for label, page, needle in (
+            ("head key case variant", ok_head.replace('property="og:title"', 'property="OG:Title"'),
+             "expected exactly 'og:title'"),
+            ("head key padded", ok_head.replace('property="og:title"', 'property=" og:title "'),
+             "expected exactly 'og:title'"),
+            ("head canonical rel case variant", ok_head.replace('rel="canonical"', 'rel="Canonical"'),
+             "expected exactly 'canonical'")):
+        _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
+                       SchemaError, needle)
+    # A block tag wrapped in a template or noscript in the head is not a head element a reader sees; an
+    # extra copy there still counts as a duplicate.
+    for label, page, needle in (
+            ("head tag inside template", ok_head.replace(_og_title, "<template>" + _og_title + "</template>"),
+             "sits inside <template> in <head>"),
+            ("head tag inside noscript", ok_head.replace(_og_title, "<noscript>" + _og_title + "</noscript>"),
+             "sits inside <noscript> in <head>"),
+            ("head extra copy inside template", ok_head.replace(
+                _og_title, _og_title + "<template>" + _og_title + "</template>"), "exactly one element keyed"),
+            ("head extra copy inside noscript", ok_head.replace(
+                _og_title, _og_title + "<noscript>" + _og_title + "</noscript>"), "exactly one element keyed")):
+        _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
+                       SchemaError, needle)
     # page_url derivation: the home page is the bare site root; every other page is its stem.
     case_count += 1
     if page_url("site/index.html") != SITE_BASE_URL:

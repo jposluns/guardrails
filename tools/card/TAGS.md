@@ -33,4 +33,5 @@ The card image is site/images/aiqt-card.png, with the SHA-256 recorded above. It
 and illustration.svg in this folder. Every published site/*.html page except site/404.html carries the tag
 block above in its head, in this order, with canonical and og:url set to that page's own URL. That covers
 the pages tools/gen_site.py generates and the hand-maintained ones. tools/check_site.py checks every such
-page. site/404.html is a noindex page, so it does not carry the block.
+page when AIQT_SITE_HOST is unset or names aiqt.ai, and skips the check under any other site host.
+site/404.html is a noindex page, so it does not carry the block.

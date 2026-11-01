@@ -28,6 +28,8 @@ directory listing, so a new page is covered without editing a list; an unreadabl
 closed (exit 2), and a *.html entry that is a symbolic link or not a regular file is a finding. This gate
 runs it because the CI workflow and tools/run_all_checks.sh both run this gate; gen_site.py --check
 runs in neither directly. Pages in subdirectories of site/ and the opf/site/ root are not checked for it.
+The block is aiqt.ai's, so the head check runs only when the site host (AIQT_SITE_HOST, default aiqt.ai)
+is gen_site.SITE_BASE_URL's host, and is skipped under any other AIQT_SITE_HOST.
 """
 import sys
 
@@ -442,6 +444,32 @@ def _self_test():
         if quiet(_scan_root, r3, "site") != 0:
             failures.append("head tags: the restored clean site/ tree did not pass the gate")
 
+    # The block is aiqt.ai's: _SITE_HOST is fixed at import, so in a child process under each env value,
+    # a site/ whose one page carries no block passes under another host (and its PASS line does not name
+    # the head block), and fails with the missing-block finding under the default host.
+    scan_probe = ("import sys; from pathlib import Path; sys.path.insert(0, {!r}); import check_site; "
+                  "sys.exit(check_site._scan_root(Path(sys.argv[1]), 'site'))".format(tools_dir))
+    with tempfile.TemporaryDirectory() as d4:
+        s4 = Path(d4) / "site"
+        s4.mkdir()
+        (s4 / "index.html").write_text("<!doctype html><html><head><title>t</title></head><body><p>x</p>"
+                                       "</body></html>", encoding="utf-8")
+        for label, env_val, want_rc, needle, absent in (
+                ("another host skips the head check", "example.test", 0, "PASS: site/", "head block"),
+                ("the default host checks the head block", None, 1, "page must carry exactly one element "
+                 "keyed", None)):
+            env = dict(os.environ)
+            if env_val is None:
+                env.pop("AIQT_SITE_HOST", None)
+            else:
+                env["AIQT_SITE_HOST"] = env_val
+            head_cases += 1
+            out = subprocess.run([sys.executable, "-I", "-c", scan_probe, d4], capture_output=True,
+                                 text=True, env=env)
+            if out.returncode != want_rc or needle not in out.stdout or (absent and absent in out.stdout):
+                failures.append("head tags: {}: expected exit {} with {!r}, got exit {}: {}".format(
+                    label, want_rc, needle, out.returncode, (out.stdout + out.stderr).strip()))
+
     if failures:
         print("SELF-TEST FAIL:")
         for x in failures:
@@ -554,7 +582,8 @@ def _scan_root(root, subdir):
     # Logo consistency (M-04): the header logo block is duplicated per page (no page generator yet), so it
     # must stay byte-identical on every page that carries it; an outlier is drift.
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
-    if subdir == HEAD_TAG_ROOT:
+    head_checked = subdir == HEAD_TAG_ROOT and _SITE_HOST == urlsplit(gen_site.SITE_BASE_URL).hostname
+    if head_checked:
         head_findings, error = head_tag_findings(site, subdir)
         if error:
             print("error: {}; fail-closed".format(error), file=sys.stderr)
@@ -566,7 +595,7 @@ def _scan_root(root, subdir):
             print("  " + finding)
         return 1
     print("PASS: {}/ dashes, links, anchors, titles, unique ids, and tag structure{} all check out"
-          .format(subdir, ", and the link-preview head block" if subdir == HEAD_TAG_ROOT else ""))
+          .format(subdir, ", and the link-preview head block" if head_checked else ""))
     return 0
 
 
