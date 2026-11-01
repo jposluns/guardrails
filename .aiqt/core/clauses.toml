@@ -4649,7 +4649,7 @@ source-path = ".aiqt/core/rules/trust-session-resume-from-handoff.md"
 start-line = 14
 end-line = 15
 canonical-text = "A session resumes from its durable handoff rather than starting cold, and works under a single named\noperating mode."
-source-digest = "9036dc8e9c4bddec87b50df099ee7b426f0c50cb9651c926375729a6c814d163"
+source-digest = "f6fa603d9ba9ca8ba6cfd9715ddab18dd1792f1e0c8b1ff9894f86f44aa75124"
 
 [[clause]]
 clause-id = "sesres.2"
@@ -4658,7 +4658,16 @@ source-path = ".aiqt/core/rules/trust-session-resume-from-handoff.md"
 start-line = 14
 end-line = 15
 canonical-text = "A session resumes from its durable handoff rather than starting cold, and works under a single named\noperating mode."
-source-digest = "9036dc8e9c4bddec87b50df099ee7b426f0c50cb9651c926375729a6c814d163"
+source-digest = "f6fa603d9ba9ca8ba6cfd9715ddab18dd1792f1e0c8b1ff9894f86f44aa75124"
+
+[[clause]]
+clause-id = "sesres.3"
+corpus-id = "sesres"
+source-path = ".aiqt/core/rules/trust-session-resume-from-handoff.md"
+start-line = 15
+end-line = 17
+canonical-text = "Where the project keeps a memory store, the session reads the store's index, if it has\none, before it dispatches work, and when its memory path is missing or does not resolve to that store, it\nholds and names the path rather than working without the store."
+source-digest = "f6fa603d9ba9ca8ba6cfd9715ddab18dd1792f1e0c8b1ff9894f86f44aa75124"
 
 [[clause]]
 clause-id = "cnstpr.1"

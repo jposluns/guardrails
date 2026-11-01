@@ -265,7 +265,8 @@ directory below, and a declaration there arms slice confinement.
   "version": 1,
   "enumerator": {"argv": ["python3", "tools/aei_backlog_md.py", "--backlog", "BACKLOG.md", "--aei"],
                  "timeout": 60},
-  "record": {"findings": "path", "pending_decisions": "path", "handoff": "path"},
+  "record": {"findings": "path", "pending_decisions": "path", "handoff": "path",
+             "memory": "/abs/path", "memory_store": "/abs/path", "memory_index": "/abs/path"},
   "truth": {"changelog": "changelog.toml", "merged_pr_history": true},
   "mode": {"path": "path"},
   "lease": {"path": "path", "max_age_hours": 24, "holder_is_session_id": true,
@@ -290,6 +291,23 @@ directory below, and a declaration there arms slice confinement.
   "companion_stores": ["/abs/path/to/a/store/repo/root"]
 }
 ```
+
+The three memory keys under `record` feed the resume audit's memory-path probe: `memory` is the path
+the session reads its project memory from, `memory_store` is the store that path must reach, and
+`memory_index` is an index file inside that store. Where both `memory` and `memory_store` are declared,
+the audit stats each (following links) and reports a finding when either cannot be resolved or is not a
+directory, or when the two differ in device and inode; declaring only one of them is a finding too. An
+empty store is not a finding, so a correctly linked new store stays silent. `memory_index` is read like
+the other record surfaces, and a missing or unreadable index is a cannot-evaluate finding; it is the
+only probe that tells a store whose mount did not come back (an empty mount point with the same
+identity) from the store itself, so declare it once the store has an index. Declare these keys only in
+`.aiqt/orchestration.local.json`, since a committed registry fires on every seat that has no store, and
+as absolute paths: a relative path, a leading `~` included, is joined onto the repository root and is
+not expanded. That local file replaces the committed registry as a whole, so it carries the full
+registry. A memory path is not on the barrier's record-surface allowlist, so a write into it while the
+barrier is armed is surfaced. The probe checks the declared paths only, not the directory the platform
+itself loads memory from, and a `stat` on a store that hangs (a stalled network mount) is bounded only
+by the hook timeout.
 
 `state_dir` defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/aiqt-guardrails/orch/<repo-key>/`
 (repo-key is a digest of the root path). The machine-written state there is `dispatch-ledger.jsonl`,
