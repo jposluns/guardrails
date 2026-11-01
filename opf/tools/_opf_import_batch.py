@@ -734,7 +734,7 @@ def parse_batch(data):
                 findings.append("{} a worklog row belongs in [[worklog]], never in [[record]]".format(where))
             elif t in store.IMPORTER_TYPES:
                 findings.append("{} type {!r} is not an OPF record type: the standard defines none and "
-                                "reserves its namespace {} unassigned, so no record type uses it in "
+                                "reserves {} unassigned, so no record type uses it in "
                                 "either series, and unmappable imported text stays verbatim in "
                                 "`unparsed` (spec 8.1/8.3)".format(where, t, store.IMPORTER_TYPES[t]))
             elif t in store.MODULE_TYPES:
@@ -1105,7 +1105,7 @@ def self_test():
         # unknown type, and the two worklog placements.
         got = parse_batch(_edited('type = "backlog_item"', 'type = "legacy_fragment"'))
         check("lf-type-refused", _refuses(got, INVALID, "is not an OPF record type: the standard defines "
-                                          "none and reserves its namespace LF unassigned"))
+                                          "none and reserves LF unassigned"))
         module_type = sorted(store.MODULE_TYPES)[0]
         got = parse_batch(_edited('type = "backlog_item"', 'type = "{}"'.format(module_type)))
         check("module-type-refused", _refuses(got, INVALID, "baseline types only"))
