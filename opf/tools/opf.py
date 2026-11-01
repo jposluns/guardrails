@@ -33,9 +33,8 @@ instead compares the store identity (the committed `.opf.toml` target and the SH
 `init.toml`) with the values pinned in `.github/opf-store-identity.toml` at the product root (`schema = 1`,
 `target`, `init_sha256`): 0 both match, 1 a value differs or a `.opf.local.toml` override is present, 2 any
 value absent, malformed, unreadable or unresolvable, which outranks 1 (the override included). Doctor is
-read-only; its
-observation gather is the caller-side git seam validate_store itself never touches. `upgrade` is a
-recognized verb, but this tooling defines no store upgrade: `opf upgrade` refuses every argument list on
+read-only; its observation gather is the caller-side git seam validate_store itself never touches. `upgrade`
+is a recognized verb, but this tooling defines no store upgrade: `opf upgrade` refuses every argument list on
 every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
 `import`'s former
 modes, `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
@@ -17032,9 +17031,9 @@ def _cmd_doctor(rest):
     SHA-256 of the machine store's init.toml against the values pinned in .github/opf-store-identity.toml at
     the product root, a fixed path no argument selects. It exits 0 when both match, 1 when a readable value
     differs or a .opf.local.toml override is present, and 2 when any required value is absent, malformed,
-    unreadable or unresolvable; every input is evaluated first, and 2 outranks 1, the override included. It
-    needs a store by construction, so --require-store beside it, or the flag given twice, is a usage error
-    (exit 2)."""
+    unreadable or unresolvable; evaluation runs before any mismatch verdict and an early cannot-evaluate ends
+    it, so 2 outranks 1, the override included. It needs a store by construction, so --require-store beside
+    it, or the flag given twice, is a usage error (exit 2)."""
     root = None
     require_store = False
     store_identity = False
