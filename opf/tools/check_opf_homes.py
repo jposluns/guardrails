@@ -1967,6 +1967,13 @@ _ATTRIBUTE_WRITER_EXCLUSIONS = {
     ("_opf_oplock.py", "_t_fd_census_pairs", "setattr(target, attr, fake)"):
         "an oplock self-test vector's fault injection: the pairs are its literal tuple, os with listdir and "
         "fstat, and the fcntl module with fcntl",
+    ("_opf_release_history.py", "_builder_vectors.<locals>._without_clock", "setattr(time, name, _raising_clock)"):
+        "the no-clock vector's stand-ins: the receiver is the time module _builder_vectors imports by name, and "
+        "name runs over the keys of saved, filled from vars(time) with its public callables that are not types",
+    ("_opf_release_history.py", "_builder_vectors.<locals>._without_clock", "setattr(time, name, fn)"):
+        "the no-clock vector restores the time module's clock functions: the receiver is the time module "
+        "_builder_vectors imports by name, and the pairs are saved, filled from vars(time) with its public "
+        "callables that are not types",
     ("_opf_schema.py", "_imported_spec_copy", "setattr(copy, slot, v[slot])"):
         "the receiver is the fresh TypeSpec object.__new__(TypeSpec) made just above, and slot runs over "
         "TypeSpec.__slots__ (name, namespace, initial, working, terminal, transitions, proposable, gated, "

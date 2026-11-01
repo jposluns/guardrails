@@ -19554,25 +19554,43 @@ def _cmd_adopt(rest):
           printed as `REFUSED (<finding>)`, in two classes. A refusal BEFORE ANY RECOVERY WRITE leaves the
           product files and every transaction as found, and releases any lock or lease it took; its message
           names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
-          creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
-          seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
-          classify, a stray or wrong-type journal entry, a transaction renamed or replaced after the
-          listing, or an open transaction whose journal records another product root's binding or none:
-          one copied in from another tree, and equally this tree's own after the tree moved to another
-          filesystem, was restored from a backup or was remounted under another device number, which
-          changes the identity the journal is bound to; reconcile never consumes it, and clearing it is
-          the operator's own act outside any OPF operation), store-lease-held (a store pointer at the
-          product root, or a store lease present, or claimed by another writer, in a machine
-          subdirectory, beside an open transaction other than init-store's), init-store-reversal-unproven (the reversal could remove content the operation
-          did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
+          creation failed part-way, a journal lock whose release faulted or left it in place, or whose
+          staying could not be observed): journal-lock-held (a possibly-live owner holds the journal lock,
+          never seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read
+          or classify, a stray or wrong-type journal entry, a transaction renamed or replaced after the
+          listing, once reconcile took the journal lock, a journal path that no longer names the journal
+          it listed or a lock it took that it cannot read back there, or an open transaction whose journal
+          records another product root's binding or none: one copied in from another tree, and equally
+          this tree's own after the tree moved to another filesystem, was restored from a backup or was
+          remounted under another device number, which changes the identity the journal is bound to;
+          reconcile never consumes it, and clearing it is the operator's own act outside any OPF
+          operation), store-lease-held (a store pointer at the product root other than the in-root one
+          init-store publishes, or a store lease present in a machine subdirectory other than a dead
+          adoption apply's leftover, or one claimed by another writer or that cannot be claimed, beside an
+          open transaction other than init-store's), init-store-reversal-unproven (the reversal could
+          remove content the operation did not create) or pre-lock-fault (any other fault before the
+          journal lock was held and recovery
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
           open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
-          never reported recovered), or store-lease-release-failed (the recovery finished,
-          but a store lease this run took could not be released and stays, named). Also exit 2: a
-          cannot-evaluate root. NOT BUILT: releasing a dead run's leftover store lease (the spec 5.7
-          lease leg) lands with the adoption lease join; until then the operator releases it. Exit 1 is
-          not used.
+          never reported recovered; also a finished recovery whose journal lock was not confirmed released:
+          its release faulted or left that lock in place, which stays, named, or the lock could not be
+          observed afterwards, each place it may stay named), or store-lease-release-failed (the recovery
+          finished, but releasing a store lease this run took faulted: one that could not be released
+          stays, named, and one removed before its directory close failed is named as released). Also exit
+          2, printed as cannot evaluate with no finding: a product root that cannot be evaluated, or an
+          unexpected error, which can come after a recovery already ran, printed with every note recorded
+          on it (such a note can name a lock or lease that stays). A leftover store lease an interrupted
+          adoption apply kept (operation adopt-apply) beside an OPEN adoption transaction is released
+          through this reconciliation only once its holder is confirmed dead on this host (spec 5.7), and
+          the release is printed on every outcome, before a refusal or error too, and named in the text of
+          every refusal raised after it; beside such a transaction any other present lease refuses as
+          store-lease-held, and a lease beside no open transaction is not touched: each stays
+          the operator's to release. Reconcile takes, reads back and releases its journal lock in the journal
+          directory it opened, and checks that the journal path still names that directory only twice: once
+          the lock is taken, and after the release. A journal moved away and put back between those two
+          checks is not seen: another run that took the journal lock meanwhile, in whatever stood at the
+          journal path, can then run beside it, and the message does not mention that run. Exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator), read contained and no-follow. The adoption journal (_opf_adopt_apply.JOURNAL_REL)
@@ -19717,17 +19735,29 @@ def _cmd_adopt(rest):
     if sub == "reconcile":
         # The explicit recovery (spec 14.2): the adoption journal ALONE, never a store resolution and
         # never the reconcile-first gate (this IS the reconcile). Every refusal names its finding.
+        leases_released = []
+
+        def print_released():
+            # a leftover lease this run released is gone whatever the run then did, so its release is
+            # printed on every outcome, before a refusal or error too
+            for report in leases_released:
+                print("opf adopt reconcile: {}".format(report))
         try:
-            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs)
+            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs, leases_released)
         except _opf_adopt_apply.ReconcileRefusal as exc:
+            print_released()
             print("opf adopt reconcile: REFUSED ({}): {}".format(exc.finding, exc), file=sys.stderr)
             return EXIT_MALFORMED
         except _opf_adopt_apply.AdoptApplyError as exc:
-            print("opf adopt reconcile: cannot evaluate: {}".format(exc), file=sys.stderr)
+            print_released()
+            print("opf adopt reconcile: cannot evaluate: {}".format(_opf_adopt_apply._journal._msg_said(exc)),
+                  file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0 or uncaught exit-1
-            print("opf adopt reconcile: cannot evaluate: unexpected error ({!r}); failing closed to exit "
-                  "2".format(exc), file=sys.stderr)
+            # rendered with its notes: a release, or a lease that stays, may be recorded only there
+            print_released()
+            print("opf adopt reconcile: cannot evaluate: unexpected error ({}); failing closed to exit "
+                  "2".format(_opf_adopt_apply._journal._exc_said(exc)), file=sys.stderr)
             return EXIT_MALFORMED
         recovered = [(txn, outcome) for txn, outcome in outcomes
                      if outcome in ("rolled-back", "rolled-forward")]
@@ -19736,6 +19766,7 @@ def _cmd_adopt(rest):
         if stale_released:
             print("opf adopt reconcile: released the adoption journal lock a confirmed-dead run left at "
                   "{}/lock".format(_opf_adopt_apply.JOURNAL_REL))
+        print_released()
         if not (recovered or stale_released) and lock_taken:
             print("opf adopt reconcile: nothing to reconcile: every adoption transaction was already terminal "
                   "when this run took the journal lock (another reconcile may have recovered it first); no "
@@ -19802,8 +19833,10 @@ def _cmd_adopt(rest):
             print("opf adopt {}: cannot evaluate: {}".format(sub, exc), file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
-            print("opf adopt {}: cannot evaluate: unexpected error ({!r}); failing closed to exit "
-                  "2".format(sub, exc), file=sys.stderr)
+            # rendered with its notes: a close error the transaction raises as itself names there the lease
+            # it left in place
+            print("opf adopt {}: cannot evaluate: unexpected error ({}); failing closed to exit "
+                  "2".format(sub, _opf_adopt_apply._journal._exc_said(exc)), file=sys.stderr)
             return EXIT_MALFORMED
 
     # sub == "status": the read-only state report over the adoption evidence home; ZERO writes. The home
@@ -22412,7 +22445,8 @@ def _retained_close_offpath_self_test():
             call()                            # the fixture reaches every registration before it is swept
             expect("offpath-adopt-observe-" + label, call)
         # _opf_adopt_apply: the product-root closes of verify_bundle, reconcile, the default-store probe
-        # and a transaction refused at the store posture (nothing written).
+        # and a transaction that joins the fixture store's single-writer lease under the journal lock,
+        # checks the store's clean state, composes nothing and refuses (nothing written).
         run_id = "adopt-20260101T000000Z-0123456789abcdef"
         expect("offpath-adopt-apply-verify-bundle", lambda: _opf_adopt_apply.verify_bundle(str(root), run_id))
         # Base 2.0.0 fences the public reconcile (adoption_journal_fenced): it refuses with ADOPTION_FENCE
@@ -22435,8 +22469,19 @@ def _retained_close_offpath_self_test():
         expect("offpath-adopt-apply-reconcile-engine", lambda: _opf_adopt_apply._reconcile_engine(str(root)))
         expect("offpath-adopt-apply-default-store-probe",
                lambda: _opf_adopt_apply._default_store_present_without_manifest(str(root)))
-        expect("offpath-adopt-apply-transaction-refusal",
-               lambda: _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None))
+
+        def transaction_refusal():
+            # Every run starts from the same tree: an injected close failure after the lease's create
+            # leaves that lease, and one in the journal lock's release keeps the lock and its journal
+            # directories, each by design and named in the refusal (or, for a close error the run raises
+            # as itself, in its note), and either would refuse every later run before it reaches the close
+            # under test, so both are reset here.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(root / machine_rel / _opf_check.LEASE_NAME))
+            shutil.rmtree(str(root / Path(_opf_adopt_apply.JOURNAL_REL).parts[0]), ignore_errors=True)
+            return _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None)
+
+        expect("offpath-adopt-apply-transaction-refusal", transaction_refusal)
         # opf.py: the init inventory / root-binding / create-only / observation helpers, beneath a held root.
         init = base / "init"
         (init / _opf_store.WORKING_DIRNAME / "a" / "b").mkdir(parents=True)

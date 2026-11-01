@@ -14,7 +14,11 @@ GIT_* variable and leaving the process environment scrubbed. Second, ROUTING che
 the fixture class is statically confirmed to call its scrub (per member, so removing one member's
 routing fails at that member's own named check), tightened by function-SCOPED checks (the named
 self-test entry itself calls the in-place scrub as a top-level statement with no process-launching
-call before it), explicit hook-fixture env checks, an OPF inherited-env probe, and TRUST checks
+call before it, or, for an entry wrapped in fixture_git_lifecycle(), matches a closed allowlist:
+no decorator, annotation, type parameter or non-constant default, only permitted statements before
+a top-level with that enters the lifecycle alone and returns the isolated main's call on the
+entry's own parameters or constants, and nothing after it), explicit hook-fixture env checks, an
+OPF inherited-env probe, and TRUST checks
 (every literal `git ... archive ...` launch in the two members that read the checkout under test
 passes env=caller_env_without_git(), so the scrub cannot regress
 a foreign-owned checkout to a rc=128 refusal). Third, an end-to-end leak probe: the originally
@@ -35,8 +39,12 @@ fails this suite instead of racing CI.
 
 Verdicts use child return codes and byte comparisons, never output tokens. DISCLOSED RESIDUAL: a
 routing/scope check proves the scrub call site and its position in the named entry, not that every
-later git call in the same process still runs under it; launch aliases, indirect helper calls,
-early returns and control-flow reachability are outside this syntactic check's coverage. The
+later git call in the same process still runs under it; for the scrub form, launch aliases,
+indirect helper calls, early returns and control-flow reachability are outside this syntactic
+check's coverage, and for the lifecycle form, which refuses every statement not on its allowlist,
+what the permitted statements do when run is outside it (the restore probe in each checked
+entry point's own self-test runs them around a stand-in isolated main, with a listed helper call
+replaced by a recorder, so what that helper itself does is outside both). The
 config-injection lane derives registered self-test commands and runs them under caller hooks and ignore
 files, attributes and fsmonitor, with separate malformed-config probes. Selection is by
 selftest_ script name or --self-test/--selftest/--suite flag, not by behaviour: a
@@ -259,15 +267,20 @@ _LAUNCH_NAMES = frozenset({
     "execl", "execle", "execlp", "execlpe", "execv", "execve", "execvp", "execvpe",
     "spawnl", "spawnle", "spawnlp", "spawnlpe", "spawnv", "spawnve", "spawnvp", "spawnvpe",
 })
+_LIFECYCLE_NAME = "fixture_git_lifecycle"
 
 
-def _scrub_scoped_first(member_path, func_name, scrub_name):
+def _scrub_scoped_first(member_path, func_name, scrub_name, isolated=None):
     """True when the named function calls scrub_name as a TOP-LEVEL statement of its OWN body
     (function-scoped: a call anywhere else in the file cannot satisfy this) with no
     recognized direct process-launching call before it. This is a syntactic check, with
     the indirect-call and reachability residuals documented above. Read from a parsed AST; a missing
     or duplicated function, a missing top-level scrub, an earlier launch call, or an unreadable
-    or unparseable member is a loud failure value, never a silent pass."""
+    or unparseable member is a loud failure value, never a silent pass.
+
+    A scrub_name of fixture_git_lifecycle selects the lifecycle form instead
+    (_lifecycle_scoped_first), an allowlist over the whole entry point, which also needs isolated,
+    the name of the isolated main the entry point delegates to."""
     try:
         tree = ast.parse(member_path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, ValueError) as exc:
@@ -288,8 +301,10 @@ def _scrub_scoped_first(member_path, func_name, scrub_name):
         owner = funcs[0]
     if not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
         return "{} is not a function".format(func_name)
+    if scrub_name == _LIFECYCLE_NAME:
+        return _lifecycle_scoped_first(owner, func_name, isolated, member_path.name)
     body = owner.body
-    # Lifecycle wrappers may put the context inside try/finally for extra restoration.
+    # A call or context inside a top-level try/finally (extra restoration) counts as top level.
     body = [inner for stmt in body
             for inner in (stmt.body if isinstance(stmt, ast.Try) else [stmt])]
     for stmt in body:
@@ -305,6 +320,200 @@ def _scrub_scoped_first(member_path, func_name, scrub_name):
                 return "{}(): a process-launching call ({}) precedes the {}() scrub".format(
                     func_name, _call_name(node), scrub_name)
     return "{}(): no top-level {}() call".format(func_name, scrub_name)
+
+
+# What every lifecycle entry point may lead with, besides a docstring and global statements: the
+# lifecycle's own import, which is also required (so the name the with enters is the lifecycle),
+# and the module-path setup that makes it importable.
+_LIFECYCLE_IMPORT = "from _git_fixture_env import fixture_git_lifecycle"
+_LIFECYCLE_COMMON_BEFORE = (
+    _LIFECYCLE_IMPORT,
+    "sys.path.insert(0, str(Path(__file__).resolve().parent))",
+    "sys.path.append(str(Path(__file__).resolve().parent))",
+)
+# The closed table of further statements a lifecycle entry point needs around its with, each
+# accepted for its own entry point only: (member file name, entry point, place, statement). A
+# "before" statement precedes the with, a "with" statement precedes the isolated main's call in
+# the with body, and a "finally" statement is in the finally body of the top-level try that holds
+# the with. Statements are compared parsed, so layout and comments do not matter.
+_LIFECYCLE_ENTRY_STATEMENTS = (
+    # The execution report is armed before the lifecycle; it is written at interpreter exit.
+    ("selftest_orch_hooks.py", "main", "before",
+     "if report_path is not None:\n    _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)"),
+    # The module's cached git executable is rebound to the lifecycle's wrapper and put back.
+    ("_qa_adapter.py", "_self_test", "before", "saved_git = _GIT"),
+    ("_qa_adapter.py", "_self_test", "with", "_GIT = fixture_git"),
+    ("_qa_adapter.py", "_self_test", "finally", "_GIT = saved_git"),
+    # The public entry's setup report learns the lifecycle was entered, and lifts its typing of
+    # the setup's temp-directory allocations, before the isolated cases run.
+    ("check_portability.py", "_self_test_main_lifecycle", "with", "on_entry()"),
+)
+_STATEMENT_KINDS = (
+    (ast.Return, "a return statement"), (ast.Raise, "a raise statement"),
+    ((ast.Import, ast.ImportFrom), "an import"),
+    ((ast.Assign, ast.AugAssign, ast.AnnAssign), "an assignment"),
+    (ast.Expr, "an expression statement"), (ast.If, "an if statement"),
+    ((ast.With, ast.AsyncWith), "a with statement"),
+    ((ast.For, ast.AsyncFor, ast.While), "a loop"), (ast.Delete, "a del statement"),
+    ((ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef), "a nested definition"),
+)
+
+
+def _statement_shape(stmt):
+    """A statement (an AST node, or the source of exactly one statement) as a comparable string
+    without positions."""
+    return ast.dump(ast.parse(stmt).body[0] if isinstance(stmt, str) else stmt)
+
+
+def _statement_label(stmt):
+    """A statement named for a refusal message: its kind and its first source line."""
+    if isinstance(stmt, (ast.Try, ast.TryStar)):
+        kind = "a try statement with " + " and ".join(
+            part for part, present in (("an except handler", stmt.handlers),
+                                       ("an else body", stmt.orelse),
+                                       ("a finally body", stmt.finalbody)) if present)
+    else:
+        kind = next((label for types, label in _STATEMENT_KINDS if isinstance(stmt, types)),
+                    "a statement")
+    return "{} ({!r})".format(kind, ast.unparse(stmt).partition("\n")[0])
+
+
+def _lifecycle_scoped_first(owner, func_name, isolated, member=""):
+    """The lifecycle form of _scrub_scoped_first, an allowlist over the whole entry point: True
+    when the entry point has no decorator, annotation or type parameter and each default is a
+    constant, and its body is only permitted statements, then one with statement that enters a
+    plain fixture_git_lifecycle() call (a bare name, no arguments) and nothing else, binding at
+    most a plain name, and whose body ends with return isolated(...), the isolated main, and then
+    nothing. The with may instead sit in the body of a top-level try: that try's statements before
+    the with are held to the same allowlist, nothing follows the with in it, it has no except
+    handler (so no else body either, which Python allows only with one), and its finally body
+    holds only statements the closed table lists for this entry point. Permitted before the with:
+    the docstring, the statements in _LIFECYCLE_COMMON_BEFORE (the lifecycle import among them is
+    required), global statements, and the "before" statements _LIFECYCLE_ENTRY_STATEMENTS lists
+    for this entry point (member is its file name); permitted in the with body before the call:
+    that table's "with" statements. Statements are matched whole, by their parsed shape. Each
+    argument and keyword value of the isolated main's call is a parameter of the entry point or a
+    constant (a starred or ** argument is neither), and isolated is named nowhere else in the
+    function. So every expression the entry point evaluates is in a permitted statement, the
+    lifecycle call, that call of the isolated main, or a constant default; any other statement,
+    decorator, annotation, type parameter, default or argument is refused by a message that names
+    it. The lifecycle saves the caller's environment and only then scrubs, so a scrub, a launch, or
+    a read or change of the environment before it would make it save, and so restore, the wrong
+    values. Syntactic: what the permitted statements do when run (the lifecycle itself, an
+    imported module's code, the listed statements) is outside it. The restore probe in each
+    checked entry point's own self-test (tools/_entry_restore_selftest.py) runs the entry point
+    around a stand-in isolated main, requires the stand-in to receive exactly the arguments the
+    probe passed, and checks the environment and the module's global bindings after each call.
+    The probe passes positional arguments only and refuses every keyword, so a keyword this check
+    accepts (one whose value is a parameter or a constant, as in
+    scope/lifecycle-parameter-arguments-accepted) fails the probe instead. The probe runs the
+    listed helper call (selftest_orch_hooks.main's _selftest_exit_report.arm) with a recorder in
+    its place and checks only the environment at that call, so it is this check that keeps the
+    call before the lifecycle: it lists that call as a "before" statement, and after the with it
+    accepts only the "finally" statements the table lists for the entry point, of which
+    selftest_orch_hooks.main has none. What that helper itself does is outside both."""
+    lead = "{}(): ".format(func_name)
+    if not isolated:
+        return lead + "the lifecycle form needs the isolated main's name"
+    if owner.decorator_list:
+        return lead + "a decorator ({!r}) wraps the entry point, which may have none".format(
+            ast.unparse(owner.decorator_list[0]))
+    signature = owner.args
+    parameters = [arg for arg in signature.posonlyargs + signature.args + signature.kwonlyargs
+                  + [signature.vararg, signature.kwarg] if arg is not None]
+    for default in signature.defaults + [d for d in signature.kw_defaults if d is not None]:
+        if not isinstance(default, ast.Constant):
+            return lead + "a default argument ({!r}) is not a constant".format(
+                ast.unparse(default))
+    annotations = [arg.annotation for arg in parameters if arg.annotation is not None] + (
+        [owner.returns] if owner.returns is not None else [])
+    if annotations:
+        return lead + ("an annotation ({!r}) is on the entry point's signature, which may carry "
+                       "none".format(ast.unparse(annotations[0])))
+    if owner.type_params:
+        return lead + ("a type parameter ({!r}) is on the entry point's signature, which may "
+                       "carry none".format(ast.unparse(owner.type_params[0])))
+    listed = {(place, _statement_shape(text))
+              for name, entry, place, text in _LIFECYCLE_ENTRY_STATEMENTS
+              if (name, entry) == (member, func_name)}
+    common = {_statement_shape(text) for text in _LIFECYCLE_COMMON_BEFORE}
+    where = "the {}() with".format(_LIFECYCLE_NAME)
+
+    def enters_lifecycle(stmt):
+        return isinstance(stmt, ast.With) and any(
+            isinstance(item.context_expr, ast.Call)
+            and _call_name(item.context_expr) == _LIFECYCLE_NAME for item in stmt.items)
+
+    body = owner.body
+    at = next((index for index, stmt in enumerate(body) if enters_lifecycle(stmt) or (
+        isinstance(stmt, ast.Try) and any(enters_lifecycle(inner) for inner in stmt.body))), None)
+    if at is None:
+        return lead + "no top-level with {}()".format(_LIFECYCLE_NAME)
+    before, holder, entered, trailing = body[:at], None, body[at], []
+    if isinstance(entered, ast.Try):
+        holder = entered
+        inner_at = next(index for index, stmt in enumerate(holder.body) if enters_lifecycle(stmt))
+        before, entered = before + holder.body[:inner_at], holder.body[inner_at]
+        trailing = holder.body[inner_at + 1:]
+    for stmt in before:
+        docstring = (stmt is body[0] and isinstance(stmt, ast.Expr)
+                     and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str))
+        shape = _statement_shape(stmt)
+        if not (docstring or isinstance(stmt, ast.Global) or shape in common
+                or ("before", shape) in listed):
+            return lead + "{} precedes {} and is not on the lifecycle allowlist".format(
+                _statement_label(stmt), where)
+    if _statement_shape(_LIFECYCLE_IMPORT) not in {_statement_shape(stmt) for stmt in before}:
+        return lead + ("no {!r} precedes {}, so the name it enters is not shown to be the "
+                       "lifecycle".format(_LIFECYCLE_IMPORT, where))
+    if holder is not None:
+        # An else body needs an except handler, so this also refuses any else body.
+        if holder.handlers:
+            return lead + "the try holding {} has an except handler".format(where)
+        for stmt in holder.finalbody:
+            if ("finally", _statement_shape(stmt)) not in listed:
+                return lead + ("{} in the finally body of the try holding {} is not on the "
+                               "lifecycle allowlist".format(_statement_label(stmt), where))
+    if trailing:
+        return lead + "{} follows {} in its try body".format(_statement_label(trailing[0]), where)
+    if body[at + 1:]:
+        return lead + "{} follows {}".format(_statement_label(body[at + 1]), where)
+    if len(entered.items) != 1:
+        return lead + "{} enters {} contexts; it may enter only the lifecycle".format(
+            where, len(entered.items))
+    context = entered.items[0]
+    call = context.context_expr
+    if not (isinstance(call.func, ast.Name) and not call.args and not call.keywords):
+        return lead + "{} enters {!r}, not a plain {}() call".format(
+            where, ast.unparse(call), _LIFECYCLE_NAME)
+    if context.optional_vars is not None and not isinstance(context.optional_vars, ast.Name):
+        return lead + "{} binds {!r}, not a plain name".format(
+            where, ast.unparse(context.optional_vars))
+    *leading, last = entered.body
+    for stmt in leading:
+        if ("with", _statement_shape(stmt)) not in listed:
+            return lead + ("{} precedes the {}() call in {} and is not on the lifecycle "
+                           "allowlist".format(_statement_label(stmt), isolated, where))
+    if not (isinstance(last, ast.Return) and isinstance(last.value, ast.Call)
+            and isinstance(last.value.func, ast.Name) and last.value.func.id == isolated):
+        return lead + "{} does not end with return {}(...)".format(where, isolated)
+    named = sum(1 for node in ast.walk(owner)
+                if (isinstance(node, ast.Name) and node.id == isolated)
+                or (isinstance(node, ast.Attribute) and node.attr == isolated))
+    if named != 1:
+        return lead + "{} is named {} times; only the return in {} may name it".format(
+            isolated, named, where)
+    names = {arg.arg for arg in parameters}
+    passed = [(node, node) for node in last.value.args] + [
+        (keyword, keyword.value if keyword.arg is not None else keyword)
+        for keyword in last.value.keywords]
+    for shown, value in passed:
+        if not (isinstance(value, ast.Constant)
+                or (isinstance(value, ast.Name) and value.id in names)):
+            return lead + ("{} passes {!r} to {}(); each argument may only be a parameter of "
+                           "{}() or a constant".format(where, ast.unparse(shown), isolated,
+                                                        func_name))
+    return True
 
 
 def _archive_reads_use_caller_env(member_path, fixture_calls=False):
@@ -1023,6 +1232,9 @@ def _config_poison_fixture(base):
 # --ci-job opf-closure-e (added when every closure leg whose command these lanes run was bounded
 # at or above its deadline here, since the closure work then no longer fit in fewer than five
 # jobs), so each of those three counts is three higher on a tree carrying all three new members.
+# On 2026-10-31 the change that adds opf-release-history-selftest registers a sixth, --ci-job
+# opf-closure-f (added when that leg fit in none of the five jobs without lowering the headroom
+# multiplier job C allows), so each of those counts is one higher again on a tree carrying it.
 # One measured member, opf/tools/check_opf_upgrade.py --self-test (one of the six shorter
 # opf/tools self-tests, timed in every run), was later removed with the store-upgrade engine, so
 # the account constants below omit it: 100 account members, 88 timed, 10 measured in the
@@ -1059,7 +1271,7 @@ def _config_poison_fixture(base):
 # outside the account. It never lowers the count of malformed-lane members not measured in that
 # lane, which reflects only the account's malformed-lane run, nor the account's own count of
 # members with no recorded time, whose members the account does not name.
-# The five tools/check_opf_standalone_closure.py --self-test --ci-job entries are such bounds:
+# The six tools/check_opf_standalone_closure.py --self-test --ci-job entries are such bounds:
 # the members have standalone times of the pre-split whole self-test only, but for one standalone
 # time of the opf-closure-c member when it held one leg, none a config-lane time, and each carries
 # its own entry below, sized outside SIZING. On the merged tree of 2026-10-20
@@ -1067,7 +1279,8 @@ def _config_poison_fixture(base):
 # 27 had no recorded time (the 12 account members the account does not name, and the 15 later
 # members SIZING_LATER_MEASURED does not cover), and the closure gate's two self-test halves had
 # pre-split standalone times only; 106 malformed-lane members were not measured in that lane.
-# The three --ci-job members registered on 2026-10-23 each carry a SIZING_LATER_MEASURED entry.
+# The three --ci-job members registered on 2026-10-23 each carry a SIZING_LATER_MEASURED entry,
+# and so does the one registered on 2026-10-31.
 # On the tree of 2026-10-24 (counted by _roster_figures; dated, not pinned), which carries all
 # five --ci-job members and two later members more (tools/check_rule_placement.py and the
 # rule-placement-selftest suite run), the roster had 123 members, 121 of them in the malformed
@@ -1113,15 +1326,16 @@ CONFIG_MEMBER_BOUNDS = {
     # MEASURED lane times (see SIZING): 207.87 s, 220.76 s, 229.02 s (whole roster) and 219.70 s
     # (malformed). ESTIMATED: 229.02 * 20 / 3 = 1526.8, so 1800 s.
     ("opf/tools/check_opf_init.py", "--self-test"): 1800,
-    # The closure gate's self-test runs as FIVE registered members since the closure CI work was
+    # The closure gate's self-test runs as SIX registered members since the closure CI work was
     # split between CI jobs (--ci-job: the gate partitions its legs between the jobs, and the flip
-    # runs in the job whose legs hold opf-tooling-selftest); this comment sizes all five. Each part
+    # runs in the job whose legs hold opf-tooling-selftest); this comment sizes all six. Each part
     # sweeps only its own part of the current roster, plus the same fast vectors, so each part's
     # sweep is a proper part of the whole self-test's over the same tree; that is NOT a subset of
     # what the measured pre-split runs below swept, since opf-closure-c holds two legs
-    # (opf-adopt-state-selftest and opf-adopt-complete-selftest) absent from the tree those runs
-    # measured. Every part keeps the whole self-test's 3600 s entry as a
-    # deliberate shorter deadline rather than a bound sized from a run of its own.
+    # (opf-adopt-state-selftest and opf-adopt-complete-selftest) and opf-closure-f one
+    # (opf-release-history-selftest) absent from the tree those runs measured. Every part keeps the
+    # whole self-test's 3600 s entry rather than a bound sized from a run of its own: a deliberate
+    # shorter deadline for every part but opf-closure-f (see below).
     # Sized outside SIZING (no config-lane time of this member is known: the lane runs below
     # reached the 1200 s default, so they have no known length and none is fed to the formula).
     # Every run below is of the PRE-SPLIT whole self-test (one sweep over every leg plus the flip).
@@ -1142,13 +1356,16 @@ CONFIG_MEMBER_BOUNDS = {
     # 2.159), covers load5 up to about 51.8 scaled from the run's start (its starting load5, 22.8,
     # sits below the 24 CPUs, where the model adds no growth, so it scales from 24: 24 x 2.159 =
     # 51.8), and about 70 from its ending load5 (32.6 x 2.159 = 70.4).
-    # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case, READ FROM
-    # SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
+    # DELIBERATE SHORTER DEADLINE: 3600 s sits far BELOW each member's own worst case but F's, READ
+    # FROM SOURCE (tools/check_opf_standalone_closure.py, its own fit arithmetic on this tree: the
     # member's legs' bounds, one 10 s cleanup deadline per leg, the flip and its cleanup where it
     # runs, and the 350 s vector allowance), 13322 s (opf-closure-a), 10585 s (b), 7780 s (c),
     # 9840 s (d) and 9526 s (e), and below each CI job's worst case (21193 s, 21420 s, 15810 s,
-    # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself), exactly
-    # as the default's comment above sanctions: this lane owns no member's
+    # 19930 s and 19302 s; see _LEG_CEILING_S and _job_worst_case_s in the member itself). For
+    # opf-closure-f, whose worst case is 1620 s (its one leg's 1260 s bound, one cleanup deadline
+    # and the vector allowance; its CI job's is 3490 s), the same 3600 s sits ABOVE that worst case,
+    # so for that member alone it is no shorter deadline. For the other five it is a shorter
+    # deadline exactly as the default's comment above sanctions: this lane owns no member's
     # verdict, and reaching this 3600 s bound is cannot-evaluate, never a pass or a fail of the
     # member. The member's OWN inner bounds are read differently: when one of its legs is killed at
     # its leg bound, ended by a signal, or its flip is not evaluated, the member itself exits 2, and
@@ -1162,12 +1379,14 @@ CONFIG_MEMBER_BOUNDS = {
     # its then worst case, 1620 s; it now sweeps five legs, so it takes the 3600 s of the others.
     # MEASURED (2026-10-23, at the tree of that one-leg member, plain, on a 24-CPU host, load5 5.4 at
     # the start and 5.9 at the end): one complete standalone run of it took 110.3 s wall and passed,
-    # its homes leg 53.4 s. No config-lane time of any of the five members is known.
+    # its homes leg 53.4 s. No config-lane time of any of the six members is known, and no run of
+    # the opf-closure-f member at all.
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-a"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-b"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-c"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-d"): 3600,
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): 3600,
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-f"): 3600,
     # Sized outside SIZING, by its formula (no config-lane time of this member is known: its lane
     # runs reached the 1200 s default in two of three config lanes of one CI run, so they have no
     # known length and none is fed to the formula; the same lanes had passed on the same tree in an
@@ -1334,6 +1553,9 @@ SIZING_LATER_MEASURED = {
         "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
         " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
     ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-e"): (
+        "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
+        " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_opf_standalone_closure.py", "--self-test", "--ci-job", "opf-closure-f"): (
         "Standalone runs of the pre-split whole self-test only (2026-10-13 to 2026-10-15), no"
         " config-lane time known: see the shared CONFIG_MEMBER_BOUNDS comment."),
     ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): (
@@ -4128,6 +4350,7 @@ OPF_LIFECYCLE_EXEMPTIONS = {
     "opf/tools/_opf_init.py": "Canonical model bytes, defaults and validator vectors.",
     "opf/tools/_opf_init_contract.py": "KEEP contract validation over synthetic models.",
     "opf/tools/_opf_pack_manifest.py": "Pack parsing and digest vectors over filesystem fixtures.",
+    "opf/tools/_opf_release_history.py": "Pure history parsing, canonical emission and digest vectors over in-memory bytes.",
     "opf/tools/check_opf_homes.py": "Homes contract and schema boundary vectors.",
     "opf/tools/check_opf_init_contract.py": "Source-free contract matcher vectors.",
     "opf/tools/check_opf_init_observe.py": "Observation vectors with mocked git subprocesses.",
@@ -4712,6 +4935,13 @@ _SCAN_ALLOWED_UNPINNED = (
      " _opf_observe._scrubbed_env; its callers pass plumbing subcommands only, never a"
      " maintenance-triggering one"),
     # Cannot-evaluate launches (argv or head outside the resolver's bounds), each audited:
+    ("tools/_entry_restore_selftest.py", "_launch_wrapper", ("unresolved",),
+     "cannot-evaluate head: the function's one statement runs a git wrapper by its path with"
+     " the fixed _WRAPPER_ARGS (status and two operands): the lifecycle's PATH-front wrapper, or"
+     " a mutant copy of it the wrapper check must refuse; the probe puts its own stand-in git"
+     " first on the caller's PATH before the lifecycle, so either wrapper execs that stand-in, a"
+     " script that records its arguments and environment and exits 0, never a real git, and"
+     " status is not maintenance-triggering either way"),
     ("tools/_load_bound.py", "run", ("unresolved",),
      "cannot-evaluate argv and executable=: the shared load-tolerant runner spawns through"
      " _acquiring_popen(owned)(...), an ownership subclass of subprocess.Popen (the holder is"
