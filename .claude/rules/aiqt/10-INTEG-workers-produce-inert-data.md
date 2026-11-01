@@ -21,6 +21,13 @@ Workers produce research and candidate diffs as inert data; one orchestrator re-
 integrates them, and workers apply nothing themselves. Parallelism lives in the research stage; authority
 and seriality live in the apply stage.
 
+A candidate records its base commit; the apply refuses to write a whole-file candidate over a path whose
+content at that base, absence included, differs on the target now: a diff with context fails where that drift
+touches it, but a whole file overwrites that drift silently. Such a path is replayed three-way from that
+base; the result, not the reviewed change, is validated before it lands. A conflicted or partial replay
+is a cannot-evaluate, never resolved by taking either side. A candidate with no recorded base is a
+cannot-evaluate, never a clean apply.
+
 Narrow recovery-snapshot exception: a guard or hook that snapshots uncommitted work so a discard can be
 undone may write a private recovery ref under `refs/aiqt-recovery/` (and the objects it points to). The
 snapshot's OWN git operations change no working state (the ref is not a branch, HEAD, the index, or the
