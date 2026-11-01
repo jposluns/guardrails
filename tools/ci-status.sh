@@ -65,7 +65,8 @@
 # requests, has no open pull request (still at the last of the probe's reads), only open pull
 # requests into another base, or only open pull requests into the base that GitHub reports
 # CONFLICTING (see THE PULL-REQUEST PROBE below; a head whose associated pull requests show a merge
-# into the base is decided by its runs alone), 2 no run found, API error, a malformed run
+# into the base is decided by its runs alone), 2 a rev that does not name exactly one commit in this
+# checkout (one that does not resolve, or an ambiguous short id), no run found, API error, a malformed run
 # record (in one-shot and --wait mode alike), a missing, unusable or repeated --require-base or
 # --require-workflow value, the repository cannot be determined (see THE REPOSITORY IS THE
 # CHECKOUT'S OWN below), or a --wait whose pull-request probe is refused the pull requests, reads a
@@ -76,6 +77,8 @@
 # probe makes all 12 reads (11 re-reads) and exits 2 (before the probe read the associated pull
 # requests, each of the three was refused at once, exit 1).
 # Report-once (no --wait) never returns 0 for a non-terminal run.
+# Once the rev resolves, the first output line is "COMMIT: " and the full id of the commit every read
+# below is of (see the resolution below).
 set -uo pipefail
 
 # Resolve whatever rev was given (short SHA, branch, tag, HEAD~1) to a FULL 40-character
@@ -222,10 +225,24 @@ if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ] && [ "$REQUIRE_BASE_SET" -ne 1 ]; then
   printf 'ERROR: --require-workflow is accepted only with --require-base; a read without --require-base always requires the workflow file .github/workflows/quality.yml.\n' >&2
   exit 2
 fi
+# Every commit id the script is given, the positional rev or the --head value, becomes SHA here and
+# nowhere else. An id that does not name exactly one commit in this checkout is refused (exit 2, cannot
+# evaluate): when the ids of more than one object start with a short id, git refuses it as ambiguous,
+# and the refusal says so. A unique short id can still name the wrong commit (one typed, or extended
+# from memory, that happens to match another commit), which nothing here can tell, so the full id used
+# is printed as the first output line, for the caller to compare with the commit it meant. A commit
+# absent from this checkout, a full 40-character id included, does not resolve and is refused the same
+# way: this script reads only commits present locally (it reads the committer date below).
 if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
-  printf 'ERROR: %s does not resolve to a commit in this repository.\n' "${SHA_IN}" >&2
+  if [[ "$SHA_IN" =~ ^[0123456789abcdefABCDEF]{4,}$ ]] &&
+      [[ "$(git rev-parse --disambiguate="$SHA_IN" 2>/dev/null)" == *$'\n'* ]]; then
+    printf 'ERROR: cannot evaluate: %s is ambiguous: the ids of more than one object in this repository start with it, so it names no single commit; give a longer or the full commit id.\n' "${SHA_IN}" >&2
+  else
+    printf 'ERROR: cannot evaluate: %s does not resolve to a commit in this repository.\n' "${SHA_IN}" >&2
+  fi
   exit 2
 fi
+printf 'COMMIT: %s\n' "$SHA"
 if ! COMMIT_TIME="$(git log -1 --no-show-signature --format=%ct "$SHA" --)" ||
     ! [[ "$COMMIT_TIME" =~ ^[0-9]+$ ]]; then
   printf 'ERROR: cannot read the committer date of %s.\n' "$SHA" >&2

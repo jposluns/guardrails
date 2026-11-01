@@ -76,6 +76,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -607,6 +608,32 @@ class Fixture:
         commit = git("-c", "user.name=Selftest", "-c", "user.email=selftest@example.invalid",
                      "commit-tree", tree, "-p", "HEAD", "-m", message)
         return commit, tree
+
+    def ambiguous_commits(self):
+        # Two commit objects beside HEAD whose ids share their first four hex digits, the shortest
+        # prefix git reads as a short id. The ids are computed here in the repository's own object
+        # format until two share a prefix (65,537 distinct prefixes cannot all differ), then written
+        # with git, which must return the same ids. Returns the shared prefix and the written ids.
+        def git(*args, stdin=None):
+            return subprocess.run([GIT, "-C", str(self.repo)] + NO_AUTO_MAINTENANCE + list(args),
+                                  input=stdin, check=True, capture_output=True, text=True,
+                                  timeout=30, env=self.base_env).stdout.strip()
+        object_format = git("rev-parse", "--show-object-format")
+        tree = git("rev-parse", "HEAD^{tree}")
+        parent = git("rev-parse", "HEAD")
+        seen = {}
+        for index in range(65537):
+            body = ("tree {}\nparent {}\nauthor Selftest <selftest@example.invalid> {} +0000\n"
+                    "committer Selftest <selftest@example.invalid> {} +0000\n\nprefix {}\n").format(
+                        tree, parent, COMMIT_TIME, COMMIT_TIME, index)
+            raw = body.encode("utf-8")
+            oid = hashlib.new(object_format, b"commit %d\0" % len(raw) + raw).hexdigest()
+            if oid[:4] in seen:
+                bodies = (seen[oid[:4]], body)
+                break
+            seen[oid[:4]] = body
+        written = [git("hash-object", "-t", "commit", "-w", "--stdin", stdin=body) for body in bodies]
+        return written[0][:4], written
 
     def gh_reads(self, prefix):
         # How many gh calls of the last invocation read an endpoint of the fixture repository starting
@@ -1613,6 +1640,45 @@ def _run_checks():
                    for argv in fixture.git_argv),
                any(argv[:3] == ["remote", "get-url", "--all"] for argv in fixture.git_argv)),
               (0, True, True))
+
+        # Every commit id, the positional rev and the --head value alike, resolves to exactly one
+        # commit of this checkout or is refused (exit 2, cannot evaluate) before any API read. A short
+        # id that matches no object (HEAD's first eight hex digits with the eighth changed, an id
+        # extended from memory) does not resolve.
+        wrong_eighth = head_sha[:7] + ("0" if head_sha[7] != "0" else "1")
+        unresolvable = []
+        for rev, extra in ((wrong_eighth, ()), (None, ("--match-tree", "--head", wrong_eighth))):
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                extra_args=extra, tree=tree_listing([], {}))
+            unresolvable.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                 "ERROR: cannot evaluate: {} does not resolve to a commit in this "
+                                 "repository.".format(wrong_eighth) in output))
+        check("ci/rev-unresolvable-short-id-refused", unresolvable, [(2, True, False, True)] * 2)
+
+        # Two commit objects whose ids share a four-digit prefix: that prefix names no single commit,
+        # so it is refused as ambiguous (exit 2), never read as either commit.
+        prefix, written = fixture.ambiguous_commits()
+        ambiguous = [(len(set(written)), all(oid.startswith(prefix) for oid in written))]
+        for rev, extra in ((prefix, ()), (None, ("--match-tree", "--head", prefix))):
+            rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                extra_args=extra, tree=tree_listing([], {}))
+            ambiguous.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                              "ERROR: cannot evaluate: {} is ambiguous".format(prefix) in output))
+        check("ci/rev-ambiguous-short-id-refused", ambiguous,
+              [(2, True)] + [(2, True, False, True)] * 2)
+
+        # A unique short id resolves to its full id, which is the first output line and the id every
+        # read uses: the head_sha query and the tree match's result line name the full id.
+        printed = []
+        rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=head_sha[:8])
+        printed.append((rc, output.splitlines()[:1],
+                        fixture.gh_reads("actions/runs?head_sha={}&".format(head_sha))))
+        rc, output, _calls = fixture.invoke([], rev=None,
+                                            extra_args=("--match-tree", "--head", head_sha[:8]),
+                                            tree=tree_listing([], {}))
+        printed.append((rc, output.splitlines()[:1], " of {} was found".format(head_sha) in output))
+        check("ci/rev-short-id-prints-full-id", printed,
+              [(0, ["COMMIT: " + head_sha], 1), (1, ["COMMIT: " + head_sha], True)])
 
         if program is None:
             harness_error("ci/jq-step-direct-cases", "no jq program was extracted")
