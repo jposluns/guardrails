@@ -65,7 +65,8 @@
 # requests, has no open pull request (still at the last of the probe's reads), only open pull
 # requests into another base, or only open pull requests into the base that GitHub reports
 # CONFLICTING (see THE PULL-REQUEST PROBE below; a head whose associated pull requests show a merge
-# into the base is decided by its runs alone), 2 no run found, API error, a malformed run
+# into the base is decided by its runs alone), 2 a rev that does not name exactly one commit in this
+# checkout (one that does not resolve, or an ambiguous short id), no run found, API error, a malformed run
 # record (in one-shot and --wait mode alike), a missing, unusable or repeated --require-base or
 # --require-workflow value, the repository cannot be determined (see THE REPOSITORY IS THE
 # CHECKOUT'S OWN below), or a --wait whose pull-request probe is refused the pull requests, reads a
@@ -76,6 +77,9 @@
 # probe makes all 12 reads (11 re-reads) and exits 2 (before the probe read the associated pull
 # requests, each of the three was refused at once, exit 1).
 # Report-once (no --wait) never returns 0 for a non-terminal run.
+# Once the rev resolves, the first output line is "COMMIT: " and the full id of the commit the caller's
+# rev resolved to, the commit whose runs (or, under --match-tree, whose tree) are checked; other reads
+# can name other commits (--match-tree reads candidate commits through the API). See the resolution below.
 set -uo pipefail
 
 # Resolve whatever rev was given (short SHA, branch, tag, HEAD~1) to a FULL 40-character
@@ -222,10 +226,103 @@ if [ "$REQUIRE_WORKFLOW_SET" -eq 1 ] && [ "$REQUIRE_BASE_SET" -ne 1 ]; then
   printf 'ERROR: --require-workflow is accepted only with --require-base; a read without --require-base always requires the workflow file .github/workflows/quality.yml.\n' >&2
   exit 2
 fi
+# Every commit id the script is given, the positional rev or the --head value, becomes SHA here and
+# nowhere else. An id that does not name exactly one commit in this checkout is refused (exit 2, cannot
+# evaluate). git asks for a commit here (the ^{commit} suffix), so a short id that starts the id of one
+# commit and the ids of objects of other types (blobs, trees) is read as that commit, not refused. A short
+# hex rev that is also a branch or tag name names that ref's commit, never a commit whose id starts with
+# it (git's own rule); a hex rev as long as a full id is read as that object id even when a ref has that
+# name (git ignores such a ref when given a full id). A unique short id can still name the wrong commit
+# (one typed, or extended from memory, that happens to match another commit), which nothing here can
+# tell, so the full id used is printed as the first output line, for the caller to compare with the
+# commit it meant. A commit absent from this checkout, a full 40-character id included, does not resolve
+# and is refused the same way: the caller's rev is resolved only against this checkout's objects (its
+# committer date is read below).
+# When the rev is refused and begins with four or more hex digits, alone or followed by a ~ or ^ suffix,
+# the refusal names its cause. If git's own ref lookup reads those digits as exactly one ref (and they
+# are not as long as a full id, which git reads as an object id), the cause names that ref, from which the
+# rev does not lead to a commit. When more than one ref has that name (a tag and a branch, say), git's
+# lookup names no ref here, so the cause comes from the objects as below and names no ref, although git
+# reads the rev through one of those refs.
+# Otherwise the cause comes from the objects whose ids start with those digits, each peeled through any
+# tags to the first object that is not a tag: two or more distinct commits are ambiguous; one commit
+# reached from more than one of them (the commit and tags of it, or several tags of it) is ambiguous too,
+# because git refuses a short id that more than one commit or tag of a commit starts with, even when they
+# all lead to the same commit; objects none of which peels to a commit mean no commit id starts with
+# them. When git reports that it cannot list or read every one of those objects (any line git writes on
+# stderr while listing or reading them, a pack index it finds corrupt included, a read of them that exits
+# non-zero, fewer lines than objects, or a line that is not an id and a commit, tree or blob type), the
+# cause is never given as ambiguous or as no commit id: it is given as not known, or as not resolving when
+# the listing itself exits non-zero. git skips a pack whose index it cannot open (one this user may not
+# read, say) without reporting anything, so the objects in that pack are missing from the listing and
+# nothing here can tell: the cause can then be wrong (that no commit id starts with the digits, say, when
+# that pack holds one). The cause is worded only after git has refused the rev, so a wrong cause is always a
+# refusal, never an acceptance. Anything else does not resolve.
 if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
-  printf 'ERROR: %s does not resolve to a commit in this repository.\n' "${SHA_IN}" >&2
+  REV_CAUSE="does not resolve to a commit in this repository."
+  if [[ "$SHA_IN" =~ ^([0123456789abcdefABCDEF]{4,})([~^].*)?$ ]]; then
+    REV_PREFIX="${BASH_REMATCH[1]}"
+    REV_REF=""
+    REV_REF_ID=""
+    if REV_REF="$(git rev-parse --verify --quiet --symbolic-full-name "$REV_PREFIX" 2>/dev/null)" &&
+        [ -n "$REV_REF" ]; then
+      REV_REF_ID="$(git rev-parse --verify --quiet "$REV_REF" 2>/dev/null)"
+    fi
+    if [ -n "$REV_REF" ] && [ -n "$REV_REF_ID" ] && [ "${#REV_PREFIX}" -ne "${#REV_REF_ID}" ]; then
+      if [ "$SHA_IN" = "$REV_PREFIX" ]; then
+        REV_CAUSE="does not resolve to a commit in this repository: git reads ${REV_PREFIX} as the ref ${REV_REF}, which does not lead to a commit."
+      else
+        REV_CAUSE="does not resolve to a commit in this repository: git reads ${REV_PREFIX} as the ref ${REV_REF}, from which ${SHA_IN} does not lead to a commit."
+      fi
+    elif REV_LIST="$(git rev-parse --disambiguate="$REV_PREFIX" 2>&1)" && [ -n "$REV_LIST" ]; then
+      mapfile -t REV_CANDIDATES <<<"$REV_LIST"
+      REV_READ=1
+      REV_COMMITS=0
+      REV_DISTINCT=0
+      REV_FIRST_COMMIT=""
+      for candidate in "${REV_CANDIDATES[@]}"; do
+        if ! [[ "$candidate" =~ ^[0123456789abcdef]+$ ]]; then
+          REV_READ=0
+        fi
+      done
+      if [ "$REV_READ" -eq 1 ] && [ "${#REV_CANDIDATES[@]}" -ne 0 ] &&
+          REV_PEELED="$(printf '%s^{}\n' "${REV_CANDIDATES[@]}" |
+            git cat-file --batch-check='%(objectname) %(objecttype)' 2>&1)"; then
+        mapfile -t REV_PEELED_LINES <<<"$REV_PEELED"
+        if [ "${#REV_PEELED_LINES[@]}" -ne "${#REV_CANDIDATES[@]}" ]; then
+          REV_READ=0
+        fi
+        for peeled in "${REV_PEELED_LINES[@]}"; do
+          if ! [[ "$peeled" =~ ^([0123456789abcdef]+)\ (commit|tree|blob)$ ]]; then
+            REV_READ=0
+          elif [ "${BASH_REMATCH[2]}" = "commit" ]; then
+            REV_COMMITS=$((REV_COMMITS + 1))
+            if [ -z "$REV_FIRST_COMMIT" ]; then
+              REV_FIRST_COMMIT="${BASH_REMATCH[1]}"
+              REV_DISTINCT=1
+            elif [ "${BASH_REMATCH[1]}" != "$REV_FIRST_COMMIT" ]; then
+              REV_DISTINCT=2
+            fi
+          fi
+        done
+      else
+        REV_READ=0
+      fi
+      if [ "$REV_READ" -ne 1 ]; then
+        REV_CAUSE="does not resolve to a commit in this repository: git could not read every object whose id starts with ${REV_PREFIX}, so the cause is not known."
+      elif [ "$REV_DISTINCT" -gt 1 ]; then
+        REV_CAUSE="is ambiguous: the ids of more than one commit (or tag of a commit) in this repository start with ${REV_PREFIX}, so it names no single commit; give a longer or the full commit id."
+      elif [ "$REV_COMMITS" -gt 1 ]; then
+        REV_CAUSE="is ambiguous: the ids of more than one object in this repository start with ${REV_PREFIX}, each of them the commit ${REV_FIRST_COMMIT} or a tag that peels to it, and git refuses a short id that the ids of more than one commit or tag of a commit start with; give the full commit id."
+      elif [ "$REV_COMMITS" -eq 0 ]; then
+        REV_CAUSE="does not resolve to a commit in this repository: no commit id starts with ${REV_PREFIX}, only the ids of objects of other types."
+      fi
+    fi
+  fi
+  printf 'ERROR: cannot evaluate: %s %s\n' "${SHA_IN}" "$REV_CAUSE" >&2
   exit 2
 fi
+printf 'COMMIT: %s\n' "$SHA"
 if ! COMMIT_TIME="$(git log -1 --no-show-signature --format=%ct "$SHA" --)" ||
     ! [[ "$COMMIT_TIME" =~ ^[0-9]+$ ]]; then
   printf 'ERROR: cannot read the committer date of %s.\n' "$SHA" >&2
