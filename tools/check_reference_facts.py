@@ -192,7 +192,9 @@ FENCE_RUN = re.compile(r"`{3,}|~{3,}")
 # scan accepts (the real standards README carries its generated roster markers in this exact shape).
 HTML_COMMENT_LINE = re.compile(r"^ {0,3}<!--")
 # A list item whose content opens with '<' (list-item HTML such as '- <pre>'): the HTML block it
-# opens is container-relative, so this line reader cannot bound it; refused.
+# opens is container-relative, so this line reader cannot bound it; refused. The list-marker \d here
+# and in FLAT_LIST_ITEM and LIST_MARKER_LEAD is Unicode on purpose: a renderer that reads a non-ASCII
+# digit as a list number opens a list there, and the wider read only refuses more.
 LIST_HTML = re.compile(r"^ {0,3}(?:[-*+]|\d{1,9}[.)])[ \t]+<")
 BLOCKQUOTE = re.compile(r"^ {0,3}> ?")
 N_OF_M = re.compile(r"\b\d+ of \d+\b")

@@ -331,6 +331,18 @@ REVERSIONS = (
 )
 
 
+def _names_identity(exc, identity):
+    """True only when exc is an exact AssertionError whose args are exactly (identity,), or, for identity
+    None, whose one argument is any exact str. Only exact built-in
+    types are read (type(exc), the args tuple of an exact AssertionError and an exact str in it), so no code
+    from the caught instance runs (no __str__, __eq__, __class__ or args property of a subclass or of an
+    argument), and the comparison cannot itself end the process."""
+    if type(exc) is not AssertionError:
+        return False
+    args = exc.args
+    return len(args) == 1 and type(args[0]) is str and (identity is None or args[0] == identity)
+
+
 def red_on_revert(source, f):
     cases = {c[0]: c for c in vectors(f)}
     expanded = []
@@ -355,16 +367,296 @@ def red_on_revert(source, f):
         check(source.count(old) == 1, "revert/" + guard + "/unique-source")
         module = types.ModuleType("_opf_init_p0_reverted")
         module.__file__ = p0.__file__
-        exec(compile(source.replace(old, new), module.__file__, "exec"), module.__dict__)
+        # The reverted source is loaded and called in this process: a process ending from it (SystemExit 0
+        # or None, GeneratorExit, any other BaseException) is a harness failure, CANNOT-EVALUATE (exit 2) in
+        # main, never this gate's status; a KeyboardInterrupt propagates so an operator's Ctrl-C stops the run.
+        # No handler here runs code from the caught instance: an AssertionError subclass from the reverted
+        # source (whose __str__ could raise SystemExit 0) is cannot-evaluate with a fixed message, and so is an
+        # exact AssertionError without one exact-str argument; any other is compared through _names_identity
+        # alone. A KeyboardInterrupt of exactly that class propagates; a subclass, which only loaded code
+        # raises, is cannot-evaluate and is never re-raised.
+        try:
+            exec(compile(source.replace(old, new), module.__file__, "exec"), module.__dict__)
+        except Exception:
+            raise
+        except KeyboardInterrupt as exc:
+            if type(exc) is KeyboardInterrupt:
+                raise
+            raise RuntimeError("revert/" + guard + ": the reverted source raised a KeyboardInterrupt subclass at "
+                               "load; fail-closed") from None
+        except BaseException:  # noqa: BLE001  a process ending at load is cannot-evaluate, never a pass
+            raise RuntimeError("revert/" + guard + ": the reverted source ended the process at load; "
+                               "fail-closed") from None
         before = fingerprint(f)
         try:
             run_case(module, cases[identity], f)
         except AssertionError as exc:
-            check(str(exc) == identity, "revert/" + guard + "/wrong-assertion")
+            if type(exc) is not AssertionError:
+                raise RuntimeError("revert/" + guard + ": the reverted source raised an AssertionError subclass "
+                                   "in a call; fail-closed") from None
+            if not _names_identity(exc, None):
+                raise RuntimeError("revert/" + guard + ": the reverted source raised an AssertionError without "
+                                   "one exact-str argument in a call; fail-closed") from None
+            check(_names_identity(exc, identity), "revert/" + guard + "/wrong-assertion")
+        except Exception:
+            raise
+        except KeyboardInterrupt as exc:
+            if type(exc) is KeyboardInterrupt:
+                raise
+            raise RuntimeError("revert/" + guard + ": the reverted source raised a KeyboardInterrupt subclass in "
+                               "a call; fail-closed") from None
+        except BaseException:  # noqa: BLE001  a process ending in a call is cannot-evaluate, never a pass
+            raise RuntimeError("revert/" + guard + ": the reverted source ended the process in a call; "
+                               "fail-closed") from None
         else:
             raise AssertionError("revert/" + guard + "/not-red")
         check(fingerprint(f) == before, "revert/" + guard + "/fixture-changed")
         print("RED {} -> {}".format(guard, identity))
+
+
+# The KeyboardInterrupt a poisoned reverted source raises on purpose. Only it is recorded by
+# red_on_revert_loaded_exit; any other KeyboardInterrupt, such as an operator's real Ctrl-C landing in the
+# vector's window, propagates.
+LOADED_EXIT_INTERRUPT = "opf-init-p0-self-test-poisoned-revert"
+
+
+def _is_interrupt(exc, sent):
+    """True only for an exact KeyboardInterrupt whose args are exactly (sent,), read through exact built-in
+    types alone, so a recorder never runs code from the caught instance (an args property or an argument's
+    __eq__ that raises SystemExit 0, for example); any other KeyboardInterrupt propagates."""
+    if type(exc) is not KeyboardInterrupt:
+        return False
+    args = exc.args
+    return len(args) == 1 and type(args[0]) is str and args[0] == sent
+
+
+def _interrupt_to_raise(exc):
+    """The KeyboardInterrupt _propagate_interrupt raises for the caught KeyboardInterrupt `exc`, chosen by the
+    exact class alone: `exc` itself, unchanged, when its class is exactly KeyboardInterrupt (what an
+    operator's Ctrl-C raises); for a subclass, which only loaded code raises, a fresh KeyboardInterrupt with
+    its context suppressed, so no code from the caught instance runs (a __notes__ property that raises
+    SystemExit 0 while the interpreter reports it, for example). It raises nothing, so the vector over it
+    catches no KeyboardInterrupt."""
+    if type(exc) is KeyboardInterrupt:
+        return exc
+    fresh = KeyboardInterrupt()
+    fresh.__suppress_context__ = True
+    return fresh
+
+
+def _propagate_interrupt(exc):
+    """Raise what _interrupt_to_raise gives for the caught KeyboardInterrupt `exc`: an exact one propagates
+    unchanged, and a subclass is never re-raised."""
+    raise _interrupt_to_raise(exc)
+
+
+def _interrupt_filter_outcomes(sent):
+    """The interrupt filters over hostile inputs: _is_interrupt of an exact KeyboardInterrupt(sent), of a
+    subclass whose args property returns (sent,), and of an exact KeyboardInterrupt whose argument is a str
+    subclass or an object whose __eq__ is always true; whether _interrupt_to_raise gives an exact
+    KeyboardInterrupt back unchanged and, for that subclass, a fresh exact KeyboardInterrupt with no args and
+    its context suppressed; and the names of any instance code they ran. Nothing here raises or catches a
+    KeyboardInterrupt, so an operator's Ctrl-C arriving here propagates unchanged (_real_sigint_propagates
+    is red if it does not). Expected: (True, False, False, False, True, [])."""
+    ran = []
+
+    class _ArgsProperty(KeyboardInterrupt):
+        @property
+        def args(self):
+            ran.append("args")
+            return (sent,)
+
+        def __str__(self):
+            ran.append("str")
+            return sent
+
+    class _StrEq(str):
+        def __eq__(self, other):
+            ran.append("str-subclass-eq")
+            return True
+
+        __hash__ = str.__hash__
+
+    class _AnyEq:
+        def __eq__(self, other):
+            ran.append("eq")
+            return True
+
+        __hash__ = object.__hash__
+
+    outcomes = [_is_interrupt(KeyboardInterrupt(sent), sent), _is_interrupt(_ArgsProperty(), sent),
+                _is_interrupt(KeyboardInterrupt(_StrEq(sent)), sent),
+                _is_interrupt(KeyboardInterrupt(_AnyEq()), sent)]
+    own = KeyboardInterrupt(sent)
+    fresh = _interrupt_to_raise(_ArgsProperty())
+    outcomes.append(_interrupt_to_raise(own) is own and type(fresh) is KeyboardInterrupt and fresh.args == ()
+                    and fresh.__suppress_context__ is True)
+    return tuple(outcomes) + (ran,)
+
+
+# Run in a child by _real_sigint_propagates: load the file named first by path, make its first
+# _interrupt_to_raise call deliver a real SIGINT to the child (as an operator's Ctrl-C does; a call outside the
+# main thread exits 3 instead), then run _interrupt_filter_outcomes. The child must end by that interrupt.
+_REAL_SIGINT_PROBE = """import importlib.util, os, signal, sys, threading
+signal.signal(signal.SIGINT, signal.default_int_handler)
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+spec = importlib.util.spec_from_file_location("_real_sigint_probe_target", sys.argv[1])
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+real = gate._interrupt_to_raise
+def hooked(exc):
+    gate._interrupt_to_raise = real
+    if threading.current_thread() is not threading.main_thread():
+        sys.exit(3)
+    signal.raise_signal(signal.SIGINT)
+    return real(exc)
+gate._interrupt_to_raise = hooked
+gate._interrupt_filter_outcomes(sys.argv[2])
+print("returned")
+"""
+
+
+def _real_sigint_propagates(sent):
+    """True when a real SIGINT delivered inside _interrupt_filter_outcomes, in a child process, ends that child
+    as an uncaught KeyboardInterrupt. Red if anything there catches a KeyboardInterrupt in the main thread (the
+    child then returns) or classifies in a worker thread (the hook exits 3 there). This process catches no
+    KeyboardInterrupt here: an operator's Ctrl-C reaches subprocess.run, which re-raises it."""
+    import signal
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="interrupt-filter-sigint-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_REAL_SIGINT_PROBE, encoding="utf-8")
+        child = subprocess.run([sys.executable, "-I", "-B", str(probe), str(Path(__file__).resolve()), sent],
+                               capture_output=True, text=True, timeout=120)
+    return (child.returncode in (-signal.SIGINT, 130) and "returned" not in child.stdout
+            and "KeyboardInterrupt" in child.stderr)
+
+
+def _loaded_exit_outcome(source, body, f):
+    """The class of what escapes red_on_revert over `source` with `body` appended, or None. Only
+    LOADED_EXIT_INTERRUPT is recorded as KeyboardInterrupt; any other KeyboardInterrupt propagates."""
+    try:
+        red_on_revert(source + "\n" + body, f)
+    except KeyboardInterrupt as exc:
+        if not _is_interrupt(exc, LOADED_EXIT_INTERRUPT):
+            _propagate_interrupt(exc)
+        return KeyboardInterrupt
+    except BaseException as exc:  # noqa: BLE001  any other escape is recorded, never this test's own end
+        return type(exc)
+    return None
+
+
+def red_on_revert_loaded_exit(source, f):
+    """A reverted source that ends the process at load is a harness failure through red_on_revert (the
+    RuntimeError main reports as CANNOT-EVALUATE, exit 2), never an early exit with the loaded code's status;
+    a KeyboardInterrupt propagates as itself. Red if the load guard in red_on_revert is removed, and red if
+    the recorder records a KeyboardInterrupt other than the poisoned source's own."""
+    for label, body, want in (("SystemExit(0)", "raise SystemExit(0)\n", RuntimeError),
+                              ("SystemExit(None)", "raise SystemExit\n", RuntimeError),
+                              ("GeneratorExit", "raise GeneratorExit\n", RuntimeError),
+                              ("BaseException subclass", "class B(BaseException):\n    pass\nraise B()\n",
+                               RuntimeError),
+                              ("KeyboardInterrupt", "raise KeyboardInterrupt({!r})\n".format(LOADED_EXIT_INTERRUPT),
+                               KeyboardInterrupt),
+                              ("KeyboardInterrupt subclass that exits 0",
+                               HOSTILE_STR_BODY.format("KeyboardInterrupt", "_StrExits()") + "raise _StrExits()\n",
+                               RuntimeError)):
+        check(_loaded_exit_outcome(source, body, f) is want, "revert/loaded-exit/" + label)
+        print("PASS revert/loaded-exit/" + label)
+    # Any other KeyboardInterrupt (here one carrying another value, standing in for a real Ctrl-C) propagates.
+    other = LOADED_EXIT_INTERRUPT + "-other"
+    try:
+        _loaded_exit_outcome(source, "raise KeyboardInterrupt({!r})\n".format(other), f)
+    except KeyboardInterrupt as exc:
+        if not _is_interrupt(exc, other):
+            _propagate_interrupt(exc)
+        propagated = True
+    else:
+        propagated = False
+    check(propagated, "revert/loaded-exit/other-interrupt-not-recorded")
+    print("PASS revert/loaded-exit/other-interrupt-not-recorded")
+    # The recorder filters run no code from the caught instance. Red if _is_interrupt reads an args property
+    # or compares through an argument's __eq__, or _propagate_interrupt re-raises a subclass.
+    check(_interrupt_filter_outcomes(LOADED_EXIT_INTERRUPT) == (True, False, False, False, True, []),
+          "revert/interrupt-filters-run-no-instance-code")
+    print("PASS revert/interrupt-filters-run-no-instance-code")
+    # A real SIGINT inside the interrupt filters ends the run as an interrupt. Red if a probe there catches it.
+    check(_real_sigint_propagates(LOADED_EXIT_INTERRUPT), "revert/interrupt-filter-real-sigint-propagates")
+    print("PASS revert/interrupt-filter-real-sigint-propagates")
+
+
+# Appended to a reverted source: every public function the reverted module defines is replaced by one that
+# raises the expression formatted in second, after a class _StrExits of the base formatted in first whose
+# __str__ (and so format and repr), __eq__ and __notes__ raise SystemExit(0). A handler that stringifies,
+# formats or compares the caught instance, or re-raises a KeyboardInterrupt subclass as itself (the
+# interpreter reads its __notes__ when it reports it), then ends the gate with status 0.
+HOSTILE_STR_BODY = (
+    "class _StrExits({}):\n"
+    "    def __str__(self):\n"
+    "        raise SystemExit(0)\n"
+    "\n"
+    "    __repr__ = __str__\n"
+    "\n"
+    "    def __eq__(self, other):\n"
+    "        raise SystemExit(0)\n"
+    "\n"
+    "    __hash__ = object.__hash__\n"
+    "\n"
+    "    @property\n"
+    "    def __notes__(self):\n"
+    "        raise SystemExit(0)\n"
+    "\n\n"
+    "def _raise_str_exits(*args, **kwargs):\n"
+    "    raise {}\n"
+    "\n\n"
+    "for _n, _v in list(globals().items()):\n"
+    "    if type(_v) is type(_raise_str_exits) and _v.__module__ == __name__ and not _n.startswith('_'):\n"
+    "        globals()[_n] = _raise_str_exits\n")
+
+# (label, the base of _StrExits, what a call into the reverted source raises).
+HOSTILE_STR_CASES = (("AssertionError", "AssertionError", "_StrExits()"),
+                     ("Exception", "Exception", "_StrExits()"),
+                     ("KeyboardInterrupt", "KeyboardInterrupt", "_StrExits()"),
+                     ("assertion-with-hostile-argument", "object", "AssertionError(_StrExits())"))
+
+
+def red_on_revert_hostile_str(source, f):
+    """Each HOSTILE_STR_CASES call into the reverted source is a harness failure, exit 2 from main itself,
+    never exit 0 from a handler that stringifies, formats or compares the caught instance or re-raises it:
+    an AssertionError subclass, an exact AssertionError whose argument is not an exact str and a
+    KeyboardInterrupt subclass each make red_on_revert raise its fixed RuntimeError, and an Exception subclass
+    reaches main's handler, which gives 2 through _failure_status without reading it. Each runs through main
+    (its fixtures replaced, for that one run, by red_on_revert over the hostile source), so it is red if
+    red_on_revert, main's handler or _failure_status runs code from the caught instance."""
+    import contextlib
+    import io
+    names = globals()
+    real_fixtures = names["fixtures"]
+    for label, base, raised in HOSTILE_STR_CASES:
+        reached = []
+
+        def _hostile_fixtures(hostile=source + "\n" + HOSTILE_STR_BODY.format(base, raised), label=label):
+            reached.append(True)
+            red_on_revert(hostile, f)
+            raise AssertionError("revert/hostile-str/" + label + "/not-raised")
+        names["fixtures"] = _hostile_fixtures
+        try:
+            # fixtures() is main's first call inside its handler and never returns here, so no flag is read
+            # before the escape reaches the handler; --vectors-only keeps main in its narrowest mode regardless.
+            with contextlib.redirect_stderr(io.StringIO()):
+                got = main(["--vectors-only"])
+        except KeyboardInterrupt as exc:
+            if type(exc) is KeyboardInterrupt:
+                raise
+            got = "a KeyboardInterrupt subclass"  # recorded, never re-raised; only loaded code raises one
+        except BaseException as escaped:  # noqa: BLE001  recorded, never this test's own end
+            got = type(escaped)
+        finally:
+            names["fixtures"] = real_fixtures
+        check(reached == [True], "revert/hostile-str/" + label + "/fixtures-not-reached")
+        check(type(got) is int and got == 2, "revert/hostile-str/" + label)
+        print("PASS revert/hostile-str/" + label)
 
 
 # Prefixed to the runner text in place of a python3 shell function. A
@@ -1061,17 +1353,39 @@ def runner_red_checks(expected):
     _runner_non_readable_fd_checks()
 
 
-def main():
+def _failure_status(exc):
+    """main's status for an Exception escaping the harness, with its stderr line: 1 (SELF-TEST FAIL) for an
+    exact AssertionError, 2 (CANNOT-EVALUATE) for any other. The line carries this harness's own text only
+    when exc is an exact AssertionError or RuntimeError (what this module raises) whose one argument is an
+    exact str; any other exception, a subclass of either included, gets a fixed line. So no code from the
+    caught instance runs (no __str__, __repr__, __format__, __class__ or args property of a subclass or of an
+    argument), and an exception whose __str__ raises SystemExit 0 is exit 2, never 0."""
+    kind = type(exc)
+    args = exc.args if kind is AssertionError or kind is RuntimeError else ()
+    text = args[0] if len(args) == 1 and type(args[0]) is str else None
+    if kind is AssertionError:
+        print("SELF-TEST FAIL " + (text if text is not None else "(an assertion without a harness identity)"),
+              file=sys.stderr)
+        return 1
+    print("CANNOT-EVALUATE P0 harness: " + (text if text is not None else
+                                           "an exception other than this harness's own; fail-closed"),
+          file=sys.stderr)
+    return 2
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--red-on-revert", action="store_true")
     parser.add_argument("--vectors-only", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         f = fixtures()
         ids = run_vectors(p0, f)
         if not args.vectors_only:
             if args.red_on_revert:
+                red_on_revert_loaded_exit(Path(p0.__file__).read_text(encoding="utf-8"), f)
+                red_on_revert_hostile_str(Path(p0.__file__).read_text(encoding="utf-8"), f)
                 red_on_revert(Path(p0.__file__).read_text(encoding="utf-8"), f)
             runner_check(ids)
             print("PASS runner/declared-test-executes")
@@ -1093,14 +1407,649 @@ def main():
                     raise AssertionError("runner/registration-not-red")
                 print("RED own-dispatch -> runner/declared-test-executes/pass-lines")
                 runner_red_checks(ids)
+        if args.self_test and not args.vectors_only:
+            fault_failures = _fault_channel_vectors()
+            check(not fault_failures, "harness/fault-channels: " + "; ".join(fault_failures))
+            print("PASS harness/fault-channels")
         return 0
-    except AssertionError as exc:
-        print("SELF-TEST FAIL " + str(exc), file=sys.stderr)
-        return 1
     except Exception as exc:
-        print("CANNOT-EVALUATE P0 harness: {}".format(exc), file=sys.stderr)
-        return 2
+        return _failure_status(exc)
+
+
+
+# --- background fault channels of code loaded in process (atexit, worker thread, destructor) ----------
+# Fail-closed settlement for the background fault channels of the code this gate loads and runs in
+# process. _fail_closed_main installs the recorders BEFORE the gate's work (so before any in-process
+# load) and settles them AFTER it: a fault the interpreter reports only to stderr (a destructor, weakref
+# or similar callback through sys.unraisablehook; an unhandled exception ending a worker thread through
+# threading.excepthook) is recorded and forces exit 2 over a passing verdict, never a silent pass. Before
+# a passing verdict the settle waits (_SETTLE_SECONDS in all) for every other thread still running,
+# threading's census and the runtime's live count of low-level _thread workers together, so a worker's
+# later fault is recorded instead of killed silently by the exit, and a thread or low-level worker still
+# running at the bound fails the verdict closed (exit 2). On Linux the settle also waits on the OS's own
+# thread list for this process (_os_threads_pending), which still shows a worker while the runtime clears
+# its thread state (its thread-local and context values' destructors run there, after the runtime's live
+# count and threading's census already dropped it), a faulthandler watchdog and a thread a C extension
+# starts. The verdict then ends the process with os._exit, so an
+# atexit callback registered by loaded code can never run after it (that channel is unreachable, not
+# merely disclosed). Only a SystemExit with code None or 0 ending a worker thread is the interpreter's
+# normal SUCCESSFUL thread exit (default-hook parity) and is not recorded; any other code is an
+# unsuccessful exit a worker reported, so it is recorded.
+# A low-level _thread worker's SystemExit never reaches any hook (the interpreter drops it), so the
+# start entries and threading's saved module aliases of them are wrapped from before the gate's work and
+# a non-zero code ending such a worker is recorded as a fault there. The subinterpreter modules are made
+# unimportable before the gate's work, because a thread inside a subinterpreter reports its faults to
+# that interpreter's own hooks, never these recorders. Stated residuals, not closed: where the platform
+# has no per-process thread list (outside Linux) a thread outside the Python runtime stays invisible to
+# the census and the live count; and a process the loaded code starts is not followed, so one still
+# running after this gate ends is outside its verdict.
+# Each recorder chains to the hook it wrapped, so the usual traceback still reaches stderr after the
+# marker line. After the exit flushes the settle stops the collector, blocks every signal, runs any
+# handler already tripped, and re-reads the record and every liveness term, so a fault recorded or a
+# worker a signal handler started while a flush was blocked on a full pipe still fails the verdict, and
+# no loaded code can run between that last read and the exit.
+# Paths that end outside _gate_exit (a propagating KeyboardInterrupt, an escaping exception) already end
+# non-zero, and an ACCIDENTAL fault in an atexit callback cannot turn that non-zero end into exit 0, so
+# no background fault reads as a pass there. Residual: loaded code replacing these hooks, this record or
+# the exit itself is the reporting-machinery channel disclosed once in the _opf_views class disclosure
+# (deliberately hostile loaded code is accepted there and not closed).
+_LOADED_FAULTS = []
+# A started low-level worker's liveness flag, set synchronously at the start call: the runtime
+# live count misses the brief window before a just-started worker's OS thread registers, so the
+# settle also waits while any flag is set, never breaking on that transient zero.
+_LOADED_WORKERS = []
+_FAULT_MARKER = "LOADED-CODE-FAULT"
+
+
+def _install_fault_hooks():
+    # A local alias: opf.py's close-lifecycle census reads an attribute store through the bare module name
+    # as shadowing that module.
+    import threading as _threads
+
+    # The modules that create a subinterpreter are made unimportable (an import is an ImportError the
+    # gate's work fails on): a thread inside one reports its faults to that interpreter's own hooks.
+    for _name in ("_interpreters", "concurrent.interpreters", "_testinternalcapi", "_testcapi"):
+        sys.modules[_name] = None
+
+    previous_unraisable = sys.unraisablehook
+    previous_thread = _threads.excepthook
+
+    def _record(channel, chained, args):
+        _LOADED_FAULTS.append(channel)
+        try:
+            sys._loaded_code_fault = True
+            sys.stderr.write("{}: a {} fault was recorded; a passing verdict will fail closed\n".format(
+                _FAULT_MARKER, channel))
+        finally:
+            chained(args)
+
+    def _record_unraisable(args):
+        _record("destructor-or-callback", previous_unraisable, args)
+
+    def _benign_thread_exit(args):
+        # Only a worker thread ending by SystemExit(None) or SystemExit(0) is the interpreter's normal
+        # SUCCESSFUL thread exit (default-hook parity). Any other SystemExit code is an unsuccessful exit
+        # a worker reported, recorded like any other fault (never a silent pass); the code is read
+        # through exact built-in types alone and never formatted.
+        if args.exc_type is None or not issubclass(args.exc_type, SystemExit):
+            return False
+        code = getattr(args.exc_value, "code", None) if args.exc_value is not None else None
+        return code is None or (type(code) is int and code == 0)
+
+    def _record_thread(args):
+        if _benign_thread_exit(args):
+            previous_thread(args)
+        else:
+            _record("worker-thread", previous_thread, args)
+
+    sys.unraisablehook = _record_unraisable
+    _threads.excepthook = _record_thread
+
+    import _thread as _lowlevel
+
+    def _record_lowlevel_fault():
+        _LOADED_FAULTS.append("lowlevel-worker")
+        try:
+            sys._loaded_code_fault = True
+            sys.stderr.write("{}: a lowlevel-worker fault was recorded; a passing verdict will fail "
+                             "closed\n".format(_FAULT_MARKER))
+        except Exception:
+            pass
+
+    import types as _types
+    _bootstrap = _threads.Thread._bootstrap
+
+    def _genuine_bootstrap(target):
+        # A thread start is threading's own only when its target is exactly a bound method whose function
+        # is threading.Thread._bootstrap and whose instance is a threading.Thread (read through the exact
+        # method type, never an attribute the target supplies). Such a worker's fault already reaches
+        # threading.excepthook, so it is passed through untouched; wrapping it would also replace the
+        # target an audit-based observer reads, making threading's own start look like a raw one.
+        return (type(target) is _types.MethodType and target.__func__ is _bootstrap
+                and isinstance(target.__self__, _threads.Thread))
+
+    def _wrap_lowlevel(original):
+        # A raw low-level worker's SystemExit reaches no hook (the interpreter drops it), so the start
+        # entry wraps the worker's function and records a non-zero code as a fault (None or 0 is the
+        # successful low-level exit, default-interpreter parity; the code is read through exact built-in
+        # types alone and never formatted), and tracks the worker's liveness flag. A genuine threading
+        # start is passed through untouched.
+        def _start(function, *args, **kwargs):
+            if _genuine_bootstrap(function):
+                return original(function, *args, **kwargs)
+            state = [True]
+            def _run(*wargs, **wkwargs):
+                try:
+                    return function(*wargs, **wkwargs)
+                except SystemExit as exc:
+                    code = getattr(exc, "code", None)
+                    if not (code is None or (type(code) is int and code == 0)):
+                        _record_lowlevel_fault()
+                    raise
+                finally:
+                    state[0] = False
+            result = original(_run, *args, **kwargs)
+            _LOADED_WORKERS.append(state)
+            return result
+        return _start
+
+    _wrapped = []
+    for _entry in ("start_new_thread", "start_new", "start_joinable_thread"):
+        if hasattr(_lowlevel, _entry):
+            _original = getattr(_lowlevel, _entry)
+            _replacement = _wrap_lowlevel(_original)
+            setattr(_lowlevel, _entry, _replacement)
+            _wrapped.append((_original, _replacement))
+    for _alias in dir(_threads):
+        _value = getattr(_threads, _alias)
+        for _original, _replacement in _wrapped:
+            if _value is _original:
+                setattr(_threads, _alias, _replacement)
+
+
+# The OS's own list of this process's threads (Linux): it still shows a worker while the runtime clears
+# its thread state, a faulthandler watchdog and a thread a C extension starts. None where the platform has
+# no such list; the runtime's own counts then carry the settle alone (a stated residual).
+_TASK_DIR = "/proc/self/task" if sys.platform.startswith("linux") else None
+
+
+def _os_threads_pending():
+    """True while the OS lists a thread of this process besides the calling one, and when that list
+    exists but cannot be read (fail-closed); False where the platform has no such list."""
+    import os
+    if _TASK_DIR is None:
+        return False
+    try:
+        return len(os.listdir(_TASK_DIR)) != 1
+    except OSError:
+        return True
+
+
+def _drain_pending_signals():
+    """A Python-level call: the interpreter runs any signal handler already tripped on entry here."""
+    return None
+
+
+_SETTLE_SECONDS = 60.0
+
+
+def _gate_exit(code):
+    """Settle and END the process: before a passing verdict, wait (up to _SETTLE_SECONDS in all) for every
+    other thread still running, so a fault it raises later is recorded, never killed silently by the exit,
+    and fail closed (exit 2) if one still runs at the bound (the census covers threading's threads and,
+    through the runtime's live count, workers started through the low-level _thread entry points, so a
+    low-level worker still running at the bound also fails closed, and on Linux the OS's own thread list
+    covers a worker still clearing its thread state, a watchdog and a C extension's thread; elsewhere a
+    thread outside the Python runtime is invisible: a stated residual); force a recorded background fault
+    to exit 2 over a passing verdict, flush both streams, then stop the collector, block every signal, run
+    any handler already tripped and re-read the record and every liveness term AFTER the flushes (a fault
+    recorded or a worker started while a flush was blocked, on a full pipe say, must still fail the
+    verdict; its late marker is written straight to fd 2, past the buffers), then os._exit, so no atexit
+    callback registered by loaded code
+    runs after the verdict (the gate's own cleanup runs inside its work; this gate registers no atexit work
+    of its own)."""
+    import os
+    import threading as _threads
+    import time
+    import _thread as _lowlevel
+    if type(code) is bool:
+        code = 1 if code else 0
+    elif code is None:
+        code = 0
+    elif type(code) is not int:
+        # The code object is never formatted: a loaded object's __str__ must not run here.
+        sys.stderr.write("{}: a non-int SystemExit code at the gate entry; exit 1\n".format(_FAULT_MARKER))
+        code = 1
+    low = code & 0xFF
+    if code != 0 and low == 0:
+        # os._exit truncates its status to the low 8 bits, so this non-zero code would end the
+        # process with exit status 0, a silent pass; fail closed instead.
+        sys.stderr.write("{}: a SystemExit code outside the exit-status range at the gate entry; exit 2\n".format(
+            _FAULT_MARKER))
+        code = 2
+    else:
+        # os._exit refuses a code outside the C int range (OverflowError) instead of exiting, and
+        # that escape would let atexit callbacks registered by loaded code run after the verdict:
+        # take the low byte, the status any in-range code would report, so the exit below always runs.
+        code = low
+    if code == 0:
+        current = _threads.current_thread()
+        deadline = time.monotonic() + _SETTLE_SECONDS
+        while True:
+            running = [worker for worker in _threads.enumerate()
+                       if worker is not current and worker.is_alive()]
+            pending = (_lowlevel._count() or any(_state[0] for _state in _LOADED_WORKERS)
+                       or _os_threads_pending())
+            remaining = deadline - time.monotonic()
+            if (not running and not pending) or remaining <= 0:
+                break
+            if running:
+                running[0].join(min(remaining, 0.5))
+            else:
+                time.sleep(min(remaining, 0.05))
+        if running or pending:
+            sys.stderr.write("{}: a worker thread or low-level worker was still running at the verdict; "
+                             "fail-closed\n".format(_FAULT_MARKER))
+            code = 2
+    if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
+        sys.stderr.write("{}: {} background fault(s) from loaded code over a passing verdict; "
+                         "fail-closed\n".format(_FAULT_MARKER, len(_LOADED_FAULTS) or 1))
+        code = 2
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        if code == 0:
+            code = 2
+    if code == 0:
+        # The verdict stands only once no loaded code can run before the exit: the collector is stopped,
+        # every signal is blocked (no other thread is left to take one), a handler already tripped runs
+        # now, and the record and every liveness term are read afresh, so a fault or a worker a handler
+        # started while a flush was blocked fails the verdict.
+        import gc as _gc
+        import signal as _signals
+        try:
+            _gc.disable()
+            _signals.pthread_sigmask(_signals.SIG_BLOCK, _signals.valid_signals())
+            _drain_pending_signals()
+        except BaseException:  # noqa: BLE001  a handler's own escape fails the verdict, never the exit
+            code = 2
+        if (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False) or _lowlevel._count()
+                or any(_state[0] for _state in _LOADED_WORKERS) or _os_threads_pending()):
+            code = 2
+        if code != 0:
+            try:
+                os.write(2, ("{}: a background fault or a worker was recorded during the exit flush; "
+                             "fail-closed\n".format(_FAULT_MARKER)).encode("utf-8"))
+            except OSError:
+                pass
+    os._exit(code)
+
+
+def _fail_closed_main(run):
+    """The canonical process entry: install the fault recorders, run the gate's own work, settle, end."""
+    _install_fault_hooks()
+    try:
+        code = run()
+    except SystemExit as exc:
+        code = exc.code
+    _gate_exit(code)
+
+
+# The background fault channels, each driven through the gate's REAL _fail_closed_main in a child that
+# loads one fixture the way this gate loads code in process: a clean load passes; an atexit callback
+# registered by loaded code never runs (unreachable behind os._exit); a worker-thread fault and a
+# destructor fault are recorded and force exit 2.
+_FAULT_CHANNEL_PROBE = """import importlib.util, sys
+tool, fixture = sys.argv[1:3]
+sys.path.insert(0, tool.rsplit("/", 1)[0])
+spec = importlib.util.spec_from_file_location("_fault_channel_probe_target", tool)
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+gate._SETTLE_SECONDS = 2.0
+def load():
+    case = importlib.util.spec_from_file_location("_fault_channel_fixture", fixture)
+    module = importlib.util.module_from_spec(case)
+    case.loader.exec_module(module)
+    return 0
+gate._fail_closed_main(load)
+"""
+
+# (label, fixture source, expected exit, marker required, text that must NOT appear on stderr)
+_FAULT_CHANNEL_CASES = (
+    ("clean", "x = 1\n", 0, False, None),
+    ("atexit", "import atexit, sys\n"
+     "def callback():\n"
+     "    sys.stderr.write('FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "    raise RuntimeError('fault-fixture-atexit')\n"
+     "atexit.register(callback)\n", 0, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("joined-thread", "import threading\n"
+     "def fault():\n"
+     "    raise RuntimeError('fault-fixture-thread')\n"
+     "worker = threading.Thread(target=fault)\n"
+     "worker.start()\n"
+     "worker.join()\n", 2, True, None),
+    ("destructor", "import gc\n"
+     "class Fault:\n"
+     "    def __del__(self):\n"
+     "        raise RuntimeError('fault-fixture-destructor')\n"
+     "Fault()\n"
+     "gc.collect()\n", 2, True, None),
+    ("thread-systemexit", "import threading\n"
+     "def fault():\n"
+     "    raise SystemExit(7)\n"
+     "worker = threading.Thread(target=fault)\n"
+     "worker.start()\n"
+     "worker.join()\n", 2, True, None),
+    ("thread-systemexit-zero", "import sys\nimport threading\n"
+     "def done():\n"
+     "    sys.exit(0)\n"
+     "worker = threading.Thread(target=done)\n"
+     "worker.start()\n"
+     "worker.join()\n", 0, False, None),
+    ("finishing-thread", "import threading, time\n"
+     "threading.Thread(target=time.sleep, args=(0.3,)).start()\n", 0, False, None),
+    ("unjoined-thread", "import threading, time\n"
+     "def fault():\n"
+     "    time.sleep(0.5)\n"
+     "    raise RuntimeError('fault-fixture-unjoined-thread')\n"
+     "threading.Thread(target=fault).start()\n", 2, True, None),
+    ("unfinished-thread", "import threading\n"
+     "threading.Thread(target=threading.Event().wait, daemon=True).start()\n", 2, True, None),
+    # Low-level _thread workers: the interpreter drops a SystemExit ending one without calling any hook,
+    # so the wrapped start entry records a non-zero code as a fault (None or 0 stays the successful
+    # low-level exit), and the settle waits on the runtime's live count, so one still running at the
+    # bound fails the verdict closed while one that finishes is waited out.
+    ("lowlevel-systemexit", "import _thread, threading\n"
+     "done = threading.Event()\n"
+     "def worker():\n"
+     "    try:\n"
+     "        raise SystemExit(7)\n"
+     "    finally:\n"
+     "        done.set()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "done.wait()\n", 2, True, None),
+    ("lowlevel-systemexit-zero", "import _thread, threading\n"
+     "done = threading.Event()\n"
+     "def worker():\n"
+     "    try:\n"
+     "        raise SystemExit(0)\n"
+     "    finally:\n"
+     "        done.set()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "done.wait()\n", 0, False, None),
+    ("lowlevel-finishing", "import _thread, time\n"
+     "_thread.start_new_thread(time.sleep, (0.3,))\n", 0, False, None),
+    ("lowlevel-unfinished", "import _thread, threading\n"
+     "_thread.start_new_thread(threading.Event().wait, ())\n", 2, True, None),
+    # A handled failed low-level start leaves no pending worker: red when the start flag is recorded
+    # before the start call (the flag then stays set and the settle fails closed at the bound).
+    ("lowlevel-failed-start", "import _thread\n"
+     "try:\n"
+     "    _thread.start_new_thread(print)\n"
+     "except TypeError:\n"
+     "    pass\n", 0, False, None),
+    # Thread-state teardown: a worker's thread-local and context-variable values are destroyed while the
+    # runtime clears its thread state, after its live count and threading's census already dropped it;
+    # the OS thread list still shows the worker, so the settle waits and records the fault (red without
+    # that term: each ends 0).
+    ("lowlevel-local-destructor", "import _thread, threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-local-destructor')\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    ("thread-local-destructor", "import threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-thread-local-destructor')\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "threading.Thread(target=worker).start()\n"
+     "entered.wait()\n", 2, True, None),
+    ("contextvar-destructor", "import _thread, contextvars, threading, time\n"
+     "entered = threading.Event()\n"
+     "held = contextvars.ContextVar('held')\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-contextvar-destructor')\n"
+     "def worker():\n"
+     "    held.set(Held())\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    # The runtime's live count, the term that carries the settle where the platform has no thread list:
+    # the fixture switches the OS list off in the probe's gate, and a low-level worker whose return value's
+    # destructor still runs after its callback returned must still be waited out and recorded (red
+    # without the live count: it ends 0).
+    ("runtime-count-return-destructor", "import _thread, sys, threading, time\n"
+     "sys.modules['__main__'].gate._TASK_DIR = None\n"
+     "entered = threading.Event()\n"
+     "class Result:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.5)\n"
+     "        raise RuntimeError('fault-fixture-return-destructor')\n"
+     "def worker():\n"
+     "    return Result()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 2, True, None),
+    # The settle's own reads of those two terms: a teardown destructor or a return value's destructor
+    # that finishes without a fault is waited out and passes (red without the settle-position read: the
+    # re-read after the flushes then still sees the worker and fails the clean run closed).
+    ("lowlevel-local-finishing", "import _thread, threading, time\n"
+     "entered = threading.Event()\n"
+     "store = threading.local()\n"
+     "class Held:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.3)\n"
+     "def worker():\n"
+     "    store.value = Held()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 0, False, None),
+    ("runtime-count-return-finishing", "import _thread, sys, threading, time\n"
+     "sys.modules['__main__'].gate._TASK_DIR = None\n"
+     "entered = threading.Event()\n"
+     "class Result:\n"
+     "    def __del__(self):\n"
+     "        entered.set()\n"
+     "        time.sleep(0.3)\n"
+     "def worker():\n"
+     "    return Result()\n"
+     "_thread.start_new_thread(worker, ())\n"
+     "entered.wait()\n", 0, False, None),
+    # Capability removal: every subinterpreter module is unimportable (red when any one is left
+    # importable: the fixture then ends 3).
+    ("subinterpreter-modules", "import importlib\n"
+     "for name in ('_interpreters', 'concurrent.interpreters', '_testinternalcapi', '_testcapi'):\n"
+     "    try:\n"
+     "        importlib.import_module(name)\n"
+     "    except ImportError:\n"
+     "        continue\n"
+     "    raise SystemExit(3)\n", 0, False, None),
+    # An armed faulthandler watchdog is a C-level thread only the OS thread list shows; still armed at
+    # the bound it fails the verdict closed (red without that term: it ends 0).
+    ("watchdog-armed", "import faulthandler\n"
+     "faulthandler.dump_traceback_later(600)\n", 2, True, None),
+    # Exit-status range: os._exit truncates its status to the low 8 bits, so a non-zero SystemExit
+    # code that is a multiple of 256 would end the child with status 0, a silent pass; the gate maps
+    # it to 2. The neighbouring codes pass through (257 reaches the parent as its low byte, 1).
+    ("exit-status-255", "raise SystemExit(255)\n", 255, False, None),
+    ("exit-status-256", "raise SystemExit(256)\n", 2, True, None),
+    ("exit-status-257", "raise SystemExit(257)\n", 1, False, None),
+    ("exit-status-negative-256", "raise SystemExit(-256)\n", 2, True, None),
+    # Codes around the ends of the C int range: os._exit raises OverflowError on a code outside that
+    # range instead of exiting, which would let the loaded code's atexit callbacks run after the
+    # verdict; the gate takes the low byte first, so the exit always runs. The wide codes (beyond
+    # each end, with non-zero low bytes) reach the parent as their low bytes only through that
+    # ordering. The boundary codes (2**31, just past the positive end, and -(2**31), exactly the
+    # negative end) have a zero low byte and fail closed as exit 2; the multiple-of-256 rule alone
+    # already gives both that outcome, so those two cases are preservation controls over the range
+    # ends, not evidence that the ordering is required. The code at the positive end itself,
+    # 2**31 - 1, has low byte 255 and is inside os._exit's accepted range.
+    ("exit-status-wide-positive", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(2**31 + 1)\n", 1, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-wide-negative", "import atexit, sys\n"
+     "atexit.register(sys.stderr.write, 'FAULT-FIXTURE-ATEXIT-RAN\\n')\n"
+     "raise SystemExit(-(2**31) - 1)\n", 255, False, "FAULT-FIXTURE-ATEXIT-RAN"),
+    ("exit-status-boundary-positive", "raise SystemExit(2**31)\n", 2, True, None),
+    ("exit-status-boundary-negative", "raise SystemExit(-(2**31))\n", 2, True, None),
+)
+
+
+# The flush-window channel: _gate_exit's fault decision must hold across the exit flushes. The fixture
+# fills the child's stdout pipe to its exact capacity (F_GETPIPE_SZ) and leaves one byte in the stream's
+# buffer, then arms a timer (SIGALRM unblocked: a caller's blocked mask is inherited) whose signal handler
+# drops an object with a faulting destructor, so the fault is recorded while the exit flush is blocked on
+# the full pipe (after the settle's thread wait, which a worker-thread fault would not outlast); the
+# parent drains stdout only after stderr shows the fault marker. Exit 2 with the marker is required. Red
+# when the fault decision runs only before the flushes: the child then ends 0 with the marker on stderr.
+_FLUSH_WINDOW_FIXTURE = """import fcntl, os, signal, sys
+os.write(1, b"x" * fcntl.fcntl(1, fcntl.F_GETPIPE_SZ))
+sys.stdout.write("y")
+class Fault:
+    def __del__(self):
+        raise RuntimeError("fault-fixture-flush-window")
+def fault(signum, frame):
+    Fault()
+signal.signal(signal.SIGALRM, fault)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGALRM])
+signal.setitimer(signal.ITIMER_REAL, 1.0)
+"""
+
+# The same window with a start instead of a fault: the handler starts a low-level worker that never ends
+# while the exit flush is blocked, then reports on fd 2, and the parent drains stdout only after that
+# line. Exit 2 with the marker is required. Red when only the record is read after the flushes: the
+# child then ends 0 with the worker still running.
+_FLUSH_WINDOW_START_FIXTURE = """import _thread, fcntl, os, signal, sys, threading
+os.write(1, b"x" * fcntl.fcntl(1, fcntl.F_GETPIPE_SZ))
+sys.stdout.write("y")
+def start(signum, frame):
+    _thread.start_new_thread(threading.Event().wait, ())
+    os.write(2, b"FAULT-FIXTURE-FLUSH-START\\n")
+signal.signal(signal.SIGALRM, start)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGALRM])
+signal.setitimer(signal.ITIMER_REAL, 1.0)
+"""
+
+
+def _flush_window_failures():
+    """One failure string per flush-window requirement a child missed (see _FLUSH_WINDOW_FIXTURE and
+    _FLUSH_WINDOW_START_FIXTURE)."""
+    import subprocess
+    import tempfile
+    import threading
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-init-p0-flush-window-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        for label, fixture, ready in (
+                ("flush-window", _FLUSH_WINDOW_FIXTURE, _FAULT_MARKER + ":"),
+                ("flush-window-start", _FLUSH_WINDOW_START_FIXTURE, "FAULT-FIXTURE-FLUSH-START")):
+            case = Path(tmp) / (label + ".py")
+            case.write_text(fixture, encoding="utf-8")
+            try:
+                child = subprocess.Popen([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            with child:
+                killer = threading.Timer(120, child.kill)
+                killer.start()
+                try:
+                    header = b""
+                    while ready.encode("ascii") not in header:
+                        line = child.stderr.readline()
+                        if not line:
+                            break
+                        header += line
+                    child.stdout.read()
+                    trailer = child.stderr.read()
+                    code = child.wait()
+                finally:
+                    killer.cancel()
+            stderr_text = (header + trailer).decode("utf-8", "replace")
+            if code != 2:
+                failures.append("fault-channel/{}: expected exit 2, got {}".format(label, code))
+            elif (_FAULT_MARKER + ":") not in stderr_text:
+                failures.append("fault-channel/{}: fault marker absent".format(label))
+    return failures
+
+
+# The entry wiring, checked statically on this file's own source: the final __main__ block must be
+# exactly _ENTRY_WIRING by AST (spacing and comments aside), so a rewiring that keeps _fail_closed_main
+# defined but routes an entry branch around it (a plain sys.exit around the work, say) is red even though
+# the channel probes above drive _fail_closed_main directly.
+_ENTRY_WIRING = '''if __name__ == "__main__":
+    _fail_closed_main(main)
+'''
+
+
+def _entry_wiring_failures():
+    """One failure string per entry-wiring requirement this file's own source misses (see _ENTRY_WIRING)."""
+    import ast
+    failures = []
+    try:
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, ValueError) as exc:
+        return ["fault-channel/entry-wiring: this file could not be parsed ({})".format(type(exc).__name__)]
+    last = tree.body[-1] if tree.body else None
+    expected = ast.parse(_ENTRY_WIRING).body[0]
+    if last is None or ast.dump(last) != ast.dump(expected):
+        failures.append("fault-channel/entry-wiring: the final __main__ block is not the expected "
+                        "fail-closed form")
+    return failures
+
+def _fault_channel_vectors():
+    """One failure string per fault-channel case whose child did not end as required: the expected exit
+    code, the fault marker exactly when a fault must be recorded, and for the atexit case no trace of the
+    callback (it must never run). Red without the entry wrapper (the probe then ends 1, AttributeError on
+    _fail_closed_main, where clean and atexit expect 0) and red with the wrapper reverted to a plain exit
+    (the thread and destructor children then end 0 with the default hooks' output alone, where exit 2 with
+    the marker is required, and the atexit child then runs the callback)."""
+    import subprocess
+    import tempfile
+    failures = []
+    tool = str(Path(__file__).resolve())
+    with tempfile.TemporaryDirectory(prefix="opf-init-p0-fault-channel-") as tmp:
+        probe = Path(tmp) / "probe.py"
+        probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
+        for index, (label, body, expected, marked, absent) in enumerate(_FAULT_CHANNEL_CASES):
+            case = Path(tmp) / "fault_channel_{}.py".format(index)
+            case.write_text(body, encoding="utf-8")
+            try:
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                                       capture_output=True, text=True, timeout=120)
+            except (OSError, subprocess.SubprocessError) as exc:
+                failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
+                continue
+            if child.returncode != expected:
+                failures.append("fault-channel/{}: expected exit {}, got {}".format(
+                    label, expected, child.returncode))
+            elif marked != ((_FAULT_MARKER + ":") in child.stderr):
+                failures.append("fault-channel/{}: fault marker {}".format(
+                    label, "absent" if marked else "present"))
+            elif absent is not None and absent in child.stderr:
+                failures.append("fault-channel/{}: the atexit callback ran".format(label))
+    failures.extend(_flush_window_failures())
+    failures.extend(_entry_wiring_failures())
+    return failures
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    _fail_closed_main(main)

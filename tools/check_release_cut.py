@@ -1937,8 +1937,10 @@ _CLOSE_SWEEP_DISPOSITIONS = (
      _CS_LEGS.format("os.open of a staged-ids fixture root")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "jr_fd", "", 3,
      _CS_LEGS.format("journal-root open (or None until one)")),
-    ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 7,
-     _CS_LEGS.format("_open_dir_nofollow")),
+    ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "root_fd", "", 10,
+     _CS_LEGS.format("_open_dir_nofollow or _open_product_root")),
+    ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "REBIND", "jfd", "", 1,
+     _CS_LEGS.format("journal-root open")),
     ("opf/tools/_opf_adopt_apply.py", "run_adopt_transaction", "TRY", "mine_held", "mine_held", 1,
      "false positive: _close_held and _close_held_into pop each number out of the list before its one close, "
      "so the final close-out's pass over a list the release path already emptied closes none twice"),
@@ -2011,8 +2013,10 @@ _CLOSE_SWEEP_DISPOSITIONS = (
                    "close of root_fd after the try never runs after it")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "AFTER", "jr_fd", "jr_fd", 3,
      _CS_FRESH.format("self-test legs", "leg's journal-root open, or its jr_fd = None ahead of one")),
-    ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "AFTER", "root_fd", "root_fd", 7,
-     _CS_FRESH.format("self-test legs", "leg's _open_dir_nofollow")),
+    ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "AFTER", "root_fd", "root_fd", 10,
+     _CS_FRESH.format("self-test legs", "leg's _open_dir_nofollow or _open_product_root")),
+    ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "AFTER", "jfd", "jfd", 1,
+     _CS_FRESH.format("self-test legs", "leg's journal-root open")),
     ("opf/tools/_opf_emit.py", "run_bounded", "AFTER", "rfd", "rfd", 1,
      "false positive: the start-failure handler's nested finally closes rfd and wfd, and the rest of that handler "
      "ends in a raise or a return on every path, so the closes after the try never run after it"),
@@ -2487,7 +2491,7 @@ def _census_mapping_check(root):
         result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
                                 capture_output=True, timeout=TIMEOUT * 4)
         err = result.stderr.decode("utf-8", "replace")
-        held = re.match(r"census-held (\d+)\n", err)
+        held = re.match(r"census-held (\d+)\n", err, re.ASCII)
         want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
                          + ": OSError(5, 'injected census read failure')")
         if result.returncode != 2 or not want or want not in err or "Traceback" in err:
@@ -2692,6 +2696,19 @@ def _self_test_isolated(red_on_revert):
             print("FAIL " + failure, file=sys.stderr)
         check("census-mapping", not mapping_failures)
         print("PASS census-mapping runs=" + str(mapping_runs) + " close-stage-legs=3")
+        # An in-process call of self_test() hands the caller's environment back exactly, with the
+        # git fixture scrub and the git wrapper in effect inside, after a return and after an
+        # exception: the entry point is run in a child around a stand-in _self_test_isolated,
+        # once with red_on_revert True and once with it False. The stand-in must receive the
+        # value passed each time, so a constant passed on in place of the parameter fails one run.
+        from _entry_restore_selftest import entry_restore_failures
+        restore_failures = (
+            entry_restore_failures(script, "self_test", "_self_test_isolated", args=(True,))
+            + entry_restore_failures(script, "self_test", "_self_test_isolated", args=(False,)))
+        for failure in restore_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("entry-restores-caller-env", not restore_failures)
+        print("PASS entry-restores-caller-env")
         if red_on_revert:
             source = script.read_text(encoding="utf-8")
             marker = "# SELF-TEST:" + " mutation targets are restricted to the production prefix above."
