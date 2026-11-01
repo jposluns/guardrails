@@ -91,9 +91,9 @@
 #                        gained its sentence that an ASK that goes ahead cites each ruling the search found
 #                        for that subject and why it does not settle the question, and that the search reads
 #                        the decision record itself, not a list derived from it (deccls.4): measured PACK
-#                        134422 -> 134663; rule files 117926 -> 118167 (+241 units); managed block 360 and
+#                        134422 -> 134713; rule files 117926 -> 118217 (+291 units); managed block 360 and
 #                        file headers 16136 unchanged. Measured against the 559-unit estimate of 2026-10-29
-#                        for four queued seed folds, this fold cost 241 units, and the ratchet rises by that
+#                        for four queued seed folds, this fold cost 291 units, and the ratchet rises by that
 #                        measured cost.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->

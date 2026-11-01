@@ -1751,7 +1751,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 16
 end-line = 17
 canonical-text = "Classify a decision before enacting it: is it yours to make (ACT), the maintainer's (ASK), or blocked\n(BLOCKED)?"
-source-digest = "82c070e2be89d997b1bab389fb11d2a92754f423beced2bd886216a978a7e36e"
+source-digest = "71896b745ed32e549f055f6eed1a9a86b3e8976a43a80ae0f692284da07baf78"
 
 [[clause]]
 clause-id = "deccls.2"
@@ -1760,7 +1760,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 17
 end-line = 17
 canonical-text = "Record the classification before acting on it."
-source-digest = "82c070e2be89d997b1bab389fb11d2a92754f423beced2bd886216a978a7e36e"
+source-digest = "71896b745ed32e549f055f6eed1a9a86b3e8976a43a80ae0f692284da07baf78"
 
 [[clause]]
 clause-id = "deccls.3"
@@ -1769,7 +1769,7 @@ source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 17
 end-line = 21
 canonical-text = "Before an ASK goes to the maintainer or any\nprocedure standing in for them, search the decision record for that subject: a maintainer ruling answers it\nand outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the\nassistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is\nunclear, the ASK goes ahead."
-source-digest = "82c070e2be89d997b1bab389fb11d2a92754f423beced2bd886216a978a7e36e"
+source-digest = "71896b745ed32e549f055f6eed1a9a86b3e8976a43a80ae0f692284da07baf78"
 
 [[clause]]
 clause-id = "deccls.4"
@@ -1777,8 +1777,8 @@ corpus-id = "deccls"
 source-path = ".aiqt/core/rules/progr-decision.md"
 start-line = 21
 end-line = 23
-canonical-text = "An ASK that goes ahead cites each ruling the search found for that subject and\nwhy it does not settle the question; the search reads the decision record itself, by the item's id and key\nterms, not a backlog or question list derived from it."
-source-digest = "82c070e2be89d997b1bab389fb11d2a92754f423beced2bd886216a978a7e36e"
+canonical-text = "An ASK that goes ahead cites each ruling the search found for that subject and\nwhy it does not settle the question, or says the search found none; the search reads the decision record\nitself, by the decision's subject and id where it has one, not a backlog or question list derived from it."
+source-digest = "71896b745ed32e549f055f6eed1a9a86b3e8976a43a80ae0f692284da07baf78"
 
 [[clause]]
 clause-id = "rpfail.1"

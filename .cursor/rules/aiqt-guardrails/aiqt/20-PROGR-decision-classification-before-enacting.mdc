@@ -10,5 +10,5 @@ procedure standing in for them, search the decision record for that subject: a m
 and outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the
 assistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is
 unclear, the ASK goes ahead. An ASK that goes ahead cites each ruling the search found for that subject and
-why it does not settle the question; the search reads the decision record itself, by the item's id and key
-terms, not a backlog or question list derived from it.
+why it does not settle the question, or says the search found none; the search reads the decision record
+itself, by the decision's subject and id where it has one, not a backlog or question list derived from it.
