@@ -14421,9 +14421,21 @@ def _branch_command_creation_start(args):
 def _worktree_creation_start(args):
     """Maximally-conservative start-point classifier for `git worktree`.
 
-    Only `worktree add -b/-B <name> <path> [<start>]` is a clean creation. A bare
-    `worktree add <path> [<commit-ish>]` (no -b) is ambiguous -> ASK. `--detach`/`-d`
-    and `--orphan` -> ASK. Recognized non-creation subcommands allow silently.
+    Two `worktree add` forms return a start for the ancestry probe. `worktree add -b/-B <name>
+    <path> [<start>]` is a clean creation (start HEAD when omitted). `worktree add --detach|-d
+    <path> <commit-ish>` creates no branch: it checks <commit-ish> out detached, so it is probed
+    the same way and allowed only on a start rooted on the protected line (an orphaned or
+    unresolvable commit-ish still denies). The detach option may stand anywhere among the
+    options and operands, the operands may follow --, and it needs exactly one path and one
+    commit-ish operand and no option but the valueless -q/-f/--quiet/--force; a detach with
+    -b/-B, with no commit-ish (git detaches at HEAD) or with an extra operand ASKs. A
+    --detach or -d after -- is an operand to git, not the option. `--orphan`, `--no-*`, and
+    any unknown, abbreviated (--det) or value-taking option ASK.
+    A bare `worktree add <path> [<commit-ish>]` with neither -b nor --detach ASKs: git may
+    create a branch there (one named after the path's last component, or a local tracking
+    branch when <commit-ish> names a branch found only on one remote) or check out an
+    existing one, and which it does depends on refs this lexical classifier does not read.
+    Recognized non-creation subcommands allow silently.
     """
     if not args:
         return _ASK_START
@@ -14434,6 +14446,7 @@ def _worktree_creation_start(args):
         return _ASK_START                               # unknown/absent subcommand -> fail-safe
 
     created = False
+    detach = False
     branch_name = None
     operands = []                                       # [<path>, <start>]
     saw_eoo = False
@@ -14458,7 +14471,11 @@ def _worktree_creation_start(args):
             if name in _CLEAN_LONG_BOOLEANS and not has_value:
                 i += 1
                 continue
-            # --detach, --orphan, --no-*, unknown, value-taking, abbreviated -> ASK
+            if tok == "--detach":
+                detach = True                           # exact, valueless: checks out detached
+                i += 1
+                continue
+            # --orphan, --no-*, unknown, value-taking, abbreviated (--det) -> ASK
             return _ASK_START
 
         if tok.startswith("-") and len(tok) > 1:
@@ -14467,6 +14484,10 @@ def _worktree_creation_start(args):
             while j < len(chars):
                 ch = chars[j]
                 if ch in _CLEAN_SHORT_LETTERS:
+                    j += 1
+                    continue
+                if ch == "d":
+                    detach = True                       # -d is --detach
                     j += 1
                     continue
                 if ch in _WORKTREE_CREATE_SHORT and not created:
@@ -14479,7 +14500,7 @@ def _worktree_creation_start(args):
                         if i < n:
                             branch_name = args[i]       # separated value: -b NAME
                     break
-                # -d (detach) or any other short letter, or a duplicate trigger -> ASK
+                # any other short letter, or a duplicate trigger -> ASK
                 return _ASK_START
             i += 1
             continue
@@ -14487,6 +14508,12 @@ def _worktree_creation_start(args):
         operands.append(tok)
         i += 1
 
+    if detach:
+        # A detached checkout creates no branch; its commit-ish is probed like a -b start, so only a
+        # rooted one allows. Detach with a create trigger, or without exactly <path> <commit-ish>, ASKs.
+        if created or len(operands) != 2:
+            return _ASK_START
+        return operands[1]
     if not created:
         return _ASK_START                               # bare `add <path> [<commit-ish>]`: ambiguous
     if branch_name is None:
@@ -14641,7 +14668,12 @@ def branch_root(data):
     that is not a rooted repository DENIES fail-safe via the ancestry-unknown path ('-C $VAR', '-C
     /nonexistent', '-C /etc', '--work-tree=/etc' all deny, since the probe finds no origin/HEAD merge base).
     A CHECKOUT/SWITCH '--track <ref>' names a rooted real start and ALLOWS (a 'git branch --track' is an
-    unclassifiable form and DENIES, not an allow). A MISSING protected line (no origin/HEAD and no local
+    unclassifiable form and DENIES, not an allow). A 'git worktree add --detach|-d <path> <commit-ish>'
+    (the detach option in any position before any '--', the operands optionally after it) creates no
+    branch, so its commit-ish is probed as a -b start is, with the same -C and working-directory
+    handling: a rooted one ALLOWS, an orphaned or unresolvable one DENIES. A detach with a missing or extra operand or beside
+    -b/-B, an --orphan, and a bare 'worktree add <path> [<commit-ish>]' (git may create a branch there)
+    still DENY as forms this guard cannot classify (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
     ONLY a redirect whose worktree this guard cannot pin at all - a --git-dir/GIT_DIR/-c form, or a
     value-less/empty/relative-with-no-cwd -C/--work-tree that resolves 'opaque' - ALLOWS-WITH-NOTE (the CI
