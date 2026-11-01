@@ -2470,21 +2470,22 @@ runpy.run_path(path, run_name="__main__")
 """
 
 # The wall-clock bound on one row of _CENSUS_MAPPINGS, each set above the run it bounds (rule
-# kill-timeout-exceeds-callee-wait). The figures below were reported from runs on an 80-CPU host shared
-# with other work, each run pinned with N busy loops to the same 2 CPUs; no artefact of those runs is kept
-# in the tree. Every row but one stops at its first census read, within 0.7 s with no busy loops, far under
-# CENSUS_TIMEOUT.
+# kill-timeout-exceeds-callee-wait). The runtime figures below were reported from runs on an 80-CPU host
+# shared with other work, each pinned with N busy loops to the same 2 CPUs; no artefact of those runs is
+# kept in the tree. The one unpinned run named below is a separate report, not one of these figures. Every
+# row but one stops at its first census read, within 0.7 s with no busy loops, far under CENSUS_TIMEOUT.
 CENSUS_TIMEOUT = TIMEOUT * 4
 # check_gensrc_failclose.py reaches the census only at its close vectors, after the rest of its self-test.
-# An earlier worker run on an earlier revision of this pull request reported 554.3 s for the census child
-# with 20 busy loops and 563.9 to 589.5 s for that self-test alone with 20; this revision adds a self-test
-# vector, so neither figure was taken on this tree. The 94.7 to 102.3 s with no busy loops and the 883.6 to
-# 913.7 s with 40 are reported figures too, from a tree that is not known. This bound is the slowest
-# reported 20-loop figure plus a 50% margin, rounded up to a multiple of 60 s, so it does not cover 40
-# loops; its provenance rests on those reported figures. It is a plain wall-clock bound: a _load_bound clock
-# divides the 1-minute load by os.process_cpu_count(), which on Python 3.14 follows CPU affinity, so its
-# factor stays 1 for an unpinned run at a 1-minute load of 60 on 80 CPUs, the load that overran the old
-# 120 s bound, while a run pinned to 2 CPUs at that load reads the cap of 16.
+# Reported figures: 554.3 s for the census child with 20 busy loops, and 563.9 to 589.5 s for that
+# self-test alone with 20. Both first appear in the same change that added a self-test vector, and the tree
+# they were measured on is not known, as for the 94.7 to 102.3 s with no busy loops and the 883.6 to
+# 913.7 s with 40. This bound is the slowest reported 20-loop figure plus a 50% margin, rounded up to a
+# multiple of 60 s, so it does not cover 40 loops; its provenance rests on those reported figures.
+# It is a plain wall-clock bound. A report, with no artefact kept, says an unpinned run on 80 CPUs at a
+# load of 60 overran the old 120 s bound; the load-average window behind that 60 is not recorded. A
+# _load_bound clock divides the 1-minute load by os.process_cpu_count(), which on Python 3.14 follows CPU
+# affinity, so at a 1-minute load of 60 its factor stays 1 for an unpinned run on 80 CPUs, while a run
+# pinned to 2 CPUs at that load reads the cap of 16.
 # Reaching this bound stays exit 2 naming the timeout, never a failure.
 CENSUS_GENSRC_TIMEOUT = 900
 # Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
@@ -2516,6 +2517,25 @@ def _census_mapping_check(root):
             failures.append("%s (census under %s): expected exit 2 with its cannot-evaluate report, got exit %d: %s"
                             % (rel, target, result.returncode, err.strip().splitlines()[-1:]))
     return failures, len(_CENSUS_MAPPINGS)
+
+
+def _census_mapping_completeness(root):
+    """Every swept source (_CLOSE_SWEEP_DIRS) that names _StCensusError has a row in _CENSUS_MAPPINGS, and
+    every row names such a source, so a deleted row fails instead of leaving one self-test unrun. Exempt:
+    _close_selftest.py, which defines the census, and this tool, whose own mapping _close_stage_mapping_check
+    runs. Returns failures."""
+    exempt = {"tools/_close_selftest.py", "tools/check_release_cut.py"}
+    naming = set()
+    for directory in _CLOSE_SWEEP_DIRS:
+        for path in sorted((Path(root) / directory).glob("*.py")):
+            rel = path.relative_to(root).as_posix()
+            if rel not in exempt and "_StCensusError" in path.read_text(encoding="utf-8"):
+                naming.add(rel)
+    mapped = {row[0] for row in _CENSUS_MAPPINGS}
+    return (["census mapping: {} names _StCensusError but has no _CENSUS_MAPPINGS row".format(rel)
+             for rel in sorted(naming - mapped)]
+            + ["census mapping: the _CENSUS_MAPPINGS row for {} names no source that names _StCensusError"
+               .format(rel) for rel in sorted(mapped - naming)])
 
 
 def _close_harness_checks(parent, script):
@@ -2709,6 +2729,10 @@ def _self_test_isolated(red_on_revert):
         for failure in stage_failures:
             print("FAIL " + failure, file=sys.stderr)
         check("close-stage-census-mapping", not stage_failures)
+        complete_failures = _census_mapping_completeness(script.parents[1])
+        for failure in complete_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("census-mapping-complete", not complete_failures)
         mapping_failures, mapping_runs = _census_mapping_check(script.parents[1])
         for failure in mapping_failures:
             print("FAIL " + failure, file=sys.stderr)

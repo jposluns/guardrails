@@ -1539,6 +1539,7 @@ _SELF_TEST_VECTORS = (
     "load tolerance",
     "sandbox-setup mkdtemp failure",
     "template setup git timeout",
+    "monitoring fault marker",
     "block-kind generator",
     "git-reading generator",
     "fsmonitor probe",
@@ -2155,6 +2156,40 @@ def _self_test_main_isolated():
         _run_vector(cannot, failures, "template setup git timeout", _setup_timeout_fixtures,
                     _evaluate_setup_timeout)
 
+        # A real monitoring fault (a _load_bound.run clock that raises once the child runs, recorded the
+        # way a baseline records a stop) is named a monitoring fault by _stopping_bound, while a template
+        # setup report that merely contains the word "monitoring" is named template setup alone. A marker
+        # reduced to the bare word "monitoring" would name a monitoring fault in the second report too.
+        def _monitor_fault_report():
+            ticks = iter((0.0, 0.0))
+
+            def faulty_clock():
+                value = next(ticks, None)
+                if value is None:
+                    raise RuntimeError("injected monitoring fault")
+                return value
+            try:
+                _load_bound.run([sys.executable, "-I", "-c", "import time\ntime.sleep(3600)\n"],
+                                budget_s=3600, stall_s=3600, poll_s=0.05, clock=faulty_clock)
+            except _load_bound.Hung as exc:
+                if exc.kind != "monitor":
+                    raise
+                return "error: {}".format(exc)
+            return None  # the child was never stopped: a named setup failure, never a pass
+
+        def _evaluate_monitor_marker(monitor_report):
+            template_report = ("template sandbox setup failed (git init: the setup child's monitoring "
+                               "pipe closed early)")
+            named = (_stopping_bound(monitor_report), _stopping_bound(template_report))
+            if named != ("a monitoring fault", "template setup (TEMPLATE_GIT_TIMEOUT or a setup error)"):
+                failures.append("monitoring fault marker: expected a real monitoring fault named 'a "
+                                "monitoring fault' and a template setup report that only contains the "
+                                "word 'monitoring' named template setup alone, got {!r} for reports {!r}"
+                                .format(named, (monitor_report, template_report)))
+
+        _run_vector(cannot, failures, "monitoring fault marker", _monitor_fault_report,
+                    _evaluate_monitor_marker)
+
         # (m) A BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on
         #     invalid UTF-8 passes (exit 0): a block target is probed with invalid UTF-8 only, which this
         #     generator rejects. This exercises the is_block probe path that no other fixture covers.
@@ -2663,7 +2698,9 @@ def _self_test_main_isolated():
           "escaping symlink (the leaky_reject_escape fixture) returns exit 2 with the containment "
           "diagnostic asserted (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure "
           "returns exit 2, and so does a template setup git reaching TEMPLATE_GIT_TIMEOUT, reported as a "
-          "template setup failure that the stopping-bound namer names; a block-kind generator that "
+          "template setup failure that the stopping-bound namer names; that namer names a real monitoring "
+          "fault as one, never a template setup report that merely contains the word monitoring; a "
+          "block-kind generator that "
           "fail-closes on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; "
           "a git-reading generator passes (exit 0) because the sandbox template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
