@@ -8,7 +8,13 @@ status, so under `set -e` a failed producer still reads as success and the scrip
 when a command's own termination status is the evidence a verdict rests on, that status is taken only
 from a construct that faithfully propagates it). This gate flags an adopter-declared relied-on command
 sitting in a NON-FINAL stage of a pipeline (`|` or `|&`), at top level or inside a `$( )` or backquote
-command-substitution body, in an adopter-declared shell surface.
+command-substitution body, in an adopter-declared shell surface (a PIPE finding). Two further findings,
+kept separate from it, cover constructs that report their own status instead of the command's: LAUNCHER,
+a declared relied-on command behind a launcher that does not wait for it (setsid without a wait option,
+systemd-run without a wait-claiming option or with --ignore-failure), and BACKGROUND, a declared
+relied-on command anywhere in an AND-OR list ended by a trailing '&' (the shell reports the launch; a
+later wait or $! read earns no credit). A setsid with a wait option, and a systemd-run wait-claiming
+mode, are cannot-evaluate (exit 2): their exit propagation is not a verified premise of this gate.
 
 The gate is ADOPTER-PARAMETERIZED: it ships NO command, subcommand, or path of its own. The adopter
 authors `.aiqt/relied-exit-pipes.toml`, declaring which script surfaces to scan and which command words
@@ -16,7 +22,8 @@ authors `.aiqt/relied-exit-pipes.toml`, declaring which script surfaces to scan 
 and exits clean; a present but unusable configuration never does (fail-closed). A pipe whose left side
 is not a declared command never fires, which keeps false alarms low: `git log | head` is not a finding.
 
-ONE EXEMPTION clears a flagged pipeline. It is credited only for a closed set of spellings the gate
+ONE EXEMPTION clears a flagged pipeline (a PIPE finding only; it never clears a LAUNCHER or BACKGROUND
+finding). It is credited only for a closed set of spellings the gate
 can read with certainty; every other spelling refuses toward a finding, never toward a silent pass:
   E1  pipefail is provably on. The credit is an ALLOWLIST over the WHOLE FILE: every line must be one
       of a small closed set of forms, read from the shared lexer's dequoted words and the raw text
@@ -57,8 +64,9 @@ new spellings that skip it, so the gate grants no credit for it at all. The reme
 pipeline with its own status saved (`tool write > rows.out` then `rc=$?` on its own line, with the former sink
 reading rows.out afterwards). The same skip hazards reach that remedy's own `rc=$?` line: the remedy is
 sound because no pipe discards the producer's status any more, not because the save provably runs, and
-whether a LATER line masks a NON-PIPE status is outside this gate's scope (non-pipe masking belongs to
-gatdis and its hook, as the residue states). This over-refuses (disclosed): an ordinary script that saves PIPESTATUS
+whether a LATER line masks a status other than through a pipe, a non-waiting launcher or a trailing '&'
+is outside this gate's scope (gatdis states it as rule text, and no hook applies this gate's
+declared-command judgement to it, as the residue states). This over-refuses (disclosed): an ordinary script that saves PIPESTATUS
 correctly right after the pipeline is flagged until it adopts one of those remedies. Under E1 the save
 line has to go as well: its '$' takes the line outside the closed grammar and withdraws the pipefail
 credit for the whole file, and pipefail already carries the producer's failure to the pipeline's status.
@@ -77,7 +85,9 @@ Configuration schema (`.aiqt/relied-exit-pipes.toml`), adopter-authored:
                                       (exit 2) any .git or __pycache__ entry, symlink, or non-regular
                                       file it meets, never pruning or skipping them silently
   commands = ["record-tool"]          relied-on command basenames (matched at command-word position,
-                                      after NAME=value assignments and the common wrappers used BARE;
+                                      after NAME=value assignments, the common wrappers used BARE,
+                                      and the launchers setsid and systemd-run read through their
+                                      own closed option grammars;
                                       a wrapper given ANY option word, and a declared NAME inside a
                                       subshell, brace group, loop, function body (one-line
                                       definitions included), coproc, or among the words of
@@ -91,8 +101,11 @@ Configuration schema (`.aiqt/relied-exit-pipes.toml`), adopter-authored:
 Exit convention (matches the repo's gates):
   0  clean, or a printed NOT APPLICABLE (the configuration path is CONFIRMED absent; an inspection
      failure such as an unreadable parent directory is exit 2, never a silent clean)
-  1  a real finding (a declared relied-on command in a non-final pipeline stage, the pipefail exemption
-     not held; a PIPESTATUS read after the pipeline does not clear it)
+  1  a real finding: PIPE (a declared relied-on command in a non-final pipeline stage, the pipefail
+     exemption not held; a PIPESTATUS read after the pipeline does not clear it), LAUNCHER (one behind
+     setsid without a wait option, or behind systemd-run without a wait-claiming option or with
+     --ignore-failure) or BACKGROUND (one in an AND-OR list ended by '&'); pipefail clears neither of
+     the last two
   2  cannot evaluate, fail-closed: a malformed, unreadable, uninspectable or non-regular (e.g. FIFO)
      configuration, an unmatched path, command or subcommand selector, a selector with an empty, '.'
      or '..' component or a symlinked component, a selector containing a NUL character (no file path
@@ -107,7 +120,14 @@ Exit convention (matches the repo's gates):
      the raw text of an `sh -c`, `bash -c`, `dash -c`, `zsh -c`, `ksh -c` or `eval` argument
      (clustered options such as `-ec` included), among the argument words of `xargs`, `flock` or
      `find`, beside a `coproc`, possibly hidden behind a wrapper's option words (any option word
-     after a wrapper: separate, attached with '=', or '--'), a declared command whose subcommand sits
+     after a wrapper: separate, attached with '=', or '--'), behind a setsid option outside its closed
+     grammar (short clusters only of c, f and w; a long name only as a non-empty prefix of exactly one
+     of ctty, fork, wait, never help or version, never with '='; no unreadable word) or a systemd-run
+     option outside the closed table read from systemd 259's --help (long options only in full), where
+     a systemd-run option value word spells a declared name, behind a waiting setsid (any w, or
+     --wait) or a wait-claiming systemd-run option (--wait, --scope, -P/--pipe, -t/--pty,
+     -T/--pty-late, -S/--shell), whose exit propagation is not a verified premise of this gate, a
+     declared command whose subcommand sits
      behind option words, a declared NAME inside a subshell, brace group, loop body or function body
      (one-line definitions and non-brace bodies included: constructs whose execution time or shell
      this gate does not model; the name counts even where it is only another command's argument data,
@@ -173,6 +193,33 @@ MAX_SUBST_DEPTH = 20
 # -exec/-execdir/-ok arguments; a declared NAME anywhere among find's words refuses, even when it is
 # only a -name operand (an over-refusal, disclosed).
 ARG_EXECUTORS = frozenset(("xargs", "flock", "find"))
+# Launchers: commands that run the next command word but can report their OWN status before it finishes.
+# Kept apart from WRAPPERS (a transparent exec) and ARG_EXECUTORS: each has a closed option parser
+# (_setsid_mode, _systemd_run_mode), and a declared command behind one that does not wait is a LAUNCHER
+# finding, never a transparent peel.
+LAUNCHERS = frozenset(("setsid", "systemd-run"))
+# setsid's long options, matched as a non-empty prefix of exactly one name (their first letters differ).
+SETSID_LONG = ("ctty", "fork", "wait", "help", "version")
+# systemd-run's options, the closed set read from systemd 259's --help; long options match only when
+# spelled in full. Value-taking options consume a value (attached, or the next word).
+SYSTEMD_RUN_SHORT_VALUE = "HMupE"
+SYSTEMD_RUN_SHORT_FLAG = "rdRqvG"
+SYSTEMD_RUN_SHORT_WAIT = "PtTS"
+SYSTEMD_RUN_LONG_VALUE = frozenset((
+    "host", "machine", "unit", "property", "setenv", "description", "slice", "expand-environment",
+    "service-type", "uid", "gid", "nice", "working-directory", "root-directory", "json", "job-mode",
+    "background", "path-property", "socket-property", "timer-property", "on-active", "on-boot",
+    "on-startup", "on-unit-active", "on-unit-inactive", "on-calendar"))
+SYSTEMD_RUN_LONG_FLAG = frozenset((
+    "no-ask-password", "user", "slice-inherit", "remain-after-exit", "send-sighup", "same-dir",
+    "same-root-dir", "quiet", "verbose", "collect", "no-pager", "no-block", "on-timezone-change",
+    "on-clock-change", "ignore-failure"))
+SYSTEMD_RUN_LONG_WAIT = frozenset(("wait", "scope", "pipe", "pty", "pty-late", "shell"))
+# Separators that keep an AND-OR list going: '&' backgrounds the whole list since the last ';', newline,
+# '&', '(' or ')', so every relied stage in it is backgrounded, not only the last pipeline.
+LIST_JOINS = ("|", "|&", "&&", "||")
+# Characters that make a launcher word unreadable as text: an expansion or a glob can become an option.
+UNREADABLE_CHARS = "$`*?["
 # Block-opener kinds a declared command may not sit under: the construct's execution time (a loop, a
 # function called later) or count is not modelled, so the gate refuses rather than judging around it.
 # if/then/else and case arms stay walked: they run at most once, in this shell, where they sit.
@@ -586,7 +633,125 @@ def _command_word(argv, raw=None):
     spelled plain (per-token through _leading_plain; where that walk stopped, the token's identity is
     unknown and _unresolved_token_plain reads it as a command name, never as syntax): a quoted or
     escaped spelling is a command name in bash, so it is returned as the command word instead
-    (raw=None, used by the pure-argv unit layer, treats every word as plain)."""
+    (raw=None, used by the pure-argv unit layer, treats every word as plain). The first four elements
+    of _command_word_launch, which also peels the LAUNCHERS."""
+    return _command_word_launch(argv, raw)[:4]
+
+
+# Launcher modes, ranked: where a command word sits behind several launchers the highest rank decides.
+_LAUNCH_RANK = {"launch": 1, "ignore-failure": 1, "wait": 2, "unclassified": 3}
+
+
+def _setsid_long(name):
+    """The setsid long option a '--NAME' spelling selects: the one name in SETSID_LONG that NAME is a
+    non-empty prefix of, or None when it prefixes none (or is empty)."""
+    hits = [full for full in SETSID_LONG if name and full.startswith(name)]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _setsid_mode(argv, i, unreadable):
+    """Read setsid's option words after argv[i]: (index of the command word, mode). The grammar is
+    closed: short clusters only of c, f and w; a long name only as a non-empty prefix of exactly one of
+    ctty, fork, wait, help, version, never with '='; a plain '--' ends the options and a lone '-' is
+    the command word. help, version, any other letter or long name, and any word unreadable(j, w)
+    reports are 'unclassified'. Any w (or --wait) is 'wait'; everything else is 'launch' (setsid may
+    fork and return its own status before the command finishes)."""
+    j = i + 1
+    waits = False
+    while j < len(argv):
+        w = argv[j]
+        if unreadable(j, w):
+            return j, "unclassified"
+        if w == "--":
+            j += 1
+            break
+        if w.startswith("--"):
+            full = None if "=" in w else _setsid_long(w[2:])
+            if full is None or full in ("help", "version"):
+                return j, "unclassified"
+            waits = waits or full == "wait"
+            j += 1
+            continue
+        if w.startswith("-") and w != "-":
+            if any(c not in "cfw" for c in w[1:]):
+                return j, "unclassified"
+            waits = waits or "w" in w[1:]
+            j += 1
+            continue
+        break
+    if j < len(argv) and unreadable(j, argv[j]):
+        return j, "unclassified"
+    return j, "wait" if waits else "launch"
+
+
+def _systemd_run_mode(argv, i, unreadable):
+    """Read systemd-run's option words after argv[i]: (index of the command word, mode, separate-word
+    option values). The table is closed (systemd 259's --help) and long options match only when spelled
+    in full. Any other option, an '=' on a flag, a missing value or an unreadable word is
+    'unclassified'; a wait-claiming option (--wait, --scope, -P/--pipe, -t/--pty, -T/--pty-late,
+    -S/--shell) is 'wait'; --ignore-failure is 'ignore-failure'; everything else is 'launch' (the
+    default service mode does not wait for the service to stop)."""
+    j = i + 1
+    seen = set()
+    values = []
+    while j < len(argv):
+        w = argv[j]
+        if unreadable(j, w):
+            return j, "unclassified", tuple(values)
+        if w == "--":
+            j += 1
+            break
+        if w.startswith("--"):
+            name, eq, _val = w[2:].partition("=")
+            if name in SYSTEMD_RUN_LONG_VALUE:
+                if not eq:
+                    if j + 1 >= len(argv) or unreadable(j + 1, argv[j + 1]):
+                        return j, "unclassified", tuple(values)
+                    values.append(argv[j + 1])
+                    j += 1
+            elif eq or name not in SYSTEMD_RUN_LONG_FLAG | SYSTEMD_RUN_LONG_WAIT:
+                return j, "unclassified", tuple(values)
+            seen.add(name)
+            j += 1
+            continue
+        if w.startswith("-") and w != "-":
+            k = 1
+            while k < len(w):
+                c = w[k]
+                if c in SYSTEMD_RUN_SHORT_VALUE:
+                    if k + 1 == len(w):
+                        if j + 1 >= len(argv) or unreadable(j + 1, argv[j + 1]):
+                            return j, "unclassified", tuple(values)
+                        values.append(argv[j + 1])
+                        j += 1
+                    break
+                if c in SYSTEMD_RUN_SHORT_WAIT:
+                    seen.add("wait")
+                elif c not in SYSTEMD_RUN_SHORT_FLAG:
+                    return j, "unclassified", tuple(values)
+                k += 1
+            j += 1
+            continue
+        break
+    if j < len(argv) and unreadable(j, argv[j]):
+        return j, "unclassified", tuple(values)
+    if "ignore-failure" in seen:
+        return j, "ignore-failure", tuple(values)
+    if seen & (SYSTEMD_RUN_LONG_WAIT | {"wait"}):
+        return j, "wait", tuple(values)
+    return j, "launch", tuple(values)
+
+
+def _command_word_launch(argv, raw=None):
+    """_command_word's walk, returning (index, basename, opens_before, opaque, launch). A LAUNCHERS
+    word is peeled through its own closed option parser, after which the next word is again in
+    command position (wrappers may follow). launch is None when no launcher was peeled, else
+    (launcher, mode, values) for the highest-ranked one: mode 'launch' or 'ignore-failure' (a
+    LAUNCHER finding when the peeled command is relied on), 'wait' (cannot evaluate when a declared
+    command is in reach: the launcher's exit propagation is not a verified premise of this gate) or
+    'unclassified' (opaque, like a wrapper given an option word). values are systemd-run's separate-word
+    option values, which must not spell a declared name. A launcher word is unreadable when it
+    carries an expansion or glob character, or (with raw given) sits where the per-token walk stopped."""
     flags = _leading_plain(raw, argv) if raw is not None else None
 
     def _plain_at(j, w):
@@ -596,10 +761,14 @@ def _command_word(argv, raw=None):
             return flags[j]
         return _unresolved_token_plain(raw, w)
 
+    def _unreadable(j, w):
+        return any(c in w for c in UNREADABLE_CHARS) or (raw is not None and j >= len(flags))
+
     opens = 0
     i = 0
     after_wrapper = False
     after_timeout = False
+    launch = None
     while i < len(argv):
         w = argv[i]
         if w in RESERVED_SKIP and _plain_at(i, w):
@@ -611,19 +780,33 @@ def _command_word(argv, raw=None):
             i += 1
             continue
         if after_wrapper and w.startswith("-"):
-            return None, None, opens, True
+            return None, None, opens, True, launch
         if after_timeout and w[:1].isdigit():
             after_timeout = False
             i += 1
             continue
         base = w.rsplit("/", 1)[-1] if w else ""
+        if base in LAUNCHERS:
+            if base == "setsid":
+                j, mode = _setsid_mode(argv, i, _unreadable)
+                values = ()
+            else:
+                j, mode, values = _systemd_run_mode(argv, i, _unreadable)
+            if launch is None or _LAUNCH_RANK[mode] > _LAUNCH_RANK[launch[1]]:
+                launch = (base, mode, values)
+            if mode == "unclassified":
+                return None, None, opens, True, launch
+            after_wrapper = False
+            after_timeout = False
+            i = j
+            continue
         if base in WRAPPERS:
             after_wrapper = True
             after_timeout = base == "timeout"
             i += 1
             continue
-        return i, base, opens, False
-    return None, None, opens, False
+        return i, base, opens, False, launch
+    return None, None, opens, False, launch
 
 
 # Sentinel for a first operand that cannot be told from the text: an option word before it may consume
@@ -666,6 +849,18 @@ def _subcommand_ok(subcommands, sub):
 def _nonfinal(stages):
     """The pipeline stages whose exit the pipe discards: every stage but the last."""
     return stages[:-1]
+
+
+def _background_stages(unit):
+    """The stages of an AND-OR list ended by '&' whose exit the shell no longer reports: every relied
+    stage in the list, the final one included (the shell reports the launch)."""
+    return [stage for stage in unit if stage[1]]
+
+
+def _value_spells_declared(values, commands):
+    """True when a separate-word launcher option value spells a declared name: the option may in fact
+    have consumed the command word, so the peel cannot be trusted (fail-closed)."""
+    return any(v and v.rsplit("/", 1)[-1] in commands for v in values)
 
 
 def _set_pipefail_effect(argv):
@@ -927,11 +1122,12 @@ def _judge(pending, events):
     be cleared: a nested stage (an if or case arm, the only walked blocks) can never in fact be
     exempt, because the block opener's own line sits outside the closed credit grammar and withdraws
     the whole-file credit, so no credited file holds one; the depth guard keeps that fail-closed (a
-    nested stage stays flagged) should the grammar ever admit an opener."""
+    nested stage stays flagged) should the grammar ever admit an opener. The exemption applies only to
+    a PIPE record: pipefail cannot recover a status a launcher or a trailing '&' never waited for."""
     ordered = sorted(events)
     kept = []
     for rec in pending:
-        if rec["depth"] == 0 and _e1_exempt(ordered, rec["offset"]):
+        if rec["kind"] == "pipe" and rec["depth"] == 0 and _e1_exempt(ordered, rec["offset"]):
             continue
         kept.append(rec)
     return kept
@@ -1087,10 +1283,14 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
     func_pending = False
     prev_sep = ""
     run_stages = []  # (segment index, absolute offset, relied, basename, effective depth, opaque)
+    bg_unit = []     # (absolute offset, relied, basename, effective depth) since the last list boundary
     for idx, seg in enumerate(kept):
         if run_stages and not _executes(seg) and seg.sep_after in ("",) + PIPE_SEPS:
             # A blank or comment-only record directly after a pipe: the pipeline continues on the next
             # executing line, so this record is neither a stage nor the end of the statement.
+            continue
+        if bg_unit and not _executes(seg) and seg.sep_after == "" and prev_sep in ("&&", "||"):
+            # Likewise after && or ||: the AND-OR list continues on the next executing line.
             continue
         # Whether a function definition was already pending when this segment began: the deferred
         # body must be consumed by THIS segment (a modelled block opener, or a subshell body judged
@@ -1100,7 +1300,7 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
         abs_off = ctx.base + offs[idx] + lead
         argv = seg.argv
         raw = seg.raw or ""
-        cmd_i, base, opens_before, opaque = _command_word(argv, raw)
+        cmd_i, base, opens_before, opaque, launch = _command_word_launch(argv, raw)
         plain_flags = _leading_plain(raw, argv)
 
         def plain_at(j, w, _flags=plain_flags, _raw=raw):
@@ -1116,6 +1316,25 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
         eff_depth = len(blocks) + paren_depth + opens_before
         relied = False
         seg_declared = declared_in_words(argv) or bool(declared_re.search(unmasked_span(idx, seg)))
+        if launch is not None and seg_declared:
+            launcher, mode, values = launch
+            if mode == "unclassified":
+                raise GateError("{}:{}: binding {!r}: a declared command may sit behind {!r} option "
+                                "words this gate cannot classify; cannot evaluate".format(
+                                    rel, line_of(abs_off), binding["id"], launcher))
+            if _value_spells_declared(values, commands):
+                raise GateError("{}:{}: binding {!r}: a {} option value word spells a declared "
+                                "command, so the option may have consumed the command word; cannot "
+                                "evaluate".format(rel, line_of(abs_off), binding["id"], launcher))
+            if mode == "wait" and launcher == "setsid":
+                raise GateError("{}:{}: binding {!r}: a declared command runs behind a waiting setsid; "
+                                "setsid -w exit propagation is not a verified premise of this gate; "
+                                "cannot evaluate".format(rel, line_of(abs_off), binding["id"]))
+            if mode == "wait":
+                raise GateError("{}:{}: binding {!r}: a declared command runs behind a wait-claiming "
+                                "systemd-run option; whether systemd-run propagates the command's exit "
+                                "in this mode is not a verified premise of this gate; cannot "
+                                "evaluate".format(rel, line_of(abs_off), binding["id"]))
         if opaque and seg_declared:
             raise GateError("{}:{}: binding {!r}: a declared command may sit behind wrapper option "
                             "words this gate cannot parse (the option may consume the following word); "
@@ -1216,7 +1435,13 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                     # shopt -uo pipefail turns the option off; recorded like set +o pipefail, at any
                     # depth. The enabling spelling stays uncredited (same stance as shopt -so).
                     events.append((abs_off, "off"))
+        if relied and launch is not None and launch[1] in ("launch", "ignore-failure"):
+            pending.append({"offset": abs_off, "rel": rel, "line": line_of(abs_off),
+                            "binding": binding["id"], "command": base, "kind": "launcher",
+                            "launcher": launch[0], "ignore_failure": launch[1] == "ignore-failure",
+                            "depth": eff_depth})
         run_stages.append((idx, abs_off, relied, base, eff_depth, opaque))
+        bg_unit.append((abs_off, relied, base, eff_depth))
         if seg.sep_after not in PIPE_SEPS:
             if len(run_stages) > 1:
                 for _si, soff, _sr, sbase, _sd, sopq in _nonfinal(run_stages):
@@ -1240,10 +1465,19 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                     if not srelied:
                         continue
                     pending.append({"offset": soff, "rel": rel, "line": line_of(soff),
-                                    "binding": binding["id"], "command": sbase,
+                                    "binding": binding["id"], "command": sbase, "kind": "pipe",
                                     "stage": k, "nstages": nstages, "final": final_word,
                                     "depth": sdepth})
             run_stages = []
+        if seg.sep_after not in LIST_JOINS:
+            if seg.sep_after == "&":
+                # '&' backgrounds the whole AND-OR list: the shell reports the launch, so no relied
+                # stage in it reports its own exit (a later wait or $! read earns no credit).
+                for boff, _br, bbase, bdepth in _background_stages(bg_unit):
+                    pending.append({"offset": boff, "rel": rel, "line": line_of(boff),
+                                    "binding": binding["id"], "command": bbase,
+                                    "kind": "background", "depth": bdepth})
+            bg_unit = []
         # In `function NAME {` the NAME is a definition, not a command, and would stop the reserved-word
         # walk before the '{' is counted; skip the keyword and the name so the body depth is tracked.
         # Either definition form (function NAME, or NAME followed by an empty '( )' pair) marks the
@@ -1564,6 +1798,19 @@ def scan_file(root, path, binding, telemetry):
         events = [event for event in events if event[1] == "off"]
     findings = []
     for rec in _judge(pending, events):
+        if rec["kind"] == "launcher":
+            how = ("with --ignore-failure" if rec["ignore_failure"] else "without a wait option")
+            findings.append("{}:{}: binding {!r}: relied-on command {!r} runs behind {!r} {}, so the "
+                            "launcher can report its own status before the command finishes; run it "
+                            "directly".format(rec["rel"], rec["line"], rec["binding"], rec["command"],
+                                              rec["launcher"], how))
+            continue
+        if rec["kind"] == "background":
+            findings.append("{}:{}: binding {!r}: relied-on command {!r} is in a list ended by '&'; the "
+                            "shell reports the launch, not the command's exit (a later wait is not "
+                            "credited); run it in the foreground".format(
+                                rec["rel"], rec["line"], rec["binding"], rec["command"]))
+            continue
         msg = ("{}:{}: binding {!r}: relied-on command {!r} (stage {} of {}) pipes into {!r}; "
                "the pipe discards its exit status, so put set -o pipefail in effect for this "
                "pipeline, or run the command outside the pipeline with its own status saved "
@@ -1647,7 +1894,8 @@ def run(root):
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: no declared relied-on command loses its exit status to a pipe")
+    print("PASS: no declared relied-on command loses its exit status to a pipe, a non-waiting launcher "
+          "or a trailing '&'")
     return 0
 
 
@@ -1687,7 +1935,13 @@ def run(root):
 # whole-context lex fallback and the locate refusal by mutants of their own helpers (the locate
 # refusal forced through readings flattened into one), and scan_file's pre-open layer is called
 # directly. A case that cannot run (no tempdir, no symlink or FIFO support, permission checks
-# bypassed) is a NAMED failure, never a skip.
+# bypassed) is a NAMED failure, never a skip. The launcher and background cases R142..R164 (exit 1,
+# every finding needle asserted, each re-run under the never-report mutant), the waiting-setsid and
+# launcher refusals (C47..C50, R146, R155b, X20..X32, exit 2 with their own needle) and the controls
+# C51..C59 (exit 0) each come with a flip, and each launcher mutant (setsid dropped from LAUNCHERS, a
+# wait-blind or 'w'-anywhere setsid reader, exact-only long options, pipefail clearing every kind, a
+# single-stage background unit, '&&' as a boundary, -u dropped from the systemd-run value table, the
+# value-word safeguard removed, setsid as a wrapper) must stop its named case from holding.
 
 def _run_quiet(root):
     import io
@@ -1754,7 +2008,14 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                                          (["env", "--chdir=/x", "tool", "write"], None, True),
                                          (["env", "--", "tool", "write"], None, True),
                                          (["command", "-v", "tool"], None, True),
-                                         (["time", "-p", "tool", "write"], None, True)):
+                                         (["time", "-p", "tool", "write"], None, True),
+                                         # A launcher is peeled through its own closed option parser;
+                                         # an option word it cannot classify makes the segment opaque.
+                                         (["setsid", "-f", "tool", "write"], "tool", False),
+                                         (["timeout", "5", "setsid", "nohup", "tool"], "tool", False),
+                                         (["systemd-run", "-u", "job", "tool"], "tool", False),
+                                         (["setsid", "-x", "tool", "write"], None, True),
+                                         (["systemd-run", "--wai", "tool"], None, True)):
         _i, base, _o, opq = _command_word(argv)
         if base != want_base or opq != want_opaque:
             failures.append("_command_word({!r}) expected base {!r}/opaque {!r}, got {!r}/{!r}".format(
@@ -2595,7 +2856,7 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C9", c9, "_subcommand_ok", lambda subs, sub: True, "ignore subcommands", 1),
                 ("C23", c23, "_leading_plain", lambda raw, argv: [True] * len(argv),
                  "read a quoted word as a reserved word", 2),
-                ("C24", c24, "_command_word", lambda argv, raw=None: (None, None, 0, True),
+                ("C24", c24, "_command_word_launch", lambda argv, raw=None: (None, None, 0, True, None),
                  "treat every wrapper as opaque", 2),
                 ("C33", c33, "_leading_plain", _dq_continuation_blind,
                  "keep the double-quoted backslash-newline, so exactly the continued quoted "
@@ -3279,6 +3540,173 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                     failures.append("X10-dangling-config: a dangling-symlink configuration expected "
                                     "fail-closed exit 2 with the configuration-symlink check's own "
                                     "diagnostic, got {}".format(rc))
+
+            # --- launcher and background findings: R142..R164 (exit 1, each needle asserted), the
+            # waiting-setsid and launcher refusals C47..C50, R146, R155b and X20..X32 (exit 2, each
+            # asserting its own needle), the controls C51..C59 (exit 0) and every flip ---
+            n_launch = "without a wait option, so the launcher can report its own status"
+            n_ignore = "with --ignore-failure, so the launcher can report its own status"
+            n_bg = "is in a list ended by '&'"
+            n_pipe = "pipes into 'tail'"
+            n_setsid_w = "setsid -w exit propagation is not a verified premise of this gate"
+            n_sdrun_w = "whether systemd-run propagates the command's exit in this mode is not a verified"
+            n_classify = "option words this gate cannot classify"
+            n_value = "option value word spells a declared command"
+            pfx = "tool write\n"
+            launch_cases = [
+                ("R142", "setsid tool write\n", 1, [n_launch]),
+                ("R143", "setsid -f tool write; echo done\n", 1, [n_launch]),
+                ("R144a", "setsid -c tool write\n", 1, [n_launch]),
+                ("R144b", "setsid --fork tool write\n", 1, [n_launch]),
+                ("R144c", "setsid --f tool write\n", 1, [n_launch]),
+                ("R145", "setsid -- tool write\n", 1, [n_launch]),
+                ("R147a", pfx + "setsid tool write | tail -1\n", 1, [n_launch, n_pipe]),
+                ("R147b", "setsid tool write | tail -1\n", 1, [n_launch, n_pipe]),
+                ("R148a", "timeout 5 setsid tool write\n", 1, [n_launch]),
+                ("R148b", "env A=1 setsid nohup tool write\n", 1, [n_launch]),
+                ("R150", "tool write &\n", 1, [n_bg]),
+                ("R151", "nohup tool write > log 2>&1 &\n", 1, [n_bg]),
+                ("R152", "nohup tool write | tail -1 &\n", 1, [n_pipe, n_bg]),
+                ("R153", "echo x | tool write &\n", 1, [n_bg]),
+                ("R154", "tool write && echo ok &\n", 1, [n_bg]),
+                ("R155", "tool write & disown\n", 1, [n_bg]),
+                ("R156a", "systemd-run tool write\n", 1, [n_launch]),
+                ("R156b", "systemd-run --no-block tool write\n", 1, [n_launch]),
+                ("R157", "systemd-run --user -u job --property=Nice=5 tool write\n", 1, [n_launch]),
+                ("R159a", "systemd-run --on-active=30 tool write\n", 1, [n_launch]),
+                ("R159b", "systemd-run --ignore-failure --wait tool write\n", 1, [n_ignore]),
+                ("R161", "set -o pipefail\ntool write\nsetsid tool write\n", 1, [n_launch]),
+                ("R162", "set -o pipefail\ntool write\ntool write &\n", 1, [n_bg]),
+                ("R163", "if true; then setsid tool write; fi\n", 1, [n_launch]),
+                ("R164", "x=$(setsid tool write)\n", 1, [n_launch]),
+                # A waiting setsid is cannot-evaluate: its exit propagation is not a verified premise.
+                ("R146", "setsid -w tool write | tail -1\n", 2, [n_setsid_w]),
+                ("R155b", "setsid -w tool write &\n", 2, [n_setsid_w]),
+                ("C47", "setsid -w tool write\n", 2, [n_setsid_w]),
+                ("C48a", "setsid --wait tool write\n", 2, [n_setsid_w]),
+                ("C48b", "setsid --wa tool write\n", 2, [n_setsid_w]),
+                ("C48c", "setsid --w tool write\n", 2, [n_setsid_w]),
+                ("C49a", "setsid -f -w tool write\n", 2, [n_setsid_w]),
+                ("C49b", "setsid -fw tool write\n", 2, [n_setsid_w]),
+                ("C49c", "setsid -cw tool write\n", 2, [n_setsid_w]),
+                ("C50", "setsid -w -- tool write\n", 2, [n_setsid_w]),
+                ("X20", "setsid -x tool write\n", 2, [n_classify]),
+                ("X20b", "setsid -xw tool write\n", 2, [n_classify]),
+                ("X21", "setsid --wait=1 tool write\n", 2, [n_classify]),
+                ("X22a", "setsid --wx tool write\n", 2, [n_classify]),
+                ("X22b", "setsid --bogus tool write\n", 2, [n_classify]),
+                ("X23a", "setsid -h tool write\n", 2, [n_classify]),
+                ("X23b", "setsid -V tool write\n", 2, [n_classify]),
+                ("X23c", "setsid --v tool write\n", 2, [n_classify]),
+                ("X24", "setsid $OPT tool write\n", 2, [n_classify]),
+                ("X25", "systemd-run --wait tool write\n", 2, [n_sdrun_w]),
+                ("X26a", "systemd-run --scope tool write\n", 2, [n_sdrun_w]),
+                ("X26b", "systemd-run -P tool write\n", 2, [n_sdrun_w]),
+                ("X26c", "systemd-run -t tool write\n", 2, [n_sdrun_w]),
+                ("X26d", "systemd-run --pty-late tool write\n", 2, [n_sdrun_w]),
+                ("X27", "systemd-run -W tool write\n", 2, [n_classify]),
+                ("X28", "systemd-run --wai tool write\n", 2, [n_classify]),
+                ("X29", pfx + "systemd-run --unit tool write\n", 2, [n_value]),
+                ("X30", "systemd-run --frobnicate tool write\n", 2, [n_classify]),
+                ("X31", "( tool write ) &\n", 2, ["inside a subshell"]),
+                ("X32", "{ tool write; } &\n", 2, ["inside a brace group"]),
+                ("C51", "nohup tool write\n", 0, []),
+                ("C52", "tool write &> out.log\n", 0, []),
+                ("C53", "tool write && echo ok\n", 0, []),
+                ("C54", pfx + "setsid -f other-job &\n", 0, []),
+                ("C55", pfx + "setsid -f /abs/run.sh\n", 0, []),
+                ("C56", pfx + "systemd-run --wait other-job\n", 0, []),
+                ("C57", pfx + "echo 'setsid tool write &'\n", 0, []),
+                ("C58", pfx + "# setsid tool write &\n", 0, []),
+                ("C59", "tool write; echo $?\n", 0, []),
+                # Flips: each control or waiting form, changed by one edit, must reach its finding.
+                ("C47-flip", "setsid tool write\n", 1, [n_launch]),
+                ("C48-flip-fork", "setsid --fork tool write\n", 1, [n_launch]),
+                ("C48-flip-f", "setsid --f tool write\n", 1, [n_launch]),
+                ("C49-flip-f", "setsid -f tool write\n", 1, [n_launch]),
+                ("C49-flip-c", "setsid -c tool write\n", 1, [n_launch]),
+                ("C50-flip", "setsid -- tool write\n", 1, [n_launch]),
+                ("C51-flip", "nohup tool write &\n", 1, [n_bg]),
+                ("C52-flip", "tool write & > out.log\n", 1, [n_bg]),
+                ("C53-flip", "tool write && echo ok &\n", 1, [n_bg]),
+                ("C54-flip", pfx + "setsid -f tool write &\n", 1, [n_launch, n_bg]),
+                ("C55-flip", pfx + "setsid -f tool write\n", 1, [n_launch]),
+                ("C56-flip", pfx + "systemd-run --wait tool write\n", 2, [n_sdrun_w]),
+                ("C57-flip", pfx + "setsid tool write &\n", 1, [n_launch, n_bg]),
+                ("C58-flip", pfx + "setsid tool write &\n", 1, [n_launch, n_bg]),
+                ("C59-flip", "tool write & echo $?\n", 1, [n_bg]),
+            ]
+            launch_roots = {}
+
+            def _launch_holds(name, expected, needles):
+                rc, text = _run_quiet(launch_roots[name])
+                return rc == expected and all(n in text for n in needles), rc, text
+
+            for name, body, expected, needles in launch_cases:
+                launch_roots[name] = _fresh("L-" + name, CFG, {"cmd/job.sh": body})
+                ok, rc, text = _launch_holds(name, expected, needles)
+                if not ok:
+                    failures.append("{}: expected exit {} with {!r}, got exit {} with {!r}".format(
+                        name, expected, needles, rc, text.strip()[:300]))
+            real_judge = this._judge
+            this._judge = lambda pending, events: []
+            try:
+                for name, _body, expected, _needles in launch_cases:
+                    if expected == 1 and _run_quiet(launch_roots[name])[0] != 0:
+                        failures.append("{} under the never-report mutant: expected exit 0".format(name))
+            finally:
+                this._judge = real_judge
+
+            real_setsid_mode = this._setsid_mode
+
+            def _wait_blind(argv, i, unreadable):
+                j, mode = real_setsid_mode(argv, i, unreadable)
+                return j, "launch" if mode == "wait" else mode
+
+            def _hook_style(argv, i, unreadable):
+                j, mode = real_setsid_mode(argv, i, unreadable)
+                if mode == "unclassified" and any(w[:1] == "-" and "w" in w[1:]
+                                                  for w in argv[i + 1:j + 1]):
+                    return j + 1, "wait"
+                return j, mode
+
+            def _e1_every_kind(pending, events):
+                ordered = sorted(events)
+                return [r for r in pending if not (r["depth"] == 0 and _e1_exempt(ordered, r["offset"]))]
+
+            launch_mutants = [
+                ("setsid removed from LAUNCHERS", {"LAUNCHERS": LAUNCHERS - {"setsid"}}, ["R142"]),
+                ("wait never detected", {"_setsid_mode": _wait_blind}, ["C47"]),
+                ("hook-style 'w' in word wait heuristic", {"_setsid_mode": _hook_style}, ["X20b"]),
+                ("exact-only setsid long options",
+                 {"_setsid_long": lambda name: name if name in SETSID_LONG else None}, ["C48c"]),
+                ("E1 applied to every kind", {"_judge": _e1_every_kind}, ["R161", "R162"]),
+                ("background on single-stage lists only",
+                 {"_background_stages": lambda unit: [s for s in unit if s[1]] if len(unit) == 1 else []},
+                 ["R152", "R154"]),
+                ("'&&' as a list boundary", {"LIST_JOINS": ("|", "|&", "||")}, ["R154"]),
+                ("-u dropped from the systemd-run value table",
+                 {"SYSTEMD_RUN_SHORT_VALUE": SYSTEMD_RUN_SHORT_VALUE.replace("u", "")}, ["R157"]),
+                ("value-word safeguard removed", {"_value_spells_declared": lambda values, commands: False},
+                 ["X29"]),
+                ("setsid as a WRAPPERS entry",
+                 {"WRAPPERS": WRAPPERS | {"setsid"}, "LAUNCHERS": LAUNCHERS - {"setsid"}},
+                 ["R142", "C47"]),
+            ]
+            by_name = {name: (expected, needles) for name, _b, expected, needles in launch_cases}
+            for label, patches, names in launch_mutants:
+                saved = {attr: getattr(this, attr) for attr in patches}
+                for attr, value in patches.items():
+                    setattr(this, attr, value)
+                try:
+                    for name in names:
+                        expected, needles = by_name[name]
+                        if _launch_holds(name, expected, needles)[0]:
+                            failures.append("{} under the '{}' mutant: the case still held, so it does "
+                                            "not discriminate the mutant".format(name, label))
+                finally:
+                    for attr, value in saved.items():
+                        setattr(this, attr, value)
         finally:
             shutil.rmtree(base_tmp, ignore_errors=True)
 
@@ -3355,7 +3783,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "FIFO surfaces and configurations, .git/__pycache__ directories, symlinks AND regular "
           "files refused rather than pruned, and scan_file's own pre-open regular-file layer) each "
           "fail closed printing the diagnostic of their OWN check, asserted by a substring no other "
-          "check prints")
+          "check prints; the launcher and background cases R142-R164, the waiting-setsid and launcher "
+          "refusals C47-C50, R146, R155b and X20-X32, the controls C51-C59 and every flip hold, and "
+          "each launcher mutant is caught")
     return 0
 
 
