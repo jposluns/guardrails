@@ -5056,19 +5056,29 @@ _DEADLINE_SIZES = (65536, 262144, 1048576)
 # at 256 KB and 1.83 s at 1 MB (on nest_parens, under git_discard or git_stash_ref), its wall-clock time
 # within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A further run on a
 # 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU (2.07 s on
-# nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. Each bound keeps a margin of
-# about 15, 6 and 3.4 times the slowest of those runs and stays under PRETOOL_BUDGET_SECONDS. These are
-# measured bounds on these cases, not a complexity guarantee: they fail a return of the growth the old
+# nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. Every timed row, here and in
+# the lex-cost rows, compares the fastest of _TIMED_RUNS (3) runs with its CPU bound and checks every run's
+# outcome. A bound is tightened only where measurement separates honest runs from runs whose timed work is
+# done twice. Measured on one shared 80-CPU host (2026-11-01), as fastest-of-3 CPU seconds of each size's
+# slowest case, the honest figure being the largest over 8 trials without added load and one pass under 8
+# added busy-loop processes (load5 39.8 to 52.2), the doubled figure the smallest over 8 trials: 64 KB,
+# honest at most 1.251 s (0.835 s under that load), doubled at least 1.526 s, so 1.5 s; 256 KB, honest at
+# most 1.745 s (under that load; 1.388 s without it), doubled at least 2.063 s, so 2.0 s; 1 MB, honest at
+# most 6.713 s (under that load; 5.780 s without it), doubled at least 7.079 s, a window too thin for any
+# tighter bound to separate the two, so 1 MB keeps its 7.0 s bound; lex-cost, honest at most 0.996 s
+# (under that load; 0.772 s without it), doubled at least 1.134 s, so 1 s. These are measured bounds on these cases, not a complexity guarantee: they fail a return of the growth the old
 # scans had, but an implementation whose super-linear cost is small enough on these sizes fits all three.
-_DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
+_DEADLINE_BOUNDS = {65536: 1.5, 262144: 2.0, 1048576: 7.0}
+_TIMED_RUNS = 3
 # Wall-clock seconds one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main() gives
 # the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
 # filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
 # the slowest wall-clock times above (at most 0.10, 0.49 and 2.07 s) the 8-second gate leaves a margin of
-# about 80, 16 and 3.9 times. A run over this bound fails, whatever a later run does: a case whose run
-# reached a decision over it is run once more only as a diagnostic, and the failure carries both runs'
-# wall-clock times, CPU times and outcomes, so a stall of a loaded host is reported as one, never passed
-# over, and an intermittent wait cannot pass on its second run.
+# about 80, 16 and 3.9 times. Like the CPU bounds, this bound judges the fastest of the case's _TIMED_RUNS
+# runs: a real hang or wait is slow on every run, so it still fails, while one run stalled by a loaded host
+# does not fail a case whose other runs finish in time. A case all of whose runs reached a decision over it
+# fails and is run once more only as a diagnostic, which never clears it; the failure carries every run's
+# wall-clock time, CPU time and outcome, and the diagnostic run's as well.
 _DEADLINE_WALL_BOUND = aiqt_hooks.PRETOOL_BUDGET_SECONDS
 # Each case runs under a _DeadlineWindow of this many wall-clock seconds, a hang guard only: it ends a case
 # that would run on for minutes, so the run reports it instead of stalling. The wall-clock gate is
@@ -5106,6 +5116,15 @@ def _cpu_seconds():
     return time.process_time() + children.children_user + children.children_system
 
 
+def _timed_runs(timed):
+    """timed() called _TIMED_RUNS times, every call made whatever an earlier one gave, each returning a
+    tuple that starts with its CPU seconds: (the fastest call's CPU seconds, [every call's tuple]). Every
+    timed row compares only the fastest with its bound and checks the outcome of every call, so no call
+    clears another's failure."""
+    results = [timed() for _ in range(_TIMED_RUNS)]
+    return min(result[0] for result in results), results
+
+
 def _deadline_shape_case(name, shape, size, cwd):
     """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
     (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
@@ -5129,8 +5148,8 @@ def _deadline_shape_case(name, shape, size, cwd):
 
 
 def _deadline_shape_runs(tmp, sizes):
-    """Every (handler, shape, size) case once (_deadline_shape_case): [(handler, shape, size, cwd,
-    cpu_seconds, wall_seconds, outcome)]."""
+    """Every (handler, shape, size) case _TIMED_RUNS times (_timed_runs over _deadline_shape_case):
+    [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for each run...)]."""
     plain, orch, gensrc = _deadline_fixtures(tmp)
     runs = []
     for name, shapes in sorted(_DEADLINE_CASES.items()):
@@ -5138,13 +5157,14 @@ def _deadline_shape_runs(tmp, sizes):
                   gensrc if name == "gensrc_guard" else plain)
         for shape in shapes + _DEADLINE_HASH_SHAPES:
             for size in sorted(sizes):
-                runs.append((name, shape, size, cwd) + _deadline_shape_case(name, shape, size, cwd))
+                runs.append((name, shape, size, cwd) + tuple(_timed_runs(
+                    lambda: _deadline_shape_case(name, shape, size, cwd))[1]))
     with _no_registry_above(plain):
         for name, shapes in sorted(_DEADLINE_PLAIN_CASES.items()):
             for shape in shapes:
                 for size in sorted(sizes):
-                    runs.append((name, shape, size, str(plain))
-                                + _deadline_shape_case(name, shape, size, str(plain)))
+                    runs.append((name, shape, size, str(plain)) + tuple(_timed_runs(
+                        lambda: _deadline_shape_case(name, shape, size, str(plain)))[1]))
     return runs
 
 
@@ -5172,14 +5192,16 @@ def _no_registry_above(root):
 
 
 def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
-    """What one run of a (handler, shape, size) case got wrong, as a list of phrases ([] for none)."""
+    """What one run of a (handler, shape, size) case got wrong, cpu and wall being the fastest CPU and
+    wall-clock times of the case's runs (_timed_runs), as a list of phrases ([] for none)."""
     if outcome == "deadline":
         return ["reached no decision within the {:g}-second hang guard".format(_DEADLINE_HANG_SECONDS)]
     problems = []
     if cpu > _DEADLINE_BOUNDS[size]:
-        problems.append("used {:.2f}s of CPU time, over its {}s bound".format(cpu, _DEADLINE_BOUNDS[size]))
+        problems.append("its fastest run used {:.2f}s of CPU time, over its {}s bound".format(
+            cpu, _DEADLINE_BOUNDS[size]))
     if wall > _DEADLINE_WALL_BOUND:
-        problems.append("took {:.2f}s wall-clock, over the {:g}s wall-clock bound".format(
+        problems.append("its fastest run took {:.2f}s wall-clock, over the {:g}s wall-clock bound".format(
             wall, _DEADLINE_WALL_BOUND))
     if (name, shape) in _DEADLINE_DENY_CASES and outcome != "deny":
         problems.append("expected deny, got {}".format(outcome))
@@ -5195,19 +5217,27 @@ def _deadline_shape_problems(name, shape, size, cpu, wall, outcome):
 
 
 def _deadline_shape_verdicts(runs, retime):
-    """The dl-shape failures for runs [(handler, shape, size, cwd, cpu_seconds, wall_seconds, outcome)]:
-    one line for each run that fails any check. A run that reached a decision over the wall-clock bound is
-    run once more by retime(handler, shape, size, cwd) only as a diagnostic: the line still records the
-    failure, carries both runs' wall-clock times, CPU times and outcomes, and applies every check to the
-    diagnostic run as well."""
+    """The dl-shape failures for runs [(handler, shape, size, cwd, (cpu_seconds, wall_seconds, outcome) for
+    each run...)]: one line for each case whose fastest run is over its CPU bound, whose fastest run is over
+    the wall-clock bound, or any of whose runs fails another check. A case whose fastest run is over the
+    wall-clock bound, with some run reaching a decision, is run once more by retime(handler, shape, size,
+    cwd) only as a diagnostic: the line still records the failure, carries every run's wall-clock time, CPU
+    time and outcome, and applies every check to the diagnostic run as well."""
     out = []
-    for name, shape, size, cwd, cpu, wall, outcome in runs:
-        problems = _deadline_shape_problems(name, shape, size, cpu, wall, outcome)
+    for name, shape, size, cwd, *timed in runs:
+        fastest = min(cpu for cpu, _wall, _outcome in timed)
+        fastest_wall = min(wall for _cpu, wall, _outcome in timed)
+        problems = []
+        for _cpu, _wall, outcome in timed:
+            problems += [problem for problem
+                         in _deadline_shape_problems(name, shape, size, fastest, fastest_wall, outcome)
+                         if problem not in problems]
         if not problems:
             continue
-        line = "(dl-shape-{}-{}-{}) {} (run: {:.2f}s wall-clock, {:.2f}s of CPU time, outcome {})".format(
-            name, shape, size, "; ".join(problems), wall, cpu, outcome)
-        if outcome != "deadline" and wall > _DEADLINE_WALL_BOUND:
+        line = "(dl-shape-{}-{}-{}) {} ({})".format(name, shape, size, "; ".join(problems), "; ".join(
+            "run: {:.2f}s wall-clock, {:.2f}s of CPU time, outcome {}".format(wall, cpu, outcome)
+            for cpu, wall, outcome in timed))
+        if fastest_wall > _DEADLINE_WALL_BOUND and any(outcome != "deadline" for _cpu, _wall, outcome in timed):
             cpu_again, wall_again, outcome_again = retime(name, shape, size, cwd)
             again = _deadline_shape_problems(name, shape, size, cpu_again, wall_again, outcome_again)
             line += ("; a diagnostic re-run, which never clears the first run, took {:.2f}s wall-clock and "
@@ -5221,8 +5251,9 @@ def _deadline_shape_failures(tmp):
     """(dl-shape) Every PreToolUse handler has shapes here, and on each shape at 64 KB, 256 KB and 1 MB it
     reaches a decision within the hang guard, that size's CPU-time bound and the wall-clock bound, denying
     where the case carries a hazard and reaching the pinned base commit's decision on each uncertain '#'
-    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a run over the
-    wall-clock bound fails, and a diagnostic re-run is reported beside it, never in its place)."""
+    shape (_DEADLINE_HASH_SHAPES, which every handler runs) (_deadline_shape_verdicts: a case whose fastest
+    run is over the wall-clock bound fails, and a diagnostic re-run is reported beside it, never in its
+    place)."""
     out = []
     missing = sorted(name for name, event in aiqt_hooks.HANDLER_EVENT.items()
                      if event == aiqt_hooks.PRETOOL and name not in _DEADLINE_CASES)
@@ -5232,7 +5263,7 @@ def _deadline_shape_failures(tmp):
 
 
 def _deadline_shape_rerun_failures():
-    """(dl-shape-rerun-*) A failed run is never erased by a later one. _deadline_shape_verdicts is given
+    """(dl-shape-rerun-*) A failed case is never erased by its diagnostic re-run. _deadline_shape_verdicts is given
     recorded runs and a re-run that returns a recorded result, with no handler run:
     dl-shape-rerun-pass: a run over the wall-clock bound (9.25 s, 0.03 s of CPU, allow) whose re-run passes
     (0.15 s, 0.02 s, allow) must still fail, with both runs' wall-clock times, CPU times and outcomes.
@@ -5242,10 +5273,14 @@ def _deadline_shape_rerun_failures():
     allows (0.15 s, 0.02 s, allow) must fail with both outcomes and the re-run's wrong decision named.
     dl-shape-rerun-control, a control, which also passes on the pinned base commit: a run within every
     check gives no line and no re-run.
-    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run exactly at the wall-clock bound
-    (8 s) or exactly at the 64 KB CPU bound (1.5 s) gives no line and no re-run; one a microsecond over the
-    wall-clock bound whose re-run passes gives one line and one re-run; one a microsecond over the CPU
-    bound gives one line and no re-run (its time within the wall-clock bound)."""
+    dl-shape-rerun-bounds: each bound at its edge, both inclusive. A run a microsecond inside or exactly at
+    the wall-clock bound (8 s) or the 64 KB CPU bound (1.5 s) gives no line and no re-run; one a microsecond
+    over the wall-clock bound whose re-run passes gives one line and one re-run; one a microsecond over the
+    CPU bound gives one line and no re-run (its time within the wall-clock bound). The wall-clock bound
+    judges the fastest of a case's runs: three runs at 9 s, 9 s and 5 s give no line and no re-run, three
+    at 9 s give one line and one re-run. Three runs at 256 KB whose fastest is a microsecond inside or
+    exactly at its CPU bound (2.0 s), the other two a second over it, give no line; with the fastest a
+    microsecond over it, one line and no re-run."""
     out = []
     retimed = []
 
@@ -5258,12 +5293,12 @@ def _deadline_shape_rerun_failures():
     plain = ("absolute_paths", "write_content", 65536, "/")
     deny = ("protected_line", "push_force_after", 65536, "/")
     cases = (
-        ("pass", plain + (0.03, 9.25, "allow"), (0.02, 0.15, "allow"),
+        ("pass", plain + ((0.03, 9.25, "allow"),), (0.02, 0.15, "allow"),
          ("9.25s wall-clock", "0.03s of CPU", "outcome allow", "0.15s wall-clock", "0.02s of CPU",
           "within every check")),
-        ("decision", deny + (0.03, 9.25, "allow"), (0.02, 0.15, "deny"),
+        ("decision", deny + ((0.03, 9.25, "allow"),), (0.02, 0.15, "deny"),
          ("9.25s wall-clock", "expected deny, got allow", "outcome allow", "0.15s wall-clock", "outcome deny")),
-        ("both", deny + (0.03, 9.25, "deny"), (0.02, 0.15, "allow"),
+        ("both", deny + ((0.03, 9.25, "deny"),), (0.02, 0.15, "allow"),
          ("9.25s wall-clock", "0.03s of CPU", "outcome deny", "0.15s wall-clock", "0.02s of CPU",
           "with outcome allow (expected deny, got allow)")))
     for label, run, result, wants in cases:
@@ -5274,16 +5309,32 @@ def _deadline_shape_rerun_failures():
                        "runs' times and outcomes {!r}, got {!r} with re-runs {!r}".format(
                            label, wants, lines, retimed))
     retimed.clear()
-    lines = _deadline_shape_verdicts([plain + (0.03, 0.15, "allow")], recorded((0.02, 0.15, "allow")))
+    lines = _deadline_shape_verdicts([plain + ((0.03, 0.15, "allow"),)], recorded((0.02, 0.15, "allow")))
     if lines or retimed:
         out.append("(dl-shape-rerun-control) a run within every check must give no line and no re-run, got "
                    "{!r} with re-runs {!r}".format(lines, retimed))
     wall_bound, cpu_bound = float(_DEADLINE_WALL_BOUND), _DEADLINE_BOUNDS[65536]
+    plain_256k, cpu_bound_256k = plain[:2] + (262144,) + plain[3:], 2.0
     for edge, run, want_lines, want_reruns in (
-            ("at the wall-clock bound", plain + (0.03, wall_bound, "allow"), 0, 0),
-            ("over the wall-clock bound", plain + (0.03, wall_bound + 1e-6, "allow"), 1, 1),
-            ("at the CPU bound", plain + (cpu_bound, 0.15, "allow"), 0, 0),
-            ("over the CPU bound", plain + (cpu_bound + 1e-6, 0.15, "allow"), 1, 0)):
+            ("just inside the wall-clock bound", plain + ((0.03, wall_bound - 1e-6, "allow"),), 0, 0),
+            ("at the wall-clock bound", plain + ((0.03, wall_bound, "allow"),), 0, 0),
+            ("over the wall-clock bound", plain + ((0.03, wall_bound + 1e-6, "allow"),), 1, 1),
+            ("of three at 9 s, 9 s and 5 s wall-clock",
+             plain + ((0.03, 9.0, "allow"), (0.03, 9.0, "allow"), (0.03, 5.0, "allow")), 0, 0),
+            ("of three all at 9 s wall-clock",
+             plain + ((0.03, 9.0, "allow"), (0.03, 9.0, "allow"), (0.03, 9.0, "allow")), 1, 1),
+            ("just inside the CPU bound", plain + ((cpu_bound - 1e-6, 0.15, "allow"),), 0, 0),
+            ("at the CPU bound", plain + ((cpu_bound, 0.15, "allow"),), 0, 0),
+            ("over the CPU bound", plain + ((cpu_bound + 1e-6, 0.15, "allow"),), 1, 0),
+            ("of three just inside the 256 KB CPU bound at its fastest", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (cpu_bound_256k - 1e-6, 0.15, "allow"),
+                (cpu_bound_256k + 1, 0.15, "allow")), 0, 0),
+            ("of three at the 256 KB CPU bound at its fastest", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (cpu_bound_256k, 0.15, "allow"),
+                (cpu_bound_256k + 1, 0.15, "allow")), 0, 0),
+            ("of three over the 256 KB CPU bound at its fastest", plain_256k + (
+                (cpu_bound_256k + 1, 0.15, "allow"), (cpu_bound_256k + 1e-6, 0.15, "allow"),
+                (cpu_bound_256k + 1, 0.15, "allow")), 1, 0)):
         retimed.clear()
         lines = _deadline_shape_verdicts([run], recorded((0.02, 0.15, "allow")))
         if len(lines) != want_lines or len(retimed) != want_reruns:
@@ -16576,16 +16627,24 @@ def _main_isolated(monitor):
                         ("main-reading-long-words", "echo \"$(cat <<'EOF'\n)\nEOF\n)\"\necho " + "a " * (128 * 1024)),
                         ("doubt-comment-pipes", "(true #'\n)\npytest |\n" + "# |\n" * (64 * 1024) + "wc"))
         _cost_doubt_got = None
+
+        def _cost_timed(guard, cmd):
+            t0 = time.process_time()
+            got = _decision(guard, cmd)
+            return time.process_time() - t0, got
         for _cost_name, _cost_cmd in _cost_inputs:
             for _cost_guard in (aiqt_hooks.gate_weakening, aiqt_hooks.bash_absolute_paths, aiqt_hooks.protected_line):
-                _cost_t0 = time.process_time()
-                _cost_got = _decision(_cost_guard, _cost_cmd)
-                _cost_cpu = time.process_time() - _cost_t0
+                _cost_cpu, _cost_runs = _timed_runs(lambda: _cost_timed(_cost_guard, _cost_cmd))
+                _cost_got = sorted(set(got for _cpu, got in _cost_runs))
                 if _cost_cpu >= 1.0:
-                    failures.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command; the bound "
-                                    "is 1 s".format(_cost_name, _cost_guard.__name__, _cost_cpu, len(_cost_cmd)))
+                    failures.append("(lex-cost-{}) {} took {:.2f} s of CPU on a {}-character command as the "
+                                    "fastest of {} runs; the bound is 1 s".format(
+                                        _cost_name, _cost_guard.__name__, _cost_cpu, len(_cost_cmd), _TIMED_RUNS))
+                if len(_cost_got) != 1:
+                    failures.append("(lex-cost-{}) {} decided {} across its {} runs on the same command".format(
+                        _cost_name, _cost_guard.__name__, _cost_got, _TIMED_RUNS))
                 if _cost_name == "doubt-comment-pipes" and _cost_guard is aiqt_hooks.gate_weakening:
-                    _cost_doubt_got = _cost_got
+                    _cost_doubt_got = " and ".join(_cost_got)
         # The doubt-comment-pipes row bounds the fail-closed sink test only while its input still reaches
         # that test: the lex must keep raising the uncertain-'#' doubt on it and gate_weakening must keep
         # giving it the checker-and-pipe note (its terminal word is off the deny list), or the row would
