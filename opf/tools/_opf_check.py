@@ -1237,7 +1237,7 @@ def _fs_path_form(value):
     path with leading or trailing whitespace (whitespace is significant in a path, so such a spelling is
     ambiguous: refused, never trimmed); "relative" for any other path-shaped payload (no scheme and no
     scp-style host colon before the first slash, the forms _canonical_remote cannot split into a host and a
-    path); and None for a URL form, which _canonical_remote handles unchanged."""
+    path); and None for an scp-style host:path form, which _canonical_remote handles unchanged."""
     s = value.strip() if isinstance(value, str) else ""
     if not s:
         return "blank"
@@ -5461,7 +5461,18 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                     # a URL form, never this branch); a URL target never takes this branch, so it compares
                     # as before, and a file:// remote stays the disclosed residual
                     acanon = _local_path_canon(actual)
-                if acanon is None:
+                # A path-shaped remote holding '://' (/srv/a://repo) is read by git as an unsupported
+                # protocol, or as a bundle file at the path the OS resolves, which takes no push. Against a
+                # git:<absolute path> target whose local form differs from that path it is a sure mismatch;
+                # where the two paths are the same it stays the disclosed residual below.
+                afold = (_local_path_canon(actual) if acanon is None and tform == "absolute" and aform is None
+                         and actual.startswith("/") else None)
+                if afold is not None and tcanon and afold not in tcanon:
+                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
+                                "repository's actual remote {!r}: git reads its '://' as an unsupported "
+                                "protocol, and the path it otherwise names, {!r}, is a different path (spec "
+                                "5.6)".format(sync_target, actual, afold[1]))
+                elif acanon is None:
                     # a form the equivalence cannot canonicalize is disclosed, never a silent mismatch (F8)
                     rep.cant("C-SYNC-AGREE: the actual remote {!r} cannot be canonicalized for "
                              "host+path agreement against the sync_target (a disclosed residual; spec "
@@ -12748,6 +12759,32 @@ def self_test():
             _sv = _sync_case(_tg, _ar)
             check("sync-scheme-substring-path-refused-{}".format(_tag),
                   _sv is not None and _sv.status in (INVALID, CANNOT_EVALUATE))
+            # The rule that refuses each: a git: target holding '://' is a URL form no canonicalizer can
+            # split, a cannot-evaluate naming that form (never a path mismatch), and a padded bare one is a
+            # URL with leading or trailing whitespace, refused on both legs.
+            if _tag == "other-remote":
+                check("sync-scheme-substring-path-other-remote-target-unresolved",
+                      _sv is not None and _sv.status == CANNOT_EVALUATE and not _sync_findings(_sv)
+                      and any("the sync_target remote form '/srv/a://repo' cannot be canonicalized" in c
+                              for c in _sv.cannot_evaluate))
+            elif _tag == "bare-padded":
+                check("sync-scheme-substring-path-bare-padded-url-whitespace",
+                      _sv is not None and _sv.status == INVALID
+                      and sum(1 for f in _sync_findings(_sv)
+                              if "is a URL with leading or trailing whitespace" in f) == 2)
+        # A path-shaped actual remote holding '://' never names the git:<absolute path> target through
+        # git: against a target whose path differs from the one it spells it is a mismatch finding, and
+        # against the same path it stays a disclosed cannot-evaluate.
+        _so = _sync_case("git:/srv/a%3A%2F%2Frepo", "/srv/a://repo")
+        check("sync-scheme-substring-remote-other-path-invalid",
+              _so is not None and _so.status == INVALID
+              and any("does not match the store repository's actual remote '/srv/a://repo': git reads its "
+                      "'://' as an unsupported protocol" in f for f in _sync_findings(_so)))
+        _ss = _sync_case("git:/srv/a:/repo", "/srv/a://repo")
+        check("sync-scheme-substring-remote-same-path-cant",
+              _ss is not None and _ss.status == CANNOT_EVALUATE and not _sync_findings(_ss)
+              and any("the actual remote '/srv/a://repo' cannot be canonicalized" in c
+                      for c in _ss.cannot_evaluate))
         # Whitespace is significant to git in a URL as in a path: a URL actual remote or URL target with
         # leading or trailing whitespace is refused by its own message, never trimmed into agreement.
         for _tag, _tg, _ar in (("remote-trailing", _url, _url + " "), ("remote-leading", _url, " " + _url),

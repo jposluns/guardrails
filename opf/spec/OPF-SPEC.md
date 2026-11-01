@@ -554,12 +554,18 @@ store location), `auth` (authenticate creation with the host), and `sync` (clone
   pointer and `opf migrate --store`, never a sync target, and validation refuses it as one
   (section 11). Validation likewise refuses a relative `git:` path and a `file://` URL as a sync
   target, and refuses as ambiguous a `git:` absolute path, or an actual remote path compared against
-  one, with leading or trailing whitespace, since whitespace is significant in a path. Any value
-  containing `://` is a URL, for the sync target and the actual remote alike, because git reads
-  `://` as a scheme separator: `/srv/a://repo` is never a filesystem path. A URL sync target or
-  actual remote with leading or trailing whitespace is refused the same way, since git does not trim
-  it, and an actual remote that is present but blank (whitespace only) is refused as naming no
-  remote. An actual remote spelled as a `file://` URL is not compared against a
+  one, with leading or trailing whitespace, since whitespace is significant in a path. A `dir:`
+  sync target is classified as a `dir:` form first; any other value containing `://` is a URL, for
+  the sync target and the actual remote alike, because git reads `://` as a scheme separator:
+  `/srv/a://repo` is never a filesystem path. Git reads such an actual remote as an unsupported
+  protocol (or as a bundle file at the path it spells, which takes no push), so against a
+  `git:<absolute path>` target whose path differs from that spelled path it is a mismatch; where the
+  two paths are the same (`git:/srv/a:/repo` against `/srv/a://repo`) validation reports it as
+  cannot-evaluate (a disclosed residual). A URL sync target or actual remote with leading or
+  trailing whitespace is refused the same way, since git does not trim it. With a dedicated sync
+  target, an actual remote that is present but blank (whitespace only) is refused as naming no
+  remote; a relocated local-only store, which declares no sync target, reads such a remote as
+  absent. An actual remote spelled as a `file://` URL is not compared against a
   `git:<absolute path>` target, even where git pushes to the same repository through it: validation
   reports it as cannot-evaluate (a disclosed residual). The pre-commit hook carries each push URL as
   validation reads it and exits 2 (cannot-evaluate) for a push URL that holds a line break, which
