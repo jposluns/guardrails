@@ -6,18 +6,28 @@ then parses the crosswalk: every residue obligation has exactly one "## Obligati
 obligation outside the roster, the Migrate/Move entry keeps each of its three "### Split:" children exactly
 once, every entry carries an Owner and an Ownership, and an entry whose Disposition is "transferred" names as
 its Successor a backlog id from the closed list in TODO.md at the repository root and an Owner other than
-"none yet". An Owner, Ownership, Disposition or Successor line under a heading that is not an entry, or
-before the first entry, belongs to no entry and is refused. Headings, fields and TODO.md table rows inside a
-fenced code block or an HTML comment do not count. It checks
+"none yet". An entry ends at the next heading that is not an entry heading, and at any line of these
+shapes, each of which a Markdown reader can render as other structure: a setext underline or thematic break,
+a line opening an HTML block, a blockquote, a list item marked other than "- " at the line start, an
+indented list item, an indented code line, or a table row or table delimiter row (a level 1 or 2 heading,
+or such a line, also ends the obligation a split sits under). Every other line is, to this gate, a field
+line, a blank line or prose. An Owner, Ownership, Disposition or Successor line after that end and before
+the next entry, before the first entry, or written as the text of such a structure line, belongs to no entry
+and is refused. A heading other than an entry heading, a structure line, or a setext heading whose text
+(block markers and HTML tags removed) begins with "Obligation" or "Split" followed by a colon, in any case,
+cannot evaluate (exit 2). Headings, fields and TODO.md table rows inside a fenced code block, or inside an
+HTML comment that opens its line, do not count; a "<!--" later in a line removes only the rest of that line
+up to its "-->" and hides no later line. It checks
 STRUCTURE only: it never reads a cited symbol, so a green run says nothing about whether any obligation is
 implemented or whether a named successor accepted the work.
 
 Exit 0 clean; exit 1 on a concrete finding (a crosswalk that parses to no usable entries is a finding, since
 any text parses); exit 2 (cannot evaluate) when the manifest, the crosswalk or TODO.md is missing or is not
-UTF-8, the manifest does not parse, the residue no longer has the shape this gate reads, or TODO.md lists no
-backlog id (in a standalone opf/ copy TODO.md is absent, so the successor check cannot evaluate and the gate
-never passes there). The --self-test is source-free (in-memory fixtures only), so it also runs in a standalone
-opf/ copy with no manifest beside it; each fixture must be red with every check active and green with only its
+UTF-8, the crosswalk writes an entry in a form this gate does not read, the manifest does not parse, the
+residue no longer has the shape this gate reads, or TODO.md lists no backlog id (in a standalone opf/ copy
+TODO.md is absent, so the successor check cannot evaluate and the gate never passes there). The --self-test
+is source-free (in-memory fixtures only), so it also runs in a standalone opf/ copy with no manifest beside
+it; each fixture must be red with every check active and green with only its
 own check removed.
 Run: python3 -I -B opf/tools/check_opf_init_reconciliation.py [--self-test].
 """
@@ -78,7 +88,28 @@ _FIELD_RE = re.compile(r"^- ([A-Za-z ]+): ?(.*?)\s*$")
 _HEADING_RE = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]|$)")
 # The fields the checks below read; one outside an entry is refused, never attached to the entry above.
 READ_FIELDS = ("owner", "ownership", "disposition", "successor")
+# Lines a Markdown reader can render as structure that is neither an ATX heading nor a "- " item. Each ends
+# the entry above it, so a field below one belongs to no entry; the list closes the class by line shape, not
+# by heading syntax.
+_SETEXT = "setext underline or thematic break"
+_STRUCTURE_FORMS = (
+    (_SETEXT, re.compile(r"^ {0,3}(?:=+|-+|(?:[-*_][ \t]*){3,})[ \t]*$")),
+    ("HTML block", re.compile(r"^ {0,3}<[A-Za-z/!?]")),
+    ("blockquote", re.compile(r"^ {0,3}>")),
+    ("list item not marked \"- \"", re.compile(r"^ {0,3}(?:[*+]|-(?=\t)|\d{1,9}[.)])(?:[ \t]|$)")),
+    ("indented list item", re.compile(r"^[ \t]+(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)")),
+    ("indented code", re.compile(r"^(?: {4}| {0,3}\t)[ \t]*\S")),
+    ("table row", re.compile(r"^ {0,3}(?:\||:?-+:?[ \t]*\|)")),
+)
+# Leading block markers (indent, blockquote, list, ATX hashes) and HTML tags, removed to read a line's text.
+_MARKER_RE = re.compile(r"^[ \t]*(?:>|(?:[-*+]|\d{1,9}[.)]|#{1,6})(?=[ \t]|$))")
+_TAG_RE = re.compile(r"<[^>]*>")
+# Text that names an entry; a line other than an entry heading that renders it is a form this gate cannot read.
+_ENTRY_WORD_RE = re.compile(r"(?:obligation|split)[ \t]*:", re.IGNORECASE)
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+# A comment hides lines only when "<!--" opens the line (an HTML block); elsewhere it is inline.
+_COMMENT_OPEN_RE = re.compile(r"^ {0,3}<!--")
+_INLINE_COMMENT_RE = re.compile(r"<!--.*?(?:-->|$)")
 # A backlog table row in TODO.md: "| ID | Status | Item | Tags |", one id per row.
 _BACKLOG_ROW_RE = re.compile(r"^\| ([A-Z0-9]+(?:-[A-Z0-9]+)*) \|")
 
@@ -162,9 +193,11 @@ def _visible_lines(text):
     """A Markdown text's lines minus fenced code blocks and HTML comments, so a heading, field or table row a
     reader does not see as one never counts. A fence closes on a line of the same character at least as
     long, and an unclosed fence hides the rest of the file. A backtick line whose info string holds a
-    backtick (```x```) is inline code, not a fence opener (CommonMark). A comment hides from "<!--" through
-    the whole line holding its closing "-->" (as a Markdown comment block does); text before "<!--" on its
-    opening line stays."""
+    backtick (```x```) is inline code, not a fence opener (CommonMark). A comment that opens its line (up to
+    three spaces, then "<!--") hides that line through the whole line holding its closing "-->", as an HTML
+    block does, and an unclosed one hides the rest of the file. A "<!--" later in a line is inline: it is
+    removed through its "-->" on that line, or through the end of the line when it does not close there, and
+    hides no later line."""
     fence = None
     in_comment = False
     for line in text.split("\n"):
@@ -181,23 +214,50 @@ def _visible_lines(text):
         if m:
             fence = m.group(1)
             continue
-        start = line.find("<!--")
-        if start >= 0:
-            in_comment = "-->" not in line[start + 4:]
-            line = line[:start]
-        yield line
+        if _COMMENT_OPEN_RE.match(line):
+            in_comment = "-->" not in line[line.find("<!--") + 4:]
+            continue
+        yield _INLINE_COMMENT_RE.sub("", line)
+
+
+def _structure_form(line):
+    """The name of the _STRUCTURE_FORMS shape this line has, or None."""
+    for name, pattern in _STRUCTURE_FORMS:
+        if pattern.match(line):
+            return name
+    return None
+
+
+def _inner(text):
+    """The text with its leading block markers and its HTML tags removed: the words a reader sees."""
+    m = _MARKER_RE.match(text)
+    while m:
+        text = text[m.end():]
+        m = _MARKER_RE.match(text)
+    return _TAG_RE.sub("", text).strip()
+
+
+def _refuse_entry_form(text, form):
+    if _ENTRY_WORD_RE.match(_inner(text)):
+        raise CannotEvaluate("{} writes an entry where this gate does not read one ({}): {!r}".format(
+            CROSSWALK, form, text))
 
 
 def parse_crosswalk(text):
     """[(level, name, fields, parent)]: level is "obligation" or "split", fields a dict of the entry's
     "- Field: value" lines (a repeated field keeps every value), parent the enclosing obligation. Any other
-    heading ends the entry above it (a level 1 or 2 heading also ends the obligation a split sits under), so
-    a field below it attaches to no entry: a field this gate reads (READ_FIELDS) there, or before the first
-    entry, is kept as a ("stray", field, {}, None) record for _check_stray to refuse."""
+    ATX heading ends the entry above it (a level 1 or 2 heading also ends the obligation a split sits
+    under), and so does any line of a _STRUCTURE_FORMS shape (which also ends that obligation), so a field
+    below it attaches to no entry: a field this gate reads (READ_FIELDS) there, or before the first entry,
+    or written as the text of such a line, is kept as a ("stray", field, {}, None) record for _check_stray
+    to refuse. Raises CannotEvaluate when a heading other than an entry heading, a structure line, or the
+    paragraph a setext underline turns into a heading names an entry ("Obligation:" or "Split:")."""
     entries = []
     parent = None
     fields = None
+    paragraph = []
     for line in _visible_lines(text):
+        prose, paragraph = paragraph, []
         m = _OBLIGATION_RE.match(line)
         if m:
             parent = _norm(m.group(1))
@@ -211,6 +271,7 @@ def parse_crosswalk(text):
             continue
         m = _HEADING_RE.match(line)
         if m:
+            _refuse_entry_form(line, "heading")
             fields = None
             if len(m.group(1)) <= 2:
                 parent = None
@@ -222,6 +283,20 @@ def parse_crosswalk(text):
                 fields.setdefault(field, []).append(m.group(2))
             elif field in READ_FIELDS:
                 entries.append(("stray", field, {}, None))
+            continue
+        form = _structure_form(line)
+        if form:
+            if prose and form == _SETEXT:
+                _refuse_entry_form(" ".join(prose), form)
+            _refuse_entry_form(line, form)
+            fields = None
+            parent = None
+            m = _FIELD_RE.match("- " + _inner(line))
+            if m and m.group(1).strip().casefold() in READ_FIELDS:
+                entries.append(("stray", m.group(1).strip().casefold(), {}, None))
+            continue
+        if line.strip() and not line.startswith("- "):
+            paragraph = prose + [line]
     return entries
 
 
@@ -300,8 +375,9 @@ def _check_transferred_owner(entries, roster, backlog):
 
 
 def _check_stray(entries, roster, backlog):
-    return ["stray: field {} sits under a heading that is not an entry, or before the first entry, so it "
-            "belongs to no entry".format(e[1].capitalize()) for e in entries if e[0] == "stray"]
+    return ["stray: field {} sits under a heading that is not an entry, after or inside a line that ends an "
+            "entry, or before the first entry, so it belongs to no entry".format(e[1].capitalize())
+            for e in entries if e[0] == "stray"]
 
 
 CHECKS = {
@@ -338,6 +414,7 @@ def run_gate():
         listed = residue_obligations(_read(MANIFEST))
         text = _read(CROSSWALK)
         backlog = backlog_ids(_read(BACKLOG))
+        crosswalk_found = findings(text, backlog)
     except CannotEvaluate as exc:
         sys.stderr.write("CANNOT EVALUATE check_opf_init_reconciliation: {}\n".format(exc))
         return 2
@@ -345,7 +422,7 @@ def run_gate():
     if tuple(listed) != OBLIGATIONS:
         found.append("residue drift: {} lists {!r}, the frozen roster is {!r}".format(
             MANIFEST, listed, list(OBLIGATIONS)))
-    found.extend(findings(text, backlog))
+    found.extend(crosswalk_found)
     for line in found:
         sys.stdout.write("FAIL check_opf_init_reconciliation: {}\n".format(line))
     if found:
@@ -528,6 +605,63 @@ def _findings_or_none(text, backlog, disabled=frozenset()):
         return None
 
 
+def _owner_after(separator):
+    """The clean crosswalk with its last entry's Owner moved below `separator`: green only when the gate lets
+    that Owner attach to the entry above the separator."""
+    last = _entry(SPLIT_CHILDREN[-1], header="### Split: ")
+    kept = "".join(line for line in last.splitlines(True) if not line.startswith("- Owner:"))
+    return _good().replace(last, kept) + separator + "- Owner: none yet.\n"
+
+
+def _with_line(name, line):
+    """The clean crosswalk with `line` placed in entry `name` above its fields."""
+    return _good(override={name: _entry(name).replace("\n\n- Owner:", "\n\n" + line + "\n\n- Owner:", 1)})
+
+
+# Lines that end the entry above them, each with the _STRUCTURE_FORMS shape that holds it red.
+_ENDING_LINES = (
+    ("setext-dash", "Appendix\n---\n\n", _SETEXT),
+    ("setext-equals", "Appendix\n===\n\n", _SETEXT),
+    ("html-heading", "<h2>Appendix</h2>\n\n", "HTML block"),
+    ("blockquote-heading", "> ## Appendix\n\n", "blockquote"),
+    ("indented-code", "    Appendix\n\n", "indented code"),
+    ("table-row", "| Appendix |\n\n", "table row"),
+    ("table-delimiter-row", "Name | Note\n--- | ---\n\n", "table row"),
+)
+
+# Read fields under a non-entry heading written with another list marker, each with the shape that holds it red.
+_MARKED_FIELDS = (
+    ("star", "* Owner: none yet.\n", "list item not marked \"- \""),
+    ("plus", "+ Owner: none yet.\n", "list item not marked \"- \""),
+    ("ordered", "1. Owner: none yet.\n", "list item not marked \"- \""),
+    ("nested-dash", "  - Owner: none yet.\n", "indented list item"),
+)
+
+# A second coordination entry written in a form this gate does not read as an entry heading: each cannot
+# evaluate, and each passes (exit 0) once _ENTRY_WORD_RE matches nothing.
+_ENTRY_FORMS = (
+    ("setext", "Obligation: coordination\n===\n"),
+    ("html", "<h2>Obligation: coordination</h2>\n"),
+    ("blockquote", "> ## Obligation: coordination\n"),
+    ("indented-heading", " ## Obligation: coordination\n"),
+    ("indented-code", "    ## Obligation: coordination\n"),
+    ("star-item", "* Obligation: coordination\n"),
+)
+
+# One vector per part of _HEADING_RE: (label, crosswalk text, whether it is red, the pattern without that part).
+_HEADING_PARTS = (
+    ("indent", _owner_after("   ## Appendix\n\n"), True, r"^(#{1,6})(?:[ \t]|$)"),
+    ("indent-cap", _good().replace("### Split: move", "    ### Notes\n\n### Split: move"), True,
+     r"^ *(#{1,6})(?:[ \t]|$)"),
+    ("space-separator", _owner_after("## Appendix\n\n"), True, r"^ {0,3}(#{1,6})(?:\t|$)"),
+    ("tab-separator", _owner_after("##\tAppendix\n\n"), True, r"^ {0,3}(#{1,6})(?: |$)"),
+    ("bare-end", _owner_after("##\n\n"), True, r"^ {0,3}(#{1,6})[ \t]"),
+    ("separator-required", _with_line("publication", "#5 is tracked elsewhere."), False, r"^ {0,3}(#{1,6})"),
+    ("six-hash-heading", _owner_after("###### Appendix\n\n"), True, r"^ {0,3}(#{1,5})(?:[ \t]|$)"),
+    ("six-hash-cap", _with_line("publication", "####### not a heading"), False, r"^ {0,3}(#+)(?:[ \t]|$)"),
+)
+
+
 def self_test():
     failures = []
     total = 0
@@ -606,10 +740,41 @@ def self_test():
     expect(_findings_or_none(_good(extra="## Appendix\n\n- Note: unread.\n"), backlog) == [],
            "clean/unread-field-outside-entry-ignored")
     # The reported shape: the last entry lacks its Owner and a field under "## Appendix" supplied it.
-    appendix = _good().replace(_entry("whole-store relocation", header="### Split: "), "".join(
-        line for line in _entry("whole-store relocation", header="### Split: ").splitlines(True)
-        if not line.startswith("- Owner:"))) + "## Appendix\n\n- Owner: none yet.\n"
-    expect(_run(_files(crosswalk=appendix))[0] == 1, "stray/appendix-owner-fails-gate")
+    expect(_run(_files(crosswalk=_owner_after("## Appendix\n\n")))[0] == 1, "stray/appendix-owner-fails-gate")
+    # The same shape after each other line that ends an entry: red, and green once that shape is not read.
+    for label, separator, form in _ENDING_LINES:
+        text = _owner_after(separator)
+        expect(_run(_files(crosswalk=text))[0] == 1, "stray/{}-owner-fails-gate".format(label))
+        with mock.patch.object(module, "_STRUCTURE_FORMS", tuple(f for f in _STRUCTURE_FORMS if f[0] != form)):
+            expect(_findings_or_none(text, backlog) == [], "stray/{}-green-without-its-shape".format(label))
+    for label, line, form in _MARKED_FIELDS:
+        text = _good(extra="## Appendix\n\n" + line)
+        with mock.patch.object(module, "_STRUCTURE_FORMS", tuple(f for f in _STRUCTURE_FORMS if f[0] != form)):
+            expect(_findings_or_none(text, backlog) == [], "stray/marked-{}-green-without-its-shape".format(label))
+    for label, form in _ENTRY_FORMS:
+        text = _good(extra=form + "\nSee above.\n")
+        code, _out, err = _run(_files(crosswalk=text))
+        expect(code == 2 and " writes an entry " in err, "entry-form/{}-cannot-evaluate".format(label))
+        with mock.patch.object(module, "_ENTRY_WORD_RE", re.compile(r"(?!)")):
+            expect(_run(_files(crosswalk=text))[0] == 0, "entry-form/{}-passes-without-refusal".format(label))
+    # A "<!--" inside a line hides no later line: the heading below it ends the entry, and an entry below it
+    # counts. Both turn green or red the other way when any "<!--" opens a comment.
+    inline_heading = _owner_after("A note <!-- x\n## Appendix -->\n")
+    inline_entry = _good(drop="git staging", extra="A note <!-- x\n\n" + _entry("git staging"))
+    expect(_run(_files(crosswalk=inline_heading))[0] == 1, "inline-comment/heading-below-ends-entry")
+    expect(_findings_or_none(inline_entry, backlog) == [], "inline-comment/entry-below-counts")
+    with mock.patch.object(module, "_COMMENT_OPEN_RE", re.compile(r".*?<!--")):
+        expect(_findings_or_none(inline_heading, backlog) == [], "inline-comment/heading-hidden-when-opener-anywhere")
+        expect(bool(_findings_or_none(inline_entry, backlog)), "inline-comment/entry-hidden-when-opener-anywhere")
+    for label, text, red, mutant in _HEADING_PARTS:
+        expect(bool(_findings_or_none(text, backlog)) == red, "heading-part/{}".format(label))
+        with mock.patch.object(module, "_HEADING_RE", re.compile(mutant)):
+            flipped = _findings_or_none(text, backlog)
+        expect(flipped is not None and bool(flipped) != red, "heading-part/{}-flips-without-it".format(label))
+    ownership = _good(extra="## Appendix\n\n- Ownership: open.\n")
+    expect(bool(_findings_or_none(ownership, backlog)), "stray/ownership-refused")
+    with mock.patch.object(module, "READ_FIELDS", tuple(f for f in READ_FIELDS if f != "ownership")):
+        expect(_findings_or_none(ownership, backlog) == [], "stray/ownership-green-without-member")
 
     # Each fixture: (label, crosswalk text, the one check that must hold it red).
     fixtures = [("missing", _good(drop="git staging"), "missing")]
@@ -665,6 +830,13 @@ def self_test():
                      "stray"))
     fixtures.append(("stray-under-level-3-heading", _good(override={
         "publication": _entry("publication") + "### Notes\n\n- Disposition: open\n\n"}), "stray"))
+    fixtures += [("stray-after-" + label, _good(extra=separator + "- Successor: OPF-ADOPT-ORCH\n"), "stray")
+                 for label, separator, _form in _ENDING_LINES]
+    fixtures += [("stray-marked-" + label, _good(extra="## Appendix\n\n" + line), "stray")
+                 for label, line, _form in _MARKED_FIELDS]
+    fixtures.append(("stray-after-inline-comment", _good(
+        extra="A note <!-- x\n## Appendix -->\n- Successor: OPF-ADOPT-ORCH\n"), "stray"))
+    fixtures.append(("stray-ownership", _good(extra="## Appendix\n\n- Ownership: open.\n"), "stray"))
     for label, text, check in fixtures:
         red = _findings_or_none(text, backlog)
         expect(bool(red), "red/{}".format(label))

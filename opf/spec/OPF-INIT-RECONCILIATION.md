@@ -12,9 +12,18 @@ closed only in the sense the closing rule below allows, by an accepted successor
 obligation has exactly one entry, the Migrate/Move entry keeps its three split children, every
 entry carries an Owner and an Ownership, and an entry whose disposition is `transferred` names as
 its successor a backlog id listed in `TODO.md` at the repository root and an Owner other than
-`none yet`. An Owner, Ownership, Disposition or Successor line under a heading that is not an
-entry belongs to no entry and is refused. Headings, fields and `TODO.md` table rows inside a fenced
-code block or an HTML comment do not count. Where `TODO.md`
+`none yet`. An entry ends at the next heading that is not an entry heading, and at any line of
+these shapes, each of which a Markdown reader can render as other structure: a setext underline or
+thematic break, a line opening an HTML block, a blockquote, a list item marked other than `- ` at
+the line start, an indented list item, an indented code line, or a table row or table delimiter
+row. Every other line is, to this gate, a field line, a blank line or prose. An Owner, Ownership, Disposition or Successor line after
+that end and before the next entry, before the first entry, or written as the text of such a line,
+belongs to no entry and is refused. A heading other than an entry heading, such a line, or a setext
+heading whose text begins with `Obligation` or `Split` followed by a colon, in any case, cannot
+evaluate. Headings,
+fields and `TODO.md` table rows inside a fenced code block, or inside an HTML comment that opens its
+line, do not count; a `<!--` later in a line removes only the rest of that line up to its `-->` and
+hides no later line. Where `TODO.md`
 cannot be read, as in a copy of `opf/` alone, the check cannot evaluate. It does not judge whether
 a cited symbol meets its requirement or whether a named successor accepted the work.
 
