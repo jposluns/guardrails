@@ -87,13 +87,12 @@
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
 #                        it. When a queued fold lands, record its measured cost here against the 559-unit
 #                        estimate.
-#                        Exact raise 134991 -> 135314 for secinp.4, secinp.5: PACK 134352 -> 134675 (+323 units).
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 135314
+ratchet = 134991
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
