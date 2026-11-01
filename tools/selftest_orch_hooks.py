@@ -1284,6 +1284,7 @@ def _rdp_cases(tmp):
     check("rdp/handler-crash-fails-closed", rc, 2)
     _rdp_label_screen_cases(base)
     _rdp_draft_cases(base)
+    _rdp_family_cases(base)
     _rdp_scope_cases(base, bare)
 
 
@@ -4244,6 +4245,120 @@ def _rdp_draft_cases(base):
     lb.write_registry(dict(lb.binding, labels=labels))
     lb_got.append(_rdp_kind(lb.run("ls")))
     check("rdp/draft-labels-declared-together", lb_got, ["unverifiable"] * 3 + ["allow"])
+
+
+def _rdp_family_cases(base):
+    """The family and purpose vectors (rdp/family-*): where the binding declares `family`, every dispatch,
+    whatever its target, names its model family once by the declared option, its brief declares one purpose
+    the table allows for that family, and each argument word the table requires for that family stands
+    before the brief option; the declaration round-trips through the binding record, so a changed table is
+    a changed binding the hook withholds until an operator rebinds. Without the declaration nothing
+    changes."""
+    table = dict(alpha=dict(purposes=["review"], required_args=[]),
+                 beta=dict(purposes=["review", "draft"]),
+                 gamma=dict(purposes=["draft"], required_args=["--no-failover"]))
+    family = dict(option="--family", label="Dispatch-purpose:", table=table)
+    fa = RdpFixture(base, "family")
+    plain_binding = fa.binding
+    fa.binding = dict(fa.binding, family=family)
+    fa.write_registry(fa.binding)
+
+    def _brief(name, target, *purposes):
+        lines = ["Draft or review the change.", "Review-target: " + target]
+        if target == "revision":
+            lines += ["Reviewed-revision: " + fa.pin] + ["Review-path: " + p for p in fa.CHANGED]
+        return fa.brief(lines + ["Dispatch-purpose: " + p for p in purposes], name)
+
+    def _send(options, brief):
+        return _rdp_kind(fa.run("orch-dispatch " + options + " --brief " + brief))
+
+    def _digest(binding):
+        return aiqt_hooks._rdp_binding_digest(aiqt_hooks._rdp_binding(dict(review_dispatch=binding))[1])
+    # A draft sent to a family whose row allows only review is refused whatever the brief's target, so a
+    # drafting brief that declares no review is checked too.
+    draft_nar = _brief("draft-nar.txt", "not-a-review", "draft")
+    draft_wt = _brief("draft-wt.txt", "working-tree", "draft")
+    draft_rev = _brief("draft-rev.txt", "revision", "draft")
+    check("rdp/family-draft-to-review-only-denies", [_send(o, b) for o, b in (
+        ("--family alpha", draft_nar), ("--family alpha", draft_wt), ("--family alpha", draft_rev),
+        ("--family=alpha", draft_nar))], ["deny"] * 4)
+    review = _brief("review-nar.txt", "not-a-review", "review")
+    check("rdp/family-allowed-purpose-keeps-target-verdict", [_send(o, b) for o, b in (
+        ("--family alpha", review), ("--family alpha", _brief("review-rev.txt", "revision", "review")),
+        ("--family beta", draft_nar))], ["warn", "allow", "warn"])
+    # --familyx is another option, not the family option, so it names no family.
+    check("rdp/family-option-missing-denies", [_rdp_kind(fa.dispatch(review))] + [_send(o, review) for o in (
+        "--family", "--family=", "--familyx alpha", "--other alpha")], ["deny"] * 5)
+    check("rdp/family-option-repeated-denies", [_send(o, review) for o in (
+        "--family alpha --family alpha", "--family alpha --family=beta", "--family=beta --family alpha")],
+        ["deny"] * 3)
+    # The shortest abbreviation (--f) and the longest (--famil), alone and beside the full option.
+    check("rdp/family-option-abbreviated-denies", [_send(o, review) for o in (
+        "--f alpha", "--famil=alpha", "--family alpha --fami beta")], ["deny"] * 3)
+    check("rdp/family-unknown-denies", [_send("--family " + n, review) for n in ("delta", "Alpha", "alph")],
+          ["deny"] * 3)
+    check("rdp/family-purpose-label-missing-denies", [_send("--family alpha", b) for b in (
+        _brief("purpose-none.txt", "not-a-review"), _brief("purpose-empty.txt", "not-a-review", ""))],
+        ["deny"] * 2)
+    check("rdp/family-purpose-label-duplicate-unverifiable", [_send(o, b) for o, b in (
+        ("--family alpha", _brief("purpose-twice.txt", "not-a-review", "review", "review")),
+        ("--family beta", _brief("purpose-two.txt", "not-a-review", "review", "draft")))], ["unverifiable"] * 2)
+    # The purpose label is screened like the others: its name with a colon after it anywhere but in a
+    # column-0 label the hook reads is a cannot-evaluate, an indented quote included.
+    check("rdp/family-purpose-label-screened-unverifiable", [_send("--family alpha", fa.brief(
+        ["Review-target: not-a-review", "Dispatch-purpose: review", line], name)) for line, name in (
+        ("  Dispatch-purpose: draft", "screened-indented.txt"), ("see Dispatch-purpose: draft", "screened-prose.txt"))],
+        ["unverifiable"] * 2)
+    gamma = _brief("gamma-nar.txt", "not-a-review", "draft")
+    check("rdp/family-required-arg-missing-denies", [_send(o, gamma) for o in (
+        "--family gamma", "--family gamma --no-failover=1", "--family gamma --no-failovers")], ["deny"] * 3)
+    check("rdp/family-required-arg-present-allows", [_send(o, b) for o, b in (
+        ("--family gamma --no-failover", gamma), ("--no-failover --family gamma", gamma),
+        ("--family gamma --no-failover", _brief("gamma-rev.txt", "revision", "draft")))], ["warn", "warn", "allow"])
+    bad = (dict(family, extra=1), {k: v for k, v in family.items() if k != "table"}, "--family",
+           dict(family, table={}), dict(family, table=dict(alpha=dict(purposes=[]))),
+           dict(family, table=dict(alpha=dict(purposes=["review", "review"]))),
+           dict(family, table=dict(alpha=dict(purposes=["review"], extra=[]))),
+           dict(family, table={"al pha": dict(purposes=["review"])}),
+           dict(family, table=dict(alpha=dict(purposes=["review"], required_args=["a b"]))),
+           dict(family, label="Review-target:"), dict(family, label="Review-target: x"),
+           dict(family, option="-f"), dict(family, option="--bri"), dict(family, option="--brief-family"),
+           dict(family, option="--family x"))
+    bad_got = []
+    for declaration in bad:
+        fa.rebind(dict(fa.binding, family=declaration))
+        bad_got.append(_rdp_kind(fa.run("ls")))
+    fa.rebind(fa.binding)
+    bad_got.append(_rdp_kind(fa.run("ls")))
+    check("rdp/family-malformed-binding", bad_got, ["unverifiable"] * len(bad) + ["allow"])
+    kind, cfg = aiqt_hooks._rdp_binding(dict(review_dispatch=fa.binding))
+    doc = aiqt_hooks._rdp_binding_doc(cfg)
+    # The same table spelled otherwise (row order, purpose order, required_args left out) has one digest.
+    respelled = dict(fa.binding, family=dict(family, table=dict(
+        gamma=table["gamma"], beta=dict(purposes=["draft", "review"]), alpha=dict(purposes=["review"]))))
+    check("rdp/family-binding-doc-round-trip", (
+        kind, aiqt_hooks._rdp_binding(dict(review_dispatch=doc)) == ("ok", cfg), doc["family"]["table"]["beta"],
+        _digest(respelled) == _digest(fa.binding)),
+        ("ok", True, {"purposes": ["draft", "review"], "required_args": []}, True))
+    widened = dict(fa.binding, family=dict(family, table=dict(table, alpha=dict(purposes=["review", "draft"]))))
+    check("rdp/family-table-change-changes-digest", [
+        _digest(widened) != _digest(fa.binding),
+        _digest(dict(fa.binding, family=dict(family, label="Work-purpose:"))) != _digest(fa.binding),
+        _digest(fa.binding) != _digest(plain_binding)], [True] * 3)
+    # A changed table is a changed binding: withheld until an operator rebinds, then the new table rules.
+    table_got = [_send("--family alpha", review)]
+    fa.write_registry(widened)
+    table_got.append(_send("--family alpha", draft_nar))
+    fa.rebind(widened)
+    table_got.append(_send("--family alpha", draft_nar))
+    check("rdp/family-table-change-withholds-until-rebind", table_got, ["warn", "unverifiable", "warn"])
+    ab = RdpFixture(base, "family-absent")
+    ab_brief = ab.brief(["Review-target: not-a-review", "Dispatch-purpose: draft"], "absent.txt")
+    check("rdp/family-absent-unchanged", ([
+        _rdp_kind(ab.run("orch-dispatch --family alpha --brief " + ab_brief)), _rdp_kind(ab.dispatch(ab_brief)),
+        _rdp_kind(ab.dispatch(ab.good()))],
+        "family" in aiqt_hooks._rdp_binding_doc(aiqt_hooks._rdp_binding(dict(review_dispatch=ab.binding))[1])),
+        (["warn", "warn", "allow"], False))
 
 
 def _rdp_ls(cwd, background):

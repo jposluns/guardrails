@@ -282,7 +282,11 @@ directory below, and a declaration there arms slice confinement.
                                  "branch": "Review-branch:", "draft": "Review-draft:",
                                  "skip": "Review-skip:"},
                       "authority": {"argv": ["python3", "tools/task_revision.py"], "timeout": 5},
-                      "max_brief_bytes": 1048576},
+                      "max_brief_bytes": 1048576,
+                      "family": {"option": "--family", "label": "Dispatch-purpose:",
+                                 "table": {"family-a": {"purposes": ["review"]},
+                                           "family-b": {"purposes": ["review", "draft"],
+                                                        "required_args": ["--no-failover"]}}}},
   "mistakes_register": "path",
   "attestations": "path",
   "staleness": {"external_hours": 24, "task_hours": 24},
@@ -855,6 +859,11 @@ malformed.
   hold the hook. Every file read also checks the budget before each read, and a result reached after
   the budget has run out is never an allow.
 - `max_brief_bytes` caps the brief size (default 1048576).
+- `family` (optional) turns on the family and purpose check below. `option` is the dispatcher's long
+  option that names the model family, `label` the brief label that declares the purpose of the work
+  (distinct from the other labels), and `table` maps each family name to its `purposes` (a non-empty
+  list) and, optionally, its `required_args` (argument words every dispatch to that family must carry).
+  The declaration is part of the binding, so a changed table is a changed binding (below).
 
 The hook checks only a provably plain dispatch, decided on the raw characters before any lexing by
 the shared plain-command specification. A command is plain only when every character is printable
@@ -979,6 +988,36 @@ fsmonitor, the untracked cache and submodule recursion, and takes no optional lo
 and the staged state are read with `--ignore-submodules=none`, so a `.gitmodules` `ignore` value
 cannot hide a submodule change. A file the pin replaces with a directory holding the pin's own
 entries counts as clean.
+
+### The family and purpose check
+
+Where the binding declares `family`, every plain dispatch is checked against the adopter's table
+after its brief is read and its labels parsed, before its target: a `working-tree` or `not-a-review`
+brief, such as a drafting brief, is checked too. The first failure decides.
+
+1. The dispatch names its family exactly once, as `--family NAME` or `--family=NAME`, among the
+   arguments before the brief option. A dispatch naming none, one naming it twice, and one writing
+   an abbreviation of the option (`--fam NAME`) are refused.
+2. The family is a key of `table`, compared exactly. An alias is listed as its own row.
+3. The brief carries the purpose label once, read and screened like the other labels, and its value
+   is one of the family's `purposes`. A brief with no purpose label, or a purpose the row does not
+   list, is refused; a brief with two purpose labels is withheld as `UNVERIFIABLE:`.
+4. Each word of the family's `required_args` stands, exactly as written, among the arguments before
+   the brief option.
+
+A dispatch that passes goes on to its target's check. The hook only checks: it never adds, removes or
+rewrites an argument, so a setting the table requires is the dispatcher's or the adopter's wrapper's
+to apply. The option, the label and each row are checked strictly: an unknown key, an empty table or
+purpose list, a family name holding a space, a label not distinct from the binding's labels, or an
+option that is not one long option word apart from `brief_option` makes the binding malformed.
+
+What the check does not establish: that the declared purpose is the work's real purpose (the label
+shows only what the brief declares); a family the dispatcher picks without the option (a default, the
+environment, its configuration, a failover or a retry), which is why a dispatch naming no family is
+refused; a setting a wrapper or a configuration file applies, which never appears among the arguments
+(leave `required_args` empty for it); how the dispatcher parses a required word (a word taken as
+another option's value still counts as present); and whether the table matches the families and
+settings in use, which is the adopter's concern.
 
 ### The worker draft census
 
@@ -1183,8 +1222,9 @@ Limits:
 - A plain command whose program runs an argument or its own configuration as shell text (a `git -c`
   alias, a pager or editor setting, a package script, a makefile) can assemble a dispatcher name the
   hook does not see; only a name written in full in the command is found.
-- The dispatcher's own options other than the brief option (a `--family` or a working directory, say)
-  are its own; the hook checks the brief and the repository, not what those options select.
+- The dispatcher's own options other than the brief option (a working directory, say) are its own;
+  the hook checks the brief and the repository, not what those options select. The family option is
+  checked only where the binding declares `family`, and then only as the words the command carries.
 - Variables that configure git without moving the repository (`GIT_CONFIG_*`, `GIT_CONFIG_PARAMETERS`)
   are not refused: the hook's own reads drop them, but the verifier inherits them.
 - Many commands are refused although they dispatch nothing: in a session a binding scopes, every

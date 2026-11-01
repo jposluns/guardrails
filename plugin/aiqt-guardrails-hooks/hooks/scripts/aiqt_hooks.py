@@ -25731,7 +25731,14 @@ def orch_dispatch_ledger(data):
 # anywhere but in a column-0 label the hook reads (_rdp_labels), are a cannot-evaluate. A refusal is a deny naming its reason;
 # a cannot-evaluate is a deny prefixed UNVERIFIABLE: so it stays distinct. Every git probe runs through
 # _review_git, which neutralizes replacement refs, grafts, pathspec magic and the commit-graph cache.
-_RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes"))
+# Where the binding declares `family`, every plain dispatch, whatever its target, must also name its model
+# family once by the declared long option, carry one purpose label the adopter's table allows for that
+# family, and carry each argument word the table requires for it (_rdp_family_check); the hook only checks
+# these, never adds or rewrites a setting.
+_RDP_KEYS = frozenset(("commands", "brief_option", "labels", "authority", "max_brief_bytes", "family"))
+# The family declaration's keys, and those of each family's row in its table (required_args optional).
+_RDP_FAMILY_KEYS = frozenset(("option", "label", "table"))
+_RDP_FAMILY_ROW_KEYS = frozenset(("purposes", "required_args"))
 _RDP_REQUIRED_KEYS = frozenset(("commands", "brief_option", "labels", "authority"))
 _RDP_LABEL_KEYS = frozenset(("target", "revision", "path", "repo", "branch"))
 # The optional labels a binding declares together or not at all: the brief line naming the worker draft a
@@ -25866,8 +25873,63 @@ def _rdp_binding(reg):
     if type(max_bytes) is not int or not 0 < max_bytes <= 16 * _RDP_DEFAULT_MAX_BRIEF:
         return ("bad", "review_dispatch.max_brief_bytes is not an integer from 1 to {}".format(
             16 * _RDP_DEFAULT_MAX_BRIEF))
-    return ("ok", {"commands": frozenset(commands), "brief_option": option, "labels": dict(labels),
-                   "argv": list(argv), "timeout": timeout, "max_brief_bytes": max_bytes})
+    cfg = {"commands": frozenset(commands), "brief_option": option, "labels": dict(labels),
+           "argv": list(argv), "timeout": timeout, "max_brief_bytes": max_bytes}
+    if "family" in raw:
+        family, why = _rdp_family_binding(raw["family"], option, values)
+        if family is None:
+            return ("bad", why)
+        cfg["family"] = family
+    return ("ok", cfg)
+
+
+def _rdp_family_binding(raw, brief_option, labels):
+    """The binding's optional family declaration as cfg holds it, each row's purposes and required words
+    sorted: (family, None) when well formed, (None, detail) otherwise. Strict like the rest of the binding:
+    an unknown or missing key, an empty table or purpose list, a family name that is not one word, a label
+    not distinct from the binding's labels, or an option that is not one long option word apart from the
+    brief option (neither an abbreviation of the other) is malformed."""
+    if not isinstance(raw, dict) or set(raw) != _RDP_FAMILY_KEYS:
+        return (None, "review_dispatch.family must be an object with exactly {}".format(sorted(_RDP_FAMILY_KEYS)))
+    option = raw["option"]
+    if not isinstance(option, str) or not option.startswith("--") or len(option) < 3 \
+            or any(ch.isspace() or ch == "=" for ch in option):
+        return (None, "review_dispatch.family.option is not a single long option word (--NAME)")
+    if option.startswith(brief_option) or brief_option.startswith(option):
+        return (None, "review_dispatch.family.option is the brief option or an abbreviation of it, or the "
+                "brief option abbreviates it")
+    label = raw["label"]
+    values = list(labels) + [label]
+    if not isinstance(label, str) or not label or label.strip() != label or "\n" in label or "\r" in label:
+        return (None, "review_dispatch.family.label is not a non-empty single-line string")
+    if len(set(values)) != len(values) or any(
+            a != b and a.startswith(b + " ") for a in values for b in values):
+        return (None, "review_dispatch.family.label must be distinct from review_dispatch.labels")
+    table = raw["table"]
+    if not isinstance(table, dict) or not table:
+        return (None, "review_dispatch.family.table is not a non-empty object")
+    rows = {}
+    for name, row in sorted(table.items()):
+        if not name or any(ch.isspace() for ch in name):
+            return (None, "review_dispatch.family.table has the family name {!r}, which is not one word".format(
+                name))
+        if not isinstance(row, dict) or set(row) - _RDP_FAMILY_ROW_KEYS or "purposes" not in row:
+            return (None, "review_dispatch.family.table[{!r}] must be an object with purposes and an optional "
+                    "required_args".format(name))
+        purposes = row["purposes"]
+        if not isinstance(purposes, list) or not purposes or not all(
+                isinstance(p, str) and p and p.strip() == p and "\n" not in p and "\r" not in p
+                for p in purposes) or len(set(purposes)) != len(purposes):
+            return (None, "review_dispatch.family.table[{!r}].purposes is not a non-empty list of distinct "
+                    "single-line strings".format(name))
+        required = row.get("required_args", [])
+        if not isinstance(required, list) or not all(
+                isinstance(w, str) and w and w.isascii() and w.isprintable() and " " not in w
+                for w in required) or len(set(required)) != len(required):
+            return (None, "review_dispatch.family.table[{!r}].required_args is not a list of distinct "
+                    "printable ASCII words".format(name))
+        rows[name] = {"purposes": sorted(purposes), "required_args": sorted(required)}
+    return ({"option": option, "label": label, "table": rows}, None)
 
 
 def _rdp_brief_args(args, option):
@@ -27383,11 +27445,18 @@ _RDP_RECORD_VERSION = 2
 
 def _rdp_binding_doc(cfg):
     """A well-formed binding (_rdp_binding's cfg) as the registry spells it, every default made explicit:
-    the form a record stores, which _rdp_binding reads back to the same cfg."""
-    return dict(commands=sorted(cfg["commands"]), brief_option=cfg["brief_option"],
-                labels=dict(sorted(cfg["labels"].items())),
-                authority=dict(argv=list(cfg["argv"]), timeout=cfg["timeout"]),
-                max_brief_bytes=cfg["max_brief_bytes"])
+    the form a record stores, which _rdp_binding reads back to the same cfg. A family declaration is written
+    only where the binding has one, so a binding without it keeps its digest, and a changed table changes it."""
+    doc = dict(commands=sorted(cfg["commands"]), brief_option=cfg["brief_option"],
+               labels=dict(sorted(cfg["labels"].items())),
+               authority=dict(argv=list(cfg["argv"]), timeout=cfg["timeout"]),
+               max_brief_bytes=cfg["max_brief_bytes"])
+    family = cfg.get("family")
+    if family is not None:
+        doc["family"] = dict(option=family["option"], label=family["label"], table={
+            name: dict(purposes=list(row["purposes"]), required_args=list(row["required_args"]))
+            for name, row in sorted(family["table"].items())})
+    return doc
 
 
 def _rdp_binding_digest(cfg):
@@ -28497,6 +28566,50 @@ def _rdp_not_plain(cfg, names, why):
                 else "is not plain", why, name, cfg["brief_option"]))
 
 
+def _rdp_family_check(family, words, purposes, brief, command):
+    """The family and purpose check of a dispatch whose binding declares `family`: None when it passes, or
+    the ("deny"|"unverifiable", message) that withholds it. words are the dispatch's arguments before its
+    brief option, and purposes the values of the brief's purpose label. The family option is counted as the
+    brief option is (_rdp_brief_args), and an abbreviation of it is refused, since a parser this hook does
+    not know may or may not read it as the option. A family the dispatcher picks without the option (a
+    default, the environment, its configuration, a failover) cannot be seen, so a dispatch naming none is
+    refused. The purpose label shows only what the brief declares, never what the work is."""
+    option = family["option"]
+    short = {option[:k] for k in range(3, len(option))}
+    abbreviated = sorted(w.partition("=")[0] for w in words if w.partition("=")[0] in short)
+    if abbreviated:
+        return ("deny", "the {} dispatch writes the family option as {}; write it in full, once, as {} "
+                "NAME".format(command, abbreviated[0], option))
+    named = _rdp_brief_args(words, option)
+    if len(named) != 1 or not named[0]:
+        return ("deny", "the {} dispatch must name its model family exactly once as {} NAME before the "
+                "brief option (found {}{}), so the brief's purpose can be checked against the declared "
+                "table".format(command, option, len(named), " with no name" if named and not named[-1] else ""))
+    name = named[0]
+    row = family["table"].get(name)
+    if row is None:
+        return ("deny", "the {} dispatch names the family {!r}, which the declared table does not list (it "
+                "lists {}); an alias is listed as its own row".format(
+                    command, name, ", ".join(sorted(family["table"]))))
+    allowed = ", ".join(row["purposes"])
+    if not purposes:
+        return ("deny", "the brief {} has no {!r} line; declare the purpose of the work, which for the "
+                "family {} must be one of {}".format(brief, family["label"], name, allowed))
+    if len(purposes) > 1:
+        return ("unverifiable", "the brief {} has {} {!r} lines".format(brief, len(purposes), family["label"]))
+    purpose = purposes[0].strip()
+    if purpose not in row["purposes"]:
+        return ("deny", "the brief {} declares the purpose {!r}, which the declared table does not allow "
+                "for the family {} (it allows {}); dispatch the work to a family whose row allows it, or "
+                "split it into one dispatch per purpose".format(brief, purpose, name, allowed))
+    missing = [w for w in row["required_args"] if w not in words]
+    if missing:
+        return ("deny", "the {} dispatch to the family {} lacks {}, which the declared table requires as "
+                "argument words before the brief option for that family; the hook checks the settings and "
+                "never adds them".format(command, name, ", ".join(missing)))
+    return None
+
+
 def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None, None)):
     """The decision for a Bash payload in a session with a well-formed binding. Every command that is not
     provably plain (_rdp_plain_words) is UNVERIFIABLE, whatever it names: a name assembled at run time
@@ -28620,9 +28733,17 @@ def _rdp_judge(data, cfg, root, reg_dir, tool_input, foreign=False, guard=(None,
     text, why = _rdp_read_brief(brief, cfg["max_brief_bytes"])
     if text is None:
         return ("unverifiable", why)
-    found, why = _rdp_labels(text, cfg["labels"])
+    family = cfg.get("family")
+    labels = cfg["labels"] if family is None else dict(cfg["labels"], purpose=family["label"])
+    found, why = _rdp_labels(text, labels)
     if found is None:
         return ("unverifiable", "the brief {} {}".format(brief, why))
+    if family is not None:
+        # before the target, so a working-tree or not-a-review brief (a drafting dispatch) is checked too
+        before = args[:-2] if len(args) >= 2 and args[-2] == option else args[:-1]
+        refused = _rdp_family_check(family, before, found["purpose"], brief, word)
+        if refused is not None:
+            return refused
     targets = found["target"]
     if not targets:
         return ("deny", "the brief {} has no {!r} line; declare revision, working-tree or "
@@ -28657,7 +28778,11 @@ def review_dispatch_pin(data):
     paths carry no uncommitted state (a checked-out submodule is compared by its HEAD only), BEFORE the
     dispatch runs; where the binding declares the draft labels, a brief naming the worker draft the commit
     applies declares every path the draft's diff headers name less the paths it records as skipped, so a
-    drafted path neither committed nor skipped is refused. Inert without a review_dispatch binding; in a
+    drafted path neither committed nor skipped is refused. Where the binding declares `family`, every
+    dispatch, whatever its target, is refused unless it names its model family once by the declared option,
+    its brief declares one purpose the adopter's table allows for that family, and each argument word the
+    table requires for that family stands before the brief option (a repeated purpose label is a
+    cannot-evaluate); the hook never adds or rewrites a setting. Inert without a review_dispatch binding; in a
     session a binding scopes, a Bash call that is not one provably plain command (its command word on the
     allowlist, or a declared dispatch command) is withheld, a plain one naming the registry is refused
     unless it only reads, a plain git command that sets configuration (every git config write, every -c or
