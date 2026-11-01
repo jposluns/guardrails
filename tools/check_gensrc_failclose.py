@@ -108,9 +108,10 @@ isolation would require OS-level confinement (a namespace or container); that pu
 out of scope (the gate runs the project's own trusted generators) and is left to code review. Sources are
 not swept (a separate invariant). The gate tests a copy of the working tree, so it captures local
 uncommitted edits; on CI, HEAD equals the tree. The self-test's load tolerance vector runs its slow leg and
-its leak legs with PROBE_STALL_S equal to _load_bound.POLL_S, so one poll interval with no output and no
-CPU tick stops a probe there; pinned with 20 busy loops to 2 CPUs, the slow leg exited 2 in 2 of 3 runs,
-cause not diagnosed. That vector's pass shows tolerance of an injected load factor, not of every host load.
+its leak legs with PROBE_STALL_S equal to _load_bound.POLL_S, so one poll interval with no output and no CPU
+tick stops a probe there; an earlier run reported (no artefact is kept) that, pinned with 20 busy loops to
+2 CPUs, the slow leg exited 2 in 2 of 3 runs, cause not diagnosed. That vector's pass shows tolerance of an
+injected load factor, not of every host load.
 
   check_gensrc_failclose.py             sweep the real registry (default)
   check_gensrc_failclose.py --self-test build synthetic mini-repos and assert this gate's own invariants
@@ -1944,9 +1945,10 @@ def _self_test_main_isolated():
         #     the 16 s budget stays under the leaked descendant's 30 s sleep. Last, on an idle host the same
         #     slow generator overruns the 1 s budget (exit 2), so the pass is owed to the load adjustment.
         #     Residual: PROBE_STALL_S here equals _load_bound.POLL_S, so one poll interval with no output and
-        #     no CPU tick stops a probe, in the slow leg and the leak legs alike; pinned with 20 busy loops to
-        #     2 CPUs, the slow leg exited 2 in 2 of 3 runs, cause not diagnosed. The leak legs keep that
-        #     stall bound: a wider one would change what they race without a loaded run to show it helps.
+        #     no CPU tick stops a probe, in the slow leg and the leak legs alike; an earlier run reported (no
+        #     artefact is kept) that, pinned with 20 busy loops to 2 CPUs, the slow leg exited 2 in 2 of 3
+        #     runs, cause not diagnosed. The leak legs keep that stall bound: a wider one would change what
+        #     they race without a loaded run to show it helps.
         #     The shared vectors follow, then the cleanup caller probes.
         leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
 
@@ -2661,9 +2663,9 @@ def _self_test_main_isolated():
           "escaping symlink (the leaky_reject_escape fixture) returns exit 2 with the containment "
           "diagnostic asserted (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure "
           "returns exit 2, and so does a template setup git reaching TEMPLATE_GIT_TIMEOUT, reported as a "
-          "template setup failure that the stopping-bound namer names; a block-kind generator that fail-closes "
-          "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
-          "git-reading generator passes (exit 0) because the sandbox template materializes a real git "
+          "template setup failure that the stopping-bound namer names; a block-kind generator that "
+          "fail-closes on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; "
+          "a git-reading generator passes (exit 0) because the sandbox template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "
           "executed by the probe (no outside write) thanks to -c core.fsmonitor=false; and a forced probe "
           "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; and "
