@@ -381,6 +381,15 @@
       "status": "hook-linked"
     },
     {
+      "corpus-id": "cnsprd",
+      "family": "aiqt",
+      "gates": [],
+      "hooks": [],
+      "previews": [],
+      "source": ".aiqt/core/rules/integ-consumer-follows-its-producer.md",
+      "status": "prose-only"
+    },
+    {
       "corpus-id": "cnstpr",
       "family": "aiqt",
       "gates": [],
