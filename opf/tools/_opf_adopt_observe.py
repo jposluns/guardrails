@@ -2398,11 +2398,17 @@ def _report_line(rows):
     return json.dumps({"opf_adopt_observe_tests": rows}, sort_keys=True)
 
 
-# The rows and resolver vectors whose verdict turns on wall-clock timing:
-# each config sets fetch_bound, so it runs with the short timing deadlines,
-# the 3.0 s watchdog and the timing bound, and a host stall can fail it
-# (self_test, run_case). The nested scrubbed run leaves them out; self_test
-# refuses a roster where these lists depart from the configs.
+# The rows and resolver vectors the nested scrubbed run leaves out, because
+# their deadlines are short enough for host load to exceed: each config sets
+# fetch_bound, so it runs on the unscaled deadlines (connect 0.20 s,
+# inactivity 0.15 s, request 0.80 s, gather 1.60 s), a fetch bound of 0.50 s
+# or 1.00 s and the 3.0 s watchdog (run_case, bounded), and a stall of a
+# fraction of a second can change its verdict. The outer run still judges
+# them; self_test refuses a roster where these lists depart from the configs.
+# The rows and vectors the nested run keeps still carry wall-clock bounds
+# (listed at the launch-only leg in _runner_check) that a heavily loaded host
+# can exceed: leaving these out reduces that run's exposure to host load, it
+# does not remove it.
 _LOAD_SENSITIVE_ROWS = ("TG-11/slow-drip", "TG-11/read-inactivity",
                         "TG-11/stalled-resolver", "TG-11/connect-timeout",
                         "TG-11/tls-timeout")
@@ -2614,13 +2620,29 @@ exit 0
         # cannot-evaluate without ever reading host configuration. 600 s
         # keeps the worst-case hang inside THIS member's own per-member
         # bound (tools/selftest_git_fixture_env.py, CONFIG_MEMBER_BOUNDS:
-        # 1800 s for this file's --self-test) while removing the load
-        # sensitivity; the interception probe and the scratch legs keep
-        # the tight bound. The launch-only leg evaluates every row and
-        # vector except the load-sensitive ones (_LOAD_SENSITIVE_ROWS), so
-        # host load slows it without changing its verdict. The rows and
-        # vectors took about 225 s at a load average of 25, most of it the
-        # cancellation line sweep; 450 s bounds the leg inside the 600 s.
+        # 1800 s for this file's --self-test) and makes a timeout under load
+        # less likely, though not impossible; the interception probe and the
+        # scratch legs keep the tight bound.
+        # The launch-only leg evaluates every row and vector except those on
+        # deadlines short enough for host load to exceed
+        # (_LOAD_SENSITIVE_ROWS, _LOAD_SENSITIVE_VECTORS). The ones it keeps
+        # still carry wall-clock bounds that can change their verdict, among
+        # them: each row run's 30 s watchdog and its deadlines scaled to
+        # connect 2.0 s, inactivity 1.5 s, request 8.0 s and gather 16.0 s;
+        # the TLS fixture's 2.0 s socket timeout (raw.settimeout) and its
+        # 1.0 s stop join; the 2.0 s join of a run's resolver workers (a
+        # straggler fails the row INVALID); the 1.0 s resolver-slot acquire
+        # after a run and in the held-slot queue; the 10 s HELD_JOIN of
+        # resolver-vector/positive-held-slot; the 5.0 s resolver join of
+        # resolver-vector/cleanup; and this leg's own 450 s bound
+        # (cannot-evaluate/timeout). A heavily loaded host can still fail
+        # any of them, so leaving out the short-deadline cases reduces this
+        # leg's exposure to host load; it does not remove it.
+        # Measured once, as part of a full --self-test run on a shared host:
+        # the leg took 229.3 s, at a one-minute load average of 29.45 when
+        # it started and 26.15 when it ended (/proc/loadavg). 450 s leaves
+        # about twice that and keeps the leg inside the 600 s; a host loaded
+        # well beyond that can still reach it.
         proc = run_shell(shim + source,
                          timeout=120 if scratch_only else 450 if launch_only else 600)
         try:
