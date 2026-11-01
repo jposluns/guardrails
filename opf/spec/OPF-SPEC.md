@@ -521,17 +521,18 @@ anywhere, repeatedly, and each move is one recorded, verified, history-preservin
 ### 5.5 Target syntax
 
 The canonical form of a target, in the pointer and as the argument to `opf migrate --store`, is a
-git URL or a filesystem path. This form is universal for clone and sync: git already speaks every
-transport it needs, and the host in a remote URL already distinguishes GitHub, GitLab, Gitea, and
-any self-hosted forge, so the standard defines no per-host syntax for synchronization.
+git URL or a filesystem path. Git already speaks every transport it needs to clone and sync such a
+form, and the host in a remote URL already distinguishes GitHub, GitLab, Gitea, and any self-hosted
+forge, so the standard defines no per-host syntax for synchronization. A dedicated sync target names
+a filesystem repository only as `git:<absolute path>` (section 5.6).
 
 Explicit typing exists only where git cannot infer what to do, which is creating a new remote and
 authenticating that creation:
 
 | Form | Example | Git infers sync? | Provider needed for |
 |---|---|---|---|
-| `dir:<path>` or a bare path | `dir:../product-ops-store` | no; a store location, never a sync target (section 5.6) | creating the local repository |
-| `git:<url>`, `git:<absolute path>` or a bare git URL | `git@git.example.com:acme/ops.git` | yes | nothing; the remote must already exist |
+| `dir:<path>` or a bare path | `dir:../product-ops-store` | git can sync to a path, but OPF does not: this form is a store location, never a sync target (section 5.6) | creating the local repository |
+| `git:<url>`, `git:<absolute path>` or a bare git URL, other than a `file://` URL (refused as a sync target, section 5.6) | `git@git.example.com:acme/ops.git` | yes | nothing; the remote must already exist |
 | `github:<owner/repo>` | `github:acme/product-ops` | yes, after creation | creating the remote and authenticating creation through the host API |
 | `gitlab:<owner/repo>` | `gitlab:acme/product-ops` | yes, after creation | same, for GitLab |
 
@@ -553,7 +554,16 @@ store location), `auth` (authenticate creation with the host), and `sync` (clone
   pointer and `opf migrate --store`, never a sync target, and validation refuses it as one
   (section 11). Validation likewise refuses a relative `git:` path and a `file://` URL as a sync
   target, and refuses as ambiguous a `git:` absolute path, or an actual remote path compared against
-  one, with leading or trailing whitespace, since whitespace is significant in a path.
+  one, with leading or trailing whitespace, since whitespace is significant in a path. Any value
+  containing `://` is a URL, for the sync target and the actual remote alike, because git reads
+  `://` as a scheme separator: `/srv/a://repo` is never a filesystem path. A URL sync target or
+  actual remote with leading or trailing whitespace is refused the same way, since git does not trim
+  it, and an actual remote that is present but blank (whitespace only) is refused as naming no
+  remote. An actual remote spelled as a `file://` URL is not compared against a
+  `git:<absolute path>` target, even where git pushes to the same repository through it: validation
+  reports it as cannot-evaluate (a disclosed residual). The pre-commit hook carries each push URL as
+  validation reads it and exits 2 (cannot-evaluate) for a push URL that holds a line break, which
+  its snapshot cannot carry.
 - `github` and `gitlab` plug in only for their create and auth API conveniences; their sync is
   ordinary git. Further hosts join by registering a provider, never by extending the target
   grammar.
