@@ -1666,6 +1666,51 @@ def _tail(output, keep=3):
     return "\n".join((output or b"").decode("utf-8", "replace").splitlines()[-keep:])
 
 
+# A failing leg's report shows, beside its last lines, the earlier lines of its output that report a
+# failure, so a passing tail cannot hide the failing case: at most _FAILURE_LINES_KEEP of them (the
+# first and the last half when there are more), each clipped to _FAILURE_LINE_CHARS characters.
+_FAILURE_LINES_KEEP = 12
+_FAILURE_LINE_CHARS = 300
+_FAILURE_LINE = re.compile(r"\bFAIL(?:ED)?\b|AssertionError")
+
+
+class _LegOutput(str):
+    """A leg's last lines, exactly _tail's text (the verdict reads the CANNOT EVALUATE marker from that
+    text alone), carrying in .failures the earlier lines that report a failure (_failure_lines), which
+    only the BROKEN report prints."""
+    failures = ()
+
+
+def _failure_lines(lines):
+    """The lines that report a failure, in order: a FAIL or FAILED line, an AssertionError line, and a
+    Traceback header with its final line (the first unindented line after it), bounded as
+    _FAILURE_LINES_KEEP and _FAILURE_LINE_CHARS say."""
+    found, in_traceback = [], False
+    for line in lines:
+        if line.startswith("Traceback (most recent call last):"):
+            found.append(line)
+            in_traceback = True
+        elif in_traceback and line[:1].strip():
+            found.append(line)
+            in_traceback = False
+        elif _FAILURE_LINE.search(line):
+            found.append(line)
+    found = [line[:_FAILURE_LINE_CHARS] for line in found]
+    if len(found) > _FAILURE_LINES_KEEP:
+        half = _FAILURE_LINES_KEEP // 2
+        found = (found[:half] + ["({} more failure lines not shown)".format(len(found) - 2 * half)]
+                 + found[-half:])
+    return found
+
+
+def _leg_output(output, keep=3):
+    """_tail(output, keep) as a _LegOutput whose .failures come from the lines before those last ones."""
+    shown = _LegOutput(_tail(output, keep))
+    shown.failures = tuple(_failure_lines(
+        (output or b"").decode("utf-8", "replace").splitlines()[:-keep]))
+    return shown
+
+
 def _shown_bytes(output, keep=200):
     """Raw output bytes as their Python literal, so every byte shows (a carriage return or a trailing
     space included), clipped to the last keep bytes; "(no output)" when empty."""
@@ -1755,8 +1800,8 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
     whole process GROUP and reaps the LEADER: work a hung leg forked does not continue past the kill
     unless the descendant itself left the group with setpgid() or setsid(), the disclosed residual on
     _kill_and_reap (such a survivor is neither killed nor reaped). Returns
-    (rc, output, elapsed_s, launched, cleanup): output is the decoded last lines of what the leg wrote,
-    or with raw True its WHOLE output (stdout with stderr merged) as the undecoded bytes it wrote, a
+    (rc, output, elapsed_s, launched, cleanup): output is the decoded last lines of what the leg wrote
+    (a _LegOutput carrying the earlier lines that report a failure), or with raw True its WHOLE output (stdout with stderr merged) as the undecoded bytes it wrote, a
     launch failure's text encoded UTF-8. rc is None when the leg was killed at its bound (the bound
     tripped; the leg itself reported nothing), a negative rc is a signal this runner did not send (-N
     for signal N; the leg reported no exit status, and the status cannot tell an outside signal from
@@ -1770,7 +1815,7 @@ def _run_one(opf_root, script, args, run_dir, env, bound_s, drain_s=_DRAIN_MARGI
     on that exception. cwd is run_dir, which is OUTSIDE any git repository and does not contain the
     tools/ tree, so only the copied opf/tools/ is reachable to `python3 -I`."""
     def shaped(stdout):
-        return (stdout or b"") if raw else _tail(stdout)
+        return (stdout or b"") if raw else _leg_output(stdout)
 
     def harness(message):
         return message.encode("utf-8") if raw else message
@@ -1887,6 +1932,11 @@ def _report(results):
               file=sys.stderr)
         for name, rc, tail, _elapsed, _launched, _bound, _cleanup in failed:
             print("  {} (rc={}): {}".format(name, rc, tail.replace("\n", " | ")), file=sys.stderr)
+            failures = getattr(tail, "failures", ())
+            if failures:
+                print("    earlier lines reporting a failure:", file=sys.stderr)
+                for line in failures:
+                    print("      " + line, file=sys.stderr)
     if cannot:
         print("STANDALONE CLOSURE: LEG CANNOT EVALUATE (each leg below exited 2 and printed the {} "
               "marker: it said it could not evaluate its own checks, so closure was not evaluated "
@@ -3333,6 +3383,64 @@ def _timeout_vectors_self_test(required):
               "fault by name, with the partial output, after {:.1f}s)".format(elapsed))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _failure_lines_self_test():
+    """A failing leg whose last lines all pass still names its failing case. Stub legs run through the
+    real _run_one and _report: one prints a FAIL line naming its check and a Traceback ending in an
+    AssertionError, then passing lines, and exits 1; the BROKEN report must show the FAIL line, the
+    Traceback header and its final line beside the last lines. One that prints 100 more FAIL lines and
+    one 5000-character FAIL line shows at most _FAILURE_LINES_KEEP of them (and the note counting the
+    rest), each at most _FAILURE_LINE_CHARS characters, the first still among them. The verdict is
+    unchanged: the tail the verdict reads is exactly _tail's, so a leg that exits 2 with the CANNOT
+    EVALUATE marker only in an earlier FAIL line is still BROKEN (exit 1), never LEG CANNOT EVALUATE."""
+    tmp = Path(tempfile.mkdtemp(prefix="opf-closure-failure-lines-"))
+    try:
+        os.makedirs(tmp / "opf" / "tools")
+        (tmp / "opf" / "tools" / "stub_failing.py").write_text(
+            "import sys\n"
+            "extra, code = int(sys.argv[1]), int(sys.argv[2])\n"
+            "print('opf ' + sys.argv[3] + ' FAIL: named-failing-check')\n"
+            "print('Traceback (most recent call last):')\n"
+            "print('  File \"case.py\", line 1, in <module>')\n"
+            "print('AssertionError: named-assertion')\n"
+            "for index in range(extra):\n"
+            "    print('opf filler-{} FAIL'.format(index))\n"
+            "if extra:\n"
+            "    print('x' * 5000 + ' FAIL')\n"
+            "for index in range(5):\n"
+            "    print('opf passing-{} PASS'.format(index))\n"
+            "sys.exit(code)\n", encoding="utf-8")
+        env = _under_test("failed-leg-failure-lines-hidden", _isolated_env)
+        for extra, code, case, want_code in ((0, 1, "early-case", 1), (100, 1, "early-case", 1),
+                                             (0, 2, _CANNOT_EVALUATE_MARKER, 1)):
+            rc, tail, _elapsed, launched, cleanup = _under_test(
+                "failed-leg-failure-lines-hidden", _run_one, tmp / "opf", "stub_failing.py",
+                [str(extra), str(code), case], tmp, env, 60)
+            if rc != code or not launched or cleanup or tail != _tail(
+                    "\n".join("opf passing-{} PASS".format(index) for index in range(5)).encode()):
+                raise _CheckFailure("closure/failed-leg-failure-lines-hidden (rc={!r}, launched {!r}, "
+                                    "cleanup {!r}, tail {!r})".format(rc, launched, cleanup, tail))
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                got = _under_test("failed-leg-failure-lines-hidden", _report,
+                                  [(_FLIP_LEG, rc, tail, 1.0, True, 60, [])])
+            said = out.getvalue()
+            shown = said.split("earlier lines reporting a failure:\n", 1)[-1].splitlines()
+            want = ("STANDALONE CLOSURE: BROKEN", "opf passing-4 PASS",
+                    "      opf {} FAIL: named-failing-check".format(case),
+                    "      Traceback (most recent call last):", "      AssertionError: named-assertion")
+            if (got != want_code or not all(w in said for w in want) or "LEG CANNOT EVALUATE" in said
+                    or "case.py" in said or len(shown) > _FAILURE_LINES_KEEP + 1
+                    or any(len(line) > _FAILURE_LINE_CHARS + 6 for line in shown)
+                    or (extra and "more failure lines not shown" not in said)):
+                raise _CheckFailure("closure/failed-leg-failure-lines-hidden (exit {}, extra {}, code "
+                                    "{}): {!r}".format(got, extra, code, said[-2000:]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS closure/failed-leg-failure-lines-shown (a failing leg's earlier FAIL, Traceback and "
+          "AssertionError lines are reported beside its passing last lines, bounded in count and "
+          "length; the verdict still reads the last lines alone)")
 
 
 def _after_launch_fault_self_test():
@@ -4877,6 +4985,7 @@ def _fast_vectors(root):
     required = _bounds_self_test(root)
     _timeout_vectors_self_test(required)
     _after_launch_fault_self_test()
+    _failure_lines_self_test()
     return required
 
 

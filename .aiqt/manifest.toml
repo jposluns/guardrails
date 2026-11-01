@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "aa1f9a13a1de13742534baaf08d8247f597f6ad65000abbb4385830c9a23688b"
+tree-sha256 = "8084f030400d21e8843ad9911b8cbbbf00ca8fba365920315e555ecc77b6de0c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2816,8 +2816,8 @@ sha256 = "6d8fd14d623adc655866dfe7349e7ae3ebde32a4c9ac268a28d733c7e94771f7"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
-bytes = 330235
-sha256 = "1dd23ac7d372c50b6fc96f8b4c8260cc8c5550225827e26d0fc88568e7e2595a"
+bytes = 331423
+sha256 = "1d2086bf7223e962fcbccbecc54a63f3f00686cd73cc1e5e160dedbcf6351927"
 
 [[sources]]
 path = "opf/tools/_opf_fuzz.py"
@@ -3146,8 +3146,8 @@ sha256 = "5f13d71937d37efa09894c7176e98c1a94dbb2271143f155a56e051562b121bc"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1371933
-sha256 = "e982dfa6854697802a4fa40ce702f28a31e5d03a3935eb1a01a0e6d533d5e05f"
+bytes = 1374729
+sha256 = "284069d71d66b1e622f59d8b732e16c1e3c5c0f66d5e880055ecce2e6dfd3624"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3586,8 +3586,8 @@ sha256 = "c1bfcfd49e043c76dabc8e5aa4a946e0dd0231899174cc581eebdecb8b627316"
 
 [[sources]]
 path = "tools/check_opf_standalone_closure.py"
-bytes = 340394
-sha256 = "5a84d0e6518d11c47300eac4236476ea7f76101f918f9a33367a9038233e4eee"
+bytes = 346786
+sha256 = "1e18607bd5cba01264699b39264cf7794c2ee207dbce00eb9478720da044a042"
 
 [[sources]]
 path = "tools/check_overclaim.py"

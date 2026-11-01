@@ -1637,6 +1637,53 @@ def _watchdog_isolation_self_test(launch=None):
     return EXIT_FINDING if failed else EXIT_OK
 
 
+def _watchdog_isolation_evidence_vectors():
+    """A timer fixture whose case fails prints the failing check's name on
+    its stdout and exits without its completion record. The real isolation
+    self-test, over the real run_status_owned with only the fixture process
+    scripted (nothing is launched), must print that name in its FAIL report,
+    and must print only a bounded tail of a runaway stdout (a name printed
+    before a flood stays unshown). Returns the misses."""
+    import contextlib
+    import io
+    import subprocess
+    from unittest.mock import patch
+    import _opf_emit as emit
+
+    name = "named-check-under-test"
+    diagnostic = ("views prof 1 (3599.0, 0.0) (3598.0, 0.0) [] [] "
+                  "OPF-VIEWS SELF-TEST FAIL (9 checks, 1 failed):\n  - " + name + "\n")
+    stderr = ("Traceback (most recent call last):\nAssertionError: fixture "
+              "'timer/views/prof': expected exit 0, observed 1\n")
+    lines = ("y" * 79 + "\n") * 10000
+    line = "x" * (1 << 20)
+    cases = len(_watchdog_isolation_cases())
+    # Over a megabyte of stdout per fixture; each FAIL report may add at most 8 KiB to its stderr.
+    ceiling = cases * (len(stderr) + 8192)
+    misses = []
+    for label, stdout, named in (("diagnostic", diagnostic, True),
+                                 ("diagnostic after a flood", line + "\n" + lines + diagnostic,
+                                  True),
+                                 ("diagnostic before many lines", diagnostic + lines, False),
+                                 ("diagnostic before one long line", diagnostic + line, False)):
+        def scripted(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 1, stdout.encode(), stderr.encode())
+
+        said = io.StringIO()
+        with patch.object(emit, "_run_fixture_process", scripted), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(said):
+            rc = _watchdog_isolation_self_test()
+        said = said.getvalue()
+        if (rc != EXIT_FINDING or said.count("opf watchdog isolation: FAIL") != cases
+                or (name in said) is not named or len(said) > ceiling):
+            misses.append("isolation failure evidence (%s): exit %r, %d characters, "
+                          "check name %s, want exit %r, %d FAIL reports, at most %d "
+                          "characters, check name %s"
+                          % (label, rc, len(said), "shown" if name in said else "missing",
+                             EXIT_FINDING, cases, ceiling, "shown" if named else "missing"))
+    return misses
+
+
 # Load-flake bound: the execution-latency ceiling is a
 # scheduling bound, not a correctness deadline. Worst observed
 # `cancelled - start` for the pipe-stall and transient-census cases under
@@ -16760,6 +16807,9 @@ def _watchdog_regression_self_test():
         if got != want:
             flip_missed.append("isolation no-verdict aggregate for %r: %r, want %r"
                                % (outcome, got, want))
+    # A failing timer case's check name reaches the isolation FAIL report
+    # (red when the completion refusal drops the fixture's stdout).
+    flip_missed.extend(_watchdog_isolation_evidence_vectors())
     # The TIMEOUT-to-marker connection inside the REAL timer fixture
     # (red-on-revert): _watchdog_timer_case itself runs here with its
     # bounded window run and its clock scripted (the "inactive" mode arms
