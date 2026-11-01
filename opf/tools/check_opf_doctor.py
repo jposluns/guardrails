@@ -988,14 +988,23 @@ def _self_test_isolated():
             # quoted key); or is left inside a quote once its own quotes are paired left to right (each
             # quote opens until the next quote of its kind closes it). A double-quoted escape such as
             # "u\x73es" for uses, in a key or in a value, fails closed. The pairing guarantees only that
-            # a line left inside a quote after pairing fails closed: the opening or closing line of a
-            # quoted scalar that spans lines does so when nothing else on that line pairs its quote, but
-            # not when the line pairs it through a quote that YAML reads as plain-scalar or comment
-            # text, as in an opening line - {name: it's, run: 'true and a closing line - z: y'} # it's
-            # (or the same with double quotes); both properties pass that and the exact text alone
-            # holds it. The pairing also refuses a plain scalar or comment holding a lone apostrophe or
-            # a lone double quote, such as - name: say "hi, which YAML reads as text (spelled inside
-            # quotes of the other kind it passes).
+            # a line left inside a quote after pairing fails closed. A line passes the pairing whenever
+            # its quotes pair left to right under that rule (a quote of the other kind inside an open
+            # quote is ignored), whatever YAML reads those quotes as; the pairing does not hold such a
+            # line, and where no other condition refuses it, the exact text alone holds it. So the
+            # opening or closing line of a quoted scalar that spans lines fails closed only when its
+            # quote is left open after pairing. Both properties pass a scalar that spans lines and
+            # swallows a step when its opening and closing lines each pair their quote: through a quote
+            # YAML reads as plain-scalar or comment text, as in an opening line
+            # - {name: it's, run: 'true and a closing line - z: y'} # it's, or in double quotes an
+            # opening line - {name: it"s, run: "true and a closing line - z: y"} # say "hi; or by
+            # sitting inside a pair of quotes of the other kind, one of which YAML reads as
+            # quoted-scalar content, as in an opening line - {n: a'b, run: "c'd and a closing line
+            # - z: it's y"} # it's, or in the other quote form an opening line - {n: a"b, run: 'c"d and
+            # a closing line - z: say "hi y'} # say "hi. The pairing also refuses a plain scalar or
+            # comment holding a lone apostrophe or a lone double quote, such as - name: say "hi, which
+            # YAML reads as text; spelled inside quotes of the other kind, as in - name: 'say "hi', it
+            # passes.
             # Not refused: a key spelled with a YAML tag, such as - !!binary dXNlcw==: (or the same
             # tag on a ? explicit key), which YAML reads as the bytes uses; its line names no uses,
             # so both properties pass it and the exact text alone holds it.
@@ -1229,22 +1238,32 @@ def _self_test_isolated():
             expect("workflow-template-properties-residual-tagged-key-passes",
                    (_wf_effective(wf_mutant.encode("ascii")) != _WORKFLOW_CANONICAL,
                     _wf_checkout_drops_token(wf_mutant), _wf_actions_pinned(wf_mutant)), (True, True, True))
-            # The other disclosed residuals, held as stated: the same tagged key spelled inline, and a
-            # quoted scalar spanning lines that swallows the run step, whose opening and closing lines
-            # each pair their quotes through a quote YAML reads as plain-scalar or comment text, in
-            # either quote character, pass both properties, and only the exact text reds them.
-            for wf_label, wf_mutant in (
-                    ("inline-tagged-key", _WORKFLOW_CANONICAL.replace(
-                        wf_step, "      - !!binary dXNlcw==: actions/github-script@v7\n" + wf_step)),
-                    ("paired-quote-span-single", _WORKFLOW_CANONICAL.replace(
-                        wf_step, "      - {name: it's, run: 'true\n" + wf_step).replace(
-                        wf_run, wf_run + "\n      - z: y'} # it's")),
-                    ("paired-quote-span-double", _WORKFLOW_CANONICAL.replace(
-                        wf_step, '      - {name: it"s, run: "true\n' + wf_step).replace(
-                        wf_run, wf_run + '\n      - z: y"} # say "hi'))):
+            # The other disclosed residual, held as stated: the same tagged key spelled inline passes both
+            # properties, and only the exact text reds it.
+            wf_mutant = _WORKFLOW_CANONICAL.replace(
+                wf_step, "      - !!binary dXNlcw==: actions/github-script@v7\n" + wf_step)
+            expect("workflow-template-properties-residual-inline-tagged-key-passes",
+                   (_wf_effective(wf_mutant.encode("ascii")) != _WORKFLOW_CANONICAL,
+                    _wf_checkout_drops_token(wf_mutant), _wf_actions_pinned(wf_mutant)), (True, True, True))
+            # The quote-pairing residual, held as stated: a quoted scalar spanning lines that swallows
+            # the run step passes both properties, and only the exact text reds it, when its opening and
+            # closing lines each pair their quote, in either quote form, through a quote YAML reads as
+            # plain-scalar or comment text (paired-quote) or by sitting inside a pair of quotes of the
+            # other kind (cross-kind). The opening line is planted before wf_step and the closing line
+            # after wf_run, and each needle must be present: the opening line pairs on its own, so a
+            # stale needle would otherwise leave a mutant that still passes.
+            for wf_label, wf_opening, wf_closing in (
+                    ("paired-quote-span-single", "      - {name: it's, run: 'true", "      - z: y'} # it's"),
+                    ("paired-quote-span-double", '      - {name: it"s, run: "true', '      - z: y"} # say "hi'),
+                    ("cross-kind-quote-span-single", "      - {n: a'b, run: \"c'd", "      - z: it's y\"} # it's"),
+                    ("cross-kind-quote-span-double", "      - {n: a\"b, run: 'c\"d", "      - z: say \"hi y'} # say \"hi")):
+                wf_mutant = _WORKFLOW_CANONICAL.replace(wf_step, wf_opening + "\n" + wf_step).replace(
+                    wf_run, wf_run + "\n" + wf_closing)
                 expect("workflow-template-properties-residual-{}-passes".format(wf_label),
-                       (_wf_effective(wf_mutant.encode("ascii")) != _WORKFLOW_CANONICAL,
-                        _wf_checkout_drops_token(wf_mutant), _wf_actions_pinned(wf_mutant)), (True, True, True))
+                       (wf_step in _WORKFLOW_CANONICAL, wf_run in _WORKFLOW_CANONICAL,
+                        _wf_effective(wf_mutant.encode("ascii")) != _WORKFLOW_CANONICAL,
+                        _wf_checkout_drops_token(wf_mutant), _wf_actions_pinned(wf_mutant)),
+                       (True, True, True, True, True))
             # The disclosed over-refusal, held as stated: a plain scalar holding a lone apostrophe or a
             # lone double quote, which YAML reads as text, fails both properties.
             for wf_label, wf_added in (
@@ -1255,13 +1274,15 @@ def _self_test_isolated():
                        (wf_mutant != _WORKFLOW_CANONICAL, _wf_checkout_drops_token(wf_mutant),
                         _wf_actions_pinned(wf_mutant)), (True, False, False))
             # Both properties still pass a legitimate spelling that holds an anchor, a quote that pairs on
-            # its own line, or an apostrophe inside quotes.
+            # its own line, an apostrophe inside quotes, or a lone double quote inside apostrophes.
             for wf_label, wf_variant in (
                     ("anchored-value", _WORKFLOW_CANONICAL.replace("fetch-depth: 0", "fetch-depth: &d 0")),
                     ("quoted-flow-branch", _WORKFLOW_CANONICAL.replace("[main]", "['main']")),
                     ("run-double-quoted-argument", _WORKFLOW_CANONICAL.replace(wf_run, wf_run + ' "x"')),
                     ("apostrophe-inside-quotes", _WORKFLOW_CANONICAL.replace(
-                        wf_step, "      - name: \"Don't mask\"\n        run: echo 'it''s'\n" + wf_step))):
+                        wf_step, "      - name: \"Don't mask\"\n        run: echo 'it''s'\n" + wf_step)),
+                    ("double-quote-inside-apostrophes", _WORKFLOW_CANONICAL.replace(
+                        wf_step, "      - name: 'say \"hi'\n        run: echo hi\n" + wf_step))):
                 expect("workflow-template-properties-spelling-holds-{}".format(wf_label),
                        (wf_variant != _WORKFLOW_CANONICAL, _wf_checkout_drops_token(wf_variant),
                         _wf_actions_pinned(wf_variant)), (True, True, True))
