@@ -60,7 +60,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "brnrot"
 status = "partial"
-mechanisms = ["gate:branch-root", "hook:branch-root-guard"]
+mechanisms = ["gate:branch-root", "hook:branch-root-guard", "hook:git-discard"]
 
 [[rule]]
 corpus-id = "chgchk"
@@ -116,6 +116,11 @@ mechanisms = ["hook:orch-lease-heartbeat-post", "hook:orch-lease-heartbeat-stop"
 corpus-id = "cnsdif"
 status = "enforced"
 mechanisms = ["hook:diff-source", "hook:diff-wall-stop"]
+
+[[rule]]
+corpus-id = "cnsprd"
+status = "none"
+mechanisms = []
 
 [[rule]]
 corpus-id = "cnstpr"
