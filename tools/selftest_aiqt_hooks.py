@@ -5975,11 +5975,12 @@ def _deadline_defer_failures():
     countdown the restore's own clock read gives, less the time from its re-arm to the final read:
     _caller_countdown_bounds); and no window may be left armed or broken. Unlike dl-defer-countdown, the
     rows judge every run whatever its bound's width: a host stall inside a bracketed timer call widens that
-    run's bound by the stall, and a restore off by less than it passes that run, so a row refuses a wrong
-    restore only through its runs no such stall widened (dl-defer-countdown and dl-defer-countdown-stall
-    judge only a run whose bound is narrower than the window's time). Not swept: the instructions of
-    __exit__ before its first statement and the return instruction of __enter__, where no code of the
-    window can run (the class docstring states that limit)."""
+    run's bound by the stall, and a restore off by less than it can pass that run (direction and position
+    in the bound decide), so a row refuses a wrong restore only through its runs no such stall widened
+    (dl-defer-countdown and dl-defer-countdown-stall judge only a run whose bound is narrower than the
+    window's time, the stall variant only one whose window time is below the stall). Not swept: the
+    instructions of __exit__ before its first statement and the return instruction of __enter__, where no
+    code of the window can run (the class docstring states that limit)."""
     out = []
     calls = []
     exit_code = aiqt_hooks._DeadlineWindow.__exit__.__code__
@@ -6166,12 +6167,14 @@ def _deadline_defer_countdown_failures(stall=0.0):
     (at most 3 in all), judges the first run that can tell them apart, and fails, naming each run's bound,
     when none can. The edge checks put each end, one microsecond inside, exactly at and one microsecond
     outside, through _countdown_within, the check the dl-defer rows make.
-    (dl-defer-countdown-stall) The same with `stall` seconds, more than the window's time, slept between the
-    restore's clock read and its re-arm (aiqt_hooks.time a _Stalled). The bound is anchored on that read
-    and on the re-arm, so it stays as narrow as its two timer calls take: a restore off by the window's
-    time is refused, and the correct one, re-armed late by the stall, is accepted. A bound as wide as the
-    time from the restore's clock read to the final read is wider than the window's time in every such
-    run, so it fails here."""
+    (dl-defer-countdown-stall) The same with `stall` seconds slept between the restore's clock read and its
+    re-arm (aiqt_hooks.time a _Stalled), judging only a run whose measured window time is also below the
+    stall: a run the window outran is retried like one whose bound is too wide, and the vector fails,
+    naming each run's bound and time, when none of the 3 qualifies. The bound is anchored on that read and
+    on the re-arm, so it stays as narrow as its two timer calls take: a restore off by the window's time
+    is refused, and the correct one, re-armed late by the stall, is accepted. A bound as wide as the time
+    from the restore's clock read to the final read is at least the stall wide, so it is never narrower
+    than a judged run's window time: no run under it qualifies, and the vector fails instead of passing."""
     out = []
     calls = []
     label = "dl-defer-countdown-stall" if stall else "dl-defer-countdown"
@@ -6205,14 +6208,20 @@ def _deadline_defer_countdown_failures(stall=0.0):
         used = clock.reads[-1] - window._began if window._began is not None else 0.0
         return window, handler, timer, low, high, problem, used, len(calls)
 
+    def can_tell(run):
+        # A bound as wide as the stall can be narrower than an outrun window's time, so the stall variant
+        # judges only a run whose window time stayed below the stall.
+        return run[4] - run[3] < run[6] and (not stall or run[6] < stall)
+
     runs = []
-    while len(runs) < 3 and not any(run[4] - run[3] < run[6] for run in runs):
+    while len(runs) < 3 and not any(can_tell(run) for run in runs):
         runs.append(attempt())
-    telling = [run for run in runs if run[4] - run[3] < run[6]]
+    telling = [run for run in runs if can_tell(run)]
     problems = []
     if not telling:
+        outran = ", or a window not under the {!r}-second stall".format(stall) if stall else ""
         problems.append("none of {} runs could tell a correct restore from one off by the window's time (a bound "
-                        "not narrower than it): {}".format(len(runs), "; ".join(
+                        "not narrower than it{}): {}".format(len(runs), outran, "; ".join(
                             "bound ({!r}, {!r}] against {!r} seconds".format(run[3], run[4], run[6])
                             for run in runs)))
         low, high = runs[-1][3:5]
