@@ -981,24 +981,38 @@ def _self_test_isolated():
                     if b != 0x0A and not 0x20 <= b <= 0x7E
                     and not _wf_refused(wf_plant + bytes([b]) + b"# || true")], [])
 
+            # Neither template property below reads YAML; each reads lines, so a key or value spelled
+            # with a YAML escape would read differently to the property and to YAML. Both therefore
+            # refuse a text in which any effective line, in any step or outside the steps, holds a
+            # backslash, or holds a quote before its first ": " (a quoted key, or the closing line of a
+            # quoted scalar that spans lines): a double-quoted escape such as "u\x73es" for uses, in a
+            # key or in a value, fails closed.
+            def _wf_unescaped(text):
+                return not any("\\" in ln or any(q in ln.partition(": ")[0] for q in "\"'")
+                               for ln in text.split("\n"))
+
             # The checkout step must not leave the job token in the checkout's git config, where every
             # later step can read it. Held as its own property, not only through the exact text, so an
             # edit that changes the template and _WORKFLOW_CANONICAL together still reds while the
             # checkout drops persist-credentials: false. The property reads the effective text as steps:
             # a step opens at an item line ("      - ") and runs while its lines stay indented under it,
             # and its item line is read with the "- " as spaces, so every key of the step sits at indent
-            # 8 whichever key comes first. Exactly one step has the key uses: actions/checkout@, and no
-            # other line names actions/checkout in any case (a flow mapping, a quoted key or a deeper
-            # uses: fails closed); no line of that step holds a quote or a backslash, so a quoted or
-            # escaped key and a quoted value running over several lines fail closed; that step has
-            # exactly one with: key; every line of that with: block is a key of lowercase letters,
-            # digits and hyphens at indent 10, then ": " and a value, so a line that continues another
-            # key's value (the closing line of a flow collection) or a key in another case fails
-            # closed; and the persist-credentials mentions inside that block are exactly the one line
-            # persist-credentials: false (the line under env:, beside a later true, or in another step
-            # does not count). The property reads lines, not YAML: any spelling outside these shapes
-            # fails closed rather than being interpreted.
+            # 8 whichever key comes first. The text passes _wf_unescaped; exactly one step has the key
+            # uses: actions/checkout@, and no other line names actions/checkout in any case (a flow
+            # mapping, a quoted key or a deeper uses: fails closed); no line of that step holds a quote,
+            # so a quoted value running over several lines fails closed; exactly one line of that step
+            # is the line with: at indent 8, and every line of its with: block sits at indent 10; every
+            # other line of the step at indent 8, and every line of that block, is a key of lowercase
+            # letters, digits and hyphens that opens with a letter and is not with, then ": " and a
+            # value, so a second with: key spelled otherwise (with :, with: {...}, ? with), a line that
+            # continues another key's value (the closing line of a flow collection), a bare word or a
+            # key in another case fails closed; and the persist-credentials mentions inside that block
+            # are exactly the one line persist-credentials: false (the line under env:, beside a later
+            # true, or in another step does not count). The property reads lines, not YAML: any
+            # spelling outside these shapes fails closed rather than being interpreted.
             def _wf_checkout_drops_token(text):
+                if not _wf_unescaped(text):
+                    return False
                 lines = text.split("\n")
                 steps, step = [], None
                 for ln in lines:
@@ -1013,7 +1027,7 @@ def _self_test_isolated():
                 if len(checkouts) != 1 or sum("actions/checkout" in ln.lower() for ln in lines) != 1:
                     return False
                 body = checkouts[0]
-                if any(c in ln for ln in body for c in "\"'\\"):
+                if any(c in ln for ln in body for c in "\"'"):
                     return False
                 keys = [i for i, ln in enumerate(body) if not ln.startswith("         ")]
                 withs = [i for i in keys if body[i] == "        with:"]
@@ -1021,9 +1035,13 @@ def _self_test_isolated():
                     return False
                 end = next((i for i in keys if i > withs[0]), len(body))
                 block = body[withs[0] + 1:end]
-                for ln in block:
-                    key, colon, value = ln[len("          "):].partition(": ")
-                    if not (ln.startswith("          ") and colon and value and key[:1].isalpha()
+                if not all(ln.startswith("          ") for ln in block):
+                    return False
+                rows = ([body[i][len("        "):] for i in keys if i != withs[0]]
+                        + [ln[len("          "):] for ln in block])
+                for row in rows:
+                    key, _colon, value = row.partition(": ")
+                    if not (value and key != "with" and key[:1].isalpha()
                             and all(c in "abcdefghijklmnopqrstuvwxyz0123456789-" for c in key)):
                         return False
                 return ([ln for ln in block if "persist-credentials" in ln]
@@ -1060,7 +1078,34 @@ def _self_test_isolated():
                         wf_persist, wf_persist + "\n          Persist-Credentials: true")),
                     ("flow-sequence-value", _WORKFLOW_CANONICAL.replace(
                         "          fetch-depth: 0" + wf_persist,
-                        "          fetch-depth: [" + wf_persist + "\n          ]"))):
+                        "          fetch-depth: [" + wf_persist + "\n          ]")),
+                    ("escaped-second-checkout-step", _WORKFLOW_CANONICAL.replace(
+                        wf_step, '      - "u\\x73es": "actions/check\\x6fut@v4"\n' + wf_step)),
+                    ("escaped-second-checkout-value", _WORKFLOW_CANONICAL.replace(
+                        wf_step, '      - uses: "actions/check\\x6fut@v4"\n' + wf_step)),
+                    ("double-quoted-key-in-other-step", _WORKFLOW_CANONICAL.replace(
+                        wf_step, '      - "name": Say hi\n        run: echo hi\n' + wf_step)),
+                    ("single-quoted-key-in-other-step", _WORKFLOW_CANONICAL.replace(
+                        wf_step, "      - 'name': Say hi\n        run: echo hi\n" + wf_step)),
+                    ("single-quoted-name-across-with", _WORKFLOW_CANONICAL.replace(
+                        "\n        with:\n          fetch-depth: 0" + wf_persist,
+                        "\n        name: 'Check out\n        with:\n          fetch-depth: 0" + wf_persist
+                        + "\n        x: '")),
+                    ("double-quoted-value-closed-after-key", _WORKFLOW_CANONICAL.replace(
+                        "          fetch-depth: 0" + wf_persist,
+                        '          fetch-depth: "0' + wf_persist + '\n          x: "')),
+                    ("second-with-key-spaced", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + "\n        with :\n          persist-credentials: true")),
+                    ("second-with-key-flow-mapping", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + "\n        with: {persist-credentials: true}")),
+                    ("second-with-key-explicit", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + "\n        ? with\n        : {persist-credentials: true}")),
+                    ("row-at-indent-nine", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + "\n         xtoken: abc")),
+                    ("bare-word-row", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + "\n          shallow")),
+                    ("key-opens-with-hyphen", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + "\n          -token: abc"))):
                 expect("workflow-checkout-persist-credentials-mutant-reds-{}".format(wf_label),
                        (wf_mutant != _WORKFLOW_CANONICAL, _wf_checkout_drops_token(wf_mutant)), (True, False))
             # The property holds whichever key the checkout step lists first: a sole checkout step spelled
@@ -1077,14 +1122,17 @@ def _self_test_isolated():
                        (wf_variant != _WORKFLOW_CANONICAL, _wf_checkout_drops_token(wf_variant)), (True, True))
 
             # Every action the template runs is pinned to a full commit SHA: a tag or a branch is a label
-            # its owner can move, and a short SHA is a prefix that can become ambiguous. Every effective
-            # line that mentions uses must be a uses: key whose value is owner/repo@ followed by 40
-            # lowercase hex digits, optionally trailed by " # " and the tag it was resolved from; a uses
-            # in any other spelling or case (a flow mapping, a quoted key, Uses:) fails closed, and a text
-            # with no uses: at all proves nothing. Residual, not closed: the property checks the shape
-            # of the ref only, so a branch or tag whose name is 40 hex digits passes it as a SHA; the
-            # template's comment and the gate's residue say so.
+            # its owner can move, and a short SHA is a prefix that can become ambiguous. The text passes
+            # _wf_unescaped, and every effective line that mentions uses in any case must be a uses: key
+            # whose value is owner/repo@ followed by 40 lowercase hex digits, optionally trailed by " # "
+            # and the tag it was resolved from; a uses in any other spelling or case (a flow mapping, a
+            # quoted or escaped key, Uses:) fails closed, and a text with no uses: at all proves nothing.
+            # Residual, not closed: the property checks the shape of the ref only, so a branch or tag
+            # whose name is 40 hex digits passes it as a SHA; the template's comment and the gate's
+            # residue say so.
             def _wf_actions_pinned(text):
+                if not _wf_unescaped(text):
+                    return False
                 found = 0
                 for ln in text.split("\n"):
                     if "uses" not in ln.lower():
@@ -1125,6 +1173,18 @@ def _self_test_isolated():
             wf_mutant = "\n".join(ln for ln in _WORKFLOW_CANONICAL.split("\n") if "uses: " not in ln)
             expect("workflow-actions-pinned-mutant-reds-no-uses",
                    (wf_mutant != _WORKFLOW_CANONICAL, _wf_actions_pinned(wf_mutant)), (True, False))
+            # A step of its own whose uses key or value is spelled with a YAML escape or quotes reds, and
+            # so does a quoted key that names no uses at all, in either quote character.
+            for wf_label, wf_added in (
+                    ("escaped-key", '      - "u\\x73es": actions/github-script@v7\n'),
+                    ("escaped-checkout-step", '      - "u\\x73es": "actions/check\\x6fut@v4"\n'),
+                    ("quoted-key", '      - "uses": actions/github-script@v7\n'),
+                    ("escaped-key-in-flow-mapping", '      - {name: Say hi, "u\\x73es": actions/github-script@v7}\n'),
+                    ("double-quoted-key-without-uses", '      - "name": Say hi\n        run: echo hi\n'),
+                    ("single-quoted-key-without-uses", "      - 'name': Say hi\n        run: echo hi\n")):
+                wf_mutant = _WORKFLOW_CANONICAL.replace(wf_step, wf_added + wf_step)
+                expect("workflow-actions-pinned-mutant-reds-{}".format(wf_label),
+                       (wf_mutant != _WORKFLOW_CANONICAL, _wf_actions_pinned(wf_mutant)), (True, False))
 
             # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
             # with ONE declared view, populated through the U4 engine's own public planner
