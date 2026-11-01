@@ -105,8 +105,12 @@ fresh independent tempdir per call deny cross-call state via $HOME, $TMPDIR, or 
 they cannot deny it categorically: a generator can still share state through a COMMON ANCESTOR of the
 per-call tempdirs, the parent of its own $HOME/$TMPDIR, or any fixed path outside its sandbox. Full
 isolation would require OS-level confinement (a namespace or container); that purely-adversarial case is
-out of scope (the gate runs the project's own trusted generators) and is left to code review. Sources are not swept (a separate invariant). The gate tests a copy of the working
-tree, so it captures local uncommitted edits; on CI, HEAD equals the tree.
+out of scope (the gate runs the project's own trusted generators) and is left to code review. Sources are
+not swept (a separate invariant). The gate tests a copy of the working tree, so it captures local
+uncommitted edits; on CI, HEAD equals the tree. The self-test's load tolerance vector runs its slow leg and
+its leak legs with PROBE_STALL_S equal to _load_bound.POLL_S, so one poll interval with no output and no
+CPU tick stops a probe there; pinned with 20 busy loops to 2 CPUs, the slow leg exited 2 in 2 of 3 runs,
+cause not diagnosed. That vector's pass shows tolerance of an injected load factor, not of every host load.
 
   check_gensrc_failclose.py             sweep the real registry (default)
   check_gensrc_failclose.py --self-test build synthetic mini-repos and assert this gate's own invariants
@@ -177,7 +181,9 @@ PROBE_STALL_S = 60
 # Wall seconds one git command that builds the sandbox template may take. Template setup is not a --check:
 # it has its own bound so that a cut to the per-probe bound cannot stop setup git before any probe runs.
 # git stays on a direct subprocess call (_load_bound.run refuses it), so this bound is not load-adjusted;
-# reaching it stays an unexpected sweep error, cannot-evaluate (exit 2).
+# reaching it is a named template setup failure, cannot-evaluate (exit 2). 120 s is the former per-probe
+# bound, kept by reasoning rather than measured at this revision: a setup git copies no generator work and
+# should finish in seconds on a working host.
 TEMPLATE_GIT_TIMEOUT = 120
 TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
@@ -769,7 +775,9 @@ def sweep(real_root):
             template = work / "template"
             shutil.copytree(real_root, template, symlinks=False, ignore=_copy_ignore)
             _materialize_git(template, real_root)  # D6: a real repo so git-reading generators baseline
-        except (OSError, shutil.Error) as exc:
+        except (OSError, shutil.Error, subprocess.TimeoutExpired) as exc:
+            # TimeoutExpired is a setup git reaching TEMPLATE_GIT_TIMEOUT; it is not an OSError, and the
+            # outer catch-all would report it as an unexpected error that names no bound.
             cannot.append("template sandbox setup failed ({})".format(exc))
         else:
             baselines = {}
@@ -882,7 +890,9 @@ def main() -> int:
 #       (removing them would let this fixture pass and the self-test would fail),
 #   (k) a total-runtime deadline overrun (via an injected monotonic clock) returns cannot-evaluate
 #       (exit 2), never a fail-open 0,
-#   (l) a sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2),
+#   (l) a sandbox-setup mkdtemp failure (injected OSError) returns cannot-evaluate (exit 2), and so does
+#       a template setup git that reaches a lowered TEMPLATE_GIT_TIMEOUT (a stand-in git that sleeps past
+#       it), reported as a template setup failure that _stopping_bound names,
 #   (m) a BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on invalid
 #       UTF-8 passes the sweep (exit 0): the gate probes a block target with invalid UTF-8 only and the
 #       generator rejects it, exercising the is_block probe path no other fixture covers,
@@ -1527,6 +1537,7 @@ _SELF_TEST_VECTORS = (
     "total-runtime deadline overrun",
     "load tolerance",
     "sandbox-setup mkdtemp failure",
+    "template setup git timeout",
     "block-kind generator",
     "git-reading generator",
     "fsmonitor probe",
@@ -1630,7 +1641,7 @@ def _stopping_bound(report):
         ("load-adjusted budget of", "the load-adjusted per-probe budget (PROBE_TIMEOUT)"),
         ("total-runtime backstop", "the total-runtime backstop (TOTAL_TIMEOUT)"),
         ("template sandbox setup failed", "template setup (TEMPLATE_GIT_TIMEOUT or a setup error)"),
-        ("monitoring", "a monitoring fault")) if marker in report]
+        ("the bound's own monitoring failed", "a monitoring fault")) if marker in report]
     return " and ".join(named) if named else "no bound the report names"
 
 
@@ -1736,10 +1747,12 @@ def _self_test_main_isolated():
     cannot = []
     _VECTORS_RUN.clear()  # this run's vector census starts empty
     global _run_check, _now, _mkdtemp, _materialize_git, sweep, _load_factor, PROBE_TIMEOUT, PROBE_STALL_S
+    global TEMPLATE_GIT_TIMEOUT
     saved_bounds = (_load_factor, PROBE_TIMEOUT, PROBE_STALL_S)
     saved_run_check = _run_check
     saved_now = _now
     saved_mkdtemp = _mkdtemp
+    saved_template_git_timeout = TEMPLATE_GIT_TIMEOUT
     saved_materialize_git = _materialize_git
     saved_sweep = sweep
     cleanup_error = None
@@ -1927,10 +1940,14 @@ def _self_test_main_isolated():
         #     containment validation a completed one gets: the same rejection that ALSO swapped the target
         #     for an escaping symlink is cannot-evaluate (exit 2), never an accepted rejection. The leak legs
         #     run under the injected load as well: each needs the generator's own exit to land before its
-        #     stop, a race a 1 s wall budget loses on a loaded host, while the 16 s budget stays under the
-        #     leaked descendant's 30 s sleep and the stall bound still ends the wait. Last, on an idle host
-        #     the same slow generator overruns the 1 s budget (exit 2), so the pass is owed to the load
-        #     adjustment. The shared vectors follow, then the cleanup caller probes.
+        #     stop, so the 1 s wall budget no longer applies to them; the 1 s stall bound still does, while
+        #     the 16 s budget stays under the leaked descendant's 30 s sleep. Last, on an idle host the same
+        #     slow generator overruns the 1 s budget (exit 2), so the pass is owed to the load adjustment.
+        #     Residual: PROBE_STALL_S here equals _load_bound.POLL_S, so one poll interval with no output and
+        #     no CPU tick stops a probe, in the slow leg and the leak legs alike; pinned with 20 busy loops to
+        #     2 CPUs, the slow leg exited 2 in 2 of 3 runs, cause not diagnosed. The leak legs keep that
+        #     stall bound: a wider one would change what they race without a loaded run to show it helps.
+        #     The shared vectors follow, then the cleanup caller probes.
         leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
 
         def _load_fixtures():
@@ -2100,6 +2117,41 @@ def _self_test_main_isolated():
 
         _run_vector(cannot, failures, "sandbox-setup mkdtemp failure", lambda: _build_repo(
             tmp / "setup-fail", {"goodfile": _GOODFILE}), _evaluate_mkdtemp_failure)
+
+        # (l) A template setup git that reaches TEMPLATE_GIT_TIMEOUT is a named template setup failure
+        #     (exit 2) that _stopping_bound names, never an unexpected sweep error naming no bound. A git
+        #     stand-in on the PATH replaces itself with a 5 s sleep on init, past the bound lowered to 1 s.
+        def _setup_timeout_fixtures():
+            repo = _build_repo(tmp / "setup-timeout", {"goodfile": _GOODFILE})
+            sleepy_git = tmp / "sleepy-git"
+            sleepy_git.mkdir()
+            (sleepy_git / "git").write_text(
+                "#!/bin/sh\ncase \" $* \" in\n  *\" init \"*) exec sleep 5 ;;\nesac\n"
+                "exec '{}' \"$@\"\n".format(shutil.which("git")), encoding="utf-8")
+            os.chmod(sleepy_git / "git", 0o755)
+            return repo, sleepy_git
+
+        def _evaluate_setup_timeout(fixtures):
+            global TEMPLATE_GIT_TIMEOUT
+            repo, sleepy_git = fixtures
+            saved_path = os.environ.get("PATH", os.defpath)
+            TEMPLATE_GIT_TIMEOUT = 1
+            os.environ["PATH"] = str(sleepy_git) + os.pathsep + saved_path
+            try:
+                rc_timeout, timeout_report = sweep_captured(repo)
+            finally:
+                os.environ["PATH"] = saved_path
+                TEMPLATE_GIT_TIMEOUT = saved_template_git_timeout
+            named = _stopping_bound(timeout_report)
+            if (rc_timeout != 2 or "template sandbox setup failed" not in timeout_report
+                    or "unexpected error during the sweep" in timeout_report
+                    or named != "template setup (TEMPLATE_GIT_TIMEOUT or a setup error)"):
+                failures.append("template setup git timeout: expected exit 2 reported as a template setup "
+                                "failure that _stopping_bound names, got exit {!r}, bound {!r}, report {!r}"
+                                .format(rc_timeout, named, timeout_report))
+
+        _run_vector(cannot, failures, "template setup git timeout", _setup_timeout_fixtures,
+                    _evaluate_setup_timeout)
 
         # (m) A BLOCK-kind generator that reads+decodes the whole target and fail-closes (non-zero) on
         #     invalid UTF-8 passes (exit 0): a block target is probed with invalid UTF-8 only, which this
@@ -2554,6 +2606,7 @@ def _self_test_main_isolated():
         _run_check = saved_run_check
         _now = saved_now
         _mkdtemp = saved_mkdtemp
+        TEMPLATE_GIT_TIMEOUT = saved_template_git_timeout
         _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
         _materialize_git = saved_materialize_git
         sweep = saved_sweep
@@ -2599,14 +2652,16 @@ def _self_test_main_isolated():
           "whose corrupted probe raises (itself exit 2); a generator changing a real-tree file's mode is "
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
-          "2; a generator slower than the per-probe bound passes under host load while a silently sleeping "
-          "generator (stopped by the heuristic stall bound, not the budget) and the same slow generator on an "
+          "2; a generator slower than the per-probe bound passes under an injected load factor while a "
+          "silently sleeping generator (stopped by the heuristic stall bound, not the budget, even when "
+          "template setup git outlasts that per-probe bound) and the same slow generator on an "
           "idle host each return exit 2, while one exiting 0 on a corrupt target beside a leaked descendant "
           "(the leaky fixture) returns exit 1, one rejecting the corrupt target beside the same leak (the "
           "leaky_reject fixture) returns exit 0, and a stopped rejection that swapped its target for an "
           "escaping symlink (the leaky_reject_escape fixture) returns exit 2 with the containment "
           "diagnostic asserted (load-tolerant bounds, shared vectors included); a sandbox-setup mkdtemp failure "
-          "returns exit 2; a block-kind generator that fail-closes "
+          "returns exit 2, and so does a template setup git reaching TEMPLATE_GIT_TIMEOUT, reported as a "
+          "template setup failure that the stopping-bound namer names; a block-kind generator that fail-closes "
           "on invalid UTF-8 passes (exit 0), exercising the invalid-UTF-8-only block probe path; a "
           "git-reading generator passes (exit 0) because the sandbox template materializes a real git "
           "repository so its baseline git ls-files succeeds; a repo-local core.fsmonitor hook is NEVER "

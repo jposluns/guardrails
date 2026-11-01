@@ -2470,15 +2470,19 @@ runpy.run_path(path, run_name="__main__")
 """
 
 # The wall-clock bound on one row of _CENSUS_MAPPINGS, each set above the run it bounds (rule
-# kill-timeout-exceeds-callee-wait). MEASURED 2026-11-01 on an 80-CPU host shared with other work, each
-# run pinned with N busy loops to the same 2 CPUs. Every row but one stops at its first census read, within
-# 0.7 s with no busy loops, far under CENSUS_TIMEOUT.
+# kill-timeout-exceeds-callee-wait). The figures below were reported from runs on an 80-CPU host shared
+# with other work, each run pinned with N busy loops to the same 2 CPUs; no artefact of those runs is kept
+# in the tree. Every row but one stops at its first census read, within 0.7 s with no busy loops, far under
+# CENSUS_TIMEOUT.
 CENSUS_TIMEOUT = TIMEOUT * 4
 # check_gensrc_failclose.py reaches the census only at its close vectors, after the rest of its self-test:
-# 94.7 to 102.3 s with no busy loops, 226.7 s with 8, and that self-test alone took 433.6 to 589.5 s with 20
-# and 883.6 to 913.7 s with 40. This bound is the slowest 20-loop figure plus a 50% margin, rounded up to a
-# multiple of 60 s, so it does not cover 40 loops. It is a plain wall-clock bound because a _load_bound clock would not stretch at the load that overran the old
-# 120 s bound: its factor stays 1 while the load average is under the CPU count, as load5 60 is on 80 CPUs.
+# 94.7 to 102.3 s with no busy loops, and on this tree 554.3 s for the census child with 20; that self-test
+# alone took 563.9 to 589.5 s with 20 (this tree) and 883.6 to 913.7 s with 40. This bound is the slowest
+# 20-loop figure plus a 50% margin, rounded up to a multiple of 60 s, so it does not cover 40 loops. It is
+# a plain wall-clock bound: a _load_bound clock divides the 1-minute load by os.process_cpu_count(), which
+# on Python 3.14 follows CPU affinity, so its factor stays 1 for an unpinned run at a 1-minute load of 60
+# on 80 CPUs, the load that overran the old 120 s bound, while a run pinned to 2 CPUs at that load reads
+# the cap of 16.
 # Reaching this bound stays exit 2 naming the timeout, never a failure.
 CENSUS_GENSRC_TIMEOUT = 900
 # Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
