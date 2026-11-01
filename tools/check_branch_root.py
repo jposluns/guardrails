@@ -5,13 +5,15 @@ The protected ref is supplied explicitly or derived from origin/HEAD. The candid
 supplied explicitly or defaults to HEAD. A merge-base exit status of 0 means rooted, 1 means
 ORPHANED, and every other status is cannot-evaluate. A rooted candidate that restores, at a path it
 changes from any merge base, the exact blob a first-parent commit of the protected line replaced
-within the REVERT_WINDOW commits ending at that merge base (or, at a path it adds, the exact blob
-such a commit replaced at a path it removes, other than that path's merge-base blob, so a rename
-that puts old content back is caught) is REVERTS, unless merging it into the
+within the REVERT_WINDOW commits ending at that merge base (following the line's exact renames
+within that window; or, at a path it adds or changes, the exact nonempty blob such a commit replaced
+at another path it removes or changes, other than that path's merge-base blob, so a rename, an
+overwrite or a copy beside new content that puts old content back is caught) is REVERTS, unless
+merging it into the
 protected tip (git merge-tree --write-tree) leaves that path, and every path the protected line renamed
 it to, as the tip has it without a conflict (a mode-only difference counts only where it restores the
-replaced image), or a commit in base..head carries a "Reverts: <full sha>" trailer naming every such
-commit.
+replaced image), or the "Reverts: <full sha>" trailers of the commits in base..head together name
+every such commit.
 First-parent lag is always reported
 and becomes a blocking STALE verdict only when --max-lag is configured.
 
@@ -62,6 +64,14 @@ Result = namedtuple(
 # first parent instead of printing no raw diff for it.
 _WINDOW_LOG_ARGS = ("log", "--first-parent", "--diff-merges=first-parent", "--raw", "--no-renames",
                     "--no-abbrev", "--no-color", "--no-show-signature", "--format=%H")
+# The same walk with exact renames only. -M100% pairs a removed and an added path by blob id, which git does
+# before and without its rename limit, so no similarity guess carries one file's history to another.
+_WINDOW_RENAME_ARGS = ("log", "--first-parent", "--diff-merges=first-parent", "--raw", "-M100%",
+                       "--no-abbrev", "--no-color", "--no-show-signature", "--format=%H")
+# The empty blob in each object format. An empty file equals an old empty pre-image of another path by
+# coincidence, so _moved never pairs it.
+_EMPTY_BLOBS = frozenset(("e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+                          "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe141f7749120a303721813"))
 # The merge's rename settings, pinned so global or repository config cannot change the merge result.
 # File renames stay on, as in git's default merge, and are followed (_renamed). Directory renames are off,
 # so a path the head adds stays where the head put it and is judged there, rather than moving silently
@@ -301,36 +311,55 @@ def _matched(touches, image):
 
 
 def _moved(records, touches):
-    """(destination, source) for each path the head adds whose blob equals a window pre-image blob of a
-    path the head removes, other than the blob that source had at the base: the head moved the source
-    and put back content the line replaced there. Pairs are made on exact blobs, not by git's rename
-    detection, so no rename limit or similarity threshold applies."""
-    removed = {path: pre for _c, path, pre, post in records if post is None and path in touches}
+    """(destination, source) for each path the head adds or changes whose blob equals a window pre-image
+    blob of another path the head removes or changes, other than the blob that source had at the base
+    and other than the empty blob: the head moved content the line replaced at the source to the
+    destination, whether it removed the source or put new content there, and whether the destination is
+    new or overwritten. Pairs are made on exact blobs, not by git's rename detection, so no rename limit
+    or similarity threshold applies."""
     sources = {}
-    for source, pre in removed.items():
-        for _commit, old in touches[source]:
-            if old is not None and _blob(old) != _blob(pre):
+    for _c, source, pre, _post in records:
+        for _commit, old in touches.get(source, ()):
+            if old is not None and _blob(old) != _blob(pre) and _blob(old) not in _EMPTY_BLOBS:
                 sources.setdefault(_blob(old), set()).add(source)
-    return sorted((path, source) for _c, path, pre, post in records if pre is None and post is not None
-                  for source in sources.get(_blob(post), ()))
+    return sorted((path, source) for _c, path, _pre, post in records if post is not None
+                  for source in sources.get(_blob(post), ()) if source != path)
+
+
+def _window_renames(root, base, window):
+    """{commit: [(source, destination)]}: the exact renames each of the window first-parent commits
+    ending at base made against its first parent."""
+    renames = {}
+    for commit, pair, _pre, _post in _raw_records(root, *_WINDOW_RENAME_ARGS, "-n", str(window), base, "--"):
+        if isinstance(pair, tuple):
+            renames.setdefault(commit, []).append(pair)
+    return renames
 
 
 def _revert_findings(root, base, head_sha, window):
     """(path, undone, restored) for each path the head changes from base whose head blob equals the
     pre-image blob of a commit in the window (file modes are not compared, but see _matched); undone lists
     the window commits on that path from base back to that commit, newest first, and restored holds that
-    pre-image. A deletion matches an add (an absent pre-image). A path the head adds is also judged
-    against the window of each path the head removes that _moved pairs it with, and is reported under its
-    own name. Paths whose undone commits all carry a Reverts trailer are dropped."""
+    pre-image. A deletion matches an add (an absent pre-image). Where a window commit renamed a path
+    exactly, the commits older than it on the old name count on the new name too, so a restore at a path
+    the line renamed is found. A path the head adds or changes is also judged against the window of each
+    other changed path that _moved pairs it with, and is reported under its own name. A path is dropped
+    when the Reverts trailers of the commits in base..head together name every commit it undoes."""
     records = _raw_records(
         root, "diff-tree", "-r", "--raw", "--no-renames", "--no-abbrev", base, head_sha, "--")
     changed = {path: post for _c, path, _pre, post in records}
     if not changed:
         return []
-    touches = {}
+    renames = _window_renames(root, base, window)
+    touches, follow, current = {}, {}, None
     for commit, path, pre, _post in _window_touches(root, base, window):
-        if path in changed:
-            touches.setdefault(path, []).append((commit, pre))
+        if commit != current:
+            for source, destination in renames.get(current, ()):
+                follow.setdefault(source, set()).update({destination} | follow.get(destination, set()))
+            current = commit
+        for name in sorted({path} | follow.get(path, set())):
+            if name in changed:
+                touches.setdefault(name, []).append((commit, pre))
     findings = []
     for path, source in [(path, path) for path in sorted(touches)] + _moved(records, touches):
         found = _matched(touches[source], changed[path])
@@ -641,7 +670,7 @@ def _plumb_commit(root, files, parents, message, modes=None):
 
 
 def _revert_vectors(temp, failures, case):
-    """R1-R28: the revert check. One repository holds every history; each case names its own refs."""
+    """R1-R30: the revert check. One repository holds every history; each case names its own refs."""
     def ref(name, sha):
         _fixture_git(repo, "update-ref", "refs/heads/" + name, sha)
         return "refs/heads/" + name
@@ -1016,6 +1045,48 @@ def _revert_vectors(temp, failures, case):
     found("R28 move of the merge-base content", ref("r28t-main", s3), ref("r28t", _plumb_commit(
         repo, {b"c.txt": a_v1, b"fill.txt": b"1\n"}, (s3,), "branch renames a to c")), set(), 2)
 
+    # R29: on the R28 history the head moves line 3's old content without a plain rename: it deletes
+    # a.txt and overwrites fill.txt with it, or writes it to c.txt and new content to a.txt. Both are
+    # found at the path that holds it. Writing that content over fill.txt while a.txt stays, rewriting
+    # a.txt beside an unrelated add, or copying a.txt's merge-base content beside a rewrite is no
+    # finding. In a second history the line filled an empty a.txt, and an empty file the head deletes,
+    # overwrites or adds beside it is never paired: an empty file matches by coincidence.
+    for label, files, want in (
+            ("R29 head deletes and overwrites", {b"fill.txt": a_v1}, {b"fill.txt"}),
+            ("R29 head moves beside new content",
+             {b"a.txt": b"fresh\n", b"c.txt": a_v1, b"fill.txt": b"1\n"}, {b"c.txt"}),
+            ("R29 overwrite with the source kept", {b"a.txt": a_v2, b"fill.txt": a_v1}, set()),
+            ("R29 rewrite beside an unrelated add",
+             {b"a.txt": b"fresh\n", b"n.txt": b"n\n", b"fill.txt": b"1\n"}, set()),
+            ("R29 copy of the base content beside a rewrite",
+             {b"a.txt": b"fresh\n", b"c.txt": a_v2, b"fill.txt": b"1\n"}, set())):
+        found(label, s_main, ref("r29-" + label[4:].replace(" ", "-"), _plumb_commit(
+            repo, files, (s2,), label)), want, 2)
+    z0 = _plumb_commit(repo, {b"a.txt": b"", b"fill.txt": b"0\n"}, (), "empty root")
+    z1 = _plumb_commit(repo, {b"a.txt": b"", b"fill.txt": b"1\n"}, (z0,), "empty filler")
+    z2 = _plumb_commit(repo, {b"a.txt": a_v2, b"fill.txt": b"1\n"}, (z1,), "main fills a")
+    z_main = ref("r29z-main", z2)
+    for label, files in (("R29 empty overwrite", {b"fill.txt": b""}),
+                         ("R29 empty add beside a rewrite",
+                          {b"a.txt": b"fresh\n", b"n.txt": b"", b"fill.txt": b"1\n"}),
+                         ("R29 empty move", {b"n.txt": b"", b"fill.txt": b"1\n"})):
+        found(label, z_main, ref("r29z-" + label[10:].replace(" ", "-"), _plumb_commit(
+            repo, files, (z2,), label)), set(), 2)
+
+    # R30: on the R28 history the line then renames a.txt to b.txt, so a window of 3 holds the rename
+    # and the line 3 edit but not the add. A branch that puts line 3 back in b.txt is found only by
+    # following the rename; moving b.txt on, or back to a.txt, with line 3 put back is found as well,
+    # and rewriting b.txt with new content is no finding.
+    s4 = _plumb_commit(repo, {b"b.txt": a_v2, b"fill.txt": b"1\n"}, (s2,), "main renames a to b")
+    s4_main = ref("r30-main", s4)
+    for label, files, want in (
+            ("R30 restore at a path the line renamed", {b"b.txt": a_v1}, {b"b.txt"}),
+            ("R30 line rename then head move", {b"c.txt": a_v1}, {b"b.txt", b"c.txt"}),
+            ("R30 line rename then head move back", {b"a.txt": a_v1}, {b"a.txt", b"b.txt"}),
+            ("R30 rewrite at a path the line renamed", {b"b.txt": b"fresh\n"}, set())):
+        found(label, s4_main, ref("r30-" + label[4:].replace(" ", "-"), _plumb_commit(
+            repo, {**files, b"fill.txt": b"1\n"}, (s4,), label)), want, 3)
+
     # R12: a shallow clone whose history ends inside the window is cannot-evaluate.
     shallow = temp / "r12-shallow"
     try:
@@ -1036,7 +1107,7 @@ def _mutant_vector(failures):
     """Each mutant of the revert check, applied by replacing module attributes, must turn every named
     R vector red in a nested self-test run."""
     real_findings, real_touches, real_records = _revert_findings, _window_touches, _raw_records
-    real_merge = _merge_result
+    real_merge, real_moved = _merge_result, _moved
 
     def tip_anchored(root, _base, head_sha, window):
         return real_findings(root, _resolve_commit(root, "refs/heads/protected", "protected"),
@@ -1099,6 +1170,12 @@ def _mutant_vector(failures):
         return sorted((path, source) for _c, path, pre, post in records if pre is None and post is not None
                       for source in sources.get(_blob(post), ()))
 
+    def removed_to_added_only(records, touches):
+        added = {path for _c, path, pre, _post in records if pre is None}
+        removed = {path for _c, path, _pre, post in records if post is None}
+        return [(path, source) for path, source in real_moved(records, touches)
+                if path in added and source in removed]
+
     for label, injected, vector in (
             ("check removed", {"_revert_findings": lambda *_a: []}, "R1 "),
             ("anchored on the protected tip", {"_revert_findings": tip_anchored}, "R10 window anchored"),
@@ -1122,6 +1199,12 @@ def _mutant_vector(failures):
              "R28 head renames and restores"),
             ("merge-base content paired as a move", {"_moved": base_content_paired},
              "R28 move of the merge-base content"),
+            ("only a removed path paired with an added one", {"_moved": removed_to_added_only},
+             ("R29 head deletes and overwrites", "R29 head moves beside new content")),
+            ("empty blob paired", {"_EMPTY_BLOBS": frozenset()},
+             ("R29 empty overwrite", "R29 empty add beside a rewrite", "R29 empty move")),
+            ("line renames not followed", {"_window_renames": lambda _r, _b, _w: {}},
+             "R30 restore at a path the line renamed"),
             ("head image in place of the merge result",
              {"_merge_result": lambda _r, _p, head_sha: (head_sha, frozenset())}, "R20 "),
             ("merge conflicts ignored", {"_merge_result": conflicts_ignored}, "R22 "),
@@ -1429,7 +1512,7 @@ def self_test(_vectors=True):
                "default-root/cwd-unavailable")
     print("SELF-TEST PASS: V1-V13 cover " + covered + ", non-UTF-8-git-output, and shallow-clone "
           "(both cannot-evaluate) outcomes; verdicts are asserted by exit code; an unbuildable V10 or V11 "
-          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R28 cover the revert "
+          "fixture is a NOT RUN failure (nonzero exit), never a PASS (PARTIAL); R1-R30 cover the revert "
           "check and each listed mutant of it turns every R vector it names red")
     return 0
 
