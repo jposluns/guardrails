@@ -32,7 +32,8 @@
 The card image is site/images/aiqt-card.png, with the SHA-256 recorded above. Its sources are card.html
 and illustration.svg in this folder. Every published site/*.html page except site/404.html carries the tag
 block above in its head, in this order, with canonical and og:url set to that page's own URL. That covers
-the pages tools/gen_site.py generates and the hand-maintained ones. tools/check_site.py checks every such
+the pages tools/gen_site.py generates and the hand-maintained ones. A page must also stay inside the page
+syntax the `_page_syntax_error` docstring in tools/gen_site.py defines. tools/check_site.py checks every such
 page when AIQT_SITE_HOST is unset, empty or names aiqt.ai (or www.aiqt.ai), and under any other site host
 skips the check and prints a line saying so; a value that is not a plain host name (a port, a trailing
 dot, or a character a host name cannot hold) is refused.

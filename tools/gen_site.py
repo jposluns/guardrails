@@ -102,6 +102,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import html
+import html.entities
 import os
 import re
 from html.parser import HTMLParser
@@ -238,82 +239,148 @@ INTEGRATION_POINTS = frozenset(("annotation-xml", "desc", "foreignobject", "mi",
 HTML_WHITESPACE = " \t\n\f\r"
 _ATTR = (r"[^\t\n\f\r />\"'<=\x00][^\t\n\f\r />\"'<=\x00]*"
          r"(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:\"[^\"]*\"|'[^']*'|[^\t\n\f\r \"'=<>`\x00]+))?")
-_START_TAG_RE = re.compile(r"<([A-Za-z][A-Za-z0-9-]*)(?:[\t\n\f\r ]+" + _ATTR + r")*[\t\n\f\r ]*/?>")
+# Group 2 is the slash that makes the tag self-closing: only text left after the last attribute counts, so
+# the "/" in `<svg x=a/>` belongs to the unquoted value and the svg stays open, as both readers take it.
+_START_TAG_RE = re.compile(r"<([A-Za-z][A-Za-z0-9-]*)(?:[\t\n\f\r ]+" + _ATTR + r")*[\t\n\f\r ]*(/?)>")
 _END_TAG_RE = re.compile(r"</([A-Za-z][A-Za-z0-9-]*)[\t\n\f\r ]*>")
-_DOCTYPE_RE = re.compile(r"<!doctype[\t\n\f\r ]+html[\t\n\f\r ]*>", re.IGNORECASE)
+_DOCTYPE_RE = re.compile(r"<!doctype[\t\n\f\r ]+html(?:[\t\n\f\r ]+system[\t\n\f\r ]+"
+                         r"(?-i:\"about:legacy-compat\"|'about:legacy-compat'))?[\t\n\f\r ]*>", re.IGNORECASE)
 _TEXT_END_RE = re.compile("</(?:" + "|".join(sorted(TEXT_CONTENT)) + ")", re.IGNORECASE)
-_RAW_END_RE = {name: re.compile("</" + name + "(?=[\t\n\f\r />])", re.IGNORECASE) for name in RAW_TEXT_ELEMENTS}
+_RAW_END_RE = {name: re.compile("</" + name + "(?=[\t\n\f\r />])", re.IGNORECASE)
+               for name in RAW_TEXT_ELEMENTS | {"noscript"}}
 _SCRIPT_START_RE = re.compile("<script[\t\n\f\r />]", re.IGNORECASE)
 _MARKUP_START_RE = re.compile("<[/!?]")
+_TAG_START_RE = re.compile("<[A-Za-z/!?]")
+# A character reference as html.unescape finds one; the accepted ones are `&name;` with "name;" in the
+# specification's table, and `&#<digits>;` or `&#x<hex digits>;` naming a CHARREF_OK code point.
+_CHARREF_RE = re.compile(r"&(#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[^\t\n\f <&#;]{1,32};?)")
+CHARREF_OK = ((0x09, 0x0A), (0x20, 0x7E), (0xA0, 0xD7FF), (0xE000, 0xFDCF), (0xFDF0, 0xFFFD))
+
+
+def _charref_error(text):
+    """The first character reference in `text` outside the accepted set, or None. A reference html.unescape
+    leaves as written passes (no table name is a prefix of it, so a browser leaves it too). Of the rest only
+    a `;`-terminated reference passes: a named one whose full "name;" is in the table (both readers decode it
+    alike, in text and in attribute values), or a numeric one naming a code point in CHARREF_OK, where
+    html.unescape and the tokenizer both yield that code point. So a reference to a control code point or a
+    noncharacter (html.unescape yields '' for most, a browser keeps them), to U+0000 or U+0080 to U+009F
+    (remapped), and a legacy name without ";" (a browser leaves it as written inside an attribute value
+    before "=" or an ASCII letter or digit, html.unescape decodes it) fail."""
+    for ref in _CHARREF_RE.finditer(text):
+        body = ref.group(1)
+        if html.unescape(ref.group(0)) == ref.group(0):
+            continue
+        if body.endswith(";") and not body.startswith("#") and body in html.entities.html5:
+            continue
+        if body.endswith(";") and body.startswith("#") and len(body) <= 10:
+            point = int(body[2:-1], 16) if body[1:2] in "xX" else int(body[1:-1])
+            if any(low <= point <= high for low, high in CHARREF_OK):
+                continue
+        return ref.group(0)
+    return None
 
 
 def _page_syntax_error(page):
-    """The accepted page subset: the first place `page` steps outside the syntax on which html.parser and
-    the HTML specification's tokenizer agree, as a message, or None. One linear pass over the source text,
-    run before html.parser so its verdict does not rest on html.parser's own error recovery. Refused
-    anywhere in the page:
+    """The accepted page subset: the first place `page` steps outside a syntax on which html.parser (as
+    shipped with the Python floor, 3.14) and the HTML specification's tokenizer read the same tags, comments
+    and text runs, as a message, or None. One pass over the source text, linear in its length (the line is
+    counted only for the message), run before html.parser so its verdict does not rest on html.parser's own
+    error recovery. Refused anywhere in the page:
       - any "<!" construct but a comment and a leading doctype: a comment must open with exactly "<!--",
         must not begin "<!-->" or "<!--->", and must close at its first later "-->" with no "--!>" and no
         nested "<!--" before it (html.parser ends some of these elsewhere than the tokenizer does), so a
-        CDATA section, a bogus comment and an abrupt or unclosed comment fail; the one doctype accepted is
-        `<!doctype html>` (any case) before all other markup; a "<?" construct fails too;
+        CDATA section, a bogus comment and an abrupt or unclosed comment fail; the doctypes accepted are
+        `<!doctype html>` and `<!doctype html system "about:legacy-compat">` (keywords in any case, the
+        quoted string exact), before all other markup; a "<?" construct fails too;
       - a start or end tag outside a plain shape: a start tag is a name of ASCII letters, digits and
         hyphens, then whitespace-separated attributes (a name free of quotes, "<", "=" and "/", with an
         optional double-quoted, single-quoted or unquoted value; an unquoted value holds no quote, "=",
         "<", ">" or backtick), then an optional "/" and ">"; an end tag is a name, optional whitespace and
-        ">";
+        ">". A start tag is self-closing only when the "/" follows its last attribute: in `<svg x=a/>` the
+        "/" ends the unquoted value, so the element stays open for both readers;
       - a self-closing start tag of an element whose contents are text (TEXT_CONTENT: `<script/>`,
         `<style/>`, `<title/>`, `<textarea/>`, `<noscript/>` and the rest), since the tokenizer ignores
-        the slash and reads on as text while html.parser reads on as markup; and any `<plaintext>`;
-      - "</" followed by the name of any TEXT_CONTENT element (any case) inside an attribute value, a
-        comment, or the text of a RAW_TEXT_ELEMENTS element, so no end tag that one reader takes as text
-        can end an element for the other;
-      - a RAW_TEXT_ELEMENTS element that never ends, or whose first end tag (its name followed by
-        whitespace, "/" or ">") carries more than its name and whitespace;
+        the slash and reads on as text while html.parser reads on as markup; a TEXT_CONTENT start tag whose
+        last attribute is an unquoted value ending in "/" (`<iframe src=/embed/>`), which both readers
+        leave open but which reads as self-closing, refused more broadly than the two readers need so the
+        page cannot be taken either way at a glance; and any `<plaintext>`;
+      - "</" followed by the name of any TEXT_CONTENT element (any case) inside an attribute value or the
+        text of a RAW_TEXT_ELEMENTS element, so no end tag that one reader takes as text can end an element
+        for the other (inside a comment it can end nothing: a comment inside a `<noscript>`, the one place
+        a browser reads it as text, is refused below);
+      - a RAW_TEXT_ELEMENTS element or a `<noscript>` that never ends, or whose first end tag (its name
+        followed by whitespace, "/" or ">") carries more than its name and whitespace;
+      - in the text of a `<noscript>`, in the head or the body, "<" followed by an ASCII letter, "/", "!"
+        or "?": a browser running scripts reads that text as text, html.parser as markup, so markup there
+        could add, hide or move a keyed tag for one reader only;
       - in the text of a `<script>`, "<!--" followed later by "<script" and then whitespace, "/" or ">"
         (any case), the only way into the tokenizer's double-escaped script state, which html.parser does
         not follow; "<!--" alone, as in a legacy `<script><!-- a() //--></script>`, passes;
       - in the text of a RAW_TEXT_ELEMENTS element other than script and style, "<" followed by "/", "!"
-        or "?": broader than the specification needs, refused because older html.parser releases read
-        that text as markup, where such a construct could end an element or hide a tag;
-      - inside svg or math content (from an `<svg>` or `<math>` start tag to its end tag), a start tag of
-        a TEXT_CONTENT element or of an HTML integration point (INTEGRATION_POINTS): there the tokenizer
-        reads `<script>`, `<style>` and `<title>` contents as markup, so a keyed tag inside one is an
-        element to a browser and text to html.parser.
+        or "?": broader than the specification needs (html.parser 3.14 reads that text as text too), kept
+        so the check does not rest on how html.parser treats such text;
+      - inside svg or math content (from an `<svg>` or `<math>` start tag that is not self-closing to its
+        end tag), a start tag of a TEXT_CONTENT element other than `<style>` and `<title>`, or of an HTML
+        integration point (INTEGRATION_POINTS), and a `<style>` or `<title>` whose text holds "<": there the
+        tokenizer reads those elements' contents as markup and html.parser as text, so a keyed tag inside
+        one is an element to a browser and text to html.parser; text without "<" reads alike. The
+        integration points, MathML's `<mi>`, `<mo>` and `<mn>` among them, stay refused whatever they hold,
+        because inside them a browser switches back to HTML rules this check does not track;
+      - outside comments and the text of RAW_TEXT_ELEMENTS elements (in text, in a `<noscript>`, and in
+        every start tag), a character reference outside the set _charref_error accepts, where html.unescape
+        and the tokenizer decode it differently (a reference to a control code point or a noncharacter,
+        which html.unescape drops and a browser keeps, could end the head for a browser only, or hide a
+        key's spelling from one reader).
     _HeadTagCollector adds the refusals that need the head's place (see there). Inside the accepted subset
-    html.parser and the tokenizer agree on where each tag, comment and text run starts and ends; residual
-    differences there are listed in _HeadTagCollector, each making the check stricter, not laxer."""
+    html.parser 3.14 and the tokenizer read the same tags, comments and text runs as far as this check has
+    found; the differences it knows of in where the head ends are listed in _HeadTagCollector and each ends
+    the head sooner here, not later. That this list is complete is not established."""
+    found = _page_syntax_scan(page)
+    if found is None:
+        return None
+    return "line {}: {}".format(page.count("\n", 0, found[0]) + 1, found[1])
+
+
+def _page_syntax_scan(page):
+    """_page_syntax_error's pass: (offset, message) for the first refusal, or None. Each character is read a
+    bounded number of times; the svg/math stack keeps a count per name so an end tag finds its element in
+    constant time, and each element is popped at most once."""
     lead = len(page) - len(page.lstrip(HTML_WHITESPACE))
     doctype = _DOCTYPE_RE.match(page, lead)
     pos = doctype.end() if doctype else 0
     foreign = []
+    open_count = dict.fromkeys(FOREIGN_ROOTS, 0)
     while True:
         at = page.find("<", pos)
+        ref = _charref_error(page[pos:] if at < 0 else page[pos:at])
+        if ref is not None:
+            return page.find(ref, pos), "a character reference {!r} this check does not accept".format(ref)
         if at < 0:
             return None
-        line = page.count("\n", 0, at) + 1
         if page.startswith("<!--", at):
             close = page.find("-->", at + 4)
             if page.startswith("<!-->", at) or page.startswith("<!--->", at):
-                return "line {}: an abrupt comment (\"<!-->\" or \"<!--->\")".format(line)
+                return at, "an abrupt comment (\"<!-->\" or \"<!--->\")"
             if close < 0:
-                return "line {}: a comment that never closes".format(line)
+                return at, "a comment that never closes"
             if page.find("--!>", at + 2, close + 3) >= 0 or page.find("<!--", at + 4, close + 2) >= 0:
-                return "line {}: a comment holding \"--!>\" or a nested \"<!--\" before its \"-->\"".format(line)
-            if _TEXT_END_RE.search(page, at + 4, close):
-                return "line {}: a comment holding the end tag of a text element".format(line)
+                return at, "a comment holding \"--!>\" or a nested \"<!--\" before its \"-->\""
             pos = close + 3
             continue
         if page.startswith("<!", at) or page.startswith("<?", at):
-            return "line {}: a \"{}\" construct other than a comment (a \"<![\" section, a bogus comment or " \
-                   "a doctype after other markup)".format(line, page[at:at + 2])
+            return at, "a \"{}\" construct other than a comment (a \"<![\" section, a bogus comment or a " \
+                       "doctype after other markup or outside the accepted forms)".format(page[at:at + 2])
         if page.startswith("</", at):
             end = _END_TAG_RE.match(page, at)
             if not end:
-                return "line {}: an end tag that is not a name, optional whitespace and \">\"".format(line)
+                return at, "an end tag that is not a name, optional whitespace and \">\""
             name = end.group(1).lower()
-            if name in foreign:
-                del foreign[len(foreign) - 1 - foreign[::-1].index(name):]
+            if open_count.get(name):
+                while True:
+                    top = foreign.pop()
+                    open_count[top] -= 1
+                    if top == name:
+                        break
             pos = end.end()
             continue
         if not (page[at + 1:at + 2].isascii() and page[at + 1:at + 2].isalpha()):
@@ -321,34 +388,50 @@ def _page_syntax_error(page):
             continue
         start = _START_TAG_RE.match(page, at)
         if not start:
-            return "line {}: a start tag outside the plain shape this check reads".format(line)
+            return at, "a start tag outside the plain shape this check reads"
         name = start.group(1).lower()
+        self_closing = start.group(2) == "/"
         if _TEXT_END_RE.search(start.group(0)):
-            return "line {}: an attribute value holding the end tag of a text element".format(line)
-        if foreign and (name in TEXT_CONTENT or name in INTEGRATION_POINTS):
-            return "line {}: a <{}> inside svg or math content".format(line, name)
+            return at, "an attribute value holding the end tag of a text element"
+        ref = _charref_error(start.group(0))
+        if ref is not None:
+            return at, "a character reference {!r} this check does not accept".format(ref)
+        if foreign and (name in INTEGRATION_POINTS or name in TEXT_CONTENT and name not in ("style", "title")):
+            return at, "a <{}> inside svg or math content".format(name)
+        if name in TEXT_CONTENT and self_closing:
+            return at, "a self-closing <{}/>, whose contents a browser reads on as text".format(name)
         if name in TEXT_CONTENT and start.group(0).endswith("/>"):
-            return "line {}: a self-closing <{}/>, whose contents a browser reads on as text".format(line, name)
+            return at, "a <{}> whose last unquoted attribute value ends in \"/\", which reads as " \
+                       "self-closing but leaves the element open".format(name)
         if name == "plaintext":
-            return "line {}: a <plaintext>".format(line)
+            return at, "a <plaintext>"
         pos = start.end()
-        if name in FOREIGN_ROOTS and not start.group(0).endswith("/>"):
+        if name in FOREIGN_ROOTS and not self_closing:
             foreign.append(name)
-        if name not in RAW_TEXT_ELEMENTS:
+            open_count[name] += 1
+        if name not in RAW_TEXT_ELEMENTS and name != "noscript":
             continue
         end = _RAW_END_RE[name].search(page, pos)
         closing = _END_TAG_RE.match(page, end.start()) if end else None
         if not closing:
-            return "line {}: a <{}> whose text has no plain </{}> end tag".format(line, name, name)
-        if _TEXT_END_RE.search(page, pos, end.start()):
-            return "line {}: the text of a <{}> holding the end tag of a text element".format(line, name)
-        if name == "script":
+            return at, "a <{}> whose text has no plain </{}> end tag".format(name, name)
+        if name == "noscript":
+            if _TAG_START_RE.search(page, pos, end.start()):
+                return at, "a <noscript> whose text holds markup, which a browser running scripts reads as text"
+            ref = _charref_error(page[pos:end.start()])
+            if ref is not None:
+                return at, "a character reference {!r} this check does not accept".format(ref)
+        elif _TEXT_END_RE.search(page, pos, end.start()):
+            return at, "the text of a <{}> holding the end tag of a text element".format(name)
+        elif foreign and "<" in page[pos:end.start()]:
+            return at, "a <{}> inside svg or math content whose text holds \"<\"".format(name)
+        elif name == "script":
             opener = page.find("<!--", pos, end.start())
             if opener >= 0 and _SCRIPT_START_RE.search(page, opener + 4, end.start()):
-                return "line {}: a <script> whose text holds \"<!--\" and then \"<script\", which a browser " \
-                       "reads as double-escaped script text".format(line)
+                return at, "a <script> whose text holds \"<!--\" and then \"<script\", which a browser " \
+                           "reads as double-escaped script text"
         elif name != "style" and _MARKUP_START_RE.search(page, pos, end.start()):
-            return "line {}: the text of a <{}> holding markup-like \"<\"".format(line, name)
+            return at, "the text of a <{}> holding markup-like \"<\"".format(name)
         pos = closing.end()
 
 
@@ -367,11 +450,16 @@ class _HeadTagCollector(HTMLParser):
     broader than needed); a `<noscript>` in the head holding anything but whitespace (a browser running
     scripts reads its contents as text, html.parser as markup, and without scripts a browser ends the head
     at some contents this collector would keep); and a start tag of a TEXT_CONTENT element other than
-    `<script>` and `<style>` inside a `<template>` in the head (broader than needed: this host's html.parser
-    follows those elements' text there too, older releases do not). Inside the accepted subset the head
-    ends here where a browser's tree builder ends it, with these known differences, each ending it sooner
-    here (so a block after that point fails as outside the head where a browser would still read it in the
-    head): the start tags `<noframes>`, `<basefont>`, `<bgsound>` and `<html>` end it here and not in a
+    `<script>` and `<style>` inside a `<template>` in the head (broader than needed for `<title>`,
+    `<textarea>`, `<iframe>`, `<noembed>`, `<noframes>` and `<xmp>`, whose text html.parser 3.14 reads as
+    text there too; how other releases read it was not checked); and a `<style>` or `<title>` start tag
+    inside svg or math content inside a `<template>` in the head, whatever its text (a browser reads those
+    elements' contents there as markup and html.parser as text, and no reader this check was compared with
+    models a template, so where one ends around such text is not established; text without "<" passes the
+    accepted subset elsewhere). Inside the accepted subset the differences this check knows of in where
+    the head ends each end it sooner here than in a browser's tree builder, none later, though that the
+    list is complete is not established (so a block after that point fails as outside the head where a
+    browser would still read it in the head): the start tags `<noframes>`, `<basefont>`, `<bgsound>` and `<html>` end it here and not in a
     browser, and `</head>` or `<body>` ends it here even inside a `<template>`. Outside the subset the page
     fails before this collector's places count. Where an element sits is None inside the head, otherwise
     "outside <head>", "inside the raw text of <script> in <head>" (or of `<style>` or `<title>`) for one
@@ -396,6 +484,7 @@ class _HeadTagCollector(HTMLParser):
         self.body_seen = False
         self.raw_text = None    # the open raw-text head element, while inside one
         self.wrappers = []      # the open <template>/<noscript> elements inside the head
+        self.template_foreign = []  # the open svg/math elements inside a <template> in the head
         self.found = []    # (key, value, place, line, written keys)
         self.errors = []
 
@@ -417,6 +506,7 @@ class _HeadTagCollector(HTMLParser):
         self.in_head = False
         self.raw_text = None
         self.wrappers = []
+        self.template_foreign = []
 
     def handle_starttag(self, tag, attrs):
         line = self.getpos()[0]
@@ -444,13 +534,23 @@ class _HeadTagCollector(HTMLParser):
                     return
                 if tag in HEAD_RAW_TEXT:
                     self.raw_text = tag
+            elif tag in ("style", "title") and self.template_foreign:
+                # Inside svg or math a browser reads this element's text as markup and html.parser as text,
+                # and how a template ends around it was not checked against a reader that models one.
+                self.errors.append("line {}: an svg or math <{}> inside a <template> in <head>, which this "
+                                   "check refuses whatever its text".format(line, tag))
             elif tag in TEXT_CONTENT and tag not in ("script", "style"):
-                # Older html.parser releases read this element's text as markup, so a "</template>" a
-                # browser reads as text there could end the template here early.
+                # html.parser 3.14 reads <noscript> text as markup, so a "</template>" a browser reads as
+                # text there could end the template here early; the others are refused too, more broadly.
                 self.errors.append("line {}: a <{}> inside a <template> in <head>, whose text this check "
                                    "does not follow".format(line, tag))
             if tag in ("template", "noscript"):
                 self.wrappers.append(tag)
+            elif tag in FOREIGN_ROOTS and "template" in self.wrappers:
+                # Self-closing as the page scan decides it, from a "/" after the last attribute only.
+                start = _START_TAG_RE.match(self.get_starttag_text() or "")
+                if not start or start.group(2) != "/":
+                    self.template_foreign.append(tag)
         if tag not in ("link", "meta"):
             return
         names = [k.lower() for k, _v in attrs]
@@ -512,9 +612,14 @@ class _HeadTagCollector(HTMLParser):
             if tag == self.raw_text:
                 self.raw_text = None
             return
+        if tag in self.template_foreign:
+            while self.template_foreign.pop() != tag:
+                pass
         if tag in ("template", "noscript") and tag in self.wrappers:
             while self.wrappers.pop() != tag:
                 pass
+            if "template" not in self.wrappers:
+                self.template_foreign = []
             return
         if "template" in self.wrappers:
             return
@@ -569,8 +674,9 @@ def _validate_head_tags(page, url, target_rel):
     _HeadTagCollector places it, not inside a `<template>` there (such a tag still counts toward "exactly
     one", so a hidden copy beside the real one fails as a duplicate, which is stricter than a browser).
     These hold as a browser's tokenizer reads the page only inside the accepted subset _page_syntax_error
-    defines; a page outside it fails before anything is counted, and inside it the head may end here
-    sooner than in a browser (see _HeadTagCollector), never later. Every spelling of its key on it is
+    defines; a page outside it fails before anything is counted, and inside it each difference known in
+    where the head ends makes it end here sooner than in a browser (see _HeadTagCollector); no known one
+    ends it later, and that none exists is not established. Every spelling of its key on it is
     exactly the block's (no case change, no surrounding whitespace, so a meta's property and name, when
     both carry the key, are both written that way; for a link, each rel token that names canonical is
     written `canonical` in lower case, which is stricter than HTML, where rel tokens compare ASCII
@@ -1911,11 +2017,12 @@ def _self_test():
             _validate_head_tags(page, _own_url, "site/rules.html")
         except SchemaError as exc:
             failures.append("{}: unexpected SchemaError: {}".format(label, exc))
-    # Markup html.parser cannot follow as a browser's tokenizer would fails rather than pass: a "<!--" in a
-    # head script (a browser's escaped script states can hide a later block as script text), a "<![" section
-    # in or before the head (a browser ends it at the first ">"), anything but whitespace, comments, a
-    # doctype and <html> before the head (a browser starts the head there), and an element with text
-    # contents inside a template in the head (a "</template>" in that text could end the template here).
+    # Markup html.parser cannot follow as a browser's tokenizer would fails rather than pass: "<!--" and then
+    # "<script" in a head script (the double-escaped state can hide a later block as script text), a "<!["
+    # section in or before the head (a browser ends it at the first ">"), anything but whitespace, comments,
+    # a doctype and <html> before the head (a browser starts the head there), an element with text contents
+    # inside a template in the head (a "</template>" in that text could end the template here), and an svg
+    # or math <style> or <title> inside a template in the head, whatever its text.
     for label, page, needle in (
             ("head script double escape", ok_head.replace(
                 "<head>", "<head><script><!--<script></script>", 1).replace("</head>", "</script></head>", 1),
@@ -1944,7 +2051,28 @@ def _self_test():
                 "<head>", "<head><template><title>x</title></template>", 1), "a <title> inside a <template>"),
             ("template noscript hides its end", ok_head.replace(
                 "<head>", "<head><template><noscript></template>", 1).replace(
-                "</head>", "</noscript></head>", 1), "a <noscript> inside a <template> in <head>")):
+                "</head>", "</noscript></head>", 1), "a <noscript> whose text holds markup"),
+            ("template svg style", ok_head.replace(
+                "<head>", "<head><template><svg><style>p{}</style></svg></template>", 1),
+             "an svg or math <style> inside a <template>"),
+            ("template svg slash value style", ok_head.replace(
+                "<head>", "<head><template><svg x=a/><style>p{}</style></svg></template>", 1),
+             "an svg or math <style> inside a <template>"),
+            ("template math style", ok_head.replace(
+                "<head>", "<head><template><math><style>p{}</style></math></template>", 1),
+             "an svg or math <style> inside a <template>"),
+            ("template math slash value style", ok_head.replace(
+                "<head>", "<head><template><math x=a/><style>p{}</style></math></template>", 1),
+             "an svg or math <style> inside a <template>"),
+            ("template svg title", ok_head.replace(
+                "<head>", "<head><template><svg><title>Icon</title></svg></template>", 1),
+             "an svg or math <title> inside a <template>"),
+            ("template math slash value title", ok_head.replace(
+                "<head>", "<head><template><math x=a/><title>x</title></math></template>", 1),
+             "an svg or math <title> inside a <template>"),
+            ("template svg nested style", ok_head.replace(
+                "<head>", "<head><template><svg><g><style></style></g></svg></template>", 1),
+             "an svg or math <style> inside a <template>")):
         _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
                        SchemaError, needle)
     # A doctype, <html>, whitespace and comments before the head, and a head script without "<!--", pass.
@@ -1972,13 +2100,13 @@ def _self_test():
             ("head tag inside template", ok_head.replace(_og_title, "<template>" + _og_title + "</template>"),
              "sits inside <template> in <head>"),
             ("head tag inside noscript", ok_head.replace(_og_title, "<noscript>" + _og_title + "</noscript>"),
-             "a <meta> start tag inside a <noscript> in <head>"),
+             "a <noscript> whose text holds markup"),
             ("head extra copy inside template", ok_head.replace(
                 _og_title, _og_title + "<template>" + _og_title + "</template>"), "exactly one element keyed"),
             ("head extra copy inside noscript", ok_head.replace(
-                _og_title, _og_title + "<noscript>" + _og_title + "</noscript>"), "inside a <noscript> in <head>"),
+                _og_title, _og_title + "<noscript>" + _og_title + "</noscript>"), "a <noscript> whose text holds markup"),
             ("head noscript end hidden in a comment", ok_head.replace(
-                "<head>", "<head><noscript><!--x--></noscript>", 1), "a comment inside a <noscript> in <head>"),
+                "<head>", "<head><noscript><!--x--></noscript>", 1), "a <noscript> whose text holds markup"),
             ("head noscript text", ok_head.replace("<head>", "<head><noscript>x</noscript>", 1),
              "text inside a <noscript> in <head>")):
         _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
@@ -2013,8 +2141,6 @@ def _self_test():
                 ("self-closed script before a comment", "<script/><!--x-->", "a self-closing <script/>"),
                 ("script end tag in an attribute", '<link title="</SCRIPT>" href="/x">',
                  "an attribute value holding the end tag"),
-                ("noscript end tag in a comment", "<!-- </noscript> -->", "a comment holding the end tag"),
-                ("textarea end tag in a comment", "<!-- </textarea> -->", "a comment holding the end tag"),
                 ("noscript end tag in script text", "<script></noscript></script>",
                  "the text of a <script> holding the end tag"),
                 ("double-escaped script", "<script><!--<script></script>x</script>", 'and then "<script"'),
@@ -2027,9 +2153,51 @@ def _self_test():
                 ("textarea text with a comment", "<textarea><!--x--></textarea>", 'markup-like "<"'),
                 ("start tag outside the plain shape", '<a b="1"c="2">', "a start tag outside the plain shape"),
                 ("end tag outside the plain shape", "</a b>", "an end tag that is not a name"),
-                ("comment never closes", "<!-- x", "a comment that never closes")):
+                ("comment never closes", "<!-- x", "a comment that never closes"),
+                ("svg slash value hiding a tag", '<svg x=a/><style><meta property="og:title" content="e"></style></svg>',
+                 'a <style> inside svg or math content whose text holds "<"'),
+                ("math slash value hiding a tag", '<math x=a/><style><meta property="og:title" content="e"></style>'
+                 "</math>", 'a <style> inside svg or math content whose text holds "<"'),
+                ("svg slash value before a script", "<svg x=/x/><script>a()</script></svg>",
+                 "a <script> inside svg or math content"),
+                ("script slash value", "<script x=a/></script>", 'last unquoted attribute value ends in "/"'),
+                ("style slash value", "<style x=a/></style>", 'last unquoted attribute value ends in "/"'),
+                ("iframe slash value", "<iframe src=/embed/></iframe>", 'last unquoted attribute value ends in "/"'),
+                ("svg title holding markup", "<svg><title>a<b>c</b></title></svg>",
+                 'a <title> inside svg or math content whose text holds "<"'),
+                ("noscript holding markup", "<noscript><b>x</b></noscript>", "a <noscript> whose text holds markup"),
+                ("noscript holding a comment", "<noscript><!-- x --></noscript>", "a <noscript> whose text holds markup"),
+                ("noscript holding a control reference", "<noscript>&#1;</noscript>", "a character reference"),
+                ("legacy reference name before = in an attribute", '<a title="&copy=x">x</a>', "a character reference"),
+                ("reference without a semicolon", "&#65", "a character reference")):
             _syntax_cases.append(("page syntax {} in {}".format(label, where), wrap(src), needle))
+        # A reference html.unescape drops or remaps where a browser keeps the code point, in text and in a key.
+        for ref in ("&#1;", "&#11;", "&#x7f;", "&#xfdd0;", "&#0;", "&#x80;", "&#xFFFE;"):
+            _syntax_cases.append(("page syntax reference {} in {}".format(ref, where), wrap(ref), "a character reference"))
+    for ref in ("&#1;", "&#11;", "&#x7f;", "&#xfdd0;"):
+        _syntax_cases.append(("page syntax reference {} in a key".format(ref),
+                              ok_head.replace('property="og:title"', 'property="og:t{}itle"'.format(ref)),
+                              "a character reference"))
+    _syntax_cases.append(("page syntax template svg slash value hiding its end", ok_head.replace(
+        "<head>", "<head><template><svg x=a/><style></template>x</style></svg></template>", 1),
+        'a <style> inside svg or math content whose text holds "<"'))
+    _syntax_cases.append(("page syntax legacy doctype after <html>",
+                          '<html><!DOCTYPE html SYSTEM "about:legacy-compat">' + ok_head, 'a "<!" construct'))
+    _syntax_cases.append(("page syntax legacy doctype string case", '<!DOCTYPE html SYSTEM "about:Legacy-compat">'
+                          + ok_head, 'a "<!" construct'))
     _syntax_cases.append(("page syntax late doctype", ok_head + "<!doctype html>", 'a "<!" construct'))
+    # CHARREF_OK's ends: the code point just outside each accepted range fails, the one at its edge passes.
+    for ref in ("&#x8;", "&#xB;", "&#x1F;", "&#x7F;", "&#x9F;", "&#xD800;", "&#xFDD0;", "&#xFDEF;", "&#xFFFE;",
+                "&#x110000;"):
+        _syntax_cases.append(("page syntax reference bound {}".format(ref), ok_head + _in_body.format(ref),
+                              "a character reference"))
+    for ref in ("&#x9;", "&#xA;", "&#x20;", "&#x7E;", "&#xA0;", "&#xD7FF;", "&#xE000;", "&#xFDCF;", "&#xFDF0;",
+                "&#xFFFD;"):
+        case_count += 1
+        try:
+            _validate_head_tags(ok_head + _in_body.format(ref), _own_url, "site/rules.html")
+        except SchemaError as exc:
+            failures.append("reference bound {}: unexpected SchemaError: {}".format(ref, exc))
     for label, page, needle in _syntax_cases:
         _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
                        SchemaError, needle)
@@ -2046,12 +2214,30 @@ def _self_test():
             ("head script less-than comparison", ok_head.replace("<head>", "<head><script>if(a<!--b){}</script>", 1)),
             ("head template script and style",
              ok_head.replace("<head>", "<head><template><script>a()</script><style>p{}</style></template>", 1)),
+            ("head template style after a closed svg", ok_head.replace(
+                "<head>", "<head><template><svg></svg><math/><style>p{}</style></template>", 1)),
+            ("head style after a template holding an open svg", ok_head.replace(
+                "<head>", "<head><template><svg></template><style>p{}</style>", 1)),
             ("head noscript whitespace", ok_head.replace("<head>", "<head><noscript> \n</noscript>", 1)),
             ("body text element name without an end tag", ok_head + '<body><a title="/script">x</a></body>'),
             ("body svg closed before a script", ok_head + "<body><svg><path d=\"M0\"/></svg><script>a()</script>"
              "</body>"),
             ("body self-closed svg before a style", ok_head + "<body><svg/><style>p{}</style></body>"),
-            ("body unquoted slash value", ok_head + "<body><a href=/x/>x</a></body>")):
+            ("body unquoted slash value", ok_head + "<body><a href=/x/>x</a></body>"),
+            ("body svg slash value closed", ok_head + "<body><svg x=a/></svg><p>x</p></body>"),
+            ("body svg slash after a space self-closes", ok_head + "<body><svg x=a /><style>p{}</style></body>"),
+            ("body iframe slash value then a space", ok_head + "<body><iframe src=/embed/ ></iframe></body>"),
+            ("body svg title and style without <", ok_head + "<body><svg><title>Icon</title><style>p{}</style></svg>"
+             "</body>"),
+            ("head comment holding text element end tags", ok_head.replace(
+                "<head>", "<head><!-- </script> </noscript> --><!--[if lt IE 9]><script src=\"/h.js\"></script>"
+                "<![endif]-->", 1)),
+            ("body noscript text", ok_head + "<body><noscript>x &amp; y</noscript></body>"),
+            ("head whitespace references", ok_head.replace("<head>", "<head>&#32;&#10;&Tab;", 1)),
+            ("key with a printable reference", ok_head.replace('property="og:title"', 'property="og:t&#105;tle"')),
+            ("body references", ok_head + "<body>a&nbsp;b&#9776;&#xFFFD;&#126;&#x20;&middot;</body>"),
+            ("legacy doctype first", '<!DOCTYPE html SYSTEM "about:legacy-compat">\n' + ok_head),
+            ("legacy doctype single quotes", "<!doctype html system 'about:legacy-compat'>" + ok_head)):
         case_count += 1
         try:
             _validate_head_tags(page, _own_url, "site/rules.html")
