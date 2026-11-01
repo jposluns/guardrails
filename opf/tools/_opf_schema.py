@@ -1880,12 +1880,12 @@ def _validate_imported_values(record, spec, findings, registered_kinds, imported
 
 def _imported_namespace_refusal(ns):
     """Why the imported series refuses `ns`, a namespace outside IMPORTED_NAMESPACES, stated for that
-    namespace: the importer-only LF, the reserved-excluded TX, the reserved-unassigned CL, or one bound to
-    no type at all (spec 8.1/8.2)."""
+    namespace: the unassigned LF of legacy_fragment, the reserved-excluded TX, the reserved-unassigned CL,
+    or one bound to no type at all (spec 8.1/8.2)."""
     for name, bound in IMPORTER_TYPES.items():
         if ns == bound:
-            return ("it is the namespace of the importer-only {} quarantine type, and the imported series "
-                    "carries no LF (spec 8.1/8.2)".format(name))
+            return ("it is reserved unassigned: the standard defines no {} type and no record type uses "
+                    "it in either series, so the imported series carries no LF (spec 8.1/8.2)".format(name))
     for name, bound in RESERVED_EXCLUDED_TYPES.items():
         if ns == bound:
             return ("it is reserved for the {} type, which is excluded from the adopter standard "
@@ -2171,9 +2171,11 @@ def validate_imported_record(record, expected_type=None, specs=None, registered_
         return RecordValidation(CANNOT_EVALUATE, named(
             ["the record has no `type` and no expected type: cannot identify it"]), rid=rid)
     if rtype in IMPORTER_TYPES:
-        # New imports use the imported series and verbatim `unparsed` text, never LF quarantine.
-        findings.append("type {!r} is the importer-only LF quarantine type, which the imported series "
-                        "refuses (spec 8.1/8.2)".format(rtype))
+        # The standard reserves LF unassigned, and unmappable imported text stays verbatim in `unparsed`.
+        findings.append("type {!r} is not an OPF record type: the standard defines none and reserves its "
+                        "namespace {} unassigned, so no record type uses it in either series, and "
+                        "unmappable imported text stays verbatim in `unparsed` (spec 8.1/8.3)".format(
+                            rtype, IMPORTER_TYPES[rtype]))
         return RecordValidation(INVALID, named(findings), rtype, rid)
     spec = specs.get(rtype)
     if spec is None:
@@ -3997,8 +3999,9 @@ def self_test():
                "title": "A legacy fragment", "created_at": TS, "updated_at": TS, "actor": dict(_IMP_ACTOR),
                "import": _imp_table()}
     check("imported-lf-roster-reconciles", _specs_roster_error(_lf_roster) is None)
-    check("imported-lf-type-refused-extended-roster", _imp_refused(_lf_rec, "importer-only LF", specs=_lf_roster))
-    check("imported-lf-type-refused-baseline", _imp_refused(_lf_rec, "importer-only LF"))
+    _lf_needle = "is not an OPF record type: the standard defines none and reserves its namespace LF unassigned"
+    check("imported-lf-type-refused-extended-roster", _imp_refused(_lf_rec, _lf_needle, specs=_lf_roster))
+    check("imported-lf-type-refused-baseline", _imp_refused(_lf_rec, _lf_needle))
     check("imported-lf-namespace-refused", _imp_refused(_imp_pd(id="imported:LF-1"), "carries no LF"))
     # Each refused namespace is refused for its own reason, on an id and on a link: only LF's names LF.
     for _ns, _needle in (("TX", "reserved for the transaction type"), ("CL", "reserved unassigned"),
