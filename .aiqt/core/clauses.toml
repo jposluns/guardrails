@@ -1859,7 +1859,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 16
 end-line = 17
 canonical-text = "A change that alters behaviour lands together with an automated test or gate that fails when the change is\nabsent."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.2"
@@ -1868,7 +1868,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 17
 end-line = 18
 canonical-text = "Verification leaves a durable artefact that keeps guarding the behaviour after the one-time\nverification pass has moved on."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.3"
@@ -1877,7 +1877,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 20
 end-line = 26
 canonical-text = "The check is confirmed to run, not merely to exist. A test or gate that is present but never reached,\nmisplaced in its file, wrongly indented, or never registered with the runner, provides no coverage, and a\npassing suite is not evidence that it holds: a check that never executed and one that executed and passed are\nindistinguishable from the suite's green alone. Before that green is trusted for the new behaviour, confirm\nthe check executed, by observing it run or by a deliberate flip that shows it failing without the change, and\nprefer a runner that reports the count or identity of the checks it actually ran over a hand-maintained\nassertion that they are all present."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.4"
@@ -1886,7 +1886,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 28
 end-line = 29
 canonical-text = "A check that asserts an absence, that a finding is not raised, an error is not thrown, or an action is not\ntaken, is held to a stricter form of that confirmation."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.5"
@@ -1895,7 +1895,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 29
 end-line = 31
 canonical-text = "Observing such a check run is not evidence that it\nguards the change, because an absence assertion passes both when the feature under test suppresses the\noutcome and when the input never reaches the path that would produce it."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.6"
@@ -1904,7 +1904,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 31
 end-line = 33
 canonical-text = "The check discriminates only when\nits input is one the feature under test changes, so that removing the feature makes the asserted outcome\nappear."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.7"
@@ -1913,7 +1913,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 33
 end-line = 34
 canonical-text = "Each such check is paired with a deliberate flip that removes or disables the feature, and it is\nobserved to fail under that flip before its pass is trusted."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.8"
@@ -1922,7 +1922,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 34
 end-line = 36
 canonical-text = "A flip that yields only a build failure, an\nexecution error, or an unrelated outcome establishes no discrimination; the flip counts only when the\nasserted outcome itself appears."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.9"
@@ -1931,7 +1931,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 36
 end-line = 38
 canonical-text = "Where the feature can be disabled within the suite, the pairing is kept as a\ndurable companion case that asserts the outcome does appear without the feature, so a later change that stops\nthe input reaching that path fails the suite rather than passing silently."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.10"
@@ -1940,7 +1940,16 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 38
 end-line = 40
 canonical-text = "This attaches to an absence check\nrelied on as the check a change carries, not to an incidental negative assertion inside a check whose\ndiscrimination already rests on a positive assertion."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
+
+[[clause]]
+clause-id = "chgchk.11"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 42
+end-line = 46
+canonical-text = "A fix to code that sorts text into verdicts, such as a lint, parser, pattern matcher, or guard over command\ntext, is tested on cases sibling to the reported input, derived from the specification or other authoritative\nsource that defines its input forms. The cases cover the outcomes the fix changes and those it preserves at\nthe boundaries it affects. The tests of changed outcomes are observed to fail with the fix reverted; tests of\npreserved outcomes need not, since they exist to catch a fix that wrongly moves a sibling's verdict."
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "cmpmig.1"

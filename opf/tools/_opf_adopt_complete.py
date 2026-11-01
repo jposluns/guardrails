@@ -140,7 +140,7 @@ identity with the shipped template and recipe, not what GitHub runs: it does not
 repository that cancels or shadows this one (for example a concurrency group with cancel-in-progress),
 branch-protection or ruleset settings that do not require this workflow's check, or GitHub-side settings
 that disable Actions or this workflow; it does not read the opf/tools/opf.py the recipe launches, the
-remote actions the template names by tag (actions/checkout, actions/setup-python) or the runner image; it
+remote actions the template pins by commit SHA (actions/checkout, actions/setup-python) or the runner image; it
 compares against the template beside this evaluator, so a later pack release that changes the template
 leaves a plan whose recorded workflow digest pins the earlier template CANNOT-EVALUATE until it is planned
 again; and it is not a run of CI. Check 5 is CANNOT-EVALUATE until PR6 ships the pack's deny programs and
@@ -588,7 +588,7 @@ _SHIPPED_RECIPE = "enforcement/ci/opf-ci.sh"
 # The released digests of those two files (bare-hex sha256), generated and drift-gated: editing either file
 # without regenerating fails tools/gen_secret_patterns.py --check in CI. Never hand-edit this region.
 # BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with tools/gen_secret_patterns.py)
-_SHIPPED_TEMPLATE_SHA256 = '3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262'
+_SHIPPED_TEMPLATE_SHA256 = '06e3aee534c802b45779b151fc0a04ca862c45fdffb6f298e8be04a80cfd35b6'
 _SHIPPED_RECIPE_SHA256 = 'f630855b4c96918e3e4e7e87cf8f4811c186e8ab59b6890be042b9631a70020c'
 # END generated OPF CI floor digests
 # Spec 14.1 check 4 requires that "CI asserts store presence and identity". The shipped recipe asserts
@@ -2333,8 +2333,9 @@ def self_test():
                 ("r9-canonical-job-masks-schema-error", template + (
                     b"  bad:\n    runs-on: ubuntu-latest\n    permissions: {contents: banana}\n"
                     b"    steps:\n      - run: opf doctor --require-store\n")),
-                ("r9-step-without-run", template.replace(b"uses: actions/checkout@v4",
-                                                         b"uses: actions/checkout@v4\n        with: [broken]")),
+                ("r9-step-without-run", template.replace(
+                    b"uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4",
+                    b"uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n        with: [broken]")),
                 ("r9-job-id-dotted", template.replace(b"  opf:", b"  opf.bad:")),
                 ("r9-job-id-digit", template.replace(b"  opf:", b'  "1opf":')),
                 ("r9-strip-chomping", template.replace(b"run: " + command + b"\n",
