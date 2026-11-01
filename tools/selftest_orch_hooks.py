@@ -11405,9 +11405,11 @@ def _resume_memory_cases(tmp):
     when _orch_resume_probes neither calls the probe nor reads memory_index. A link into an empty store with
     no index declared, a store whose declared index exists, and a registry declaring no memory key stay
     silent (the first-launch and no-store cases must not fire). A memory key present with an empty or
-    non-string value is a finding naming that key, never the undeclared case; an index that is a FIFO (run
-    in a child with a timeout), a directory or one byte over the barrier's bound is a finding, and an index
-    one byte under or exactly at the bound stays silent."""
+    non-string value is a finding naming that key and its kind in ORCHESTRATION.md's words, never the
+    undeclared case, and it does not hide a store that cannot be resolved; a memory path with a NUL is a
+    finding even where the path cut at the NUL is a correct link. An index that is a FIFO (run in a child
+    with a timeout), a directory or one byte over the index bound is a finding, and an index one byte under
+    or exactly at the bound stays silent."""
     base = tmp / "resumemem"
     base.mkdir()
 
@@ -11484,10 +11486,37 @@ def _resume_memory_cases(tmp):
     os.symlink(str(ei.store), str(ei.memory))
     ei.reg["record"]["memory_index"] = ""
     check("resume/memory-index-empty-value-finding", len(unusable(ei, "memory_index")), 1)
+    # the path cut at the NUL is a correct link into the store, so a probe that stats the cut path passes
     nul = build("nulmemory")
+    os.symlink(str(nul.store), str(nul.memory))
     nul.reg["record"]["memory"] = str(nul.memory) + "\x00x"
+    nul_head = "declared memory path {} cannot be resolved (".format(nul.reg["record"]["memory"])
     check("resume/memory-nul-path-finding",
-          any("cannot be resolved" in fi and "memory" in fi for fi in probes(nul)), True)
+          [fi.startswith(nul_head) and fi.endswith("): cannot-evaluate") for fi in probes(nul)], [True])
+    # an unusable value in one key does not hide the other key's own finding
+    us = build("unusablememorymissingstore")
+    us.reg["record"]["memory"] = ""
+    us.reg["record"]["memory_store"] = str(us.root / "gone")
+    us_rows = probes(us)
+    check("resume/memory-unusable-keeps-store-finding",
+          (us_rows[:1], [fi.startswith("declared memory_store path {} cannot be resolved (".format(
+              us.root / "gone")) for fi in us_rows[1:]]),
+          (["the registry declares record.memory with an unusable value (an empty string), not a non-empty "
+            "path string: cannot-evaluate"], [True]))
+    # each value kind is named in ORCHESTRATION.md's words, never a Python type name
+    kd = build("unusablekinds")
+    os.symlink(str(kd.store), str(kd.memory))
+    for cid, value, kind in (("resume/memory-unusable-kind-empty-string", "", "an empty string"),
+                             ("resume/memory-unusable-kind-null", None, "null"),
+                             ("resume/memory-unusable-kind-number", 7, "a number"),
+                             ("resume/memory-unusable-kind-float", 1.5, "a number"),
+                             ("resume/memory-unusable-kind-boolean", True, "a boolean"),
+                             ("resume/memory-unusable-kind-list", [], "a list"),
+                             ("resume/memory-unusable-kind-object", {}, "an object")):
+        kd.reg["record"]["memory_index"] = value
+        check(cid, probes(kd),
+              ["the registry declares record.memory_index with an unusable value ({}), not a non-empty path "
+               "string: cannot-evaluate".format(kind)])
 
     # the index is opened without waiting and read only when it is a regular file within the barrier's
     # bound; the FIFO row runs in a child with a timeout, so a blocking open fails the row, not this run
@@ -11512,7 +11541,7 @@ def _resume_memory_cases(tmp):
     os.symlink(str(di.store), str(di.memory))
     di.index.mkdir()
     check("resume/memory-index-directory-finding", index_finding(di, "not a regular file"), True)
-    bound = aiqt_hooks._ORCH_BARRIER_MAX_BYTES
+    bound = aiqt_hooks._ORCH_MEMORY_INDEX_MAX_BYTES
     bi = build("indexbound", index=True)
     os.symlink(str(bi.store), str(bi.memory))
     rows = []

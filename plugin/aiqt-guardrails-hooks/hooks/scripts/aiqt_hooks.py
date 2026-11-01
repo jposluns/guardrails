@@ -31357,15 +31357,16 @@ def _orch_memory_findings(rec, root):
     by identity, is caught only through a declared memory_index, which _orch_memory_index_findings reads.
     A key absent from the record is undeclared, and leaving out both keys removes the probe; a key that is
     present with a value _orch_path refuses (an empty string, null, or any other non-string) is a finding
-    naming the key, never read as absent; declaring one alone is a finding."""
+    naming the key, never read as absent; declaring one alone is a finding. Where both are declared, each
+    key is checked on its own: an unusable value in one does not stop the other from being stat'ed, so a
+    store that cannot be resolved is reported beside an unusable memory value, and the identity comparison
+    runs only when both resolve to directories."""
     present = [key for key in ("memory", "memory_store") if key in rec]
     if not present:
         return []
-    unusable = [_orch_memory_unusable(key, rec[key]) for key in present
-                if _orch_path(root, rec[key]) is None]
-    if unusable:
-        return unusable
     if len(present) == 1:
+        if _orch_path(root, rec[present[0]]) is None:
+            return [_orch_memory_unusable(present[0], rec[present[0]])]
         return ["the registry declares only one of record.memory and record.memory_store; declare both or "
                 "neither: cannot-evaluate"]
     memory = _orch_path(root, rec["memory"])
@@ -31373,6 +31374,9 @@ def _orch_memory_findings(rec, root):
     findings = []
     ids = {}
     for key, path in (("memory", memory), ("memory_store", store)):
+        if path is None:
+            findings.append(_orch_memory_unusable(key, rec[key]))
+            continue
         try:
             st = os.stat(path)
         except (OSError, ValueError) as exc:  # ValueError: a path with a NUL character
@@ -31391,23 +31395,48 @@ def _orch_memory_findings(rec, root):
 
 def _orch_memory_unusable(key, value):
     """The finding for a memory key that is present in the record with a value _orch_path refuses. It
-    names the key and the value's kind, never the value itself, so a large value stays out of the text."""
-    kind = ("an empty string" if isinstance(value, str) else "null" if value is None
-            else "a {} value".format(type(value).__name__))
+    names the key and the value's kind, never the value itself, so a large value stays out of the text. The
+    kinds are named in the words ORCHESTRATION.md uses for the JSON kinds: an empty string, null, a number,
+    a boolean, a list or an object. A boolean is tested before a number, since bool is a subclass of int;
+    any other value (none that JSON produces) is a non-string value."""
+    if isinstance(value, str):
+        kind = "an empty string"
+    elif value is None:
+        kind = "null"
+    elif isinstance(value, bool):
+        kind = "a boolean"
+    elif isinstance(value, (int, float)):
+        kind = "a number"
+    elif isinstance(value, list):
+        kind = "a list"
+    elif isinstance(value, dict):
+        kind = "an object"
+    else:
+        kind = "a non-string value"
     return ("the registry declares record.{} with an unusable value ({}), not a non-empty path string: "
             "cannot-evaluate".format(key, kind))
 
 
+_ORCH_MEMORY_INDEX_MAX_BYTES = 64 * 1024  # the resume audit reads a memory index this long at most
+
+
 def _orch_memory_index_findings(rec, root):
     """The memory-index read of the resume audit. An absent memory_index key is undeclared; a present key
-    with a value _orch_path refuses is a finding naming it. The index is read the way _orch_barrier_read
-    reads the barrier: os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer
-    opens at once instead of waiting for one; the opened descriptor is fstat'ed and anything not a regular
-    file (a FIFO, a device, a directory) is a finding without a read; the read asks for at most
-    _ORCH_BARRIER_MAX_BYTES + 1 bytes in all and a longer index is a finding. The descriptor is closed
-    exactly once on every path. A missing or unreadable index (a NUL character in the path included) is a
-    finding too; every finding is cannot-evaluate. The content is not parsed: a readable index within the
-    bound is the evidence that the store came back."""
+    with a value _orch_path refuses is a finding naming it. The index is opened with
+    os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC): O_NONBLOCK so a FIFO with no writer opens at
+    once instead of waiting for one, O_NOCTTY so a terminal device never becomes the controlling terminal
+    (_orch_barrier_read passes the same flags without O_NOCTTY). The opened descriptor is fstat'ed and
+    anything not a regular file (a FIFO, a device, a directory) is a finding without a read: a device is
+    opened but never read. The read asks for at most _ORCH_MEMORY_INDEX_MAX_BYTES + 1 bytes in all (65537:
+    the 65536-byte bound plus one byte that detects a longer file) and a longer index is a finding. The
+    descriptor is closed exactly once on every path. A missing or unreadable index (a NUL character in the
+    path included) is a finding too; every finding is cannot-evaluate. The content is not parsed: an index
+    read to its end within the bound is the evidence that the store came back. A longer index was read only
+    up to the bound, so passing it would pass on a part of the file and leave a read error past the bound
+    unseen; it is reported instead, and the bound also caps what each audit reads. Not bounded here: the
+    path lookup of the os.open can stall on a hung mount for any file type, a regular file on a stalled
+    filesystem can stall the read, and what opening a device node does is up to its driver; in a hook the
+    hook timeout (10 seconds in hooks.json) bounds each such stall."""
     if "memory_index" not in rec:
         return []
     path = _orch_path(root, rec["memory_index"])
@@ -31425,13 +31454,13 @@ def _orch_memory_index_findings(rec, root):
                 detail = "not a regular file"
             else:
                 total = 0
-                while total <= _ORCH_BARRIER_MAX_BYTES:
-                    chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                while total <= _ORCH_MEMORY_INDEX_MAX_BYTES:
+                    chunk = os.read(fd, _ORCH_MEMORY_INDEX_MAX_BYTES + 1 - total)
                     if not chunk:
                         break
                     total += len(chunk)
-                if total > _ORCH_BARRIER_MAX_BYTES:
-                    detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+                if total > _ORCH_MEMORY_INDEX_MAX_BYTES:
+                    detail = "larger than the {}-byte bound".format(_ORCH_MEMORY_INDEX_MAX_BYTES)
         except OSError as exc:
             detail = str(exc)
         finally:
