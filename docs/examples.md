@@ -2,8 +2,6 @@
 title = "AIQT examples: the priority ordering making real calls"
 description = "Five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line. Drawn from the project where AIQT was built and dogfooded."
 canonical = "https://aiqt.ai/examples"
-og-title = "AIQT examples: the priority ordering making real calls"
-og-description = "Five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line. Drawn from the project where AIQT was built and dogfooded."
 og-url = "https://aiqt.ai/examples"
 sidebar-active = "examples"
 +++

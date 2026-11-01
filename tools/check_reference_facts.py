@@ -271,11 +271,13 @@ def check_parenthetical(text, where, fams, findings):
 
 
 def check_meta(root, fams, findings):
+    # Only the page's own meta name="description" carries the families parenthetical: the og:description
+    # (and the twitter:description) carry the site-wide link-preview text, identical on every page, so
+    # they are not family-bearing surfaces.
     text = _read(root / "site" / "mappings.html")
-    metas = [ln for ln in text.splitlines()
-             if 'name="description"' in ln or 'property="og:description"' in ln]
-    if len(metas) != 2:
-        findings.append("site/mappings.html: expected 2 description metas, found {}".format(len(metas)))
+    metas = [ln for ln in text.splitlines() if 'name="description"' in ln]
+    if len(metas) != 1:
+        findings.append("site/mappings.html: expected 1 description meta, found {}".format(len(metas)))
     for ln in metas:
         check_parenthetical(ln, "site/mappings.html meta", fams, findings)
 
@@ -1338,8 +1340,9 @@ _README = (
     "Not yet vendored (their keys stay inert until a manifest lands): Google SAIF and OWASP SCVS.\n"
 )
 
-# Two meta descriptions, a two-row registry, and a two-block reverse view mirroring the real render (the
-# name in a <summary>, the coverage in a later <p>). The subset row and subset reverse block use the
+# The family-bearing meta description (the og:description beside it carries the site-wide link-preview
+# text and is not checked), a two-row registry, and a two-block reverse view mirroring the real render
+# (the name in a <summary>, the coverage in a later <p>). The subset row and subset reverse block use the
 # honest "curated subset" form; the full block legitimately reads "3 of 3".
 _PAGE = (
     '<!doctype html>\n'

@@ -2,8 +2,6 @@
 title = "The five rules of AIQT"
 description = "The five working rules of AIQT: surface what a guardrail catches, re-anchor the standard with a self-check, fix in-scope issues before shipping, surface out-of-scope issues, and propose an underlying guardrail."
 canonical = "https://aiqt.ai/rules"
-og-title = "The five rules of AIQT"
-og-description = "The five working rules of AIQT, one per tab: catch surfacing, standard re-anchoring, in-scope fix, out-of-scope surfacing, and the guardrail give-back."
 og-url = "https://aiqt.ai/rules"
 sidebar-active = "rules"
 +++

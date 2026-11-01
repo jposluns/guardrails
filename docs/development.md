@@ -2,8 +2,6 @@
 title = "The AIQT development assistant: governance that installs into your project"
 description = "The AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
 canonical = "https://aiqt.ai/development"
-og-title = "The AIQT development assistant: governance that installs into your project"
-og-description = "The AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
 og-url = "https://aiqt.ai/development"
 sidebar-active = "development"
 +++

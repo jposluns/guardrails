@@ -2,8 +2,6 @@
 title = "AIQT evidence and assurance: the proof behind the claims"
 description = "The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
 canonical = "https://aiqt.ai/evidence"
-og-title = "AIQT evidence and assurance: the proof behind the claims"
-og-description = "The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
 og-url = "https://aiqt.ai/evidence"
 sidebar-active = "evidence"
 +++
