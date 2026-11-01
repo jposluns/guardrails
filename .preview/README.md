@@ -188,7 +188,7 @@ files are served from this repository's main branch; for a raw download, use
 | `constraint-reread.py` | `725974c306e63a3f9a1b4a2be2992c9ee9792c231aaad66035a813525d10c48a` | [constraint-reread.py](constraint-reread.py) |
 | `future-stamp-write.py` | `1cf8608693f472df1c7bee03b5ab5bf5de3e79a19b00c782a7015e77d167c348` | [future-stamp-write.py](future-stamp-write.py) |
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
-| `record-remove-check.py` | `bb8412272fcaba0401621061396f01410cf282503210ce918468249d0245d376` | [record-remove-check.py](record-remove-check.py) |
+| `record-remove-check.py` | `54a6ebdcf62c317e5f449cadf82cfc7637639fe4689c914083aa02f88e9fb939` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
 | `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
@@ -454,8 +454,11 @@ unset, so "unset" below means both spellings are unset. The worker skip likewise
   spelling alone does not turn it on) and `AIQT_STORE_WRITE_ROUTE` holds a non-blank text naming the
   sanctioned route for store writes, such as a designated applier. In that mode the hook also denies
   `>>`, `&>>`, `tee -a` and `tee --append` onto an existing regular file in a store (empty files
-  included, files in the store's `.git` directory excepted), and the reason quotes the route text. An
-  append to a new file or outside the store, and a read, are allowed. With either variable unset, or
+  included, files in the store's `.git` directory excepted), and the reason quotes the route text up to
+  200 characters (a longer text is cut there and ends with `...`). An
+  append to a new file or outside the store, and a read, are allowed. The append checks have their own
+  bound on target words and their own work budgets, the same sizes as the removal checks' and kept apart
+  from them, so an append never shortens what a removal later in the same command is checked with. With either variable unset, or
   the route empty or blank, behaviour is exactly as without the mode. The `# record-rm-ok:` comment
   does not opt out of an append denial. Helper-session calls are judged like any other. Interpreter,
   editor, `Write` and `Edit` tool writes, `bash -c` strings, `eval`, and scripts stay uncovered, and
@@ -481,7 +484,7 @@ content of the command. Their reasons are optional; text inside quotes does not 
 | Variable | What it does |
 |---|---|
 | `AIQT_STORE_ROOT` | The folder or folders holding your working records, as absolute paths joined with `:`. The future-date and record-removal checks only look at files under these folders. |
-| `AIQT_STORE_WRITE_ROUTE` | A short text naming the sanctioned route for writes to existing store files, for `record-remove-check.py`. Set together with `AIQT_STORE_ROOT`, it turns on that hook's append mode, and the hook quotes it when it denies an append. It has no older spelling; unset, empty, or blank, the mode is off. |
+| `AIQT_STORE_WRITE_ROUTE` | A short text naming the sanctioned route for writes to existing store files, for `record-remove-check.py`. Set together with `AIQT_STORE_ROOT`, it turns on that hook's append mode, and the hook quotes it (up to 200 characters) when it denies an append. It has no older spelling; unset, empty, or blank, the mode is off. |
 | `AIQT_LEASE_FILE` | The absolute path to a small text file that marks when the current working session started. When it is set and valid, the hooks report and check how long the session has been running. |
 | `AIQT_CHAR_POLICY_ROOT` | The absolute path to one repository root, for `char-policy-write.py`. The hook reads the policy file `.aiqt/char-policy.json` under it and checks only files inside it. |
 | `AIQT_CONSTRAINT_RECORD` | The absolute path to the project's durable record of standing constraints, for `constraint-reread.py`; unset, empty, or relative, that hook does nothing. It reads `Constraint: <text>` lines as the constraints to name, and `Constraints-reread: <UTC time>` lines (written by the assistant from `date -u +%Y-%m-%dT%H:%M:%SZ` after re-reading) as re-read entries. |
@@ -705,8 +708,8 @@ section of its opening docstring. Read that section before relying on a hook; in
   A file created or filled after the check can be lost without a warning. It can deny unreachable
   commands and files that have a good backup; it does not check for a restore path. Its opt-in append
   mode reads only `>>`, `&>>`, `tee -a` and `tee --append` in Bash calls: interpreter, editor, `Write`
-  and `Edit` tool writes, `bash -c` strings, `eval`, scripts, and `<>` stay uncovered, and the mode
-  trusts the environment it reads.
+  and `Edit` tool writes, `bash -c` strings, `eval`, scripts, and `<>` stay uncovered, appends beyond
+  the mode's own scan budgets are not checked, and the mode trusts the environment it reads.
 - **`pattern-self-match.py`** denies only its closed set of shapes, and each deny rests on premises
   observed on one host: that the Bash tool runs each command inside a shell whose own command line holds
   the command's text (its docstring gives a one-line `pgrep -c` probe to re-check a host), and how procps

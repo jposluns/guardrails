@@ -71,7 +71,8 @@ APPEND MODE (opt-in, off by default)
     The mode is on only when AIQT_STORE_ROOT itself is set and names a store (the legacy ORCH_STORE_ROOT alone
     does not turn it on) and AIQT_STORE_WRITE_ROUTE holds a non-blank text naming the sanctioned route for
     store writes (a designated applier, say); the reason quotes that text with its blank runs joined to one
-    space. AIQT_STORE_WRITE_ROUTE has no legacy name. With either setting unset, or the route empty or blank,
+    space, up to 200 characters (a longer text is cut there and ends with `...`). AIQT_STORE_WRITE_ROUTE has
+    no legacy name. With either setting unset, or the route empty or blank,
     the hook behaves exactly as without the mode. In the mode it also denies an append onto a file that, at
     the moment the hook runs, is inside a store, not inside a `.git` directory there, and is an existing
     regular file of any size, empty included (the write is followed through links): an appending redirection
@@ -80,14 +81,18 @@ APPEND MODE (opt-in, off by default)
     and no `-` or `--` word). An append onto a file that does not exist yet or lies outside every store, and a
     read, are allowed. The `# record-rm-ok: <reason>` comment does not opt out of an append denial (it still
     opts out of the destructions above); clearing AIQT_STORE_WRITE_ROUTE turns the mode off. A subagent's call
-    is judged by the mode like any other call: nothing is exempted on agent_id or agent_type. Append target
-    words count toward the 128-word bound below.
+    is judged by the mode like any other call: nothing is exempted on agent_id or agent_type. The append
+    checks have their own bound and budgets, the same sizes as the destruction checks' (128 target words,
+    2000 entries, 262144 characters; THREAT MODEL) and kept apart from them: an append target never counts
+    toward the destruction checks' bound or spends their budgets, so a destruction is judged in the mode
+    exactly as without it, and the work in one command is at most twice those bounds. Past its own bound or
+    budget an append is not judged (allowed), and the destructions after it still are.
     Not covered, in the mode as outside it: a write by an interpreter (python3, perl, and the like), an
     editor, the Write and Edit tools (this hook reads only Bash calls), `bash -c` and `sh -c` strings, eval, a
     script file, a read-write redirection (`<>`), tee -a with any other option (`-ai`, `-p`, a long option
     prefix such as `--app`), and every form OUT OF SCOPE below. The mode trusts the environment it reads:
     whoever can set or clear AIQT_STORE_ROOT or AIQT_STORE_WRITE_ROUTE in the hook's environment turns it on
-    or off, and the route text is quoted as given, never checked against any real route.
+    or off, and the route text is quoted (up to 200 characters), never checked against any real route.
 
 OPERANDS AND THE DIRECTORY
     An operand is read from the command text: a word with its quoting removed; a leading `~` or `~/`; a parameter
@@ -166,7 +171,8 @@ THREAT MODEL
     target words are read, a word is read in time linear in its length, walks, glob expansion, and the
     values a for list multiplies together share one budget of 2000 entries, symbolic links not followed, and
     the characters expansions produce (a variable's value, however it grew, and each copy of it) are held
-    to 262144 per command.
+    to 262144 per command. In the APPEND MODE the append checks read their targets on a second, separate
+    set of these three bounds.
     The hook never runs the command or any part of it, and it starts no process: it only inspects the
     filesystem (lstat, stat, realpath, and directory listings).
 
@@ -177,7 +183,8 @@ RESIDUAL COVERAGE.
     character, brace expansion (`{a,b}`), a glob bracket opening with `^` or holding a `[:class:]`, `[=c=]`,
     or `[.c.]` form, an extended glob, and a removal inside a backtick substitution, which the vendored lexer
     does not read); any relative operand after a directory change the hook does not follow (see above, and
-    CDPATH, which is not read); more than 128 target words in one command; and what lies past the
+    CDPATH, which is not read); more than 128 target words in one command (the APPEND MODE counts append
+    targets apart, on a bound of their own); and what lies past the
     2000-entry budget (a store tree larger than that is not fully examined, a glob past it is matched only
     so far, a word whose expansion would pass it is not read at all, and what was not reached is allowed),
     and past the 262144-character expansion budget (a word or assignment whose expansion would pass it is not
@@ -921,9 +928,10 @@ _RM_LONG = {"force": "flag", "interactive": "opt", "one-file-system": "flag", "n
             "version": "exit"}
 
 _APPEND_REASON = ("record-remove-check (store writes go through their sanctioned route): this command {action}, an "
-                  "existing file under the working-record store {root}. While " + _ROUTE_NAME + " is set, a shell "
-                  "append onto an existing store file is refused. Write it through the sanctioned route instead: "
-                  "{route}")
+                  "existing file under the working-record store {root}. While AIQT_STORE_ROOT is set and "
+                  + _ROUTE_NAME + " is not blank, an append onto an existing store file outside the store's .git "
+                  "by a '>>' or '&>>' redirection, or by tee whose only options are -a or --append, is refused. "
+                  "Write it through the sanctioned route instead: {route}")
 _LEAD = ("record-remove-check (a destructive operation requires a verified restore path; preserve uncommitted "
          "work): ")
 _REASON = (_LEAD + "this command {action}, an existing file under the working-record store {root}. It holds "
@@ -1704,12 +1712,13 @@ def _tee(args, toks, ctx, text, off, state, phys):
 
 def _tee_append(args, toks, ctx, text, off, state, phys):
     """In the append mode: tee whose option words are each exactly -a or --append, at least one, with file
-    operands; each file is appended to. Any other option, `-`, or `--` leaves it out of scope."""
+    operands; each file is appended to. Any other option, `-`, or `--` leaves it out of scope. Its words are read
+    on the append checks' own bound and budgets (ctx["meter"])."""
     ops = [k for k, a in enumerate(args) if a not in _TEE_APPEND]
     if len(ops) == len(args) or any(args[k].startswith("-") for k in ops):
         return  # no append option, or another option word: out of scope
     for k in ops:
-        for path in _paths(toks[k], ctx, text, off, state, phys):
+        for path in _paths(toks[k], ctx["meter"], text, off, state, phys):
             _check_append(path, ctx, tool="tee")
             if ctx["hit"] is not None:
                 return
@@ -2019,7 +2028,7 @@ def _scan(toks, ctx, text, off, state, top):
                 if ctx["hit"] is not None or ctx["stop"]:
                     return
             elif ctx["route"] is not None and rop in _APPENDING and target is not None:
-                for path in _paths(target, ctx, text, off, state, phys):
+                for path in _paths(target, ctx["meter"], text, off, state, phys):
                     _check_append(path, ctx, op=rop)
                     if ctx["hit"] is not None:
                         break
@@ -2067,9 +2076,12 @@ def _verdict(cmd, roots, env, cwd):
     marked = _marked(text)
     if marked and route is None:
         return None
-    # destroy: the destruction checks run (the marker opts out of them, never out of the append mode)
+    # destroy: the destruction checks run (the marker opts out of them, never out of the append mode). meter: the
+    # append checks' own target bound and budgets, so reading an append never spends what a later destruction is
+    # read with, and a destruction is judged in the mode exactly as without it
     ctx = {"roots": roots, "env": env, "count": 0, "stop": False, "budget": _MAX_WALK, "bytes": _MAX_EXPANDED,
-           "hit": None, "route": route, "destroy": not marked}
+           "hit": None, "route": route, "destroy": not marked,
+           "meter": {"env": env, "count": 0, "stop": False, "budget": _MAX_WALK, "bytes": _MAX_EXPANDED}}
     start = None if cwd is None else os.path.normpath(cwd)
     _scan(toks, ctx, text, 0, {"cwd": start, "vars": {}, "held": None, "forgot": False}, True)
     return ctx["hit"]
@@ -3134,8 +3146,64 @@ def _self_test():
                          "a write by an interpreter", "an editor", "the Write and Edit tools", "`bash -c`", "eval",
                          "a script file", "The mode trusts the environment it reads",
                          "nothing is exempted on agent_id or agent_type",
-                         "does not opt out of an append the APPEND MODE denies"):
+                         "does not opt out of an append the APPEND MODE denies",
+                         "The append checks have their own bound and budgets",
+                         "a destruction is judged in the mode exactly as without it",
+                         "a second, separate set of these three bounds",
+                         "up to 200 characters (a longer text is cut there and ends with `...`)"):
                 self.assertIn(item, doc, item)
+
+        def test_27_flip_append_mode_own_budget(self):
+            # appends are read on their own bound and budgets: none spends what a later destruction is judged with
+            for k in range(_MAX_WALK + 100):
+                self.x.put("other/big/%04d" % k, b"")
+
+            def appends(n):
+                return "; ".join("echo a >> @O/n%03d" % k for k in range(n))
+
+            def tees(n):
+                return "echo a | tee -a " + " ".join("@O/n%03d" % k for k in range(n))
+
+            def wide(n):  # n appends each expanding 60000 characters: five pass the 262144 a command may make
+                return "v=" + "a" * 60000 + "; " + "echo x >> @O/$v; " * n
+
+            def outside(n):
+                return " ".join("@O/m%03d" % k for k in range(n))
+            many, store = appends(_MAX_OPERANDS), " \"$AIQT_STORE_ROOT/X.md\""
+            cases = (("128 appends, rm", many + "; rm @S/X.md"), ("128 appends, >", many + "; echo x > @S/X.md"),
+                     ("tee -a 128, rm", tees(_MAX_OPERANDS) + "; rm @S/X.md"),
+                     ("glob past the entries, rm -r", "echo x >> @O/big/*; rm -r @S/sub"),
+                     ("past the characters, rm", wide(5) + "rm" + store),
+                     ("128 appends, rm 127 and the store file", many + "; rm " + outside(_MAX_OPERANDS - 1)
+                      + " @S/X.md"),
+                     ("129 appends, rm", appends(_MAX_OPERANDS + 1) + "; rm @S/X.md"),
+                     ("control: 127 appends, rm", appends(_MAX_OPERANDS - 1) + "; rm @S/X.md"),
+                     ("control: 127 appends, >", appends(_MAX_OPERANDS - 1) + "; echo x > @S/X.md"),
+                     ("control: tee -a 127, rm", tees(_MAX_OPERANDS - 1) + "; rm @S/X.md"),
+                     ("control: glob, rm", "echo x >> @O/big/*; rm @S/X.md"),
+                     ("control: within the characters, rm", wide(4) + "rm" + store))
+            for env in (self.mode_env(), self.env):
+                for label, c in cases:
+                    with self.subTest(case=label, mode=_ROUTE_NAME in env):
+                        self.assertDeny(c, env=env)
+                # the destruction bound itself is as before (test_19): its 129th word is not read
+                self.assertAllow(many + "; rm " + outside(_MAX_OPERANDS) + " @S/X.md", env=env)
+            # the append checks keep a bound and budgets of their own
+            self.assertAppendDeny(appends(_MAX_OPERANDS - 1) + "; echo x >> @S/X.md")
+            self.assertAllow(many + "; echo x >> @S/X.md", env=self.mode_env())  # its 129th word: not read
+            self.assertAppendDeny(wide(4) + "echo x >>" + store)
+            self.assertAllow(wide(5) + "echo x >>" + store, env=self.mode_env())  # past its characters
+            self.assertAppendDeny("rm @O/big/*; echo x >> @S/X.m?")  # a destruction spends none of its entries
+
+        def test_27_append_reason_text(self):
+            reason = self.assertAppendDeny("echo x >> @S/X.md")
+            self.assertIn("While AIQT_STORE_ROOT is set and AIQT_STORE_WRITE_ROUTE is not blank, an append onto an "
+                          "existing store file outside the store's .git by a '>>' or '&>>' redirection, or by tee "
+                          "whose only options are -a or --append, is refused.", reason)
+            for n in (199, 200, 201):  # the route is quoted whole up to 200 characters, and cut past them
+                route = "r" * n
+                got = self.assertAppendDeny("echo x >> @S/X.md", env=self.mode_env(AIQT_STORE_WRITE_ROUTE=route))
+                self.assertTrue(got.endswith("instead: " + (route if n <= 200 else "r" * 200 + "...")), n)
 
         # the differential check against real bash
         def test_22_differential_bash(self):
