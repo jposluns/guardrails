@@ -8,9 +8,10 @@ the register, its header and the pack to these rules:
   rows        exactly one [[residual]] row per token of ENFORCEMENT_RESIDUALS (opf/tools/_opf_adopt.py,
               read statically), in that order. The document carries exactly format-version and the rows,
               the format-version is the exact integer 1 (a boolean true or a float 1.0 is refused), and
-              each row carries exactly id, spec, members, anchors and statement: spec and statement
-              non-empty strings, members a non-empty list of unique contained paths, anchors a table whose
-              keys are exactly the row's members and whose values are non-empty strings.
+              each row carries exactly id, spec, members, anchors and statement: id, spec and statement
+              non-empty strings (a row with any other id is a finding, recorded under no id), members a
+              non-empty list of unique contained paths, anchors a table whose keys are exactly the row's
+              members and whose values are non-empty strings.
   members     each member is a regular file of the pack (opf/enforcement/) reached through no symlink,
               and never one of the two registers (residuals.toml, platforms.toml), which are not members.
   anchors     each anchor occurs in its member verbatim. The register states no other normalisation
@@ -46,9 +47,9 @@ member really discloses the residual: it checks that each anchor occurs, and hol
 and unnamed members to its two lists and the header. The spec field is not compared with
 opf/spec/OPF-SPEC.md, and the statement is not compared with the members. The header reading is lexical:
 it reads the listed sentence forms, not meaning. platforms.toml is read only for each row's platform,
-means and member; tools/check_opf_enforce_platforms.py validates it. Inputs are read after a
-symlinked-parent check and a regular-file check, so a file swapped between those checks and the read is a
-check-to-use race.
+means and member; tools/check_opf_enforce_platforms.py validates it. Each input is opened after a
+symlinked-parent check, and its regular-file and size checks are made on the opened descriptor, so a
+parent directory swapped for a symlink between that check and the open is a check-to-use race.
 """
 import sys
 
@@ -116,17 +117,19 @@ def _input(root, rel, label):
 
 
 def _text(path, label):
-    """The UTF-8 text of a regular input file of at most MAX_INPUT_BYTES, or CannotEvaluate naming it."""
+    """The UTF-8 text of a regular input file of at most MAX_INPUT_BYTES, or CannotEvaluate naming it. The
+    file is opened without blocking (a FIFO never stalls the gate) and through no final symlink; the type and
+    size checks and the read use that one descriptor, and the read stops one byte past the bound, so a file
+    that grows after the check is refused as over the bound without being read whole."""
     try:
-        st = os.lstat(path)
-    except OSError as exc:
-        raise CannotEvaluate("%s %s cannot be read (%s)" % (label, path, exc))
-    if not stat.S_ISREG(st.st_mode):
-        raise CannotEvaluate("%s %s is not a regular file" % (label, path))
-    if st.st_size > MAX_INPUT_BYTES:
-        raise CannotEvaluate("%s %s exceeds %d bytes" % (label, path, MAX_INPUT_BYTES))
-    try:
-        data = Path(path).read_bytes()
+        with open(path, "rb", opener=lambda name, flags: os.open(name, flags | os.O_NONBLOCK | os.O_NOFOLLOW)) \
+                as handle:
+            st = os.fstat(handle.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise CannotEvaluate("%s %s is not a regular file" % (label, path))
+            if st.st_size > MAX_INPUT_BYTES:
+                raise CannotEvaluate("%s %s exceeds %d bytes" % (label, path, MAX_INPUT_BYTES))
+            data = handle.read(MAX_INPUT_BYTES + 1)
     except OSError as exc:
         raise CannotEvaluate("%s %s cannot be read (%s)" % (label, path, exc))
     if len(data) > MAX_INPUT_BYTES:
@@ -314,6 +317,8 @@ def _header_findings(header, unnamed, locators):
 def _row_findings(root, where, row, texts):
     """The findings for one row with exactly the row keys; `texts` caches member text."""
     findings = []
+    if not isinstance(row["id"], str) or not row["id"]:
+        findings.append("%s: id must be a non-empty string" % (where,))
     for key in ("spec", "statement"):
         if not isinstance(row[key], str) or not row[key].strip():
             findings.append("%s: %s must be a non-empty string" % (where, key))
@@ -661,6 +666,12 @@ def _vectors():
                                 'note = "x"\n'), "finding", "keys must be exactly"),
          (edit(REGISTER_REL, 'id = "canonical-hand-edits"\n', 'id = "canonical-hand-edits"\n# note = "x"\n'),)
          + clean),
+        ("row-id-array", (edit(REGISTER_REL, 'id = "canonical-hand-edits"\n', 'id = ["canonical-hand-edits"]\n'),
+                          "finding", "id must be a non-empty string"),
+         (edit(REGISTER_REL, 'id = "canonical-hand-edits"\n', "id = 'canonical-hand-edits'\n"),) + clean),
+        ("row-id-table", (edit(REGISTER_REL, 'id = "canonical-hand-edits"\n', 'id = {id = "canonical-hand-edits"}\n'),
+                          "finding", "id must be a non-empty string"),
+         (edit(REGISTER_REL, 'id = "canonical-hand-edits"\n', 'id = """canonical-hand-edits"""\n'),) + clean),
         ("statement-empty", (edit(REGISTER_REL, 'statement = "Anyone acting', 'statement = " "\n# "Anyone acting'),
                              "finding", "statement must be a non-empty string"),
          (edit(REGISTER_REL, 'statement = "Anyone acting', 'statement = "Whoever acts'),) + clean),
@@ -720,7 +731,8 @@ MODE_000 = frozenset(("member-mode-000", "register-mode-000"))
 
 def _observe(base, name, mutate):
     """The status and text of the gate over a fresh fixture mutated by `mutate` (a mutation that reads an
-    input it cannot parse is cannot-evaluate too)."""
+    input it cannot parse is cannot-evaluate too). A RecursionError or MemoryError that escapes the mutation
+    or the gate is the status "error", which no vector expects, so the run names the vector it failed."""
     tree = _fixture(base, name)
     try:
         overrides = mutate(tree)
@@ -728,6 +740,8 @@ def _observe(base, name, mutate):
         got = evaluate(tree, **overrides)
     except CannotEvaluate as exc:
         return "cannot", "CANNOT EVALUATE: %s" % (exc,)
+    except (RecursionError, MemoryError) as exc:
+        return "error", "%s: %s" % (type(exc).__name__, exc)
     return ("finding" if got else "clean"), "\n".join(got)
 
 
@@ -746,7 +760,8 @@ def self_test():
                     runs += 1
                     try:
                         got_status, got_text = _observe(base, "%s-%s" % (case_id, leg), mutate)
-                    except (AssertionError, OSError, ValueError, KeyError, IndexError) as exc:
+                    except (AssertionError, OSError, ValueError, KeyError, IndexError, RecursionError,
+                            MemoryError) as exc:
                         failures.append("%s %s: fixture setup failed (%r)" % (case_id, leg, exc))
                         continue
                     statuses.append(got_status)
