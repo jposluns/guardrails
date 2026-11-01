@@ -2673,6 +2673,34 @@ def _test_coauthor_replay(failures, base):
         aiqt_hooks._CAB_GIT_TIMEOUT = saved
     if got != "deny":
         failures.append("(cab-replay-timeout) a replay read that does not finish must deny, got {}".format(got))
+    # -h or --help before any '--' is taken by git cherry-pick's or revert's own option reader, which prints
+    # the usage and replays nothing: the help form lands nothing ungated and allows, its neighbour lands the
+    # token and denies, and with the help words read as revision-reader options (the flip) the help form denies.
+    for label, help_form, neighbour in (
+            ("cab-replay-help-short", "git cherry-pick -h", "git cherry-pick -x plain-dirty"),
+            ("cab-replay-help-revert", "git revert -h", "git cherry-pick -x plain-dirty"),
+            ("cab-replay-help-long", "git cherry-pick --help", "git cherry-pick --ff plain-dirty"),
+            ("cab-replay-help-after", "git cherry-pick plain-dirty -h", "git cherry-pick plain-dirty -x")):
+        if lands(help_form) or not lands(neighbour):
+            failures.append("({}) {!r} must land nothing and {!r} the token when run ungated".format(
+                label, help_form, neighbour))
+        got = (decision(help_form), decision(neighbour))
+        saved = aiqt_hooks._CAB_PICK_HELP
+        aiqt_hooks._CAB_PICK_HELP = frozenset()
+        try:
+            flipped = decision(help_form)
+        finally:
+            aiqt_hooks._CAB_PICK_HELP = saved
+        if got != ("allow", "deny") or flipped != "deny":
+            failures.append("({}) expected allow for {!r} and deny for {!r}, and deny for the first with the help "
+                            "words unread, got {} and {}".format(label, help_form, neighbour, got, flipped))
+    # The revision-walk options git hands to its revision reader stay refused, disclosed as over-denials: with
+    # the token message the form lands it ungated, and with the clean one it lands none; both deny.
+    for option in ("--no-merges", "--reverse", "--topo-order", "--no-walk", "-1"):
+        dirty, clean = ("git cherry-pick {} {}".format(option, rev) for rev in ("plain-dirty", "plain-clean"))
+        if not lands(dirty) or lands(clean) or (decision(dirty), decision(clean)) != ("deny", "deny"):
+            failures.append("(cab-replay-walk-option) {!r} must land the token, {!r} nothing, and both deny"
+                            .format(dirty, clean))
 
 
 def _test_coauthor_children(failures, base, script):

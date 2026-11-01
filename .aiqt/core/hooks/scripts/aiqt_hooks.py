@@ -6072,12 +6072,14 @@ _CAB_GIT_REPLAY_VERBS = frozenset(("commit", "cherry-pick", "rebase", "revert"))
 _CAB_GIT_DASH_VERBS = frozenset(("merge", "cherry-pick", "rebase", "revert"))
 # The options git cherry-pick and git revert read themselves. Their option reader takes no abbreviation and
 # hands every other option word to git's revision reader, where one can name commits (--all, --branches), so
-# a word that is none of these refuses the stage. Short letters: a flag, one taking a value (the rest of the
-# word, or the next word), or -S, whose value is only the rest of the word. Long names map to whether they
-# take a value as the next word; --gpg-sign takes one only after '='.
+# a word that is none of these (nor a help word below) refuses the stage. Short letters: a flag, one taking a
+# value (the rest of the word, or the next word), or -S, whose value is only the rest of the word. Long names
+# map to whether they take a value as the next word; --gpg-sign takes one only after '='.
 _CAB_PICK_FLAGS = {"cherry-pick": frozenset("nersx"), "revert": frozenset("ners")}
 _CAB_PICK_VALUE_FLAGS = frozenset("mX")
 _CAB_PICK_MODES = frozenset(("quit", "continue", "abort", "skip"))
+# The help words their option reader takes before any '--': git prints the usage and replays nothing.
+_CAB_PICK_HELP = frozenset(("-h", "--help"))
 _CAB_PICK_COMMON = {name: False for name in (
     "no-commit", "commit", "edit", "no-edit", "signoff", "no-signoff", "no-mainline", "rerere-autoupdate",
     "no-rerere-autoupdate", "no-strategy", "no-strategy-option", "gpg-sign", "no-gpg-sign", "no-cleanup",
@@ -6822,11 +6824,12 @@ def _cab_pick_revs(verb, args):
     """(revs, why) for the words after git cherry-pick or revert: every word their own option reader does not
     take (_CAB_PICK_FLAGS, _CAB_PICK_LONG) goes to git's revision reader, so each word but such an option and
     its value is a revision, and after --end-of-options every word is. A '--' is dropped (the option reader
-    drops it and the revision reader still reads the words after it). An option word of neither reader that
-    this layer knows may name commits, so it refuses the stage (why). A '-' operand is the previous branch
-    (@{-1}); with --quit, --continue, --abort or --skip git takes no revision."""
+    drops it and the revision reader still reads the words after it). Every other option word refuses the
+    stage (why), since git hands it to the revision reader, where it may name or select the commits replayed
+    (--all, --branches, --no-merges, -1). A '-' operand is the previous branch (@{-1}); with --quit,
+    --continue, --abort or --skip, or -h or --help before any '--', git takes no revision."""
     flags, long_names = _CAB_PICK_FLAGS[verb], _CAB_PICK_LONG[verb]
-    revs, j, ended = [], 0, False
+    revs, j, ended, dashed = [], 0, False, False
     while j < len(args):
         word = args[j]
         j += 1
@@ -6836,7 +6839,11 @@ def _cab_pick_revs(verb, args):
             revs.append("@{-1}")
         elif word == "--end-of-options":
             ended = True
-        elif word.startswith("--") and word != "--":
+        elif word in _CAB_PICK_HELP and not dashed:
+            return [], None
+        elif word == "--":
+            dashed = True
+        elif word.startswith("--"):
             name, eq, _value = word[2:].partition("=")
             if name in _CAB_PICK_MODES:
                 return [], None
@@ -6845,7 +6852,7 @@ def _cab_pick_revs(verb, args):
                             "commits it replays (--all, --branches), so they cannot be read".format(verb, word[:80]))
             if long_names[name] and not eq:
                 j += 1
-        elif word != "--":
+        else:
             for k, letter in enumerate(word[1:], 1):
                 if letter in _CAB_PICK_VALUE_FLAGS:
                     j += k == len(word) - 1
@@ -7350,7 +7357,7 @@ def _cab_reference_problem(joined, cwd, raw=None):
     reader, replayed = _CabReader(), {}
     try:
         for exact, _tokens, units, grouped in parsed:
-            sinks =[unit for unit in units if any(_cab_stage_sink(stage) for stage in unit)]
+            sinks = [unit for unit in units if any(_cab_stage_sink(stage) for stage in unit)]
             if not sinks:
                 continue
             reader.writes, reader.dir_writes, reader.loose, reader.patch_writes = _cab_writes(units)
@@ -7381,7 +7388,7 @@ def _cab_reference_problem(joined, cwd, raw=None):
                     extra = []
                     if stage.text and _cab_stdin_revs(stage):
                         texts = list(stage.texts)
-                        if stage.doc is not None:  # every line of the command text: the body and more
+                        if stage.doc is not None:  # where the body ends is not found: every line of the text
                             texts += [text for base in dict.fromkeys((raw or joined, joined)) for text in (
                                 base, "\n".join(line.lstrip("\t") for line in base.split("\n")))]
                         extra, why = _cab_stdin_lines(texts)
