@@ -747,7 +747,7 @@ def self_test():
             return real_cli(argv)
         return run
 
-    green_doctor = (complete, "store_doctor", lambda observations=None: (lambda root: complete._Doctor()))
+    green_doctor = (complete, "store_doctor", lambda observations=None: complete._Doctor())
     switches = [(complete, "PR6_DENY_PROBES_SHIPPED", True), (complete, "U25_CI_IDENTITY_ASSERTED", True),
                 (here, "PROBER", complete._Surface()), green_doctor]
 
