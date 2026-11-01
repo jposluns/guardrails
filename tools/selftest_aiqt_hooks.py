@@ -2344,13 +2344,15 @@ def _test_cannot_evaluate_paths(failures, tmp):
                             "the case; got made={!r} recorded={!r}".format(name, made, probe))
 
 
-# Breadth-then-push rows with redirections: (label, command, the git calls real bash makes). The shared lexer
-# drops a redirection from a segment's words, so a redirection after the stage, before the subcommand or beside
-# a -C target leaves the breadth stage and the push in view, and each denies as its redirection-free control
-# does. The lexer refuses a here-string, so a command holding one takes the raw fallback, which reads git, the
-# stage and its selector in text order whatever redirections stand between them, and denies too. Each command
-# runs under bash -c with a stub git function that prints its arguments to descriptor 3, which the command's
-# own redirections leave open, so each row also pins what bash runs.
+# Breadth-then-push rows: (label, command, the git calls real bash makes). Two rows, (eb-r1) and (eb-r7), are
+# redirection-free controls; every other row adds a redirection, and two of those, (eb-r6) and (eb-r12), add a
+# here-string. The shared lexer drops a redirection from a segment's words, so a redirection after the stage,
+# before the subcommand or beside a -C target leaves the breadth stage and the push in view, and the parsed
+# pre-scan (_git_is_breadth) denies the row as it denies its control. The lexer refuses a here-string, so a
+# command holding one takes the raw fallback (_expbnd_fallback_kind), which reads git, the stage and its
+# selector in text order whatever redirections stand between them, and denies too. Each command runs under
+# bash -c with a stub git function that prints its arguments to descriptor 3, which the command's own
+# redirections leave open, so each row also pins what bash runs.
 _EB_REDIRECT_ROWS = (
     ("(eb-r1) add -A and push, the control", "git add -A -- . && git push", ("add -A -- .", "push")),
     ("(eb-r2) add -A silenced to /dev/null", "git add -A -- . > /dev/null 2>&1 && git push",
@@ -2377,7 +2379,10 @@ _EB_REDIRECT_ROWS = (
 def _test_expbnd_redirect_rows(failures):
     """Each _EB_REDIRECT_ROWS command must deny, and real bash must make exactly its git calls. Each must also
     be red with the breadth reading removed (_git_is_breadth and the raw fallback's _expbnd_fallback_kind
-    patched to find nothing), so the row pins the breadth-then-push decision."""
+    patched to find nothing), so the row pins the breadth-then-push decision. Removing one detector at a time
+    pins which one decides each row: with only _git_is_breadth removed the rows the lexer reads allow and the
+    here-string rows still deny, and with only _expbnd_fallback_kind removed the here-string rows allow and
+    the rows the lexer reads still deny."""
     handler = aiqt_hooks.git_explicit_binding
     if shutil.which("bash") is None:
         failures.append("(eb-r-oracle) the real-bash oracle needs bash on PATH")
@@ -2391,17 +2396,29 @@ def _test_expbnd_redirect_rows(failures):
             failures.append("{}: expected deny and git calls {!r} under real bash, got {} and exit {}, stdout {!r}, "
                             "stderr {!r}".format(label, calls, got, run.returncode, run.stdout[:200],
                                                  run.stderr[:200]))
+    here = [label for label, command, _calls in _EB_REDIRECT_ROWS if "<<<" in command]
+    if not here or len(here) == len(_EB_REDIRECT_ROWS):
+        failures.append("(eb-r-split) the table must hold both here-string rows and rows the lexer reads, got "
+                        "{} here-string rows of {}".format(len(here), len(_EB_REDIRECT_ROWS)))
     saved = (aiqt_hooks._git_is_breadth, aiqt_hooks._expbnd_fallback_kind)
-    aiqt_hooks._git_is_breadth = lambda sub, args: False
-    aiqt_hooks._expbnd_fallback_kind = lambda command: None
-    try:
-        removed = [(label, _decision(handler, command)) for label, command, _calls in _EB_REDIRECT_ROWS]
-    finally:
-        aiqt_hooks._git_is_breadth, aiqt_hooks._expbnd_fallback_kind = saved
-    for label, got in removed:
-        if got != "allow":
-            failures.append("{}: with the breadth reading removed this deny row must go red (allow), got {}"
-                            .format(label, got))
+    # (removed, patch _git_is_breadth off, patch _expbnd_fallback_kind off, lexer row want, here-string row want)
+    for removed, breadth_off, fallback_off, want_lexed, want_here in (
+            ("the breadth reading", True, True, "allow", "allow"),
+            ("only _git_is_breadth", True, False, "allow", "deny"),
+            ("only _expbnd_fallback_kind", False, True, "deny", "allow")):
+        if breadth_off:
+            aiqt_hooks._git_is_breadth = lambda sub, args: False
+        if fallback_off:
+            aiqt_hooks._expbnd_fallback_kind = lambda command: None
+        try:
+            got = [(label, _decision(handler, command)) for label, command, _calls in _EB_REDIRECT_ROWS]
+        finally:
+            aiqt_hooks._git_is_breadth, aiqt_hooks._expbnd_fallback_kind = saved
+        for label, decision in got:
+            want = want_here if label in here else want_lexed
+            if decision != want:
+                failures.append("{}: with {} removed this deny row must give {}, got {}"
+                                .format(label, removed, want, decision))
 
 
 def _test_git_stash_ref(failures):
