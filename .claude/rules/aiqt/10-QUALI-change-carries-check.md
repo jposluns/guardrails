@@ -39,5 +39,8 @@ the input reaching that path fails the suite rather than passing silently. This 
 relied on as the check a change carries, not to an incidental negative assertion inside a check whose
 discrimination already rests on a positive assertion.
 
-For a fix to a text classifier, derive sibling cases from its specification, test changed and preserved
-outcomes at the affected boundaries, and show the changed outcomes fail with the fix reverted.
+A fix to code that sorts text into verdicts, such as a lint, parser, pattern matcher, or guard over command
+text, is tested on cases sibling to the reported input, derived from the specification or other authoritative
+source that defines its input forms. The cases cover the outcomes the fix changes and those it preserves at
+the boundaries it affects. The tests of changed outcomes fail with the fix reverted; tests of preserved
+outcomes need not, since they exist to catch a fix that wrongly moves a sibling's verdict.
