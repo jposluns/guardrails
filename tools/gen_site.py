@@ -413,8 +413,8 @@ def _page_syntax_scan(page, foreign=None):
         if name in TEXT_CONTENT and self_closing:
             return at, "a self-closing <{}/>, whose contents a browser reads on as text".format(name)
         if name in TEXT_CONTENT and start.group(0).endswith("/>"):
-            return at, "a <{}> whose last unquoted attribute value ends in \"/\", which reads as " \
-                       "self-closing but leaves the element open".format(name)
+            return at, "a <{}> whose last unquoted attribute value ends in \"/\" right before the \">\", " \
+                       "which reads as self-closing but leaves the element open".format(name)
         if name == "plaintext":
             return at, "a <plaintext>"
         pos = start.end()
@@ -628,6 +628,8 @@ class _HeadTagCollector(HTMLParser):
                 self.script_text = []
             return
         if tag in ("template", "noscript") and self.open_wrappers[tag]:
+            # One end tag can pop several wrappers, but each is popped once: linear in total, amortized
+            # constant per tag.
             while True:
                 top = self.wrappers.pop()
                 self.open_wrappers[top] -= 1
@@ -2300,7 +2302,7 @@ def _self_test():
             failures.append("reference length {}: unexpected SchemaError: {}".format(label, exc))
     # The page scan stays linear: on 600 tags with 200 svg elements left open below 200 math elements opened
     # and closed, it counts lines once and does a bounded amount of work on its svg/math stack (counted on
-    # the stack itself, not timed), and the head collector does a bounded amount of work on its wrapper stack.
+    # the stack itself, not timed).
     class _CountingPage(str):
         count_calls = 0
 
@@ -2349,15 +2351,28 @@ def _self_test():
         failures.append("page scan work: expected a refusal on line 402 after at most one line count and at "
                         "most 2400 stack operations, got {!r}, {} line counts, {} stack operations"
                         .format(message, _CountingPage.count_calls, _CountingStack.work))
-    case_count += 1
-    _CountingStack.work = 0
-    collector = _HeadTagCollector(None)
-    collector.wrappers = _CountingStack()
-    collector.feed("<head>" + "<template>" * 200 + "</noscript>" * 200 + "</template>" * 200)
-    collector.close()
-    if _CountingStack.work > 4 * 600:
-        failures.append("head collector work: expected at most 2400 wrapper stack operations, got {}"
-                        .format(_CountingStack.work))
+    # The head collector stays linear too: every list it keeps in an attribute, whenever it is assigned,
+    # counts the work done on it, so a list search over the open wrappers, or a stack of the svg and math
+    # elements open in a head template, fails here. Each input holds at most about 600 tags: wrapper end tags
+    # after 200 open templates, 400 svg and math elements in one template, and text or keyed tags inside 200
+    # open templates.
+    class _CountingCollector(_HeadTagCollector):
+        def __setattr__(self, name, value):
+            super().__setattr__(name, _CountingStack(value) if type(value) is list else value)
+
+    for label, source in (
+            ("wrapper end tags", "<template>" * 200 + "</noscript>" * 200 + "</template>" * 200),
+            ("svg and math in a template", "<template>" + "<svg>" * 200 + "<math></math>" * 200 + "</template>"),
+            ("text in wrappers", "<template>" * 200 + "<b>x</b>" * 200),
+            ("keyed tags in wrappers", "<template>" * 200 + '<meta property="og:title" content="x">' * 200)):
+        case_count += 1
+        _CountingStack.work = 0
+        collector = _CountingCollector(None)
+        collector.feed("<head>" + source)
+        collector.close()
+        if _CountingStack.work > 4 * 600:
+            failures.append("head collector work, {}: expected at most 2400 list operations, got {}"
+                            .format(label, _CountingStack.work))
     # The repository's own published pages pass (the check site.py runs over them too).
     for _page_path in sorted((Path(__file__).resolve().parents[1] / SITE_DIR).glob("*.html")):
         if _page_path.name == "404.html":
