@@ -90,13 +90,15 @@
 #                        Queued fold landed on 2026-11-01: repeated-failure-triggers-premise-review gained its
 #                        sentence that the premise review held when successive attempts along the same line fail
 #                        asks whether the task with any explicit human amendment, a rule that governs it, or a
-#                        standing constraint requires the failing surface at all, if only for correctness; that
-#                        a surface the failing attempts added that nothing requires is removed, with the removal
-#                        and its reason recorded in the change record, rather than narrowed or hardened again;
-#                        that any other surface nothing requires is kept, and the assistant escalates; and that
-#                        a removal settles a finding only when it fixes it (rpfail.6): measured PACK 134352 ->
-#                        134838 (+486 units); rule files 117729 -> 118215; managed block 360 and file headers
-#                        16263 unchanged. Against the 559-unit estimate, 73 units remain.
+#                        standing constraint requires the failing surface at all, if only for correctness; that a
+#                        surface the failing attempts added, not yet integrated, that nothing requires is
+#                        removed, with the removal and its reason recorded in the change record, rather than
+#                        narrowed or hardened again; that any other surface nothing requires is kept, and the
+#                        assistant changes approach or escalates; that a control or guard is removed only under
+#                        the gate-discipline rule; and that a removal settles a finding only when it fixes it
+#                        (rpfail.6): measured PACK 134352 -> 134946 (+594 units); rule files 117729 -> 118323;
+#                        managed block 360 and file headers 16263 unchanged. This fold alone exceeds the 559-unit
+#                        estimate by 35 units; PACK stays 45 units under the ratchet.
 #                        The ratchet is unchanged.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
