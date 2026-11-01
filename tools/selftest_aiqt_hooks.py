@@ -5433,12 +5433,58 @@ def _sleeper(seconds, result=(0, None, None)):
     return handler
 
 
+# How long a deadline-path stub sleeps by its own clock: a 0.1-second deadline must cut it short.
+_DEADLINE_STUB_SECONDS = 0.8
+
+
+def _clocked_sleep(seconds, reads):
+    """Sleep until `seconds` after this call's first time.monotonic read, logging in reads that end
+    (reads["end"]) and each read the loop compares with it (reads["reached"], the last one kept): the sleep
+    has run to its end only when reached >= end. A deadline that fires first cuts it short, leaving reached
+    below end, or ends the run before this call logs anything."""
+    reads["end"] = time.monotonic() + seconds
+    while True:
+        reads["reached"] = time.monotonic()
+        if reads["reached"] >= reads["end"]:
+            return
+        time.sleep(reads["end"] - reads["reached"])
+
+
+def _clocked_sleeper(seconds, reads, result=(0, None, None)):
+    def handler(_data):
+        _clocked_sleep(seconds, reads)
+        return result
+    return handler
+
+
+def _deadline_cut_problems(label, what, code, err, want, seconds, reads):
+    """What one deadline-path run got wrong, as a list of phrases ([] for none): code and err its exit and
+    stderr, want the text its stderr must hold, seconds its wall-clock time (reported only), and reads the
+    clock reads of the _clocked_sleep the deadline must cut short. The run is judged by those reads, not by
+    its wall-clock time: the window's timer is armed before the stub starts its sleep and its expiry, due
+    first, interrupts the sleep however late the host then schedules the run, while a deadline that does
+    not fire lets the sleep reach its end. Measured on an 80-CPU host at a one-minute load average of 50 to
+    53: 198 firing runs (22 modes) took 0.109 to 0.131 s of wall-clock time, and 66 more with 8 busy loops
+    sharing their one CPU took 0.175 to 0.347 s, each cutting the stub short; with the deadline disabled
+    and the stub returning the refusal itself, 88 runs took 0.810 to 0.916 s, each sleep run to its end.
+    A full self-test run at a load average of about 38 saw a firing run take 2.06 s, past
+    every disabled run measured, so a fixed wall-clock bound, on one run or on the median of three, does
+    not separate the two under such load, and the stub's reads do."""
+    finished = "end" in reads and reads.get("reached", float("-inf")) >= reads["end"]
+    if code == 2 and want in err and not finished:
+        return []
+    return ["({}) expected exit 2 with {} before the stub's {:g}-second sleep ended, got exit {} after {:.2f}s "
+            "with the stub's sleep {} and {!r}".format(label, what, _DEADLINE_STUB_SECONDS, code, seconds,
+                                                      "run to its end" if finished else "cut short", err)]
+
+
 def _deadline_path_failures():
     """(dl-fires, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by handler stubs that sleep
     past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler, the budget
     and the input size; a deadline during the payload read exits 2 too; a fail-open mode keeps its result
     (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
-    decision is written."""
+    decision is written. A firing deadline is judged by whether it cut the stub's sleep short
+    (_deadline_cut_problems), and (dl-cut-judged) recorded runs pin that judgement at the sleep's end."""
     out = []
     size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
     for mode, event in sorted(aiqt_hooks.HANDLER_EVENT.items()):
@@ -5449,24 +5495,42 @@ def _deadline_path_failures():
                 out.append("(dl-fail-open-{}) a fail-open mode must keep its result with no deadline, got "
                            "exit {} and {!r}".format(mode, code, err))
             continue
-        with _stub_handler(mode, _sleeper(1.0)):
+        reads = {}
+        with _stub_handler(mode, _clocked_sleeper(_DEADLINE_STUB_SECONDS, reads)):
             code, err, seconds = _main_run(mode, budget=0.1)
         want = ("AIQT guardrail: the {} check could not reach a decision within its 0.1-second budget on an "
                 "input of {} bytes; failing closed. Split the command into smaller calls, or move long content "
                 "into a file and pass its path.".format(mode, size))
-        if code != 2 or want not in err or seconds >= 0.8:
-            out.append("(dl-fires-{}) expected exit 2 with the deadline refusal within 0.8s, got exit {} after "
-                       "{:.2f}s and {!r}".format(mode, code, seconds, err))
+        out.extend(_deadline_cut_problems("dl-fires-" + mode, "the deadline refusal", code, err, want, seconds,
+                                          reads))
+
+    read_reads = {}
 
     class SlowStdin:
         def read(self):
-            time.sleep(1.0)
+            _clocked_sleep(_DEADLINE_STUB_SECONDS, read_reads)
             return _DEADLINE_PAYLOAD
     with _stub_handler("diff_source_pretool", _sleeper(0)):
         code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
-    if code != 2 or "on an input it had not finished reading" not in err or seconds >= 0.8:
-        out.append("(dl-read) a deadline during the payload read expected exit 2 naming the unread input, got "
-                   "exit {} after {:.2f}s and {!r}".format(code, seconds, err))
+    out.extend(_deadline_cut_problems("dl-read", "the refusal naming the unread input", code, err,
+                                      "on an input it had not finished reading", seconds, read_reads))
+
+    refusal = "AIQT guardrail: recorded refusal"
+    for edge, code, err, seconds, reads, want_lines in (
+            ("cut just inside its end, after 2.06 s of wall-clock time", 2, refusal, 2.06,
+             {"end": 10.0, "reached": 10.0 - 1e-6}, 0),
+            ("run exactly to its end, after 0.15 s of wall-clock time", 2, refusal, 0.15,
+             {"end": 10.0, "reached": 10.0}, 1),
+            ("run just past its end, after 0.15 s of wall-clock time", 2, refusal, 0.15,
+             {"end": 10.0, "reached": 10.0 + 1e-6}, 1),
+            ("never started", 2, refusal, 0.15, {}, 0),
+            ("cut before its first read of the clock", 2, refusal, 0.15, {"end": 10.0}, 0),
+            ("cut short, the run exiting 0", 0, refusal, 0.15, {"end": 10.0, "reached": 9.0}, 1),
+            ("cut short, the run without the refusal", 2, "", 0.15, {"end": 10.0, "reached": 9.0}, 1)):
+        lines = _deadline_cut_problems("recorded", "the refusal", code, err, "recorded refusal", seconds, reads)
+        if len(lines) != want_lines:
+            out.append("(dl-cut-judged) a recorded run whose stub sleep was {} must give {} line(s), got {!r}"
+                       .format(edge, want_lines, lines))
 
     seen = []
 
