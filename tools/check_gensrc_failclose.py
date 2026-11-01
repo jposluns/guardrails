@@ -174,6 +174,11 @@ PROBE_TIMEOUT = 120  # per --check; an own exit beside the stop stands, else can
 # and interpreter children, whose CPU counts as its own progress, so only blocked disk I/O leaves it
 # silent; 60 s is far above that on a working host.
 PROBE_STALL_S = 60
+# Wall seconds one git command that builds the sandbox template may take. Template setup is not a --check:
+# it has its own bound so that a cut to the per-probe bound cannot stop setup git before any probe runs.
+# git stays on a direct subprocess call (_load_bound.run refuses it), so this bound is not load-adjusted;
+# reaching it stays an unexpected sweep error, cannot-evaluate (exit 2).
+TEMPLATE_GIT_TIMEOUT = 120
 TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
 _load_factor = _load_bound.load_factor  # module-level indirection so the self-test can inject host load
@@ -363,7 +368,7 @@ def _materialize_git(template, real_root):
             ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
              "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
              "-c", "init.defaultBranch=main", *_TEMPLATE_GIT_NO_MAINTENANCE, *args],
-            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
+            capture_output=True, env=env, timeout=TEMPLATE_GIT_TIMEOUT, shell=False)
 
     if git(template, "init", "-q", "--template=").returncode != 0:
         raise OSError("cannot git-init the failclose sandbox template")
@@ -371,7 +376,7 @@ def _materialize_git(template, real_root):
     # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh.
     probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
                             "--no-optional-locks", "ls-files", "-z"],
-                           capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
+                           capture_output=True, env=env, timeout=TEMPLATE_GIT_TIMEOUT, shell=False)
     if probe.returncode != 0:
         raise OSError("cannot enumerate real_root's tracked set (git ls-files exit {}); fail-closed"
                       .format(probe.returncode))
@@ -882,7 +887,8 @@ def main() -> int:
 #       UTF-8 passes the sweep (exit 0): the gate probes a block target with invalid UTF-8 only and the
 #       generator rejects it, exercising the is_block probe path no other fixture covers,
 #   (n) load tolerance: under an injected host load a generator slower than a 1 s per-probe bound passes
-#       while printing progress, a silent sleeper is still stopped by the stall bound (exit 2), and the
+#       while printing progress, a silent sleeper is still stopped by the stall bound (exit 2) even when
+#       template setup git outlasts that per-probe bound, and the
 #       same slow generator on an idle host overruns the bound (exit 2), a generator that exits 0 on a
 #       corrupt target while a leaked descendant holds its output is a violation (exit 1), not a stop,
 #       a nonzero rejection beside the same leak stands (exit 0), and a stopped rejection that left the
@@ -1616,6 +1622,18 @@ def _close_vectors(base):
              None)) + _close_selftest._st_helper_vectors(globals())
 
 
+def _stopping_bound(report):
+    """Name the bound a sweep report shows stopped it, from the reasons _load_bound.Hung and sweep print, so a
+    failed load-tolerance leg says which bound fired instead of only its exit code."""
+    named = [name for marker, name in (
+        ("heuristic stall bound fired", "the stall bound (PROBE_STALL_S)"),
+        ("load-adjusted budget of", "the load-adjusted per-probe budget (PROBE_TIMEOUT)"),
+        ("total-runtime backstop", "the total-runtime backstop (TOTAL_TIMEOUT)"),
+        ("template sandbox setup failed", "template setup (TEMPLATE_GIT_TIMEOUT or a setup error)"),
+        ("monitoring", "a monitoring fault")) if marker in report]
+    return " and ".join(named) if named else "no bound the report names"
+
+
 def _self_test_verdict(failures, cannot, cleanup_error=None, census_error=None):
     """Print the self-test outcome and return its exit code, never hiding a recorded line: every assertion
     failure and every cannot-evaluate line is printed before a cleanup or census error. Cannot-evaluate
@@ -1900,14 +1918,19 @@ def _self_test_main_isolated():
         #     generator that takes about 2 s while printing progress passes every probe (a 1 s wall-clock
         #     bound would have made it cannot-evaluate); a generator that sleeps silently is still stopped
         #     by the stall bound (exit 2; a spy on _run_check requires the stop to be the stall bound's,
-        #     not the 16 s budget's); and on an idle host the same slow generator overruns the 1 s budget
-        #     (exit 2), so the pass is owed to the load adjustment; a generator exiting 0 on a corrupt target
+        #     not the 16 s budget's), while a git stand-in holds the template's gc past the 1 s bound, so a
+        #     cut per-probe bound that reached template setup would end the sweep before any probe ran and
+        #     leave no stop recorded, on any host; a generator exiting 0 on a corrupt target
         #     beside a leaked descendant is a violation (exit 1), and a generator REJECTING the corrupt
         #     target (nonzero) beside the same leak passes (exit 0): the own exit stands either way, never
         #     filed as cannot-evaluate, but only once the stopped probe passed the same post-probe
         #     containment validation a completed one gets: the same rejection that ALSO swapped the target
-        #     for an escaping symlink is cannot-evaluate (exit 2), never an accepted rejection. The shared
-        #     vectors follow, then the cleanup caller probes.
+        #     for an escaping symlink is cannot-evaluate (exit 2), never an accepted rejection. The leak legs
+        #     run under the injected load as well: each needs the generator's own exit to land before its
+        #     stop, a race a 1 s wall budget loses on a loaded host, while the 16 s budget stays under the
+        #     leaked descendant's 30 s sleep and the stall bound still ends the wait. Last, on an idle host
+        #     the same slow generator overruns the 1 s budget (exit 2), so the pass is owed to the load
+        #     adjustment. The shared vectors follow, then the cleanup caller probes.
         leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
 
         def _load_fixtures():
@@ -1942,12 +1965,21 @@ def _self_test_main_isolated():
                  "        os.unlink(target)\n        os.symlink(sys.executable, target)\n"
                  "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
                  "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
-            return slow, hang, leaky, leaky_reject, leaky_reject_escape
+            # A git stand-in for the PATH: its gc outlasts the 1 s per-probe bound by a margin no scheduler
+            # delay can remove, the same overrun host load gives the real git, on demand and on any host.
+            slow_git = tmp / "slow-git"
+            slow_git.mkdir()
+            (slow_git / "git").write_text(
+                "#!/bin/sh\ncase \" $* \" in\n  *\" gc \"*) sleep 1.5 ;;\nesac\n"
+                "exec '{}' \"$@\"\n".format(shutil.which("git")), encoding="utf-8")
+            os.chmod(slow_git / "git", 0o755)
+            return slow, hang, leaky, leaky_reject, leaky_reject_escape, slow_git
 
         def _evaluate_load_tolerance(fixtures):
             global _run_check, _now, _load_factor, PROBE_TIMEOUT, PROBE_STALL_S
-            slow, hang, leaky, leaky_reject, leaky_reject_escape = fixtures
+            slow, hang, leaky, leaky_reject, leaky_reject_escape, slow_git = fixtures
             stops = []
+            saved_path = os.environ.get("PATH", os.defpath)
 
             def _spy_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
                 try:
@@ -1960,16 +1992,20 @@ def _self_test_main_isolated():
             try:
                 _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
                 _now = _load_bound.LoadClock(factor=lambda: _load_factor())
-                rc_slow = sweep_quiet(slow)
+                rc_slow, slow_report = sweep_captured(slow)  # kept: a failure names the bound that stopped it
                 _run_check = _spy_run_check
-                rc_hang = sweep_quiet(hang)
+                os.environ["PATH"] = str(slow_git) + os.pathsep + saved_path
+                try:
+                    rc_hang = sweep_quiet(hang)
+                finally:
+                    os.environ["PATH"] = saved_path
                 _run_check = saved_run_check
-                _load_factor = lambda: 1.0  # noqa: E731
-                _now = _load_bound.LoadClock(factor=lambda: _load_factor())
-                rc_idle = sweep_quiet(slow)
                 rc_leaky = sweep_quiet(leaky)
                 rc_leaky_reject = sweep_quiet(leaky_reject)
                 rc_leaky_reject_escape, escape_out, escape_err = sweep_captured_streams(leaky_reject_escape)
+                _load_factor = lambda: 1.0  # noqa: E731
+                _now = _load_bound.LoadClock(factor=lambda: _load_factor())
+                rc_idle = sweep_quiet(slow)
             finally:
                 _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
                 _now = saved_now
@@ -1988,6 +2024,9 @@ def _self_test_main_isolated():
                                 "(0, 2, 2, ['stall'], 1, 0, 2), got {!r}"
                                 .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky,
                                          rc_leaky_reject, rc_leaky_reject_escape)))
+                if rc_slow != 0:
+                    failures.append("load tolerance: the slow sweep under load was stopped by {}; its report: {!r}"
+                                    .format(_stopping_bound(slow_report), slow_report))
             # The escaping fixture's exit 2 must come from the stopped-path CONTAINMENT validation, not
             # from any other cannot-evaluate condition that shares the exit code: require the
             # containment diagnostic itself (printed in the sweep's CANNOT-EVALUATE report).

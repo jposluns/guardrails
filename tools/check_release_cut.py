@@ -2469,16 +2469,28 @@ sys.path.insert(0, os.path.dirname(path))
 runpy.run_path(path, run_name="__main__")
 """
 
+# The wall-clock bound on one row of _CENSUS_MAPPINGS, each set above the run it bounds (rule
+# kill-timeout-exceeds-callee-wait). MEASURED 2026-11-01 on an 80-CPU host shared with other work, each
+# run pinned with N busy loops to the same 2 CPUs. Every row but one stops at its first census read, within
+# 0.7 s with no busy loops, far under CENSUS_TIMEOUT.
+CENSUS_TIMEOUT = TIMEOUT * 4
+# check_gensrc_failclose.py reaches the census only at its close vectors, after the rest of its self-test:
+# 94.7 to 102.3 s with no busy loops, 226.7 s with 8, and that self-test alone took 433.6 to 589.5 s with 20
+# and 883.6 to 913.7 s with 40. This bound is the slowest 20-loop figure plus a 50% margin, rounded up to a
+# multiple of 60 s, so it does not cover 40 loops. It is a plain wall-clock bound because a _load_bound clock would not stretch at the load that overran the old
+# 120 s bound: its factor stays 1 while the load average is under the CPU count, as load5 60 is on 80 CPUs.
+# Reaching this bound stays exit 2 naming the timeout, never a failure.
+CENSUS_GENSRC_TIMEOUT = 900
 # Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
-# caller that reaches its clause: (path, census caller, self-test arguments).
+# caller that reaches its clause: (path, census caller, self-test arguments, bound on the run).
 _CENSUS_MAPPINGS = (
-    ("tools/check_footer.py", "*", ("--self-test",)),
-    ("tools/check_overclaim.py", "*", ("--self-test",)),
-    ("tools/check_gensrc_failclose.py", "*", ("--self-test",)),
-    ("tools/gen_crosswalk.py", "*", ("--self-test",)),
-    ("tools/import_cwe.py", "*", ("--self-test",)),
-    ("opf/tools/_journal.py", "*", ("--self-test",)),                     # the close-vector clause
-    ("opf/tools/_journal.py", "_st_fd_table_eio", ("--self-test",)),      # the descriptor-helper clause
+    ("tools/check_footer.py", "*", ("--self-test",), CENSUS_TIMEOUT),
+    ("tools/check_overclaim.py", "*", ("--self-test",), CENSUS_TIMEOUT),
+    ("tools/check_gensrc_failclose.py", "*", ("--self-test",), CENSUS_GENSRC_TIMEOUT),
+    ("tools/gen_crosswalk.py", "*", ("--self-test",), CENSUS_TIMEOUT),
+    ("tools/import_cwe.py", "*", ("--self-test",), CENSUS_TIMEOUT),
+    ("opf/tools/_journal.py", "*", ("--self-test",), CENSUS_TIMEOUT),                 # the close-vector clause
+    ("opf/tools/_journal.py", "_st_fd_table_eio", ("--self-test",), CENSUS_TIMEOUT),  # the descriptor-helper clause
 )
 
 
@@ -2487,9 +2499,9 @@ def _census_mapping_check(root):
     report naming the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"),
     never a traceback (exit 1) or a pass. Returns (failures, runs)."""
     failures = []
-    for rel, target, argv in _CENSUS_MAPPINGS:
+    for rel, target, argv, bound in _CENSUS_MAPPINGS:
         result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
-                                capture_output=True, timeout=TIMEOUT * 4)
+                                capture_output=True, timeout=bound)
         err = result.stderr.decode("utf-8", "replace")
         held = re.match(r"census-held (\d+)\n", err, re.ASCII)
         want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)

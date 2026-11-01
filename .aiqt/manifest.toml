@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "9a9cb320612fd5c12e0c8ef97427b232ff63125001a58ed786d7109c8b0357fa"
+tree-sha256 = "7f2c62ca4f0405cd871b0ded06d3f448f42a293ba2f517da6ab1770600adf0f5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3506,8 +3506,8 @@ sha256 = "ae247523c96924dec2827bbd7cb29e6e668bb5124e8b719521df96a8c5d7fbd9"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 154999
-sha256 = "2128d7394f267bb5c478ac1ccc336dfd3127ed3f57918772078398f0d9312edf"
+bytes = 157901
+sha256 = "3221fe11761942ea8b6b9ee42f7638c06e0230d0a1f79ab06fa471548df18450"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
@@ -3651,8 +3651,8 @@ sha256 = "1062f2cdf038f39b3a88bb1a124c4e9d6bc58d89e5aa3b4b8855dadf04d8c447"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 170281
-sha256 = "77df81394de8598c7bfbd71a7938c4b9edc518909de9c6317215b000197c4451"
+bytes = 171493
+sha256 = "05c3c36c27b8aed03232fae199b94f2acfc1bff983c8c85793ae409aa6e4c5d0"
 
 [[sources]]
 path = "tools/check_release_delta.py"
