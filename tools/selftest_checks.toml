@@ -3279,6 +3279,7 @@ expected-check-ids = [
   "cannot/nesting-definition-hold",
   "structure/nesting-definition-boundary",
   "cannot/nesting-held-fence-placed",
+  "structure/nesting-residual-held-title",
   "structure/nesting-held-superset",
   "cannot/whitespace-run-2",
   "cannot/whitespace-class-over",

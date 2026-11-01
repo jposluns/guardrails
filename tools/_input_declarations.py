@@ -39,11 +39,12 @@ shape, so no such model is relied on for the bound. Before any parse, two cheap 
 refuse degenerate shapes up front with a named reason, each decided on the text alone: a text over
 MAX_TEXT_BYTES (the dispatcher's own brief cap, so every brief that can be dispatched is read; it bounds
 one parse's memory, not its time, and the constant's comment records the timings measured at it) is
-refused in forbidden() whatever it holds; a text that can nest blocks more than MAX_NESTING_DEPTH levels
-deep (judged by _nesting_refused, a conservative prescan over marker runs and indentation whose running depth
-follows block structure, resetting where a new top-level block must start, so a block's outcome never
-depends on content before its block; after a quote marker it consumes one optional non-LF whitespace
-character as a column, exactly as the parser's own quote prefix does, so a no-break space or a
+refused in forbidden() whatever it holds; a text whose lead counts past MAX_NESTING_DEPTH nested levels
+(judged by _nesting_refused, a fast over-counting prescan over marker runs and indentation that refuses
+most deep texts early but is not a guaranteed bound, since a text it passes can still nest deeper in the
+parser; its running depth follows block structure, resetting where a new top-level block must start,
+so a block's outcome never depends on content before its block; after a quote marker it consumes one
+optional non-LF whitespace character as a column, exactly as the parser's own quote prefix does, so a no-break space or a
 vertical tab after > hides no level; and it skips a fenced code block's content, which opens nothing,
 placing each fence where the parser's FencedCode opens and closes it and skipping nothing from the first
 fence-shaped line it cannot place) is refused up front too; and so is a line holding a run of more than
@@ -951,8 +952,15 @@ def _opaque_start(rest):
 
 
 def _nesting_refused(text):
-    """(line number, reason) for the first line whose lead can take the document past MAX_NESTING_DEPTH
-    nested levels; None otherwise. A conservative upper bound, never a parse: a line's marker tokens each
+    """(line number, reason) for the first line whose lead this prescan counts past MAX_NESTING_DEPTH
+    nested levels; None otherwise. A fast over-counting prescan that refuses most deep texts early, with
+    a reason that names the line; never a parse and not a guaranteed bound. A text it passes can still
+    nest deeper in the parser: a held link title keeps the parser in its list item while the running
+    depth below resets, so a two-column fence after it is placed from the margin, where the parser opens
+    it in the item and ends it with the item, and a list after it, skipped here as fence content, is
+    parsed past the ceiling (23 levels in the self-test's witness, kept there as a disclosed residual
+    vector that this prescan passes today). The wall-clock bound is the child parse's kill at
+    PARSE_DEADLINE_SECONDS (_child_parse), not this prescan. Its counting: a line's marker tokens each
     open at most one level, and its leading whitespace continues at most the levels already opened (every
     two columns one level, and never more than any earlier line of the same block run opened), so a
     deeply indented fence body or continuation line alone opens nothing, while a run of markers on one
@@ -976,7 +984,8 @@ def _nesting_refused(text):
     after it; a line is refused when either count passes the ceiling. The held depth is read by that
     comparison alone: the running depth and every fence and placement decision, which read the running
     depth, are computed exactly as without it, so the held depth only adds refusals, never removes one.
-    Over-counting only refuses more, never less."""
+    Where it over-counts it only refuses more; where its reading of block structure differs from the
+    parser's (the residual above) it can pass a text the parser nests deeper."""
     running = 0
     holding = 0               # the held depth: running, with no reset inside an open label or title
     after_blank = True

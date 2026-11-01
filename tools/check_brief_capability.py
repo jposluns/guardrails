@@ -5155,13 +5155,37 @@ def self_test(report_path=None):
         held_label + rungs(15, 26), rungs(0, 14) + "  " * 14 + "- [x]\n\ny\n" + rungs(15, 26),
         rungs(0, 14) + "  " * 14 + "- [x]: /u 't\n\ny\n'\n" + rungs(15, 26),
         rungs(0, 14) + "  " * 14 + "- [x]: /u\n\ny\n" + rungs(15, 26))], [False, True, True, True])
-    # the held depth is read by the ceiling comparison alone, never by fence placement: after a held
-    # title, a two-column fence where the running depth is zero opens at the top level and its column-0
-    # run closes it, so the item fence after the next list is placed and its empty line is fence content,
-    # the line after it resets nothing and the list marching on past the ceiling is refused
+    # the held depth is read by the ceiling comparison alone, never by fence placement, so this text is
+    # refused as the earlier prescan without the held depth (_running_nesting_refused) refuses it: the
+    # vector pins that agreement, not the parser's reading. The prescan places the two-column fence after
+    # the held title at the top level (running depth zero), lets the column-0 run close it and so counts
+    # the list marching on past the ceiling; the parser instead reads the column-0 run as a new top-level
+    # fence that holds everything after it, and nests this text 15 levels deep
     held_fence = (held_title + "\n  ```\n```\n" + rungs(0, 14) + "- ```\n\nx\n" + rungs(14, 22),)
     check("cannot/nesting-held-fence-placed", [_outcome(text) for text in held_fence],
           ["CannotEvaluate"] * len(held_fence))
+
+    def parsed_depth(text):
+        """The most list items and quotes the parsed document nests one inside another in `text`."""
+
+        def walk(node):
+            deepest = 0
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    deepest = max(deepest, walk(child) + (1 if child.get("kind") in ("ListItem", "Quote") else 0))
+            return deepest
+
+        return walk(_input_declarations._parse(text))
+
+    # a disclosed residual, not a bound: after a held title, the prescan places a two-column fence from
+    # the margin and skips the rest as its content, while the parser opens that fence in the list item,
+    # ends it with the item at the quote line and nests the list after it 23 levels deep. Today the
+    # prescan passes the text and the brief is read; a change that closes this gap turns the check red,
+    # and the vector then moves to the refused ones
+    residual = rungs(0, 13) + "  " * 13 + "- [x]: /u 't\n  \ny\n'\n\n  ```\n> x\n" + rungs(0, 23)
+    check("structure/nesting-residual-held-title",
+          [_input_declarations._nesting_refused(residual), _outcome(residual), parsed_depth(residual)],
+          [None, (0, []), 23])
     # the held depth only adds refusals: over a fixed seeded sample of generated texts (a held definition,
     # fence lines and lists around an item fence, each part optional, with stray lines between), every
     # text the prescan without the held depth refuses (_running_nesting_refused) is refused still
@@ -6683,11 +6707,12 @@ def self_test(report_path=None):
             """_fence_opening fed the calling prescan's held depth in place of its running depth."""
             return fence_opening(line, position, markers, sys._getframe(1).f_locals["holding"], after_blank)
 
-        # with the held depth fed into fence placement again, the fence after the held title is read as one
-        # in a list item or at the top level, its column-0 run cannot be placed, fence skipping stops, the
-        # item fence's empty line then sets up a reset,
-        # the brief is read clean, and texts of the seeded sample that the running depth alone refuses
-        # pass (each is refused with fence placement reading the running depth)
+        # with the held depth fed into fence placement again, the prescan reads the fence after the held
+        # title as one in a list item or at the top level, its column-0 run cannot be placed, fence
+        # skipping stops, the item fence's empty line then sets up a reset, the brief is read clean, and
+        # texts of the seeded sample that the running depth alone refuses pass (each is refused with fence
+        # placement reading the running depth). This pins agreement with the earlier prescan's refusal,
+        # not the parser's reading, which nests the held-fence text only 15 levels deep
         check("revert/nesting-held-fences-red", *parser_flip(
             [lambda: p6_code("Input notes.\n\n" + held_fence[0]), superset_holds], [0, False],
             _fence_opening=fences_read_held))
