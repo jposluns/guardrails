@@ -530,8 +530,8 @@ authenticating that creation:
 
 | Form | Example | Git infers sync? | Provider needed for |
 |---|---|---|---|
-| `dir:<path>` or a bare path | `dir:../product-ops-store` | yes (file transport) | creating the local repository |
-| `git:<url>` or a bare git URL | `git@git.example.com:acme/ops.git` | yes | nothing; the remote must already exist |
+| `dir:<path>` or a bare path | `dir:../product-ops-store` | no; a store location, never a sync target (section 5.6) | creating the local repository |
+| `git:<url>`, `git:<absolute path>` or a bare git URL | `git@git.example.com:acme/ops.git` | yes | nothing; the remote must already exist |
 | `github:<owner/repo>` | `github:acme/product-ops` | yes, after creation | creating the remote and authenticating creation through the host API |
 | `gitlab:<owner/repo>` | `gitlab:acme/product-ops` | yes, after creation | same, for GitLab |
 
@@ -551,7 +551,9 @@ store location), `auth` (authenticate creation with the host), and `sync` (clone
   manifest's `[store] sync_target`, section 9) is synced as a git remote, so it names a filesystem
   repository only as `git:<absolute path>`; a `dir:` or bare-path form is a store location for the
   pointer and `opf migrate --store`, never a sync target, and validation refuses it as one
-  (section 11).
+  (section 11). Validation likewise refuses a relative `git:` path and a `file://` URL as a sync
+  target, and refuses as ambiguous a `git:` absolute path, or an actual remote path compared against
+  one, with leading or trailing whitespace, since whitespace is significant in a path.
 - `github` and `gitlab` plug in only for their create and auth API conveniences; their sync is
   ordinary git. Further hosts join by registering a provider, never by extending the target
   grammar.

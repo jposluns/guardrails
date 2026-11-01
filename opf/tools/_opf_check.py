@@ -1225,17 +1225,25 @@ def _canonical_remote(url):
     return (host.lower(), p)
 
 
-def _git_path_form(value):
-    """How a `git:` payload names a filesystem repository rather than a URL. A filesystem sync target is
-    accepted only as git:<absolute path> (spec 5.6), so this returns "absolute" for a POSIX-absolute path,
-    "relative" for any other path-shaped payload (no scheme and no scp-style host colon before the first
-    slash, the forms _canonical_remote cannot split into a host and a path), and None for a URL form, which
-    _canonical_remote handles unchanged."""
+def _fs_path_form(value):
+    """How a remote spelling (a `git:` payload, or an observed actual remote) names a filesystem repository
+    rather than a URL. Both C-SYNC-AGREE legs classify through this one function, so a spelling classifies
+    the same whichever leg reads it. A filesystem sync target is accepted only as git:<absolute path> (spec
+    5.6), so this returns "absolute" for a POSIX-absolute path (tested before any '://', which a directory
+    name may contain); "padded" for an absolute path with leading or trailing whitespace (whitespace is
+    significant in a path, so such a spelling is ambiguous: refused, never trimmed); "file-url" for a
+    file:// URL; "relative" for any other path-shaped payload (no scheme and no scp-style host colon before
+    the first slash, the forms _canonical_remote cannot split into a host and a path); and None for a URL
+    form, which _canonical_remote handles unchanged."""
     s = value.strip() if isinstance(value, str) else ""
-    if not s or "://" in s:
+    if not s:
         return None
     if s.startswith("/"):
-        return "absolute"
+        return "absolute" if s == value else "padded"
+    if s[:len("file://")].lower() == "file://":
+        return "file-url"
+    if "://" in s:
+        return None
     slash, colon = s.find("/"), s.find(":")
     if colon == -1 or (slash != -1 and slash < colon):
         return "relative"
@@ -1245,10 +1253,11 @@ def _git_path_form(value):
 def _local_path_canon(value):
     """The comparable local form of an absolute filesystem repository path: ("", path) with repeated
     slashes, '.' segments and a trailing slash dropped. _canonical_remote never returns an empty host, so a
-    local form cannot collide with a URL endpoint. The path is otherwise kept exactly (no '.git' fold:
-    /srv/a and /srv/a.git are different directories). A '..' segment is unresolvable (None), since folding
-    it lexically can name a different directory than the one git opens through a symlink."""
-    s = value.strip() if isinstance(value, str) else ""
+    local form cannot collide with a URL endpoint. The path is otherwise kept exactly, whitespace included
+    (no trimming, and no '.git' fold: /srv/a and /srv/a.git are different directories). A '..' segment is
+    unresolvable (None), since folding it lexically can name a different directory than the one git opens
+    through a symlink."""
+    s = value if isinstance(value, str) else ""
     if not s.startswith("/"):
         return None
     segs = [seg for seg in s.split("/") if seg not in ("", ".")]
@@ -1274,7 +1283,7 @@ def _target_remote_canon(target, local_paths=True):
             return set(), [target.value]
         return {(host, val)}, []
     if target.kind == "git":
-        if local_paths and _git_path_form(target.value) == "absolute":
+        if local_paths and _fs_path_form(target.value) == "absolute":
             lc = _local_path_canon(target.value)
             if lc is None:
                 return set(), [target.value]
@@ -5348,14 +5357,21 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.finding("C-SYNC-AGREE: [store].sync_target {!r} does not classify as a target (spec "
                         "5.5): {}".format(sync_target, exc))
         else:
-            # A filesystem sync target is accepted only as git:<absolute path> (spec 5.6). A dir:, bare-path
-            # or relative git: dedicated target (tcanon None) names nothing either leg can agree with, so
-            # BOTH legs refuse it, each naming the remedy, whatever the committed pointer and the actual
-            # remote observation hold. Only a git:<absolute path> target compares the committed pointer and
-            # the actual remote by their local form; a URL target compares exactly as a URL.
-            tform = _git_path_form(tgt.value) if tgt.kind == "git" else None
-            tform_word = {"dir": "dir:", "path": "bare-path"}.get(tgt.kind, "relative git:")
-            if tform == "relative":
+            # A filesystem sync target is accepted only as git:<absolute path> (spec 5.6). A dir:, bare-path,
+            # relative git:, file:// URL or whitespace-padded git: path dedicated target (tcanon None) names
+            # nothing either leg can agree with, so BOTH legs refuse it, each naming the remedy, whatever the
+            # committed pointer and the actual remote observation hold. Only a git:<absolute path> target
+            # compares the committed pointer and the actual remote by their local form; a URL target
+            # compares exactly as a URL. classify_target trims the whole value, which would drop whitespace
+            # ending a git: path, so the payload is classified from the untrimmed value.
+            tpayload = tgt.value
+            if tgt.kind == "git" and sync_target.lstrip().startswith("git:"):
+                tpayload = sync_target.lstrip()[len("git:"):]
+            tform = _fs_path_form(tpayload) if tgt.kind == "git" else None
+            tform_word = {"dir": "dir:", "path": "bare-path"}.get(tgt.kind) or {
+                "file-url": "file:// URL",
+                "padded": "git: path with leading or trailing whitespace, an ambiguous"}.get(tform, "relative git:")
+            if tform in ("relative", "file-url", "padded"):
                 tcanon, tunresolved = None, []
             else:
                 tcanon, tunresolved = _target_remote_canon(tgt)   # canonical (host, path) forms, None (local)
@@ -5391,7 +5407,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                             "target; a filesystem sync target is accepted only as git:<absolute path> (use "
                             "git:<absolute path>; spec 5.5/5.6)".format(
                                 sync_target, tform_word, repr(actual) if actual_present
-                                else ("none" if actual == "" else "not observed")))
+                                else ("none" if isinstance(actual, str) else actual_reason)))
             elif actual is None:
                 rep.cant("C-SYNC-AGREE: {}; the sync-target / remote agreement (spec 5.6) is required "
                          "for a dedicated sync target and is not evaluable by a parse-only engine".format(
@@ -5399,11 +5415,18 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             elif not actual_present:
                 rep.finding("C-SYNC-AGREE: the manifest declares a dedicated sync_target {!r} but the "
                             "store repository has no actual remote (spec 5.6)".format(sync_target))
+            elif tform == "absolute" and _fs_path_form(actual) == "padded":
+                # whitespace is significant in a path, so an actual remote path with leading or trailing
+                # whitespace is ambiguous: refused, never trimmed into agreement with the target
+                rep.finding("C-SYNC-AGREE: the store repository's actual remote {!r} is a filesystem path with "
+                            "leading or trailing whitespace, which is ambiguous and cannot agree with the "
+                            "manifest sync_target {!r} (spec 5.6)".format(actual, sync_target))
             else:
                 acanon = _canonical_remote(actual)
-                if acanon is None and tform == "absolute":
+                if acanon is None and tform == "absolute" and _fs_path_form(actual) == "absolute":
                     # a git:<absolute path> target is reached through a local-path remote: compare that
-                    # path's local form; a URL target never takes this branch, so it compares as before
+                    # path's local form, classified exactly as the target was; a URL target never takes this
+                    # branch, so it compares as before, and a file:// remote stays the disclosed residual
                     acanon = _local_path_canon(actual)
                 if acanon is None:
                     # a form the equivalence cannot canonicalize is disclosed, never a silent mismatch (F8)
@@ -12560,10 +12583,11 @@ def self_test():
                                         for f in _f6cr.findings))
 
         # Fable F2: a dedicated LOCAL sync_target (dir:/path -> tcanon is None) whose committed pointer names
-        # a canonicalizable REMOTE is a C-SYNC-AGREE finding (leg 2), symmetric with the actual-remote leg's
-        # local-target-with-a-remote finding. Pre-fix leg 2 short-circuited on `tcanon and pcanon` (tcanon
-        # None) and passed the remote pointer silently. Hand-set the remote Target, since resolve_store
-        # rejects a remote committed pointer before validate_store sees it.
+        # a canonicalizable REMOTE is still a C-SYNC-AGREE finding (leg 2): the dir: target is refused on
+        # that leg whatever the pointer holds, so a remote pointer is never passed silently. Pre-fix leg 2
+        # short-circuited on `tcanon and pcanon` (tcanon None) and passed the remote pointer silently.
+        # Hand-set the remote Target, since resolve_store rejects a remote committed pointer before
+        # validate_store sees it.
         _lt = clean_machine()
         _lt["manifest.toml"] = base_manifest()
         _lt["manifest.toml"]["store"] = {"sync_target": "dir:/some/where"}
@@ -12572,7 +12596,7 @@ def self_test():
         _ltr = validate_store(_ltres, observations={"tracked": "tracked", "actual_remote": "",
                                                     "prior": clean_prior()["prior"]})
         check("sync-local-target-remote-pointer-invalid", _ltr is not None and _ltr.status == INVALID)
-        check("sync-local-target-remote-pointer-named",
+        check("sync-dir-target-refused-despite-remote-pointer",
               _ltr is not None and any("is a dir: filesystem target" in f
                                        and "no committed pointer can agree" in f for f in _ltr.findings))
 
@@ -12652,6 +12676,52 @@ def self_test():
             _up = _sync_case(_tg, "git@example.invalid:org/store.git", pointer="git:/srv/opf-store.git")
             check("sync-{}-target-local-pointer-cant".format(_tag),
                   _up is not None and _up.status == CANNOT_EVALUATE and not _sync_findings(_up))
+        # A file:// URL names a filesystem repository outside the git:<absolute path> form, so it is refused
+        # on both legs with the remedy, spelled bare or under git: (it used to be cannot-evaluate).
+        for _tag, _fu in (("bare", "file:///srv/opf-store.git"), ("git", "git:file:///srv/opf-store.git"),
+                          ("upper", "FILE:///srv/opf-store.git")):
+            _fr = _sync_case(_fu, "/srv/opf-store.git")
+            check("sync-file-url-target-refused-{}".format(_tag),
+                  _fr is not None and _fr.status == INVALID
+                  and sum(1 for f in _sync_findings(_fr)
+                          if "is a file:// URL filesystem target" in f and _remedy in f) == 2)
+        # Whitespace is significant in a path: a git: path or an actual remote path with leading or trailing
+        # whitespace is refused as ambiguous, never trimmed into agreement with the unpadded spelling.
+        _pt = _sync_case("git:/srv/opf-store ", "/srv/opf-store")
+        check("sync-git-abs-path-padded-target-refused",
+              _pt is not None and _pt.status == INVALID
+              and sum(1 for f in _sync_findings(_pt)
+                      if "leading or trailing whitespace, an ambiguous filesystem target" in f
+                      and _remedy in f) == 2)
+        _pl = _sync_case("git: /srv/opf-store", "/srv/opf-store")
+        check("sync-git-abs-path-leading-space-target-refused",
+              _pl is not None and _pl.status == INVALID
+              and any("leading or trailing whitespace" in f for f in _sync_findings(_pl)))
+        for _tag, _pr in (("trailing", "/srv/opf-store "), ("leading", " /srv/opf-store")):
+            _pa = _sync_case("git:/srv/opf-store", _pr)
+            check("sync-git-abs-path-padded-remote-refused-{}".format(_tag),
+                  _pa is not None and _pa.status == INVALID
+                  and any("actual remote {!r} is a filesystem path with leading or trailing whitespace".format(_pr)
+                          in f for f in _sync_findings(_pa)))
+        # An absolute path containing '://' classifies as an absolute path on BOTH legs, so the target and
+        # the actual remote canonicalize alike whichever of them spells the repeated slash.
+        for _tag, _tg, _ar in (("in-target", "git:/srv/a://repo", "/srv/a:/repo"),
+                               ("in-remote", "git:/srv/a:/repo", "/srv/a://repo")):
+            _sv = _sync_case(_tg, _ar)
+            check("sync-git-abs-path-scheme-substring-agrees-{}".format(_tag), _sv is not None
+                  and _sv.status == VALID and not _sync_findings(_sv))
+        _sx = _sync_case("git:/srv/a://repo", "/srv/a:/other")
+        check("sync-git-abs-path-scheme-substring-other-remote-invalid",
+              _sx is not None and _sx.status == INVALID
+              and any("does not match the store repository's actual remote" in f for f in _sync_findings(_sx)))
+        # The actual-remote leg labels a supplied but malformed observation as malformed, not as unobserved.
+        _mr = _sync_case("dir:/srv/opf-store", 5)
+        check("sync-dir-target-malformed-remote-labelled",
+              any("actual remote (the `actual_remote` observation was supplied but malformed)" in f
+                  for f in _sync_findings(_mr)))
+        _ur = _sync_case("dir:/srv/opf-store", None)
+        check("sync-dir-target-unobserved-remote-labelled",
+              any("actual remote (no `actual_remote` observation was supplied)" in f for f in _sync_findings(_ur)))
 
         # F-5: _canonical_remote exotic edges.
         # (a) an scp bracketed-IPv6 host whose PATH itself contains '@' must not mis-split on a colon
