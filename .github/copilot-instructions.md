@@ -1294,7 +1294,10 @@ what will actually happen.
 
 External input is validated for type, range, and format at the point where it enters, preferring an
 allow-list over a deny-list. The injection classes, whether SQL, operating-system command, markup, or
-template, are prevented by construction rather than filtered after the fact.
+template, are prevented by construction rather than filtered after the fact. When an identifier
+comparison decides a security verdict, use the identifier's explicitly defined comparison semantics,
+never the ambient locale. For identifiers defined to compare exactly or ASCII-case-insensitively, use
+exact comparison or an explicit fold of A to Z onto a to z respectively, never a Unicode-aware fold.
 
 ## Trust between agents is earned, not inherited
 
