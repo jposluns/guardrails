@@ -376,6 +376,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py
 
+      - name: OPF enforcement-pack residual register gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_residuals.py --self-test
+
+      - name: OPF enforcement-pack residual register gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_residuals.py
+
       - name: OPF adoption apply-shell self-test (clean-start adoption U1)
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
