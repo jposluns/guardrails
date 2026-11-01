@@ -17401,6 +17401,110 @@ def _gate_recovered_sink(command, doubt=None):
     return _verification_sink(_gate_recovered_segments(command, doubt))
 
 
+# nocncl note (gate_weakening): the reserved words a compound puts before a stage's own command word, passed over to
+# reach it; the separators a 'set' that turns pipefail on may end with, and the only ones that may stand before it,
+# for that set to count as run in this shell before a later pipeline.
+_GATE_GIT_PIPE_LEADERS = frozenset(("!", "{", "if", "then", "elif", "else", "while", "until", "do"))
+_GATE_PIPEFAIL_SET_AFTER = frozenset(("", ";", "&&"))
+_GATE_PIPEFAIL_SET_BEFORE = frozenset(("", ";"))
+
+
+def _gate_set_pipefail(argv):
+    """What the plain set command argv does to pipefail: True (on), False (off) or None (neither). Each option
+    cluster is read left to right, and an 'o' in it takes the next word as an option name, so -o pipefail, -eo
+    pipefail and -euxo pipefail turn it on and +o pipefail turns it off; the last one read wins. The reading stops
+    at '-', '--' or the first word that is not an option cluster."""
+    state = None
+    i, n = 1, len(argv)
+    while i < n:
+        word = argv[i]
+        if word in ("-", "--") or len(word) < 2 or word[0] not in "-+":
+            break
+        for ch in word[1:]:
+            if ch == "o":
+                i += 1
+                if i < n and argv[i] == "pipefail":
+                    state = word[0] == "-"
+        i += 1
+    return state
+
+
+def _gate_git_pipe_stage(argv):
+    """The subcommand of the repository-changing git command that the pipeline stage argv runs, or None. The
+    stage's command word is found past a compound's leading reserved words (_GATE_GIT_PIPE_LEADERS) and the
+    wrappers _orch_effective_word_index peels; the subcommand past git's global options (_git_sub_and_args), and
+    it counts only where the shared classifier reads it as mutating (_git_is_mutating). A help invocation
+    (_has_info_flag) and a --dry-run on push or commit change nothing and are passed over; a --dry-run counts only
+    where the word before it is not an option, since that word may take it as its value (git commit -m
+    --dry-run commits)."""
+    start = 0
+    while start < len(argv) and argv[start] in _GATE_GIT_PIPE_LEADERS:
+        start += 1
+    words = argv[start:]
+    idx = _orch_effective_word_index(words)
+    if idx is None or words[idx].lstrip("\\").rsplit("/", 1)[-1] != "git":
+        return None
+    tokens = words[idx:]
+    sub, args = _git_sub_and_args(tokens)
+    if sub is None or not _git_is_mutating(sub, args) or _has_info_flag(tokens):
+        return None
+    if sub in ("push", "commit"):
+        pre, _post, _had = _split_pre_post(args)
+        if any(word == "--dry-run" and (j == 0 or not pre[j - 1].startswith("-")) for j, word in enumerate(pre)):
+            return None
+    return sub
+
+
+def _gate_git_pipe_note(readings):
+    """The nocncl note for a repository-changing git command that stands before a pipe ('|' or '|&') with no
+    'set -o pipefail' credited before it in the same command, or None: the pipeline's exit status is then that of
+    its last stage, so a git command that fails partway, after rewriting files too, reads as success. It never
+    denies. Each reading of the command (readings, as gate_weakening lexes them) is read on its own, and the
+    first such stage in any of them gives the note.
+    pipefail is credited only from a segment whose words are a plain 'set' that turns it on
+    (_gate_set_pipefail), ended by ';', a newline or '&&', with no separator but ';' or a newline between it and
+    the command before it, in a reading with no '(' or ')' grouping or substitution; a later set that turns it off,
+    wherever it stands, takes the credit away. Any other spelling earns no credit, so the note over-fires there,
+    the safe direction: pipefail set by an earlier call, the profile, SHELLOPTS or 'bash -o pipefail', a set
+    inside a group, a subshell, a compound or behind '||', a pipeline whose status a later PIPESTATUS read
+    checks, and a stage the classifier reads as mutating though it changes nothing here (git rebase
+    --show-current-patch, a bare git checkout). Not read: git text inside an sh -c, bash -c or eval word, git
+    behind a wrapper _orch_effective_word_index does not peel (sudo, timeout, xargs), an alias or shell function
+    that renames git, a script the command runs, and a failure hidden with no pipe (git merge x || true)."""
+    for reading in readings:
+        grouped = any(seg.sep_after in ("(", ")") for seg in reading)
+        pipefail = False
+        joins = {""}  # the separators between the last segment with words and the one read next
+        for index, seg in enumerate(reading):
+            argv = seg.argv
+            if not argv:
+                joins.add(seg.sep_after)
+                continue
+            if argv[0] == "set":
+                effect = _gate_set_pipefail(argv)
+                if effect is False:
+                    pipefail = False
+                elif (effect and not grouped and joins <= _GATE_PIPEFAIL_SET_BEFORE
+                        and seg.sep_after in _GATE_PIPEFAIL_SET_AFTER):
+                    pipefail = True
+            elif seg.sep_after in ("|", "|&") and not pipefail:
+                sub = _gate_git_pipe_stage(argv)
+                if sub is not None:
+                    nxt = next((later.argv for later in reading[index + 1:] if later.argv), [])
+                    sink = _orch_effective_sink_word(nxt) or "the next stage"
+                    return (
+                        "AIQT guardrail (rule nocncl, no-concealed-failure): this command pipes a repository-"
+                        "changing 'git {0}' into '{1}', and no 'set -o pipefail' earlier in this same command covers "
+                        "that pipeline, so the pipeline's exit status is that of its last stage, not git's. A 'git "
+                        "{0}' that fails partway, possibly after rewriting files, still reads as success, under "
+                        "'set -e' too. Put 'set -o pipefail;' at the start of the command, or run 'git {0}' alone "
+                        "with its output redirected to a file at an absolute path, take its own exit status, and "
+                        "read the file in a separate step; then check 'git status'. Allowed; this is a note."
+                        .format(sub, sink))
+            joins = {seg.sep_after}
+    return None
+
+
 def gate_weakening(data):
     """gatdis (integ/gate-discipline), PreToolUse/Bash. DENY a git segment that bypasses its
     verification hooks: a --no-verify spelling (exact or conservative long prefix) on a subcommand
@@ -17657,6 +17761,12 @@ def gate_weakening(data):
     the closed literal grammar (_gate_closed_grammar_scan) denies an expansion in a git command's global options or
     subcommand word, quoted or not ('git -C "$D" log'), as it does one anywhere else on a roster-verb git segment
     outside its one accepted commit-message here-document form (_gate_heredoc_message).
+    A REPOSITORY-CHANGING GIT COMMAND PIPED ON (rule nocncl) ALLOWS-WITH-NOTE, never a deny: on a parsed command
+    whose denies above all pass, a git stage before a '|' or '|&' whose subcommand the shared classifier reads as
+    mutating, with no 'set -o pipefail' credited before it in the same command (_gate_git_pipe_note), adds a note
+    saying the pipeline reports its last stage's status, not git's, and naming the fix; it joins any gatdis note in
+    one message. Its credit rule, its safe-direction over-fires and its residuals are stated there; it is not
+    given on a command the lexer cannot parse, nor where main's decision as a floor decides with no gatdis note.
     Disclosed residuals: R1 a check inside an sh -c/bash -c, eval or
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
@@ -17957,14 +18067,18 @@ def gate_weakening(data):
     runtime_hit = _gate_runtime_bypass(command)
     if runtime_hit is not None:
         return _gate_runtime_deny(runtime_hit)
-    if pending_note is not None:
-        return _allow_note(pending_note)
-    flow_note = _gate_flow_note(records, command)
-    if flow_note is not None:
-        return _allow_note(flow_note)
+    # A repository-changing git command piped on with no pipefail credited before it (_gate_git_pipe_note) adds its
+    # note to the gatdis note this command earns, in one message; it never denies. Where the floor below decides,
+    # its decision stands as before and this note is not given.
+    git_note = _gate_git_pipe_note(readings)
+    note = pending_note if pending_note is not None else _gate_flow_note(records, command)
+    if note is not None:
+        return _allow_note(note if git_note is None else note + " " + git_note)
     if floor:
         # its note, or the allow, in place of this allow
         return _gate_weakening_fallback(command, heredoc_message=True)
+    if git_note is not None:
+        return _allow_note(git_note)
     return _allow()
 
 

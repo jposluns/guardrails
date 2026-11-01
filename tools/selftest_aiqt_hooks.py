@@ -17980,6 +17980,52 @@ def _main_isolated(monitor):
         gexpect("(gw-ab) a git_discard verb is out of gate_weakening scope (disjoint controls)",
                 "git reset --hard", "allow")
 
+        # nocncl note: a repository-changing git command before a pipe, with no 'set -o pipefail' credited before it
+        # in the same command, allows with a note naming nocncl and the git subcommand; a read-only, help, dry-run or
+        # final-stage git, and a pipeline a credited pipefail covers, stay silent. A note row's last field is the
+        # subcommand the note must name; None on a row that is not a note.
+        for _gp_label, _gp_cmd, _gp_want, _gp_sub in (
+                ("gp-merge", "git merge --ff-only origin/main | tail -1", "allow-note", "merge"),
+                ("gp-pull-C", "git -C /abs/r pull | tee /abs/log", "allow-note", "pull"),
+                ("gp-set-off", "set -o pipefail; set +o pipefail; git reset --hard x | cat", "allow-note", "reset"),
+                ("gp-subshell", "(set -o pipefail); git merge x | tail -1", "allow-note", "merge"),
+                ("gp-or-set", "true || set -o pipefail; git merge x | tail -1", "allow-note", "merge"),
+                ("gp-and-set", "cd /abs/r && set -o pipefail; git merge x | tail -1", "allow-note", "merge"),
+                ("gp-piped-set", "set -o pipefail | cat; git merge x | tail -1", "allow-note", "merge"),
+                ("gp-bg-set", "set -o pipefail & git merge x | tail -1", "allow-note", "merge"),
+                ("gp-pipe-amp", "git merge x |& tail -1", "allow-note", "merge"),
+                ("gp-compound", "if true; then git merge x | cat; fi", "allow-note", "merge"),
+                ("gp-earlier-call", "git push 2>&1 | tee /abs/log", "allow-note", "push"),
+                ("gp-pipestatus", 'git push | tee log; exit "${PIPESTATUS[0]}"', "allow-note", "push"),
+                ("gp-show-patch", "git rebase --show-current-patch | less", "allow-note", "rebase"),
+                ("gp-checkout", "git checkout | cat", "allow-note", "checkout"),
+                ("gp-dry-run-value", "git commit -m --dry-run | cat", "allow-note", "commit"),
+                ("gp-gatdis-joined", "pytest || true; git merge x | cat", "allow-note", "merge"),
+                ("gp-log", "git log | head", "allow", None),
+                ("gp-status", "git status | wc -l", "allow", None),
+                ("gp-stash-list", "git stash list | grep x", "allow", None),
+                ("gp-branch-list", "git branch | grep y", "allow", None),
+                ("gp-help", "git merge --help | head", "allow", None),
+                ("gp-dry-run", "git push --dry-run | tail", "allow", None),
+                ("gp-final-stage", "printf m | git commit -F -", "allow", None),
+                ("gp-echo-git", "echo git push | head", "allow", None),
+                ("gp-pipefail", "set -o pipefail; git push 2>&1 | tee /abs/log", "allow", None),
+                ("gp-pipefail-cluster", "set -euo pipefail; git merge x | tail -1", "allow", None),
+                ("gp-pipefail-and", "set -o pipefail && git merge x | tail -1", "allow", None),
+                ("gp-grep-quoted", "grep -r 'git push' . | head", "deny", None),
+                ("gp-no-verify", "git commit --no-verify -m x | tail -1", "deny", None)):
+            gexpect("({}) {!r}".format(_gp_label, _gp_cmd), _gp_cmd, _gp_want)
+            _gp_msg = ((gwg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                             "tool_input": {"command": _gp_cmd}})[1] or {}).get("systemMessage") or "")
+            if (_gp_sub is not None) != ("rule nocncl" in _gp_msg):
+                failures.append("({}-text) {!r}: the nocncl note is {}".format(
+                    _gp_label, _gp_cmd, "missing" if _gp_sub is not None else "present"))
+            elif _gp_sub is not None and "'git {}'".format(_gp_sub) not in _gp_msg:
+                failures.append("({}-text) {!r}: the note does not name 'git {}'".format(_gp_label, _gp_cmd, _gp_sub))
+        # The gatdis note joined with it keeps its own text; a --no-verify deny keeps its message.
+        gdeny_names("(gp-no-verify-msg) a piped --no-verify commit keeps the gatdis bypass deny",
+                    "git commit --no-verify -m x | tail -1", "a deliberate bypass of the verification hooks")
+
         # Parse-error posture (unbalanced quote): fail-safe, never a silent allow.
         gexpect("(gw-ac) unparseable apparent --no-verify denies",
                 'git commit --no-verify -m "unbalanced', "deny")
