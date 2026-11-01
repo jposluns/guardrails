@@ -2344,6 +2344,66 @@ def _test_cannot_evaluate_paths(failures, tmp):
                             "the case; got made={!r} recorded={!r}".format(name, made, probe))
 
 
+# Breadth-then-push rows with redirections: (label, command, the git calls real bash makes). The shared lexer
+# drops a redirection from a segment's words, so a redirection after the stage, before the subcommand or beside
+# a -C target leaves the breadth stage and the push in view, and each denies as its redirection-free control
+# does. The lexer refuses a here-string, so a command holding one takes the raw fallback, which reads git, the
+# stage and its selector in text order whatever redirections stand between them, and denies too. Each command
+# runs under bash -c with a stub git function that prints its arguments to descriptor 3, which the command's
+# own redirections leave open, so each row also pins what bash runs.
+_EB_REDIRECT_ROWS = (
+    ("(eb-r1) add -A and push, the control", "git add -A -- . && git push", ("add -A -- .", "push")),
+    ("(eb-r2) add -A silenced to /dev/null", "git add -A -- . > /dev/null 2>&1 && git push",
+     ("add -A -- .", "push")),
+    ("(eb-r3) add -A with 2>&1 alone", "git add -A -- . 2>&1 && git push", ("add -A -- .", "push")),
+    ("(eb-r4) add -A with a redirection before the subcommand", "git >/dev/null add -A && git push",
+     ("add -A", "push")),
+    ("(eb-r5) add -A with -C and a redirection",
+     "git -C /abs/repo add -A -- . > /dev/null 2>&1 && git -C /abs/repo push",
+     ("-C /abs/repo add -A -- .", "-C /abs/repo push")),
+    ("(eb-r6) add -A with a here-string", "git add -A -- . <<< x && git push", ("add -A -- .", "push")),
+    ("(eb-r7) commit -a and push, the control", "git commit -a -m x && git push", ("commit -a -m x", "push")),
+    ("(eb-r8) commit -a silenced to /dev/null", "git commit -a -m x > /dev/null 2>&1 && git push",
+     ("commit -a -m x", "push")),
+    ("(eb-r9) commit -a with 2>&1 alone", "git commit -a -m x 2>&1 && git push", ("commit -a -m x", "push")),
+    ("(eb-r10) commit -a with a redirection before the subcommand", "git >/dev/null commit -a -m x && git push",
+     ("commit -a -m x", "push")),
+    ("(eb-r11) commit -a with -C and a redirection",
+     "git -C /abs/repo commit -a -m x > /dev/null 2>&1 && git -C /abs/repo push",
+     ("-C /abs/repo commit -a -m x", "-C /abs/repo push")),
+    ("(eb-r12) commit -a with a here-string", "git commit -a -m x <<< x && git push", ("commit -a -m x", "push")))
+
+
+def _test_expbnd_redirect_rows(failures):
+    """Each _EB_REDIRECT_ROWS command must deny, and real bash must make exactly its git calls. Each must also
+    be red with the breadth reading removed (_git_is_breadth and the raw fallback's _expbnd_fallback_kind
+    patched to find nothing), so the row pins the breadth-then-push decision."""
+    handler = aiqt_hooks.git_explicit_binding
+    if shutil.which("bash") is None:
+        failures.append("(eb-r-oracle) the real-bash oracle needs bash on PATH")
+        return
+    for label, command, calls in _EB_REDIRECT_ROWS:
+        got = _decision(handler, command)
+        run = subprocess.run(["bash", "-c", "git() { printf '%s\\n' \"$*\" >&3; }; { " + command + "; } 3>&1"],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             timeout=30, check=False)
+        if got != "deny" or run.returncode != 0 or tuple(run.stdout.splitlines()) != calls:
+            failures.append("{}: expected deny and git calls {!r} under real bash, got {} and exit {}, stdout {!r}, "
+                            "stderr {!r}".format(label, calls, got, run.returncode, run.stdout[:200],
+                                                 run.stderr[:200]))
+    saved = (aiqt_hooks._git_is_breadth, aiqt_hooks._expbnd_fallback_kind)
+    aiqt_hooks._git_is_breadth = lambda sub, args: False
+    aiqt_hooks._expbnd_fallback_kind = lambda command: None
+    try:
+        removed = [(label, _decision(handler, command)) for label, command, _calls in _EB_REDIRECT_ROWS]
+    finally:
+        aiqt_hooks._git_is_breadth, aiqt_hooks._expbnd_fallback_kind = saved
+    for label, got in removed:
+        if got != "allow":
+            failures.append("{}: with the breadth reading removed this deny row must go red (allow), got {}"
+                            .format(label, got))
+
+
 def _test_git_stash_ref(failures):
     """Direct, warn-distinct checks; no submitted Bash command is executed."""
     handler = aiqt_hooks.git_stash_ref
@@ -27150,6 +27210,7 @@ def _main_isolated(monitor):
                             "HANDLER_EVENT {!r}".format(aiqt_hooks.FLOOR_FAIL_OPEN_MODES, _pf_want))
 
         _test_git_stash_ref(failures)
+        _test_expbnd_redirect_rows(failures)
         _test_pgrep_self_match(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
