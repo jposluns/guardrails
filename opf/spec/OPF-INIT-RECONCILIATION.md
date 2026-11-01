@@ -23,23 +23,26 @@ code span onto the next line when that line is indented, prose, or an ordered it
 `1. ` with text (the one item a reader starts a list on below a paragraph), and is literal text
 when the next line ends the paragraph. Heading, ordered item, continuation and prose text must open
 with a letter, a digit that starts no list marker, `(`, a quote, a backtick or an option name; must
-not begin with an entry or field name, any whitespace, and a colon, either once emphasis, code and
+not begin with an entry or field name, spaces or tabs, and a colon, either once emphasis, code and
 escape marks are removed or as a reader renders it (a character reference decoded as the vendored
 marko decodes it: a decimal number of up to seven digits, a hexadecimal one of up to six or a name
 of up to 32 characters, ended by `;`, read by Python's `html.unescape`; an escaped character and a
 closed code span's content kept literal); and must not open with letters that could begin such a
-name (a prefix of one, or a whole one and whitespace) followed, once rendered, by a character a
-reader shows with no glyph: a format character (Unicode category Cf) or a default-ignorable code
-point (the Unicode `Default_Ignorable_Code_Point` property, such as U+034F or U+3164). Whitespace
-here is any character Python's `str.isspace` accepts: the tab, line feed, form feed, carriage return
-and space that HTML shows as one space (so `Owner&#10;:` reads as `Owner :`), and the no-break and
-other Unicode spaces, which HTML does not collapse but a reader shows blank. A vertical tab is not
-HTML whitespace; its reference decodes to nothing and a literal one is a control character, so it
-is refused either way. A character reference is so refused only where its decoded character
-completes such a name: `S&amp;P` and `Split&nbsp;decisions` are read, and two spellings a reader
-renders alike are judged alike. A name spelled with a look-alike a reader does show (a visible
-combining mark such as U+0301, a full-width colon) is read as that text, not as the name. That
-text, and a field line, must hold no raw HTML outside a code span; a field value
+name (a prefix of one, a whole one and spaces or tabs, or nothing) followed, once rendered, by a
+character outside the closed set a name may hold. That set is the tab and printable ASCII (U+0020
+to U+007E): the names use letters, the space, `-` and `/`, and the text the check reads there adds
+digits and punctuation such as `&`, `#` and `;`. Any other character there is outside the accepted
+set and is refused, whether a reader shows it blank, not at all or as a visible glyph: a format or
+default-ignorable character, a no-break or other Unicode space (U+1680 OGHAM SPACE MARK among
+them, although many fonts draw it as a stroke), a line feed or carriage return a reference decodes
+to (so `Owner&#10;:`, which HTML shows as `Owner :`), a blank glyph such as U+2800, and a letter
+such as U+00E9. A vertical tab's reference decodes to nothing and a literal one is a control
+character, so it is refused either way. The one exception is U+0301 COMBINING ACUTE ACCENT, which a
+reader draws as an accent over the letter before it, so `Own&#769;er:` is read as that different
+text. A character reference is so refused only where its decoded character completes such a name
+or falls outside the set there: `S&amp;P` is read, `Split&nbsp;decisions` is refused, and two
+spellings a reader renders alike are judged alike. That text, and a field line, must hold no raw
+HTML outside a code span; a field value
 is checked for nothing else, apart from the refusals below that apply to every line. Every other
 line cannot evaluate: a blockquote, a bullet item other than a field line, an ordered item marked
 other than `<digits>. `, a table row, a setext underline or thematic break, an HTML line, an
@@ -51,15 +54,17 @@ it), a code span carried into a line that does not close it, two backtick runs o
 nothing on it closes above a line that continues the paragraph (refused although a reader may
 render them, as the check carries one run), a backtick run left open above an ordered item that
 continues the paragraph (also inside a list, where a reader may start a sibling item instead), an
-entry heading whose name holds a character reference `html.unescape` decodes or a character a reader
-shows with no glyph, and a carriage return or other control character. Two refusals reach text a
-reader shows differently: an entry heading name holding a reference that a backslash escapes or a
-code span holds (`coordi\&#110;ation`, which the vendored marko shows literally) cannot evaluate
-rather than reading as an unknown obligation, and a name matched without regard to case also
-matches U+017F (long s) for `s` and U+0130 and U+0131 (dotted capital and dotless i) for `i`, so
-a Split name spelled with a long s is refused. An entry ends at the next heading that is not an
-entry heading; prose and ordered items end no entry. An Owner, Ownership, Disposition or
-Successor field line after that end and before the next entry, or before the first entry, belongs
+entry heading whose name holds a character reference `html.unescape` decodes or a character outside
+the closed set above, and a carriage return or other control character. Besides the `<!--`,
+backtick and list cases above, these refusals also reach text a reader shows differently: a
+character outside the closed set where a name could be, when a reader shows it as a visible glyph
+(U+1680, U+00E9, a full-width colon); an entry heading name holding such a character (which would
+otherwise read as an unknown obligation) or a reference that a backslash escapes or a code span
+holds (`coordi\&#110;ation`, which the vendored marko shows literally); and a name matched without
+regard to case, which also matches U+017F (long s) for `s` and U+0130 and U+0131 (dotted capital
+and dotless i) for `i`, so a Split name spelled with a long s is refused. An entry ends at the next
+heading that is not an entry heading; prose and ordered items end no entry. An Owner, Ownership,
+Disposition or Successor field line after that end and before the next entry, or before the first entry, belongs
 to no entry and is refused. Lines and `TODO.md`
 table rows inside a fenced code block, or inside an HTML comment that opens its line, are not read;
 such a comment ends on the first line holding `-->`, so `<!-->` and `<!--->` end it on their own
