@@ -87,12 +87,20 @@
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
 #                        it. When a queued fold lands, record its measured cost here against the 559-unit
 #                        estimate.
+#                        Raised 134991 -> 135232 on 2026-11-01 when decision-classification-before-enacting
+#                        gained its sentence that an ASK that goes ahead cites each ruling the search found
+#                        for that subject and why it does not settle the question, and that the search reads
+#                        the decision record itself, not a list derived from it (deccls.4): measured PACK
+#                        134422 -> 134663; rule files 117926 -> 118167 (+241 units); managed block 360 and
+#                        file headers 16136 unchanged. Measured against the 559-unit estimate of 2026-10-29
+#                        for four queued seed folds, this fold cost 241 units, and the ratchet rises by that
+#                        measured cost.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 134991
+ratchet = 135232
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

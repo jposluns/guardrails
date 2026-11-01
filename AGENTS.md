@@ -1111,7 +1111,9 @@ Classify a decision before enacting it: is it yours to make (ACT), the maintaine
 procedure standing in for them, search the decision record for that subject: a maintainer ruling answers it
 and outranks any predicted one, but counts only when recorded in an artefact the maintainer controls and the
 assistant cannot write, and where such rulings conflict the later recorded one governs or, if their order is
-unclear, the ASK goes ahead.
+unclear, the ASK goes ahead. An ASK that goes ahead cites each ruling the search found for that subject and
+why it does not settle the question; the search reads the decision record itself, by the item's id and key
+terms, not a backlog or question list derived from it.
 
 ## Repeated failure triggers premise review
 
