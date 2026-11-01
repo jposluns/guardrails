@@ -8,32 +8,47 @@ once, every entry carries an Owner and an Ownership, and an entry whose Disposit
 its Successor a backlog id from the closed list in TODO.md at the repository root and an Owner other than
 "none yet". It reads the crosswalk through a closed list of line shapes, each starting at the line start:
 a blank line, an entry heading ("## Obligation: " or "### Split: " and a name), any other ATX heading (one to
-six "#" and a space, a tab or the line end), a field line ("- Name: value"), an ordered item ("1. text"),
-a line indented exactly to the text of the item line just above it, continuing that item, and prose. The
-text of a heading, item, continuation or prose line must open with a letter, a digit that starts no list
-marker, "(", a quote, a backtick or an option name such as --self-test, must hold no raw HTML outside a
-code span, and must not begin with "Obligation", "Split", "Owner", "Ownership", "Disposition" or "Successor"
-and a colon, in any case, once emphasis, code and escape marks are removed. Any other line cannot evaluate
-(exit 2): a blockquote, a list item marked other than "- ", a table row, a setext underline or thematic
-break, an HTML line, an indented line that continues no item, a fence or comment opened by an indented
-line, text after the "-->" closing a comment that opens its line, and a carriage return or other control
-character. An entry ends at the next heading that is not an entry heading (a level 1 or 2 heading also
-ends the obligation a split sits under); prose and ordered items end no entry. An Owner, Ownership,
-Disposition or Successor field line after that end and before the next entry, or before the first entry,
-belongs to no entry and is refused. Lines inside a fenced code block, or inside an HTML comment that opens
-its line, are not read, and the same holds for TODO.md table rows; a "<!--" later in a line removes only the
-rest of that line up to its "-->" and hides no later line. A field's value is read from its first line
-only. It checks STRUCTURE only: it never reads a cited symbol, so a green run says nothing about whether any
-obligation is implemented or whether a named successor accepted the work.
+six "#" and a space, a tab or the line end), a field line ("- Name: value"), an ordered item ("<digits>.
+text"), a line indented with spaces exactly to the text of the item line above it or of the continuation
+line above it, and prose. Inline text is read as CommonMark 0.31.2 reads it (the vendored marko's version):
+a backslash escapes ASCII punctuation, a code span closes only on a backtick run of exactly its opening
+length, and an inline comment is "<!-->", "<!--->" or "<!--" through the next "-->" on its line. A
+backtick run that nothing on its line closes carries a code span onto the next line when that line continues
+the paragraph (an indented line or prose), and is literal text when the next line ends the paragraph. The
+text of a heading, ordered item, continuation or prose line must open with a letter, a digit that starts no
+list marker, "(", a quote, a backtick or an option name such as --self-test; it must not begin with
+"Obligation", "Split", "Owner", "Ownership", "Disposition" or "Successor" and a colon, in any case, once
+emphasis, code and escape marks are removed, nor open with letters that could begin such a name (a prefix of
+one, or a whole one and spaces or tabs) followed by a character reference ("&...;") or a format character
+(Unicode Cf, such as U+200B). That line, and a field line, must hold no raw HTML outside a code span; a
+field value is checked for nothing else, apart from the refusals below that apply to every line. Any other
+line cannot evaluate (exit 2): a blockquote, a bullet item other than a field line, an ordered item marked
+other than "<digits>. ", a table row, a setext
+underline or thematic break, an HTML line, an indented line that continues no item, a fence or comment
+opened by a line indented with spaces or tabs at any width (a backtick run with another backtick later on
+its line is inline code, not an opener), text after the "-->" closing a comment that opens its line, a
+"<!--" that does not close on its line (refused as raw HTML), a code span carried into a line that does not
+close it, two backtick runs on one line that nothing on it closes, a backtick run left open above a
+"<digits>. " line, an entry heading whose name holds a character reference or format character, and a
+carriage return or other control character. An entry ends at the next heading that is not an entry heading
+(a level 1 or 2 heading also ends the obligation a split sits under); prose and ordered items end no entry.
+An Owner, Ownership, Disposition or Successor field line after that end and before the next entry, or before
+the first entry, belongs to no entry and is refused. Lines inside a fenced code block, or inside an HTML
+comment that opens its line, are not read, and the same holds for TODO.md table rows; such a comment ends on
+the first line holding "-->", so "<!-->" and "<!--->" end it on their own line. An inline comment hides no
+later line.
+A field's value is read from its first line only. It checks STRUCTURE only: it never reads a cited symbol,
+so a green run says nothing about whether any obligation is implemented or whether a named successor
+accepted the work.
 
 Exit 0 clean; exit 1 on a concrete finding (a crosswalk that parses to no usable entries is a finding, since
 any text parses); exit 2 (cannot evaluate) when the manifest, the crosswalk or TODO.md is missing or is not
-UTF-8, the crosswalk writes an entry in a form this gate does not read, the manifest does not parse, the
-residue no longer has the shape this gate reads, or TODO.md lists no backlog id (in a standalone opf/ copy
-TODO.md is absent, so the successor check cannot evaluate and the gate never passes there). The --self-test
-is source-free (in-memory fixtures only), so it also runs in a standalone opf/ copy with no manifest beside
-it; each fixture must be red with every check active and green with only its
-own check removed.
+UTF-8, a crosswalk line is one this gate refuses (above), the manifest does not parse, the residue no longer
+has the shape this gate reads, or TODO.md lists no backlog id (in a standalone opf/ copy TODO.md is absent,
+so the successor check cannot evaluate and the gate never passes there). The --self-test is source-free
+(in-memory fixtures only), so it also runs in a standalone opf/ copy with no manifest beside it; each
+finding fixture must be red with every check active and green with only its own check removed, and each
+refused line must exit 2 and pass with only the rules its vector names removed.
 Run: python3 -I -B opf/tools/check_opf_init_reconciliation.py [--self-test].
 """
 import sys
@@ -54,6 +69,7 @@ import contextlib
 import io
 import re
 import tomllib
+import unicodedata
 from pathlib import Path
 from unittest import mock
 
@@ -102,23 +118,33 @@ _ORDERED_RE = re.compile(r"^(\d{1,9}\. )(.*)$")
 # an ordered-list marker, "(", a quote, a backtick (a fence never reaches here), or one or two hyphens before a
 # letter (an option name such as --self-test); every mark a reader can render as structure is outside this list.
 _PLAIN_RE = re.compile(r"(?![0-9]{1,9}[.)](?:[ \t]|$))(?:[^\W_]|[(\"'`]|--?[^\W_])")
-# Raw HTML, looked for outside single-line code spans: a reader can render a tag as structure.
+# Raw HTML, looked for outside code spans (_inline): a reader can render a tag as structure. An unclosed "<!--"
+# is literal text to a reader, but it matches here too, so a comment that might run on into the next line of
+# a paragraph is never read past.
 _HTML_RE = re.compile(r"<[A-Za-z/!?]")
-_CODE_SPAN_RE = re.compile(r"(`+).*?\1")
+# Inline text as CommonMark 0.31.2 reads it, the version the vendored marko implements: a backslash escapes
+# ASCII punctuation, a code span closes only on a backtick run of exactly its opening length, and an HTML
+# comment is "<!-->", "<!--->", or "<!--" through the next "-->".
+_ESCAPABLE = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+_SHORT_COMMENTS = ("<!-->", "<!--->")
 # Text that names an entry or a read field, after emphasis, code and escape marks are removed: outside an entry
 # heading or a field line it is a form this gate cannot read.
-_NAMES_RE = re.compile(r"(?:obligation|split|owner|ownership|disposition|successor)[ \t]*:", re.IGNORECASE)
+_NAMES = ("obligation", "split", "owner", "ownership", "disposition", "successor")
+_NAMES_RE = re.compile(r"(?:{})[ \t]*:".format("|".join(_NAMES)), re.IGNORECASE)
 _FORMATTING_RE = re.compile(r"[*_`\\~]")
+# A character reference a reader may decode (CommonMark decodes only known entity names and bounded numbers;
+# this matches every such reference and more), and so can spell a name or its colon.
+_CHAR_REF_RE = re.compile(r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);")
 # A carriage return (a line ending to a Markdown reader, not to this gate's line split) or another control
 # character other than a tab, including the Unicode line and paragraph separators.
 _CONTROL_RE = re.compile("[\\x00-\\x08\\x0b-\\x1f\\x7f\\x85\\u2028\\u2029]")
 _FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 # A comment hides lines only when "<!--" opens the line (an HTML block); elsewhere it is inline.
 _COMMENT_OPEN_RE = re.compile(r"^ {0,3}<!--")
-_INLINE_COMMENT_RE = re.compile(r"<!--.*?(?:-->|$)")
-# A fence or comment opened by an indented line may sit inside a list item, where an unindented line closes
-# it; this gate hides through the closing line, so the crosswalk refuses the indented opener instead.
-_INDENTED_OPENER_RE = re.compile(r"^[ \t]+(?:`{3}|~{3}|<!--)")
+# A fence or comment opened by an indented line (spaces or tabs, any width) may sit inside a list item, where
+# an unindented line closes it, or open nothing at all; this gate reads neither case, so the crosswalk refuses
+# the indented opener. A backtick run followed by a backtick on its line is inline code, not a fence.
+_INDENTED_OPENER_RE = re.compile(r"^[ \t]+(?:`{3,}(?!.*`)|~{3,}|<!--)")
 # A backlog table row in TODO.md: "| ID | Status | Item | Tags |", one id per row.
 _BACKLOG_ROW_RE = re.compile(r"^\| ([A-Z0-9]+(?:-[A-Z0-9]+)*) \|")
 
@@ -182,7 +208,7 @@ def backlog_ids(todo_text):
     that lists no id cannot evaluate, so an unreadable backlog never lets a transferred entry pass."""
     ids = set()
     in_table = False
-    for _number, line in _visible_lines(todo_text):
+    for _number, line, _bare in _visible_lines(todo_text):
         if line.startswith("| ID |"):
             in_table = True
             continue
@@ -204,11 +230,15 @@ def _visible_lines(text, strict=False):
     long, and an unclosed fence hides the rest of the file. A backtick line whose info string holds a
     backtick (```x```) is inline code, not a fence opener (CommonMark). A comment that opens its line (up to
     three spaces, then "<!--") hides that line through the whole line holding its closing "-->", as an HTML
-    block does, and an unclosed one hides the rest of the file. A "<!--" later in a line is inline: it is
-    removed through its "-->" on that line, or through the end of the line when it does not close there, and
-    hides no later line. Yields (line number, line). With strict set (the crosswalk), raises CannotEvaluate
-    on a control character (_CONTROL_RE), on a fence or comment opened by an indented line, and on text after
-    the "-->" that closes a line-opening comment: that text is part of an HTML block a reader renders."""
+    block does: "<!-->" and "<!--->" hold their own "-->", so they end the block on their own line. An
+    unclosed one hides the rest of the file. Any other line is read as inline text (_inline): its comments are
+    removed and hide no later line. Yields (line number, line without its inline comments, that line without
+    its code spans). With strict set (the crosswalk), raises CannotEvaluate on a control character
+    (_CONTROL_RE), on a fence or comment opened by an indented line, on text after the "-->" that closes a
+    line-opening comment (that text is part of an HTML block a reader renders), and on a code span it cannot
+    bound: one carried from the line above that this line does not close, two runs on one line that nothing
+    on it closes, or a run left open above a "<digits>. " line. A run that nothing on its line closes carries
+    into the next line when that line is indented or prose, and is literal text otherwise."""
     if strict:
         m = _CONTROL_RE.search(text)
         if m:
@@ -216,31 +246,125 @@ def _visible_lines(text, strict=False):
             raise _unread(number, text.split("\n")[number - 1], "a carriage return or other control character")
     fence = None
     in_comment = False
-    for number, line in enumerate(text.split("\n"), 1):
+    lines = text.split("\n")
+    # carried: the length of a backtick run left open by the line above, whose paragraph this line continues.
+    carried = 0
+    for number, line in enumerate(lines, 1):
+        carry, carried = carried, 0
         if in_comment:
-            in_comment = "-->" not in line
+            rest = _block_comment_rest(line, False)
+            in_comment = rest is None
             if strict and not in_comment:
-                _refuse_remainder(number, line, line.split("-->", 1)[1])
+                _refuse_remainder(number, line, rest)
             continue
         m = _FENCE_RE.match(line)
         if fence is not None:
             if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence) and not m.group(2).strip():
                 fence = None
             continue
+        if strict and _INDENTED_OPENER_RE.match(line):
+            raise _unread(number, line, "a fence or comment opened by an indented line")
         if m and m.group(1)[0] == "`" and "`" in m.group(2):
             m = None
-        if (m or _COMMENT_OPEN_RE.match(line)) and strict and _INDENTED_OPENER_RE.match(line):
-            raise _unread(number, line, "a fence or comment opened by an indented line")
         if m:
             fence = m.group(1)
             continue
         if _COMMENT_OPEN_RE.match(line):
-            rest = line[line.find("<!--") + 4:]
-            in_comment = "-->" not in rest
+            rest = _block_comment_rest(line, True)
+            in_comment = rest is None
             if strict and not in_comment:
-                _refuse_remainder(number, line, rest.split("-->", 1)[1])
+                _refuse_remainder(number, line, rest)
             continue
-        yield number, _INLINE_COMMENT_RE.sub("", line)
+        visible, bare, unclosed = _inline(line, carry)
+        if strict and unclosed is None:
+            _refuse_unbounded(number, line, "a code span open from the line above does not close on this line")
+        elif strict and unclosed and not _HEADING_RE.match(line):
+            following = lines[number] if number < len(lines) else ""
+            if len(unclosed) > 1:
+                _refuse_unbounded(number, line, "more than one backtick run that no run of its length closes")
+            elif _ORDERED_RE.match(following):
+                _refuse_unbounded(number, line, "a backtick run left open above an ordered item")
+            elif following.strip() and (following[0] in " \t" or _PLAIN_RE.match(following)):
+                carried = unclosed[0]
+        yield number, visible, bare
+
+
+def _block_comment_rest(line, opener):
+    """The text after the "-->" that ends an HTML comment block on this line, or None when the line does not
+    end it. On the opening line the "-->" may share the opener's dashes ("<!-->", "<!--->"), as CommonMark's
+    end condition is any "-->" on the line."""
+    end = line.find("-->", line.find("<!--") + 2 if opener else 0)
+    return None if end < 0 else line[end + 3:]
+
+
+def _code_span_end(line, start, length):
+    """The end of the first backtick run of exactly `length` at or after `start`, or None: the close of a code
+    span opened by a run of that length. A longer or shorter run closes nothing."""
+    while True:
+        begin = line.find("`", start)
+        if begin < 0:
+            return None
+        start = begin
+        while start < len(line) and line[start] == "`":
+            start += 1
+        if start - begin == length:
+            return start
+
+
+def _comment_end(line, start):
+    """The end of the inline HTML comment opening at `start`, or None when it does not close on this line."""
+    for short in _SHORT_COMMENTS:
+        if line.startswith(short, start):
+            return start + len(short)
+    end = line.find("-->", start + 4)
+    return None if end < 0 else end + 3
+
+
+def _inline(line, carried=0):
+    """(visible, bare, unclosed) for a line read left to right as CommonMark inline text: a backslash before
+    ASCII punctuation escapes it (an escaped backtick opens nothing); a backtick run opens a code span that the
+    next run of exactly its length closes, and its content is code (a "<!--" in it is no comment); a comment
+    (_comment_end) is removed; an unclosed "<!--" stays as literal text. visible is the line without its
+    comments, bare is visible without its code spans, and unclosed lists the length of each backtick run no
+    run on the line closes (each is read as literal text here, which leaves more of the line in bare than a
+    span closing on the next line would). With carried set, the line opens inside a code span of that length
+    from the line above; when no run of that length closes it here, unclosed is None."""
+    visible = []
+    bare = []
+    unclosed = []
+    i = 0
+    if carried:
+        i = _code_span_end(line, 0, carried)
+        if i is None:
+            return line, "", None
+        visible.append(line[:i])
+    while i < len(line):
+        if line[i] == "\\" and line[i + 1:i + 2] and line[i + 1] in _ESCAPABLE:
+            visible.append(line[i:i + 2])
+            bare.append(line[i:i + 2])
+            i += 2
+            continue
+        if line[i] == "`":
+            run = i
+            while run < len(line) and line[run] == "`":
+                run += 1
+            end = _code_span_end(line, run, run - i)
+            if end is None:
+                unclosed.append(run - i)
+                end = run
+                bare.append(line[i:end])
+            visible.append(line[i:end])
+            i = end
+            continue
+        if line.startswith("<!--", i):
+            end = _comment_end(line, i)
+            if end is not None:
+                i = end
+                continue
+        visible.append(line[i])
+        bare.append(line[i])
+        i += 1
+    return "".join(visible), "".join(bare), unclosed
 
 
 def _unread(number, line, reason):
@@ -257,15 +381,45 @@ def _refuse_indented(number, line):
     raise _unread(number, line, "an indented line that does not continue the item line or line above it")
 
 
-def _read_text(number, line, text):
+def _refuse_unbounded(number, line, reason):
+    raise _unread(number, line, reason)
+
+
+def _hidden(text):
+    """True when `text` holds a character reference (_CHAR_REF_RE) or a format character (Unicode category
+    Cf, such as U+200B): a reader may see a name this gate does not."""
+    return bool(_CHAR_REF_RE.search(text)) or any(unicodedata.category(ch) == "Cf" for ch in text)
+
+
+def _hidden_name(text):
+    """True when `text` opens with ASCII letters, spaces or tabs that could begin an entry or read field name
+    and its colon (a prefix of a name, or a whole name and spaces or tabs), and then a character reference or a
+    format character. Refusing that, rather than decoding it, cannot accept a name a reader decodes:
+    _CHAR_REF_RE matches every reference CommonMark decodes, and the text before it is what a name would start
+    with. Other text, such as "AT&amp;T" or "Keep&nbsp;this", is read."""
+    for i, ch in enumerate(text):
+        if (ch == "&" and _CHAR_REF_RE.match(text, i)) or unicodedata.category(ch) == "Cf":
+            prefix = text[:i].casefold()
+            return any(name.startswith(prefix) or prefix.rstrip(" \t") == name for name in _NAMES)
+        if not (ch.isascii() and (ch.isalpha() or ch in " \t")):
+            return False
+    return False
+
+
+def _read_text(number, line, text, bare):
     """Refuses the text of a heading, item, continuation or prose line unless it is plain: it opens as
-    _PLAIN_RE allows, holds no raw HTML outside a code span, and does not name an entry or a read field."""
+    _PLAIN_RE allows, its line holds no raw HTML outside a code span (bare, from _inline), and, once emphasis,
+    code and escape marks are removed, it neither names an entry or a read field nor opens with a name spelled
+    with a character reference or a format character."""
     if not _PLAIN_RE.match(text):
         raise _unread(number, line, "text that opens with a mark a reader can render as structure")
-    if _HTML_RE.search(_CODE_SPAN_RE.sub("", text)):
-        raise _unread(number, line, "raw HTML")
-    if _NAMES_RE.match(_FORMATTING_RE.sub("", text).lstrip()):
+    if _HTML_RE.search(bare):
+        raise _unread(number, line, "raw HTML, or a \"<!--\" that does not close on its line")
+    name = _FORMATTING_RE.sub("", text).lstrip()
+    if _NAMES_RE.match(name):
         raise _unread(number, line, "an entry or read field named outside an entry heading or field line")
+    if _hidden_name(name):
+        raise _unread(number, line, "a character reference or format character where a name would be")
 
 
 def parse_crosswalk(text):
@@ -280,11 +434,14 @@ def parse_crosswalk(text):
     parent = None
     fields = None
     width = None
-    for number, line in _visible_lines(text, strict=True):
+    for number, line, bare in _visible_lines(text, strict=True):
         # width: the indent a line needs to continue the item or continuation line just above it.
         item, width = width, None
         if not line.strip():
             continue
+        m = _OBLIGATION_RE.match(line) or _SPLIT_RE.match(line)
+        if m and _hidden(m.group(1)):
+            raise _unread(number, line, "an entry name holding a character reference or format character")
         m = _OBLIGATION_RE.match(line)
         if m:
             parent = _norm(m.group(1))
@@ -299,15 +456,15 @@ def parse_crosswalk(text):
         m = _HEADING_RE.match(line)
         if m:
             if m.group(2):
-                _read_text(number, line, m.group(2))
+                _read_text(number, line, m.group(2), bare)
             fields = None
             if len(m.group(1)) <= 2:
                 parent = None
             continue
         m = _FIELD_RE.match(line)
         if m:
-            if _HTML_RE.search(_CODE_SPAN_RE.sub("", m.group(2))):
-                raise _unread(number, line, "raw HTML")
+            if _HTML_RE.search(bare):
+                raise _unread(number, line, "raw HTML, or a \"<!--\" that does not close on its line")
             field = m.group(1).strip().casefold()
             if fields is not None:
                 fields.setdefault(field, []).append(m.group(2))
@@ -317,17 +474,17 @@ def parse_crosswalk(text):
             continue
         m = _ORDERED_RE.match(line)
         if m:
-            _read_text(number, line, m.group(2))
+            _read_text(number, line, m.group(2), bare)
             width = len(m.group(1))
             continue
         if line[0] in " \t":
             if item and line[:item] == " " * item and line[item] not in " \t":
-                _read_text(number, line, line[item:])
+                _read_text(number, line, line[item:], bare)
                 width = item
             else:
                 _refuse_indented(number, line)
             continue
-        _read_text(number, line, line)
+        _read_text(number, line, line, bare)
     return entries
 
 
@@ -653,7 +810,31 @@ def _ignore(*_args):
     return None
 
 
-# Each rule a crosswalk line is refused under, with the module attribute and the stand-in that removes it.
+def _never(*_args):
+    return False
+
+
+def _comment_to_line_end(line, start):
+    """An inline comment read as running to the line end when it does not close, with no short form."""
+    end = line.find("-->", start + 4)
+    return len(line) if end < 0 else end + 3
+
+
+def _code_span_end_any(line, start, length):
+    """A code span read as closing on the next `length` backticks, even inside a longer run."""
+    end = line.find("`" * length, start)
+    return None if end < 0 else end + length
+
+
+def _block_comment_rest_after_opener(line, opener):
+    """A comment block read as ending only on a "-->" after the opener's own four characters."""
+    end = line.find("-->", line.find("<!--") + 4 if opener else 0)
+    return None if end < 0 else line[end + 3:]
+
+
+# Each rule a crosswalk line is refused under, with the module attribute and the stand-in that removes it. The
+# last five are readings rather than refusals: each stand-in reads a comment, a code span or a name the way a
+# reader does not, and the vectors under them pass because raw HTML or a name is then hidden from this gate.
 _RULE_FLIPS = {
     "plain": ("_PLAIN_RE", re.compile("")),
     "html": ("_HTML_RE", re.compile(r"(?!)")),
@@ -662,6 +843,12 @@ _RULE_FLIPS = {
     "control": ("_CONTROL_RE", re.compile(r"(?!)")),
     "remainder": ("_refuse_remainder", _ignore),
     "opener": ("_INDENTED_OPENER_RE", re.compile(r"(?!)")),
+    "unbounded": ("_refuse_unbounded", _ignore),
+    "hidden-name": ("_hidden_name", _never),
+    "comment-eol": ("_comment_end", _comment_to_line_end),
+    "short-comment": ("_SHORT_COMMENTS", ()),
+    "span-length": ("_code_span_end", _code_span_end_any),
+    "escape": ("_ESCAPABLE", ""),
 }
 
 # Crosswalks holding a line outside the shapes this gate reads: (label, text, the rules that refuse it). Each
@@ -717,6 +904,36 @@ _UNREAD_SHAPES = (
     ("entry-emphasis", _good(extra="## **Obligation:** coordination\n"), {"plain", "names"}),
     ("entry-emphasis-setext", _good(extra="**Obligation:** coordination\n===\n"), {"plain", "names"}),
     ("entry-escaped", _good(extra="## Obligation\\: coordination\n"), {"names"}),
+    ("unclosed-comment-in-prose", _owner_after("A note <!-- <h2>Appendix</h2>\n\n"), {"comment-eol"}),
+    ("unclosed-comment-in-field", _owner_after("- Note: x <!-- <h2>Appendix</h2>\n\n"), {"comment-eol"}),
+    ("short-comment-in-prose", _owner_after("A note <!--> <h2>Appendix</h2>\n\n"), {"comment-eol"}),
+    ("short-comment-ends-first", _owner_after("A note <!--> <h2>Appendix</h2> -->\n\n"), {"short-comment"}),
+    ("dash-short-comment-ends-first", _owner_after("A note <!---> <h2>Appendix</h2> -->\n\n"), {"short-comment"}),
+    ("span-longer-closer", _owner_after("A note ` <h2>Appendix</h2> ``\n\n"), {"span-length", "unbounded"}),
+    ("span-longer-closer-in-field", _owner_after("- Note: `` <h2>Appendix</h2> ```\n\n"),
+     {"span-length", "unbounded"}),
+    ("span-exact-closer-later", _owner_after("A note `` a ``` b `` <h2>Appendix</h2> `` c ``\n\n"), {"span-length"}),
+    ("span-escaped-opener", _owner_after("A note \\` <h2>Appendix</h2> `\n\n"), {"escape"}),
+    ("span-across-lines", _owner_after("A note `x\ny `<h2>Appendix</h2>` z\n\n"), {"html"}),
+    ("span-open-past-next-line", _owner_after("A note `x\ny\nz `<h2>Appendix</h2>` w\n\n"), {"unbounded"}),
+    ("span-open-above-ordered-item", _good(extra="A note `x\n10. y `<h2>Appendix</h2>` z\n"), {"unbounded"}),
+    ("name-decimal-reference", _good(extra="## Obligation&#58; coordination\n"), {"hidden-name"}),
+    ("name-named-reference", _good(extra="## Obligation&colon; coordination\n"), {"hidden-name"}),
+    ("name-zero-width", _good(extra="## Obli\u200bgation: coordination\n"), {"hidden-name"}),
+    ("field-name-reference", _good(extra="Owner&#58; none yet.\n"), {"hidden-name"}),
+    ("field-name-soft-hyphen", _good(extra="Own\u00ader: none yet.\n"), {"hidden-name"}),
+    ("field-name-inner-reference", _good(extra="Own&#101;r: none yet.\n"), {"hidden-name"}),
+    ("field-name-reference-after-space", _good(extra="Owner &#58; none yet.\n"), {"hidden-name"}),
+    ("tab-indented-comment-opener", _good(extra="- Note: x\n\t<!-- x\n"), {"opener", "indent", "html"}),
+    ("ordered-item-indented-fence", _good(extra="10. x\n    ```\n    y\n"), {"opener", "unbounded"}),
+)
+
+# Entry headings whose name holds a character reference or a format character: each cannot evaluate, and
+# without that refusal each reads as an obligation or split outside the roster (exit 1), never a pass.
+_HIDDEN_ENTRY_NAMES = (
+    ("obligation-reference", _good(extra=_entry("coordi&#110;ation"))),
+    ("obligation-zero-width", _good(extra=_entry("coordination\u200b"))),
+    ("split-reference", _good(children=SPLIT_CHILDREN + ("move disposition&#8203;",))),
 )
 
 # Headings that end the entry above them: the Owner below each is a stray field (exit 1).
@@ -826,15 +1043,42 @@ def self_test():
             expect(_run(_files(crosswalk=text))[0] == 0, "unread/{}-passes-without-its-rules".format(label))
     expect({min(r) for _label, _text, r in _UNREAD_SHAPES if len(r) == 1} == set(_RULE_FLIPS),
            "unread/every-rule-alone-refuses-a-vector")
-    # A "<!--" inside a line hides no later line: the heading below it ends the entry, and an entry below it
-    # counts. Both turn green or red the other way when any "<!--" opens a comment.
+    for label, text in _HIDDEN_ENTRY_NAMES:
+        code, _out, err = _run(_files(crosswalk=text))
+        expect(code == 2 and " is not a shape this gate reads " in err, "hidden-entry-name/{}-cannot-evaluate".format(label))
+        with mock.patch.object(module, "_hidden", _never):
+            expect(_run(_files(crosswalk=text))[0] == 1, "hidden-entry-name/{}-unknown-without-refusal".format(label))
+    # A "<!--" inside a line that does not close there is literal text to a reader, or a comment the paragraph's
+    # next line closes; either way this gate cannot read past it. Read as running to the line end, it hid no
+    # later line: the heading below it ended the entry (exit 1), and an entry below it counted.
     inline_heading = _owner_after("A note <!-- x\n## Appendix -->\n")
     inline_entry = _good(drop="git staging", extra="A note <!-- x\n\n" + _entry("git staging"))
-    expect(_run(_files(crosswalk=inline_heading))[0] == 1, "inline-comment/heading-below-ends-entry")
-    expect(_findings_or_none(inline_entry, backlog) == [], "inline-comment/entry-below-counts")
-    with mock.patch.object(module, "_COMMENT_OPEN_RE", re.compile(r".*?<!--")):
-        expect(_findings_or_none(inline_heading, backlog) == [], "inline-comment/heading-hidden-when-opener-anywhere")
-        expect(bool(_findings_or_none(inline_entry, backlog)), "inline-comment/entry-hidden-when-opener-anywhere")
+    expect(_run(_files(crosswalk=inline_heading))[0] == 2, "inline-comment/unclosed-above-heading-cannot-evaluate")
+    expect(_run(_files(crosswalk=inline_entry))[0] == 2, "inline-comment/unclosed-above-entry-cannot-evaluate")
+    with mock.patch.object(module, *_RULE_FLIPS["comment-eol"]):
+        expect(_run(_files(crosswalk=inline_heading))[0] == 1, "inline-comment/heading-below-ends-entry-at-line-end")
+        expect(_findings_or_none(inline_entry, backlog) == [], "inline-comment/entry-below-counts-at-line-end")
+    # A closed inline comment and a code span opened on one line and closed on the next are read.
+    expect(_findings_or_none(_with_line("publication", "A note <!-- x --> here, `a\nb` and ``c ` d``."),
+                             backlog) == [], "clean/closed-comment-and-wrapped-code-span")
+    expect(_findings_or_none(_good(override={"publication": _entry("publication").replace(
+        "- Owner: none yet.", "- Owner: none yet `x\n  y`.")}), backlog) == [], "clean/field-code-span-wraps")
+    # A reference after letters that cannot begin an entry or field name is read.
+    for label, line in (("ampersand", "AT&amp;T ships it."), ("space", "Keep&nbsp;this mid-sentence."),
+                        ("after-space", "Keep x&nbsp;y mid-sentence.")):
+        expect(_findings_or_none(_with_line("publication", line), backlog) == [],
+               "clean/reference-after-other-letters/{}".format(label))
+    # "<!-->" and "<!--->" end the comment block they open on their own line, so the entry below is read.
+    for form in ("<!-->", "<!--->"):
+        for label, entry, check in (("duplicate", _entry("coordination"), "duplicate"),
+                                    ("unknown", _entry("store upgrade"), "unknown")):
+            text = _good(extra=form + "\n\n" + entry)
+            found = _findings_or_none(text, backlog)
+            expect(bool(found) and _findings_or_none(text, backlog, disabled=frozenset({check})) == [],
+                   "comment-block/{}-then-{}-read".format(form, label))
+            with mock.patch.object(module, "_block_comment_rest", _block_comment_rest_after_opener):
+                expect(_findings_or_none(text, backlog) == [],
+                       "comment-block/{}-then-{}-hidden-when-end-sought-after-opener".format(form, label))
     ownership = _good(extra="## Appendix\n\n- Ownership: open.\n")
     expect(bool(_findings_or_none(ownership, backlog)), "stray/ownership-refused")
     with mock.patch.object(module, "READ_FIELDS", tuple(f for f in READ_FIELDS if f != "ownership")):
@@ -897,7 +1141,7 @@ def self_test():
     fixtures += [("stray-after-" + label + "-heading", _good(extra=heading + "- Successor: OPF-ADOPT-ORCH\n"), "stray")
                  for label, heading in _ENDING_HEADINGS]
     fixtures.append(("stray-after-inline-comment", _good(
-        extra="A note <!-- x\n## Appendix -->\n- Successor: OPF-ADOPT-ORCH\n"), "stray"))
+        extra="A note <!-- x -->\n## Appendix -->\n- Successor: OPF-ADOPT-ORCH\n"), "stray"))
     fixtures.append(("stray-ownership", _good(extra="## Appendix\n\n- Ownership: open.\n"), "stray"))
     for label, text, check in fixtures:
         red = _findings_or_none(text, backlog)

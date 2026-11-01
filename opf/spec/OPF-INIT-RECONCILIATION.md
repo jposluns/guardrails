@@ -14,21 +14,35 @@ entry carries an Owner and an Ownership, and an entry whose disposition is `tran
 its successor a backlog id listed in `TODO.md` at the repository root and an Owner other than
 `none yet`. The check reads this file through a closed list of line shapes, each starting at the
 line start: a blank line, an entry heading, any other ATX heading, a field line (`- Name: value`),
-an ordered item (`1. text`), a line indented exactly to continue the item line above it, and
-prose. Heading, item, continuation and prose text must open with a letter, a digit that starts no
-list marker, a parenthesis, a quote, a backtick or an option name, must hold no raw HTML outside
-a code span, and must not begin with an entry or field name and a colon. Every other line cannot
-evaluate: a blockquote, a list item marked other than `- `, a table row, a setext underline or
-thematic break, an HTML line, an indented line that continues no item, an indented fence or comment
-opener, text after the end of a comment that opens its line, and a carriage return or other
-control character. An entry ends at the next heading that is not an entry heading; prose and
-ordered items end no entry. An Owner, Ownership, Disposition or Successor field line after that
-end and before the next entry, or before the first entry, belongs to no entry and is refused.
-Lines and `TODO.md` table rows inside a fenced code block, or inside an HTML comment that opens its
-line, are not read; a `<!--` later in a line removes only the rest of that line up to its `-->`
-and hides no later line. A field's value is read from its first line only. Where `TODO.md` cannot
-be read, as in a copy of `opf/` alone, the check cannot evaluate. It does not judge whether a cited
-symbol meets its requirement or whether a named successor accepted the work.
+an ordered item (`1. text`), a line indented with spaces exactly to the text of the item line or
+continuation line above it, and prose. Inline text is read by the CommonMark 0.31.2 rules: a
+backslash escapes ASCII punctuation, a code span closes only on a backtick run of exactly its
+opening length, and an inline comment is `<!-->`, `<!--->` or `<!--` through the next `-->` on its
+line. A backtick run that nothing on its line closes carries a code span onto the next line when
+that line is indented or prose, and is literal text when the next line ends the paragraph. Heading,
+ordered item, continuation and prose text must open with a letter, a digit that starts no list
+marker, `(`, a quote, a backtick or an option name; must not begin with an entry or field name and
+a colon once emphasis, code and escape marks are removed; and must not open with letters that could
+begin such a name followed by a character reference or a format character (Unicode category Cf).
+That text, and a field line, must hold no raw HTML outside a code span; a field value is checked
+for nothing else, apart from the refusals below that apply to every line. Every other line cannot
+evaluate: a blockquote, a bullet item other than a field line, an ordered item marked other than
+`<digits>. `, a table row, a setext underline or thematic break, an HTML line, an indented line
+that continues no item, a fence or comment opener indented by spaces or tabs at any width (a
+backtick run with another backtick later on its line is inline code, not an opener), text after the
+end of a comment that opens its line, a `<!--` that does not close on its line (refused as raw
+HTML), a code span carried into a line that does not close it, two backtick runs on one line that
+nothing on it closes, a backtick run left open above a `<digits>. ` line, an entry heading whose
+name holds a character reference or format character, and a carriage return or other control
+character. An entry ends at the next heading that is not an entry heading; prose and ordered items
+end no entry. An Owner, Ownership, Disposition or Successor field line after that end and before
+the next entry, or before the first entry, belongs to no entry and is refused. Lines and `TODO.md`
+table rows inside a fenced code block, or inside an HTML comment that opens its line, are not read;
+such a comment ends on the first line holding `-->`, so `<!-->` and `<!--->` end it on their own
+line. An inline comment hides no later line. A field's value is read from its first line only.
+Where `TODO.md` cannot be read, as in a copy of `opf/` alone, the check cannot evaluate. It does
+not judge whether a cited symbol meets its requirement or whether a named successor accepted the
+work.
 
 Generation note: `OPF-SPEC.md` section 16.1 states that the reference tooling still initializes and
 validates stores at base `1.2.0` (`_opf_store.SUPPORTED_SPEC_VERSION`, with
