@@ -1688,6 +1688,17 @@ A dispatcher without hooks can run the review dispatch check as a preflight: pip
 payload (`tool_name` `Bash`, `cwd`, and `tool_input.command`) to `aiqt_hooks.py review_dispatch_pin`,
 and withhold the dispatch on exit 2 or on a printed `deny` decision.
 
+## Command text that raises a host permission prompt
+
+The pack ships no hook for this. A host harness can raise a permission prompt because of what a Bash command's text contains, not what it does: a heredoc or a `python -c` / `python -` body holding `$(`, a backtick, or the words of a destructive command such as a hard reset, a force push or a recursive forced removal. In an unattended run that prompt stalls the run. Which text prompts is set by the harness build and the adopter's own permission rules, which the pack cannot read, so detection belongs to the adopter.
+
+An adopter that wants a guard adds its own PreToolUse Bash hook, keyed to the patterns its own permission rules act on, that denies only while the operating-mode record reads unattended. Its deny message separates two cases:
+
+- Text the command only carries as data, such as a brief, a probe or a commit message, is written with the file-write tool and passed by path (for example `git commit -F <file>`).
+- A body that performs the matched action is not moved into a file to avoid the prompt. The action is presented as itself and taken to the authorization it needs (sechau): a script path shown for approval hides what the script does.
+
+Such a hook over-fires by design. It fires on a quoted-delimiter heredoc, on prose that quotes a destructive command, on a legitimate `$(` and on `$((` arithmetic, because the prompt it heads off reacts to the raw text. Quoting the delimiter stops shell expansion only: `python3 - <<'EOF'` still runs its body. It misses other interpreters, `sh -c` and `eval` bodies, and prompts raised by paths, tool type or permission state.
+
 ## Honest limits (suite-level)
 
 Machine-local state is local-only: CI gates cover committed surfaces and the gates' own self-tests; gates over machine-local records run at session checkpoints and in the local mirror. The controls below RAISE THE BAR against a forged stop or escape; they are not categorical, because the state directory they read (the escape sentinel's anchor, and the anti-shrinkage checkpoint with its init marker and eligibility memory) is one the assistant itself can write, as is a declared attestation register with its anchor (a separately-declared surface wherever it is located). Categorical forgery-resistance needs operator-owned, assistant-non-writable READ sources at the OS layer (the attestation register, the decision record, and the escape sentinel; the guard's own working channel, its denial counter, guard-events, the checkpoint and its marker, forced-exit.jsonl, and the validated snapshot, must stay assistant-writable or the guard cannot record and fails open), described in SYSTEM-HARDENING.md; what the pack enforces in code is the following.
