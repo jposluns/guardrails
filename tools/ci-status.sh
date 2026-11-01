@@ -239,17 +239,25 @@ fi
 # and is refused the same way: the caller's rev is resolved only against this checkout's objects (its
 # committer date is read below).
 # When the rev is refused and begins with four or more hex digits, alone or followed by a ~ or ^ suffix,
-# the refusal names its cause. If git's own ref lookup reads those digits as a ref (and they are not as
-# long as a full id, which git reads as an object id), the cause names that ref, from which the rev does
-# not lead to a commit.
+# the refusal names its cause. If git's own ref lookup reads those digits as exactly one ref (and they
+# are not as long as a full id, which git reads as an object id), the cause names that ref, from which the
+# rev does not lead to a commit. When more than one ref has that name (a tag and a branch, say), git's
+# lookup names no ref here, so the cause comes from the objects as below and names no ref, although git
+# reads the rev through one of those refs.
 # Otherwise the cause comes from the objects whose ids start with those digits, each peeled through any
 # tags to the first object that is not a tag: two or more distinct commits are ambiguous; one commit
 # reached from more than one of them (the commit and tags of it, or several tags of it) is ambiguous too,
 # because git refuses a short id that more than one commit or tag of a commit starts with, even when they
 # all lead to the same commit; objects none of which peels to a commit mean no commit id starts with
-# them. When git cannot list or read every one of those objects (a git read that exits non-zero, fewer
-# lines than objects, or a line that is not an id and a commit, tree or blob type), the cause is given as
-# not known, never as ambiguous or as no commit id. Anything else does not resolve.
+# them. When git reports that it cannot list or read every one of those objects (any line git writes on
+# stderr while listing or reading them, a pack index it finds corrupt included, a read of them that exits
+# non-zero, fewer lines than objects, or a line that is not an id and a commit, tree or blob type), the
+# cause is never given as ambiguous or as no commit id: it is given as not known, or as not resolving when
+# the listing itself exits non-zero. git skips a pack whose index it cannot open (one this user may not
+# read, say) without reporting anything, so the objects in that pack are missing from the listing and
+# nothing here can tell: the cause can then be wrong (that no commit id starts with the digits, say, when
+# that pack holds one). The cause is worded only after git has refused the rev, so a wrong cause is always a
+# refusal, never an acceptance. Anything else does not resolve.
 if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
   REV_CAUSE="does not resolve to a commit in this repository."
   if [[ "$SHA_IN" =~ ^([0123456789abcdefABCDEF]{4,})([~^].*)?$ ]]; then
@@ -266,7 +274,7 @@ if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
       else
         REV_CAUSE="does not resolve to a commit in this repository: git reads ${REV_PREFIX} as the ref ${REV_REF}, from which ${SHA_IN} does not lead to a commit."
       fi
-    elif REV_LIST="$(git rev-parse --disambiguate="$REV_PREFIX" 2>/dev/null)" && [ -n "$REV_LIST" ]; then
+    elif REV_LIST="$(git rev-parse --disambiguate="$REV_PREFIX" 2>&1)" && [ -n "$REV_LIST" ]; then
       mapfile -t REV_CANDIDATES <<<"$REV_LIST"
       REV_READ=1
       REV_COMMITS=0
@@ -279,7 +287,7 @@ if ! SHA="$(git rev-parse --verify --quiet "${SHA_IN}^{commit}")"; then
       done
       if [ "$REV_READ" -eq 1 ] && [ "${#REV_CANDIDATES[@]}" -ne 0 ] &&
           REV_PEELED="$(printf '%s^{}\n' "${REV_CANDIDATES[@]}" |
-            git cat-file --batch-check='%(objectname) %(objecttype)' 2>/dev/null)"; then
+            git cat-file --batch-check='%(objectname) %(objecttype)' 2>&1)"; then
         mapfile -t REV_PEELED_LINES <<<"$REV_PEELED"
         if [ "${#REV_PEELED_LINES[@]}" -ne "${#REV_CANDIDATES[@]}" ]; then
           REV_READ=0

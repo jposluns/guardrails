@@ -1938,22 +1938,108 @@ def _run_checks():
               [(2, True, False, True, False, False)] * 3)
 
         # The same with the two loose files at mode 000. A user that can still read a mode-000 file (root)
-        # cannot make them unreadable, so there the case is skipped: it prints that reason to stderr and
-        # records the wanted value without running the script.
+        # cannot make them unreadable, so there the case is not evaluated: it is recorded as a harness
+        # error, which the run counts as not passed (exit 2), never as a pass.
+        denied = None
         try:
             for path in loose:
                 path.chmod(0)
-            if all(os.access(path, os.R_OK) for path in loose):
-                print("ci/rev-mode-000-objects-cause-not-misstated: not exercised: this user can read "
-                      "mode-000 files", file=sys.stderr)
-                denied = [(2, True, False, True, False, False)] * 3
-            else:
+            if not any(os.access(path, os.R_OK) for path in loose):
                 denied = unreadable_reads()
         finally:
             for path, (_content, mode) in zip(loose, saved):
                 path.chmod(mode)
-        check("ci/rev-mode-000-objects-cause-not-misstated", denied,
-              [(2, True, False, True, False, False)] * 3)
+        if denied is None:
+            harness_error("ci/rev-mode-000-objects-cause-not-misstated", "this user can read mode-000 files")
+        else:
+            check("ci/rev-mode-000-objects-cause-not-misstated", denied,
+                  [(2, True, False, True, False, False)] * 3)
+
+        # A commit in a pack and a loose blob share a prefix no other object has, and the commit's loose
+        # file is gone. With the pack index readable the prefix reads as the commit (its COMMIT: line;
+        # the later CI read is not this case's subject). With garbage in the
+        # index git reports the bad index on stderr while still listing only the blob, so the refusal
+        # (exit 2) says the cause is not known, never that no commit id starts with the prefix. With the
+        # index at mode 000 git skips the pack without reporting anything, which nothing in the script can
+        # tell, so only the refusal is pinned there (exit 2, no gh call, no COMMIT: line), not its cause;
+        # a user that can read a mode-000 file (root) cannot exercise that, so it is not evaluated there.
+        pack_prefix, (pack_commit, _pack_blob) = fixture.prefix_pair(("commit", "blob"))
+        pack_dir = fixture.repo / ".git" / "objects" / "pack"
+        pack_name = subprocess.run([GIT, "-C", str(fixture.repo)] + NO_AUTO_MAINTENANCE
+                                   + ["pack-objects", str(pack_dir / "pack")], input=pack_commit + "\n",
+                                   check=True, capture_output=True, text=True, timeout=30,
+                                   env=fixture.base_env).stdout.strip()
+        pack_index = pack_dir / "pack-{}.idx".format(pack_name)
+        commit_file = fixture.repo / ".git" / "objects" / pack_commit[:2] / pack_commit[2:]
+        commit_saved = (commit_file.read_bytes(), commit_file.stat().st_mode)
+        index_saved = (pack_index.read_bytes(), pack_index.stat().st_mode)
+        packed = []
+        index_hidden = None
+        try:
+            commit_file.unlink()
+
+            def packed_read(rev, extra):
+                rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                    extra_args=extra, tree=tree_listing([], {}))
+                return rc, output
+            for rev, extra in ((pack_prefix, ()), (None, ("--match-tree", "--head", pack_prefix))):
+                rc, output = packed_read(rev, extra)
+                packed.append(output.splitlines()[:1])
+            pack_index.chmod(0o644)
+            pack_index.write_bytes(b"not a pack index\n")
+            for rev, extra in ((pack_prefix, ()), (None, ("--match-tree", "--head", pack_prefix)),
+                               (pack_prefix + "~0", ())):
+                rc, output = packed_read(rev, extra)
+                packed.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                               "ERROR: cannot evaluate: {} does not resolve to a commit in this repository: "
+                               "git could not read every object whose id starts with {}, so the cause is "
+                               "not known.".format(rev or pack_prefix, pack_prefix) in output,
+                               "no commit id starts with" in refusal_text(output)))
+            pack_index.write_bytes(index_saved[0])
+            pack_index.chmod(0)
+            if not os.access(pack_index, os.R_OK):
+                index_hidden = []
+                for rev, extra in ((pack_prefix, ()), (None, ("--match-tree", "--head", pack_prefix)),
+                                   (pack_prefix + "~0", ())):
+                    rc, output = packed_read(rev, extra)
+                    index_hidden.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                         "ERROR: cannot evaluate: {} does not resolve to a commit in this "
+                                         "repository".format(rev or pack_prefix) in output))
+        finally:
+            pack_index.chmod(0o644)
+            pack_index.write_bytes(index_saved[0])
+            pack_index.chmod(index_saved[1])
+            for leftover in pack_dir.glob("pack-{}.*".format(pack_name)):
+                leftover.chmod(0o644)
+                leftover.unlink()
+            commit_file.parent.mkdir(exist_ok=True)
+            commit_file.write_bytes(commit_saved[0])
+            commit_file.chmod(commit_saved[1])
+        check("ci/rev-corrupt-pack-index-cause-not-misstated", packed,
+              [["COMMIT: " + pack_commit]] * 2 + [(2, True, False, True, False)] * 3)
+        if index_hidden is None:
+            harness_error("ci/rev-unreadable-pack-index-refused", "this user can read mode-000 files")
+        else:
+            check("ci/rev-unreadable-pack-index-refused", index_hidden, [(2, True, False, True)] * 3)
+
+        # A tag and a branch of the same hex name (the tag at a blob, the branch at HEAD): git's ref
+        # lookup names neither ref for the name, so the refusal (exit 2) is still made but its cause names
+        # no ref.
+        fixture_git("update-ref", "refs/tags/" + blob_prefix, ref_blob)
+        fixture_git("update-ref", "refs/heads/" + blob_prefix, head_sha)
+        two_refs = []
+        try:
+            for rev, extra in ((blob_prefix, ()), (None, ("--match-tree", "--head", blob_prefix))):
+                rc, output, _calls = fixture.invoke([[page([success_a, success_b])]], rev=rev,
+                                                    extra_args=extra, tree=tree_listing([], {}))
+                two_refs.append((rc, fixture.gh_argv == [], "COMMIT:" in output,
+                                 "ERROR: cannot evaluate: {} ".format(blob_prefix) in refusal_text(output),
+                                 "the ref" in refusal_text(output)))
+        finally:
+            fixture_git("update-ref", "-d", "refs/heads/" + blob_prefix)
+            fixture_git("update-ref", "-d", "refs/tags/" + blob_prefix)
+        check("ci/rev-tag-and-branch-same-hex-name-cause-names-no-ref", two_refs,
+              [(2, True, False, True, False)] * 2)
 
         if program is None:
             harness_error("ci/jq-step-direct-cases", "no jq program was extracted")
