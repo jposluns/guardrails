@@ -78,7 +78,9 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    removes the lease and releases the lock before it reports success; while another OPF run holds
    the lock, `opf init` refuses. A run that stopped partway can leave a partial `.working/` and
    its lock record behind: once that `.working/` is moved aside, `opf init --recover` clears a
-   record whose holder is confirmed dead, and refuses a record whose holder may still be live.
+   record whose holder is confirmed dead and that names the same init operation. It refuses a
+   record whose holder may still be live, and it refuses and keeps a record that another operation
+   left, even when that holder is confirmed dead: only that operation's own recovery releases it.
    `opf init` also refuses when the git
    history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
    never restart, so record ids are never reissued). That scan follows the first-parent line only: a store that never reached a tree on

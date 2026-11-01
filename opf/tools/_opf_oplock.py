@@ -2505,13 +2505,17 @@ def _require_same_operation(active_bytes, operation):
     this acquisition cannot reconcile another operation's journal work. Only the active record is
     compared: the liveness gate has already refused a lone lease and a lease whose operation differs
     from the active record's (_validate_recovery_lease), so a lease kept here names the same
-    operation. Returns the recorded operation."""
+    operation. The refusal names the operator's next step: that recorded operation's own recovery,
+    then a retry of this one. Returns the recorded operation."""
     recorded = _recorded_operation(active_bytes)
     if recorded != operation:
         raise OpLockError("the stale operation record(s) were left by a confirmed-dead holder of the "
                           "{!r} operation, not this {!r} operation; recovery releases only a leftover "
                           "of the same operation, so they are kept for that operation's own "
-                          "reconciliation; refusing recovery (fail-closed)".format(recorded, operation))
+                          "reconciliation; refusing recovery (fail-closed). Next step: run the {!r} "
+                          "operation's own recovery (that operation with explicit recovery), the only "
+                          "route that releases them, then retry this {!r} operation".format(
+                              recorded, operation, recorded, operation))
     return recorded
 
 
@@ -9852,10 +9856,12 @@ def _st_init_store_state(root):
     return state
 
 
-def _st_i6_refused(root, operation, needle):
+def _st_i6_refused(root, operation, needles, reached):
     """Init recovery as `operation` must REFUSE the planted leftover with an OpLockError naming
-    `needle`, under the held anchor and before any delete, removing nothing and leaving the store
-    byte-identical; any release, or any other outcome, raises AssertionError (the vector's red)."""
+    each of `needles`, under the held anchor and before any delete, removing nothing and leaving the
+    store byte-identical; any release, or any other outcome, raises AssertionError (the vector's
+    red). With `reached`, the operation check must have run at least once (an empty observation
+    list fails, rather than passing vacuously); without it, the liveness gate may refuse first."""
     mod = sys.modules[__name__]
     current = mod._require_same_operation
     active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
@@ -9877,10 +9883,12 @@ def _st_i6_refused(root, operation, needle):
             operation, h.recovered))
     finally:
         mod._require_same_operation = current
-    assert needle in str(refused), "refusal {!r} lacks {!r}".format(str(refused), needle)
+    for needle in needles:
+        assert needle in str(refused), "refusal {!r} lacks {!r}".format(str(refused), needle)
     assert (getattr(refused, "recovered", None), getattr(refused, "staging_removed", None)) \
         == ((), ()), "the refusal reports no removal: {!r}".format(refused)
     assert _st_init_store_state(root) == before, "the refused store must stay byte-identical"
+    assert seen or not reached, "the operation check was never reached"
     assert all(seen_at == (False, True) for seen_at in seen), \
         "the operation check runs under the held anchor, before any delete: {}".format(seen)
     assert _st_anchor_free(root), "the refusal frees the anchor"
@@ -9895,8 +9903,12 @@ def _st_i6_other_operation(d, env):
                                                    ("opf-init", "opf-init-plain"))):
         root = _st_init_fixture(d, "other{}".format(index), env)
         _st_plant_init_leftover(root, 'operation = "{}"'.format(recorded))
-        _st_i6_refused(root, acquiring, "holder of the {!r} operation, not this {!r} "
-                                        "operation".format(recorded, acquiring))
+        _st_i6_refused(root, acquiring,
+                       ("holder of the {!r} operation, not this {!r} operation".format(
+                           recorded, acquiring),
+                        "Next step: run the {!r} operation's own recovery".format(recorded),
+                        "then retry this {!r} operation".format(acquiring)),
+                       reached=True)
 
 
 def _st_i6_own_operation(d, env):
@@ -9922,7 +9934,7 @@ def _st_i6_malformed(d, env):
     for index, line in enumerate(('operation = 7', 'operation = ""', 'operation = ["opf-init"]')):
         root = _st_init_fixture(d, "malformed{}".format(index), env)
         _st_plant_init_leftover(root, line, lease=False)
-        _st_i6_refused(root, "opf-init", "refusing recovery")
+        _st_i6_refused(root, "opf-init", ("refusing recovery",), reached=False)
 
 
 def _st_i6_flip(no_check=False, fixed_kind=False, lax_gate=False):
