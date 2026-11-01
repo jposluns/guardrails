@@ -3251,15 +3251,24 @@ CLEAN_IMPORTER = ("C-HANDOFF: clean record {!r} (type {!r}) carries actor.kind '
 RENDER_REFUSED = "the view render after publication did not complete"
 
 
+def _other_handoff_findings(out, finding):
+    """The doctor's C-HANDOFF findings in `out` other than `finding`. Only the report's finding lines
+    (`  FINDING: <message>`, opf._doctor_report) are read: its per-check verdict line (`  C-HANDOFF: FINDING`)
+    states the check's verdict, which `finding` alone already sets, and is never a second finding."""
+    lines = [line[len("  FINDING: "):] for line in out.splitlines() if line.startswith("  FINDING: ")]
+    return [line for line in lines if line.startswith("C-HANDOFF:") and line != finding]
+
+
 def clean_importer_at_rest(env, root, rid, rtype):
     """The doctor's refusal at rest of a clean record carrying the importer kind (spec 8.6: a clean-series
     record MUST NOT carry it), on this store with no active imported series graded under C-HANDOFF, and
-    no other C-HANDOFF finding beside it, so the at-most-one-current rule still holds."""
+    no other C-HANDOFF finding line beside it (_other_handoff_findings), so the at-most-one-current rule
+    still holds."""
     rc, out, err = cli(env, ["doctor", "--root", str(root)])
     finding = CLEAN_IMPORTER.format(rid, rtype)
     assert rc == 1 and finding in out, ("the clean importer record is a doctor finding at rest", rc,
                                         out[-1600:], err[-800:])
-    others = [line for line in out.splitlines() if "C-HANDOFF:" in line and finding not in line]
+    others = _other_handoff_findings(out, finding)
     assert not others, ("no other C-HANDOFF finding", others)
 
 
@@ -3279,8 +3288,8 @@ def t89_importer_history_posts(fx):
     MUST evaluate only clean records authored by non-importer actors): a clean posting publishes HO-2
     current, supersedes nothing and leaves the importer bytes untouched, then the view render refuses the
     INVALID store. A second clean posting then supersedes the clean current handoff only (the mixed
-    importer/clean-current case), the importer record again untouched, and the doctor reports only the
-    importer record's finding, never a second current handoff."""
+    importer/clean-current case), the importer record again untouched, and once that posting is committed
+    the doctor reports only the importer record's C-HANDOFF finding, never a second current handoff."""
     env = fx.env
     root = fx.case("t89-importer-history")
     legacy = {
@@ -3307,6 +3316,7 @@ def t89_importer_history_posts(fx):
         assert row(root, "HO-2", HO_INDEX)["status"] == "superseded/proposed", row(root, "HO-2", HO_INDEX)
         assert row(root, "HO-3", HO_INDEX)["links"] == [{"rel": "supersedes", "id": "HO-2"}], (
             row(root, "HO-3", HO_INDEX))
+        fx.commit_all(root, "HO-3 supersedes HO-2")
         clean_importer_at_rest(env, root, "HO-1", "handoff")
 
 
@@ -3326,6 +3336,48 @@ def flip_t89_importer():
         return [rec for rec in recs
                 if rec.rtype == record.HANDOFF and rec.state == "current" and rec.qual is None]
     return patch.object(record, "_current_handoffs", counted)
+
+
+def t89_importer_finding_lines(fx):
+    """The at-rest oracle of the importer vectors (_other_handoff_findings) over reports the doctor's own
+    printer writes (opf._doctor_report): the clean importer finding alone sets the `  C-HANDOFF: FINDING`
+    verdict line and leaves no other C-HANDOFF finding; a second C-HANDOFF finding line beside it is named;
+    a finding of another check is not."""
+    finding = CLEAN_IMPORTER.format("HO-1", "handoff")
+    second = "C-HANDOFF: 2 clean current handoffs ('HO-2', 'HO-3'); at most one is current (spec 8.5)"
+    receipt = "C-RECEIPTS: backlog item 'BI-1' is done with no receipt (spec 8.6)"
+
+    def printed(findings):
+        checks = {"C-RECEIPTS": "FINDING" if receipt in findings else "PASS", "C-HANDOFF": "FINDING"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            opf._doctor_report(opf_check.StoreValidation(opf_check.INVALID, findings=list(findings),
+                                                         checks=checks))
+        return buf.getvalue()
+    alone = printed([finding])
+    assert "  C-HANDOFF: FINDING" in alone.splitlines(), ("the doctor prints the verdict line", alone)
+    wrong = []
+    for label, findings, want in (("finding-alone", [finding], []),
+                                  ("second-handoff-finding", [finding, second], [second]),
+                                  ("other-check-finding", [finding, receipt], [])):
+        got = _other_handoff_findings(printed(findings), finding)
+        if got != want:
+            wrong.append((label, got, want))
+    assert not wrong, ("T89 the other C-HANDOFF findings of each (report, got, want) below are wrong", wrong)
+
+
+def flip_t89_verdict_line():
+    """Any line naming C-HANDOFF that is not the expected finding counts as another finding, the doctor's
+    per-check verdict line included, so the report holding the clean importer finding alone is red."""
+    def any_line(out, finding):
+        return [line for line in out.splitlines() if "C-HANDOFF:" in line and finding not in line]
+    return patch.object(sys.modules[__name__], "_other_handoff_findings", any_line)
+
+
+def flip_t89_no_findings():
+    """A reader that finds no other C-HANDOFF finding in any report, so a second current handoff beside the
+    clean importer finding passes."""
+    return patch.object(sys.modules[__name__], "_other_handoff_findings", lambda out, finding: [])
 
 
 def t89_archived_current_refused(fx):
@@ -9830,8 +9882,8 @@ def t95_importer_operand_receipt(fx):
 def t95_importer_resolution_superseded(fx):
     """A --supersedes target is read and linked, never the operand: a clean decide superseding a legacy
     importer-authored resolution (a doctor finding at rest, spec 8.6, as is the clean record carrying the
-    importer kind) publishes with the target's bytes unchanged, and the store is then refused at rest for
-    the clean importer record alone."""
+    importer kind) publishes with the target's bytes unchanged, and once committed the store is refused at
+    rest with no C-HANDOFF finding but the clean importer record's."""
     env = fx.env
     root = fx.case("t95-importer-resolution-superseded")
     ts = "2026-08-01T00:00:00Z"
@@ -9856,6 +9908,7 @@ def t95_importer_resolution_superseded(fx):
     assert row(root, "PD-1", PD_INDEX) == held, ("T95 the target keeps its bytes", row(root, "PD-1", PD_INDEX))
     assert row(root, "PD-2", PD_INDEX)["links"] == [{"rel": "supersedes", "id": "PD-1"}], (
         row(root, "PD-2", PD_INDEX))
+    fx.commit_all(root, "PD-2 supersedes the importer resolution")
     clean_importer_at_rest(env, root, "PD-1", "pending_decision")
 
 
@@ -11029,6 +11082,7 @@ TESTS = (
                                                                   flip_t89_unqualified)),
     ("T89-two-current-handoffs-refused", t89_two_current_refused, flip_t89_first_current),
     ("T89-importer-history-clean-posting", t89_importer_history_posts, flip_t89_importer),
+    ("T89-importer-finding-lines", t89_importer_finding_lines, (flip_t89_verdict_line, flip_t89_no_findings)),
     ("T89-archived-current-handoff-refused", t89_archived_current_refused, flip_t89_archived),
     ("T89-reject-supersession-sole-current", t89_reject_supersession, flip_t89_reject_guard),
     ("T89-prior-separator-spelling-respelled", t89_prior_separator_spelling, (flip_t89_no_escape,
