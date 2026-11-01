@@ -3335,7 +3335,7 @@ source-path = ".aiqt/core/rules/security-seci-input-validation.md"
 start-line = 24
 end-line = 25
 canonical-text = "External input is validated for type, range, and format at the point where it enters, preferring an\nallow-list over a deny-list."
-source-digest = "83c0ebf7d7efd8f557a05a10842824dccbf83734dd67978b6ae9329ab59120f0"
+source-digest = "f5042f60a2ff5b86efe4fbb1c04b9e54d4d3ea8a9c138262904083394b1df30b"
 
 [[clause]]
 clause-id = "secinp.2"
@@ -3344,7 +3344,7 @@ source-path = ".aiqt/core/rules/security-seci-input-validation.md"
 start-line = 24
 end-line = 25
 canonical-text = "External input is validated for type, range, and format at the point where it enters, preferring an\nallow-list over a deny-list."
-source-digest = "83c0ebf7d7efd8f557a05a10842824dccbf83734dd67978b6ae9329ab59120f0"
+source-digest = "f5042f60a2ff5b86efe4fbb1c04b9e54d4d3ea8a9c138262904083394b1df30b"
 
 [[clause]]
 clause-id = "secinp.3"
@@ -3353,7 +3353,25 @@ source-path = ".aiqt/core/rules/security-seci-input-validation.md"
 start-line = 25
 end-line = 26
 canonical-text = "The injection classes, whether SQL, operating-system command, markup, or\ntemplate, are prevented by construction rather than filtered after the fact."
-source-digest = "83c0ebf7d7efd8f557a05a10842824dccbf83734dd67978b6ae9329ab59120f0"
+source-digest = "f5042f60a2ff5b86efe4fbb1c04b9e54d4d3ea8a9c138262904083394b1df30b"
+
+[[clause]]
+clause-id = "secinp.4"
+corpus-id = "secinp"
+source-path = ".aiqt/core/rules/security-seci-input-validation.md"
+start-line = 26
+end-line = 28
+canonical-text = "When an identifier\ncomparison decides a security verdict, use the identifier's explicitly defined comparison semantics,\nnever the ambient locale."
+source-digest = "f5042f60a2ff5b86efe4fbb1c04b9e54d4d3ea8a9c138262904083394b1df30b"
+
+[[clause]]
+clause-id = "secinp.5"
+corpus-id = "secinp"
+source-path = ".aiqt/core/rules/security-seci-input-validation.md"
+start-line = 28
+end-line = 29
+canonical-text = "For identifiers defined to compare exactly or ASCII-case-insensitively, use\nexact comparison or an explicit fold of A to Z onto a to z respectively, never a Unicode-aware fold."
+source-digest = "f5042f60a2ff5b86efe4fbb1c04b9e54d4d3ea8a9c138262904083394b1df30b"
 
 [[clause]]
 clause-id = "secagt.1"

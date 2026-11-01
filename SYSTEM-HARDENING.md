@@ -104,6 +104,24 @@ Each entry follows the same shape:
 
 ---
 
+## 6. Compare identifiers by their defined semantics, not the locale or a Unicode fold
+
+- **Guardrail:** Validate external input at the boundary (`security/SECI-input-validation`, rule `secinp`): when an identifier comparison decides a security verdict, it uses the identifier's explicitly defined comparison semantics, never the ambient locale, and an identifier defined to compare exactly or ASCII-case-insensitively is compared exactly or after an explicit fold of A to Z onto a to z, never a Unicode-aware fold.
+- **What the pack does:** it states the rule. The rule's one linked gate (`gate:dangerous-api`) does not look for case folding, so nothing in the pack checks how your own scripts and code compare identifiers.
+- **The gap:** a case fold that follows the locale or Unicode can change a verdict with no change to the code. The locale and the shell options come from the environment the script runs in, not from the script.
+  - Under a Turkish or Azerbaijani locale (`tr_TR.UTF-8`, `az_AZ.UTF-8`), a capital `I` folds to a dotless i (U+0131). Bash `nocasematch`, `${x,,}` and `${x^^}`, and `grep -i` can then fail to match an ASCII host name with its own lower-case spelling.
+  - Under any UTF-8 locale, `C.UTF-8` included, `nocasematch` can accept a non-ASCII lookalike of an ASCII pattern, such as a capital I with a dot (U+0130) or the Kelvin sign (U+212A). On an allow-list, that fails open.
+  - The `BASHOPTS` environment variable can switch `nocasematch` on in a script that never asks for it.
+  - In Python, `str.lower()` and `str.casefold()` ignore the locale, but they are Unicode folds, not ASCII folds: the Kelvin sign lower-cases to an ASCII `k`.
+- **What you set up:**
+  - Fold only A to Z onto a to z, and only where an identifier is defined as ASCII-case-insensitive; otherwise compare exactly. Where an identifier's definition specifies some other comparison, use that one, set explicitly rather than taken from the locale.
+  - In shell, run that fold with `LC_ALL=C` set, or spell out the character sets (`[abcdefghijklmnopqrstuvwxyz]`, not `[a-z]` or `[[:lower:]]`), so the result does not depend on the locale.
+  - In a script that compares identifiers, switch `nocasematch` off explicitly near the top (`shopt -u nocasematch`), because `BASHOPTS` can turn it on.
+  - In Python, fold with an explicit table, `value.translate(str.maketrans(string.ascii_uppercase, string.ascii_lowercase))`, which leaves every other character unchanged. Do not fold such an identifier with `str.lower()` or `str.casefold()` unless you have first checked `str.isascii()` and treated a value that is not ASCII as no match.
+- **What remains even then:** a comparison made inside a tool or service you call follows that tool's own folding rules, and a lookalike that is not a case variant (a letter from another script, for example) is outside this entry; an exact comparison against an ASCII allow-list rejects both kinds of lookalike.
+
+---
+
 *More entries are added here as guardrails with a host-level component are identified. Likely next
 candidates: an enforced network egress allow-list (`security/SECC-egress-destinations`) and kernel-enforced
 resource bounds (`security/SECA-resource-bounds`). If an entry does not apply to your
