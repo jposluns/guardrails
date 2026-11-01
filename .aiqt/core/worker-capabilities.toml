@@ -15,6 +15,14 @@
 #   scratch     "persistent" (a writable directory that lasts the whole run); "per-command" (empty at the
 #               start of each command and discarded at its end); or "none".
 #   handback    "yes" or "no": whether it can write a file the requester can read afterwards.
+#   reads-outside-workdir
+#               "yes", "no", or "undeclared": whether it can read a path outside the workdir a brief
+#               names. "no" makes the lint refuse a brief that names an absolute path outside that
+#               workdir (P2). Undeclared means nobody has shown it either way, so no rule relies on it.
+#               Only gemini says "no": its one declared read is repo-read = "path" (files under a
+#               directory it is given) with execute, network and scratch all closed, so it has no
+#               other route to a file. claude and codex can run commands, which this file does not
+#               bound to the workdir, so they stay undeclared.
 format-version = 1
 
 [[family]]
@@ -25,6 +33,7 @@ repo-read = "path"
 git-read = "yes"
 scratch = "persistent"
 handback = "yes"
+reads-outside-workdir = "undeclared"
 
 [[family]]
 name = "codex"
@@ -34,6 +43,7 @@ repo-read = "path"
 git-read = "yes"
 scratch = "per-command"
 handback = "no"
+reads-outside-workdir = "undeclared"
 
 [[family]]
 name = "gemini"
@@ -43,3 +53,4 @@ repo-read = "path"
 git-read = "undeclared"
 scratch = "none"
 handback = "no"
+reads-outside-workdir = "no"

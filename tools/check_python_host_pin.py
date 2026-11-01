@@ -40,7 +40,9 @@ Legs, in order:
                  checkout       the first step is the checkout step as written (uses: CHECKOUT_USES and a
                                 with: of exactly CHECKOUT_INPUTS, no other key), and no other step uses a
                                 checkout action: a ref:, repository: or path: input, or a second checkout,
-                                can put another tree under the gate and the suite;
+                                can put another tree under the gate and the suite, and a
+                                persist-credentials other than false leaves the job token in the
+                                checkout's git config;
                  step-env       no step of the job carries env:: a step env: changes what an otherwise
                                 accepted run: command does (a BASH_ENV value, or a write to GITHUB_PATH
                                 or GITHUB_ENV through it), so env: on any step, held or extra, is a
@@ -477,10 +479,12 @@ JOB_KEYS = {"name", "runs-on", "steps"}
 HEAVY_JOB_IF_LINE = ("    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && "
                      "github.event.pull_request.head.repo.full_name == github.repository)")
 # The first step of each host-patch job, as written: another ref, repository or path can put another tree
-# under the gate and the suite.
+# under the gate and the suite, and a persist-credentials other than false leaves the job token in the
+# checkout's git config, where every later step can read it (tools/check_ci_parity.py holds that input on
+# every checkout step of every workflow).
 CHECKOUT_USES = "actions/checkout@v4"
 CHECKOUT_KEYS = {"uses", "with"}
-CHECKOUT_INPUTS = {"fetch-depth": "0", "fetch-tags": "true"}
+CHECKOUT_INPUTS = {"fetch-depth": "0", "fetch-tags": "true", "persist-credentials": "false"}
 SETUP_KEYS = {"name", "uses", "with"}
 # The keys of an executable step (_step_departures): the Python host pin step, each suite step and the
 # --jobs-only judge step carry exactly these, their shell: written as the one line STEP_SHELL_LINE once its
@@ -1200,7 +1204,8 @@ def _host_job_findings(job, tree, want):
                 and first.get("with") == CHECKOUT_INPUTS):
             found.append("{}: its first step is not the checkout step as written (uses: {} with only {}, no "
                          "other key): another ref, repository or path can put another tree under the gate "
-                         "and the suite".format(where, CHECKOUT_USES, ", ".join(
+                         "and the suite, and a persist-credentials other than false leaves the job token in "
+                         "the checkout's git config".format(where, CHECKOUT_USES, ", ".join(
                              "{}: {}".format(key, value) for key, value in CHECKOUT_INPUTS.items())))
         others = [index for index, step in enumerate(steps) if index
                   and isinstance(step.get("uses"), str) and "checkout" in step["uses"].lower()]
@@ -1926,7 +1931,8 @@ def _lane_reading(reader, refusal, text):
 def _host_job(job):
     """A whole host-patch job, laid out as quality.yml lays it out, its pinned if: line included."""
     return ("  {0}:\n    name: {0}\n{2}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
-            "        with:\n          fetch-depth: 0\n          fetch-tags: true\n\n".format(
+            "        with:\n          fetch-depth: 0\n          fetch-tags: true\n"
+            "          persist-credentials: false\n\n".format(
                 job, RUNNER, HEAVY_JOB_IF_LINE)
             + SETUP_STEP + GATE_STEP + _suite_step(job))
 
@@ -2114,6 +2120,7 @@ def _job_cases():
     setup_uses = "      - uses: actions/setup-python@v5\n"
     checkout_uses = "      - uses: actions/checkout@v4\n"
     fetch_tags = "          fetch-tags: true\n"
+    persist = "          persist-credentials: false\n"
     runs = "    runs-on: "
     pinned_if = HEAVY_JOB_IF_LINE + "\n"
     block = "\n".join(CONCURRENCY_BLOCK) + "\n"
@@ -2473,6 +2480,13 @@ def _job_cases():
          GFE + ": its first step is not the checkout step as written", "checkout"),
         ("jobs/checkout-path-finding", ((OPF, fetch_tags, fetch_tags + "          path: other\n"),), (),
          "opf-host-patch: its first step is not the checkout step as written", "checkout"),
+        # Without persist-credentials: false, or with it true, the checkout leaves the job token in its git
+        # config.
+        ("jobs/checkout-persist-credentials-missing-finding", ((OPF, persist, ""),), (),
+         "opf-host-patch: its first step is not the checkout step as written", "checkout"),
+        ("jobs/checkout-persist-credentials-true-finding",
+         ((GFE, persist, "          persist-credentials: true\n"),), (),
+         GFE + ": its first step is not the checkout step as written", "checkout"),
         ("jobs/checkout-other-ref-of-action-finding",
          ((GFE, "actions/checkout@v4", "actions/checkout@main"),), (),
          GFE + ": its first step is not the checkout step as written", "checkout"),
