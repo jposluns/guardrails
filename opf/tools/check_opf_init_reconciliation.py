@@ -24,34 +24,37 @@ it (a character reference decoded as the vendored marko decodes it: a decimal nu
 hexadecimal one of up to six or a name of up to 32 characters, ended by ";", read by html.unescape; an escaped
 character and a closed code span's content kept literal), nor open with letters that could begin such a name
 (a prefix of one, or a whole one and spaces or tabs, or nothing) followed, once rendered, by a character
-outside the closed set a name may hold: the tab and printable ASCII (U+0020 to U+007E). Any other character
-there, such as a format or default-ignorable character, a Unicode space, a line feed a reference decodes to, a
-blank glyph such as U+2800 or a letter such as U+00E9, is refused, whether or not a reader shows it, except
-U+0301 COMBINING ACUTE ACCENT, a visible mark read as different text. A character reference is thus refused
-only where its decoded character completes such a name or falls outside that set there; "S&amp;P" is read,
-and two spellings a reader renders alike are judged alike. re.IGNORECASE also folds U+017F to "s" and
-U+0130 and U+0131 to "i", so a name spelled with one of those is refused although a reader shows it
-differently. That line, and a field line, must hold no
-raw HTML outside a code span; a field value is checked for nothing else, apart from the refusals below that
-apply to every line. Any other line cannot evaluate (exit 2): a blockquote, a bullet item other than a field
-line, an ordered item marked other than "<digits>. ", a table row, a setext underline or thematic break, an
-HTML line, an indented line that continues no item, a fence or comment opened by a line indented with spaces
-or tabs at any width (a backtick run with another backtick later on its line is inline code, not an opener),
-text after the "-->" closing a comment that opens its line, a "<!--" that does not close on its line
-(refused as raw HTML, although a reader shows it as literal text unless a later line of the paragraph closes
-it), a code span carried into a line that does not close it, two backtick runs on one line that nothing on it
-closes above a line that continues the paragraph (refused although a reader may render them, as this gate
-carries one run), a backtick run left open above an ordered item that continues the paragraph (also inside a
-list, where a reader may start a sibling item instead), an entry
-heading whose name holds a character reference html.unescape decodes (even one a backslash escapes or a code
-span holds, which a reader shows literally) or a character outside that closed set, and a carriage
-return or other control character. An entry ends at the next heading that is not an entry heading
-(a level 1 or 2 heading also ends the obligation a split sits under); prose and ordered items end no entry.
-An Owner, Ownership, Disposition or Successor field line after that end and before the next entry, or before
-the first entry, belongs to no entry and is refused. Lines inside a fenced code block, or inside an HTML
-comment that opens its line, are not read, and the same holds for TODO.md table rows; such a comment ends on
-the first line holding "-->", so "<!-->" and "<!--->" end it on their own line. An inline comment hides no
-later line.
+outside the closed set a name may hold, the tab and printable ASCII (U+0020 to U+007E), or by link or image
+markup ("[" or "![", however written, as this gate does not render links or images). Only spaces and tabs are
+dropped from the start of the rendered text before a name is sought. Any other character there, such as a
+format or default-ignorable character, a Unicode space, a line feed a reference decodes to, a blank glyph
+such as U+2800 or a letter such as U+00E9, is refused, whether or not a reader shows it; so is text whose
+first character, or whose character after an opening "O", "S" or "D", is outside that set. The exception is
+U+0301 COMBINING ACUTE ACCENT, a visible mark read as different text: like a digit or ASCII punctuation, it
+ends the place a name could be, and nothing after it is checked. A character reference is thus refused only
+where its decoded character completes such a name or falls outside that set there; "S&amp;P" is read, and two
+spellings a reader renders alike are judged alike. re.IGNORECASE also folds U+017F to "s" and U+0130 and
+U+0131 to "i", so a name spelled with one of those is refused although a reader shows it differently. That
+line, and a field line, must hold no raw HTML outside a code span; a field value is checked for nothing else,
+apart from the refusals below that apply to every line. Any other line cannot evaluate (exit 2): a blockquote,
+a bullet item other than a field line, an ordered item marked other than "<digits>. ", a table row, a setext
+underline or thematic break, an HTML line, an indented line that continues no item, a fence or comment opened
+by a line indented with spaces or tabs at any width (a backtick run with another backtick later on its line is
+inline code, not an opener), text after the "-->" closing a comment that opens its line, a "<!--" that does
+not close on its line (refused as raw HTML, although a reader shows it as literal text unless a later line of
+the paragraph closes it), a code span carried into a line that does not close it, two backtick runs on one
+line that nothing on it closes above a line that continues the paragraph (refused although a reader may
+render them, as this gate carries one run), a backtick run left open above an ordered item that continues the
+paragraph (also inside a list, where a reader may start a sibling item instead), an entry heading whose name
+holds a character reference html.unescape decodes (even one a backslash escapes or a code span holds, which a
+reader shows literally) or a character outside that closed set (only trailing spaces and tabs are dropped from
+the name), and a carriage return or other control character. An entry ends at the next heading that is not an
+entry heading (a level 1 or 2 heading also ends the obligation a split sits under); prose and ordered items
+end no entry. An Owner, Ownership, Disposition or Successor field line after that end and before the next
+entry, or before the first entry, belongs to no entry and is refused. Lines inside a fenced code block, or
+inside an HTML comment that opens its line, are not read, and the same holds for TODO.md table rows; such a
+comment ends on the first line holding "-->", so "<!-->" and "<!--->" end it on their own line. An inline
+comment hides no later line.
 A field's value is read from its first line only. It checks STRUCTURE only: it never reads a cited symbol,
 so a green run says nothing about whether any obligation is implemented or whether a named successor
 accepted the work.
@@ -118,8 +121,11 @@ DISPOSITIONS = ("open", "retained", "transferred", "superseded")
 # Owner values that name nobody, compared after casefold and a trailing-dot strip.
 NO_OWNER = ("", "none", "none yet")
 
-_OBLIGATION_RE = re.compile(r"^## Obligation: (.+?)\s*$")
-_SPLIT_RE = re.compile(r"^### Split: (.+?)\s*$")
+# An entry name ends before trailing spaces and tabs only, which every CommonMark reader strips from a heading;
+# any other character there stays in the name, where _hidden refuses it. The vendored marko also strips Unicode
+# spaces such as U+00A0 (str.strip), but another reader shows them, so they are not trimmed.
+_OBLIGATION_RE = re.compile(r"^## Obligation: (.+?)[ \t]*$")
+_SPLIT_RE = re.compile(r"^### Split: (.+?)[ \t]*$")
 _FIELD_RE = re.compile(r"^- ([A-Za-z ]+): ?(.*?)\s*$")
 # The fields the checks below read; one outside an entry is refused, never attached to the entry above.
 READ_FIELDS = ("owner", "ownership", "disposition", "successor")
@@ -164,7 +170,15 @@ _REFERENCE_RE = re.compile(r"&(?:#[0-9]{1,7};|#[xX][0-9a-fA-F]{1,6};|[^\t\n\f <&
 _NAME_CHARS = frozenset("\t" + "".join(map(chr, range(0x20, 0x7F))))
 # Characters outside _NAME_CHARS read as different text where a name could be, because a reader shows each as
 # a visible mark: U+0301 COMBINING ACUTE ACCENT, drawn over the letter before it ("Own&#769;er" shows "Owńer").
-_VISIBLE_MARKS = frozenset("́")
+_VISIBLE_MARKS = frozenset("\N{COMBINING ACUTE ACCENT}")
+# The characters dropped from the start of rendered text before a name is sought: spaces and tabs, which a reader
+# shows blank or not at all, so they cannot stand for a hidden character. Any other character, such as U+00A0
+# left at the start by a code span, stays for the closed-set check (_hidden_name).
+_LEADING = " \t"
+# Link or image markup, "[" or "![": a reader shows a link's text and an image's alt text, and nothing for an
+# empty one, so "Ow[ner](): x" and "Owner![](): x" show "Owner: x". This gate does not render links or images,
+# so it refuses either opener where a name could be (_hidden_name), however it is written.
+_LINK_RE = re.compile(r"!?\[")
 # A carriage return (a line ending to a Markdown reader, not to this gate's line split) or another control
 # character other than a tab, including the Unicode line and paragraph separators.
 _CONTROL_RE = re.compile("[\\x00-\\x08\\x0b-\\x1f\\x7f\\x85\\u2028\\u2029]")
@@ -484,11 +498,12 @@ def _rendered(text):
 def _hidden_name(text):
     """True when `text` opens with ASCII letters, spaces and tabs that could begin an entry or read field name
     and its colon (a prefix of a name, or a whole name and spaces or tabs), and then a character outside the set
-    a name may hold (_NAME_CHARS) other than a visible mark (_VISIBLE_MARKS). A digit or ASCII punctuation,
-    the colon among them, ends the place a name could be. The caller passes the rendered text (_rendered), so a
-    character spelled as a character reference is judged as the character itself."""
+    a name may hold (_NAME_CHARS) other than a visible mark (_VISIBLE_MARKS), or link or image markup (_LINK_RE).
+    A digit, other ASCII punctuation (the colon among it) or a visible mark ends the place a name could be, and
+    nothing after it is checked. The caller passes the rendered text (_rendered), so a character spelled as a
+    character reference is judged as the character itself."""
     for i, ch in enumerate(text):
-        if ch not in _NAME_CHARS:
+        if ch not in _NAME_CHARS or _LINK_RE.match(text, i):
             prefix = text[:i].casefold()
             return ch not in _VISIBLE_MARKS and any(
                 name.startswith(prefix) or prefix.rstrip(" \t") == name for name in _NAMES)
@@ -501,15 +516,15 @@ def _read_text(number, line, text, bare):
     """Refuses the text of a heading, item, continuation or prose line unless it is plain: it opens as
     _PLAIN_RE allows, its line holds no raw HTML outside a code span (bare, from _inline), and it does not name
     an entry or a read field, either once emphasis, code and escape marks are removed or as a reader renders
-    it (_rendered), nor open with a name a character outside the set a name may hold splits or follows
-    (_hidden_name). A character reference is judged by what it decodes to, so one that decodes to a letter, a
-    space, a colon or a character outside that set can complete a name, and others, such as "S&amp;P", are
-    read."""
+    it (_rendered), nor open with a name a character outside the set a name may hold, or link or image markup,
+    splits or follows (_hidden_name). A character reference is judged by what it decodes to, so one that decodes
+    to a letter, a space, a colon or a character outside that set can complete a name, and others, such as
+    "S&amp;P", are read."""
     if not _PLAIN_RE.match(text):
         raise _unread(number, line, "text that opens with a mark a reader can render as structure")
     if _HTML_RE.search(bare):
         raise _unread(number, line, "raw HTML, or a \"<!--\" that does not close on its line")
-    rendered = _rendered(text).lstrip()
+    rendered = _rendered(text).lstrip(_LEADING)
     if _NAMES_RE.match(_FORMATTING_RE.sub("", text).lstrip()) or _NAMES_RE.match(rendered):
         raise _unread(number, line, "an entry or read field named outside an entry heading or field line")
     if _hidden_name(rendered):
@@ -916,6 +931,12 @@ def _broad_hidden(text):
         _NAME_CHARS.issuperset(text))
 
 
+def _hidden_before_colon(text):
+    """Every character before the first colon judged against the closed set, past the end of the place a name
+    could be: the flip the overlay vectors turn red under."""
+    return not _NAME_CHARS.issuperset(text.partition(":")[0])
+
+
 def _comment_to_line_end(line, start):
     """An inline comment read as running to the line end when it does not close, with no short form."""
     end = line.find("-->", start + 4)
@@ -947,6 +968,10 @@ _RULE_FLIPS = {
     "opener": ("_INDENTED_OPENER_RE", re.compile(r"(?!)")),
     "unbounded": ("_refuse_unbounded", _ignore),
     "two-runs": ("_refuse_runs", _ignore),
+    "obligation-end": ("_OBLIGATION_RE", re.compile(r"^## Obligation: (.+?)\s*$")),
+    "split-end": ("_SPLIT_RE", re.compile(r"^### Split: (.+?)\s*$")),
+    "leading": ("_LEADING", None),
+    "link": ("_LINK_RE", re.compile(r"(?!)")),
     "hidden-name": ("_hidden_name", _never),
     "comment-eol": ("_comment_end", _comment_to_line_end),
     "short-comment": ("_SHORT_COMMENTS", ()),
@@ -1073,6 +1098,28 @@ _UNREAD_SHAPES = (
     ("field-name-mongolian-selector-reference", _good(extra="Own&#x180B;er: none yet.\n"), {"hidden-name"}),
     ("field-name-hangul-filler-reference", _good(extra="Own&#x3164;er: none yet.\n"), {"hidden-name"}),
     ("field-name-hangul-filler-after-name", _good(extra="Owner&#x3164;: none yet.\n"), {"hidden-name"}),
+    # A Unicode space trailing an entry name stays in the name, and one a code span or a dropped backtick run
+    # leaves before a name stays for the closed-set check; trimmed as Python whitespace (\s, str.lstrip), each
+    # passes. The vendored marko strips the heading's trailing ones, but other readers show them.
+    ("obligation-trailing-no-break-space", _good().replace(
+        "## Obligation: coordination\n", "## Obligation: coordination\N{NO-BREAK SPACE}\n"), {"obligation-end"}),
+    ("obligation-trailing-ideographic-space", _good().replace(
+        "## Obligation: coordination\n", "## Obligation: coordination\N{IDEOGRAPHIC SPACE}\n"), {"obligation-end"}),
+    ("obligation-trailing-ogham-space-mark", _good().replace(
+        "## Obligation: coordination\n", "## Obligation: coordination\N{OGHAM SPACE MARK}\n"), {"obligation-end"}),
+    ("split-trailing-no-break-space", _good().replace(
+        "### Split: import disposition\n", "### Split: import disposition\N{NO-BREAK SPACE}\n"), {"split-end"}),
+    ("code-span-no-break-space-before-name", _good(extra="`\N{NO-BREAK SPACE}`Owner notes.\n"), {"leading"}),
+    ("open-run-no-break-space-reference-before-name", _good(extra="`&nbsp;Owner notes.\n"), {"leading"}),
+    # Link or image markup that splits or follows a name, which a reader shows as the name: link text, alt text
+    # or nothing for an empty one. Each passes once the link refusal is removed.
+    ("link-splits-name", _good(extra="Ow[ner](): none yet.\n"), {"link"}),
+    ("link-with-destination-splits-name", _good(extra="Ow[ner](x): none yet.\n"), {"link"}),
+    ("link-text-reference-splits-name", _good(extra="Ow[n&#101;r](): none yet.\n"), {"link"}),
+    ("empty-link-after-name", _good(extra="Owner[](): none yet.\n"), {"link"}),
+    ("empty-link-after-name-and-space", _good(extra="Owner [](): none yet.\n"), {"link"}),
+    ("empty-link-after-name-and-space-reference", _good(extra="Owner&#32;[](): none yet.\n"), {"link"}),
+    ("empty-image-after-name", _good(extra="Owner![](): none yet.\n"), {"link"}),
     ("tab-indented-comment-opener", _good(extra="- Note: x\n\t<!-- x\n"), {"opener", "indent", "html"}),
     ("ordered-item-indented-fence", _good(extra="10. x\n    ```\n    y\n"), {"opener", "unbounded"}),
 )
@@ -1088,6 +1135,8 @@ _HIDDEN_ENTRY_NAMES = (
     ("obligation-braille-blank", _good(extra=_entry("coordination\u2800"))),
     ("obligation-other-letter", _good(extra=_entry("coordin\u00e1tion"))),
     ("split-reference", _good(children=SPLIT_CHILDREN + ("move disposition&#8203;",))),
+    ("obligation-trailing-no-break-space-reference", _good(extra=_entry("coordination&nbsp;"))),
+    ("split-trailing-ideographic-space-reference", _good(children=SPLIT_CHILDREN + ("move disposition&#x3000;",))),
 )
 
 # Headings that end the entry above them: the Owner below each is a stray field (exit 1).
@@ -1232,7 +1281,7 @@ def self_test():
                         ("whole-name-ampersand", "Owner &amp; operator notes are open."),
                         ("letter-completing-no-name", "Own&#101;rship notes are open."),
                         ("visible-combining-mark", "Own&#769;er: none yet."),
-                        ("visible-combining-mark-literal", "Owńer: none yet."),
+                        ("visible-combining-mark-literal", "Own\N{COMBINING ACUTE ACCENT}er: none yet."),
                         ("escaped-reference", "Own\\&#101;r: none yet."),
                         ("reference-in-code", "Own`&#101;`r: none yet."),
                         ("number-without-semicolon", "Owner&#58 none yet."),
@@ -1241,6 +1290,15 @@ def self_test():
                         ("number-over-seven-digits", "Owner&#00000058; none yet.")):
         expect(_findings_or_none(_with_line("publication", line), backlog) == [],
                "clean/reference-after-other-letters/{}".format(label))
+    # "&bne;", "&nvgt;" and "&nvlt;" decode to "=", ">" or "<" with an overlay mark (U+20E5 or U+20D2) drawn over
+    # it. The overlay attaches to that visible ASCII base, which already ends the place a name could be, so it
+    # cannot change a letter of a name and each is read; judged past that end, up to the colon, each is refused.
+    for label, line in (("bne", "Owner&bne;: none yet."), ("nvgt", "Own&nvgt;er: none yet."),
+                        ("nvlt", "Owner&nvlt;: none yet.")):
+        overlay = _good(extra=line + "\n")
+        expect(_run(_files(crosswalk=overlay))[0] == 0, "clean/overlay-on-ascii-base/{}".format(label))
+        with mock.patch.object(module, "_hidden_name", _hidden_before_colon):
+            expect(_run(_files(crosswalk=overlay))[0] == 2, "flip/overlay-judged-past-name-end/{}".format(label))
     # Two spellings a reader renders alike get the same exit: a reference and the character it decodes to.
     for label, spelled, literal in (("colon", "Owner&#58; none yet.", "Owner: none yet."),
                                     ("letter", "Own&#101;r: none yet.", "Owner: none yet."),

@@ -29,43 +29,51 @@ marko decodes it: a decimal number of up to seven digits, a hexadecimal one of u
 of up to 32 characters, ended by `;`, read by Python's `html.unescape`; an escaped character and a
 closed code span's content kept literal); and must not open with letters that could begin such a
 name (a prefix of one, a whole one and spaces or tabs, or nothing) followed, once rendered, by a
-character outside the closed set a name may hold. That set is the tab and printable ASCII (U+0020
-to U+007E): the names use letters, the space, `-` and `/`, and the text the check reads there adds
+character outside the closed set a name may hold, or by link or image markup (`[` or `![`, however
+it is written, since the check does not render links or images and a reader shows `Ow[ner](): x`
+and `Owner![](): x` as `Owner: x`). Only spaces and tabs are dropped from the start of the
+rendered text before a name is sought. The closed set is the tab and printable ASCII (U+0020 to
+U+007E): the names use letters, the space, `-` and `/`, and the text the check reads there adds
 digits and punctuation such as `&`, `#` and `;`. Any other character there is outside the accepted
 set and is refused, whether a reader shows it blank, not at all or as a visible glyph: a format or
 default-ignorable character, a no-break or other Unicode space (U+1680 OGHAM SPACE MARK among
 them, although many fonts draw it as a stroke), a line feed or carriage return a reference decodes
-to (so `Owner&#10;:`, which HTML shows as `Owner :`), a blank glyph such as U+2800, and a letter
-such as U+00E9. A vertical tab's reference decodes to nothing and a literal one is a control
-character, so it is refused either way. The one exception is U+0301 COMBINING ACUTE ACCENT, which a
-reader draws as an accent over the letter before it, so `Own&#769;er:` is read as that different
-text. A character reference is so refused only where its decoded character completes such a name
-or falls outside the set there: `S&amp;P` is read, `Split&nbsp;decisions` is refused, and two
-spellings a reader renders alike are judged alike. That text, and a field line, must hold no raw
-HTML outside a code span; a field value
-is checked for nothing else, apart from the refusals below that apply to every line. Every other
-line cannot evaluate: a blockquote, a bullet item other than a field line, an ordered item marked
-other than `<digits>. `, a table row, a setext underline or thematic break, an HTML line, an
-indented line that continues no item, a fence or comment opener indented by spaces or tabs at any
-width (a backtick run with another backtick later on its line is inline code, not an opener), text
-after the end of a comment that opens its line, a `<!--` that does not close on its line (refused
-as raw HTML, although a reader shows it as literal text unless a later line of the paragraph closes
-it), a code span carried into a line that does not close it, two backtick runs on one line that
-nothing on it closes above a line that continues the paragraph (refused although a reader may
-render them, as the check carries one run), a backtick run left open above an ordered item that
-continues the paragraph (also inside a list, where a reader may start a sibling item instead), an
-entry heading whose name holds a character reference `html.unescape` decodes or a character outside
-the closed set above, and a carriage return or other control character. Besides the `<!--`,
-backtick and list cases above, these refusals also reach text a reader shows differently: a
-character outside the closed set where a name could be, when a reader shows it as a visible glyph
-(U+1680, U+00E9, a full-width colon); an entry heading name holding such a character (which would
-otherwise read as an unknown obligation) or a reference that a backslash escapes or a code span
-holds (`coordi\&#110;ation`, which the vendored marko shows literally); and a name matched without
-regard to case, which also matches U+017F (long s) for `s` and U+0130 and U+0131 (dotted capital
-and dotless i) for `i`, so a Split name spelled with a long s is refused. An entry ends at the next
-heading that is not an entry heading; prose and ordered items end no entry. An Owner, Ownership,
-Disposition or Successor field line after that end and before the next entry, or before the first entry, belongs
-to no entry and is refused. Lines and `TODO.md`
+to (so `Owner&#10;:` is refused, although HTML shows it as `Owner :`), a blank glyph such as
+U+2800, and a letter such as U+00E9. So text is also refused when its first character, or its
+character after an opening `O`, `S` or `D`, is outside that set (U+00C9, or `D` and U+00E9). A
+vertical tab's reference decodes to nothing and a literal one is a control character, so it is
+refused either way. The one exception is U+0301 COMBINING ACUTE ACCENT, which a reader draws as an accent
+over the letter before it, so `Own&#769;er:` is read as that different text; like a digit or ASCII
+punctuation, it ends the place a name could be, and nothing after it is checked. A character
+reference is so refused only where its decoded character completes such a name or falls outside
+the set there: `S&amp;P` is read, `Split&nbsp;decisions` is refused, and two spellings a reader
+renders alike are judged alike. That text, and a field line, must hold no raw HTML outside a code
+span; a field value is checked for nothing else, apart from the refusals below that apply to every
+line. Every other line cannot evaluate: a blockquote, a bullet item other than a field line, an
+ordered item marked other than `<digits>. `, a table row, a setext underline or thematic break, an
+HTML line, an indented line that continues no item, a fence or comment opener indented by spaces
+or tabs at any width (a backtick run with another backtick later on its line is inline code, not
+an opener), text after the end of a comment that opens its line, a `<!--` that does not close on
+its line (refused as raw HTML, although a reader shows it as literal text unless a later line of
+the paragraph closes it), a code span carried into a line that does not close it, two backtick
+runs on one line that nothing on it closes above a line that continues the paragraph (refused
+although a reader may render them, as the check carries one run), a backtick run left open above
+an ordered item that continues the paragraph (also inside a list, where a reader may start a
+sibling item instead), an entry heading whose name holds a character reference `html.unescape`
+decodes or a character outside the closed set above (only trailing spaces and tabs are dropped
+from the name, although the vendored marko also drops a trailing no-break or other Unicode space),
+and a carriage return or other control character. Besides the `<!--`, backtick and list cases
+above, these refusals also reach text a reader shows differently: a character outside the closed
+set where a name could be, when a reader shows it as a visible glyph (U+1680, U+00E9, a full-width
+colon); an entry heading name holding such a character (which would otherwise read as an unknown
+obligation, or, where case folding or the whitespace split removes the difference, as the known
+one, as for a Kelvin sign in `Keep-apply` or a no-break space in `git staging`) or a reference that
+a backslash escapes or a code span holds (`coordi\&#110;ation`, which the vendored marko shows
+literally); and a name matched without regard to case, which also matches U+017F (long s) for `s`
+and U+0130 and U+0131 (dotted capital and dotless i) for `i`, so a Split name spelled with a long s
+is refused. An entry ends at the next heading that is not an entry heading; prose and ordered items
+end no entry. An Owner, Ownership, Disposition or Successor field line after that end and before
+the next entry, or before the first entry, belongs to no entry and is refused. Lines and `TODO.md`
 table rows inside a fenced code block, or inside an HTML comment that opens its line, are not read;
 such a comment ends on the first line holding `-->`, so `<!-->` and `<!--->` end it on their own
 line. An inline comment hides no later line. A field's value is read from its first line only.
