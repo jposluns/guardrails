@@ -18,16 +18,20 @@ next line when that line continues the paragraph (an indented line, prose, or an
 "1. " with text, the one item a reader starts a list on below a paragraph), and is literal text when the next
 line ends the paragraph. The text of a heading, ordered item, continuation or prose line must open with a
 letter, a digit that starts no list marker, "(", a quote, a backtick or an option name such as --self-test;
-it must not begin with "Obligation", "Split", "Owner", "Ownership", "Disposition" or "Successor" and spaces
-or tabs and a colon, in any case, either once emphasis, code and escape marks are removed or as a reader
-renders it (a character reference decoded as the vendored marko decodes it: a decimal number of up to seven
-digits, a hexadecimal one of up to six or a name of up to 32 characters, ended by ";", read by html.unescape;
-an escaped character and a closed code span's content kept literal), nor open with letters that could begin such a name
-(a prefix of one, or a whole one and spaces or tabs) followed, once rendered, by a format character (Unicode
-Cf, such as U+200B). A character reference is thus refused only where its decoded character completes such a
-name; "S&amp;P" and "Split&nbsp;decisions" are read, and two spellings a reader renders alike are judged
-alike. A name spelled with a look-alike a reader does show (a combining mark, a no-break or other non-ASCII
-space, a full-width colon) is read as that text, not as the name. That line, and a field line, must hold no
+it must not begin with "Obligation", "Split", "Owner", "Ownership", "Disposition" or "Successor", any
+whitespace (a character str.isspace accepts: a space or tab, a line feed, carriage return or form feed a
+reference decodes to, or a no-break or other Unicode space) and a colon, in any case, either once emphasis,
+code and escape marks are removed or as a reader renders it (a character reference decoded as the vendored
+marko decodes it: a decimal number of up to seven digits, a hexadecimal one of up to six or a name of up to
+32 characters, ended by ";", read by html.unescape; an escaped character and a closed code span's content
+kept literal), nor open with letters that could begin such a name (a prefix of one, or a whole one and
+whitespace) followed, once rendered, by a character a reader shows with no glyph: a format character (Unicode
+Cf, such as U+200B) or a default-ignorable code point (such as U+034F or U+3164). A character reference is
+thus refused only where its decoded character completes such a name; "S&amp;P" and "Split&nbsp;decisions"
+are read, and two spellings a reader renders alike are judged alike. A name spelled with a look-alike a
+reader does show (a visible combining mark such as U+0301, a full-width colon) is read as that text, not as
+the name; re.IGNORECASE also folds U+017F to "s" and U+0130 and U+0131 to "i", so a name spelled with one
+of those is refused although a reader shows it differently. That line, and a field line, must hold no
 raw HTML outside a code span; a field value is checked for nothing else, apart from the refusals below that
 apply to every line. Any other line cannot evaluate (exit 2): a blockquote, a bullet item other than a field
 line, an ordered item marked other than "<digits>. ", a table row, a setext underline or thematic break, an
@@ -39,8 +43,9 @@ it), a code span carried into a line that does not close it, two backtick runs o
 closes above a line that continues the paragraph (refused although a reader may render them, as this gate
 carries one run), a backtick run left open above an ordered item that continues the paragraph (also inside a
 list, where a reader may start a sibling item instead), an entry
-heading whose name holds a character reference the vendored marko decodes or a format character, and a
-carriage return or other control character. An entry ends at the next heading that is not an entry heading
+heading whose name holds a character reference html.unescape decodes (even one a backslash escapes or a code
+span holds, which a reader shows literally) or a character a reader shows with no glyph, and a carriage
+return or other control character. An entry ends at the next heading that is not an entry heading
 (a level 1 or 2 heading also ends the obligation a split sits under); prose and ordered items end no entry.
 An Owner, Ownership, Disposition or Successor field line after that end and before the next entry, or before
 the first entry, belongs to no entry and is refused. Lines inside a fenced code block, or inside an HTML
@@ -140,8 +145,13 @@ _ESCAPABLE = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 _SHORT_COMMENTS = ("<!-->", "<!--->")
 # Text that names an entry or a read field, after emphasis, code and escape marks are removed: outside an entry
 # heading or a field line it is a form this gate cannot read.
+# Whitespace before the colon is any character str.isspace accepts (\s in a str pattern): the ASCII whitespace
+# HTML shows as one space (tab, line feed, form feed, carriage return, space), which "&#10;" or "&NewLine;"
+# decodes to, and the no-break and other Unicode spaces, which HTML does not collapse but a reader shows blank.
+# A vertical tab is not HTML whitespace; html.unescape decodes its reference to nothing, and a literal one is a
+# control character (_CONTROL_RE), so either spelling is refused.
 _NAMES = ("obligation", "split", "owner", "ownership", "disposition", "successor")
-_NAMES_RE = re.compile(r"(?:{})[ \t]*:".format("|".join(_NAMES)), re.IGNORECASE)
+_NAMES_RE = re.compile(r"(?:{})\s*:".format("|".join(_NAMES)), re.IGNORECASE)
 _FORMATTING_RE = re.compile(r"[*_`\\~]")
 _EMPHASIS = "*_~"
 # A character reference as the vendored marko's renderer finds it (its Renderer._charref): a decimal number of up
@@ -149,6 +159,16 @@ _EMPHASIS = "*_~"
 # each with html.unescape, which also reads a name that only begins with a legacy one ("&shyer;" is U+00AD and
 # "er;"), and leaves an unknown name as it is.
 _REFERENCE_RE = re.compile(r"&(?:#[0-9]{1,7};|#[xX][0-9a-fA-F]{1,6};|[^\t\n\f <&#;]{1,32};)")
+# The Unicode Default_Ignorable_Code_Point property (Unicode Character Database, DerivedCoreProperties.txt),
+# which the standard library does not expose: code points a reader shows with no glyph. Most are format
+# characters (Cf); the rest include U+034F COMBINING GRAPHEME JOINER, the Mongolian free variation selectors,
+# the Hangul fillers and the variation selectors. Inclusive ranges; a character in one is never read as text.
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+    (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+    (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
 # A carriage return (a line ending to a Markdown reader, not to this gate's line split) or another control
 # character other than a tab, including the Unicode line and paragraph separators.
 _CONTROL_RE = re.compile("[\\x00-\\x08\\x0b-\\x1f\\x7f\\x85\\u2028\\u2029]")
@@ -416,8 +436,9 @@ def _holds_paragraph(line):
 
 def _interrupts(ordered):
     """True when the ordered item `ordered` (an _ORDERED_RE match) starts a list below a paragraph line, so the
-    paragraph ends above it: the vendored marko starts one only on the marker "1. " with text after it. Any
-    other ordered item continues the paragraph."""
+    paragraph ends above it: outside a list, the vendored marko starts one only on the marker "1. " with text
+    after it. Any other ordered item is read here as continuing the paragraph, although inside a list marko
+    ends the paragraph at any list item; a backtick run left open above such an item is refused, not read."""
     return ordered.group(1) == "1. " and bool(ordered.group(2).strip())
 
 
@@ -426,10 +447,20 @@ def _decoded(text):
     return _REFERENCE_RE.sub(lambda m: html.unescape(m.group()), text)
 
 
+def _invisible(ch):
+    """True when a reader shows `ch` with no glyph: a format character (Unicode category Cf, such as U+200B) or
+    a default-ignorable code point (_DEFAULT_IGNORABLE, such as U+034F)."""
+    if unicodedata.category(ch) == "Cf":
+        return True
+    point = ord(ch)
+    return any(low <= point <= high for low, high in _DEFAULT_IGNORABLE)
+
+
 def _hidden(text):
-    """True when `text` holds a character reference a reader decodes (_decoded changes it) or a format character
-    (Unicode category Cf, such as U+200B): a reader may see a name this gate does not."""
-    return _decoded(text) != text or any(unicodedata.category(ch) == "Cf" for ch in text)
+    """True when `text` holds a character reference html.unescape decodes (_decoded changes it, even where a
+    backslash or a code span keeps it literal to a reader) or a character a reader shows with no glyph
+    (_invisible): a reader may see a name this gate does not."""
+    return _decoded(text) != text or any(_invisible(ch) for ch in text)
 
 
 def _rendered(text):
@@ -464,15 +495,15 @@ def _rendered(text):
 
 
 def _hidden_name(text):
-    """True when `text` opens with ASCII letters, spaces or tabs that could begin an entry or read field name
-    and its colon (a prefix of a name, or a whole name and spaces or tabs), and then a format character (Unicode
-    Cf), which a reader does not show. The caller passes the rendered text (_rendered), so a format character
-    spelled as a character reference is judged as the character itself."""
+    """True when `text` opens with ASCII letters and whitespace (str.isspace) that could begin an entry or read
+    field name and its colon (a prefix of a name, or a whole name and whitespace), and then a character a
+    reader shows with no glyph (_invisible). The caller passes the rendered text (_rendered), so such a
+    character spelled as a character reference is judged as the character itself."""
     for i, ch in enumerate(text):
-        if unicodedata.category(ch) == "Cf":
+        if _invisible(ch):
             prefix = text[:i].casefold()
-            return any(name.startswith(prefix) or prefix.rstrip(" \t") == name for name in _NAMES)
-        if not (ch.isascii() and (ch.isalpha() or ch in " \t")):
+            return any(name.startswith(prefix) or prefix.rstrip() == name for name in _NAMES)
+        if not ((ch.isascii() and ch.isalpha()) or ch.isspace()):
             return False
     return False
 
@@ -481,9 +512,10 @@ def _read_text(number, line, text, bare):
     """Refuses the text of a heading, item, continuation or prose line unless it is plain: it opens as
     _PLAIN_RE allows, its line holds no raw HTML outside a code span (bare, from _inline), and it does not name
     an entry or a read field, either once emphasis, code and escape marks are removed or as a reader renders
-    it (_rendered), nor open with a name a format character splits or follows. A character reference is judged
-    by what it decodes to, so one that decodes to a letter, space, tab, colon or format character can complete
-    a name, and others, such as "S&amp;P" or "Split&nbsp;decisions", are read."""
+    it (_rendered), nor open with a name a character a reader shows with no glyph splits or follows. A
+    character reference is judged by what it decodes to, so one that decodes to a letter, whitespace, a colon
+    or such a character can complete a name, and others, such as "S&amp;P" or "Split&nbsp;decisions", are
+    read."""
     if not _PLAIN_RE.match(text):
         raise _unread(number, line, "text that opens with a mark a reader can render as structure")
     if _HTML_RE.search(bare):
@@ -492,7 +524,7 @@ def _read_text(number, line, text, bare):
     if _NAMES_RE.match(_FORMATTING_RE.sub("", text).lstrip()) or _NAMES_RE.match(rendered):
         raise _unread(number, line, "an entry or read field named outside an entry heading or field line")
     if _hidden_name(rendered):
-        raise _unread(number, line, "a format character where a name would be")
+        raise _unread(number, line, "a character a reader shows with no glyph where a name would be")
 
 
 def parse_crosswalk(text):
@@ -514,7 +546,8 @@ def parse_crosswalk(text):
             continue
         m = _OBLIGATION_RE.match(line) or _SPLIT_RE.match(line)
         if m and _hidden(m.group(1)):
-            raise _unread(number, line, "an entry name holding a character reference or format character")
+            raise _unread(number, line, "an entry name holding a character reference or a character a reader "
+                                        "shows with no glyph")
         m = _OBLIGATION_RE.match(line)
         if m:
             parent = _norm(m.group(1))
@@ -887,6 +920,13 @@ def _never(*_args):
     return False
 
 
+def _broad_hidden(text):
+    """An entry name refused for any "&...;", decoded or not: the flip the undecoded-reference vector turns red
+    under."""
+    return bool(re.search(r"&(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);", text)) or any(
+        _invisible(ch) for ch in text)
+
+
 def _comment_to_line_end(line, start):
     """An inline comment read as running to the line end when it does not close, with no short form."""
     end = line.find("-->", start + 4)
@@ -1002,6 +1042,31 @@ _UNREAD_SHAPES = (
     ("field-name-reference-after-space", _good(extra="Owner &#58; none yet.\n"), {"names"}),
     ("field-name-reference-after-tab", _good(extra="Owner\t&#58; none yet.\n"), {"names"}),
     ("field-name-format-character-after-tab", _good(extra="Owner\t\u200b: none yet.\n"), {"hidden-name"}),
+    # Whitespace a reference decodes to before the colon: HTML shows each as a space, as it does "Owner :".
+    ("field-name-line-feed-reference", _good(extra="Owner&#10;: none yet.\n"), {"names"}),
+    ("field-name-hex-line-feed-reference", _good(extra="Owner&#xA;: none yet.\n"), {"names"}),
+    ("field-name-named-line-feed-reference", _good(extra="Owner&NewLine;: none yet.\n"), {"names"}),
+    ("field-name-carriage-return-reference", _good(extra="Owner&#13;: none yet.\n"), {"names"}),
+    ("field-name-hex-carriage-return-reference", _good(extra="Owner&#x0D;: none yet.\n"), {"names"}),
+    ("field-name-form-feed-reference", _good(extra="Owner&#12;: none yet.\n"), {"names"}),
+    ("field-name-hex-form-feed-reference", _good(extra="Owner&#xC;: none yet.\n"), {"names"}),
+    ("field-name-no-break-space-reference", _good(extra="Owner&nbsp;: none yet.\n"), {"names"}),
+    ("field-name-no-break-space", _good(extra="Owner\u00a0: none yet.\n"), {"names"}),
+    ("field-name-em-space-reference", _good(extra="Owner&#x2003;: none yet.\n"), {"names"}),
+    ("successor-line-feed-reference", _good(extra="Successor&#10;: none.\n"), {"names"}),
+    ("disposition-line-feed-reference", _good(extra="Disposition&#10;: transferred\n"), {"names"}),
+    ("ownership-named-line-feed-reference", _good(extra="Ownership&NewLine;: open.\n"), {"names"}),
+    ("obligation-carriage-return-reference", _good(extra="Obligation&#13;: coordination\n"), {"names"}),
+    ("split-form-feed-reference", _good(extra="Split&#12;: import disposition\n"), {"names"}),
+    ("heading-line-feed-reference", _good(extra="## Obligation&#10;: coordination\n"), {"names"}),
+    ("field-name-line-feed-then-zero-width", _good(extra="Owner&#10;&#x200B;: none yet.\n"), {"hidden-name"}),
+    # Default-ignorable characters that are not format characters: a reader shows "Owner:".
+    ("field-name-grapheme-joiner-reference", _good(extra="Own&#847;er: none yet.\n"), {"hidden-name"}),
+    ("field-name-grapheme-joiner", _good(extra="Own\u034fer: none yet.\n"), {"hidden-name"}),
+    ("field-name-variation-selector-reference", _good(extra="Own&#xFE0F;er: none yet.\n"), {"hidden-name"}),
+    ("field-name-mongolian-selector-reference", _good(extra="Own&#x180B;er: none yet.\n"), {"hidden-name"}),
+    ("field-name-hangul-filler-reference", _good(extra="Own&#x3164;er: none yet.\n"), {"hidden-name"}),
+    ("field-name-hangul-filler-after-name", _good(extra="Owner&#x3164;: none yet.\n"), {"hidden-name"}),
     ("tab-indented-comment-opener", _good(extra="- Note: x\n\t<!-- x\n"), {"opener", "indent", "html"}),
     ("ordered-item-indented-fence", _good(extra="10. x\n    ```\n    y\n"), {"opener", "unbounded"}),
 )
@@ -1012,6 +1077,7 @@ _HIDDEN_ENTRY_NAMES = (
     ("obligation-reference", _good(extra=_entry("coordi&#110;ation"))),
     ("obligation-hex-reference", _good(extra=_entry("coordi&#x6E;ation"))),
     ("obligation-zero-width", _good(extra=_entry("coordination\u200b"))),
+    ("obligation-grapheme-joiner", _good(extra=_entry("coordi\u034fnation"))),
     ("split-reference", _good(children=SPLIT_CHILDREN + ("move disposition&#8203;",))),
 )
 
@@ -1127,6 +1193,12 @@ def self_test():
         expect(code == 2 and " is not a shape this gate reads " in err, "hidden-entry-name/{}-cannot-evaluate".format(label))
         with mock.patch.object(module, "_hidden", _never):
             expect(_run(_files(crosswalk=text))[0] == 1, "hidden-entry-name/{}-unknown-without-refusal".format(label))
+    # A reference html.unescape leaves as it is ("&foo;" names no entity) is part of the entry name, so the entry
+    # is read and is unknown (exit 1); refused for any "&...;", as a broad pattern would, it cannot evaluate.
+    undecoded = _good(extra=_entry("coordination&foo;"))
+    expect(_run(_files(crosswalk=undecoded))[0] == 1, "hidden-entry-name/undecoded-reference-read-as-unknown")
+    with mock.patch.object(module, "_hidden", _broad_hidden):
+        expect(_run(_files(crosswalk=undecoded))[0] == 2, "flip/undecoded-reference-refused-by-broad-pattern")
     # A "<!--" inside a line that does not close there is literal text to a reader, or a comment the paragraph's
     # next line closes; either way this gate cannot read past it. Read as running to the line end, it hid no
     # later line: the heading below it ended the entry (exit 1), and an entry below it counted.
@@ -1149,8 +1221,8 @@ def self_test():
                         ("name-letter-ampersand-other", "O&amp;M work."),
                         ("whole-name-ampersand", "Owner &amp; operator notes are open."),
                         ("whole-name-no-break-space", "Split&nbsp;decisions are open."),
-                        ("no-break-space-before-colon", "Owner&nbsp;: none yet."),
                         ("letter-completing-no-name", "Own&#101;rship notes are open."),
+                        ("visible-combining-mark", "Own&#769;er: none yet."),
                         ("escaped-reference", "Own\\&#101;r: none yet."),
                         ("reference-in-code", "Own`&#101;`r: none yet."),
                         ("number-without-semicolon", "Owner&#58 none yet."),
@@ -1165,7 +1237,9 @@ def self_test():
                                     ("soft-hyphen", "Own&#173;er: none yet.", "Own\u00ader: none yet."),
                                     ("legacy-prefix", "Own&shyer; notes.", "Own\u00ader; notes."),
                                     ("no-break-space", "Owner&nbsp;: none yet.", "Owner\u00a0: none yet."),
-                                    ("combining-mark", "Own&#847;er: none yet.", "Own\u034fer: none yet."),
+                                    ("combining-mark", "Own&#769;er: none yet.", "Own\u0301er: none yet."),
+                                    ("grapheme-joiner", "Own&#847;er: none yet.", "Own\u034fer: none yet."),
+                                    ("line-feed", "Owner&#10;: none yet.", "Owner : none yet."),
                                     ("letters", "Own&#101;rship notes.", "Ownership notes."),
                                     ("code", "Own`&#101;`r: none yet.", "Own&amp;#101;r: none yet.")):
         expect(_run(_files(crosswalk=_good(extra=spelled + "\n")))[0]
