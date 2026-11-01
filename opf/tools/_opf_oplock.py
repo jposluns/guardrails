@@ -2499,24 +2499,46 @@ def _recorded_operation(active_bytes):
 
 def _require_same_operation(active_bytes, operation):
     """Refuse (fail-closed) a recovery whose confirmed-dead holder recorded an operation other than
-    the acquiring `operation`, BEFORE any delete, so both of its records are kept. A leftover is
-    released only through the reconciliation of the operation that left it (spec section 5.7, and
-    section 8.8 item 1: a confirmed-dead leftover of another verb is refused, never released), and
-    this acquisition cannot reconcile another operation's journal work. Only the active record is
+    the acquiring `operation`, BEFORE any delete, so both of its records are kept. This init
+    acquisition never releases another operation's leftover (spec section 5.7, and section 8.8 item
+    1: a confirmed-dead leftover of another verb is refused), because it cannot reconcile another
+    operation's journal work; this is not a claim about other acquisitions (acquire_operation's own
+    recovery does not compare operations). Only the active record is
     compared: the liveness gate has already refused a lone lease and a lease whose operation differs
     from the active record's (_validate_recovery_lease), so a lease kept here names the same
-    operation. The refusal names the operator's next step: that recorded operation's own recovery,
-    then a retry of this one. Returns the recorded operation."""
+    operation. The refusal names the operator's next step (_other_operation_next_step), then a retry
+    of this one. Returns the recorded operation."""
     recorded = _recorded_operation(active_bytes)
     if recorded != operation:
         raise OpLockError("the stale operation record(s) were left by a confirmed-dead holder of the "
-                          "{!r} operation, not this {!r} operation; recovery releases only a leftover "
-                          "of the same operation, so they are kept for that operation's own "
-                          "reconciliation; refusing recovery (fail-closed). Next step: run the {!r} "
-                          "operation's own recovery (that operation with explicit recovery), the only "
-                          "route that releases them, then retry this {!r} operation".format(
-                              recorded, operation, recorded, operation))
+                          "{!r} operation, not this {!r} operation; this init acquisition releases only "
+                          "a leftover of its own operation, so they are kept for that operation's own "
+                          "reconciliation; refusing recovery (fail-closed). Next step: {}, then retry "
+                          "this {!r} operation".format(recorded, operation,
+                                                       _other_operation_next_step(recorded),
+                                                       operation))
     return recorded
+
+
+def _other_operation_next_step(recorded):
+    """The next step _require_same_operation names for a confirmed-dead leftover of the `recorded`
+    operation. Of the opf commands, only `opf init` passes explicit recovery to an init acquisition,
+    as "opf-init-plain", and it releases that leftover only as the first step of a plain init that
+    goes on to create the store; opf adopt apply and opf adopt reconcile pass none to the adoption's
+    "opf-init" acquisition, so no opf init or opf adopt command releases that one. Any other
+    operation's recovery lies outside this module's init paths, so its step is named generally."""
+    if recorded == "opf-init-plain":
+        return ("opf init --recover releases this leftover, but only as the first step of a plain "
+                "opf init that then creates the store; where that store is not wanted, the records "
+                "need manual intervention (with their holder confirmed dead, move the active record "
+                "and its lease aside)")
+    if recorded == "opf-init":
+        return ("no opf init or opf adopt command releases this leftover (opf init --recover "
+                "recovers only as 'opf-init-plain', and opf adopt apply and opf adopt reconcile pass "
+                "no explicit recovery to this acquisition), so the records need manual intervention "
+                "(with their holder confirmed dead, move the active record and its lease aside)")
+    return ("release them through the {!r} operation's own recovery where that operation offers "
+            "one".format(recorded))
 
 
 def _tag_removals(exc, recovered, recovered_operation, staging_removed, created_removed):
@@ -9896,7 +9918,15 @@ def _st_i6_refused(root, operation, needles, reached):
 
 def _st_i6_other_operation(d, env):
     """Vector: a confirmed-dead leftover of ANOTHER operation is refused, naming that operation,
-    and kept byte for byte; the two init kinds never release each other's leftover."""
+    and kept byte for byte; the two init kinds never release each other's leftover. The next step
+    is pinned per recorded operation: the plain init's leftover names opf init --recover and the
+    store it creates, the adoption's names no releasing command, and any other names its own
+    recovery."""
+    steps = {"opf-adopt": "Next step: release them through the 'opf-adopt' operation's own recovery "
+                          "where that operation offers one, then retry",
+             "opf-init-plain": "Next step: opf init --recover releases this leftover, but only as the "
+                               "first step of a plain opf init that then creates the store",
+             "opf-init": "Next step: no opf init or opf adopt command releases this leftover"}
     for index, (recorded, acquiring) in enumerate((("opf-adopt", "opf-init"),
                                                    ("opf-adopt", "opf-init-plain"),
                                                    ("opf-init-plain", "opf-init"),
@@ -9906,7 +9936,7 @@ def _st_i6_other_operation(d, env):
         _st_i6_refused(root, acquiring,
                        ("holder of the {!r} operation, not this {!r} operation".format(
                            recorded, acquiring),
-                        "Next step: run the {!r} operation's own recovery".format(recorded),
+                        steps[recorded],
                         "then retry this {!r} operation".format(acquiring)),
                        reached=True)
 
