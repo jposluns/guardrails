@@ -18538,8 +18538,10 @@ def _init_main(rest):
     the spec 5.7 lease (.working/toml/lease.toml beside its active record) is attached, the payloads
     are published, and the lease is detached before the final observation, which runs with the
     mutex still held, as does a generation-2 run's post-write .gitignore effectiveness check; the
-    mutex is released before the success report. --recover passes explicit recovery to the acquisition, which
-    clears a dead run's leftover records only once their holder is confirmed dead. Publication is
+    mutex is released before the success report. --recover passes explicit recovery to the acquisition
+    (as operation "opf-init-plain"), which clears a dead run's leftover records only once their holder
+    is confirmed dead and they name that same operation; a leftover of another operation, an adoption's
+    "opf-init" included, is refused and kept (_opf_oplock._require_same_operation). Publication is
     create-only and deliberately not transactional: a later failure reports observed planned
     paths and leaves them for review. A failure releases whatever is still held in a finally
     inside the handled try, so before either handler below prints; a release failure there prints
