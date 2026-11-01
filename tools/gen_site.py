@@ -225,6 +225,9 @@ def page_url(target_rel):
 HEAD_ELEMENTS = frozenset(("base", "link", "meta", "noscript", "script", "style", "template", "title"))
 # Head elements whose contents are raw text, not markup.
 HEAD_RAW_TEXT = frozenset(("script", "style", "title"))
+# Elements whose contents a browser's tokenizer reads as text, not markup (noscript when scripts run).
+TEXT_CONTENT = HEAD_RAW_TEXT | frozenset(("iframe", "noembed", "noframes", "noscript", "plaintext", "textarea",
+                                          "xmp"))
 # HTML's whitespace characters; any other text inside the head ends it.
 HTML_WHITESPACE = " \t\n\f\r"
 
@@ -236,14 +239,20 @@ class _HeadTagCollector(HTMLParser):
     browser's tree builder ends it: at `</head>`, at a `<body>` start or a `</body>`, `</html>` or
     `</br>` end tag, at the first start tag that is not one of HEAD_ELEMENTS, or at the first text that
     is not HTML whitespace (comments and the raw-text contents of `<script>`, `<style>` and `<title>` do
-    not end it; neither does anything inside a `<template>`). It never ends later than a browser's would,
-    but may end sooner, so a block after that point fails as outside the head where a browser would still
-    read it in the head: the start tags `<noframes>`, `<basefont>`, `<bgsound>` and `<html>` end it here
-    and not in a browser, as does text inside a `<noscript>` (raw text to a browser running scripts), and
-    `</head>`, `<body>`, `</body>`, `</html>` or `</br>` end it here even inside raw text a self-closing
-    `<script/>`, `<style/>` or `<title/>` opened. A raw-text element opened that way stays open, as a
-    browser keeps it, up to its matching end tag: html.parser reports the tags inside it, but a browser
-    reads them as text. Where an element sits is None inside the
+    not end it; neither does anything else inside a `<template>`). Where html.parser cannot follow a
+    browser's tokenizer it records an error instead of a place: any start tag but `<html>`, any end tag, a
+    `<![` section or text that is not whitespace before the head starts (a browser starts the head there);
+    a `<![` section in the head (a browser ends it at the first `>`, html.parser at `]]>`); a `<script>` in
+    the head whose text holds `<!--` (a browser's escaped script states can keep it open past its end tag);
+    and a start tag of an element whose contents a browser reads as text (TEXT_CONTENT) inside a
+    `<template>` in the head. Otherwise it never ends later than a browser's would, but may end sooner, so a
+    block after that point fails as outside the head where a browser would still read it in the head: the
+    start tags `<noframes>`, `<basefont>`, `<bgsound>` and `<html>` end it here and not in a browser, as
+    does text inside a `<noscript>` (raw text to a browser running scripts), `</head>` or `<body>` ends it
+    here even inside a `<template>` or inside raw text a self-closing `<script/>`, `<style/>` or `<title/>`
+    opened. A raw-text element opened that way stays open, as a browser keeps it, up to its matching end
+    tag: html.parser reports the tags inside it, but a browser reads them as text. Where an element sits is
+    None inside the
     head, otherwise "outside <head>", "inside the raw text of <script> in <head>" (or of `<style>` or
     `<title>`) for one read while such raw text is open, or "inside <template> in <head>"/"inside
     <noscript> in <head>" for one wrapped in those in the head (a template's contents are not in the
@@ -252,7 +261,7 @@ class _HeadTagCollector(HTMLParser):
     `property` value and its `name` value, so a `name="og:title"` meta still collides with the block's
     `property="og:title"`. Key values compare stripped and lowercased, so a case variant of a block tag
     counts as a second occurrence; the written forms behind each key are kept so the check can require
-    the block's exact key on the tag that counts. `keys` limits recording to those keys (None records
+    every spelling of the key on the tag that counts to be the block's exact one. `keys` limits recording to those keys (None records
     every key). An element carrying a duplicate attribute is an error: a browser keeps the first and
     this parser the last, so they would disagree on the tag's value."""
 
@@ -265,9 +274,30 @@ class _HeadTagCollector(HTMLParser):
         self.head_ended = False
         self.body_seen = False
         self.raw_text = None    # the open raw-text head element, while inside one
+        self.raw_start = 0      # the source offset where that raw text begins
         self.wrappers = []      # the open <template>/<noscript> elements inside the head
+        self.source = []        # the text fed so far, to read a script's raw text as written
         self.found = []    # (key, value, place, line, written keys)
         self.errors = []
+
+    def feed(self, data):
+        self.source.append(data)
+        super().feed(data)
+
+    def _offset(self, pos):
+        """The source offset of an html.parser (line, column) position (it counts lines at LF only)."""
+        text = "".join(self.source)
+        start = 0
+        for _ in range(pos[0] - 1):
+            start = text.index("\n", start) + 1
+        return start + pos[1]
+
+    def _before_head(self, line, what):
+        """Refuse markup before the head starts that a browser reads as starting the head (or body)
+        itself, so the page's own <head> would not be the head a browser builds."""
+        if not self.heads and not self.body_seen:
+            self.errors.append("line {}: {} before <head>; a browser starts the head there, not at the "
+                               "page's <head>".format(line, what))
 
     def _end_head(self):
         self.in_head = False
@@ -276,6 +306,8 @@ class _HeadTagCollector(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         line = self.getpos()[0]
+        if tag not in ("html", "head", "body"):
+            self._before_head(line, "a <{}> start tag".format(tag))
         if tag == "head":
             self.heads += 1
             if self.body_seen:
@@ -297,6 +329,12 @@ class _HeadTagCollector(HTMLParser):
                     return
                 if tag in HEAD_RAW_TEXT:
                     self.raw_text = tag
+                    self.raw_start = self._offset(self.getpos()) + len(self.get_starttag_text())
+            elif tag in TEXT_CONTENT:
+                # Raw text is not followed inside a template, so a "</template>" a browser reads as text
+                # there could end the template here early.
+                self.errors.append("line {}: a <{}> inside a <template> in <head>, whose text this check "
+                                   "does not follow".format(line, tag))
             if tag in ("template", "noscript"):
                 self.wrappers.append(tag)
         if tag not in ("link", "meta"):
@@ -346,6 +384,7 @@ class _HeadTagCollector(HTMLParser):
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag):
+        self._before_head(self.getpos()[0], "a </{}> end tag".format(tag))
         if tag == "head" and self.head_open:
             self.head_open = False
             self.head_ended = True
@@ -355,6 +394,13 @@ class _HeadTagCollector(HTMLParser):
             return
         if self.raw_text:
             if tag == self.raw_text:
+                # "<!--" in a script's text can start a browser's escaped script states, where a nested
+                # "<script>" keeps the script open past this end tag; this parser does not follow them,
+                # so such a script fails rather than let a later tag count as in the head.
+                if tag == "script" and "<!--" in "".join(self.source)[
+                        self.raw_start:self._offset(self.getpos())]:
+                    self.errors.append("line {}: a <script> in <head> holds \"<!--\", whose escaped script "
+                                       "text this check does not follow".format(self.getpos()[0]))
                 self.raw_text = None
             return
         if tag in ("template", "noscript") and tag in self.wrappers:
@@ -367,9 +413,18 @@ class _HeadTagCollector(HTMLParser):
             self._end_head()
 
     def handle_data(self, data):
+        if data.strip(HTML_WHITESPACE):
+            self._before_head(self.getpos()[0], "text")
         if self.in_head and not self.raw_text and "template" not in self.wrappers \
                 and data.strip(HTML_WHITESPACE):
             self._end_head()
+
+    def unknown_decl(self, data):
+        # html.parser reads "<![CDATA[" up to "]]>"; a browser outside svg or math reads it as a comment
+        # ending at the first ">", so text after that point would end the head there.
+        if self.in_head or not self.heads:
+            self.errors.append("line {}: a \"<![\" section in or before <head>, which a browser ends at the "
+                               "first \">\"".format(self.getpos()[0]))
 
 
 def _key_text(key):
@@ -386,7 +441,7 @@ def _head_block_spec(url):
     for tag in HEAD_TAG_BLOCK:
         own = tag.format(url=url)
         collector = _HeadTagCollector(None)
-        collector.feed(own)
+        collector.feed("<head>" + own)
         collector.close()
         if len(collector.found) != 1 or collector.errors or len(collector.found[0][4]) != 1:
             raise SchemaError("internal: HEAD_TAG_BLOCK entry {!r} does not carry exactly one key"
@@ -408,22 +463,25 @@ def _validate_head_tags(page, url, target_rel):
     tree builder ends it and in a few named cases sooner (see _HeadTagCollector), not inside a
     `<template>` or `<noscript>` there nor inside raw text a self-closing `<script/>`, `<style/>` or
     `<title/>` left open (such a tag still counts toward "exactly one", so a hidden copy beside the real
-    one fails as a duplicate, which is stricter than a browser); it writes
-    its key exactly as the block does (no case change, no surrounding whitespace; for a link, its rel
-    token written `canonical` in lower case, which is stricter than HTML, where rel tokens compare
-    ASCII case-insensitively); its value (a link's
+    one fails as a duplicate, which is stricter than a browser); every spelling of its key on it is
+    exactly the block's (no case change, no surrounding whitespace, so a meta's property and name, when
+    both carry the key, are both written that way; for a link, each rel token that names canonical is
+    written `canonical` in lower case, which is stricter than HTML, where rel tokens compare ASCII
+    case-insensitively; other rel tokens may sit beside it); its value (a link's
     href, a meta's content) equals the block's value exactly, with `url` (the page's own URL) in the
     canonical href and og:url slots; and the block's tags appear in HEAD_TAG_BLOCK's order. So a second
     element with a block tag's key fails whatever its value and wherever it sits, a canonical or og:url
     naming another page fails as a wrong value, and a block tag after the point where the collector ends
     the head (`</head>`, `<body>`, a start tag that is not a head element, or text that is not whitespace)
     fails as outside the head. A page the parser rejects, a page with no head or more than one, a head
-    that never ends, or a keyed element carrying a duplicate attribute fails too; every failure names
+    that never ends, a keyed element carrying a duplicate attribute, or markup the collector cannot follow
+    as a browser would (see _HeadTagCollector) fails too; every failure names
     `target_rel`. Not established: that the block's tags are adjacent (other head elements may sit
     between them), anything about elements carrying none of the block's keys, whether a meta's key sits
     in `property` or `name`, attributes beyond the key and the value, and tag-like text inside comments,
     `<script>`, `<style>` or `<title>` (not elements, so neither counted nor flagged, except a keyed tag
-    inside raw text a self-closing one left open, which counts and fails as misplaced)."""
+    inside raw text a self-closing one left open, which counts and fails as misplaced, and a head
+    `<script>` whose text holds `<!--`, which fails)."""
     spec = _head_block_spec(url)
     collector = _HeadTagCollector({s[0] for s in spec})
     try:
@@ -431,11 +489,11 @@ def _validate_head_tags(page, url, target_rel):
         collector.close()
     except (ValueError, AssertionError) as exc:
         raise SchemaError("{}: cannot parse the page to check its head tags: {}".format(target_rel, exc))
-    if collector.errors:
-        raise SchemaError("{}: {}".format(target_rel, collector.errors[0]))
     if collector.heads != 1:
         raise SchemaError("{}: page must have exactly one <head>, found {}"
                           .format(target_rel, collector.heads))
+    if collector.errors:
+        raise SchemaError("{}: {}".format(target_rel, collector.errors[0]))
     if not collector.head_ended:
         raise SchemaError("{}: <head> never ends (no </head> or <body>)".format(target_rel))
     positions = {}
@@ -453,9 +511,10 @@ def _validate_head_tags(page, url, target_rel):
         if place is not None:
             raise SchemaError("{}:{}: block tag keyed {} sits {}".format(target_rel, line, _key_text(key),
                                                                          place))
-        if exact not in written:
+        other = next((w for w in written if w != exact), None)
+        if other is not None:
             raise SchemaError("{}:{}: block tag keyed {} writes its key as {!r}, expected exactly {!r}"
-                              .format(target_rel, line, _key_text(key), written[0], exact))
+                              .format(target_rel, line, _key_text(key), other, exact))
         if got != value:
             raise SchemaError(
                 "{}:{}: block tag keyed {} carries {!r}, expected exactly {!r} (its own URL is {})"
@@ -1723,7 +1782,75 @@ def _self_test():
             ("head key padded", ok_head.replace('property="og:title"', 'property=" og:title "'),
              "expected exactly 'og:title'"),
             ("head canonical rel case variant", ok_head.replace('rel="canonical"', 'rel="Canonical"'),
-             "expected exactly 'canonical'")):
+             "expected exactly 'canonical'"),
+            ("head key second spelling", ok_head.replace('property="og:title"',
+                                                         'property="og:title" name="OG:Title"'),
+             "as 'OG:Title', expected exactly 'og:title'"),
+            ("head canonical rel second spelling", ok_head.replace('rel="canonical"',
+                                                                   'rel="canonical Canonical"'),
+             "as 'Canonical', expected exactly 'canonical'")):
+        _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
+                       SchemaError, needle)
+    # The exact key repeated, or another rel token beside canonical, still passes.
+    for label, page in (
+            ("head key exact twice", ok_head.replace('property="og:title"', 'property="og:title" name="og:title"')),
+            ("head canonical beside another rel token", ok_head.replace('rel="canonical"',
+                                                                        'rel="alternate canonical"'))):
+        case_count += 1
+        try:
+            _validate_head_tags(page, _own_url, "site/rules.html")
+        except SchemaError as exc:
+            failures.append("{}: unexpected SchemaError: {}".format(label, exc))
+    # Markup html.parser cannot follow as a browser's tokenizer would fails rather than pass: a "<!--" in a
+    # head script (a browser's escaped script states can hide a later block as script text), a "<![" section
+    # in or before the head (a browser ends it at the first ">"), anything but whitespace, comments, a
+    # doctype and <html> before the head (a browser starts the head there), and an element with text
+    # contents inside a template in the head (a "</template>" in that text could end the template here).
+    for label, page, needle in (
+            ("head script double escape", ok_head.replace(
+                "<head>", "<head><script><!--<script></script>", 1).replace("</head>", "</script></head>", 1),
+             'holds "<!--"'),
+            ("head self-closed script double escape", ok_head.replace(
+                "<head>", "<head><script/><!--<script>--!></script>", 1).replace("</head>", "</script></head>", 1),
+             'holds "<!--"'),
+            ("head self-closed script escape in an attribute", ok_head.replace(
+                "<head>", '<head><script/><meta content="<!--"><script></script>', 1).replace(
+                "</head>", "</script></head>", 1), 'holds "<!--"'),
+            ("head legacy script comment", ok_head.replace("<head>", "<head><script><!-- a() //--></script>", 1),
+             'holds "<!--"'),
+            ("head cdata section", ok_head.replace("<head>", "<head><![CDATA[x>y]]>", 1), 'a "<![" section'),
+            ("cdata section before head", ok_head.replace("<head>", "<![CDATA[x>y]]><head>", 1),
+             'a "<![" section'),
+            ("text before head", ok_head.replace("<head>", "x<head>", 1), "text before <head>"),
+            ("start tag before head", ok_head.replace("<head>", "<div></div><head>", 1),
+             "a <div> start tag before <head>"),
+            ("end tag before head", ok_head.replace("<head>", "</html><head>", 1),
+             "a </html> end tag before <head>"),
+            ("template style hides its end", ok_head.replace(
+                "<head>", "<head><template><style/></template>", 1).replace("</head>", "</style></head>", 1),
+             "a <style> inside a <template> in <head>"),
+            ("template noscript hides its end", ok_head.replace(
+                "<head>", "<head><template><noscript></template>", 1).replace(
+                "</head>", "</noscript></head>", 1), "a <noscript> inside a <template> in <head>")):
+        _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
+                       SchemaError, needle)
+    # A doctype, <html>, whitespace and comments before the head, and a head script without "<!--", pass.
+    case_count += 1
+    try:
+        _validate_head_tags(ok_head.replace("<head>", "<!doctype html> <!-- c -->\n<html lang=\"en\">\n<head>"
+                                            "<script>a--></script>", 1), _own_url, "site/rules.html")
+    except SchemaError as exc:
+        failures.append("head prologue and script: unexpected SchemaError: {}".format(exc))
+    # The head ends sooner than a browser's at </head> or <body> inside a template (a browser ignores both
+    # there) and at </head> inside raw text a self-closing script left open; </body>, </html> and </br>
+    # there do not end it, so a block after them still fails inside that raw text.
+    for label, page, needle in (
+            ("head ended by </head> in a template", ok_head.replace(
+                "<head>", "<head><template></head></template>", 1), "sits outside <head>"),
+            ("head ended by <body> in a template", ok_head.replace(
+                "<head>", "<head><template><body></template>", 1), "sits outside <head>"),
+            ("raw text kept past </body>", ok_head.replace("<head>", "<head><script/></body>", 1).replace(
+                "</head>", "</script></head>", 1), "sits inside the raw text of <script> in <head>")):
         _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
                        SchemaError, needle)
     # A block tag wrapped in a template or noscript in the head is not a head element a reader sees; an

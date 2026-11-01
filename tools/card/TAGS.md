@@ -38,7 +38,8 @@ skips the check and prints a line saying so; a value that is not a plain host na
 dot, or a character a host name cannot hold) is refused.
 site/404.html is a noindex page, so it does not carry the block.
 
-Each tag must write its key exactly as the block above does: `rel="canonical"` in lower case, and each
-og: or twitter: property or name value in the same case with no surrounding whitespace. This is stricter
+Each tag must write every spelling of its key exactly as the block above does: each rel token naming
+canonical as `canonical` in lower case (other rel tokens may sit beside it), and each og: or twitter:
+property or name value carrying the key in the same case with no surrounding whitespace. This is stricter
 than HTML for rel, whose tokens compare case-insensitively, so a `rel="Canonical"` a browser would honour
 fails the check.

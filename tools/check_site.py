@@ -33,8 +33,9 @@ is gen_site.SITE_BASE_URL's host or that host with www. before it, and is skippe
 AIQT_SITE_HOST, with a SKIP line saying so. The value is stripped of surrounding whitespace (empty or
 whitespace-only means the default) and lowercased; one that is then not a plain host name (a port, a
 trailing dot, or any character a host name cannot hold) is refused with exit 2 and the reason.
-Each block tag must write its key exactly as the block does: the rel token `canonical` and each og: or
-twitter: property or name value in the block's case with no surrounding whitespace. That is stricter than
+Each block tag must write every spelling of its key exactly as the block does: each rel token naming
+canonical as `canonical` (other rel tokens may sit beside it) and each og: or twitter: property or name
+value carrying the key in the block's case with no surrounding whitespace. That is stricter than
 HTML for rel, whose tokens compare ASCII case-insensitively, so a rel="Canonical" a browser would honour
 fails here.
 """
@@ -404,6 +405,24 @@ def _self_test():
         got = hosts_under(env_val)
         if got != want:
             failures.append("SITE_HOSTS {}: expected {} got {}".format(label, sorted(want), sorted(got)))
+    # Each length and hyphen rule at its boundary: a name of 252 or 253 characters and a label of 62 or 63
+    # pass, one more fails; a hyphen inside a label passes, at either end fails.
+    long_name = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 61))
+    host_rule_cases = (
+            ("name of 252", long_name[:-1], None),
+            ("name of 253", long_name, None),
+            ("name of 254", long_name + "d", "longer than a host name can be"),
+            ("label of 62", "a" * 62 + ".test", None),
+            ("label of 63", "a" * 63 + ".test", None),
+            ("label of 64", "a" * 64 + ".test", "longer than 63 characters"),
+            ("inner hyphen", "a-b.test", None),
+            ("leading hyphen", "-ab.test", "starts or ends with a hyphen"),
+            ("trailing hyphen", "ab-.test", "starts or ends with a hyphen"))
+    for label, raw, needle in host_rule_cases:
+        _host, err = _read_site_host(raw)
+        if (needle is None and err is not None) or (needle is not None and (err is None or needle not in err)):
+            failures.append("_read_site_host {}: expected {} got {!r}".format(
+                label, "no error" if needle is None else repr(needle), err))
 
     # Coverage-root integration: _scan_root treats opf/site as its own link-containment boundary, so a
     # nested draft page's relative link resolves within opf/site (clean) while a dangling one is a finding;
@@ -542,8 +561,9 @@ def _self_test():
         for x in failures:
             print("  - " + x)
         return 1
-    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + coverage-root legs + {} "
-          "head tag cases)".format(len(cases), len(host_cases), head_cases))
+    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + {} host rule cases + "
+          "coverage-root legs + {} head tag cases)".format(len(cases), len(host_cases), len(host_rule_cases),
+                                                           head_cases))
     return 0
 
 
