@@ -11,10 +11,12 @@ sitting in a NON-FINAL stage of a pipeline (`|` or `|&`), at top level or inside
 command-substitution body, in an adopter-declared shell surface (a PIPE finding). Two further findings,
 kept separate from it, cover constructs that report their own status instead of the command's: LAUNCHER,
 a declared relied-on command behind a launcher that does not wait for it (setsid without a wait option,
-systemd-run without a wait-claiming option or with --ignore-failure), and BACKGROUND, a declared
-relied-on command anywhere in an AND-OR list ended by a trailing '&' (the shell reports the launch; a
-later wait or $! read earns no credit). A setsid with a wait option, and a systemd-run wait-claiming
-mode, are cannot-evaluate (exit 2): their exit propagation is not a verified premise of this gate.
+systemd-run without a wait-claiming option or with --ignore-failure, which ignores the command's exit
+status), and BACKGROUND, a declared relied-on command anywhere in an AND-OR list ended by a trailing
+'&', the list read at its own nesting depth so an if or case that is a part of it counts with what it
+holds (the shell reports the launch; a later wait or $! read earns no credit). A setsid with a wait
+option, and a systemd-run wait-claiming mode, are cannot-evaluate (exit 2): their exit propagation is
+not a verified premise of this gate.
 
 The gate is ADOPTER-PARAMETERIZED: it ships NO command, subcommand, or path of its own. The adopter
 authors `.aiqt/relied-exit-pipes.toml`, declaring which script surfaces to scan and which command words
@@ -127,7 +129,9 @@ Exit convention (matches the repo's gates):
      a systemd-run option value word spells a declared name, behind a waiting setsid (any w, or
      --wait) or a wait-claiming systemd-run option (--wait, --scope, -P/--pipe, -t/--pty,
      -T/--pty-late, -S/--shell), whose exit propagation is not a verified premise of this gate, a
-     declared command whose subcommand sits
+     declared NAME inside a command substitution in an AND-OR list ended by '&', a closing word or
+     ')' with no open construct while a declared command's list is pending (the list's end cannot be
+     placed), a declared command whose subcommand sits
      behind option words, a declared NAME inside a subshell, brace group, loop body or function body
      (one-line definitions and non-brace bodies included: constructs whose execution time or shell
      this gate does not model; the name counts even where it is only another command's argument data,
@@ -215,8 +219,10 @@ SYSTEMD_RUN_LONG_FLAG = frozenset((
     "same-root-dir", "quiet", "verbose", "collect", "no-pager", "no-block", "on-timezone-change",
     "on-clock-change", "ignore-failure"))
 SYSTEMD_RUN_LONG_WAIT = frozenset(("wait", "scope", "pipe", "pty", "pty-late", "shell"))
-# Separators that keep an AND-OR list going: '&' backgrounds the whole list since the last ';', newline,
-# '&', '(' or ')', so every relied stage in it is backgrounded, not only the last pipeline.
+# Separators that keep an AND-OR list going. Every other separator but '(' ends the list at its own
+# nesting depth; a '&' there backgrounds every relied stage in that list, not only the last pipeline:
+# stages before a later subshell, brace group, if or case part, and stages inside an if or case part
+# (a declared command inside a subshell or brace group already refuses).
 LIST_JOINS = ("|", "|&", "&&", "||")
 # Characters that make a launcher word unreadable as text: an expansion or a glob can become an option.
 UNREADABLE_CHARS = "$`*?["
@@ -1283,7 +1289,11 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
     func_pending = False
     prev_sep = ""
     run_stages = []  # (segment index, absolute offset, relied, basename, effective depth, opaque)
-    bg_unit = []     # (absolute offset, relied, basename, effective depth) since the last list boundary
+    # [absolute offset, relied, basename, effective depth, list level, substitution] for every stage
+    # still pending in an AND-OR list: list level is the nesting depth of the innermost list the stage
+    # still belongs to. A list ending at depth D without '&' moves its stages to the enclosing list
+    # (level D - 1: the compound holding them is a part of that list) and drops them at depth 0.
+    bg_unit = []
     for idx, seg in enumerate(kept):
         if run_stages and not _executes(seg) and seg.sep_after in ("",) + PIPE_SEPS:
             # A blank or comment-only record directly after a pipe: the pipeline continues on the next
@@ -1441,7 +1451,10 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                             "launcher": launch[0], "ignore_failure": launch[1] == "ignore-failure",
                             "depth": eff_depth})
         run_stages.append((idx, abs_off, relied, base, eff_depth, opaque))
-        bg_unit.append((abs_off, relied, base, eff_depth))
+        # A declared name only the masked filler hides lives in a $( ) or backquote body of this stage.
+        in_subst = (len(declared_re.findall(unmasked_span(idx, seg)))
+                    > len(declared_re.findall(seg.raw or "")))
+        bg_unit.append([abs_off, relied, base, eff_depth, eff_depth, in_subst])
         if seg.sep_after not in PIPE_SEPS:
             if len(run_stages) > 1:
                 for _si, soff, _sr, sbase, _sd, sopq in _nonfinal(run_stages):
@@ -1469,15 +1482,6 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                                     "stage": k, "nstages": nstages, "final": final_word,
                                     "depth": sdepth})
             run_stages = []
-        if seg.sep_after not in LIST_JOINS:
-            if seg.sep_after == "&":
-                # '&' backgrounds the whole AND-OR list: the shell reports the launch, so no relied
-                # stage in it reports its own exit (a later wait or $! read earns no credit).
-                for boff, _br, bbase, bdepth in _background_stages(bg_unit):
-                    pending.append({"offset": boff, "rel": rel, "line": line_of(boff),
-                                    "binding": binding["id"], "command": bbase,
-                                    "kind": "background", "depth": bdepth})
-            bg_unit = []
         # In `function NAME {` the NAME is a definition, not a command, and would stop the reserved-word
         # walk before the '{' is counted; skip the keyword and the name so the body depth is tracked.
         # Either definition form (function NAME, or NAME followed by an empty '( )' pair) marks the
@@ -1489,6 +1493,7 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
         # neither opens nor closes a block here.
         words = argv
         word_base = 0
+        unbalanced = False
         if argv[:1] == ["function"] and plain_at(0, "function"):
             func_pending = True
             words = argv[2:]
@@ -1510,6 +1515,8 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
             elif w in BLOCK_CLOSE and plain_at(j, w):
                 if blocks:
                     blocks.pop()
+                else:
+                    unbalanced = True
                 if w == "esac":
                     case_depth = max(0, case_depth - 1)
             elif (w in RESERVED_SKIP and plain_at(j, w)) or ENV_ASSIGN_RE.match(w):
@@ -1536,6 +1543,37 @@ def _scan_reading(ctx, original_text, rel, binding, telemetry, events, pending, 
                 func_pending = False
             elif seg.sep_after == "(":
                 func_pending = False
+        # The AND-OR list this separator belongs to sits at the depth after this segment's own block
+        # words (a closing fi, esac or '}' hands the separator to the enclosing list), counting a ')'
+        # at the depth it closes. '(' opens a part of the list and never ends it.
+        if case_depth == 0 and seg.sep_after == ")" and paren_depth == 0:
+            unbalanced = True
+        if unbalanced and any(e[1] or e[5] for e in bg_unit):
+            raise GateError("{}:{}: binding {!r}: a closing word or ')' with no open construct leaves "
+                            "the end of the AND-OR list holding a declared command unplaceable; cannot "
+                            "evaluate".format(rel, line_of(abs_off), binding["id"]))
+        list_depth = len(blocks) + paren_depth
+        if seg.sep_after == "&":
+            # '&' backgrounds the whole AND-OR list at its own depth, every compound part in it
+            # included: the shell reports the launch, so no relied stage in it reports its own exit (a
+            # later wait or $! read earns no credit).
+            ended = [e for e in bg_unit if e[4] >= list_depth]
+            bg_unit = [e for e in bg_unit if e[4] < list_depth]
+            for boff, _br, _bb, _bd, _bl, bsub in ended:
+                if bsub:
+                    raise GateError("{}:{}: binding {!r}: a declared command inside a command "
+                                    "substitution in an AND-OR list ended by '&' runs in the background "
+                                    "shell, which this gate does not attribute; cannot evaluate".format(
+                                        rel, line_of(boff), binding["id"]))
+            for boff, _br, bbase, bdepth, _bl, _bs in _background_stages(ended):
+                pending.append({"offset": boff, "rel": rel, "line": line_of(boff),
+                                "binding": binding["id"], "command": bbase,
+                                "kind": "background", "depth": bdepth})
+        elif seg.sep_after not in LIST_JOINS and seg.sep_after != "(":
+            for e in bg_unit:
+                if e[4] >= list_depth:
+                    e[4] = list_depth - 1
+            bg_unit = [e for e in bg_unit if e[4] >= 0]
         if case_depth == 0:
             # Inside a case statement a ')' ends a pattern, not a subshell, so the paren separators are
             # not depth boundaries there; case itself already holds the block depth above zero.
@@ -1799,9 +1837,11 @@ def scan_file(root, path, binding, telemetry):
     findings = []
     for rec in _judge(pending, events):
         if rec["kind"] == "launcher":
-            how = ("with --ignore-failure" if rec["ignore_failure"] else "without a wait option")
-            findings.append("{}:{}: binding {!r}: relied-on command {!r} runs behind {!r} {}, so the "
-                            "launcher can report its own status before the command finishes; run it "
+            how = ("with --ignore-failure, so the launcher ignores the command's exit status"
+                   if rec["ignore_failure"] else
+                   "without a wait option, so the launcher can report its own status before the "
+                   "command finishes")
+            findings.append("{}:{}: binding {!r}: relied-on command {!r} runs behind {!r} {}; run it "
                             "directly".format(rec["rel"], rec["line"], rec["binding"], rec["command"],
                                               rec["launcher"], how))
             continue
@@ -1935,10 +1975,10 @@ def run(root):
 # whole-context lex fallback and the locate refusal by mutants of their own helpers (the locate
 # refusal forced through readings flattened into one), and scan_file's pre-open layer is called
 # directly. A case that cannot run (no tempdir, no symlink or FIFO support, permission checks
-# bypassed) is a NAMED failure, never a skip. The launcher and background cases R142..R164 (exit 1,
+# bypassed) is a NAMED failure, never a skip. The launcher and background cases R142..R167 (exit 1,
 # every finding needle asserted, each re-run under the never-report mutant), the waiting-setsid and
-# launcher refusals (C47..C50, R146, R155b, X20..X32, exit 2 with their own needle) and the controls
-# C51..C59 (exit 0) each come with a flip, and each launcher mutant (setsid dropped from LAUNCHERS, a
+# launcher refusals (C47..C50, R146, R155b, X20..X34, exit 2 with their own needle) and the controls
+# C51..C62 (exit 0) each come with a flip, and each launcher mutant (setsid dropped from LAUNCHERS, a
 # wait-blind or 'w'-anywhere setsid reader, exact-only long options, pipefail clearing every kind, a
 # single-stage background unit, '&&' as a boundary, -u dropped from the systemd-run value table, the
 # value-word safeguard removed, setsid as a wrapper) must stop its named case from holding.
@@ -3541,17 +3581,19 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                                     "fail-closed exit 2 with the configuration-symlink check's own "
                                     "diagnostic, got {}".format(rc))
 
-            # --- launcher and background findings: R142..R164 (exit 1, each needle asserted), the
-            # waiting-setsid and launcher refusals C47..C50, R146, R155b and X20..X32 (exit 2, each
-            # asserting its own needle), the controls C51..C59 (exit 0) and every flip ---
+            # --- launcher and background findings: R142..R167 (exit 1, each needle asserted), the
+            # waiting-setsid and launcher refusals C47..C50, R146, R155b and X20..X34 (exit 2, each
+            # asserting its own needle), the controls C51..C62 (exit 0) and every flip ---
             n_launch = "without a wait option, so the launcher can report its own status"
-            n_ignore = "with --ignore-failure, so the launcher can report its own status"
+            n_ignore = "with --ignore-failure, so the launcher ignores the command's exit status"
             n_bg = "is in a list ended by '&'"
             n_pipe = "pipes into 'tail'"
             n_setsid_w = "setsid -w exit propagation is not a verified premise of this gate"
             n_sdrun_w = "whether systemd-run propagates the command's exit in this mode is not a verified"
             n_classify = "option words this gate cannot classify"
             n_value = "option value word spells a declared command"
+            n_subst_bg = "inside a command substitution in an AND-OR list ended by '&'"
+            n_unplaced = "with no open construct leaves the end of the AND-OR list"
             pfx = "tool write\n"
             launch_cases = [
                 ("R142", "setsid tool write\n", 1, [n_launch]),
@@ -3579,6 +3621,22 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("R162", "set -o pipefail\ntool write\ntool write &\n", 1, [n_bg]),
                 ("R163", "if true; then setsid tool write; fi\n", 1, [n_launch]),
                 ("R164", "x=$(setsid tool write)\n", 1, [n_launch]),
+                # '&' after a compound part still backgrounds the earlier stages of the same list.
+                ("R165a", "tool write && ( echo ok ) &\n", 1, [n_bg]),
+                ("R165b", "tool write || { echo fail; } &\n", 1, [n_bg]),
+                ("R165c", "tool write && { echo ok; } &\n", 1, [n_bg]),
+                ("R165d", "tool write && if true; then :; fi &\n", 1, [n_bg]),
+                # An if or case ended by '&' backgrounds every relied stage inside it.
+                ("R166a", "if true; then tool write; fi &\n", 1, [n_bg]),
+                ("R166b", "if tool write; then :; fi &\n", 1, [n_bg]),
+                ("R166c", "case x in x) tool write;; esac &\n", 1, [n_bg]),
+                # A blank or comment line after && keeps the list going to the '&'.
+                ("R167", "tool write &&\n\n# c\necho ok &\n", 1, [n_bg]),
+                ("X33a", "x=$(tool write) &\n", 2, [n_subst_bg]),
+                ("X33b", "echo \"$(tool write)\" &\n", 2, [n_subst_bg]),
+                # A close with nothing open leaves the pending list's end unplaceable.
+                ("X34a", "tool write && fi &\n", 2, [n_unplaced]),
+                ("X34b", "tool write && ) &\n", 2, [n_unplaced]),
                 # A waiting setsid is cannot-evaluate: its exit propagation is not a verified premise.
                 ("R146", "setsid -w tool write | tail -1\n", 2, [n_setsid_w]),
                 ("R155b", "setsid -w tool write &\n", 2, [n_setsid_w]),
@@ -3619,6 +3677,11 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C57", pfx + "echo 'setsid tool write &'\n", 0, []),
                 ("C58", pfx + "# setsid tool write &\n", 0, []),
                 ("C59", "tool write; echo $?\n", 0, []),
+                # A '&' inside a compound part, or after the list already ended, backgrounds only its own
+                # list.
+                ("C60", "tool write && { echo & }\n", 0, []),
+                ("C61", "if true; then tool write; echo b & fi\n", 0, []),
+                ("C62", "tool write; ( echo ok ) &\n", 0, []),
                 # Flips: each control or waiting form, changed by one edit, must reach its finding.
                 ("C47-flip", "setsid tool write\n", 1, [n_launch]),
                 ("C48-flip-fork", "setsid --fork tool write\n", 1, [n_launch]),
@@ -3635,6 +3698,9 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
                 ("C57-flip", pfx + "setsid tool write &\n", 1, [n_launch, n_bg]),
                 ("C58-flip", pfx + "setsid tool write &\n", 1, [n_launch, n_bg]),
                 ("C59-flip", "tool write & echo $?\n", 1, [n_bg]),
+                ("C60-flip", "tool write && { echo; } &\n", 1, [n_bg]),
+                ("C61-flip", "if true; then tool write & fi\n", 1, [n_bg]),
+                ("C62-flip", "tool write && ( echo ok ) &\n", 1, [n_bg]),
             ]
             launch_roots = {}
 
@@ -3783,8 +3849,8 @@ def self_test_main(_mkdtemp=None, _symlink=None):  # noqa: C901  a flat sequence
           "FIFO surfaces and configurations, .git/__pycache__ directories, symlinks AND regular "
           "files refused rather than pruned, and scan_file's own pre-open regular-file layer) each "
           "fail closed printing the diagnostic of their OWN check, asserted by a substring no other "
-          "check prints; the launcher and background cases R142-R164, the waiting-setsid and launcher "
-          "refusals C47-C50, R146, R155b and X20-X32, the controls C51-C59 and every flip hold, and "
+          "check prints; the launcher and background cases R142-R167, the waiting-setsid and launcher "
+          "refusals C47-C50, R146, R155b and X20-X34, the controls C51-C62 and every flip hold, and "
           "each launcher mutant is caught")
     return 0
 
