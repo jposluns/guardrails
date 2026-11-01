@@ -1690,14 +1690,16 @@ and withhold the dispatch on exit 2 or on a printed `deny` decision.
 
 ## Command text that raises a host permission prompt
 
-The pack ships no hook for this. A host harness can raise a permission prompt because of what a Bash command's text contains, not what it does: a heredoc or a `python -c` / `python -` body holding `$(`, a backtick, or the words of a destructive command such as a hard reset, a force push or a recursive forced removal. In an unattended run that prompt stalls the run. Which text prompts is set by the harness build and the adopter's own permission rules, which the pack cannot read, so detection belongs to the adopter.
+A host harness may raise a permission prompt because of what a Bash command's text contains, not what it does: a heredoc or a `python -c` / `python -` body holding `$(`, a backtick, or the words of a destructive command such as a hard reset, a force push or a recursive forced removal. A prompt that waits for a human stalls an unattended run. Which text prompts, if any, is set by the harness build and the adopter's own permission rules, which the pack does not read, so detection belongs to the adopter.
 
-An adopter that wants a guard adds its own PreToolUse Bash hook, keyed to the patterns its own permission rules act on, that denies only while the operating-mode record reads unattended. Its deny message separates two cases:
+No shipped hook guards against the prompt itself. Three shipped PreToolUse Bash hooks already deny some of the same text, in every mode, for their own reasons: `commit-msg-subst` denies `$(` or a backtick in a git commit argument where the shell may substitute it, `git-discard` denies some lossy git discards such as a hard reset on a dirty tree, and `protected-line-guard` denies a force, delete or mirror push that names a protected branch. An adopter's hook stacks on them, with its own deny message.
 
-- Text the command only carries as data, such as a brief, a probe or a commit message, is written with the file-write tool and passed by path (for example `git commit -F <file>`).
+An adopter that wants a guard adds its own PreToolUse Bash hook, keyed to the patterns its own permission rules act on inside the heredoc and `python -c` / `python -` bodies named above, that denies only while the mode record (defined under The registry above) reads unattended. Like the pack's reader, it fails closed to unattended when a mode record is present but yields no recognized mode. Its deny message separates two cases:
+
+- Text the command only carries as data, such as a brief, a probe payload or a commit message, is written with the file-write tool and passed by path (for example `git commit -F <file>`).
 - A body that performs the matched action is not moved into a file to avoid the prompt. The action is presented as itself and taken to the authorization it needs (sechau): a script path shown for approval hides what the script does.
 
-Such a hook over-fires by design. It fires on a quoted-delimiter heredoc, on prose that quotes a destructive command, on a legitimate `$(` and on `$((` arithmetic, because the prompt it heads off reacts to the raw text. Quoting the delimiter stops shell expansion only: `python3 - <<'EOF'` still runs its body. It misses other interpreters, `sh -c` and `eval` bodies, and prompts raised by paths, tool type or permission state.
+Such a hook over-fires by design. It fires on a quoted-delimiter heredoc, on prose that quotes a destructive command, on a legitimate `$(` and on `$((` arithmetic, because it matches the raw text, which is what a prompt keyed to command text reacts to. Quoting the delimiter stops shell expansion only: `python3 - <<'EOF'` still runs its body. Keyed to those bodies, it misses other interpreters, `sh -c` and `eval` bodies, and prompts raised by paths, tool type or permission state.
 
 ## Honest limits (suite-level)
 
