@@ -547,7 +547,11 @@ manifest. Each provider is a handler covering some or all of three roles: `creat
 store location), `auth` (authenticate creation with the host), and `sync` (clone, fetch, push).
 
 - `local-directory` and `generic-git-remote` ship as the universal fallbacks and cover every
-  target between them: any local path and any git URL on any host.
+  target between them: any local path and any git URL on any host. A dedicated sync target (the
+  manifest's `[store] sync_target`, section 9) is synced as a git remote, so it names a filesystem
+  repository only as `git:<absolute path>`; a `dir:` or bare-path form is a store location for the
+  pointer and `opf migrate --store`, never a sync target, and validation refuses it as one
+  (section 11).
 - `github` and `gitlab` plug in only for their create and auth API conveniences; their sync is
   ordinary git. Further hosts join by registering a provider, never by extending the target
   grammar.
