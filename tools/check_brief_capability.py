@@ -10,7 +10,8 @@ fence, or a command line in the text the family is addressed by (S1 to S3), unle
 and for every family, a path outside a declared workdir when the family's row says it cannot read outside one
 (P2), or a pinned revision that a git command line of the listed subcommands (P5: clone, checkout, switch,
 reset, fetch, pull, worktree add, merge, rebase, restore --source, archive) reaches through a ref that can move with
-no later cure, or through a dispatch ref that resolves to another commit (P5). The
+no later cure, or through a dispatch ref that resolves to another commit (P5), or an input the brief declares on an
+INPUT: line that does not exist on the host the lint runs on (P6). The
 signal is structural, not certain: the lint fails closed, so some text a human would pass refuses (see
 RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is ADVISORY:
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
@@ -27,7 +28,7 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        whitespace only (a span in " or ` quotes that closes on the line is one word together
                        with anything glued to either end of it) and judges every U+002F slash in a word that
                        is at the word's start or right after a character that is not a letter, a digit, `.`
-                       or `_` (so @/x, %/x, -/x, =/x, Input:/x, (/x, "/x and the second slash of // are all
+                       or `_` (so @/x, %/x, -/x, =/x, Path:/x, (/x, "/x and the second slash of // are all
                        judged). For each judged slash it takes the text from that slash to the END of the
                        word, strips only trailing sentence punctuation (. , ; : ) ! ? " ' `), folds it
                        lexically (posixpath.normpath, and a leading // read as /; no link followed) and
@@ -224,10 +225,81 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        after the reach, git -C <dir> checkout --detach and the first 40-hex BRIEF-PIN value followed
                        by ^{commit} (with none, it says to add such a BRIEF-PIN line first), and the REFUSE line
                        states the cure shape (CURE_SHAPE). With no pin the rule does not fire.
+  P6 declared input    HARD, for every family. INPUT declarations are read by ONE shared parser
+                       (tools/_input_declarations.py), the same reading check_verifier_delivery's C1 takes, so
+                       the two cannot disagree, and that parser judges the CommonMark document the vendored
+                       parser builds (opf/tools/_vendor/marko, pinned 2.2.4, with the vendored GFM elements),
+                       because the worker reads the brief through a Markdown reader. A declaration is a
+                       paragraph at the document's top level or directly in a list item (bullet or numbered),
+                       judged one rendered line at a time: the line declares when its rendered text, after the
+                       parser has applied emphasis, strikethrough, backslash escapes and character references,
+                       and after format (Cf) and combining (Mn, Me) characters are removed and each character
+                       is folded through NFKC and a bounded confusable-to-ASCII table (Greek and Cyrillic
+                       look-alikes of I N P U T; U+A789, U+2236, U+0589, U+05C3, U+02D0 and U+02F8 read as the
+                       colon), begins with INPUT: (upper case, the colon directly after, no part of the label
+                       in a code span or inline HTML), so **INPUT:**, __INPUT:__, *INPUT:*, INPUT\\:,
+                       INPUT&#58; and a fullwidth or confusable-spelt label all declare what the reader shows.
+                       After the label comes one path, taken from the rendered text: one word, one code span
+                       (the quoted form for a path with spaces or markup characters) or one double-quoted
+                       span, then only whitespace on that rendered line; emphasis inside an unquoted path is
+                       applied like any other emphasis (quote such a path in a code span, whose literal
+                       characters are then judged by shape). The lint calls os.stat on the declared path on
+                       the host the lint runs on: a path that does
+                       not exist (ENOENT, or ENOTDIR for a path under a file; a dangling symbolic link is one,
+                       since the link is followed) is a HARD finding (exit 1). Any other stat error (EACCES on a
+                       parent directory, ELOOP, ENAMETOOLONG), a path that is neither a regular file nor a
+                       directory (a FIFO, a socket, a device) and a path os.access(R_OK) refuses for the lint's
+                       uid are CANNOT_EVALUATE (exit 2); os.access opens no descriptor, so a FIFO or a device is
+                       never opened. A path of only / is absolute with no `..` component, so INPUT: / declares
+                       the root directory and passes where the root is readable. A declaration P6 cannot check
+                       is CANNOT_EVALUATE (exit 2): no path (a bare
+                       INPUT:, an empty quoted path), a path holding a placeholder, variable, home, glob or
+                       brace character (< > $ ~ * ? [ ] { }) or a control character,
+                       a relative path, a `..` component, a quote that does not close on the line, a word
+                       after the path (an unquoted space), or inline HTML in the path (a <scratch>
+                       placeholder, which a reader hides). A
+                       LOOK-ALIKE input label is never ignored: a rendered paragraph line (wherever the
+                       paragraph sits), a heading or a table cell whose folded text begins, past leading
+                       whitespace, dashes and bare markup marks, with the token INPUT or INPUTS in any case
+                       and then a colon (Input:, INPUTS:, INPUT :, **INPUT: with its markup unclosed,
+                       <b>INPUT:</b>, a task-list item's label, a bulleted or dashed label, a blockquoted
+                       label, ## Inputs:), and a table cell that is exactly INPUT or INPUTS (upper case), is
+                       CANNOT_EVALUATE (exit 2), and so is a label opening a line of an HTML block or comment
+                       once its tags are stripped (a reader may hide that text). NAMED MISSES: the scan is
+                       anchored at the rendered start, so prose that only mentions the word input (The tool's
+                       input: a TOML file.), a label glued after other visible text (1.INPUT:, Step 1 -
+                       INPUT:), a mid-line table pipe in plain prose (| INPUT | x | with no delimiter row) and
+                       a | Input | Expected | header pass; the confusable table is bounded, so an unlisted
+                       look-alike letter or colon passes; INPUT FILE: x (a word between the token and the
+                       colon) declares nothing and is not a look-alike; and a link reference definition
+                       ([INPUT]: /x) renders as nothing and declares nothing. CODE is never read: inside a
+                       fenced or indented code block and a code span nothing is a declaration and nothing is a
+                       look-alike, so a brief may quote a GitHub Actions workflow (an indented inputs: key),
+                       an example INPUT line, or the label itself (`INPUT:`) in code; a tab-indented INPUT
+                       line is an indented code block and declares nothing. A
+                       path in prose is never judged by P6: only a
+                       declared input is, and an output the brief asks the worker to create is not declared, so
+                       it is not judged. A brief the vendored parser cannot read, or one over the shared
+                       reading's bounds (its 102,400-byte text ceiling, the dispatcher's own brief cap,
+                       its whitespace-run and nesting prescans, its parse deadline, held by killing the
+                       parse child's process group), is CANNOT_EVALUATE, never read
+                       another way;
+                       conformance is exactly Marko
+                       2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
+                       CommonMark reading (a no-break space accepted after a closing fence, for one).
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
-there. It does not follow symbolic links, so a path under the workdir lexically can lead outside it; it does
+there. P6 checks only the paths a brief declares on INPUT: lines, only on the host the lint runs on and only at
+lint time: a declared input present there can be missing where the worker runs, unreadable by the worker's uid,
+sandbox or mount, or removed or replaced after the lint runs; os.access answers for the lint's own real uid and
+groups, not the worker's, so a lint run as root passes a mode-000 file; a directory is checked for read
+permission, not for search permission; a symbolic link is followed and its target judged; a required input the
+brief names only in prose, in code (not checked by design), or not at all, is not checked; and a
+verifier that skips a declared input without
+saying so is not caught here (check_verifier_delivery reads a clean verdict whose UNVERIFIABLE answer names a
+declared input, or a parent directory of one, as no vote, and no more). P2 does not follow symbolic links, so a path under the workdir lexically
+can lead outside it; the preflight does
 not know which relative paths are inputs and which are files the brief asks the worker to create, so a path
 missing at a pin is ADVISORY (P3); P2 judges only the slashes above (a path split by a line break, a relative
 path, a path in an http:// or https:// word, and a path spelt with look-alike slashes are not judged, and an
@@ -250,8 +322,8 @@ so a cure line that a report, a question or a prohibition quotes (on a line of i
 because the shape is a whole line of the canonical command, and a cure in any other place (inside a sentence,
 after any other word, or with a stop or any word after it) cures nothing and refuses whatever the words around it,
 as does every cure in a brief whose pins are only REVIEWED HEAD lines, confirm clauses or BRIEF-PIN values of
-fewer than 40 or of 64 hex digits (a brief pinned in a SHA-256 repository has no cure and refuses) and every cure
-line in a brief with CRLF line ends (its carriage return is no cure character); REVIEWED HEAD lines with no
+fewer than 40 or of 64 hex digits (a brief pinned in a SHA-256 repository has no cure and refuses); a brief with
+CRLF or any other non-LF line end never reaches P5 (the TEXT gate refuses it, exit 2); REVIEWED HEAD lines with no
 BRIEF-PIN line are not compared with each other, and a confirm clause is not compared with the pin lines (the pin
 lines govern); a look-alike pin line is read only at a line's start, with the two labels as written once case,
 compatibility forms and Pd dashes are folded (a label later in a line, in a table row's second column, spelt
@@ -287,8 +359,12 @@ is read as two lines; a tag force-moved after the lint runs is not seen; a dispa
 --repo cannot resolve is only ADVISORY, and the worker then fails closed at the fetch; and, like every rule, it
 helps only where the sender refuses to send on exit 1 or 2.
 
-TEXT. Format characters (Unicode category Cf: a byte order mark, zero-width and bidirectional
-controls) are removed first, for every rule but the P5 cure, which reads each cure line as written; a brief
+TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
+NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
+byte order mark, zero-width and bidirectional controls) outside a fenced code block, is CANNOT_EVALUATE
+(exit 2) before any rule runs: such a character can hide or split a line or a declaration, so it is refused,
+never removed silently. A format character inside a fenced block's body is still removed
+for every rule but the P5 cure, which reads each cure line as written; a brief
 that is then empty or only whitespace and control characters is blank. Every list item (a line opening with `-`,
 `*`, `+`, `N.` or `N)`, at any indentation) is its own paragraph, so it starts a sentence. A fence opens at any
 indentation.
@@ -403,16 +479,20 @@ not one, so "do not run, build or install" stays negated.
 Outcomes, printed one finding per line (HARD, INFO, or ADVISORY) and then one summary line:
 
   exit 0  OK               no HARD hit (INFO and ADVISORY findings may be printed).
-  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2 or P5). Rewrite the brief, or send the item
+  exit 1  REFUSE           at least one HARD hit (S1, S2, S3, P2, P5 or P6). Rewrite the brief, or send the item
                            to a family that can execute (S1 to S3), name paths it can read (P2) or, after the reach,
                            add the cure line the hit gives (git -C <dir> checkout --detach <pin>^{commit}) or reach
-                           the pin by a dispatch ref (P5).
+                           the pin by a dispatch ref (P5), or provide each missing declared input or correct its
+                           INPUT line (P6).
                            When a hit is a command line (S2 or S3), the REFUSE line
                            says how to rewrite: name the function, row or entry instead of embedding the
                            command (quote the def line of X, not the line that runs git push).
   exit 2  CANNOT_EVALUATE  the brief is missing, not a regular file, larger than MAX_BYTES, not UTF-8, or
                            blank; a scope range runs backwards; a pinned revision does not resolve or
-                           cannot be read (P3); the family is not in the table; the
+                           cannot be read (P3); an INPUT line P6 cannot check, a look-alike input label, a
+                           brief the shared reading's vendored parser cannot read, or a
+                           declared input that exists but cannot be confirmed readable (P6); the family is not
+                           in the table; the
                            table is missing, unreadable, or malformed (format-version must be the
                            integer 1); or the arguments are wrong (a repeated --family or --table
                            included). A brief that cannot be evaluated is never OK.
@@ -510,17 +590,18 @@ command line is split on whitespace once and its tokens classified by a plain pr
 command line end; per opener, R6 measures its subject's length before reading it; and every word-run, command and
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
 space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative times,
-each shape at 1 MiB must take at most LINEAR_FACTOR times as long as at 128 KiB plus LINEAR_SLACK seconds
+each shape at 64 KiB must take at most LINEAR_FACTOR times as long as at 8 KiB plus LINEAR_SLACK seconds
 (the input is eight times larger; a pass whose time grows with the square of the input takes about 64 times as
-long). A shape is evidence only for the text it repeats. Measured on 2026-10-08 on one shared host, each in such a
-child under nice 10, in two runs of these shapes: every shape took at most 0.29 s at 128 KiB and 2.13 s at 1 MiB,
-at most 9.4 times its 128 KiB time. On the previous revision, with the same harness and a 60-second timeout
-(measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix (" -x.y" repeated then
-"!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s; the fence-contents shape
-took at most 0.06 s there and guards the new reading of fence contents, not the change. Of the older shapes,
-closed-args-linear repeats a token with one parse and did not catch that argument tail; the whitespace-run shapes
-(whitespace-run-linear and item-list-whitespace-linear) were added when an earlier revision did not finish 128 KiB
-within 60 s, and some others when an earlier revision exceeded the bound, each measured only to a 60-second timeout.
+long). Every shape carries a lead that holds "nput", so each runs through the shared parsed-document reading, never
+the ASCII fast path, and the larger size sits exactly at that reading's text ceiling; a shape the reading's own
+bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the nesting prescan)
+is timed through its refusal, which is the bounded behaviour an oversized or pathological brief gets. A shape is
+evidence only for the text it repeats. On the previous revision, with a 1 MiB size, a 60-second timeout and the
+parse-free fast path (measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix
+(" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s;
+the whitespace-run shapes (whitespace-run-linear and item-list-whitespace-linear) were added when an earlier
+revision did not finish 128 KiB within 60 s, and some others when an earlier revision exceeded the bound, each
+measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
@@ -546,15 +627,20 @@ import ast
 import atexit
 import bisect
 import contextlib
+import errno
 import io
+import json
 import os
 import posixpath
+import random
 import re
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
+import time
 import unicodedata
 from pathlib import Path
 
@@ -574,6 +660,12 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402
 import _git_fixture_env  # noqa: E402
+import _input_declarations  # noqa: E402
+
+# the one reading of INPUT declarations, shared with check_verifier_delivery (C1) so the two cannot
+# disagree; bound here so the self-test can patch each seam out
+forbidden_text = _input_declarations.forbidden
+read_inputs = _input_declarations.read
 
 ROOT = Path(__file__).resolve().parents[1]
 TABLE_REL = ".aiqt/core/worker-capabilities.toml"
@@ -686,12 +778,25 @@ def _blank_character(ch):
 
 
 def decode_brief(data):
-    """The brief's text with format characters removed, or CannotEvaluate when it is not UTF-8 or blank."""
+    """The brief's text, or CannotEvaluate when it is not UTF-8, blank, or holds a line separator other
+    than LF anywhere or a format character outside a code block or code span of the parsed CommonMark
+    document (forbidden_text, the shared reading of tools/_input_declarations.py): such a character can
+    hide or split a declaration, so it is refused, never removed silently, and a brief the shared
+    reading's vendored parser cannot read (DeclarationError) is CannotEvaluate too. A format character
+    inside code is still removed for the rules that read fence content (the P5 cure alone reads each
+    cure line as written)."""
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise CannotEvaluate("brief: not valid UTF-8 ({})".format(exc.reason))
-    # A byte order mark, a zero-width or a bidirectional control is invisible and can split a word.
+    try:
+        found = forbidden_text(text)
+    except _input_declarations.DeclarationError as exc:
+        raise CannotEvaluate("brief: {}".format(exc))
+    if found is not None:
+        raise CannotEvaluate("brief: line {}: {}".format(*found))
+    # A byte order mark, a zero-width or a bidirectional control is invisible and can split a word; only
+    # code of the parsed document (a fenced or indented block's body, a code span) can still hold one here.
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
     if all(_blank_character(ch) for ch in text):
         raise CannotEvaluate("brief: blank")
@@ -1701,6 +1806,11 @@ NEAR_PIN_FORM = "NFKC"
 NEAR_PIN_DASHES = frozenset(("Pd",))
 NEAR_PIN_RE = re.compile(r"[`|*_\s]*+(?:REVIEWED\s++HEAD|BRIEF-PIN)[`|*_\s]*+[:=]?+[`|*_\s(]*+"
                          r"([0-9a-f]{64}|[0-9a-f]{7,40})(?![\w-])", re.I)
+# P6: INPUT declarations, their shapes and their look-alikes are read by the shared parser
+# (tools/_input_declarations.py, bound above as read_inputs), the same reading check_verifier_delivery's
+# C1 uses, so the two cannot disagree; a stat error in MISSING_ERRNOS is a missing input, any other is
+# cannot evaluate
+MISSING_ERRNOS = frozenset((errno.ENOENT, errno.ENOTDIR))
 # a slash after a letter, a digit or one of these continues a relative path word, so P2 does not judge it
 PATH_GLUE = frozenset("._")
 # a web address is not a file read; file:// and every other scheme is judged as a path
@@ -1932,9 +2042,16 @@ class PreflightText:
     BRIEF-PIN, plain or in bold, and a commit of 7 to 40 or 64 hex digits; the BRIEF-PIN ones and the REVIEWED HEAD
     ones also apart, for pin agreement (rule_p3) and the P5 cure), the lines that open with such a label but carry
     no such commit (bad_pins) and the commit ids of the other lines that are look-alike pin lines (near_pins, see
-    near_pin; for pin agreement); and whether a hand-back file is named (the words hand-back file or path and an
-    absolute path on one line). `raw` is the brief's text before decode_brief removes format characters, which the P5
-    cure reads (cure_lines); None stands for `text` itself."""
+    near_pin; for pin agreement); the declared inputs ([(line, path)]) and the malformed declarations and
+    look-alike INPUT lines, with the reason (bad_inputs), both read from `raw` by the shared parser
+    (tools/_input_declarations.py, read_inputs), the same reading check_verifier_delivery's C1 uses: a
+    top-level or list-item paragraph line of the parsed CommonMark document whose rendered, folded text
+    begins with INPUT: declares one path, code declares nothing, and a rendered paragraph line, heading
+    or table cell opening with the folded token INPUT or INPUTS and a colon (or a cell that is exactly
+    the token) is bad; and whether a
+    hand-back file is named (the words hand-back file or path and an absolute path on one line). `raw` is the
+    brief's text before decode_brief removes format characters, which the P5 cure reads (cure_lines); None stands
+    for `text` itself."""
 
     def __init__(self, text, raw=None):
         self.text = text
@@ -1946,6 +2063,13 @@ class PreflightText:
         self.reviewed_heads = []   # [(line, pin)] for the pin lines labelled REVIEWED HEAD
         self.near_pins = []   # [(line, commit id)] for the look-alike pin lines (near_pin)
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
+        # the INPUT declarations P6 checks and the malformed or look-alike INPUT lines, each [(line, ...)],
+        # read from the raw text by the shared parser so P6 and C1 cannot disagree; a raw text that
+        # parser cannot read is CannotEvaluate, never an empty reading
+        try:
+            self.inputs, self.bad_inputs = read_inputs(self.raw)
+        except _input_declarations.DeclarationError as exc:
+            raise CannotEvaluate("brief: {}".format(exc))
         self.handback_named = False
         bare = None   # the line of a bare Workdir (or Workdir:, Workdir is) whose path is on the next line
         for number, line in enumerate(text.split("\n"), 1):
@@ -2870,12 +2994,58 @@ def rule_p5(names, row, repo):
     return findings
 
 
+def input_readable(path):
+    """Whether the lint's real uid may read `path`: os.access R_OK, which opens no descriptor."""
+    return os.access(path, os.R_OK)
+
+
+def input_state(path):
+    """(errno, reason) for a declared input on the host the lint runs on, opening nothing: (None, None) when os.stat
+    finds a regular file or a directory that input_readable allows; the stat's errno and message when it fails;
+    (None, reason) for any other file type (a FIFO, a socket, a device); (EACCES, reason) when input_readable
+    refuses."""
+    try:
+        info = os.stat(path)
+    except OSError as exc:
+        return exc.errno, exc.strerror or str(exc)
+    except ValueError as exc:
+        return None, str(exc)
+    if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+        return None, "it is neither a regular file nor a directory"
+    if not input_readable(path):
+        return errno.EACCES, "the lint's uid may not read it (os.access R_OK refused)"
+    return None, None
+
+
+def rule_p6(names, row, repo):
+    """P6 HARD, for every family: a declared input (a declaring paragraph line of the parsed CommonMark
+    document, read by the shared parser)
+    that does not exist on the host
+    the lint runs on (input_state gives an errno of MISSING_ERRNOS: ENOENT, or ENOTDIR for a path under a file).
+    A malformed declaration or a look-alike label (bad_inputs), any other stat error, another
+    file type and a path input_readable refuses leave the input unconfirmed: CannotEvaluate, never a pass. Paths in
+    prose and in code (a fenced or indented block, a code span) are not judged."""
+    if names.bad_inputs:
+        line, reason = names.bad_inputs[0]
+        raise CannotEvaluate("line {}: {}".format(line, reason))
+    findings = []
+    for line, path in _first_seen(names.inputs):
+        code, reason = input_state(path)
+        if code in MISSING_ERRNOS:
+            findings.append(("P6", "HARD", line, "declared input does not exist on this host ({}), so the worker "
+                             "cannot read it; provide it or correct the INPUT line".format(reason), _excerpt(path)))
+        elif reason is not None:
+            raise CannotEvaluate("line {}: the declared input {} cannot be confirmed readable: {}".format(
+                line, path, reason))
+    return findings
+
+
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P5) for a brief's text and its family's row; they apply to every family. `raw`
+    """The preflight findings (P1 to P6) for a brief's text and its family's row; they apply to every family. `raw`
     is the text before decode_brief removed format characters, which the P5 cure reads."""
     names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo)
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo)
 
 
 def can_execute(row):
@@ -2938,7 +3108,9 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6"))
+# added to a REFUSE line when a P6 hit is among the hard hits
+INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 
 
 def run(brief_path, family, table_path, scoped=True, repo=None):
@@ -2951,22 +3123,27 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     for rule, severity, line, message, excerpt in findings:
         print("{}:{}: {} {}: {}: {}".format(brief_path, line, severity, rule, message, excerpt))
     hard = [rule for rule, severity, _, _, _ in findings if severity == "HARD"]
+    missing_input = INPUT_HINT if "P6" in hard else ""
     if code == EXIT_REFUSE and set(hard) - PREFLIGHT_RULES:
         print("REFUSE: family {} cannot execute and the brief carries a structural execution request ({} hard "
-              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}".format(
+              "hit(s): {}); rewrite the brief or send these items to a family that can execute{}{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
-                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else ""))
+                  "; " + COMMAND_LINE_HINT if set(hard) & {"S2", "S3"} else "", missing_input))
     elif code == EXIT_REFUSE and "P5" in hard:
         print("REFUSE: family {}: the brief reaches a pinned revision through a ref that can move ({} hard hit(s): "
-              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}; "
+              "{}); after the reach, add the line each P5 hit gives ({}), or reach the pin by a dispatch ref{}{}; "
               "{}".format(
                   family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
                   CURE_EXAMPLE.format("<pin>"), ", and name paths under the declared workdir" if "P2" in hard else "",
-                  CURE_SHAPE))
+                  missing_input, CURE_SHAPE))
+    elif code == EXIT_REFUSE and set(hard) == {"P6"}:
+        print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
+              "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
-              "paths under the declared workdir, or state a path the worker must not use as a prohibition".format(
-                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard)))))
+              "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
+                  family, len(hard), ", ".join("{} x{}".format(r, hard.count(r)) for r in sorted(set(hard))),
+                  missing_input))
     elif can_execute(table[family]):
         advisory = sum(1 for _, severity, _, _, _ in findings if severity == "ADVISORY")
         print("OK: family {} can execute ({}); the execution rules do not apply{}".format(
@@ -3389,6 +3566,8 @@ REVERSED = "Gamma leg: answer items 2-1 only.\n\n1. Run the parser.\n"
 DASH_LIST = "- Read the diff\n- Run `t.py --self-test`\n- Report the exit code\n"
 BOM_BRIEF = b"\xef\xbb\xbf```bash\ncd repo\n```\n"   # a byte order mark before the fence opener
 ZERO_WIDTH_SPLIT = "Read only `git sh" + chr(0x200B) + "ow abc1234:t.py`.\n"   # a zero-width space inside "show"
+# a zero-width space inside a fenced command: the fence body may hold it, and removal restores the command
+FENCED_ZERO_WIDTH = "```\nc" + chr(0x200B) + "d repo\n```\n"
 # "no" in "casino" ends exactly NEGATION_WINDOW characters before "run": a slice of the window would
 # open on a false word boundary and read it as a negation.
 SLICE_EDGE = "Read the casino" + " w" * 25 + " ww and run the parser.\n"
@@ -3444,7 +3623,7 @@ P2_ESCAPES = ("/w/repo//../../etc/passwd", "/w/repo/x~/../../../etc/passwd", "/w
 P2_UNPLACED = ("~user/notes.md", "$TMPDIR/x.md", "../x.md", ",".join(["/w/repo/a.md"] * 17))
 # text glued after a quoted span with a space; a path glued after a character that is not a letter or digit
 P2_GLUED_QUOTE = ("\"/w/repo/a b\"/../../../etc/x.md", "`/w/repo/a b`/../../../etc/x.md")
-P2_GLUED_AFTER = ("@/etc/x.md", "%/etc/x.md", "-/etc/x.md", "Input:/etc/x.md")
+P2_GLUED_AFTER = ("@/etc/x.md", "%/etc/x.md", "-/etc/x.md", "Path:/etc/x.md")
 P2_FILE_URL, P2_WEB_URL = "file:///etc/x.md", "https://example.com/a/../../etc/x.md"
 # odd words the slash rule refuses although a human would pass them (fail closed)
 P2_OVER_REFUSED = ("/w/repo//docs/a.md", "/w/repo/x~/a.md", "\"/w/repo/a b\"/x.md", "ftp://h/w/repo/x.md")
@@ -3542,16 +3721,18 @@ P5_CURE_CHAIN_WORDS = ("Run `git clone -q --no-hardlinks file:///srv/g.git w && 
                        "Make a scratch clone: `git clone --no-hardlinks /srv/w/repo <scratch>/r && git -C "
                        "<scratch>/r checkout --detach {0}`\n")
 # a cure line is read on the raw text, printable ASCII with only space or tab between words: a no-break, em,
-# ideographic or other Unicode space, a control character (unit separator, vertical tab, form feed) or a carriage
-# return makes it no cure line (each one a looser reading splits as a space)
+# ideographic or other Unicode space or a control character (unit separator, vertical tab, file separator)
+# makes it no cure line (each one a looser reading splits as a space); a carriage return or a form feed never
+# reaches P5, since the brief gate refuses every non-LF line separator first
 P5_NOT_CURE_CHARACTERS = tuple(line.format(chr(code)) for line, code in (
     ("git -C w checkout{}--detach {{0}}\n", 0xA0), ("git -C w{}checkout --detach {{0}}\n", 0x2003),
     ("git{}-C w checkout --detach {{0}}\n", 0x3000), ("git -C w checkout{}--detach {{0}}\n", 0x1F),
-    ("git -C w checkout{}--detach {{0}}\n", 0x0B), ("git -C w checkout --detach{}{{0}}\n", 0x0C),
-    ("git -C w checkout --detach {{0}}{}\n", 0x0D)))
+    ("git -C w checkout{}--detach {{0}}\n", 0x0B), ("git -C w checkout --detach{}{{0}}\n", 0x1C)))
 # and before format characters are removed: a zero-width space, a soft hyphen, a byte order mark or a bidirectional
-# control inside a cure line makes it none (each one the text with format characters removed would cure)
-P5_NOT_CURE_FORMAT = tuple(line.format(chr(code)) for line, code in (
+# control inside a cure line makes it none (each one the text with format characters removed would cure). The
+# lines stand in a fence behind the `$ ` prompt: only a fenced block's body may hold a format character (outside
+# one the brief gate refuses the whole brief first), and a fence line cures behind the prompt
+P5_NOT_CURE_FORMAT = tuple("```\n$ " + line.format(chr(code)) + "```\n" for line, code in (
     ("git -C w checkout --de{}tach {{0}}\n", 0x200B), ("git -C w checkout --detach {}{{0}}\n", 0x200B),
     ("git -C w check{}out --detach {{0}}\n", 0xAD), ("{}git -C w checkout --detach {{0}}\n", 0xFEFF),
     ("git -C w checkout --detach {}{{0}}\n", 0x202E)))
@@ -3718,6 +3899,190 @@ P5_CLONE_REVISION = (P5_PIN + "Use `git clone --revision={0} <url> w` and review
                      P5_PIN + "Use `git clone --revision {0} <url> w` and review w.\n",
                      P5_PIN + "Use `git clone --revision=main <url> w` and review w.\n")
 LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
+# the measured slack over the parse deadline for one whole read() through the killed child: the child
+# start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
+# old-ceiling shapes (an 80-cpu host at one-minute load averages 35 to 43), so three seconds is wide
+DEADLINE_MARGIN_SECONDS = 3.0
+# the probe child for revert/parse-thread-join-red: it runs the shared reading with the thread join
+# restored (PARSE_IN_CHILD=False) over one shape at the old ceiling and never returns within the
+# deadline (the join's timeout cannot fire while one regex match holds the GIL); the parent shows it
+# still running at the deadline plus DEADLINE_MARGIN_SECONDS and kills its process group
+THREAD_JOIN_PROBE = (
+    "import sys\n"
+    "sys.path.insert(0, sys.argv[1])\n"
+    "import _input_declarations as m\n"
+    "m.MAX_TEXT_BYTES = 1 << 19\n"
+    "m.PARSE_IN_CHILD = False\n"
+    "text = ('x<!--' * ((1 << 19) // 5))[:(1 << 19) - 1] + chr(10) if sys.argv[2] == 'html-opener' "
+    "else chr(0xFF21) * (((1 << 19) - 1) // 3) + chr(10)\n"
+    "try:\n"
+    "    m.read(text)\n"
+    "except m.DeclarationError:\n"
+    "    pass\n")
+# a stand-in parse child: _CHILD_PATH is pointed at a script that opens with this prefix (the text read
+# from stdin, the script's own directory as `here`) and then runs one vector's body, so each way a child
+# can end is shown against the parent's reading of it
+STAND_IN_PREFIX = ("import json, os, signal, subprocess, sys\n"
+                   "text = sys.stdin.buffer.read().decode('utf-8')\n"
+                   "here = os.path.dirname(os.path.abspath(__file__))\n")
+# the body of a stand-in that writes one complete well-formed empty document for its text
+STAND_IN_DOCUMENT = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                     "'children': []}}))\n"
+                     "sys.stdout.flush()\n")
+# a stand-in that leaves a grandchild running after a normal exit: it opens the fifo beside it for
+# writing (the self-test holds the read end), hands that descriptor to a grandchild in its process group
+# that sleeps for a bounded time, records the grandchild's pid, writes a complete document and exits 0;
+# the fifo reads end of file only once the grandchild is gone
+STAND_IN_GRANDCHILD = (
+    "held = os.open(os.path.join(here, 'fifo'), os.O_WRONLY | os.O_NONBLOCK)\n"
+    "grandchild = subprocess.Popen([sys.executable, '-I', '-c', 'import time; time.sleep(30)'],\n"
+    "                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,\n"
+    "                              stderr=subprocess.DEVNULL, pass_fds=(held,))\n"
+    "with open(os.path.join(here, 'pid'), 'w') as handle:\n"
+    "    handle.write(str(grandchild.pid))\n" + STAND_IN_DOCUMENT)
+# how long a grandchild may take to be gone once the call returns, and how long a cleanup kill may take
+GRANDCHILD_WAIT_SECONDS = 5.0
+# a stand-in that records the names in its environment beside it, then writes a complete document
+STAND_IN_ENVIRON = ("with open(os.path.join(here, 'environ'), 'w') as handle:\n"
+                    "    handle.write(chr(10).join(sorted(os.environ)))\n" + STAND_IN_DOCUMENT)
+# a variable set in the self-test's own environment around the environment vector; the child must not see it
+ENVIRON_MARK = "INPUT_DECLARATIONS_SELFTEST_MARK"
+# the stand-in parent module of the child-import vectors: the child under test imports it as its parent
+# and serializes through it, so the document it returns names which copy it imported ("beside" for the
+# copy beside the child, "decoy" for the one installed in site-packages)
+STAND_IN_PARENT = ("class DeclarationError(Exception):\n"
+                   "    pass\n\n\n"
+                   "def _parse_document(text):\n"
+                   "    return text\n\n\n"
+                   "def _serialize(text):\n"
+                   "    return {{'kind': 'Document', 'span': [0, len(text)], 'children': [], 'from': {!r}}}\n")
+
+
+def _deep_tree_body(levels):
+    """The body of a stand-in that writes a document of `levels` nested Emphasis nodes under one paragraph
+    (levels + 3 deep, the document being level 1 and the innermost RawText the last), built as text so no
+    encoder recursion bounds it."""
+    return ("leaf = json.dumps({'kind': 'RawText', 'text': 'x'})\n"
+            "opening, closing = '{\"kind\": \"Emphasis\", \"children\": [', ']}'\n"
+            "nested = opening * %d + leaf + closing * %d\n"
+            "document = json.dumps({'kind': 'Document', 'span': [0, len(text)],\n"
+            "                       'children': [{'kind': 'Paragraph', 'children': ['NESTED']}]})\n"
+            "sys.stdout.write('{\"tree\": ' + document.replace('\"NESTED\"', nested) + '}')\n" % (levels, levels))
+
+
+def _stand_in_read(directory, body, text="Input notes.\n"):
+    """read()'s outcome on `text` with the parse child replaced by a stand-in script (STAND_IN_PREFIX, then
+    `body`) written in `directory`: ("ok", (inputs, bad)), "DeclarationError", or the name of any other
+    exception that escaped, so a reverted guard shows what it lets through."""
+    path = os.path.join(directory, "stand_in_child.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(STAND_IN_PREFIX + body)
+    saved = _input_declarations._CHILD_PATH
+    _input_declarations._CHILD_PATH = path
+    try:
+        return ("ok", _input_declarations.read(text))
+    except _input_declarations.DeclarationError:
+        return "DeclarationError"
+    except Exception as caught:   # named, never swallowed: the escape the vector exists to show
+        return type(caught).__name__
+    finally:
+        _input_declarations._CHILD_PATH = saved
+
+
+def _writers_gone(reader, seconds):
+    """True once a non-blocking read of the fifo descriptor `reader` reads end of file (every writer has
+    closed it) within `seconds`; False while a writer still holds it open."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            if os.read(reader, 1) == b"":
+                return True
+        except BlockingIOError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _grandchild_outcome(base):
+    """(read()'s outcome, whether the grandchild a normally exiting stand-in left running is gone within
+    GRANDCHILD_WAIT_SECONDS of the call's return) for STAND_IN_GRANDCHILD, in a new directory under
+    `base`. A grandchild still running then is killed here by the pid its stand-in recorded (it holds the
+    fifo, so that pid is still its own), so none outlives the self-test."""
+    directory = tempfile.mkdtemp(dir=base)
+    fifo = os.path.join(directory, "fifo")
+    os.mkfifo(fifo)
+    reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        outcome = _stand_in_read(directory, STAND_IN_GRANDCHILD)
+        gone = _writers_gone(reader, GRANDCHILD_WAIT_SECONDS)
+        if not gone:
+            with open(os.path.join(directory, "pid"), encoding="ascii") as handle:
+                os.kill(int(handle.read()), signal.SIGKILL)
+            _writers_gone(reader, GRANDCHILD_WAIT_SECONDS)
+    finally:
+        os.close(reader)
+    return outcome, gone
+
+
+def _environment_outcome(base):
+    """(read()'s outcome, whether the stand-in child saw ENVIRON_MARK) with ENVIRON_MARK set in this
+    process's environment around the call, in a new directory under `base`."""
+    directory = tempfile.mkdtemp(dir=base)
+    with _environ(**{ENVIRON_MARK: "1"}):
+        outcome = _stand_in_read(directory, STAND_IN_ENVIRON)
+    with open(os.path.join(directory, "environ"), encoding="utf-8") as handle:
+        names = handle.read().split("\n")
+    return outcome, ENVIRON_MARK in names
+
+
+def _child_import_outcomes(base, source):
+    """For the parse child source `source`, written beside a stand-in parent ("beside") and run under a
+    minimal virtual environment (a pyvenv.cfg beside a link to this interpreter) whose site-packages holds
+    a decoy parent ("decoy"): which parent the child read through, first with the decoy installed on the
+    module path, then with a site .pth line importing the decoy before the child runs. Each is "beside",
+    "decoy", "refused" (the child's declaration_error) or "failed"; a source of None (a flip that could
+    not be built) is "not built"."""
+    if source is None:
+        return ("not built", "not built")
+    directory = tempfile.mkdtemp(dir=base)
+    interpreter = os.path.realpath(sys.executable)
+    venv_python = os.path.join(directory, "venv", "bin", "python3")
+    site = os.path.join(directory, "venv", "lib", "python{}.{}".format(*sys.version_info[:2]), "site-packages")
+    tools = os.path.join(directory, "tools")
+    for path in (os.path.dirname(venv_python), site, tools):
+        os.makedirs(path)
+    os.symlink(interpreter, venv_python)
+    for path, text in ((os.path.join(directory, "venv", "pyvenv.cfg"),
+                        "home = {}\ninclude-system-site-packages = false\n".format(os.path.dirname(interpreter))),
+                       (os.path.join(tools, "_input_declarations_child.py"), source),
+                       (os.path.join(tools, "_input_declarations.py"), STAND_IN_PARENT.format("beside")),
+                       (os.path.join(site, "_input_declarations.py"), STAND_IN_PARENT.format("decoy"))):
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    outcomes = []
+    for preload in (False, True):
+        if preload:
+            with open(os.path.join(site, "preload.pth"), "w", encoding="utf-8") as handle:
+                handle.write("import _input_declarations\n")
+        try:
+            done = subprocess.run([venv_python, "-I", "-B", os.path.join(tools, "_input_declarations_child.py")],
+                                  input=b"x", stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env={},
+                                  timeout=120)
+        except subprocess.TimeoutExpired:
+            outcomes.append("failed")
+            continue
+        try:
+            result = json.loads(done.stdout.decode("utf-8"))
+        except ValueError:
+            result = None
+        if done.returncode != 0 or not isinstance(result, dict):
+            outcomes.append("failed")
+        elif isinstance(result.get("tree"), dict):
+            outcomes.append(result["tree"].get("from", "failed"))
+        else:
+            outcomes.append("refused" if "declaration_error" in result else "failed")
+    return tuple(outcomes)
 
 
 def _preflight_repo(base):
@@ -3764,8 +4129,10 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
-# The child caps its address space at 1 GiB, then times evaluate() on 128 KiB and 1 MiB briefs, each a prefix,
-# one unit repeated, and a suffix.
+# The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
+# larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
+# (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
+# A refusal (a prescan or deadline cannot-evaluate) is still a bounded evaluation and is timed as one.
 LINEAR_CHILD = (
     "import resource, sys, time\n"
     "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
@@ -3775,19 +4142,23 @@ LINEAR_CHILD = (
     "import check_brief_capability as m\n"
     "table = m.parse_table(m.TABLE_FIXTURE.encode('utf-8'))\n"
     "prefix, unit, suffix = sys.argv[2:5]\n"
-    "for size in (1 << 17, 1 << 20):\n"
-    "    body = size - len(prefix) - len(suffix)\n"
-    "    data = (prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
+    "lead = 'Input notes.\\n\\n'\n"
+    "for size in (1 << 13, 1 << 16):\n"
+    "    body = size - len(lead) - len(prefix) - len(suffix)\n"
+    "    data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
     "    began = time.perf_counter()\n"
-    "    m.evaluate(data, 'gamma', table)\n"
+    "    try:\n"
+    "        m.evaluate(data, 'gamma', table)\n"
+    "    except m.CannotEvaluate:\n"
+    "        pass\n"
     "    print(time.perf_counter() - began)\n")
 
 
 def _linear(unit, prefix="", suffix=""):
-    """True when evaluate() on a 1 MiB brief (`prefix`, `unit` repeated, `suffix`) takes at most LINEAR_FACTOR
-    times as long as on the 128 KiB one plus LINEAR_SLACK seconds, both timed in a child capped at 1 GiB
-    (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went wrong. The child must exit 0
-    and print exactly two finite, nonnegative times."""
+    """True when evaluate() on a 64 KiB brief (a parse-forcing lead, `prefix`, `unit` repeated, `suffix`)
+    takes at most LINEAR_FACTOR times as long as on the 8 KiB one plus LINEAR_SLACK seconds, both timed
+    in a child capped at 1 GiB (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went
+    wrong. The child must exit 0 and print exactly two finite, nonnegative times."""
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", LINEAR_CHILD, str(Path(__file__).resolve().parent),
                                prefix, unit, suffix], capture_output=True, text=True, timeout=LINEAR_TIMEOUT)
@@ -3800,7 +4171,7 @@ def _linear(unit, prefix="", suffix=""):
     if done.returncode != 0 or not all(0.0 <= value < float("inf") for value in (small, large)):
         return "child exit {}, output {!r}: {}".format(done.returncode, done.stdout.strip()[-80:],
                                                       done.stderr.strip()[-200:])
-    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "1 MiB took {:.3f} s, 128 KiB {:.3f} s".format(
+    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "64 KiB took {:.3f} s, 8 KiB {:.3f} s".format(
         large, small)
 
 
@@ -4209,6 +4580,90 @@ class _NoFormatRemoval:
         return "Cc" if ch in "\x00" else ("Zs" if ch.isspace() else "Ll")
 
 
+def _running_nesting_refused(text):
+    """The self-test's oracle: a frozen copy of _input_declarations._nesting_refused before it kept a held
+    depth (the running depth alone, which every fence and placement decision reads), so the self-test
+    can show the held depth only adds refusals. Its statements are that revision's, with the module
+    prefix added, the comments dropped and a short reason; never edited to follow the prescan. It reads
+    the module's helpers and seams, so the self-test calls it with none of them patched."""
+    module = _input_declarations
+    running = 0
+    after_blank = True
+    placed = module.NESTING_FENCES
+    fence = None
+    opaque = set()
+    for number, line in enumerate(text.split("\n"), 1):
+        closing = False
+        if placed and fence is not None:
+            held = module._fence_holds(fence, line)
+            if held == "content":
+                continue
+            fence = None
+            placed = held is not False
+            closing = held == "closed"
+        if not line.strip():
+            after_blank = True
+            opaque = {kind for kind in opaque if not isinstance(kind, str)
+                      or (kind == "label" and module.NESTING_LABELS) or (kind in ("label", "link") and line)}
+            continue
+        markers, columns, position = module._lead_shape(line)
+        if placed and not closing:
+            if module.FENCE_SHAPE_RE.match(line, position):
+                fence = False if opaque else module._fence_opening(line, position, markers, running, after_blank)
+                placed = fence is not False
+                fence = fence or None
+            else:
+                opaque = {kind for kind in opaque if isinstance(kind, str) or not kind.search(line)}
+                if "label" in opaque:
+                    ended = module.LABEL_END_RE.match(line)
+                    if ended is not None:
+                        opaque.discard("label")
+                        if ended.group(1) == "]":
+                            opaque.add("link")
+                started = module._opaque_start(line[position:])
+                if started is not None and (isinstance(started, str) or not started.search(line)):
+                    opaque.add(started)
+        if module.NESTING_RESETS and markers == 0 and columns < 2 \
+                and (after_blank or module.BLOCK_START_RE.match(line)):
+            running = 0
+        after_blank = False
+        depth = min(running, columns // 2) + markers
+        if depth > module.MAX_NESTING_DEPTH:
+            return number, "nesting"
+        if depth > running:
+            running = depth
+    return None
+
+
+def _nesting_sample(seed, count):
+    """`count` texts for the nesting prescan's property checks, drawn by a random.Random(seed): six
+    optional parts in order (a list with a link reference definition held on its last level, a blank
+    line, fence lines, a list, an item fence or a margin line, a list from the margin or from the middle
+    list's depth), each followed at random by a stray line from a fixed set, so the same texts come back
+    on every run."""
+    rungs = lambda start, stop: "".join("  " * level + "- a\n" for level in range(start, stop))  # noqa: E731
+    stray = ("\n", "  \n", "x\n", "'\n", "]: /u\n", "```\n", "  ```\n", "   ~~~\n", "- ```\n", "~~~\n", "> ```\n",
+             "[x\n", "<div>\n", "# h\n", "\t```\n", "    ```\n", "\n  ```\n```\n", "\n    ```\n", "- ```\n\nx\n",
+             "- ~~~\n  \n~~~\n")
+    definitions = ("- [x\n\ny\n]: /u\n", "- [x]: /u 't\n  \ny\n'\n", "- [x]: /u\n\ny\n", "- [x\n")
+    fences = ("", "  ```\n```\n", "    ```\n", "   ~~~\n~~~\n", "  ```\n", "- ```\n", "```\n", "> ```\n")
+    items = ("", "- ```\n\nx\n", "- ~~~\n  \nx\n", "1. ```\n\nx\n", "- ```\n", "x\n")
+    chooser = random.Random(seed)
+    texts = []
+    for _ in range(count):
+        held, middle = chooser.randint(0, 20), chooser.randint(0, 20)
+        slots = (rungs(0, held) + chooser.choice(("", "  " * held + chooser.choice(definitions))),
+                 chooser.choice(("", "\n", "  \n")), chooser.choice(fences), rungs(0, middle),
+                 chooser.choice(items), rungs(chooser.choice((0, middle)), chooser.randint(0, 26)))
+        parts = []
+        for slot in slots:
+            parts.append(slot)
+            if chooser.random() < 0.3:
+                parts.append(chooser.choice(stray))
+        texts.append("".join(parts))
+    return texts
+
+
 def self_test(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -4289,8 +4744,12 @@ def self_test(report_path=None):
           (1, [("R1", "ADVISORY"), ("S2", "HARD")]))
     check("structure/indented-fence-refused",
           _outcome("1. Steps for the check:\n\n    ```bash\n    python3 t.py\n    ```\n"), (1, [("S1", "HARD")]))
-    check("structure/bom-refused", _outcome(BOM_BRIEF), (1, [("S1", "HARD")]))
+    # a format character outside code refuses the whole brief (exit 2) before any rule runs; inside a
+    # fence or a code span it is removed, so the fenced command, and the code-span command a zero-width
+    # space tried to split, are read and S1 or S3 fires
+    check("structure/bom-refused", _outcome(BOM_BRIEF), "CannotEvaluate")
     check("structure/zero-width-split-refused", _outcome(ZERO_WIDTH_SPLIT), (1, [("S3", "HARD")]))
+    check("structure/fenced-format-removed", _outcome(FENCED_ZERO_WIDTH), (1, [("S1", "HARD")]))
     check("structure/indented-code-refused", _outcome("    git show HEAD\n"), (1, [("S3", "HARD")]))
     # ---------- S1: an executable fence ----------
     check("s1/bash-fence-refused", _outcome(BASH_FENCE), (1, [("S1", "HARD")]))
@@ -4580,6 +5039,313 @@ def self_test(report_path=None):
     check("cannot/blank-2", _outcome(" \n\n"), "CannotEvaluate")
     check("cannot/nul-blank-2", _outcome(b"\x00\x00\n"), "CannotEvaluate")
     check("cannot/zero-width-blank-2", _outcome(chr(0x200B) + chr(0xFEFF) + "\n"), "CannotEvaluate")
+    # the shared reading's text ceiling, judged up front on every brief: at the ceiling the brief is
+    # evaluated (on the parse-free fast path and through the full parse alike), one byte over it is
+    # refused whatever the brief holds, a parse-free pure-ASCII text and a parse-forcing one alike
+    at_ceiling = "a" * _input_declarations.MAX_TEXT_BYTES
+    parse_lead = "Input notes.\n\n"
+    check("cannot/text-ceiling-boundary",
+          (_outcome(at_ceiling)[0],
+           _outcome(parse_lead + "a" * (_input_declarations.MAX_TEXT_BYTES - len(parse_lead)))[0],
+           _outcome(at_ceiling + "a"),
+           _outcome(parse_lead + at_ceiling)),
+          (0, 0, "CannotEvaluate", "CannotEvaluate"))
+    # the nesting prescan refuses up front, whatever else the brief holds: the same deep lead in a
+    # parse-free ASCII brief and beside a non-ASCII character, a marker run on one line, and marker lines
+    # that march deeper line by line
+    deep_line = "1) " * 150 + "x\n"
+    check("cannot/nesting-depth-2", [_outcome(text) for text in (
+        deep_line, "Café.\n\n" + deep_line, "> " * 21 + "x\n",
+        "".join("  " * level + "- a\n" for level in range(21)))], ["CannotEvaluate"] * 4)
+    # the stated over-counts stand: a second 20-marker quote line re-counts its markers past the levels
+    # its indentation continues; after a blank line, a two-column line continues a deep list, so a deep
+    # indent after it still counts; an ordered marker run one past the ceiling is refused like the others
+    tall_list = "".join("  " * level + "- a\n" for level in range(20))
+    check("cannot/nesting-overcount-2", [_outcome(text) for text in (
+        "> " * 20 + "x\n" + "> " * 20 + "y\n",
+        tall_list + "\n  x\n" + " " * 40 + "- x\n",
+        "1. " * 21 + "x\n")], ["CannotEvaluate"] * 3)
+    # the running depth follows block structure: a block is read as it reads alone, whatever stood
+    # earlier in the brief, where a new top-level block starts (after a blank line, a margin line with no
+    # markers and under two columns; anywhere, a margin ATX heading or fence, which breaks a paragraph)
+    deep_list = "".join("  " * level + "- a\n" for level in range(5))
+    deep_yaml = ("```yaml\n"
+                 + "".join("        " * level + "- k%d:\n" % level for level in range(18)) + "```\n")
+    wide_fence = "```\n" + " " * 40 + "- x\n```\n"
+    check("structure/nesting-block-local", [read_inputs(parse_lead + text) for text in (
+        deep_yaml, deep_list + "\n# Notes\n\n" + deep_yaml,
+        wide_fence, tall_list + "\n# Notes\n\n" + wide_fence,
+        tall_list + "# Notes\n" + wide_fence,
+        tall_list + "\nplain prose.\n" + wide_fence)], [([], [])] * 6)
+    # a fenced code block's content opens nothing, so the prescan skips it where the parser's FencedCode
+    # opens and closes: a quoted diff whose marker lines march deeper line by line and end on a line
+    # indented 51 spaces (a real brief's shape) is read in a backtick fence, a tilde fence closed by a
+    # longer run, an unclosed fence (to the text's end), a fence on a numbered item's continuation line, a
+    # fence on a bullet's own line, and a four-backtick fence holding a three-backtick line
+    diff_body = "".join(" " * (2 * level) + "-+"[level % 2] + " x\n" for level in range(30)) + " " * 51 + "- y\n"
+    indented_body = lambda indent: "".join(indent + line + "\n" for line in diff_body.splitlines())  # noqa: E731
+    fenced_diffs = (
+        "```diff\n" + diff_body + "```\n",
+        "~~~ diff\n" + diff_body + "~~~~\nafter.\n",
+        "```\n" + diff_body,
+        "1. Apply this:\n\n   ```diff\n" + indented_body("   ") + "   ```\n",
+        "- ```diff\n" + indented_body("  ") + "  ```\n",
+        "````\n```\n" + diff_body + "````\n")
+    check("structure/nesting-fence-skipped", [read_inputs(parse_lead + text) for text in fenced_diffs],
+          [([], [])] * len(fenced_diffs))
+
+    def fenced_at(text, needle):
+        """Whether the parsed document reads the last `needle` in `text` inside a FencedCode block."""
+        at = text.rindex(needle)
+        spans = []
+
+        def walk(node):
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    if child.get("kind") == "FencedCode" and child.get("span"):
+                        spans.append(child["span"])
+                    walk(child)
+
+        walk(_input_declarations._parse(text))
+        return any(start <= at < end for start, end in spans)
+
+    # the reader agrees: in each of those briefs the parsed document holds the 51-space line in a fence
+    check("structure/nesting-fence-reader-agrees",
+          [fenced_at(parse_lead + text, " " * 51 + "- y") for text in fenced_diffs], [True] * len(fenced_diffs))
+    # a fence placed on a numbered item's own line takes ASCII digits only: the same quoted diff after
+    # "1." is skipped as fence content and read clean, while after an Arabic-Indic or fullwidth one the
+    # fence line is unplaced, the prescan skips no line and the marker lines count (the parser reads
+    # those markers as list items too, so this over-refuses, never under-refuses)
+    other_digit_fences = [parse_lead + digit + ". ```diff\n" + indented_body("   ") + "   ```\n"
+                          for digit in ("1", chr(0x0661), chr(0xFF11))]
+    check("cannot/nesting-fence-marker-ascii", [_outcome(text) for text in other_digit_fences],
+          [(0, []), "CannotEvaluate", "CannotEvaluate"])
+    # real nesting outside a fence is still refused: after a closed fence, after a bullet-line fence whose
+    # item an unindented line ends, after a backtick line with a backtick in its info string (no fence),
+    # after a tilde fence that a backtick line does not close, after a four-space line at the top level
+    # (indented code, no fence), and after a fence-shaped line the prescan cannot place (in an HTML block,
+    # which the parser reads on to the blank line; in a quote; in a link label still open across an empty
+    # line, whose "]" the parser searches for with no line limit, in backtick and tilde forms; in a link
+    # title across a line of whitespace alone, which the parser does not end there)
+    deep21 = "".join("  " * level + "- a\n" for level in range(21))
+    check("cannot/nesting-fence-bounds", [_outcome(text) for text in (
+        "```\nquoted\n```\n" + deep21, "- ```\n  code\n" + deep21, "``` a`\n" + deep21,
+        "~~~\n```\n~~~\n" + deep21, "    ```\n" + deep21, "<div>\n```\n\n" + deep21,
+        "> ```\n" + deep21, "[a\n\n```\n]: /u\n" + deep21, "[a\n\n~~~\n]: /u\n" + deep21,
+        "[a]: /u 't\n  \n```\n'\n" + deep21)], ["CannotEvaluate"] * 10)
+    # the link-label bound just inside, exactly at and just outside it: a label whose "]" comes after the
+    # fence line holds it (refused, also across two empty lines and past an escaped "]"); a label closed
+    # on its own line and a title cut by an empty line hold nothing past that line, and a "[" before any
+    # "]" fails the label, so the fence after each is placed (True: the prescan passes the text)
+    check("structure/nesting-label-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        "[a\n\n\n```\n]: /u\n" + deep21, "[a\\]\n\n```\n]: /u\n" + deep21,
+        "[a]: /u\n\n```\n" + deep21, "[a]: /u 't\n\n```\n'\n" + deep21, "[a[b\n```\n" + deep21)],
+          [False, False, True, True, True])
+    # a margin line inside an open link reference definition resets nothing: the parser reads it as part
+    # of the definition, stays in the definition's list item and resumes at its full depth after it, so
+    # the list that marches on past the ceiling after it is refused, with the line in an open label
+    # (across an empty line), in a title across a line of spaces alone, in two labels chained (each
+    # alone below the ceiling), and in each form after a fence line the prescan cannot place
+    rungs = lambda start, stop: "".join("  " * level + "- a\n" for level in range(start, stop))  # noqa: E731
+    held_label = rungs(0, 14) + "  " * 14 + "- [x\n\ny\n]: /u\n"
+    held_title = rungs(0, 14) + "  " * 14 + "- [x]: /u 't\n  \ny\n'\n"
+    held_definitions = (
+        held_label + rungs(15, 26), held_title + rungs(15, 26),
+        held_label + rungs(15, 28) + "  " * 28 + "- [z\n\ny\n]: /u\n" + rungs(29, 40),
+        "> ```\n\n" + held_label + rungs(15, 26), "> ```\n\n" + held_title + rungs(15, 26))
+    check("cannot/nesting-definition-hold", [_outcome(text) for text in held_definitions],
+          ["CannotEvaluate"] * len(held_definitions))
+    # the definition bound just inside, exactly at and just outside it: a label still open at the margin
+    # line holds the depth (refused); a label closed on its own line, a title cut by an empty line and a
+    # definition ended by an empty line hold nothing, so the margin line resets the depth (True: the
+    # prescan passes the text, which the parser reads in the definition's item no deeper than 15 levels)
+    check("structure/nesting-definition-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        held_label + rungs(15, 26), rungs(0, 14) + "  " * 14 + "- [x]\n\ny\n" + rungs(15, 26),
+        rungs(0, 14) + "  " * 14 + "- [x]: /u 't\n\ny\n'\n" + rungs(15, 26),
+        rungs(0, 14) + "  " * 14 + "- [x]: /u\n\ny\n" + rungs(15, 26))], [False, True, True, True])
+    # the held depth is read by the ceiling comparison alone, never by fence placement, so this text is
+    # refused as the earlier prescan without the held depth (_running_nesting_refused) refuses it: the
+    # vector pins that agreement, not the parser's reading. The prescan places the two-column fence after
+    # the held title at the top level (running depth zero), lets the column-0 run close it and so counts
+    # the list marching on past the ceiling; the parser instead reads the column-0 run as a new top-level
+    # fence that holds everything after it, and nests this text 15 levels deep
+    held_fence = (held_title + "\n  ```\n```\n" + rungs(0, 14) + "- ```\n\nx\n" + rungs(14, 22),)
+    check("cannot/nesting-held-fence-placed", [_outcome(text) for text in held_fence],
+          ["CannotEvaluate"] * len(held_fence))
+
+    def parsed_depth(text):
+        """The most list items and quotes the parsed document nests one inside another in `text`."""
+
+        def walk(node):
+            deepest = 0
+            for child in node.get("children") or []:
+                if isinstance(child, dict):
+                    deepest = max(deepest, walk(child) + (1 if child.get("kind") in ("ListItem", "Quote") else 0))
+            return deepest
+
+        return walk(_input_declarations._parse(text))
+
+    # a disclosed residual, not a bound: after a held title, the prescan places a two-column fence from
+    # the margin and skips the rest as its content, while the parser opens that fence in the list item,
+    # ends it with the item at the quote line and nests the list after it 23 levels deep. Today the
+    # prescan passes the text and the brief is read; a change that closes this gap turns the check red,
+    # and the vector then moves to the refused ones
+    residual = rungs(0, 13) + "  " * 13 + "- [x]: /u 't\n  \ny\n'\n\n  ```\n> x\n" + rungs(0, 23)
+    check("structure/nesting-residual-held-title",
+          [_input_declarations._nesting_refused(residual), _outcome(residual), parsed_depth(residual)],
+          [None, (0, []), 23])
+    # the held depth only adds refusals: over a fixed seeded sample of generated texts (a held definition,
+    # fence lines and lists around an item fence, each part optional, with stray lines between), every
+    # text the prescan without the held depth refuses (_running_nesting_refused) is refused still
+    superset_sample = _nesting_sample(2, 5000)
+    running_refused = [text for text in superset_sample if _running_nesting_refused(text) is not None]
+
+    def superset_holds():
+        return all(_input_declarations._nesting_refused(text) is not None for text in running_refused)
+
+    check("structure/nesting-held-superset", [len(superset_sample), bool(running_refused), superset_holds()],
+          [5000, True, True])
+    # each fence bound just inside, exactly at and just outside it: an opening run indented three columns
+    # opens, four does not; a closing run indented three columns closes, four does not (the deep list
+    # after it stays fence content); a closing run one shorter than the opening run does not close, as
+    # long or longer does; an opening run of two backticks opens nothing, three does (True: the prescan
+    # passes the text)
+    check("structure/nesting-fence-boundary", [_input_declarations._nesting_refused(text) is None for text in (
+        "   ```\n" + diff_body, "    ```\n" + diff_body,
+        "```\nx\n   ```\n" + deep21, "```\nx\n    ```\n" + deep21,
+        "````\nx\n```\n" + deep21, "````\nx\n````\n" + deep21, "````\nx\n`````\n" + deep21,
+        "``\n" + diff_body, "```\n" + diff_body)],
+          [True, False, False, True, True, False, False, False, True])
+    # the whitespace-run prescan refuses the same way on both paths
+    check("cannot/whitespace-run-2", [_outcome(text) for text in (
+        "a" + " " * 2001 + "b\n", "Input notes.\n\na" + " " * 2001 + "b\n")], ["CannotEvaluate"] * 2)
+    # every character the vendored parser reads as whitespace is run-bounded like a space: over the bound
+    # each is refused up front, at it each is read through the full parse (the class is \s minus LF; the
+    # five separators among them are refused at any count by the separator gate, the form feed asserted
+    # here, the rest with the separator vectors)
+    run_class = [chr(point) for point in (
+        0x0B, 0x1C, 0x1D, 0x1E, 0x1F, 0xA0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+        0x2006, 0x2007, 0x2008, 0x2009, 0x200A, 0x202F, 0x205F, 0x3000)]
+    check("cannot/whitespace-class-over",
+          [_outcome("a" + character * 2001 + "b\n") for character in run_class],
+          ["CannotEvaluate"] * len(run_class))
+    check("structure/whitespace-class-at",
+          [read_inputs(parse_lead + "a" + character * 2000 + "b\n") for character in run_class],
+          [([], [])] * len(run_class))
+    check("cannot/whitespace-ff-run-separator",
+          [_outcome("a" + "\x0c" * count + "b\n") for count in (2000, 2001)], ["CannotEvaluate"] * 2)
+    # the deleted total-cost sums stay deleted: each shape the old sums refused up front (just over the
+    # whitespace, nesting and inline-mark caps) is now read through the bounded parse and answered; the
+    # deadline, not a text model, is what bounds the pathological relatives of these shapes
+    check("structure/cost-shapes-read", [read_inputs(parse_lead + text) for text in (
+        ("a" + " " * 2000 + "b\n\n") * 9,
+        ("> " * 13 + "x\n\n") * 21,
+        "*" * 32769 + "a\n")], [([], [])] * 3)
+    # the quote prefix consumes one optional whitespace character after >, any whitespace but LF, as the
+    # parser's own pattern does: a no-break space, a vertical tab or an ideographic space between quote
+    # markers hides no level from the prescan, alone, mixed with spaced markers, or after bullets
+    check("cannot/nesting-quote-prefix-2", [_outcome(text) for text in (
+        ">\xa0" * 30 + "x\n", ">\x0b" * 30 + "x\n", ">　" * 30 + "x\n",
+        ">\xa0" + "> " * 21 + "x\n", "- " * 5 + ">\xa0" * 25 + "x\n")], ["CannotEvaluate"] * 5)
+    # the same lead at the depth ceiling is read (just inside, exactly at, just over: 19, 20 and 21
+    # no-break-space quote markers), so the prefix reading widens no refusal
+    check("structure/nesting-quote-prefix-boundary",
+          ([_outcome(parse_lead + ">\xa0" * depth + "x\n")[0] for depth in (19, 20)],
+           _outcome(">\xa0" * 21 + "x\n")), ([0, 0], "CannotEvaluate"))
+    # each bound's just-inside value is read through the full parsed document (the lead forces the parse,
+    # the shared reading answers), asserted on the reading itself so the structure rules take no part
+    check("structure/parse-bounds-boundary",
+          (read_inputs("Input notes.\n\n" + "> " * 20 + "ok\n"),
+           read_inputs("Input notes.\n\n" + "1. " * 20 + "ok\n"),
+           read_inputs("Input notes.\n\n" + "".join("  " * level + "- a\n" for level in range(20))),
+           read_inputs("Input notes.\n\na" + " " * 2000 + "b\n")),
+          (([], []), ([], []), ([], []), ([], [])))
+    # the child parse and the in-process seam read the same document: over briefs that exercise every
+    # unit kind (declarations, look-alikes, code, tables, task lists, quotes, HTML, non-ASCII folds),
+    # read() answers identically with PARSE_IN_CHILD on and off
+    identity_corpus = (
+        "INPUT: /abs/in.md\n", "**INPUT:** /abs/in.md\n", "- INPUT: `/abs/dir with space/in.md`\n",
+        "Input: /abs/in.md\n", "| INPUT | x |\n|---|---|\n| a | b |\n",
+        "```\nINPUT: /abs/in.md\n```\n", "- [ ] INPUT: /abs/in.md\n", "> INPUT: /abs/in.md\n",
+        "<div>\nINPUT: /abs/in.md\n</div>\n", "ІNPUT: /abs/in.md\n",
+        "I&#78;PUT: /abs/in.md\n", "prose `code` *emph* [link](/x) <!-- c -->\n")
+
+    def read_outcome(text):
+        try:
+            return ("ok", read_inputs(text))
+        except _input_declarations.DeclarationError as caught:
+            return ("error", str(caught))
+
+    in_child = [read_outcome(text) for text in identity_corpus]
+    _input_declarations.PARSE_IN_CHILD = False
+    try:
+        in_process = [read_outcome(text) for text in identity_corpus]
+    finally:
+        _input_declarations.PARSE_IN_CHILD = True
+    check("parse/child-matches-in-process", in_child, in_process)
+    # the wall-clock bound holds by construction, shown at the OLD 512 KiB ceiling on the two shapes
+    # that held the in-process parse far past the deadline (a paragraph of unclosed inline-HTML openers,
+    # held inside InlineHTML.pattern's lazy scans, and a line of fullwidth letters, held inside the GFM
+    # bare-URL lookbehind's quadratic backtracking): with the ceiling patched up to admit them, read()
+    # answers or refuses within the deadline plus DEADLINE_MARGIN_SECONDS of measured wall clock, timed
+    # here in the parent around the call that waits on the killed child
+    old_ceiling = 1 << 19
+    slow_shapes = (("x<!--" * (old_ceiling // 5))[:old_ceiling - 1] + "\n",
+                   "Ａ" * ((old_ceiling - 1) // 3) + "\n")
+    saved_ceiling = _input_declarations.MAX_TEXT_BYTES
+    held = []
+    try:
+        _input_declarations.MAX_TEXT_BYTES = old_ceiling
+        for shape in slow_shapes:
+            began = time.monotonic()
+            try:
+                read_inputs(shape)
+                ended = "answered"
+            except _input_declarations.DeclarationError:
+                ended = "refused"
+            held.append((ended in ("answered", "refused"),
+                         time.monotonic() - began
+                         <= _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS))
+    finally:
+        _input_declarations.MAX_TEXT_BYTES = saved_ceiling
+    check("parse/deadline-held-at-old-ceiling", held, [(True, True)] * 2)
+    # and at the current ceiling, on the in-bound shapes measured slowest there (an underscore-mark run and
+    # a paragraph of unclosed <? openers, each filled to the ceiling behind a parse-forcing lead): each is
+    # answered or refused within the deadline plus DEADLINE_MARGIN_SECONDS, timed in the parent the same way
+    ceiling = _input_declarations.MAX_TEXT_BYTES
+    ceiling_shapes = [parse_lead + unit * ((ceiling - len(parse_lead) - 1) // len(unit)) + "\n"
+                      for unit in ("_a", "x<?")]
+    held = []
+    for shape in ceiling_shapes:
+        began = time.monotonic()
+        try:
+            read_inputs(shape)
+        except _input_declarations.DeclarationError:
+            pass
+        held.append((len(shape.encode("utf-8")) <= ceiling, time.monotonic() - began
+                     <= _input_declarations.PARSE_DEADLINE_SECONDS + DEADLINE_MARGIN_SECONDS))
+    check("parse/deadline-held-at-ceiling", held, [(True, True)] * 2)
+    # and shown red under the flip that restores the thread join: a probe child runs the flipped read on
+    # each shape, has NOT returned at the deadline plus the same margin (join cannot fire while one regex
+    # match holds the GIL), and its own process group is then killed, never left running
+    still_running = []
+    for name in ("html-opener", "fullwidth"):
+        probe = subprocess.Popen([sys.executable, "-I", "-B", "-c", THREAD_JOIN_PROBE,
+                                  str(Path(__file__).resolve().parent), name],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+        try:
+            probe.communicate(timeout=_input_declarations.PARSE_DEADLINE_SECONDS
+                              + DEADLINE_MARGIN_SECONDS)
+            still_running.append(False)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(probe.pid, signal.SIGKILL)
+            except OSError:
+                probe.kill()
+            probe.communicate()
+            still_running.append(True)
+    check("revert/parse-thread-join-red", still_running, [True, True])
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-brief-capability-selftest-"))
     try:
         table_path = str(tmp / "table.toml")
@@ -4659,6 +5425,24 @@ def self_test(report_path=None):
         before = [outcome() for outcome in cases]
         with _patched(**replacements):
             after = [outcome() for outcome in cases]
+        flipped.append(sorted(replacements))
+        if before == want_patched:   # a fixture the rule never changed proves nothing
+            FAILURES.append("revert of %s: the unpatched outcome already equals the patched one"
+                            % ", ".join(sorted(replacements)))
+        return (before, after), (before, want_patched)
+
+    def parser_flip(cases, want_patched, **replacements):
+        """flip over the shared declaration parser: each named attribute of tools/_input_declarations.py
+        is replaced for the patched run, then restored."""
+        before = [outcome() for outcome in cases]
+        saved = dict((name, getattr(_input_declarations, name)) for name in replacements)
+        try:
+            for name, value in replacements.items():
+                setattr(_input_declarations, name, value)
+            after = [outcome() for outcome in cases]
+        finally:
+            for name, value in saved.items():
+                setattr(_input_declarations, name, value)
         flipped.append(sorted(replacements))
         if before == want_patched:   # a fixture the rule never changed proves nothing
             FAILURES.append("revert of %s: the unpatched outcome already equals the patched one"
@@ -4766,7 +5550,7 @@ def self_test(report_path=None):
         WORD_RUN_RE=re.compile(NOUN_WORD + r"(?:\s*,\s*" + NOUN_WORD + r")++")))
     check("revert/list-structure-red", *flip([lambda: _outcome("- Read the diff\n- Run the parser\n")], [(0, [])],
                                             LIST_LINE_RE=never))
-    check("revert/format-characters-red", *flip([code(BOM_BRIEF), code(ZERO_WIDTH_SPLIT)], [0, 0],
+    check("revert/format-characters-red", *flip([code(FENCED_ZERO_WIDTH)], [0],
                                                unicodedata=_NoFormatRemoval))
     check("revert/capability-gate-red", *flip([lambda: _outcome(RUN_ITEM, "alpha")[0],
                                               lambda: _outcome(RUN_ITEM, "beta")[0]], [1, 1],
@@ -5663,7 +6447,380 @@ def self_test(report_path=None):
             CLONE_REVISION_OPTIONS=frozenset()))
     finally:
         shutil.rmtree(base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 187)
+    # ---------- P6: a declared input (an INPUT line) must exist on the lint's host; {T} is a fresh directory ----------
+    inputs = Path(tempfile.mkdtemp(prefix="aiqt-brief-input-"))
+    locked = inputs / "locked"
+    try:
+        os.makedirs(inputs / "dir with space")
+        os.makedirs(locked)
+        for name in ("in.md", "dir with space/in.md", "unreadable.md", "locked/in.md"):
+            with open(inputs / name, "w", encoding="utf-8") as handle:
+                handle.write("input\n")
+        os.symlink(inputs / "nowhere.md", inputs / "dangling.md")
+        os.mkfifo(inputs / "fifo")
+        os.chmod(inputs / "unreadable.md", 0)
+        os.chmod(locked, 0)
+
+        def p6(text, family="alpha"):
+            return _outcome(text.replace("{T}", str(inputs)), family)
+
+        def p6_code(text):
+            outcome = p6(text)
+            return outcome if isinstance(outcome, str) else outcome[0]
+
+        def unreadable_code():
+            """The mode-000 vector with os.access refusing for every uid, so it runs as root too."""
+            with _patched(input_readable=lambda path: False):
+                return p6_code("INPUT: {T}/unreadable.md\n")
+
+        p6_missing = (1, [("P6", "HARD")])
+        check("preflight/p6-present-quiet", [p6(text) for text in (
+            "INPUT: {T}/in.md\n", "INPUT: \"{T}/dir with space/in.md\"\n", "INPUT: `{T}/dir with space/in.md`\n",
+            "INPUT: {T}\n", "INPUT: \"{T}/dir with space\"\n", "**INPUT:** {T}/in.md\n", "**INPUT**: {T}/in.md\n",
+            "- INPUT: {T}/in.md\n", "* INPUT: {T}/in.md\n", "+ INPUT: {T}/in.md\n")], [(0, [])] * 10)
+        # every form a reader shows as INPUT: declares: emphasis however it is spelt, a numbered item, an
+        # escaped or character-referenced colon, a fullwidth or confusable spelling, a combining or format
+        # character the fold removes, strikethrough, and a declaration after a list item's fence or an
+        # indented code block (the parsed document hides nothing there); each with the input present
+        check("preflight/p6-markdown-present-quiet", [p6(text) for text in (
+            "__INPUT:__ {T}/in.md\n", "_INPUT:_ {T}/in.md\n", "*INPUT:* {T}/in.md\n",
+            "1. INPUT: {T}/in.md\n", "INPUT\\: {T}/in.md\n", "INPUT&#58; {T}/in.md\n",
+            "INPUT： {T}/in.md\n", "ＩＮＰＵＴ: {T}/in.md\n",
+            "I" + chr(0x034F) + "NPUT: {T}/in.md\n", "INPUT" + chr(0xFE0F) + ": {T}/in.md\n",
+            "~~INPUT:~~ {T}/in.md\n",
+            "- ```text\n  example\n  ```\n\nINPUT: {T}/in.md\n",
+            "Intro.\n\n    ```\n\nINPUT: {T}/in.md\n",
+            "INPUT: {T}/in.md")], [(0, [])] * 14)
+        # the end of the declaration: exactly at the path's end, just inside (trailing whitespace), just outside
+        check("preflight/p6-trailing-boundary", [p6(text) for text in (
+            "INPUT: {T}/in.md\n", "INPUT: {T}/in.md  \t \n", "INPUT: {T}/in.md extra\n")],
+            [(0, []), (0, []), "CannotEvaluate"])
+        # prose is never judged: a missing input named only in prose, an output to create, a placeholder
+        # clone line, a mid-line mention of the word input, a glued or mid-line label, a lone pipe row
+        # with no delimiter row, an unlisted look-alike letter or colon (the bounded table's named miss)
+        # and a link reference definition (which renders as nothing) all pass
+        check("preflight/p6-prose-quiet", [p6(text) for text in (
+            "Read {T}/missing.md and summarise it.\n", "Write your notes to {T}/out/new.md (create it).\n",
+            "Make a scratch clone: `git clone --no-hardlinks <url> <scratch>/r && git -C <scratch>/r checkout "
+            "--detach <pin>`\n", "Input files are listed below: {T}/missing.md\n",
+            "The tool's input: a TOML file.\n", "1.INPUT: {T}/missing.md\n",
+            "Step 1 - INPUT: {T}/missing.md\n", "| INPUT | {T}/missing.md |\n",
+            "| INPUT: | {T}/missing.md |\n",
+            "| Input | Expected |\n|---|---|\n| a | b |\n",
+            "ɪɴᴘᴜᴛ: {T}/missing.md\n", "INPUTꓽ {T}/missing.md\n",
+            "[INPUT]: {T}/missing.md \"title\"\n")], [(0, [])] * 13)
+        check("preflight/p6-missing-hard", [p6(text) for text in (
+            "INPUT: {T}/missing.md\n", "**INPUT:** {T}/missing.md\n", "**INPUT**: {T}/missing.md\n",
+            "INPUT: {T}/dangling.md\n", "INPUT: {T}/in.md/x\n")]
+            + [p6("INPUT: {T}/missing.md\n", "gamma")], [p6_missing] * 6)
+        # the declaring forms above go HARD the same way when their input is missing, the list-fence and
+        # indented-code briefs and a brief with no final newline included
+        check("preflight/p6-markdown-missing-hard", [p6(text) for text in (
+            "__INPUT:__ {T}/missing.md\n", "_INPUT:_ {T}/missing.md\n", "*INPUT:* {T}/missing.md\n",
+            "1. INPUT: {T}/missing.md\n", "INPUT\\: {T}/missing.md\n", "INPUT&#58; {T}/missing.md\n",
+            "ІNPUT: {T}/missing.md\n", "I" + chr(0x034F) + "NPUT: {T}/missing.md\n",
+            "- ```text\n  example\n  ```\n\nINPUT: {T}/missing.md\n",
+            "Intro.\n\n    ```\n\nINPUT: {T}/missing.md\n",
+            "Intro.\n\n\t```\n\nINPUT: {T}/missing.md\n",
+            "INPUT: {T}/missing.md")], [p6_missing] * 12)
+        # ASCII-only rendered labels: a character reference or intraword emphasis spells INPUT: with no
+        # literal "nput" substring and no non-ASCII character anywhere in the brief, so the reading must
+        # answer them from the parsed document, never from a text shortcut; the reference-spelt look-alike
+        # (it renders Input:) is refused the same way
+        check("preflight/p6-ascii-rendered-present-quiet", [p6(text) for text in (
+            "I&#78;PUT: {T}/in.md\n", "IN**PUT**: {T}/in.md\n", "IN*PUT*: {T}/in.md\n")], [(0, [])] * 3)
+        check("preflight/p6-ascii-rendered-missing-hard", [p6(text) for text in (
+            "I&#78;PUT: {T}/missing.md\n", "IN**PUT**: {T}/missing.md\n", "IN*PUT*: {T}/missing.md\n")],
+            [p6_missing] * 3)
+        check("preflight/p6-ascii-look-alike-cannot-evaluate", p6("Inp&#117;t: {T}/in.md\n"),
+              "CannotEvaluate")
+        # inside code nothing is a declaration and nothing is a look-alike: a fenced or tab-indented INPUT
+        # line, a quoted workflow's indented inputs: key, the label in a code span, a shell snippet, an
+        # unclosed fence (whose four-space closer closes nothing, so the rest stays code) and a format
+        # character in fenced or code-span text are all unread
+        check("preflight/p6-fence-quiet", [p6(text) for text in (
+            "```\nINPUT: {T}/missing.md\n```\n", "~~~\nInput: {T}/missing.md\n~~~\n",
+            "A quoted workflow:\n```yaml\non:\n  workflow_dispatch:\n    inputs:\n      target:\n```\nRead it.\n",
+            "```\nINPUT: {T}/i" + chr(0x200B) + "n.md\n```\n")], [(0, [])] * 4)
+        check("preflight/p6-code-quiet", [p6(text) for text in (
+            "\tINPUT: {T}/missing.md\n", "Intro.\n\n    INPUT: {T}/missing.md\n",
+            "Intro.\n\n    inputs:\n      target: x\n", "`INPUT: {T}/missing.md`\n",
+            "`cat input | wc -l`\n", "```\ncode\n    ```\nINPUT: {T}/missing.md\n",
+            "a `co" + chr(0x200B) + "de` span\n",
+            "`x` " * 50 + "`y" + chr(0x200B) + "z`\n")], [(0, [])] * 8)
+        table = parse_table(TABLE_FIXTURE.encode("utf-8"))
+        second = evaluate("INPUT: {T}/in.md\nINPUT: {T}/missing.md\n".replace("{T}", str(inputs)).encode("utf-8"),
+                          "alpha", table)
+        check("preflight/p6-second-line-named", (second[0], [(rule, line) for rule, _, line, _, _ in second[1]]),
+              (1, [("P6", 2)]))
+        check("preflight/p6-shape-cannot-evaluate", [p6(text) for text in (
+            "INPUT: <scratch>/in.md\n", "INPUT: $HOME/in.md\n", "INPUT: ~/in.md\n", "INPUT: docs/in.md\n",
+            "INPUT: {T}/a/../in.md\n", "INPUT: {T}/*.md\n", "INPUT: {T}/{a,b}.md\n", "INPUT:\n", "INPUT: \"\"\n",
+            "INPUT: \"{T}/in.md\n", "INPUT: {T}/dir with space/in.md\n", "**INPUT: {T}/in.md\n",
+            "INPUT:** {T}/in.md\n")], ["CannotEvaluate"] * 13)
+        check("preflight/p6-look-alike-cannot-evaluate", [p6(text) for text in (
+            "Input: {T}/in.md\n", "input: {T}/in.md\n", "INPUTS: {T}/in.md\n",
+            "INPUT : {T}/in.md\n", chr(0x0456) + "nput: {T}/in.md\n", "**INPUT: {T}/in.md\n",
+            "x\nInput: {T}/in.md\n")], ["CannotEvaluate"] * 7)
+        # the look-alike scan reads each rendered paragraph line's, heading's or table cell's start, past
+        # leading dashes, bullets and bare markup marks: a task-list item, another bullet, inline HTML
+        # around the label, a dash prefix, a blockquoted label, a heading, a header cell that is exactly
+        # the token, and a label line of an HTML block or comment are never ignored
+        check("preflight/p6-look-alike-start-cannot-evaluate", [p6(text) for text in (
+            "- [ ] INPUT: {T}/in.md\n", chr(0x2022) + " INPUT: {T}/in.md\n",
+            "<b>INPUT:</b> {T}/in.md\n",
+            chr(0x2013) + " INPUT: {T}/in.md\n", chr(0x2014) + " INPUT: {T}/in.md\n",
+            "> INPUT: {T}/in.md\n", "## Inputs:\n",
+            "| INPUT | x |\n|---|---|\n| a | b |\n",
+            "<p>INPUT: {T}/in.md</p>\n", "<!--\nINPUT: {T}/in.md\n-->\n")], ["CannotEvaluate"] * 10)
+        # the bounded confusable fold serves the declaration itself: Cyrillic and Greek I and a colon-like
+        # character fold to the exact label, which declares and is judged on the host
+        check("preflight/p6-confusable-declares", [p6(text) for text in (
+            chr(0x0406) + "NPUT: {T}/in.md\n", chr(0x0399) + "NPUT: {T}/in.md\n",
+            "INPUT" + chr(0xA789) + " {T}/in.md\n", "INPUT" + chr(0x2236) + " {T}/in.md\n")], [(0, [])] * 4)
+        check("preflight/p6-confusable-missing-hard", [p6(text) for text in (
+            chr(0x0406) + "NPUT: {T}/missing.md\n", chr(0x0399) + "NPUT: {T}/missing.md\n",
+            "INPUT" + chr(0xA789) + " {T}/missing.md\n")], [p6_missing] * 3)
+        # the named misses of the bounded fold: a word between the token and the colon declares nothing
+        # and is no look-alike, and prose naming the token with no colon after it passes
+        check("preflight/p6-word-miss-quiet", [p6(text) for text in (
+            "INPUT FILE: {T}/missing.md\n", "The INPUT files are described here.\n",
+            "Input files are below: {T}/missing.md\n")], [(0, [])] * 3)
+        # a line separator other than LF, anywhere, refuses the brief before any rule runs (a form feed is
+        # one here, since the parser reads it as a line ending)
+        check("preflight/p6-separator-cannot-evaluate", [p6(text) for text in (
+            "INPUT: {T}/in.md\r\n", "x\rINPUT: {T}/in.md\n", "x" + chr(0x2028) + "y\n",
+            "x" + chr(0x2029) + "y\n", "x" + chr(0x0085) + "y\n", "x" + chr(0x0C) + "y\n")],
+            ["CannotEvaluate"] * 6)
+        # a format character outside a fence refuses the brief: one inside a declared path, one glued to
+        # the label, a byte order mark at the brief's start and one in plain prose
+        check("preflight/p6-format-cannot-evaluate", [p6(text) for text in (
+            "INPUT: {T}/i" + chr(0x200B) + "n.md\n", "INPUT:" + chr(0xAD) + " {T}/in.md\n",
+            chr(0xFEFF) + "INPUT: {T}/in.md\n", "Read the notes" + chr(0x200B) + " first.\n",
+            "`x` " * 50 + "a" + chr(0x200B) + "b\n")],
+            ["CannotEvaluate"] * 5)
+        check("preflight/p6-not-file-or-directory-cannot-evaluate",
+              [p6(text) for text in ("INPUT: {T}/fifo\n", "INPUT: /dev/null\n")], ["CannotEvaluate"] * 2)
+        # a uid that reads a mode-000 file (root, or a capability) cannot show the permission refusal: recorded
+        enforced = not os.access(inputs / "unreadable.md", os.R_OK)
+        skipped = "skipped: this uid reads a mode-000 file, so os.access cannot refuse here"
+        check("preflight/p6-permission-cannot-evaluate",
+              [p6(text) for text in ("INPUT: {T}/unreadable.md\n", "INPUT: {T}/locked/in.md\n")] if enforced
+              else skipped, ["CannotEvaluate"] * 2 if enforced else skipped)
+        if not enforced:
+            print("NOTE: preflight/p6-permission-cannot-evaluate " + skipped)
+        printed = io.StringIO()
+        brief_path, table_path = inputs / "brief.md", inputs / "table.toml"
+        with open(brief_path, "w", encoding="utf-8") as handle:
+            handle.write("INPUT: {}/missing.md\n".format(inputs))
+        with open(table_path, "w", encoding="utf-8") as handle:
+            handle.write(TABLE_FIXTURE)
+        with contextlib.redirect_stdout(printed):
+            refused = run(str(brief_path), "alpha", table_path)
+        check("preflight/p6-refuse-line", (refused, "declares an input that does not exist" in printed.getvalue(),
+                                           INPUT_HINT in printed.getvalue()), (1, True, True))
+        missing = lambda: p6_code("INPUT: {T}/missing.md\n")  # noqa: E731
+        check("revert/p6-red", *flip([missing], [0], rule_p6=nothing))
+        check("revert/p6-probe-red", *flip([missing], [0], input_state=lambda path: (None, None)))
+        check("revert/p6-eacces-red", *flip([unreadable_code], [1], MISSING_ERRNOS=MISSING_ERRNOS | {errno.EACCES}))
+        check("revert/p6-near-input-red", *parser_flip([lambda: p6_code("Input: {T}/in.md\n")], [0],
+                                                       NEAR_INPUT_RE=never))
+        check("revert/p6-shape-red", *parser_flip([lambda: p6_code("INPUT: {T}/*.md\n")], [1],
+                                                  INPUT_SHAPE_CHARACTERS=frozenset()))
+        # the TEXT gate: with the separator refusal patched out, a U+2028 after the path is read as
+        # trailing whitespace and the declaration passes; with it, the brief is refused
+        check("revert/p6-separator-red", *parser_flip(
+            [lambda: p6_code("INPUT: {T}/in.md" + chr(0x2028) + "\n")], [0], SEPARATOR_RE=never))
+        # with the format-character refusal patched out AND the declarations read from the stripped text,
+        # the zero-width space is removed silently and the declaration resolves to the present in.md: the
+        # silent pass the gate and the raw read replaced (either seam alone still refuses or goes HARD)
+        check("revert/p6-format-red", *flip(
+            [lambda: p6_code("INPUT: {T}/i" + chr(0x200B) + "n.md\n")], [0],
+            forbidden_text=lambda text: None,
+            read_inputs=lambda text: _input_declarations.read(
+                "".join(ch for ch in text if unicodedata.category(ch) != "Cf"))))
+        # with the code-block rule patched out, a quoted workflow's indented inputs: key is a look-alike
+        check("revert/p6-fence-red", *parser_flip(
+            [lambda: p6_code("```yaml\non:\n  workflow_dispatch:\n    inputs:\n      target:\n```\n")],
+            ["CannotEvaluate"], CODE_BLOCKS_ARE_CODE=False))
+        # with the code-span rule patched out, a label quoted in backticks is a look-alike again
+        check("revert/p6-code-span-red", *parser_flip(
+            [lambda: p6_code("`Input: {T}/in.md`\n")], ["CannotEvaluate"], CODE_SPANS_ARE_CODE=False))
+        # with the ignored categories emptied, a combining character splits the label unseen
+        check("revert/p6-ignored-categories-red", *parser_flip(
+            [lambda: p6_code("I" + chr(0x034F) + "NPUT: {T}/missing.md\n")], [0], IGNORED_CATEGORIES=()))
+        # with quoted paragraphs declaring, a blockquoted INPUT line is a declaration, not a look-alike
+        check("revert/p6-declaring-kind-red", *parser_flip(
+            [lambda: p6_code("> INPUT: {T}/missing.md\n")], [1],
+            unit_declares=lambda kind: kind in ("paragraph", "quoted")))
+        # with the cell tokens emptied, a header cell that is exactly INPUT passes
+        check("revert/p6-cell-token-red", *parser_flip(
+            [lambda: p6_code("| INPUT | x |\n|---|---|\n| a | b |\n")], [0], CELL_TOKENS=()))
+        # with the confusable table emptied, a Cyrillic I hides the label (and its missing path) again
+        check("revert/p6-confusable-red", *parser_flip(
+            [lambda: p6_code(chr(0x0406) + "NPUT: {T}/missing.md\n")], [0], CONFUSABLES={}))
+        # with the rendering-mark scan patched out, a pure-ASCII brief whose character reference renders
+        # the label is answered by the fast path and its missing input goes unseen (the declared path must
+        # not spell "nput" itself, which alone forces the parse)
+        check("revert/p6-fast-path-red", *parser_flip(
+            [lambda: p6_code("I&#78;PUT: /absent-fixture-path/missing.md\n")], [0],
+            RENDERING_MARK_RE=never))
+        # with the deadline patched to zero, a brief the parse answers well inside it is refused instead
+        check("revert/parse-deadline-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + "word word word\n" * 3000)], ["CannotEvaluate"],
+            PARSE_DEADLINE_SECONDS=0.0))
+        # with the nesting ceiling lifted, the over-deep quote run is read (its text never forces a
+        # parse, so the lifted ceiling meets no other bound)
+        check("revert/nesting-prescan-red", *parser_flip(
+            [lambda: p6_code("> " * 21 + "x\n")], [0], MAX_NESTING_DEPTH=1 << 30))
+        # with the whitespace-run scan patched out, the over-long run is read the same way
+        check("revert/whitespace-run-red", *parser_flip(
+            [lambda: p6_code("a" + " " * 2001 + "b\n")], [0], WHITESPACE_RUN_RE=never))
+        # with the run class narrowed to space and tab (the class a remembered list would have kept), an
+        # over-long vertical-tab or no-break-space run is read again instead of refused
+        check("revert/whitespace-class-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\na" + "\x0b" * 2001 + "b\n"),
+             lambda: p6_code("Input notes.\n\na" + "\xa0" * 2001 + "b\n")], [0, 0],
+            WHITESPACE_RUN_RE=re.compile(r"[ \t]{2001}")))
+        # with the block-structure resets patched out, a block's outcome depends on the unrelated deep
+        # list before it again (each of these briefs reads clean with the resets); the wide line is
+        # indented code, not a fence, so the fenced-code skip takes no part
+        wide_code = " " * 40 + "- x\n"
+        check("revert/nesting-resets-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + tall_list + "\n# Notes\n\n" + wide_code),
+             lambda: p6_code("Input notes.\n\n" + tall_list + "# Notes\n" + wide_code),
+             lambda: p6_code("Input notes.\n\n" + tall_list + "\nplain prose.\n" + wide_code)],
+            ["CannotEvaluate"] * 3, NESTING_RESETS=False))
+        # with the fenced-code skip patched out, a quoted diff's deeply indented marker lines count as
+        # nesting again and the brief is refused (each reads clean with the skip)
+        check("revert/nesting-fences-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n```diff\n" + diff_body + "```\n"),
+             lambda: p6_code("Input notes.\n\n- ```diff\n" + indented_body("  ") + "  ```\n")],
+            ["CannotEvaluate"] * 2, NESTING_FENCES=False))
+        # with the list marker's digits read as Unicode again, the fence after an Arabic-Indic or
+        # fullwidth marker is placed, its diff skipped and each brief read clean (each is refused with
+        # ASCII digits)
+        check("revert/nesting-marker-ascii-red", *parser_flip(
+            [lambda text=text: p6_code(text) for text in other_digit_fences[1:]], [0, 0],
+            LIST_MARK_RE=re.compile(r"(\d{1,9}[.)]|[-*+])( +)")))
+        # with an open link label cleared at an empty line again, the fence line inside the label is read
+        # as a fence, the real nesting after it is skipped and the brief is read clean (each is refused
+        # with the label kept open)
+        check("revert/nesting-labels-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n[a\n\n```\n]: /u\n" + deep21),
+             lambda: p6_code("Input notes.\n\n[a\n\n~~~\n]: /u\n" + deep21)], [0, 0], NESTING_LABELS=False))
+        # with the depth reset again at a margin line inside an open link label or title, the list after
+        # the definition is counted from zero, the parser's deeper reading is never refused and each brief
+        # is read clean (each is refused with the depth held)
+        check("revert/nesting-definitions-red", *parser_flip(
+            [lambda text=text: p6_code("Input notes.\n\n" + text) for text in held_definitions],
+            [0] * len(held_definitions), NESTING_DEFINITIONS=False))
+        fence_opening = _input_declarations._fence_opening
+
+        def fences_read_held(line, position, markers, running, after_blank):
+            """_fence_opening fed the calling prescan's held depth in place of its running depth."""
+            return fence_opening(line, position, markers, sys._getframe(1).f_locals["holding"], after_blank)
+
+        # with the held depth fed into fence placement again, the prescan reads the fence after the held
+        # title as one in a list item or at the top level, its column-0 run cannot be placed, fence
+        # skipping stops, the item fence's empty line then sets up a reset, the brief is read clean, and
+        # texts of the seeded sample that the running depth alone refuses pass (each is refused with fence
+        # placement reading the running depth). This pins agreement with the earlier prescan's refusal,
+        # not the parser's reading, which nests the held-fence text only 15 levels deep
+        check("revert/nesting-held-fences-red", *parser_flip(
+            [lambda: p6_code("Input notes.\n\n" + held_fence[0]), superset_holds], [0, False],
+            _fence_opening=fences_read_held))
+        # with the nesting ceiling lifted, the no-break-space quote lead is read too, so the ceiling is
+        # load-bearing for the quote-prefix vectors (their text never forces a parse)
+        check("revert/nesting-quote-prefix-red", *parser_flip(
+            [lambda: p6_code(">\xa0" * 30 + "x\n")], [0], MAX_NESTING_DEPTH=1 << 30))
+        # the text ceiling is the dispatcher's own brief cap, so a brief-like text the size of the largest
+        # real brief measured (92,342 bytes: headings, prose with markup, bullets) is read and answered;
+        # with the old 64 KiB ceiling restored it is refused for its size alone
+        brief_unit = ("## A section\n\nThe reading takes each paragraph as a reader shows it, with *emphasis*, "
+                      "`code` and a [link](https://example.invalid/x) applied.\n\n- one item\n- another item\n\n")
+        brief_like = brief_unit * (92342 // len(brief_unit))
+        brief_like += "x" * (92342 - len(brief_like) - 1) + "\n"
+        check("structure/text-ceiling-dispatch-cap",
+              (_input_declarations.MAX_TEXT_BYTES, len(brief_like.encode("utf-8")), _outcome(brief_like)),
+              (102400, 92342, (0, [])))
+        check("revert/text-ceiling-red", *parser_flip(
+            [lambda: p6_code(brief_like)], ["CannotEvaluate"], MAX_TEXT_BYTES=1 << 16))
+        # the parse child replaced by stand-ins: each way a child can end is judged on the parent's reading
+        # of it, and each guard goes red under the flip that restores the reading without it
+        stand_ins = str(inputs / "stand-ins")
+        os.makedirs(stand_ins)
+
+        def stand_in(body, text="Input notes.\n"):
+            return lambda: _stand_in_read(tempfile.mkdtemp(dir=stand_ins), body, text)
+
+        empty_reading = ("ok", ([], []))
+        # a grandchild the child left running when it exited normally is gone once the call returns; with
+        # the group kill patched out (the old normal-exit path killed nothing) it survives the call
+        check("parse/child-group-killed-after-exit", _grandchild_outcome(stand_ins), (empty_reading, True))
+        check("revert/child-group-kill-red", *parser_flip(
+            [lambda: _grandchild_outcome(stand_ins)], [(empty_reading, False)], _kill_group=lambda process: None))
+        # a child that writes a complete well-formed document and then exits non-zero, or is ended by a
+        # signal, is refused; exit 0 is read. With the status read patched out, both failures are read
+        exit_three = STAND_IN_DOCUMENT + "os._exit(3)\n"
+        terminated = STAND_IN_DOCUMENT + "os.kill(os.getpid(), signal.SIGTERM)\n"
+        check("parse/child-exit-status-refused",
+              [stand_in(body)() for body in (STAND_IN_DOCUMENT, exit_three, terminated)],
+              [empty_reading, "DeclarationError", "DeclarationError"])
+        check("revert/child-exit-status-red", *parser_flip(
+            [stand_in(exit_three), stand_in(terminated)], [empty_reading] * 2, _check_exit=lambda status: None))
+        # well-formed JSON of the wrong shape is a named refusal: a node with no kind, an integer in a node's
+        # place, a document with no children list, and a tree deeper than the recursive readings walk; with
+        # the shape check patched out each escapes as another exception or reads as an empty document
+        no_kind = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                   "'children': [{'span': [0, len(text)]}]}}))\n")
+        integer_node = ("sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)], "
+                        "'children': [7]}}))\n")
+        no_children = "sys.stdout.write(json.dumps({'tree': {'kind': 'Document', 'span': [0, len(text)]}}))\n"
+        deep_tree = _deep_tree_body(5000)
+        shapes = [stand_in(body) for body in (no_kind, integer_node, no_children, deep_tree)]
+        check("parse/child-tree-shape-refused", [shape() for shape in shapes], ["DeclarationError"] * 4)
+        check("revert/child-tree-shape-red", *parser_flip(
+            shapes, ["KeyError", "AttributeError", empty_reading, "RecursionError"],
+            _checked_tree=lambda tree: tree))
+        # the depth bound, just inside, exactly at and just over MAX_TREE_DEPTH (the document is level 1)
+        check("structure/tree-depth-boundary",
+              [stand_in(_deep_tree_body(_input_declarations.MAX_TREE_DEPTH - 3 + offset))()
+               for offset in (-1, 0, 1)], [empty_reading, empty_reading, "DeclarationError"])
+        # JSON nested past the decoder's own stack bound is the same refusal; with RecursionError dropped
+        # from the decode failures it escapes from the decode
+        deep_json = stand_in("sys.stdout.write('{\"tree\": ' + '[' * 1000000 + ']' * 1000000 + '}')\n")
+        check("parse/child-result-recursion-refused", deep_json(), "DeclarationError")
+        check("revert/child-result-recursion-red", *parser_flip(
+            [deep_json], ["RecursionError"], CHILD_RESULT_ERRORS=(ValueError,)))
+        # the child starts with an empty environment, so a variable of the caller's never reaches it; with
+        # the caller's environment handed down again, it does
+        check("parse/child-environment-empty", _environment_outcome(stand_ins), (empty_reading, False))
+        check("revert/child-environment-red", *parser_flip(
+            [lambda: _environment_outcome(stand_ins)], [(empty_reading, True)], CHILD_ENVIRONMENT=None))
+        # the child imports its parent from its own directory first and checks the module's file is the one
+        # beside it: run under a minimal virtual environment holding a decoy parent in site-packages, the
+        # child reads through the copy beside it, and refuses when a site .pth line imported the decoy
+        # first. Each flip is built from the child's own source, only when its line is there exactly once:
+        # with the directory appended (the old search order) the installed decoy is imported first, and the
+        # origin check refuses it; with the origin check removed the pre-imported decoy is used; with both
+        # (the old child) the decoy is used either way
+        with open(_input_declarations._CHILD_PATH, encoding="utf-8") as handle:
+            child_source = handle.read()
+        front, appended = "sys.path.insert(0, _HERE)\n", "sys.path.append(_HERE)\n"
+        origin = "if _IMPORTED is None or os.path.realpath(_IMPORTED) != _BESIDE:\n"
+        path_flip = child_source.replace(front, appended) if child_source.count(front) == 1 else None
+        origin_flip = child_source.replace(origin, "if False:\n") if child_source.count(origin) == 1 else None
+        both_flips = path_flip.replace(origin, "if False:\n") if path_flip and origin_flip else None
+        check("parse/child-imports-beside", _child_import_outcomes(stand_ins, child_source), ("beside", "refused"))
+        check("revert/child-import-path-red", _child_import_outcomes(stand_ins, path_flip), ("refused", "refused"))
+        check("revert/child-import-origin-red", _child_import_outcomes(stand_ins, origin_flip), ("beside", "decoy"))
+        check("revert/child-import-old-red", _child_import_outcomes(stand_ins, both_flips), ("decoy", "decoy"))
+    finally:
+        if os.path.lexists(locked):
+            os.chmod(locked, 0o700)
+        shutil.rmtree(inputs, ignore_errors=True)
+    check("revert/every-flip-ran", len(flipped), 218)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -5713,12 +6870,26 @@ def self_test(report_path=None):
           "negation before another verb, a prohibition word in a code span or after `=`, a second listed command "
           "line and a later clause are judged), and prints one reached from prose, gh pr checkout, a web address "
           "naming a branch or a "
-          "submodule update --remote (P5), and "
+          "submodule update --remote (P5), refuses a declared input (a declaring paragraph line of the parsed "
+          "CommonMark document whose rendered, folded text begins with INPUT:, read by the parser C1 shares; "
+          "code declares nothing and is not checked) missing on this host, a dangling "
+          "link or a path under a file included, never a path in prose, and "
+          "exits 2 on an INPUT line it cannot check, a look-alike label opening a rendered paragraph line, "
+          "heading or table cell (folded through the bounded confusable table), a brief holding a non-LF line "
+          "separator or a format character outside code, a brief the vendored parser cannot read, a FIFO or "
+          "device, or an input this uid "
+          "cannot read (P6), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
-          "each evaluate in linear time at 1 MiB in a capped child that must exit 0; scope keeps and drops "
+          "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
+          "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
+          "in a capped child that must exit 0; the parse child's process group is killed after a normal "
+          "exit too, a non-zero or signalled child and a result of the wrong shape or depth are refused, "
+          "the child sees an empty environment and imports its parent only from beside it, each red with "
+          "its guard patched out; "
+          "scope keeps and drops "
           "numbered items, other families' legs, sections and tail markers; undecodable, blank, oversized, "
           "missing, non-regular, backwards-range and unknown-family input exits 2); execution set reconciled "
           "against tools/selftest_checks.toml".format(
