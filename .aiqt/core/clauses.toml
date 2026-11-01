@@ -1778,7 +1778,7 @@ source-path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.m
 start-line = 13
 end-line = 14
 canonical-text = "When successive attempts along the same line fail, the repetition is treated as evidence against the\nworking diagnosis, not as a prompt for another variant."
-source-digest = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
+source-digest = "586cca5354144499a42e9f94b1b9e7b85de8f478cebbef7dd421132749e824ea"
 
 [[clause]]
 clause-id = "rpfail.2"
@@ -1787,7 +1787,7 @@ source-path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.m
 start-line = 14
 end-line = 15
 canonical-text = "The assistant stops, re-derives the problem from\nfresh observation, and either changes approach or escalates; a refuted premise is retired, never retried."
-source-digest = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
+source-digest = "586cca5354144499a42e9f94b1b9e7b85de8f478cebbef7dd421132749e824ea"
 
 [[clause]]
 clause-id = "rpfail.3"
@@ -1796,7 +1796,7 @@ source-path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.m
 start-line = 14
 end-line = 15
 canonical-text = "The assistant stops, re-derives the problem from\nfresh observation, and either changes approach or escalates; a refuted premise is retired, never retried."
-source-digest = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
+source-digest = "586cca5354144499a42e9f94b1b9e7b85de8f478cebbef7dd421132749e824ea"
 
 [[clause]]
 clause-id = "rpfail.4"
@@ -1805,7 +1805,7 @@ source-path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.m
 start-line = 14
 end-line = 15
 canonical-text = "The assistant stops, re-derives the problem from\nfresh observation, and either changes approach or escalates; a refuted premise is retired, never retried."
-source-digest = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
+source-digest = "586cca5354144499a42e9f94b1b9e7b85de8f478cebbef7dd421132749e824ea"
 
 [[clause]]
 clause-id = "rpfail.5"
@@ -1814,7 +1814,16 @@ source-path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.m
 start-line = 14
 end-line = 15
 canonical-text = "The assistant stops, re-derives the problem from\nfresh observation, and either changes approach or escalates; a refuted premise is retired, never retried."
-source-digest = "10f3addc005116937671bd2be90da3fde26828f6678226fb131ca4c500dcd7ac"
+source-digest = "586cca5354144499a42e9f94b1b9e7b85de8f478cebbef7dd421132749e824ea"
+
+[[clause]]
+clause-id = "rpfail.6"
+corpus-id = "rpfail"
+source-path = ".aiqt/core/rules/progr-repeated-failure-triggers-premise-review.md"
+start-line = 16
+end-line = 19
+canonical-text = "That review asks whether the task with any explicit human amendment, or a rule that governs it, requires\nthe failing surface at all, if only for correctness; a surface nothing requires is removed, with the\nremoval recorded, rather than narrowed or hardened again; a finding the removal does not fix still\nblocks."
+source-digest = "586cca5354144499a42e9f94b1b9e7b85de8f478cebbef7dd421132749e824ea"
 
 [[clause]]
 clause-id = "abspth.1"

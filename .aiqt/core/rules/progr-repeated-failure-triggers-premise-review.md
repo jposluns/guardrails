@@ -13,3 +13,7 @@ slug: repeated-failure-triggers-premise-review
 When successive attempts along the same line fail, the repetition is treated as evidence against the
 working diagnosis, not as a prompt for another variant. The assistant stops, re-derives the problem from
 fresh observation, and either changes approach or escalates; a refuted premise is retired, never retried.
+That review asks whether the task with any explicit human amendment, or a rule that governs it, requires
+the failing surface at all, if only for correctness; a surface nothing requires is removed, with the
+removal recorded, rather than narrowed or hardened again; a finding the removal does not fix still
+blocks.
