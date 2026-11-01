@@ -843,8 +843,10 @@ FENCE_OPEN_RE = re.compile(r"(`{3,})[^`]*$|(~{3,})")
 # character, then only whitespace; it closes when its run is the opening character at least as long and
 # its leading spaces fit the container
 FENCE_CLOSE_RE = re.compile(r"([ \t]*)(`+|~+)[^\S\n]*$")
-# a list marker and the spaces after it, read one marker at a time across a fence line's lead
-LIST_MARK_RE = re.compile(r"(\d{1,9}[.)]|[-*+])( +)")
+# a list marker and the spaces after it, read one marker at a time across a fence line's lead; its digits
+# are ASCII, so a marker numbered in another script's digits leaves the fence line unplaced (the prescan
+# then skips no line, which only refuses more)
+LIST_MARK_RE = re.compile(r"([0-9]{1,9}[.)]|[-*+])( +)")
 # a lead that may open an HTML block the parser reads on to an end marker, across blank lines and fence
 # lines alike (HTMLBlock.match, its types 1 to 4 in its own order); the value builds the end marker
 HTML_END_STARTS = ((re.compile(r"<(script|pre|style|textarea)(?:[>\s]|$)", re.I),

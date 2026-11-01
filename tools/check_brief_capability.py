@@ -5112,6 +5112,14 @@ def self_test(report_path=None):
     # the reader agrees: in each of those briefs the parsed document holds the 51-space line in a fence
     check("structure/nesting-fence-reader-agrees",
           [fenced_at(parse_lead + text, " " * 51 + "- y") for text in fenced_diffs], [True] * len(fenced_diffs))
+    # a fence placed on a numbered item's own line takes ASCII digits only: the same quoted diff after
+    # "1." is skipped as fence content and read clean, while after an Arabic-Indic or fullwidth one the
+    # fence line is unplaced, the prescan skips no line and the marker lines count (the parser reads
+    # those markers as list items too, so this over-refuses, never under-refuses)
+    other_digit_fences = [parse_lead + digit + ". ```diff\n" + indented_body("   ") + "   ```\n"
+                          for digit in ("1", chr(0x0661), chr(0xFF11))]
+    check("cannot/nesting-fence-marker-ascii", [_outcome(text) for text in other_digit_fences],
+          [(0, []), "CannotEvaluate", "CannotEvaluate"])
     # real nesting outside a fence is still refused: after a closed fence, after a bullet-line fence whose
     # item an unindented line ends, after a backtick line with a backtick in its info string (no fence),
     # after a tilde fence that a backtick line does not close, after a four-space line at the top level
@@ -6689,6 +6697,12 @@ def self_test(report_path=None):
             [lambda: p6_code("Input notes.\n\n```diff\n" + diff_body + "```\n"),
              lambda: p6_code("Input notes.\n\n- ```diff\n" + indented_body("  ") + "  ```\n")],
             ["CannotEvaluate"] * 2, NESTING_FENCES=False))
+        # with the list marker's digits read as Unicode again, the fence after an Arabic-Indic or
+        # fullwidth marker is placed, its diff skipped and each brief read clean (each is refused with
+        # ASCII digits)
+        check("revert/nesting-marker-ascii-red", *parser_flip(
+            [lambda text=text: p6_code(text) for text in other_digit_fences[1:]], [0, 0],
+            LIST_MARK_RE=re.compile(r"(\d{1,9}[.)]|[-*+])( +)")))
         # with an open link label cleared at an empty line again, the fence line inside the label is read
         # as a fence, the real nesting after it is skipped and the brief is read clean (each is refused
         # with the label kept open)
@@ -6806,7 +6820,7 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 217)
+    check("revert/every-flip-ran", len(flipped), 218)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
