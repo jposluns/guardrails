@@ -225,11 +225,131 @@ def page_url(target_rel):
 HEAD_ELEMENTS = frozenset(("base", "link", "meta", "noscript", "script", "style", "template", "title"))
 # Head elements whose contents are raw text, not markup.
 HEAD_RAW_TEXT = frozenset(("script", "style", "title"))
-# Elements whose contents a browser's tokenizer reads as text, not markup (noscript when scripts run).
-TEXT_CONTENT = HEAD_RAW_TEXT | frozenset(("iframe", "noembed", "noframes", "noscript", "plaintext", "textarea",
-                                          "xmp"))
+# Elements whose contents both html.parser and a browser's tokenizer read as text up to the first end tag
+# of the same name (the specification's raw-text and RCDATA elements, plaintext aside).
+RAW_TEXT_ELEMENTS = HEAD_RAW_TEXT | frozenset(("iframe", "noembed", "noframes", "textarea", "xmp"))
+# Elements whose contents a browser's tokenizer reads as text, not markup (noscript when scripts run,
+# plaintext to the end of the page).
+TEXT_CONTENT = RAW_TEXT_ELEMENTS | frozenset(("noscript", "plaintext"))
+# The elements that start svg or math content, and the elements inside it where HTML rules apply again.
+FOREIGN_ROOTS = frozenset(("math", "svg"))
+INTEGRATION_POINTS = frozenset(("annotation-xml", "desc", "foreignobject", "mi", "mn", "mo", "ms", "mtext"))
 # HTML's whitespace characters; any other text inside the head ends it.
 HTML_WHITESPACE = " \t\n\f\r"
+_ATTR = (r"[^\t\n\f\r />\"'<=\x00][^\t\n\f\r />\"'<=\x00]*"
+         r"(?:[\t\n\f\r ]*=[\t\n\f\r ]*(?:\"[^\"]*\"|'[^']*'|[^\t\n\f\r \"'=<>`\x00]+))?")
+_START_TAG_RE = re.compile(r"<([A-Za-z][A-Za-z0-9-]*)(?:[\t\n\f\r ]+" + _ATTR + r")*[\t\n\f\r ]*/?>")
+_END_TAG_RE = re.compile(r"</([A-Za-z][A-Za-z0-9-]*)[\t\n\f\r ]*>")
+_DOCTYPE_RE = re.compile(r"<!doctype[\t\n\f\r ]+html[\t\n\f\r ]*>", re.IGNORECASE)
+_TEXT_END_RE = re.compile("</(?:" + "|".join(sorted(TEXT_CONTENT)) + ")", re.IGNORECASE)
+_RAW_END_RE = {name: re.compile("</" + name + "(?=[\t\n\f\r />])", re.IGNORECASE) for name in RAW_TEXT_ELEMENTS}
+_SCRIPT_START_RE = re.compile("<script[\t\n\f\r />]", re.IGNORECASE)
+_MARKUP_START_RE = re.compile("<[/!?]")
+
+
+def _page_syntax_error(page):
+    """The accepted page subset: the first place `page` steps outside the syntax on which html.parser and
+    the HTML specification's tokenizer agree, as a message, or None. One linear pass over the source text,
+    run before html.parser so its verdict does not rest on html.parser's own error recovery. Refused
+    anywhere in the page:
+      - any "<!" construct but a comment and a leading doctype: a comment must open with exactly "<!--",
+        must not begin "<!-->" or "<!--->", and must close at its first later "-->" with no "--!>" and no
+        nested "<!--" before it (html.parser ends some of these elsewhere than the tokenizer does), so a
+        CDATA section, a bogus comment and an abrupt or unclosed comment fail; the one doctype accepted is
+        `<!doctype html>` (any case) before all other markup; a "<?" construct fails too;
+      - a start or end tag outside a plain shape: a start tag is a name of ASCII letters, digits and
+        hyphens, then whitespace-separated attributes (a name free of quotes, "<", "=" and "/", with an
+        optional double-quoted, single-quoted or unquoted value; an unquoted value holds no quote, "=",
+        "<", ">" or backtick), then an optional "/" and ">"; an end tag is a name, optional whitespace and
+        ">";
+      - a self-closing start tag of an element whose contents are text (TEXT_CONTENT: `<script/>`,
+        `<style/>`, `<title/>`, `<textarea/>`, `<noscript/>` and the rest), since the tokenizer ignores
+        the slash and reads on as text while html.parser reads on as markup; and any `<plaintext>`;
+      - "</" followed by the name of any TEXT_CONTENT element (any case) inside an attribute value, a
+        comment, or the text of a RAW_TEXT_ELEMENTS element, so no end tag that one reader takes as text
+        can end an element for the other;
+      - a RAW_TEXT_ELEMENTS element that never ends, or whose first end tag (its name followed by
+        whitespace, "/" or ">") carries more than its name and whitespace;
+      - in the text of a `<script>`, "<!--" followed later by "<script" and then whitespace, "/" or ">"
+        (any case), the only way into the tokenizer's double-escaped script state, which html.parser does
+        not follow; "<!--" alone, as in a legacy `<script><!-- a() //--></script>`, passes;
+      - in the text of a RAW_TEXT_ELEMENTS element other than script and style, "<" followed by "/", "!"
+        or "?": broader than the specification needs, refused because older html.parser releases read
+        that text as markup, where such a construct could end an element or hide a tag;
+      - inside svg or math content (from an `<svg>` or `<math>` start tag to its end tag), a start tag of
+        a TEXT_CONTENT element or of an HTML integration point (INTEGRATION_POINTS): there the tokenizer
+        reads `<script>`, `<style>` and `<title>` contents as markup, so a keyed tag inside one is an
+        element to a browser and text to html.parser.
+    _HeadTagCollector adds the refusals that need the head's place (see there). Inside the accepted subset
+    html.parser and the tokenizer agree on where each tag, comment and text run starts and ends; residual
+    differences there are listed in _HeadTagCollector, each making the check stricter, not laxer."""
+    lead = len(page) - len(page.lstrip(HTML_WHITESPACE))
+    doctype = _DOCTYPE_RE.match(page, lead)
+    pos = doctype.end() if doctype else 0
+    foreign = []
+    while True:
+        at = page.find("<", pos)
+        if at < 0:
+            return None
+        line = page.count("\n", 0, at) + 1
+        if page.startswith("<!--", at):
+            close = page.find("-->", at + 4)
+            if page.startswith("<!-->", at) or page.startswith("<!--->", at):
+                return "line {}: an abrupt comment (\"<!-->\" or \"<!--->\")".format(line)
+            if close < 0:
+                return "line {}: a comment that never closes".format(line)
+            if page.find("--!>", at + 2, close + 3) >= 0 or page.find("<!--", at + 4, close + 2) >= 0:
+                return "line {}: a comment holding \"--!>\" or a nested \"<!--\" before its \"-->\"".format(line)
+            if _TEXT_END_RE.search(page, at + 4, close):
+                return "line {}: a comment holding the end tag of a text element".format(line)
+            pos = close + 3
+            continue
+        if page.startswith("<!", at) or page.startswith("<?", at):
+            return "line {}: a \"{}\" construct other than a comment (a \"<![\" section, a bogus comment or " \
+                   "a doctype after other markup)".format(line, page[at:at + 2])
+        if page.startswith("</", at):
+            end = _END_TAG_RE.match(page, at)
+            if not end:
+                return "line {}: an end tag that is not a name, optional whitespace and \">\"".format(line)
+            name = end.group(1).lower()
+            if name in foreign:
+                del foreign[len(foreign) - 1 - foreign[::-1].index(name):]
+            pos = end.end()
+            continue
+        if not (page[at + 1:at + 2].isascii() and page[at + 1:at + 2].isalpha()):
+            pos = at + 1
+            continue
+        start = _START_TAG_RE.match(page, at)
+        if not start:
+            return "line {}: a start tag outside the plain shape this check reads".format(line)
+        name = start.group(1).lower()
+        if _TEXT_END_RE.search(start.group(0)):
+            return "line {}: an attribute value holding the end tag of a text element".format(line)
+        if foreign and (name in TEXT_CONTENT or name in INTEGRATION_POINTS):
+            return "line {}: a <{}> inside svg or math content".format(line, name)
+        if name in TEXT_CONTENT and start.group(0).endswith("/>"):
+            return "line {}: a self-closing <{}/>, whose contents a browser reads on as text".format(line, name)
+        if name == "plaintext":
+            return "line {}: a <plaintext>".format(line)
+        pos = start.end()
+        if name in FOREIGN_ROOTS and not start.group(0).endswith("/>"):
+            foreign.append(name)
+        if name not in RAW_TEXT_ELEMENTS:
+            continue
+        end = _RAW_END_RE[name].search(page, pos)
+        closing = _END_TAG_RE.match(page, end.start()) if end else None
+        if not closing:
+            return "line {}: a <{}> whose text has no plain </{}> end tag".format(line, name, name)
+        if _TEXT_END_RE.search(page, pos, end.start()):
+            return "line {}: the text of a <{}> holding the end tag of a text element".format(line, name)
+        if name == "script":
+            opener = page.find("<!--", pos, end.start())
+            if opener >= 0 and _SCRIPT_START_RE.search(page, opener + 4, end.start()):
+                return "line {}: a <script> whose text holds \"<!--\" and then \"<script\", which a browser " \
+                       "reads as double-escaped script text".format(line)
+        elif name != "style" and _MARKUP_START_RE.search(page, pos, end.start()):
+            return "line {}: the text of a <{}> holding markup-like \"<\"".format(line, name)
+        pos = closing.end()
 
 
 class _HeadTagCollector(HTMLParser):
@@ -239,24 +359,25 @@ class _HeadTagCollector(HTMLParser):
     browser's tree builder ends it: at `</head>`, at a `<body>` start or a `</body>`, `</html>` or
     `</br>` end tag, at the first start tag that is not one of HEAD_ELEMENTS, or at the first text that
     is not HTML whitespace (comments and the raw-text contents of `<script>`, `<style>` and `<title>` do
-    not end it; neither does anything else inside a `<template>`). Where html.parser cannot follow a
-    browser's tokenizer it records an error instead of a place: any start tag but `<html>`, any end tag, a
-    `<![` section or text that is not whitespace before the head starts (a browser starts the head there);
-    a `<![` section in the head (a browser ends it at the first `>`, html.parser at `]]>`); a `<script>` in
-    the head whose text holds `<!--` (a browser's escaped script states can keep it open past its end tag);
-    and a start tag of an element whose contents a browser reads as text (TEXT_CONTENT) inside a
-    `<template>` in the head. Otherwise it never ends later than a browser's would, but may end sooner, so a
-    block after that point fails as outside the head where a browser would still read it in the head: the
-    start tags `<noframes>`, `<basefont>`, `<bgsound>` and `<html>` end it here and not in a browser, as
-    does text inside a `<noscript>` (raw text to a browser running scripts), `</head>` or `<body>` ends it
-    here even inside a `<template>` or inside raw text a self-closing `<script/>`, `<style/>` or `<title/>`
-    opened. A raw-text element opened that way stays open, as a browser keeps it, up to its matching end
-    tag: html.parser reports the tags inside it, but a browser reads them as text. Where an element sits is
-    None inside the
-    head, otherwise "outside <head>", "inside the raw text of <script> in <head>" (or of `<style>` or
-    `<title>`) for one read while such raw text is open, or "inside <template> in <head>"/"inside
-    <noscript> in <head>" for one wrapped in those in the head (a template's contents are not in the
-    document, and a browser running scripts reads a noscript's contents as text). A link's key is ("link", "canonical") when one of its
+    not end it; neither does anything else inside a `<template>`). It is meant for pages inside the
+    accepted subset _page_syntax_error defines, and adds the refusals that need the head's place, each
+    recorded as an error: any start tag but `<html>`, any end tag, or text that is not whitespace before the
+    head starts (a browser starts the head at such a start tag or text; it ignores end tags there other
+    than `</head>`, `</body>`, `</html>` and `</br>`, so refusing every end tag is a conservative choice,
+    broader than needed); a `<noscript>` in the head holding anything but whitespace (a browser running
+    scripts reads its contents as text, html.parser as markup, and without scripts a browser ends the head
+    at some contents this collector would keep); and a start tag of a TEXT_CONTENT element other than
+    `<script>` and `<style>` inside a `<template>` in the head (broader than needed: this host's html.parser
+    follows those elements' text there too, older releases do not). Inside the accepted subset the head
+    ends here where a browser's tree builder ends it, with these known differences, each ending it sooner
+    here (so a block after that point fails as outside the head where a browser would still read it in the
+    head): the start tags `<noframes>`, `<basefont>`, `<bgsound>` and `<html>` end it here and not in a
+    browser, and `</head>` or `<body>` ends it here even inside a `<template>`. Outside the subset the page
+    fails before this collector's places count. Where an element sits is None inside the head, otherwise
+    "outside <head>", "inside the raw text of <script> in <head>" (or of `<style>` or `<title>`) for one
+    read while such raw text is open (only a self-closing `<script/>`, `<style/>` or `<title/>` leaves it
+    open with tags inside, which the accepted subset refuses), or "inside <template> in <head>" for one
+    wrapped in a template in the head (a template's contents are not in the document). A link's key is ("link", "canonical") when one of its
     whitespace-separated rel tokens is `canonical`; a meta's keys are ("meta", <value>) for its
     `property` value and its `name` value, so a `name="og:title"` meta still collides with the block's
     `property="og:title"`. Key values compare stripped and lowercased, so a case variant of a block tag
@@ -274,30 +395,23 @@ class _HeadTagCollector(HTMLParser):
         self.head_ended = False
         self.body_seen = False
         self.raw_text = None    # the open raw-text head element, while inside one
-        self.raw_start = 0      # the source offset where that raw text begins
         self.wrappers = []      # the open <template>/<noscript> elements inside the head
-        self.source = []        # the text fed so far, to read a script's raw text as written
         self.found = []    # (key, value, place, line, written keys)
         self.errors = []
 
-    def feed(self, data):
-        self.source.append(data)
-        super().feed(data)
-
-    def _offset(self, pos):
-        """The source offset of an html.parser (line, column) position (it counts lines at LF only)."""
-        text = "".join(self.source)
-        start = 0
-        for _ in range(pos[0] - 1):
-            start = text.index("\n", start) + 1
-        return start + pos[1]
-
     def _before_head(self, line, what):
-        """Refuse markup before the head starts that a browser reads as starting the head (or body)
-        itself, so the page's own <head> would not be the head a browser builds."""
+        """Refuse markup before the head starts: a start tag or text there starts a browser's head (or
+        body) itself, so the page's own <head> would not be the head a browser builds; end tags are
+        refused too, more broadly than needed, as a conservative choice."""
         if not self.heads and not self.body_seen:
-            self.errors.append("line {}: {} before <head>; a browser starts the head there, not at the "
-                               "page's <head>".format(line, what))
+            self.errors.append("line {}: {} before <head>, which this check refuses".format(line, what))
+
+    def _in_head_noscript(self, line, what):
+        """Refuse anything but whitespace inside a <noscript> in the head: a browser running scripts reads
+        it as text, html.parser as markup."""
+        if self.in_head and self.wrappers and self.wrappers[-1] == "noscript":
+            self.errors.append("line {}: {} inside a <noscript> in <head>, which must hold only whitespace"
+                               .format(line, what))
 
     def _end_head(self):
         self.in_head = False
@@ -308,6 +422,7 @@ class _HeadTagCollector(HTMLParser):
         line = self.getpos()[0]
         if tag not in ("html", "head", "body"):
             self._before_head(line, "a <{}> start tag".format(tag))
+        self._in_head_noscript(line, "a <{}> start tag".format(tag))
         if tag == "head":
             self.heads += 1
             if self.body_seen:
@@ -329,10 +444,9 @@ class _HeadTagCollector(HTMLParser):
                     return
                 if tag in HEAD_RAW_TEXT:
                     self.raw_text = tag
-                    self.raw_start = self._offset(self.getpos()) + len(self.get_starttag_text())
-            elif tag in TEXT_CONTENT:
-                # Raw text is not followed inside a template, so a "</template>" a browser reads as text
-                # there could end the template here early.
+            elif tag in TEXT_CONTENT and tag not in ("script", "style"):
+                # Older html.parser releases read this element's text as markup, so a "</template>" a
+                # browser reads as text there could end the template here early.
                 self.errors.append("line {}: a <{}> inside a <template> in <head>, whose text this check "
                                    "does not follow".format(line, tag))
             if tag in ("template", "noscript"):
@@ -385,6 +499,8 @@ class _HeadTagCollector(HTMLParser):
 
     def handle_endtag(self, tag):
         self._before_head(self.getpos()[0], "a </{}> end tag".format(tag))
+        if tag != "noscript":
+            self._in_head_noscript(self.getpos()[0], "a </{}> end tag".format(tag))
         if tag == "head" and self.head_open:
             self.head_open = False
             self.head_ended = True
@@ -394,13 +510,6 @@ class _HeadTagCollector(HTMLParser):
             return
         if self.raw_text:
             if tag == self.raw_text:
-                # "<!--" in a script's text can start a browser's escaped script states, where a nested
-                # "<script>" keeps the script open past this end tag; this parser does not follow them,
-                # so such a script fails rather than let a later tag count as in the head.
-                if tag == "script" and "<!--" in "".join(self.source)[
-                        self.raw_start:self._offset(self.getpos())]:
-                    self.errors.append("line {}: a <script> in <head> holds \"<!--\", whose escaped script "
-                                       "text this check does not follow".format(self.getpos()[0]))
                 self.raw_text = None
             return
         if tag in ("template", "noscript") and tag in self.wrappers:
@@ -415,16 +524,13 @@ class _HeadTagCollector(HTMLParser):
     def handle_data(self, data):
         if data.strip(HTML_WHITESPACE):
             self._before_head(self.getpos()[0], "text")
+            self._in_head_noscript(self.getpos()[0], "text")
         if self.in_head and not self.raw_text and "template" not in self.wrappers \
                 and data.strip(HTML_WHITESPACE):
             self._end_head()
 
-    def unknown_decl(self, data):
-        # html.parser reads "<![CDATA[" up to "]]>"; a browser outside svg or math reads it as a comment
-        # ending at the first ">", so text after that point would end the head there.
-        if self.in_head or not self.heads:
-            self.errors.append("line {}: a \"<![\" section in or before <head>, which a browser ends at the "
-                               "first \">\"".format(self.getpos()[0]))
+    def handle_comment(self, data):
+        self._in_head_noscript(self.getpos()[0], "a comment")
 
 
 def _key_text(key):
@@ -458,12 +564,13 @@ def _validate_head_tags(page, url, target_rel):
     (html.parser, character references decoded). The page must have exactly one `<head>` start tag, and
     that head must end (at `</head>` or a `<body>` start) before the document does. For each tag of
     HEAD_TAG_BLOCK, keyed by a link's rel="canonical" or a meta's property or name value (compared
-    stripped and lowercased): exactly one `<link>`/`<meta>` element in the whole page carries that key,
-    whatever its value; that element sits directly in the head, which ends no later than a browser's
-    tree builder ends it and in a few named cases sooner (see _HeadTagCollector), not inside a
-    `<template>` or `<noscript>` there nor inside raw text a self-closing `<script/>`, `<style/>` or
-    `<title/>` left open (such a tag still counts toward "exactly one", so a hidden copy beside the real
-    one fails as a duplicate, which is stricter than a browser); every spelling of its key on it is
+    stripped and lowercased): exactly one `<link>`/`<meta>` element in the whole page, as html.parser
+    reads it, carries that key, whatever its value; that element sits directly in the head, as
+    _HeadTagCollector places it, not inside a `<template>` there (such a tag still counts toward "exactly
+    one", so a hidden copy beside the real one fails as a duplicate, which is stricter than a browser).
+    These hold as a browser's tokenizer reads the page only inside the accepted subset _page_syntax_error
+    defines; a page outside it fails before anything is counted, and inside it the head may end here
+    sooner than in a browser (see _HeadTagCollector), never later. Every spelling of its key on it is
     exactly the block's (no case change, no surrounding whitespace, so a meta's property and name, when
     both carry the key, are both written that way; for a link, each rel token that names canonical is
     written `canonical` in lower case, which is stricter than HTML, where rel tokens compare ASCII
@@ -474,15 +581,18 @@ def _validate_head_tags(page, url, target_rel):
     naming another page fails as a wrong value, and a block tag after the point where the collector ends
     the head (`</head>`, `<body>`, a start tag that is not a head element, or text that is not whitespace)
     fails as outside the head. A page the parser rejects, a page with no head or more than one, a head
-    that never ends, a keyed element carrying a duplicate attribute, or markup the collector cannot follow
-    as a browser would (see _HeadTagCollector) fails too; every failure names
+    that never ends, a keyed element carrying a duplicate attribute, a page outside the accepted subset
+    (_page_syntax_error) or a refusal of _HeadTagCollector fails too; every failure names
     `target_rel`. Not established: that the block's tags are adjacent (other head elements may sit
     between them), anything about elements carrying none of the block's keys, whether a meta's key sits
     in `property` or `name`, attributes beyond the key and the value, and tag-like text inside comments,
-    `<script>`, `<style>` or `<title>` (not elements, so neither counted nor flagged, except a keyed tag
-    inside raw text a self-closing one left open, which counts and fails as misplaced, and a head
-    `<script>` whose text holds `<!--`, which fails)."""
+    `<script>`, `<style>` or `<title>` (not elements, so neither counted nor flagged, except where the
+    accepted subset refuses it: a self-closing `<script/>`, `<style/>` or `<title/>` anywhere, and a
+    `<script>` whose text holds "<!--" and then "<script", fail)."""
     spec = _head_block_spec(url)
+    outside = _page_syntax_error(page)
+    if outside is not None:
+        raise SchemaError("{}: {}, outside the page syntax this check accepts".format(target_rel, outside))
     collector = _HeadTagCollector({s[0] for s in spec})
     try:
         collector.feed(page)
@@ -1764,7 +1874,7 @@ def _self_test():
     except SchemaError as exc:
         failures.append("head raw-text contents: unexpected SchemaError: {}".format(exc))
     # A browser ignores the slash on <script/>, <style/> and <title/>, so everything up to the matching
-    # end tag is raw text: a block hidden there is not in the head, and fails at its first tag.
+    # end tag is raw text: a block hidden there is not in the head, and the self-closing tag fails.
     for label, opener in (("head block hidden after <script/>", '<script src="/theme.js"/>'),
                           ("head block hidden after <style/>", "<style/>"),
                           ("head block hidden after <title/>", "<title/>")):
@@ -1774,7 +1884,7 @@ def _self_test():
             lambda o=opener, t=raw_tag: _validate_head_tags(
                 ok_head.replace("<head>", "<head>" + o, 1).replace("</head>", "</{}></head>".format(t), 1),
                 _own_url, "site/rules.html"),
-            SchemaError, "sits inside the raw text of <{}> in <head>".format(raw_tag))
+            SchemaError, "a self-closing <{}/>".format(raw_tag))
     # The tag that counts must write the block's key exactly: a case variant or a padded key fails.
     for label, page, needle in (
             ("head key case variant", ok_head.replace('property="og:title"', 'property="OG:Title"'),
@@ -1812,11 +1922,12 @@ def _self_test():
              'holds "<!--"'),
             ("head self-closed script double escape", ok_head.replace(
                 "<head>", "<head><script/><!--<script>--!></script>", 1).replace("</head>", "</script></head>", 1),
-             'holds "<!--"'),
+             "a self-closing <script/>"),
             ("head self-closed script escape in an attribute", ok_head.replace(
                 "<head>", '<head><script/><meta content="<!--"><script></script>', 1).replace(
-                "</head>", "</script></head>", 1), 'holds "<!--"'),
-            ("head legacy script comment", ok_head.replace("<head>", "<head><script><!-- a() //--></script>", 1),
+                "</head>", "</script></head>", 1), "a self-closing <script/>"),
+            ("head script double escape upper case", ok_head.replace(
+                "<head>", "<head><script><!-- a <SCRIPT\n></script>", 1).replace("</head>", "</script></head>", 1),
              'holds "<!--"'),
             ("head cdata section", ok_head.replace("<head>", "<head><![CDATA[x>y]]>", 1), 'a "<![" section'),
             ("cdata section before head", ok_head.replace("<head>", "<![CDATA[x>y]]><head>", 1),
@@ -1828,7 +1939,9 @@ def _self_test():
              "a </html> end tag before <head>"),
             ("template style hides its end", ok_head.replace(
                 "<head>", "<head><template><style/></template>", 1).replace("</head>", "</style></head>", 1),
-             "a <style> inside a <template> in <head>"),
+             "a self-closing <style/>"),
+            ("template title hides its end", ok_head.replace(
+                "<head>", "<head><template><title>x</title></template>", 1), "a <title> inside a <template>"),
             ("template noscript hides its end", ok_head.replace(
                 "<head>", "<head><template><noscript></template>", 1).replace(
                 "</head>", "</noscript></head>", 1), "a <noscript> inside a <template> in <head>")):
@@ -1850,22 +1963,110 @@ def _self_test():
             ("head ended by <body> in a template", ok_head.replace(
                 "<head>", "<head><template><body></template>", 1), "sits outside <head>"),
             ("raw text kept past </body>", ok_head.replace("<head>", "<head><script/></body>", 1).replace(
-                "</head>", "</script></head>", 1), "sits inside the raw text of <script> in <head>")):
+                "</head>", "</script></head>", 1), "a self-closing <script/>")):
         _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
                        SchemaError, needle)
-    # A block tag wrapped in a template or noscript in the head is not a head element a reader sees; an
-    # extra copy there still counts as a duplicate.
+    # A block tag wrapped in a template in the head is not a head element a reader sees; an extra copy
+    # there still counts as a duplicate. A noscript in the head holding anything but whitespace fails.
     for label, page, needle in (
             ("head tag inside template", ok_head.replace(_og_title, "<template>" + _og_title + "</template>"),
              "sits inside <template> in <head>"),
             ("head tag inside noscript", ok_head.replace(_og_title, "<noscript>" + _og_title + "</noscript>"),
-             "sits inside <noscript> in <head>"),
+             "a <meta> start tag inside a <noscript> in <head>"),
             ("head extra copy inside template", ok_head.replace(
                 _og_title, _og_title + "<template>" + _og_title + "</template>"), "exactly one element keyed"),
             ("head extra copy inside noscript", ok_head.replace(
-                _og_title, _og_title + "<noscript>" + _og_title + "</noscript>"), "exactly one element keyed")):
+                _og_title, _og_title + "<noscript>" + _og_title + "</noscript>"), "inside a <noscript> in <head>"),
+            ("head noscript end hidden in a comment", ok_head.replace(
+                "<head>", "<head><noscript><!--x--></noscript>", 1), "a comment inside a <noscript> in <head>"),
+            ("head noscript text", ok_head.replace("<head>", "<head><noscript>x</noscript>", 1),
+             "text inside a <noscript> in <head>")):
         _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
                        SchemaError, needle)
+    # Outside the accepted page syntax a page fails wherever the construct sits, head or body: each shape
+    # html.parser and a browser's tokenizer read differently (an abrupt or nested comment, a "<![" section,
+    # a self-closing text element, a text element's end tag inside an attribute value, a comment or other
+    # raw text, a double-escaped script, svg content hiding a keyed tag) and each tag outside the plain shape.
+    _in_body = "<body>{}</body>"
+    _syntax_cases = []
+    for where, wrap in (("head", lambda s: ok_head.replace("<head>", "<head>" + s, 1)),
+                        ("body", lambda s: ok_head + _in_body.format(s))):
+        for label, src, needle in (
+                ("abrupt comment", "<!--><div>-->", 'an abrupt comment'),
+                ("abrupt dash comment", "<!--->x<div>-->", 'an abrupt comment'),
+                ("comment closed by --!>", "<!-- a --!> b -->", 'holding "--!>"'),
+                ("nested comment", "<!-- <!-- x -->", 'a nested "<!--"'),
+                ("cdata hiding a tag", '<![CDATA[x><meta property="og:title" content="evil">]]>',
+                 'a "<![" section'),
+                ("abrupt comment hiding a tag", '<!--><meta property="og:title" content="evil">-->',
+                 'an abrupt comment'),
+                ("bogus comment", "<!x>", 'a "<!" construct'),
+                ("processing instruction", "<?x>", 'a "<?" construct'),
+                ("self-closed script with end tag in an attribute",
+                 '<script/><meta content="</script>x"></script>', "a self-closing <script/>"),
+                ("self-closed style with end tag in an attribute",
+                 '<style/><meta content="</style>x"></style>', "a self-closing <style/>"),
+                ("self-closed title with end tag in an attribute",
+                 '<title/><meta content="</title>x"></title>', "a self-closing <title/>"),
+                ("self-closed textarea", "<textarea/></textarea>", "a self-closing <textarea/>"),
+                ("self-closed noscript", "<noscript/>", "a self-closing <noscript/>"),
+                ("self-closed script before a comment", "<script/><!--x-->", "a self-closing <script/>"),
+                ("script end tag in an attribute", '<link title="</SCRIPT>" href="/x">',
+                 "an attribute value holding the end tag"),
+                ("noscript end tag in a comment", "<!-- </noscript> -->", "a comment holding the end tag"),
+                ("textarea end tag in a comment", "<!-- </textarea> -->", "a comment holding the end tag"),
+                ("noscript end tag in script text", "<script></noscript></script>",
+                 "the text of a <script> holding the end tag"),
+                ("double-escaped script", "<script><!--<script></script>x</script>", 'and then "<script"'),
+                ("svg style hiding a tag", '<svg><style><meta property="og:title" content="e"></style></svg>',
+                 "a <style> inside svg or math content"),
+                ("math integration point", "<math><mi>x</mi></math>", "a <mi> inside svg or math content"),
+                ("plaintext", "<plaintext>", "a <plaintext>"),
+                ("unterminated script", "<script>x", "has no plain </script> end tag"),
+                ("raw text end tag with an attribute", "<style>x</style a>", "has no plain </style> end tag"),
+                ("textarea text with a comment", "<textarea><!--x--></textarea>", 'markup-like "<"'),
+                ("start tag outside the plain shape", '<a b="1"c="2">', "a start tag outside the plain shape"),
+                ("end tag outside the plain shape", "</a b>", "an end tag that is not a name"),
+                ("comment never closes", "<!-- x", "a comment that never closes")):
+            _syntax_cases.append(("page syntax {} in {}".format(label, where), wrap(src), needle))
+    _syntax_cases.append(("page syntax late doctype", ok_head + "<!doctype html>", 'a "<!" construct'))
+    for label, page, needle in _syntax_cases:
+        _expect_raises(label, lambda p=page: _validate_head_tags(p, _own_url, "site/rules.html"),
+                       SchemaError, needle)
+    # Inside the accepted page syntax these pass, each on the accepted side of a refusal's line: a legacy
+    # script comment, "<!--" then "<scripts" (no delimiter after the name), "<script" with no "<!--" before
+    # it, script and style inside a template, a text element's name in an attribute without "</", "<" text
+    # in a title, an svg closed before a script, and a self-closed svg.
+    for label, page in (
+            ("head legacy script comment", ok_head.replace("<head>", "<head><script><!-- a() //--></script>", 1)),
+            ("head script comment then a script-like word",
+             ok_head.replace("<head>", "<head><script><!-- a <scripts --></script>", 1)),
+            ("head script start text without a comment",
+             ok_head.replace("<head>", '<head><script>a("<script>")</script>', 1)),
+            ("head script less-than comparison", ok_head.replace("<head>", "<head><script>if(a<!--b){}</script>", 1)),
+            ("head template script and style",
+             ok_head.replace("<head>", "<head><template><script>a()</script><style>p{}</style></template>", 1)),
+            ("head noscript whitespace", ok_head.replace("<head>", "<head><noscript> \n</noscript>", 1)),
+            ("body text element name without an end tag", ok_head + '<body><a title="/script">x</a></body>'),
+            ("body svg closed before a script", ok_head + "<body><svg><path d=\"M0\"/></svg><script>a()</script>"
+             "</body>"),
+            ("body self-closed svg before a style", ok_head + "<body><svg/><style>p{}</style></body>"),
+            ("body unquoted slash value", ok_head + "<body><a href=/x/>x</a></body>")):
+        case_count += 1
+        try:
+            _validate_head_tags(page, _own_url, "site/rules.html")
+        except SchemaError as exc:
+            failures.append("{}: unexpected SchemaError: {}".format(label, exc))
+    # The repository's own published pages pass (the check site.py runs over them too).
+    for _page_path in sorted((Path(__file__).resolve().parents[1] / SITE_DIR).glob("*.html")):
+        if _page_path.name == "404.html":
+            continue
+        case_count += 1
+        try:
+            _validate_head_tags(_page_path.read_text(encoding="utf-8"), page_url(SITE_DIR + "/" + _page_path.name),
+                                SITE_DIR + "/" + _page_path.name)
+        except SchemaError as exc:
+            failures.append("repository page {}: unexpected SchemaError: {}".format(_page_path.name, exc))
     # page_url derivation: the home page is the bare site root; every other page is its stem.
     case_count += 1
     if page_url("site/index.html") != SITE_BASE_URL:
