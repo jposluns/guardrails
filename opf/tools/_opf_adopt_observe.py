@@ -4455,6 +4455,8 @@ def self_test(vectors_only=False):
                     "resolver-vector/cleanup")
     detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
+    # The positive-held-slot vector's join of the worker it releases.
+    HELD_JOIN = 10.0
 
     class SlotProbe:
         # The real slot. The retained-slot bound is the only timed wait for
@@ -4615,10 +4617,15 @@ def self_test(vectors_only=False):
         # While that worker holds the slot, the cancellation sweep is not run:
         # its row is CANNOT-EVALUATE naming that run, so no row goes missing
         # and the exit is not 0. Run, the sweep raises on the held slot.
+        # The worker it releases is joined before it returns, so the next
+        # vector starts with no resolver worker alive; one that outlives
+        # HELD_JOIN fails this vector, not the next. The worker ends
+        # within milliseconds of its release when it is scheduled; the bound
+        # also covers a host that stalls it for several seconds.
         gate = threading.Event()
         case = ("vector/positive-held-slot", VALID, "archive", {"hold_after_publish": gate})
+        failures = []
         try:
-            failures = []
             run = run_case(base, contexts, case, False)
             if run[:2] != (True, VALID) or run[4:] != ([], ["after", "teardown"], [], [], []):
                 failures.append("the positive run was not a passing run with one straggler")
@@ -4637,9 +4644,12 @@ def self_test(vectors_only=False):
                     "detail": BLOCKED_SWEEP + case[0]}]:
                 failures.append("the cancellation sweep's row was not CANNOT-EVALUATE naming "
                                 + case[0])
-            results.append((VECTOR_NAMES[10], failures))
         finally:
             gate.set()
+            if join_resolvers(HELD_JOIN):
+                failures.append("the released resolver worker outlived its {} s join".format(
+                    HELD_JOIN))
+        results.append((VECTOR_NAMES[10], failures))
 
     def sweep_leaked_vector(base, contexts, results):
         # A slot held with no live resolver worker before the cancellation
@@ -4671,11 +4681,24 @@ def self_test(vectors_only=False):
             failures.append("the leaked slot did not fail the sweep's row INVALID")
         results.append((VECTOR_NAMES[11], failures))
 
+    def run_vector(vector, names, base, contexts, results):
+        # A vector that raises reports each of its names not yet reported as
+        # "cannot evaluate", naming the exception and its message, so the
+        # report says what could not be evaluated.
+        try:
+            vector(base, contexts, results)
+        except Exception as exc:
+            done = {name for name, _ in results}
+            reason = type(exc).__name__ + (": " + str(exc) if str(exc) else "")
+            results.extend((name, ["cannot evaluate: " + reason])
+                           for name in names if name not in done)
+
     def resolver_vectors(base, contexts):
         # Returns (name, failures) per vector; a vector that raises reports
         # "cannot evaluate". Every vector releases its hold, then all workers
         # are joined, and the cleanup vector requires none alive, the self-test
-        # lookup and the real slot still bound, and the slot free.
+        # lookup and the real slot still bound, the slot free, and a raising
+        # vector's report to carry its exception's message.
         results = []
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
@@ -4684,13 +4707,16 @@ def self_test(vectors_only=False):
                               (leaked_vector, VECTOR_NAMES[9:10]),
                               (held_slot_vector, VECTOR_NAMES[10:11]),
                               (sweep_leaked_vector, VECTOR_NAMES[11:12])):
-            try:
-                vector(base, contexts, results)
-            except Exception as exc:
-                done = {name for name, _ in results}
-                results.extend((name, ["cannot evaluate: " + type(exc).__name__])
-                               for name in names if name not in done)
+            run_vector(vector, names, base, contexts, results)
         failures = []
+
+        def raising(base, contexts, results):
+            raise AssertionError("the probe precondition does not hold")
+        probe = []
+        run_vector(raising, ("vector/raising",), base, contexts, probe)
+        if probe != [("vector/raising", ["cannot evaluate: AssertionError: "
+                                         "the probe precondition does not hold"])]:
+            failures.append("a raising vector's report did not name what it could not evaluate")
         if join_resolvers(5.0):
             failures.append("a resolver worker outlived the vectors")
         if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
