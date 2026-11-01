@@ -10,6 +10,8 @@ WHAT IT DOES
     content: an append creates a file only when it was absent). This hook reads the command before it runs and
     checks the filesystem at that moment: when a file the command would destroy already exists in the store
     and is not empty, the command is denied, and the reason names the file and its size and says how to go on.
+    An opt-in mode, off by default (APPEND MODE below), also denies a shell append onto an existing store file
+    and names the sanctioned route for store writes.
 
     Event: PreToolUse, matcher Bash. Register the launch line REGISTRATION (below the imports), filled with
     python3 and this file's absolute path. Output: nothing (allow), or ONE line holding the standard PreToolUse
@@ -44,7 +46,8 @@ IN SCOPE (judged exactly)
     - A redirection that truncates its file: `>`, `>|`, `&>`, and `>& FILE`, with or without a descriptor
       number or {name} before it, on any command, on a compound command, or on none (`: > f`, `> f`),
       including inside a substitution or a pipeline. Appending and read-write redirections (`>>`, `&>>`, `<>`)
-      and reads do not count. The write is followed through links.
+      and reads do not count (an append counts only in the APPEND MODE below). The write is followed through
+      links.
     - cp SOURCE DEST and mv SOURCE DEST, with exactly two operands, no option, and no glob, when DEST is not a
       directory: cp writes over DEST through a link, mv replaces the DEST entry. Not when SOURCE is a directory
       or the same file as DEST (both commands refuse).
@@ -63,6 +66,28 @@ IN SCOPE (judged exactly)
     (so a file the command itself creates before destroying it never fires), is empty, is not a regular file,
     is outside every store, or lies inside a `.git` directory within a store (git's own files, such as a stale
     index.lock); a `.git` directory removed whole is judged.
+
+APPEND MODE (opt-in, off by default)
+    The mode is on only when AIQT_STORE_ROOT itself is set and names a store (the legacy ORCH_STORE_ROOT alone
+    does not turn it on) and AIQT_STORE_WRITE_ROUTE holds a non-blank text naming the sanctioned route for
+    store writes (a designated applier, say); the reason quotes that text with its blank runs joined to one
+    space. AIQT_STORE_WRITE_ROUTE has no legacy name. With either setting unset, or the route empty or blank,
+    the hook behaves exactly as without the mode. In the mode it also denies an append onto a file that, at
+    the moment the hook runs, is inside a store, not inside a `.git` directory there, and is an existing
+    regular file of any size, empty included (the write is followed through links): an appending redirection
+    (`>>` or `&>>`, with or without a descriptor number or {name} before it), read wherever a truncating one
+    is read, and tee whose option words are each exactly `-a` or `--append`, at least one (no other option,
+    and no `-` or `--` word). An append onto a file that does not exist yet or lies outside every store, and a
+    read, are allowed. The `# record-rm-ok: <reason>` comment does not opt out of an append denial (it still
+    opts out of the destructions above); clearing AIQT_STORE_WRITE_ROUTE turns the mode off. A subagent's call
+    is judged by the mode like any other call: nothing is exempted on agent_id or agent_type. Append target
+    words count toward the 128-word bound below.
+    Not covered, in the mode as outside it: a write by an interpreter (python3, perl, and the like), an
+    editor, the Write and Edit tools (this hook reads only Bash calls), `bash -c` and `sh -c` strings, eval, a
+    script file, a read-write redirection (`<>`), tee -a with any other option (`-ai`, `-p`, a long option
+    prefix such as `--app`), and every form OUT OF SCOPE below. The mode trusts the environment it reads:
+    whoever can set or clear AIQT_STORE_ROOT or AIQT_STORE_WRITE_ROUTE in the hook's environment turns it on
+    or off, and the route text is quoted as given, never checked against any real route.
 
 OPERANDS AND THE DIRECTORY
     An operand is read from the command text: a word with its quoting removed; a leading `~` or `~/`; a parameter
@@ -92,18 +117,18 @@ OUT OF SCOPE (allowed, by design)
     install, dd, sed -i, perl -i, ln -sf over a file, an interpreter one-liner, an editor; cp and mv with any
     option (-n, -u, -b, --backup, -t, -T, -f, --exchange, and the like), with a glob, with more or fewer than
     two operands, or onto a directory; truncate with any size but zero or with any other option; tee with any
-    option; env -S strings; eval, `bash -c` and `sh -c` strings, xargs, a script file, and aliases and
-    functions defined in an earlier call; and a command run through a launcher other than the prefixes named
-    above (nice, stdbuf, busybox, a shell). Also out of scope, and allowed: an rm, cp, mv, truncate, or tee
-    whose argument words include one made by an expansion (a variable, `~`, or a glob) that expands to a word
-    beginning with `-` (`flag=-r; rm "$flag" DIR`, or a glob matching a file named `-rf`), since that word is
-    an option; an option value given through a variable (`truncate -s "$n"`); a word that uses one `for` list
-    variable more than once (`for n in a b; do rm "$n-$n.md"; done`), whose references are not correlated;
-    a `>&` redirection whose target holds an expansion (`>& "$fd"`), which may name a descriptor; and array
-    elements: an assignment to one (`f[0]=...`, `read f[0]`, `declare f[0]=...`) is not followed, though bash
-    applies index 0 to `$f` itself, so `f` keeps its earlier value (a stale value may be over-denied, and a new
-    one missed), and an array element read as an operand (`"${f[0]}"`) is not read. Moving
-    a record out of the store is not a loss this hook judges.
+    option (only the APPEND MODE judges tee -a and tee --append); env -S strings; eval, `bash -c` and `sh -c`
+    strings, xargs, a script file, and aliases and functions defined in an earlier call; and a command run
+    through a launcher other than the prefixes named above (nice, stdbuf, busybox, a shell). Also out of
+    scope, and allowed: an rm, cp, mv, truncate, or tee whose argument words include one made by an
+    expansion (a variable, `~`, or a glob) that expands to a word beginning with `-` (`flag=-r; rm "$flag"
+    DIR`, or a glob matching a file named `-rf`), since that word is an option; an option value given through
+    a variable (`truncate -s "$n"`); a word that uses one `for` list variable more than once (`for n in a b;
+    do rm "$n-$n.md"; done`), whose references are not correlated; a `>&` redirection whose target holds an
+    expansion (`>& "$fd"`), which may name a descriptor; and array elements: an assignment to one (`f[0]=...`,
+    `read f[0]`, `declare f[0]=...`) is not followed, though bash applies index 0 to `$f` itself, so `f` keeps
+    its earlier value (a stale value may be over-denied, and a new one missed), and an array element read as
+    an operand (`"${f[0]}"`) is not read. Moving a record out of the store is not a loss this hook judges.
 
 OPT-OUT
     For a destruction that is meant, end the command with a real shell comment whose text is
@@ -112,7 +137,8 @@ OPT-OUT
     It must follow the command's last token on the same line after a blank, be unquoted, and be the last
     non-blank content of the command; a marker inside quotes, on a here-document's body line, or followed by
     another command does not count. The marker is an explicit, recorded attestation: it does not prove the
-    file was read, and it does not verify a restore path.
+    file was read, and it does not verify a restore path. It does not opt out of an append the APPEND MODE
+    denies.
 
 THREAT MODEL
     This is an accidental-habit guard, not a security boundary. The actor is a well-meaning assistant that
@@ -868,6 +894,9 @@ _READERS = frozenset(("read", "mapfile", "readarray", "getopts", "unset", "let")
 _OPAQUE = frozenset(("eval", "source", "."))  # may change anything: directory and variables become unknown
 _LEAD_WORDS = frozenset(("!", "then", "else", "elif", "do"))
 _TRUNCATING = frozenset((">", ">|", "&>"))  # and `>& FILE` with no descriptor number (see _truncates)
+_APPENDING = frozenset((">>", "&>>"))  # judged only in the append mode
+_ROUTE_NAME = "AIQT_STORE_WRITE_ROUTE"  # the append mode's second setting; it has no legacy name
+_TEE_APPEND = frozenset(("-a", "--append"))
 _EXPAND_NAMES = frozenset(("AIQT_STORE_ROOT", "ORCH_STORE_ROOT", "HOME", "CLAUDE_PROJECT_DIR"))
 _NAME_AT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _ASSIGN_HEAD_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)(\+?)=")
@@ -891,6 +920,10 @@ _RM_LONG = {"force": "flag", "interactive": "opt", "one-file-system": "flag", "n
             "preserve-root": "opt", "recursive": "flag", "dir": "flag", "verbose": "flag", "help": "exit",
             "version": "exit"}
 
+_APPEND_REASON = ("record-remove-check (store writes go through their sanctioned route): this command {action}, an "
+                  "existing file under the working-record store {root}. While " + _ROUTE_NAME + " is set, a shell "
+                  "append onto an existing store file is refused. Write it through the sanctioned route instead: "
+                  "{route}")
 _LEAD = ("record-remove-check (a destructive operation requires a verified restore path; preserve uncommitted "
          "work): ")
 _REASON = (_LEAD + "this command {action}, an existing file under the working-record store {root}. It holds "
@@ -936,6 +969,17 @@ def _store_roots(env):
         if real.strip("/") and real not in roots:
             roots.append(real)
     return roots
+
+
+def _append_route(env):
+    """The route text the append mode quotes, or None when the mode is off: AIQT_STORE_ROOT itself must be set
+    (the legacy store name alone does not turn the mode on), and AIQT_STORE_WRITE_ROUTE must be a string with
+    no NUL and something besides blanks; its blank runs are joined to one space. The caller has already found a
+    store; the environment is trusted as given."""
+    raw = env.get(_ROUTE_NAME)
+    if "AIQT_STORE_ROOT" not in env or not isinstance(raw, str) or "\0" in raw:
+        return None
+    return " ".join(raw.split()) or None
 
 
 def _within(path, root):
@@ -1530,16 +1574,17 @@ def _nonempty_under(top, ctx, dev=None):
     return None
 
 
-def _store_file(path, follow, ctx):
+def _store_file(path, follow, ctx, empty=False):
     """(resolved path, root, stat) when path (resolved: followed through links when follow, else its parent only)
-    is a non-empty regular file in a store and not inside `.git` there, else None."""
+    is a non-empty regular file (with empty, one of any size) in a store and not inside `.git` there, else
+    None."""
     try:
         real = os.path.realpath(path) if follow else os.path.join(os.path.realpath(os.path.dirname(path) or "/"),
                                                                   os.path.basename(path))
         st = os.stat(real) if follow else os.lstat(real)
     except (OSError, ValueError):
         return None
-    if not stat.S_ISREG(st.st_mode) or st.st_size == 0:
+    if not stat.S_ISREG(st.st_mode) or (st.st_size == 0 and not empty):
         return None
     return next(((real, root, st) for root in ctx["roots"] if _within(real, root) and not _in_git(real, root)),
                 None)
@@ -1567,6 +1612,13 @@ def _check_write(path, kind, ctx, **extra):
     got = _store_file(path, True, ctx)
     if got:
         ctx["hit"] = _hit(kind, got[0], got[1], got[2], **extra)
+
+
+def _check_append(path, ctx, **extra):
+    """In the append mode: an append onto the existing regular file path reaches (through links), of any size."""
+    got = _store_file(path, True, ctx, empty=True)
+    if got:
+        ctx["hit"] = _hit("append", got[0], got[1], got[2], route=ctx["route"], **extra)
 
 
 # The commands in scope.
@@ -1646,6 +1698,19 @@ def _tee(args, toks, ctx, text, off, state, phys):
     for k in range(len(args)):
         for path in _paths(toks[k], ctx, text, off, state, phys):
             _check_write(path, "overwrite", ctx, tool="tee")
+            if ctx["hit"] is not None:
+                return
+
+
+def _tee_append(args, toks, ctx, text, off, state, phys):
+    """In the append mode: tee whose option words are each exactly -a or --append, at least one, with file
+    operands; each file is appended to. Any other option, `-`, or `--` leaves it out of scope."""
+    ops = [k for k, a in enumerate(args) if a not in _TEE_APPEND]
+    if len(ops) == len(args) or any(args[k].startswith("-") for k in ops):
+        return  # no append option, or another option word: out of scope
+    for k in ops:
+        for path in _paths(toks[k], ctx, text, off, state, phys):
+            _check_append(path, ctx, tool="tee")
             if ctx["hit"] is not None:
                 return
 
@@ -1858,13 +1923,17 @@ def _command(words, op, ctx, text, off, state, plain):
     phys = None if moved else state["cwd"]
     if name in ("rm", "truncate", "tee", "cp", "mv") and _expanded_option(arg_toks, ctx, text, off, state, phys):
         return  # an option word made by an expansion: out of scope
-    if name == "rm":
+    destroy = ctx["destroy"]  # False when the opt-out marker is present: only the append mode judges
+    if name == "rm" and destroy:
         _rm(args, arg_toks, ctx, text, off, state, phys)
-    elif name == "truncate":
+    elif name == "truncate" and destroy:
         _truncate(args, arg_toks, ctx, text, off, state, phys)
     elif name == "tee":
-        _tee(args, arg_toks, ctx, text, off, state, phys)
-    elif name in ("cp", "mv"):
+        if destroy:
+            _tee(args, arg_toks, ctx, text, off, state, phys)
+        if ctx["route"] is not None and ctx["hit"] is None:
+            _tee_append(args, arg_toks, ctx, text, off, state, phys)
+    elif name in ("cp", "mv") and destroy:
         _copy_or_move(name, args, arg_toks, ctx, text, off, state, phys)
     if moved:
         state["cwd"] = None
@@ -1944,9 +2013,16 @@ def _scan(toks, ctx, text, off, state, top):
                 return
         phys = state["cwd"]
         for fd, rop, target in redirs:
-            if _truncates(fd, rop, target, text, off):
+            if ctx["destroy"] and _truncates(fd, rop, target, text, off):
                 for path in _paths(target, ctx, text, off, state, phys):
                     _check_write(path, "truncate", ctx, op=rop)
+                if ctx["hit"] is not None or ctx["stop"]:
+                    return
+            elif ctx["route"] is not None and rop in _APPENDING and target is not None:
+                for path in _paths(target, ctx, text, off, state, phys):
+                    _check_append(path, ctx, op=rop)
+                    if ctx["hit"] is not None:
+                        break
                 if ctx["hit"] is not None or ctx["stop"]:
                     return
         if words:
@@ -1987,10 +2063,13 @@ def _verdict(cmd, roots, env, cwd):
         toks = _tokenize(text)
     except ValueError:
         return None  # unparseable, or past the work bound: fail open
-    if _marked(text):
+    route = _append_route(env)
+    marked = _marked(text)
+    if marked and route is None:
         return None
+    # destroy: the destruction checks run (the marker opts out of them, never out of the append mode)
     ctx = {"roots": roots, "env": env, "count": 0, "stop": False, "budget": _MAX_WALK, "bytes": _MAX_EXPANDED,
-           "hit": None}
+           "hit": None, "route": route, "destroy": not marked}
     start = None if cwd is None else os.path.normpath(cwd)
     _scan(toks, ctx, text, 0, {"cwd": start, "vars": {}, "held": None, "forgot": False}, True)
     return ctx["hit"]
@@ -2009,11 +2088,17 @@ def _deny_object(hit):
         action, noun = "would truncate %s to zero bytes with truncate" % path, "truncation"
     elif kind == "overwrite":
         action, noun = "would overwrite %s with %s" % (path, hit["tool"]), "overwrite"
+    elif kind == "append":
+        how = "tee in append mode" if hit.get("tool") == "tee" else "a '%s' redirection" % hit["op"]
+        action, noun = "would append to %s with %s" % (path, how), "append"
     else:
         action, noun = "would replace %s with mv" % path, "replacement"
     size = "%d byte%s" % (hit["size"], "" if hit["size"] == 1 else "s")
     mtime = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(hit["mtime"]))
-    reason = _REASON.format(action=action, root=root, size=size, mtime=mtime, example=shlex.quote(path))
+    if kind == "append":
+        reason = _APPEND_REASON.format(action=action, root=root, route=_show(hit["route"]))
+    else:
+        reason = _REASON.format(action=action, root=root, size=size, mtime=mtime, example=shlex.quote(path))
     note = "record-remove-check: blocked %s of existing store record %s (%s)." % (noun, path, size)
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
                                    "permissionDecisionReason": reason},
@@ -2956,6 +3041,101 @@ def _self_test():
             for c in ("(( a > b ))", "for ((i=0; i>b; i++)); do :; done", "while (( a > b )); do :; done"):
                 self.assertAllow(c, cwd=self.x.s)
             self.assertDeny("echo > b", cwd=self.x.s)
+
+        # the opt-in append mode: AIQT_STORE_ROOT and AIQT_STORE_WRITE_ROUTE both set
+        ROUTE = "the record applier (apply-record)"
+        APPENDS = ("echo x >> @S/X.md", "echo x &>> @S/X.md", "echo x 2>> @S/X.md", "echo x | tee -a @S/X.md",
+                   "echo x | tee --append @S/X.md", "cat >> @S/X.md <<'EOF'\nx\nEOF", "echo x >> @S/E.md",
+                   "echo x >> @O/l", "echo x | tee -a @O/a @S/X.md", "exec {fd}>> @S/X.md",
+                   "tee @O/a --append @S/X.md < /dev/null", "x=$(echo x >> @S/X.md)", "echo x >> X.md")
+
+        def mode_env(self, **extra):
+            env = dict(self.env, AIQT_STORE_WRITE_ROUTE=self.ROUTE)
+            env.update(extra)
+            return env
+
+        def assertAppendDeny(self, command, env=None, **kw):
+            out = self.decide(command, env=self.mode_env() if env is None else env, **kw)
+            self.assertIsNotNone(out, command)
+            h = out["hookSpecificOutput"]
+            self.assertEqual((h["hookEventName"], h["permissionDecision"]), ("PreToolUse", "deny"))
+            reason = h["permissionDecisionReason"]
+            self.assertTrue(reason.startswith("record-remove-check (store writes go through"), command)
+            self.assertIn("would append to ", reason)
+            self.assertNotIn("record-rm-ok", reason)  # the marker does not opt out of the mode
+            self.assertTrue(out["systemMessage"].startswith("record-remove-check: blocked append "), command)
+            return reason
+
+        def test_27_flip_append_mode_denies(self):
+            for c in self.APPENDS:
+                reason = self.assertAppendDeny(c, cwd=self.x.s if c.endswith(" X.md") else None)
+                self.assertTrue(reason.endswith("sanctioned route instead: " + self.ROUTE), c)
+            self.assertIn("with a '&>>' redirection", self.assertAppendDeny("echo x &>> @S/X.md"))
+            self.assertIn("with tee in append mode", self.assertAppendDeny("echo x | tee --append @S/X.md"))
+            self.assertTrue(self.assertAppendDeny("echo x >> @S/X.md", env=self.mode_env(
+                AIQT_STORE_WRITE_ROUTE="\ta \n b ")).endswith("instead: a b"))  # blank runs joined
+
+        def test_27_flip_append_mode_settings_unset(self):
+            off = ({"AIQT_STORE_ROOT": self.x.s}, {"AIQT_STORE_ROOT": self.x.s, "AIQT_STORE_WRITE_ROUTE": ""},
+                   {"AIQT_STORE_ROOT": self.x.s, "AIQT_STORE_WRITE_ROUTE": " \t\n"},
+                   {"AIQT_STORE_ROOT": self.x.s, "AIQT_STORE_WRITE_ROUTE": 7},
+                   {"AIQT_STORE_ROOT": self.x.s, "AIQT_STORE_WRITE_ROUTE": "a\0b"},
+                   {"AIQT_STORE_WRITE_ROUTE": self.ROUTE},
+                   {"AIQT_STORE_ROOT": "", "AIQT_STORE_WRITE_ROUTE": self.ROUTE},
+                   {"ORCH_STORE_ROOT": self.x.s, "AIQT_STORE_WRITE_ROUTE": self.ROUTE})
+            for env in off:
+                for c in self.APPENDS:
+                    self.assertAllow(c, env=env, cwd=self.x.s if c.endswith(" X.md") else None)
+            self.assertDeny("rm @S/X.md", env=off[0])  # the destruction checks stay as they were
+            self.assertIn("truncate", self.assertDeny("echo x > @S/X.md", env=off[-1]))
+
+        def test_27_append_mode_allows(self):
+            for c in ("echo x >> @S/new.md", "echo x | tee -a @S/new.md", "echo x >> @O/X.md",
+                      "echo x | tee -a @O/X.md", "cat @S/X.md", "cat < @S/X.md", "true <> @S/X.md",
+                      "echo x >> @S/.git/index.lock",
+                      "echo x | tee -ai @S/X.md", "echo x | tee -a - @S/X.md", "echo x | tee -a -- @S/X.md",
+                      "echo x | tee --app @S/X.md", "echo x | tee -a -p @S/X.md", "echo x >> @S/sub",
+                      "echo x >> @F/records-old/X.md", "echo 'x >> @S/X.md'", "cat <<EOF\n>> @S/X.md\nEOF",
+                      "[[ a >> @S/X.md ]]", "echo x >> @S/X.md\\", "flag=-a; tee \"$flag\" @S/X.md < /dev/null",
+                      "echo x 1>&2"):
+                self.assertAllow(c, env=self.mode_env())
+
+        def test_27_append_mode_keeps_destruction(self):
+            env = self.mode_env()
+            self.assertIn("would remove", self.assertDeny("rm @S/X.md", env=env))
+            self.assertIn("truncate", self.assertDeny("echo x > @S/X.md", env=env))
+            self.assertIn("with tee", self.assertDeny("echo x | tee @S/X.md", env=env))
+            self.assertAllow("rm @S/E.md", env=env)
+            self.assertAllow("rm @S/X.md # record-rm-ok: retired", env=env)
+            self.assertAppendDeny("echo x >> @S/X.md # record-rm-ok: by hand")  # the marker does not cover it
+            self.assertAppendDeny("rm @S/X.md; echo x >> @S/E.md # record-rm-ok: retired")
+
+        def test_27_flip_append_mode_subagent_judged(self):
+            for extra in ({"agent_id": "a1"}, {"agent_id": "a1", "agent_type": "general-purpose"},
+                          {"agent_type": "Explore"}, {"agent_id": ""}):
+                self.assertAppendDeny("echo x >> @S/X.md", **extra)
+                self.assertAllow("echo x >> @S/new.md", env=self.mode_env(), **extra)
+                self.assertAllow("echo x >> @S/X.md", **extra)  # the mode off: as before
+            env = dict(self.mode_env(), LC_ALL="C")
+            data = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "agent_id": "a1",
+                               "agent_type": "general-purpose",
+                               "tool_input": {"command": self.x.sub("echo x | tee -a @S/X.md")}}).encode()
+            rc, out, err = run_hook(data, env)
+            self.assertEqual((rc, err), (0, b""))
+            h = json.loads(out)["hookSpecificOutput"]
+            self.assertEqual(h["permissionDecision"], "deny")
+            self.assertIn(self.ROUTE, h["permissionDecisionReason"])
+            self.assertEqual(run_hook(data, dict(self.env, LC_ALL="C")), (0, b"", b""))  # the mode off
+
+        def test_27_append_mode_disclosed(self):
+            doc = " ".join((__doc__ or "").split())
+            for item in ("APPEND MODE (opt-in, off by default)", "AIQT_STORE_WRITE_ROUTE has no legacy name",
+                         "With either setting unset, or the route empty or blank, the hook behaves exactly as without",
+                         "a write by an interpreter", "an editor", "the Write and Edit tools", "`bash -c`", "eval",
+                         "a script file", "The mode trusts the environment it reads",
+                         "nothing is exempted on agent_id or agent_type",
+                         "does not opt out of an append the APPEND MODE denies"):
+                self.assertIn(item, doc, item)
 
         # the differential check against real bash
         def test_22_differential_bash(self):

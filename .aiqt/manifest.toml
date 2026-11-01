@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a34f65ffe6a78f4a1d783a2bd3714b106a0d228d38d3958d48fa501099706a2e"
+tree-sha256 = "e06b193c2cdab47194cf6f649dcb5b4a9b618fdea4da84e978151964b63a6311"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -86,8 +86,8 @@ sha256 = "45de1ea3ec956e07bcc04d7dd4f6279721d8bc6ee2326b471fad35da01ce660c"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
-bytes = 19458
-sha256 = "5abcd3d73c58dad02c8bc2bdf6bfd297c01ee14dd6fc3aa672b9f372d146f084"
+bytes = 19997
+sha256 = "97841feac43c2315a723ae48d4cc4978b79d9b677f1c2ada0bbec4e5760f66fd"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
@@ -2301,13 +2301,13 @@ sha256 = "9c29bdebdb607d3e5aedb9504f1f9dddbb26d3a2ca2fa32527727097c367ff55"
 
 [[sources]]
 path = ".preview/README.md"
-bytes = 68884
-sha256 = "e5924f69aee67e42e2d11365861c147a93c81b9d6b6f9f92d8ff61dfa240e4fe"
+bytes = 70722
+sha256 = "69ce46d0758e6615fa5c3f38545666c169212f46a4a94a6cbf6022abd8bc3348"
 
 [[sources]]
 path = ".preview/SHA256SUMS"
 bytes = 984
-sha256 = "6d76d7e2235927ad11109a71a8863659ffc9d6dd7e4ea2849ec27960131ed229"
+sha256 = "762b73ab9a963cd8c831fb8699a76c28634c959876c93567ff22b53ef169e03d"
 
 [[sources]]
 path = ".preview/char-policy-write.py"
@@ -2336,8 +2336,8 @@ sha256 = "b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f"
 
 [[sources]]
 path = ".preview/record-remove-check.py"
-bytes = 179578
-sha256 = "9ad3454daf7ea104a62ef022957f06e2584cdaff8d2d595dbcf2a0a8cfc9c366"
+bytes = 192079
+sha256 = "bb8412272fcaba0401621061396f01410cf282503210ce918468249d0245d376"
 
 [[sources]]
 path = ".preview/rerun-pass-check.py"
