@@ -12884,7 +12884,8 @@ def _main_isolated(report_path=None):
         # later `&` can be a hidden detach: in the unquoted here-document row the apostrophe leaves the scan
         # open while bash starts `sleep 1` in the background. The quoted here-document row, whose delimiter
         # line never comes, is the disclosed over-warn on a safe body. Each row holds an `&` the scan cannot
-        # place, since a command with no `&` byte holds no detach and the detector reads nothing in it.
+        # place, since a command with no `&` byte and no runtime start form holds no detach and the detector
+        # reads nothing in it.
         # Each row reads ("allow", False, False, False) with the guard keeping its silent allow on
         # "unbalanced", and the note check fails if it gives the detach note instead.
         ti_note_of = lambda res: (res[1] or {}).get("systemMessage", "")
@@ -13765,7 +13766,10 @@ def _main_isolated(report_path=None):
         # as shell text, so the apostrophe still denies: no delimiter line, a delimiter line that is not the
         # whole line (indented under <<, or ending in a carriage return), and a here-document in a subshell.
         # Here and in the body rows below, a body apostrophe denies only with an `&` after it, which the
-        # scan cannot show is quoted text: a command with no `&` byte holds no detach, and the guard allows it.
+        # scan cannot show is quoted text: a command with no `&` byte and no runtime start form holds no
+        # detach, and the guard allows it. Two rows deny on their `&` alone, apostrophe or not, since the
+        # scan reads that body as code and its `&` as a bare detach: the here-document in a subshell here,
+        # and the line with a second here-document in the outside-write-form rows below.
         check("trunc/fg-quoted-heredoc-then-amp-denies",
               _verdict(bg("cat > /abs/f <<'EOF'\nThe project's own material.\nEOF\nsleep 5 &", rib=False)),
               "deny")
@@ -14114,8 +14118,10 @@ def _main_isolated(report_path=None):
         # `)` or at a word start inside an open ${...}, so the foreground scan reads every one as
         # unbalanced, and the guard denies every one (a and b as the detach a lexer reading reaches). At the
         # base commit a and b denied as a detach and c to i allowed; the earlier comment rule allowed all
-        # nine. Vectors c to i each carry one `&` in text a comment holds in bash, so the guard has an `&`
-        # it cannot place; with no `&` byte the command holds no detach and the guard allows it.
+        # nine. Vectors c to h each carry one `&` in the text of their uncertain '#', which a comment holds
+        # in bash, so the guard has an `&` it cannot place. Vector i's `&` sits in a trailing comment every
+        # reading drops; it denies because its `(a)#b` is uncertain and the command holds an `&` byte. With
+        # no `&` byte and no runtime start form the command holds no detach and the guard allows it.
         _fg_hash_vectors = (
             'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
             'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
@@ -14155,7 +14161,8 @@ def _main_isolated(report_path=None):
               ["allow", "allow"])
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
         # that a bare '&' was found (before this fix it reused the bare-& detach reason). The body holds an
-        # '&' after the apostrophe: with no '&' byte the command holds no detach and the guard allows it.
+        # '&' after the apostrophe: with no '&' byte and no runtime start form the command holds no detach
+        # and the guard allows it.
         uq = bg("cat > f <<'EOF'\nthe user's & file\nEOX", rib=False)
         uq_reason = (uq[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         check("trunc/fg-unbalanced-quote-reason-names-quote",

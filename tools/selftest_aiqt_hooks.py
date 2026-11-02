@@ -2944,12 +2944,12 @@ def _psm_oracle(failures, handler):
 # command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
 # a '#' heading) written with cat, then hashed.
 _TRKASY_NOAMP_FULL = (
-    "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (row 66: ci-status)\n\n"
+    "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (the ci-status check)\n\n"
     "You are an independent reviewer. Check that the findings are fixed; do not just confirm.\n\n"
     "## Target\n\nRead MANIFEST.txt first: it lists what main/ and prev/ hold (with their sha256 values).\n"
-    "1. `bash tools/test-ci-status.sh` (claim: 216 ok, exit 0).\n"
+    "1. `bash tools/test-ci-status.sh` (expect: all pass, exit 0).\n"
     "2. A present null head_sha was reported as \"missing required field\".\n"
-    "Keep this well under one hour; this round's fix is the last commit.\nEOF\n"
+    "Keep this well under one hour; the branch's newest commit holds the fix.\nEOF\n"
     "sha256sum /abs/qa/brief.md")
 _TRKASY_NOAMP_ALLOW_ROWS = (
     ("trkasy-noamp-min", "'"),
@@ -2962,11 +2962,32 @@ _TRKASY_REAL_AMP_DENY_ROWS = (
     ("trkasy-amp-unquoted-heredoc-compound", "while read x; do sleep 1 & done <<EOF\nit's\nEOF"),
     ("trkasy-amp-after-noamp-full", _TRKASY_NOAMP_FULL + "\nsleep 5 &"),
 )
+# Runtime start forms that can start a background job with no '&' byte, each beside an apostrophe in a
+# here-document body read as code and beside an uncertain '#': the open quote or '#' still denies, since
+# the guard takes the no-'&' allow only for a command holding no such form. The plain forms are the
+# disclosed silent allow and are not rows here.
+_TRKASY_RUNTIME_START_FORMS = (
+    ("coproc", "coproc sleep 5"),
+    ("eval-runtime-amp", "eval \"sleep 5 $(printf '\\x26')\""),
+    ("setsid-f", "setsid -f sleep 5"),
+    ("herestring-bash", "bash <<< $'sleep 5 \\x26'"),
+    ("herestring-sh", "sh <<< $'sleep 5 \\x26'"),
+    ("source-file", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; source /abs/j.sh"),
+    ("dot-file", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; . /abs/j.sh"),
+    ("procsub-in", ": <(sleep 5)"),
+    ("procsub-out", ": >(sleep 5)"),
+    ("disown", "coproc sleep 5\ndisown"),
+)
+_TRKASY_RUNTIME_START_DENY_ROWS = tuple(
+    row for label, form in _TRKASY_RUNTIME_START_FORMS
+    for row in (("trkasy-start-heredoc-apos-" + label, "cat <<'EOF'\nit's\nEOF\n" + form),
+                ("trkasy-start-uncertain-hash-" + label, "(true)# x\n" + form)))
 
 
 def _test_trkasy_no_amp(failures, tmp):
     """Foreground trkasy rows in registry scope: each no-'&' row allows, and is red with the no-'&' branch of
-    _orch_foreground_detach_lexed restored to the raw scan's verdict; each real bare-'&' row denies."""
+    _orch_foreground_detach_lexed restored to the raw scan's verdict; each real bare-'&' row denies; each
+    runtime start form row denies, and is red with that branch allowing every command with no '&'."""
     root = tmp / "trkasy-noamp"
     (root / ".aiqt").mkdir(parents=True)
     (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
@@ -2980,7 +3001,26 @@ def _test_trkasy_no_amp(failures, tmp):
         got = _decision(handler, command, cwd=str(root))
         if got != "deny":
             failures.append("({}) a real bare '&' must deny in registry scope; got {}".format(label, got))
+    for label, command in _TRKASY_RUNTIME_START_DENY_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "deny":
+            failures.append("({}) a runtime start form beside an open quote or uncertain '#' must deny in "
+                            "registry scope; got {}".format(label, got))
     fixed = aiqt_hooks._orch_foreground_detach_lexed
+
+    def no_start_forms(command, lifts=None):
+        if "&" not in command:
+            return None
+        return fixed(command, lifts)
+    aiqt_hooks._orch_foreground_detach_lexed = no_start_forms
+    try:
+        for label, command in _TRKASY_RUNTIME_START_DENY_ROWS:
+            got = _decision(handler, command, cwd=str(root))
+            if got != "allow":
+                failures.append("({}-flip) the row must allow with the no-'&' branch allowing every command, "
+                                "so it pins the runtime start forms; got {}".format(label, got))
+    finally:
+        aiqt_hooks._orch_foreground_detach_lexed = fixed
 
     def unfixed(command, lifts=None):
         if "&" not in command:
@@ -5038,10 +5078,12 @@ def _deadline_hash_decision(name, shape, size):
     """The decision a handler must reach on an uncertain '#' shape of that size (_DEADLINE_HASH_DECISIONS)."""
     return _DEADLINE_HASH_DECISIONS.get((name, shape, size), _DEADLINE_HASH_DECISIONS.get((name, shape), "allow"))
 # The truncation guard times each uncertain '#' shape with one '&' glued to its last '#' word, one separator
-# or parenthesis fewer keeping the size: that '&' is comment text where the '#' starts a comment and a bare
-# detach where it does not, so the guard scans the whole command and denies it as a detach, as the pinned
-# base commit does. A command with no '&' byte holds no detach, which the guard allows without a scan, so
-# the shapes as written would time no scan there. The other handlers keep the shapes as written.
+# fewer keeping the size (paren_hash4 drops one parenthesis and is one byte shorter, n where it was n + 1):
+# that '&' is comment text where the '#' starts a comment and a bare detach where it does not, so the guard
+# scans the whole command and denies it, as a detach on four shapes and, on seps_hash5, with the open-quote
+# or uncertain '#' reason. A command with no '&' byte and no runtime start form holds no detach, which the
+# guard allows without a scan, so the shapes as written would time no scan there. The other handlers keep
+# the shapes as written.
 _DEADLINE_HASH_DETACH_SHAPES = {
     ("orch_truncation_guard", "seps_hash"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 21)
                                                                       + " #a #b #c #d&\n)"}),
@@ -5132,15 +5174,19 @@ _DEADLINE_SIZES = (65536, 262144, 1048576)
 # within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A further run on a
 # 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU (2.07 s on
 # nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. Each bound keeps a margin of
-# about 15, 6 and 3.4 times the slowest of those runs and stays under PRETOOL_BUDGET_SECONDS. These are
+# about 15, 6 and 3.4 times the slowest of those runs and stays under PRETOOL_BUDGET_SECONDS. The truncation
+# guard on seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of
+# CPU at 1 MB with Python 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are
 # measured bounds on these cases, not a complexity guarantee: they fail a return of the growth the old
 # scans had, but an implementation whose super-linear cost is small enough on these sizes fits all three.
 _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
 # Wall-clock seconds one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main() gives
 # the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
 # filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
-# the slowest wall-clock times above (at most 0.10, 0.49 and 2.07 s) the 8-second gate leaves a margin of
-# about 80, 16 and 3.9 times. A run over this bound fails, whatever a later run does: a case whose run
+# the slowest wall-clock times above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second gate leaves
+# a margin of about 80 and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&'
+# (_DEADLINE_HASH_DETACH_SHAPES) measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of
+# that, a margin of about 2.5 times. A run over this bound fails, whatever a later run does: a case whose run
 # reached a decision over it is run once more only as a diagnostic, and the failure carries both runs'
 # wall-clock times, CPU times and outcomes, so a stall of a loaded host is reported as one, never passed
 # over, and an intermittent wait cannot pass on its second run.
