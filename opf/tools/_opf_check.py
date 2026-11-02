@@ -2563,15 +2563,17 @@ class ArchiveRead:
     """What one archive walk held (archive_read). `tree` is "absent" (no archive tree: nothing rotated),
     "unreadable" (a tree exists but cannot be listed) or "listed". `records` lists one
     (location, type, body) triple per archived row the walk seated, in walk order, so a duplicate id
-    keeps every copy. `problems` lists every cannot-evaluate, finding and C-ROTATION message, a
-    duplicate archived id included. `complete` is False when any record population could not be read
-    or confirmed in full. `source_bytes` maps each store-relative path the walk parsed to the exact bytes
-    of that parse."""
-    __slots__ = ("tree", "records", "problems", "complete", "source_bytes")
+    keeps every copy. `worklog` lists one (location, entry) pair per archived worklog entry the walk
+    mapped, bucket by bucket in walk order and in ledger order within a bucket. `problems` lists every
+    cannot-evaluate, finding and C-ROTATION message, a duplicate archived id included. `complete` is
+    False when any record population could not be read or confirmed in full. `source_bytes` maps each
+    store-relative path the walk parsed to the exact bytes of that parse."""
+    __slots__ = ("tree", "records", "worklog", "problems", "complete", "source_bytes")
 
-    def __init__(self, tree, records, problems, complete, source_bytes):
+    def __init__(self, tree, records, worklog, problems, complete, source_bytes):
         self.tree = tree
         self.records = records
+        self.worklog = worklog
         self.problems = problems
         self.complete = complete
         self.source_bytes = source_bytes
@@ -2579,17 +2581,30 @@ class ArchiveRead:
 
 def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import_status, homes=1):
     """The archive as one _validate_archive walk read it, for a caller that must account the archive
-    inputs it renders from: the record bodies archived_records seats, the same problems (plus one per
-    archived id seated more than once, every copy kept), whether every population was read and
-    confirmed in full, and the bytes of each archive.toml, index and worklog the walk parsed. Those
-    bytes are the report's read cache (_read_toml, _gather_worklog), the first read of each path, which
-    is the read every returned record was parsed from; a destination probe that reads a path again
-    only adds a problem. A file that could not be read or parsed has no bytes and a problem names it.
-    A caller relies on the result only when `problems` is empty and `complete` is True."""
+    inputs it renders from: the record bodies archived_records seats, the archived worklog entries the
+    walk mapped, the problems archived_records returns plus one per archived id seated more than once
+    (every copy kept), whether every population was read and confirmed in full, and the bytes of each
+    archive.toml, index and worklog the walk parsed. Those bytes are the report's read cache
+    (_read_toml, _gather_worklog), the first read of each path. The bucket scan reads each manifest,
+    index and worklog once, and every returned record and worklog entry is parsed from that read. A
+    destination probe (_dest_index_has_id) reads an index again only where the bucket scan counted
+    nothing at that path; it never seats a record, and whatever it finds leaves `complete` False (a miss
+    also adds a finding). Where the scan read that path first, its bytes are the ones kept; where it did
+    not (the index was not listed, or its read failed), the probe's bytes are kept although no record
+    comes from them. A file that could not be read or parsed has no bytes and a problem names it.
+
+    Each problem names the check the doctor files it under, so the problems are not the doctor's
+    C-ARCHIVE-ENUM list alone: a non-terminal archived record, or a bucket that rotates records with no
+    worklog span, is a C-ROTATION message, as the doctor reports it; an archived id seated more than once
+    is a C-ID-SPACE message, which the doctor reports under C-ID-SPACE in its own wording. archive_read
+    reads no active records, so an archived id that repeats an active one is reported by the doctor
+    alone, and since it passes the walk no active locations, a destination naming one leaves `complete`
+    False where the doctor counts it. A caller relies on the result only when `problems` is empty and
+    `complete` is True."""
     rep = _Report()
     rep.ran("C-ARCHIVE-ENUM")
     unread, unconfirmed, walk = set(), set(), {}
-    archive_recs, _worklogs, rotatable = _validate_archive(
+    archive_recs, archive_worklogs, rotatable = _validate_archive(
         root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=homes,
         unread=unread, unconfirmed=unconfirmed, walk=walk)
     problems = rep.cannot + rep.findings + rotatable
@@ -2599,12 +2614,16 @@ def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import
             seen.setdefault(rec.id, []).append(rec.location)
     for rid in sorted(seen):
         if len(seen[rid]) > 1:
-            problems.append("C-ARCHIVE-ENUM: archived id {!r} is seated {} times ({}); every copy is kept "
-                            "and none stands for another (spec 11)".format(
+            problems.append("C-ID-SPACE: archived id {!r} is seated {} times ({}); every copy is kept "
+                            "and none stands for another (spec 8.2, 11)".format(
                                 rid, len(seen[rid]), ", ".join(seen[rid])))
     complete = not (rep.cannot or unread or unconfirmed)
     records = [(rec.location, rec.rtype, rec.body) for rec in archive_recs]
-    return ArchiveRead(walk.get("tree"), records, problems, complete, dict(rep.toml_reads))
+    # Each bucket's map holds the entries _gather_worklog parsed from the one read whose bytes the read
+    # cache keeps; an entry it left out (not a table, no WL id, a reused id) already made `complete` False.
+    worklog = [("archive/{}".format(year), entry)
+               for year, wl_map in archive_worklogs.items() for entry in wl_map.values()]
+    return ArchiveRead(walk.get("tree"), records, worklog, problems, complete, dict(rep.toml_reads))
 
 
 def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
@@ -10536,6 +10555,9 @@ def self_test():
                   (_rd.tree, _rd.complete, not _rd.problems) == (_tree, _complete, _clean))
             check("archive-read-{}-seats-every-read-row".format(_name),
                   [b.get("id") for _l, t, b in _rd.records if t == "pending_decision"] == _seated)
+            check("archive-read-{}-returns-the-parsed-worklog-entries".format(_name),
+                  _rd.worklog == [("archive/" + rel.split("/")[1], e) for rel in _parsed
+                                  if rel.endswith("/worklog.toml") for e in f[rel]["entry"]])
         f = clean_machine()
         _ar_case_several_years(f)
         f[_ar_pd] = idx([pd(1)])
@@ -10548,7 +10570,109 @@ def self_test():
               and _rd.records == [(r.location, r.rtype, r.body) for r in _lrecs])
         check("archive-read-duplicate-id-is-a-problem",
               _rd.problems[:len(_lprobs)] == _lprobs and len(_ar_dup) == 1
-              and "'PD-1' is seated 2 times" in _ar_dup[0])
+              and _ar_dup[0].startswith("C-ID-SPACE: archived id 'PD-1' is seated 2 times"))
+        # The doctor files that duplicate under C-ID-SPACE too, not under C-ARCHIVE-ENUM.
+        _ar_doc = run(f)
+        check("archive-read-duplicate-id-is-the-doctors-id-space-check",
+              _ar_doc is not None
+              and any("duplicate id 'PD-1'" in m for m in _ar_doc.by_check.get("C-ID-SPACE", []))
+              and not any("PD-1" in m for m in _ar_doc.by_check.get("C-ARCHIVE-ENUM", [])))
+
+        # A non-terminal archived record is a C-ROTATION problem, the message the doctor reports under its
+        # C-ROTATION check and not under C-ARCHIVE-ENUM.
+        f = clean_machine()
+        _ar_case_one_year(f)
+        f[_ar_pd] = idx([pd(1, status="open")])
+        _mrel, _legacy, _rd = _ar_run(f)
+        _ar_rot = [p for p in _rd.problems if p.startswith("C-ROTATION: archived record 'PD-1'")]
+        _ar_doc = run(f)
+        check("archive-read-non-terminal-record-is-the-doctors-rotation-problem",
+              len(_ar_rot) == 1 and _ar_doc is not None
+              and _ar_rot[0] in _ar_doc.by_check.get("C-ROTATION", [])
+              and _ar_rot[0] not in _ar_doc.by_check.get("C-ARCHIVE-ENUM", []))
+
+        # An archive holding only a rotated worklog seats no record, and its worklog entries come back,
+        # parsed from the bytes returned for that worklog.
+        f = clean_machine()
+        _mrel, _legacy, _rd = _ar_run(f)
+        check("archive-read-worklog-only-archive-returns-its-entries",
+              _rd.records == [] and _rd.complete and not _rd.problems
+              and [e.get("id") for _l, e in _rd.worklog] == ["WL-1", "WL-2"]
+              and _rd.source_bytes.get(_mrel + "/" + _ar_wl) == _ar_bytes(f[_ar_wl]))
+
+        # Each archive file is read once, and the records, worklog entries and bytes archive_read returns
+        # all come from that read: right after its first read each file is rewritten on disk with other
+        # content (another title, another summary, a comment before the manifest), so a second read would
+        # parse other bytes. The result must equal archive_read's over the unchanged tree, and a fresh read
+        # of the rewritten tree must differ from it, so the rewrite is visible to any second read. Red
+        # under a reader that walks the archive twice, keeping the first walk's bytes and returning the
+        # second walk's records.
+        from unittest.mock import patch as _ar_patch
+
+        def _ar_changed(machine):
+            out = {}
+            for rel, doc in machine.items():
+                if not rel.startswith("archive/"):
+                    continue
+                if rel.endswith("/archive.toml"):
+                    out[rel] = "# rewritten after the first read\n" + _ar_bytes(doc).decode("utf-8")
+                elif rel.endswith("/worklog.toml"):
+                    out[rel] = {"schema": 1, "entry": [dict(e, summary="rewritten") for e in doc["entry"]]}
+                else:
+                    out[rel] = idx([dict(r, title="rewritten") for r in doc["record"]])
+            return out
+
+        def _ar_single_read(machine):
+            changed = _ar_changed(machine)
+            _brel, _blegacy, base_read = _ar_run(machine)
+            aroot = build(machine)
+            ares = resolve_store(aroot)
+            disk = {ares.machine_rel + "/" + rel: Path(ares.store_root) / ares.machine_rel / rel
+                    for rel in changed}
+            counts = {}
+            real_read_contained = _journal._read_contained
+
+            def read_then_rewrite(fd, relpath, *args, **kwargs):
+                got = real_read_contained(fd, relpath, *args, **kwargs)
+                counts[relpath] = counts.get(relpath, 0) + 1
+                if counts[relpath] == 1 and relpath in disk:
+                    doc = changed[relpath[len(ares.machine_rel) + 1:]]
+                    disk[relpath].write_text(doc if isinstance(doc, str) else _opf_emit.emit(doc),
+                                             encoding="utf-8")
+                return got
+
+            afd = _open_store_root_fd(ares.store_root, ares.pointer_source != "default")
+            try:
+                atypes = _authoritative_types(_enabled_modules(machine["manifest.toml"]),
+                                              machine["manifest.toml"]["types"])
+                with _ar_patch.object(_journal, "_read_contained", read_then_rewrite):
+                    read = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+                again = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+            finally:
+                os.close(afd)
+            archive_counts = {p: n for p, n in counts.items() if p.startswith(ares.machine_rel + "/archive/")}
+            return (archive_counts == {p: 1 for p in disk}
+                    and read.complete and not read.problems and read.records and read.worklog
+                    and (read.records, read.worklog, read.source_bytes)
+                    == (base_read.records, base_read.worklog, base_read.source_bytes)
+                    and again.records != read.records and again.worklog != read.worklog
+                    and all(again.source_bytes.get(p) != read.source_bytes.get(p) for p in disk))
+
+        f = clean_machine()
+        _ar_case_several_years(f)
+        check("archive-read-reads-each-file-once-and-returns-that-read", _ar_single_read(f))
+        _real_validate_archive = _validate_archive
+
+        def _validate_archive_twice(*args, **kwargs):
+            _real_validate_archive(*args, **kwargs)
+            return _real_validate_archive(*args, **kwargs)
+
+        globals()["_validate_archive"] = _validate_archive_twice
+        try:
+            _ar_flipped = _ar_single_read(f)
+        finally:
+            globals()["_validate_archive"] = _real_validate_archive
+        check("archive-read-single-read-red-under-a-second-walk", not _ar_flipped)
 
         # The reader contract a decision view relies on: an archived pending decision comes back with the
         # bytes of the index it was parsed from and of the manifest that enumerates it. Red when the read
