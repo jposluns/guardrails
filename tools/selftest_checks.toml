@@ -2449,6 +2449,7 @@ expected-check-ids = [
   "harness/fault-channel-runtime-count-destructor-exit-2",
   "harness/fault-channel-lowlevel-local-finishing-clean",
   "harness/fault-channel-runtime-count-finishing-clean",
+  "harness/fault-channel-settle-bound-names-pending-term",
   "harness/fault-channel-subinterpreter-modules-unimportable",
   "harness/fault-channel-watchdog-armed-exit-2",
   "harness/fault-channel-exit-status-255-passes-through",
