@@ -2939,6 +2939,162 @@ def _psm_oracle(failures, handler):
                                                  run.stdout[:200], run.stderr[:200]))
 
 
+# Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
+# reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
+# command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
+# a '#' heading) written with cat, then hashed.
+_TRKASY_NOAMP_FULL = (
+    "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (the ci-status check)\n\n"
+    "You are an independent reviewer. Check that the findings are fixed; do not just confirm.\n\n"
+    "## Target\n\nRead MANIFEST.txt first: it lists what main/ and prev/ hold (with their sha256 values).\n"
+    "1. `bash tools/test-ci-status.sh` (expect: all pass, exit 0).\n"
+    "2. A present null head_sha was reported as \"missing required field\".\n"
+    "Keep this well under one hour; the branch's newest commit holds the fix.\nEOF\n"
+    "sha256sum /abs/qa/brief.md")
+_TRKASY_NOAMP_ALLOW_ROWS = (
+    ("trkasy-noamp-min", "'"),
+    ("trkasy-noamp-heredoc-min", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/f"),
+    ("trkasy-noamp-full", _TRKASY_NOAMP_FULL),
+)
+_TRKASY_REAL_AMP_DENY_ROWS = (
+    ("trkasy-amp-trailing", "sleep 5 &"),
+    ("trkasy-amp-then-command", "sleep 5 & echo done"),
+    ("trkasy-amp-unquoted-heredoc-compound", "while read x; do sleep 1 & done <<EOF\nit's\nEOF"),
+    ("trkasy-amp-after-noamp-full", _TRKASY_NOAMP_FULL + "\nsleep 5 &"),
+)
+# Runtime start forms that can start a background job with no '&' byte, each beside an apostrophe in a
+# here-document body read as code and beside an uncertain '#': the open quote or '#' still denies, since
+# the guard takes the no-'&' allow only for a command holding no such form. The plain forms are the
+# disclosed silent allow and are not rows here.
+_TRKASY_RUNTIME_START_FORMS = (
+    ("coproc", "coproc sleep 5"),
+    ("eval-runtime-amp", "eval \"sleep 5 $(printf '\\x26')\""),
+    ("setsid-f", "setsid -f sleep 5"),
+    ("herestring-bash", "bash <<< $'sleep 5 \\x26'"),
+    ("herestring-sh", "sh <<< $'sleep 5 \\x26'"),
+    ("source-file", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; source /abs/j.sh"),
+    ("dot-file", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; . /abs/j.sh"),
+    ("procsub-in", ": <(sleep 5)"),
+    ("procsub-out", ": >(sleep 5)"),
+    ("disown", "coproc sleep 5\ndisown"),
+    ("disown-alone", "disown -a"),
+)
+# The same forms split by a backslash-newline, which bash joins before it reads words, so each still runs.
+_TRKASY_RUNTIME_START_SPLIT_FORMS = (
+    ("split-eval", "ev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("split-coproc", "co\\\nproc sleep 5"),
+    ("split-procsub-in", ": <\\\n(sleep 5)"),
+    ("split-herestring", "bash <<\\\n< $'sleep 5 \\x26'"),
+    ("split-setsid", "set\\\nsid -f sleep 5"),
+    ("split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; sou\\\nrce /abs/j.sh"),
+)
+# eval spelled with quotes or a backslash, which bash removes before it runs the word.
+_TRKASY_RUNTIME_START_QUOTED_FORMS = (
+    ("quoted-eval-apos", "e'v'al \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-dq", "\"eval\" \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-backslash", "\\eval \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-inner-backslash", "ev\\al \"sleep 5 $(printf '\\x26')\""),
+)
+
+
+def _trkasy_start_rows(forms, contexts=("heredoc-apos", "uncertain-hash")):
+    """Deny rows for runtime start forms, each beside the named contexts: an apostrophe in a here-document body
+    read as code, and an uncertain '#'."""
+    prefixes = {"heredoc-apos": "cat <<'EOF'\nit's\nEOF\n", "uncertain-hash": "(true)# x\n"}
+    return tuple(("trkasy-start-" + context + "-" + label, prefixes[context] + form)
+                 for label, form in forms for context in contexts)
+
+
+_TRKASY_RUNTIME_START_DENY_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_FORMS)
+_TRKASY_RUNTIME_START_SPLIT_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_SPLIT_FORMS)
+_TRKASY_RUNTIME_START_QUOTED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_QUOTED_FORMS, ("heredoc-apos",))
+
+
+def _test_trkasy_no_amp(failures, tmp):
+    """Foreground trkasy rows in registry scope: each no-'&' row allows, and is red with the no-'&' branch of
+    _orch_foreground_detach_lexed restored to the raw scan's verdict; each real bare-'&' row denies; each
+    runtime start form row denies, and is red with that branch allowing every command with no '&'; each row
+    split by a backslash-newline is red with the search not joining those pairs; the disown-alone rows are
+    red with disown removed from the pattern; and the e'v'al and ev\\al rows are red with the search reading
+    the raw command ("eval" and \\eval match there too, so those rows deny either way)."""
+    root = tmp / "trkasy-noamp"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "allow":
+            failures.append("({}) a foreground command with no '&' must allow in registry scope; got {}"
+                            .format(label, got))
+    for label, command in _TRKASY_REAL_AMP_DENY_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "deny":
+            failures.append("({}) a real bare '&' must deny in registry scope; got {}".format(label, got))
+    start_rows = (_TRKASY_RUNTIME_START_DENY_ROWS + _TRKASY_RUNTIME_START_SPLIT_ROWS
+                  + _TRKASY_RUNTIME_START_QUOTED_ROWS)
+    for label, command in start_rows:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "deny":
+            failures.append("({}) a runtime start form beside an open quote or uncertain '#' must deny in "
+                            "registry scope; got {}".format(label, got))
+    text = aiqt_hooks._orch_runtime_start_text
+    pattern = aiqt_hooks._ORCH_RUNTIME_START_RE
+    no_disown = re.compile(pattern.pattern.replace("|disown", ""))
+    if no_disown.pattern == pattern.pattern:
+        failures.append("(trkasy-start-disown-flip) the runtime start pattern no longer holds |disown")
+    quoted_raw_red = tuple(row for row in _TRKASY_RUNTIME_START_QUOTED_ROWS
+                           if row[0].endswith(("-quoted-eval-apos", "-quoted-eval-inner-backslash")))
+    flips = (
+        ("join", "_orch_runtime_start_text",
+         lambda command: command.translate(aiqt_hooks._ORCH_RUNTIME_START_UNQUOTE),
+         _TRKASY_RUNTIME_START_SPLIT_ROWS, "the search not joining backslash-newline pairs"),
+        ("raw", "_orch_runtime_start_text", lambda command: command, quoted_raw_red,
+         "the search reading the raw command"),
+        ("disown", "_ORCH_RUNTIME_START_RE", no_disown,
+         tuple(row for row in _TRKASY_RUNTIME_START_DENY_ROWS if row[0].endswith("-disown-alone")),
+         "disown removed from the runtime start pattern"))
+    for flip, name, stand_in, rows, how in flips:
+        setattr(aiqt_hooks, name, stand_in)
+        try:
+            for label, command in rows:
+                got = _decision(handler, command, cwd=str(root))
+                if got != "allow":
+                    failures.append("({}-{}-flip) the row must allow with {}, so it pins that; got {}"
+                                    .format(label, flip, how, got))
+        finally:
+            aiqt_hooks._orch_runtime_start_text = text
+            aiqt_hooks._ORCH_RUNTIME_START_RE = pattern
+    fixed = aiqt_hooks._orch_foreground_detach_lexed
+
+    def no_start_forms(command, lifts=None):
+        if "&" not in command:
+            return None
+        return fixed(command, lifts)
+    aiqt_hooks._orch_foreground_detach_lexed = no_start_forms
+    try:
+        for label, command in start_rows:
+            got = _decision(handler, command, cwd=str(root))
+            if got != "allow":
+                failures.append("({}-flip) the row must allow with the no-'&' branch allowing every command, "
+                                "so it pins the runtime start forms; got {}".format(label, got))
+    finally:
+        aiqt_hooks._orch_foreground_detach_lexed = fixed
+
+    def unfixed(command, lifts=None):
+        if "&" not in command:
+            return aiqt_hooks._orch_foreground_detach_kind(command)
+        return fixed(command, lifts)
+    aiqt_hooks._orch_foreground_detach_lexed = unfixed
+    try:
+        for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+            got = _decision(handler, command, cwd=str(root))
+            if got != "deny":
+                failures.append("({}-flip) the row must deny with the no-'&' branch reading the raw scan, "
+                                "so it pins that branch; got {}".format(label, got))
+    finally:
+        aiqt_hooks._orch_foreground_detach_lexed = fixed
+
+
 def _test_pgrep_self_match(failures):
     """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
     must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
@@ -4979,6 +5135,25 @@ _DEADLINE_HASH_DECISIONS = {
 def _deadline_hash_decision(name, shape, size):
     """The decision a handler must reach on an uncertain '#' shape of that size (_DEADLINE_HASH_DECISIONS)."""
     return _DEADLINE_HASH_DECISIONS.get((name, shape, size), _DEADLINE_HASH_DECISIONS.get((name, shape), "allow"))
+# The truncation guard times each uncertain '#' shape with one '&' glued to its last '#' word, one separator
+# fewer keeping the size (paren_hash4 drops one '(' and one ')' and is one byte shorter, n where it was n + 1):
+# that '&' is comment text where the '#' starts a comment and a bare detach where it does not, so the guard
+# scans the whole command and denies it, as a detach on four shapes and, on seps_hash5, with the open-quote
+# or uncertain '#' reason. A command with no '&' byte and no runtime start form holds no detach, which the
+# guard allows without a scan, so the shapes as written would time no scan there. The other handlers keep
+# the shapes as written.
+_DEADLINE_HASH_DETACH_SHAPES = {
+    ("orch_truncation_guard", "seps_hash"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 21)
+                                                                      + " #a #b #c #d&\n)"}),
+    ("orch_truncation_guard", "seps_hash_lines"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 27)
+                                                                            + " #a\n #b\n #c\n #d&\n)"}),
+    ("orch_truncation_guard", "seps_hash_nested"): lambda n, base: ("Bash", {"command": "(((" + ";" * (n - 25)
+                                                                             + " #a #b #c #d&\n)))"}),
+    ("orch_truncation_guard", "paren_hash4"): lambda n, base: ("Bash", {"command": "(" * ((n - 13) // 2)
+                                                                        + " #a #b #c #d&\n" + ")" * ((n - 13) // 2)}),
+    ("orch_truncation_guard", "seps_hash5"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 25)
+                                                                       + " #a #b #c #d #e&\n)"}),
+}
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
@@ -5057,15 +5232,19 @@ _DEADLINE_SIZES = (65536, 262144, 1048576)
 # within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A further run on a
 # 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU (2.07 s on
 # nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. Each bound keeps a margin of
-# about 15, 6 and 3.4 times the slowest of those runs and stays under PRETOOL_BUDGET_SECONDS. These are
+# about 15, 6 and 3.4 times the slowest of those runs and stays under PRETOOL_BUDGET_SECONDS. The truncation
+# guard on seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of
+# CPU at 1 MB with Python 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are
 # measured bounds on these cases, not a complexity guarantee: they fail a return of the growth the old
 # scans had, but an implementation whose super-linear cost is small enough on these sizes fits all three.
 _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
 # Wall-clock seconds one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main() gives
 # the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
 # filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
-# the slowest wall-clock times above (at most 0.10, 0.49 and 2.07 s) the 8-second gate leaves a margin of
-# about 80, 16 and 3.9 times. A run over this bound fails, whatever a later run does: a case whose run
+# the slowest wall-clock times above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second gate leaves
+# a margin of about 80 and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&'
+# (_DEADLINE_HASH_DETACH_SHAPES) measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of
+# that, a margin of about 2.5 times. A run over this bound fails, whatever a later run does: a case whose run
 # reached a decision over it is run once more only as a diagnostic, and the failure carries both runs'
 # wall-clock times, CPU times and outcomes, so a stall of a loaded host is reported as one, never passed
 # over, and an intermittent wait cannot pass on its second run.
@@ -5110,7 +5289,7 @@ def _deadline_shape_case(name, shape, size, cwd):
     """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
     (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
     fired, "hard-block" for an exit 2, or "crash: <type>"."""
-    tool, tool_input = _DEADLINE_SHAPES[shape](size, cwd)
+    tool, tool_input = _DEADLINE_HASH_DETACH_SHAPES.get((name, shape), _DEADLINE_SHAPES[shape])(size, cwd)
     data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
             "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
     window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
@@ -27527,6 +27706,7 @@ def _main_isolated(monitor):
 
         _test_git_stash_ref(failures)
         _test_pgrep_self_match(failures)
+        _test_trkasy_no_amp(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
