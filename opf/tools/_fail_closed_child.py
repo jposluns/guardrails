@@ -33,13 +33,19 @@ never overwritten) as JSON {nonce, decided_code, check_ids, faults} and then RET
 ends with the interpreter's OWN exit status, the one carried by the exception that really ended it:
 the parent refuses a record whose decided code differs from that real status, so a confirmation
 spoofed by loaded code (a frameless main-thread read it arranges, as from an atexit callback through
-a C caller) at most produces a record the real exit status then contradicts. Any exit that settled
-nothing (a raw SystemExit, 0 included; an uncaught exception; an os._exit anywhere, which skips the
-finalizer and so leaves NO record) writes no record, and the finalizer's refusing paths end with
-os._exit(2), which drops unflushed buffers on file objects other than sys.stdout, sys.stderr,
-sys.__stdout__ and sys.__stderr__ (those four the finalizer flushes first); a refusing path writes
-no record and exits 2, so an os._exit there can only lose refusal diagnostics, never turn into a
-pass, while the reporting path defers to the interpreter, whose own teardown flushes what remains.
+a C caller) produces a record that stands or falls with the real exit status: the spoof is refused
+when that status differs from the decided code, while a spoof followed by an exit carrying the
+MATCHING status still reads as the decided code (the spoofed-confirmation residual disclosed in NOT
+YET COVERED below, pinned by its vector). Any exit that settled nothing (a raw SystemExit, 0
+included; an uncaught exception; an os._exit before the finalizer runs, which skips it and so leaves
+NO record) writes no record (an os._exit during interpreter teardown, after the finalizer returned,
+instead leaves the record in place and sets the real status the parent compares against it), and the
+finalizer's refusing paths end with os._exit(2), which drops unflushed buffers on file objects other
+than sys.stdout, sys.stderr, sys.__stdout__ and sys.__stderr__ (those four the finalizer flushes
+after its own-process check, so the forked-process refusal exits before any flush, and a flush that
+itself raises ends the attempt unflushed); a refusing path writes no record and exits 2, so an
+os._exit there can only lose refusal diagnostics, never turn into a pass, while the reporting path
+defers to the interpreter, whose own teardown flushes what remains.
 
 THE PARENT (minimal, this slice): run_child first calls the canonical child-status guard, carried
 below as the inline copy tools/check_child_status_coverage.py pins by AST to opf/tools/_child_status.py,
@@ -60,8 +66,12 @@ the exit callbacks are not yet observed here. The reporting path RETURNS instead
 os._exit(decided_code), trading away the no-loaded-code-runs-after-the-record property: interpreter
 teardown (destructors of objects still alive) runs after the record exists, and deliberately hostile
 code there could still end the process with a matching os._exit; in exchange the record no longer
-fixes the exit status by construction, so a spoofed confirmation alone is contradicted by the real
-exit status at the parent, which the os._exit form could not refuse. Deliberately hostile loaded code
+fixes the exit status by construction, so a spoofed confirmation is contradicted by the real exit
+status at the parent whenever that status differs from the decided code, which the os._exit form
+could not refuse. A spoofed confirmation whose later exit carries the MATCHING status (a caught
+exit_with(0), a frameless read of that exception's code arranged from atexit, then a raw sys.exit(0)
+or falling off the end) still reads as the decided code; that residual is not closed here, and its
+vector pins the disclosed behaviour. Deliberately hostile loaded code
 forging the record (the nonce is readable in process) or replacing this module's state in the child
 is the reporting-machinery residual the stronger contracts disclose; it is not closed here either.
 
@@ -99,6 +109,7 @@ import types
 
 NAME = "_fail_closed_child.py"
 CHILD_TIMEOUT = 120
+_RECORD_CAP = 1 << 20    # bytes; a genuine record is small, so anything larger is malformed
 _GC_PASSES = 3           # the bounded exit-time collection: stop early once a pass frees nothing
 _THREAD_START_EVENTS = ("_thread.start_new_thread", "_thread.start_joinable_thread")
 # The audit event CPython documents for the creation of an interpreter; receiving it is a fault. The
@@ -180,7 +191,9 @@ class _ChildExit(SystemExit):
     """The SystemExit that exit_with raises. When it ends the process the interpreter reads its code on
     the main thread with no Python frame on the stack; only such a read confirms this instance, and the
     finalizer writes the record only when the confirmed instance is the one the most recent exit_with
-    raised, so an exit_with whose exception was caught settles nothing."""
+    raised, so an exit_with whose exception was caught settles nothing unless loaded code itself
+    arranges such a frameless main-thread read of that instance afterwards (the disclosed
+    spoofed-confirmation residual, which the real exit status refuses only where it differs)."""
 
     @property
     def code(self, *, _getframe=sys._getframe, _get_ident=threading.get_ident, _STATE=_STATE,
@@ -429,13 +442,17 @@ def _child_env():
 
 def _read_record(record_path):
     """(parsed record or None, whether anything exists at the path). A record that exists but cannot
-    be read, decoded or parsed is (None, True), never a pass."""
+    be read, decoded or parsed is (None, True), never a pass and never a raise: the read is bounded
+    to _RECORD_CAP plus one byte, so a record over the cap is malformed like any other, where an
+    unbounded read of an oversized record could raise under memory pressure instead of refusing."""
     try:
         with open(record_path, "rb") as handle:
-            raw = handle.read()
+            raw = handle.read(_RECORD_CAP + 1)
     except FileNotFoundError:
         return None, False
-    except OSError:
+    except (OSError, MemoryError):
+        return None, True
+    if len(raw) > _RECORD_CAP:
         return None, True
     try:
         record = json.loads(raw.decode("utf-8"))
@@ -659,6 +676,24 @@ with open(fcc._STATE["record_path"], "x", encoding="utf-8") as handle:
 import os
 os._exit(0)
 """
+_CONFIRM_MATCHING_EXIT = """import atexit
+import sys
+import _fail_closed_child as fcc
+try:
+    fcc.exit_with(0)
+except SystemExit as exc:
+    saved = exc
+atexit.register(getattr, saved, "code")
+sys.exit(0)
+"""
+_OVERSIZED_RECORD = """import json
+import os
+import _fail_closed_child as fcc
+with open(fcc._STATE["record_path"], "x", encoding="utf-8") as handle:
+    json.dump({"nonce": fcc._STATE["nonce"], "decided_code": 0, "check_ids": [], "faults": []}, handle)
+    handle.write(" " * fcc._RECORD_CAP)
+os._exit(0)
+"""
 
 # One flip per vector family, each an exact single occurrence in this module's source, each written
 # here as adjacent string literals so the table's own text never matches the code it names.
@@ -723,6 +758,9 @@ FLIPS = {
     "deep-record-raises": (
         '    except (UnicodeDecodeError, ValueError, Recursion' 'Error, MemoryError):',
         '    except (UnicodeDecodeError, ValueError):'),
+    "oversized-record-accepted": (
+        '    if len(raw) > _RECORD' '_CAP:\n        return None, True',
+        '    if False and len(raw) > _RECORD_CAP:\n        return None, True'),
 }
 
 # (check id, payload source, sidecar file or None, expected summary, flip key). A summary is
@@ -768,6 +806,12 @@ VECTORS = (
     ("contract/thread-settle-rethrown-refused", _THREAD_SETTLE, None, (2, False, False),
      "thread-settle-accepted"),
     ("contract/deep-record-refused", _DEEP_RECORD, None, (2, True, False), "deep-record-raises"),
+    # the disclosed spoofed-confirmation residual: a spoof whose later exit carries the matching
+    # status reads as the decided code; this vector pins that disclosure, it does not endorse it
+    ("contract/spoofed-confirm-matching-exit-disclosed", _CONFIRM_MATCHING_EXIT, None,
+     (0, True, False), "record-write-broken"),
+    ("contract/oversized-record-refused", _OVERSIZED_RECORD, None, (2, True, False),
+     "oversized-record-accepted"),
 )
 
 
@@ -854,8 +898,10 @@ def self_test():
           "decided code outside 0 to 255, a settled 3, a dirty or lying thread exit, a raw _thread "
           "start, a wrong nonce, a record already present, stderr noise, a settle from a forked "
           "process, a caught exit, a spoofed confirmation before a raw exit 1, a thread's settle "
-          "rethrown from main and a record too deep to parse each read 2; every paired flip of this "
-          "module is red)".format(len(results)))
+          "rethrown from main, a record too deep to parse and a record over the size cap each read "
+          "2; a spoofed confirmation whose later exit carries the matching status reads the decided "
+          "code, the disclosed residual this suite pins; every paired flip of this module is "
+          "red)".format(len(results)))
     return 0
 
 
