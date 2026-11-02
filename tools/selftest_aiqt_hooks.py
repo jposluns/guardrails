@@ -2512,8 +2512,9 @@ def _test_coauthor_replay(failures, base):
     away that lands nothing and must allow. Each row is decided again under a flip that restores the drop
     or misreading it pins (a revision holding a blank dropped, one past the length bound or starting with '-'
     dropped, the --stdin text split at blanks or its '-' lines dropped, an unknown git cherry-pick option word
-    skipped, a help word dropping every revision read, a git rebase option read with no value, --root read as
-    <upstream>), where the deny vector must allow and the twin still allow."""
+    skipped, a help word dropping every revision read, a mode word dropping every revision read, a git rebase
+    option read with no value, --root read as <upstream>), where the deny vector must allow and the twin
+    still allow."""
     root = base / "replay"
     root.mkdir(parents=True, exist_ok=True)
     land_env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
@@ -2615,6 +2616,15 @@ def _test_coauthor_replay(failures, base):
                 return [], None
         return pick_of(verb, args)
 
+    def mode_drops_all(verb, args):
+        """The drop restored: a --quit, --continue, --abort or --skip word returns no revisions at all, so a
+        mode word this reading takes from a comment, a here-document body or de-quoted text that git never
+        receives (git runs the command and replays) drops every revision read."""
+        for word in args:
+            if word.startswith("--") and word[2:].partition("=")[0] in aiqt_hooks._CAB_PICK_MODES:
+                return [], None
+        return pick_of(verb, args)
+
     blank = dropping(lambda rev: re.search(r"\s", rev))
     stdin_split = {"_cab_stdin_lines": split_stdin}
     long_rev = "~0" * 520
@@ -2690,6 +2700,44 @@ def _test_coauthor_replay(failures, base):
          "git checkout -q subject-dirty\ngit revert --no-edit subject-dirty # -h",
          "git checkout -q subject-clean\ngit revert --no-edit subject-clean # -h",
          {"_cab_pick_revs": help_drops_all}),
+        # A mode word (--quit, --continue, --abort, --skip) only the hook reads (a # comment kept as words,
+        # a here-document body, de-quoted text): real git never receives it, runs the replay and lands the
+        # token, so a mode word must drop no revision already read or read after it. The flip restores the
+        # drop of every revision.
+        ("cab-replay-mode-comment-quit", "git cherry-pick plain-dirty # --quit",
+         "git cherry-pick plain-clean # --quit", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-continue", "git cherry-pick plain-dirty # --continue",
+         "git cherry-pick plain-clean # --continue", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-abort", "git cherry-pick plain-dirty # --abort",
+         "git cherry-pick plain-clean # --abort", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-skip", "git cherry-pick plain-dirty # --skip",
+         "git cherry-pick plain-clean # --skip", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-word", "git cherry-pick plain-dirty #see --quit",
+         "git cherry-pick plain-clean #see --quit", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-tab", "git cherry-pick plain-dirty\t# --continue",
+         "git cherry-pick plain-clean\t# --continue", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-redirect", "git cherry-pick plain-dirty 2>&1 >/dev/null # --abort",
+         "git cherry-pick plain-clean 2>&1 >/dev/null # --abort", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-newline", "git cherry-pick plain-dirty # --skip\necho done",
+         "git cherry-pick plain-clean # --skip\necho done", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-continued", "git cherry-pick plain-dirty \\\n # --quit",
+         "git cherry-pick plain-clean \\\n # --quit", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-chdir", "git -C . cherry-pick plain-dirty # --continue",
+         "git -C . cherry-pick plain-clean # --continue", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-range", "git cherry-pick main..plain-dirty # --abort",
+         "git cherry-pick main..plain-clean # --abort", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-comment-quote", "git cherry-pick plain-dirty # it's --skip",
+         "git cherry-pick plain-clean # it's --skip", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-heredoc", "git cherry-pick plain-dirty <<EOF # --quit\nbody\nEOF",
+         "git cherry-pick plain-clean <<EOF # --quit\nbody\nEOF", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-quoted-target", "git cherry-pick plain-dirty 2>\"e --continue\" # it's",
+         "git cherry-pick plain-clean 2>\"e --continue\" # it's", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-quoted-target-heredoc", "git cherry-pick plain-dirty 2>\"e --abort\" <<EOF\nit's\nEOF",
+         "git cherry-pick plain-clean 2>\"e --abort\" <<EOF\nit's\nEOF", {"_cab_pick_revs": mode_drops_all}),
+        ("cab-replay-mode-revert-subject",
+         "git checkout -q subject-dirty\ngit revert --no-edit subject-dirty # --quit",
+         "git checkout -q subject-clean\ngit revert --no-edit subject-clean # --quit",
+         {"_cab_pick_revs": mode_drops_all}),
     )
     for label, deny, twin, flip in rows:
         if not lands(deny):
@@ -2754,6 +2802,35 @@ def _test_coauthor_replay(failures, base):
         if got != (want, "deny") or flipped != "deny":
             failures.append("({}) expected {} for {!r} and deny for {!r}, and deny for the first with the help "
                             "words unread, got {} and {}".format(label, want, help_form, neighbour, got, flipped))
+    # Every mode form lands nothing ungated (git quits, resumes or abandons a replay in progress, or refuses
+    # the mode word beside a revision, and replays nothing here) and its neighbour lands the token. A mode
+    # word drops no revision, so only the bare forms, where no revision is read at all, allow; a mode word
+    # beside a revision whose message holds the token still denies, an over-denial disclosed in the residue.
+    # With the mode words read as revision-reader options (the flip) every mode form denies.
+    for label, mode_form, neighbour, want in (
+            ("cab-replay-mode-bare-quit", "git cherry-pick --quit", "git cherry-pick -x plain-dirty", "allow"),
+            ("cab-replay-mode-bare-continue", "git cherry-pick --continue", "git cherry-pick -x plain-dirty",
+             "allow"),
+            ("cab-replay-mode-bare-abort", "git cherry-pick --abort", "git cherry-pick -x plain-dirty", "allow"),
+            ("cab-replay-mode-bare-skip", "git cherry-pick --skip", "git cherry-pick -x plain-dirty", "allow"),
+            ("cab-replay-mode-bare-revert", "git revert --quit", "git cherry-pick -x plain-dirty", "allow"),
+            ("cab-replay-mode-after", "git cherry-pick plain-dirty --quit", "git cherry-pick plain-dirty -x",
+             "deny"),
+            ("cab-replay-mode-before", "git cherry-pick --continue plain-dirty", "git cherry-pick -x plain-dirty",
+             "deny")):
+        if lands(mode_form) or not lands(neighbour):
+            failures.append("({}) {!r} must land nothing and {!r} the token when run ungated".format(
+                label, mode_form, neighbour))
+        got = (decision(mode_form), decision(neighbour))
+        saved = aiqt_hooks._CAB_PICK_MODES
+        aiqt_hooks._CAB_PICK_MODES = frozenset()
+        try:
+            flipped = decision(mode_form)
+        finally:
+            aiqt_hooks._CAB_PICK_MODES = saved
+        if got != (want, "deny") or flipped != "deny":
+            failures.append("({}) expected {} for {!r} and deny for {!r}, and deny for the first with the mode "
+                            "words unread, got {} and {}".format(label, want, mode_form, neighbour, got, flipped))
     # The revision-walk options git hands to its revision reader stay refused, disclosed as over-denials: with
     # the token message the form lands it ungated, and with the clean one it lands none; both deny.
     for option in ("--no-merges", "--reverse", "--topo-order", "--no-walk", "-1"):

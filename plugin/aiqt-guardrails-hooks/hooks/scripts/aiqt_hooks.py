@@ -6077,6 +6077,10 @@ _CAB_GIT_DASH_VERBS = frozenset(("merge", "cherry-pick", "rebase", "revert"))
 # map to whether they take a value as the next word; --gpg-sign takes one only after '='.
 _CAB_PICK_FLAGS = {"cherry-pick": frozenset("nersx"), "revert": frozenset("ners")}
 _CAB_PICK_VALUE_FLAGS = frozenset("mX")
+# The mode words (--quit, --continue, --abort, --skip), passed over where this reading takes one as a long
+# option name before any '--': git with one quits, resumes or abandons a replay in progress and takes no
+# revision from the command, but the reading can take a mode word from a comment, a here-document body or
+# de-quoted text that git never receives, so a mode word drops no revision read before or after it.
 _CAB_PICK_MODES = frozenset(("quit", "continue", "abort", "skip"))
 # The help words, passed over where this reading takes one as a whole word before any '--': git prints the
 # usage and replays nothing, but the reading can take a help word from a comment, a here-document body or
@@ -6828,12 +6832,14 @@ def _cab_pick_revs(verb, args):
     its value is a revision, and after --end-of-options every word is. A '--' is dropped (the option reader
     drops it and the revision reader still reads the words after it). Every other option word refuses the
     stage (why), since git hands it to the revision reader, where it may name or select the commits replayed
-    (--all, --branches, --no-merges, -1). A '-' operand is the previous branch (@{-1}); with --quit,
-    --continue, --abort or --skip git takes no revision. A -h or --help read as a whole word before any '--'
-    is passed over and drops no revision: git prints its usage and replays nothing, but this reading can take
-    a help word from a comment, a here-document body or de-quoted text that git never receives, so every
-    revision read before or after one still counts (a bare help call reads none; a help word beside a
-    revision whose message holds the token is an over-denial)."""
+    (--all, --branches, --no-merges, -1). A '-' operand is the previous branch (@{-1}). A mode word (--quit,
+    --continue, --abort or --skip) read as a long option name, or a -h or --help read as a whole word, before
+    any '--' is passed over and drops no revision: git with a mode word quits, resumes or abandons a replay
+    in progress and takes no revision from the command, and with a help word prints its usage and replays
+    nothing, but this reading can take such a word from a comment, a here-document body or de-quoted text
+    that git never receives, so every revision read before or after one still counts (a bare mode or help
+    call reads none; a mode or help word beside a revision whose message holds the token is an over-denial).
+    After a '--' a mode word is read as an unknown option word and refuses the stage."""
     flags, long_names = _CAB_PICK_FLAGS[verb], _CAB_PICK_LONG[verb]
     revs, j, ended, dashed = [], 0, False, False
     while j < len(args):
@@ -6851,8 +6857,8 @@ def _cab_pick_revs(verb, args):
             dashed = True
         elif word.startswith("--"):
             name, eq, _value = word[2:].partition("=")
-            if name in _CAB_PICK_MODES:
-                return [], None
+            if name in _CAB_PICK_MODES and not dashed:
+                continue
             if name not in long_names:
                 return [], ("git {} takes the option {!r}, which git's revision reader may read as naming the "
                             "commits it replays (--all, --branches), so they cannot be read".format(verb, word[:80]))
