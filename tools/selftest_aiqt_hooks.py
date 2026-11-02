@@ -2989,10 +2989,23 @@ _TRKASY_RUNTIME_START_SPLIT_FORMS = (
     ("split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; sou\\\nrce /abs/j.sh"),
 )
 # A start word after a backslash-newline pair bash does not join (its backslash escaped, or ending a comment
-# line), so the word runs as written; removing the pair would glue it to the word before it.
+# line), so the word runs as written; removing the pair would glue it to the word before it. A pair inside
+# single quotes is one bash does not join either: a start word right after it, the quote closed before or
+# after the word, is glued the same way, and bash reads that word as part of the quoted word, so those rows
+# pin only that the scan's verdict stands.
 _TRKASY_RUNTIME_START_UNJOINED_FORMS = (
     ("unjoined-escaped-backslash-eval", ": x\\\\\neval \"sleep 5 $(printf '\\x26')\""),
     ("unjoined-comment-eval", "# note\\\neval \"sleep 5 $(printf '\\x26')\""),
+    ("unjoined-single-quote-closed-before-eval", "echo 'x\\\n'eval \"sleep 5 $(printf '\\x26')\""),
+    ("unjoined-single-quote-closed-after-eval", "echo 'x\\\neval' \"sleep 5 $(printf '\\x26')\""),
+)
+# DISCLOSED RESIDUAL, not a deny: a form split by a pair bash joins, right after a pair bash does not join,
+# matches in neither text the search reads (the pairs removed glue it to the word before it; kept, it stays
+# split), so the no-'&' allow is taken although bash runs the form. These rows assert that CURRENT allow,
+# so a change that closes or widens the residual fails here and has to update them.
+_TRKASY_RUNTIME_START_MIXED_RESIDUAL_FORMS = (
+    ("mixed-escaped-backslash-split-eval", ": x\\\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("mixed-comment-split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n# c\\\nsou\\\nrce /abs/j.sh"),
 )
 # eval spelled with quotes or a backslash, which bash removes before it runs the word.
 _TRKASY_RUNTIME_START_QUOTED_FORMS = (
@@ -3015,6 +3028,7 @@ _TRKASY_RUNTIME_START_DENY_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_FORMS
 _TRKASY_RUNTIME_START_SPLIT_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_SPLIT_FORMS)
 _TRKASY_RUNTIME_START_UNJOINED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_UNJOINED_FORMS)
 _TRKASY_RUNTIME_START_QUOTED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_QUOTED_FORMS, ("heredoc-apos",))
+_TRKASY_RUNTIME_START_MIXED_RESIDUAL_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_MIXED_RESIDUAL_FORMS)
 
 
 def _test_trkasy_no_amp(failures, tmp):
@@ -3025,7 +3039,8 @@ def _test_trkasy_no_amp(failures, tmp):
     with a start word after a pair bash does not join is red with the search reading only the text with
     every pair removed; the disown-alone rows are red with disown removed from the pattern; and the e'v'al
     and ev\\al rows are red with the search reading the raw command ("eval" and \\eval match there too, so
-    those rows deny either way)."""
+    those rows deny either way). Each disclosed-residual row (a form split by a pair bash joins, right after
+    a pair bash does not join) allows, the current behaviour, so a change to that residual shows here."""
     root = tmp / "trkasy-noamp"
     (root / ".aiqt").mkdir(parents=True)
     (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
@@ -3046,6 +3061,12 @@ def _test_trkasy_no_amp(failures, tmp):
         if got != "deny":
             failures.append("({}) a runtime start form beside an open quote or uncertain '#' must deny in "
                             "registry scope; got {}".format(label, got))
+    for label, command in _TRKASY_RUNTIME_START_MIXED_RESIDUAL_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "allow":
+            failures.append("({}) disclosed residual (a split start form right after a pair bash does not "
+                            "join) allows today; got {}, so update this row and the residual it pins"
+                            .format(label, got))
     readings = aiqt_hooks._orch_runtime_start_readings
     pattern = aiqt_hooks._ORCH_RUNTIME_START_RE
     no_disown = re.compile(pattern.pattern.replace("|disown", ""))

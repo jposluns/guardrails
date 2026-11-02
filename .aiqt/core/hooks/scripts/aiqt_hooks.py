@@ -23699,16 +23699,19 @@ def _orch_lexed_amp_places(command, amps):
 # source and a lone '.' (one at the start, or after a blank, newline, ';', '|', '(', '{' or backquote, with
 # a blank after it) read a file as code, and a here-string (<<<) fed to a shell is code too; a process
 # substitution, <( ) or >( ), runs its command asynchronously. The search reads two texts, each with every
-# quote and backslash removed, so e'v'al, "eval" and \eval match as well: the command as written, and the
-# command with every backslash-newline pair removed first, so a form split by a pair bash joins
-# (ev\<newline>al is eval, <\<newline>( a process substitution) is read whole. Not every pair is one bash
-# joins (one whose backslash is itself escaped, one ending a comment line, one inside single quotes), and
-# removing such a pair can glue a start word on the next line to the word before it, so a start form in
-# EITHER text keeps the scan's verdict: removing the pairs never lifts a deny the first text gives. A word
-# that matches only after a removal, or one in a body or comment, reads as a start form all the same, which
-# only keeps the scan's verdict. A '.' right after a ')' is not read (prose ends a sentence that way far
-# more often than a case pattern runs '.'), nor is a start word built at run time (from a variable or an
-# ANSI-C escape).
+# quote and backslash removed, so e'v'al, "eval" and \eval match as well: the command as written, which
+# reads a start form written whole, and the command with every backslash-newline pair removed first, which
+# reads a form split by a pair bash joins (ev\<newline>al is eval, <\<newline>( a process substitution)
+# whole. Not every pair is one bash joins (one whose backslash is itself escaped, one ending a comment line,
+# one inside single quotes), and removing such a pair can glue a start word on the next line to the word
+# before it, so a start form in EITHER text keeps the scan's verdict: removing the pairs never lifts a deny
+# the first text gives. Neither text reads a form split by a pair bash joins that sits right after a pair
+# bash does not join (: x\\<newline>ev\<newline>al, or a comment line ending in a backslash and then
+# sou\<newline>rce): the second text glues it to the word before it and the first keeps it split, so the
+# no-'&' allow is taken although bash runs the form (a disclosed residual). A word that matches only after
+# a removal, or one in a body or comment, reads as a start form all the same, which only keeps the scan's
+# verdict. A '.' right after a ')' is not read (prose ends a sentence that way far more often than a case
+# pattern runs '.'), nor is a start word built at run time (from a variable or an ANSI-C escape).
 _ORCH_RUNTIME_START_RE = re.compile(
     r"(?<![\w.-])(?:coproc|eval|setsid|disown|source)(?![\w.-])|(?<![^\s;|({`])\.(?=[ \t])|<<<|[<>]\(")
 _ORCH_RUNTIME_START_UNQUOTE = str.maketrans("", "", "'\"\\")
@@ -23716,8 +23719,11 @@ _ORCH_RUNTIME_START_UNQUOTE = str.maketrans("", "", "'\"\\")
 
 def _orch_runtime_start_readings(command):
     """The two texts the runtime start search (_ORCH_RUNTIME_START_RE) reads, a start form in either keeping
-    the scan's verdict: the command with every quote and backslash removed, and the command with every
-    backslash-newline pair removed first, then every quote and backslash."""
+    the scan's verdict: the command with every quote and backslash removed, which reads a start word written
+    whole (one after a pair bash does not join included), and the command with every backslash-newline pair
+    removed first, then every quote and backslash, which reads a form split by a pair bash joins. A form split
+    by a pair bash joins right after a pair bash does not join matches in neither (the second text glues it to
+    the word before it), a disclosed residual."""
     return (command.translate(_ORCH_RUNTIME_START_UNQUOTE),
             command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
 
