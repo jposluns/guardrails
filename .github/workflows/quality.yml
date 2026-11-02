@@ -384,6 +384,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
 
+      - name: OPF release import-history parser self-test (inert until the imported-release writer lands)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_release_history.py --self-test
+
       - name: OPF source-only init gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init.py --self-test
@@ -467,10 +471,11 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_observe.py --self-test --red-on-revert
 
-  # The closure work is split between five jobs because the whole roster's worst case does not fit
+  # The closure work is split between six jobs because the whole roster's worst case does not fit
   # one job's time limit, nor four once every leg whose command the config lanes also run is bounded
   # at or above the deadline those lanes give that command plus the launch margin (each leg bound
-  # is a deliberate shorter deadline, its expiry reported as LEG BOUND EXCEEDED, exit 2); the gate's
+  # is a deliberate shorter deadline, its expiry reported as LEG BOUND EXCEEDED, exit 2), and the
+  # sixth holds a leg the other five have no room for; the gate's
   # own self-test checks the partition (every leg in exactly one job) and each job's worst case
   # against that job's limit, and the flip (negative leg) runs in the job whose legs hold
   # opf-tooling-selftest.
@@ -603,6 +608,32 @@ jobs:
       - name: OPF standalone-closure gate
         shell: bash
         run: python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-e
+
+  opf-closure-f:
+    name: OPF standalone closure F
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-f
+
+      - name: OPF standalone-closure gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-f
 
   release:
     name: Corpus, release and versioning
@@ -1501,6 +1532,7 @@ jobs:
       - opf-closure-c
       - opf-closure-d
       - opf-closure-e
+      - opf-closure-f
       - release
       - generated
       - selftest-execution

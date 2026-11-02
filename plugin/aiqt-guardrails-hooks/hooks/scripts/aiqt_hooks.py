@@ -371,7 +371,8 @@ DENY_CONSTRUCTORS = (
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny", "_wrtscp_deny")
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
+    "_reset_ancestry_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -7531,8 +7532,16 @@ def _git_alias_spelled_segments(command):
             last_end = -1
         if words:
             segments.append(words)
+    # A word holding no '$', backquote or '{' is all literal, with no brace and no unquoted part: each of the three
+    # searches below finds nothing in it. Where the text holds none, every word is such a word, so each gets its
+    # record (the shared one the lexer gives it, _WORD_SPELLINGS) with no search.
+    marked = "$" in text or "`" in text or "{" in text
     spelled = []
     for seg in segments:
+        if not marked:
+            spelled.append(_SpelledWords(seg, [_WORD_SPELLINGS[4 * len(word)] if len(word) < 64
+                                               else _WordSpelling(len(word), False, False) for word in seg]))
+            continue
         spelling = []
         for word in seg:
             mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
@@ -9144,6 +9153,152 @@ def _reset_role(args):
     if mode == "soft":
         return ("allow", None)  # HEAD-only: the index and worktree are untouched
     return ("scoped", "git reset (an index or worktree reset that can drop staged or unstaged changes)")
+
+
+# git reset modes, for the ancestry check below. A soft reset keeps the older tree in the index and a mixed
+# reset (also the default) keeps it in the worktree, where a later 'git add -A' stages it again, so the next
+# commit records that tree. --hard, --keep and --merge rewrite tracked content to the target's tree, so they
+# leave no older tree to commit and are not judged by the ancestry check.
+_RESET_MODES = ("soft", "mixed", "hard", "keep", "merge")
+_RESET_ANCESTRY_MODES = frozenset(("soft", "mixed"))
+
+
+def _reset_commit_operand(args):
+    """(mode, operand) when a git reset moves HEAD to ONE commit operand under --soft, --mixed or no mode
+    (mode is "soft" or "mixed"); None otherwise: no operand, more than one operand (a path reset), any path
+    after '--', a path-scoped form (-p/--patch, --pathspec-from-file), or an effective --hard, --keep or
+    --merge. The last mode given wins and a mode is matched by unambiguous prefix, as git does; the ambiguous
+    '--m' (mixed or merge) is read as mixed, so it is judged. Options may follow operands, as git accepts;
+    '--end-of-options' ends the option region and '--' starts the paths. A lone '-' is git's shorthand for the
+    previous branch and is read as '@{-1}'. Pure: it runs nothing."""
+    mode = "mixed"
+    operands = []
+    end_of_options = False
+    for idx, a in enumerate(args):
+        if a == "--":
+            if args[idx + 1:]:
+                return None  # 'git reset <tree-ish> -- <paths>' resets paths and leaves HEAD where it is
+            break
+        if end_of_options or not a.startswith("-"):
+            operands.append(a)
+            continue
+        if a == "--end-of-options":
+            end_of_options = True
+            continue
+        if a == "-":
+            operands.append("@{-1}")
+            continue
+        if not a.startswith("--"):
+            if "p" in a[1:]:
+                return None  # a clustered -p: interactive patch mode is path-scoped
+            continue
+        name = a[2:].split("=", 1)[0]
+        if not name:
+            continue
+        if "patch".startswith(name) or "pathspec-from-file".startswith(name):
+            return None  # a path-scoped reset
+        if "=" in a:
+            continue  # no mode takes a value
+        matches = [m for m in _RESET_MODES if m.startswith(name)]
+        if len(matches) == 1:
+            mode = matches[0]
+        elif matches and set(matches) <= {"mixed", "merge"}:
+            mode = "mixed"  # an ambiguous '--m': judged, the safe direction
+    if mode not in _RESET_ANCESTRY_MODES or len(operands) != 1:
+        return None
+    return (mode, operands[0])
+
+
+def _reset_ancestry(repo, operand):
+    """Ask git, read-only and offline, whether a reset target is an ancestor of HEAD in `repo`. Returns
+    ('ancestor'|'not-ancestor'|'not-a-commit'|'no-commit-object'|'unknown', detail), read only from unmasked
+    git exit statuses, with the scrubbed environment of _branch_root_git. The operand is resolved alone and
+    the object it names is then peeled to a commit: appending '^{commit}' to the operand itself would change
+    what some operands name (everything after ':/' is a commit-message pattern, so ':/<text>^{commit}'
+    searches for the suffix too). 'not-a-commit': the operand resolves to no object (git then reads a single
+    operand as a path). 'no-commit-object': the operand resolves to an object that peels to no commit (a tree
+    or a blob), which git does not read as a path. 'unknown': no repository directory is known, git cannot be
+    launched or does not finish, HEAD resolves to no commit (an unborn branch or an unreadable repository),
+    the ancestry walk exits with anything but 0 or 1, or a repository that is shallow (or whose shallowness
+    cannot be read) answers 'not an ancestor' over history it may not hold."""
+    if not isinstance(repo, str) or not repo:
+        return ("unknown", "no repository directory could be resolved for it")
+    found = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", operand)
+    if found is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if found.returncode == 1 and not found.stdout.strip():
+        return ("not-a-commit", "{!r} resolves to no commit".format(operand))
+    if found.returncode != 0 or not found.stdout.strip():
+        return ("unknown", "git rev-parse exited {} resolving {!r}".format(found.returncode, operand))
+    found_sha = found.stdout.strip()
+    target = _branch_root_git(
+        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(found_sha))
+    if target is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if target.returncode == 1 and not target.stdout.strip():
+        return ("no-commit-object", found_sha)
+    if target.returncode != 0 or not target.stdout.strip():
+        return ("unknown", "git rev-parse exited {} peeling {} to a commit".format(target.returncode, found_sha))
+    target_sha = target.stdout.strip()
+    head = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
+        return ("unknown", "HEAD resolves to no commit (an unborn branch or an unreadable repository)")
+    walk = _branch_root_git(repo, "merge-base", "--is-ancestor", target_sha, head.stdout.strip())
+    if walk is None:
+        return ("unknown", "git merge-base could not be launched or did not finish")
+    if walk.returncode == 0:
+        return ("ancestor", target_sha)
+    if walk.returncode != 1:
+        return ("unknown", "git merge-base --is-ancestor exited {}".format(walk.returncode))
+    shallow = _branch_root_git(repo, "rev-parse", "--is-shallow-repository")
+    if shallow is None or shallow.returncode != 0 or shallow.stdout.strip() != "false":
+        return ("unknown", "the repository is shallow, or its shallowness cannot be read, so a missing "
+                           "ancestry may only be missing history")
+    return ("not-ancestor", target_sha)
+
+
+def _reset_ancestry_refusal(args, repo, cannot):
+    """(mode, operand, what) for a git reset that moves HEAD to one commit (_reset_commit_operand) which is
+    not an ancestor of HEAD, or None when the reset is outside this check or its target is an ancestor. Such a
+    reset keeps the older tree in the index or worktree, so the next commit records it on top of the newer
+    history and reverts every change made since (a fold onto a newer main reverts that main). A probe that
+    cannot evaluate denies: `cannot` is a reason the repository the reset acts on cannot be established from
+    the command (the probe is then not run), and an 'unknown' probe denies as well. A soft reset whose operand
+    resolves to no object denies; a mixed reset whose single operand resolves to no object is a path reset,
+    and the caller's decision stands. An operand that resolves to an object that peels to no commit denies in
+    every mode. A target that equals HEAD or lies behind it is an ancestor and passes. The undo-amend
+    form 'HEAD@{1}' names the pre-amend commit, which is not an ancestor of the amended one, so it denies.
+    The caller returns _reset_ancestry_deny of a refusal."""
+    found = _reset_commit_operand(args)
+    if found is None:
+        return None
+    mode, operand = found
+    verdict, detail = ("unknown", cannot) if cannot is not None else _reset_ancestry(repo, operand)
+    if verdict == "ancestor" or (verdict == "not-a-commit" and mode == "mixed"):
+        return None
+    if verdict == "not-ancestor":
+        what = "moves HEAD to {}, which is not an ancestor of HEAD".format(detail)
+    elif verdict == "not-a-commit":
+        what = "names {!r}, which resolves to no commit".format(operand)
+    elif verdict == "no-commit-object":
+        what = "names {!r}, which resolves to {}, an object that is no commit".format(operand, detail)
+    else:
+        what = "could not be checked against HEAD's ancestry ({})".format(detail)
+    return (mode, operand, what)
+
+
+def _reset_ancestry_deny(refusal, alts):
+    """The deny for a refusal from _reset_ancestry_refusal; it gives the portable fold recipe and names no
+    repository-local tool."""
+    mode, operand, what = refusal
+    return _deny(
+        "AIQT rule brnrot (branch-rooted-on-live-main): this {} reset to {!r} {}. A reset that moves HEAD to a "
+        "commit that is not an ancestor of HEAD keeps the older tree in the index or worktree, so the next "
+        "commit records that tree on top of the newer history and reverts every change made there since; "
+        "denied rather than run. To fold a branch's commits onto its base, run git merge-base HEAD <ref> "
+        "and then git reset --soft <printed sha>, which this guard allows. {}".format(mode, operand, what, alts),
+        "AIQT guardrail: denied a git reset to a commit that is not an ancestor of HEAD (rule brnrot); "
+        "reset to the merge base instead.")
 
 
 # git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
@@ -11272,6 +11427,20 @@ def _discard_cd_target(operands):
     return _discard_literal_abs_path(path)
 
 
+def _discard_grammar_git_target(words, eff):
+    """(directory, subcommand, args) of a git segment the grammar ACCEPTED (_discard_git_segment_grammar):
+    its only global options are '-C <absolute literal path>' pairs, the last of which names the directory;
+    otherwise the directory is `eff` (None when unprovable)."""
+    seg_dir = eff
+    i = 1
+    while i + 1 < len(words) and words[i][0] == "-C":
+        seg_dir = _discard_literal_abs_path(words[i + 1][0])
+        i += 2
+    if i >= len(words):
+        return (seg_dir, None, [])
+    return (seg_dir, words[i][0], [t for t, _q in words[i + 1:]])
+
+
 def _discard_git_segment_grammar(words, eff):
     """Validate ONE segment whose bare command word is 'git' against the positive grammar. `words` is
     the full (text, quoted) token list (words[0] is 'git'); `eff` is the tracked effective directory,
@@ -11398,8 +11567,11 @@ def _discard_positive_grammar(command, cwd):
       deny            - None, or (kind, what) naming the first grammar violation
       snapshot_bases  - the resolved repo dir of every accepted worktree-discard segment
       stash_ops       - (repo dir, op word) of every accepted stash drop/clear segment
-      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)"""
-    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set()}
+      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)
+      reset_checks    - (directory or None, args, moved) of every accepted git reset that moves HEAD to one
+                        commit (_reset_commit_operand); moved says an earlier segment is a recognized lossy
+                        verb, which may already have moved HEAD before the reset runs"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": []}
     items, bad = _discard_grammar_lex(command)
     if bad is None:
         segments, bad = _discard_grammar_segments(items)
@@ -11439,6 +11611,9 @@ def _discard_positive_grammar(command, cwd):
                 out["deny"] = (res[1], res[2])
                 return out
             _act, _base, _label = res[1], res[2], res[3]
+            r_dir, r_sub, r_args = _discard_grammar_git_target(words, eff)
+            if r_sub == "reset" and _reset_commit_operand(r_args) is not None:
+                out["reset_checks"].append((r_dir, r_args, lossy_segs > 0))
             if _act is not None:
                 lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
             if _act == "snapshot":
@@ -11735,7 +11910,8 @@ def git_discard(data):
     non-pristine path and the unparseable fallback never read the name, so there the prefixed command gets
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
-    reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
+    reflog-recoverable; a reset that moves HEAD to one commit that is not an ancestor of HEAD, or whose
+    ancestry cannot be evaluated, DENIES under brnrot, see _reset_ancestry_refusal) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
     verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
     missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
@@ -11966,6 +12142,19 @@ def git_discard(data):
             g_kind, g_what = walk["deny"]
             g_reason, g_banner = _DISCARD_GRAMMAR_DENY_TEXTS[g_kind]
             return _deny(g_reason.format(g_what, _DISCARD_ALTS), g_banner)
+        # Every accepted reset that moves HEAD to one commit is judged against HEAD's ancestry in the
+        # directory the grammar resolved for it, before any preservation or snapshot. An earlier lossy
+        # segment may move HEAD before the reset runs, and an unprovable directory names no repository, so
+        # either cannot be evaluated here and denies.
+        for r_dir, r_args, r_moved in walk["reset_checks"]:
+            r_cannot = None
+            if r_moved:
+                r_cannot = "an earlier segment of this command may move HEAD before the reset runs"
+            elif r_dir is None:
+                r_cannot = "the directory it runs in cannot be established"
+            r_refusal = _reset_ancestry_refusal(r_args, r_dir, r_cannot)
+            if r_refusal is not None:
+                return _reset_ancestry_deny(r_refusal, _DISCARD_ALTS)
         np_verb = next(iter(sorted(walk["subs"])), "discard")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
         # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
@@ -12061,6 +12250,26 @@ def git_discard(data):
     # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
     # target a DESTRUCTIVE form DENIES below (fail closed): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
+    # A reset that moves HEAD to one commit is judged against HEAD's ancestry before any snapshot or role
+    # decision (_reset_ancestry_refusal); a reset with no commit operand is untouched. The probe reads the
+    # repository the reset acts on: the session directory, or the -C target. Under an ambient GIT_* override,
+    # a --git-dir/--work-tree/--bare redirect, a leading GIT_DIR/GIT_WORK_TREE assignment or an unresolvable
+    # -C, that repository cannot be established from the command, so the reset denies.
+    if sub == "reset":
+        r_cwd = data.get("cwd")
+        r_cwd = r_cwd if isinstance(r_cwd, str) and r_cwd else None
+        r_cannot = None
+        if ambient_override:
+            r_cannot = "a non-cosmetic ambient GIT_* variable shapes the repository it acts on"
+        elif _segment_has_path_redirect(pristine):
+            r_cannot = ("a --git-dir, --work-tree or --bare redirect, or a leading GIT_DIR or GIT_WORK_TREE "
+                        "assignment, shapes the repository it acts on")
+        r_repo = None if r_cannot is not None else _segment_repo_dir(pristine, r_cwd)
+        if r_repo == "opaque":
+            r_cannot = "its -C target cannot be resolved"
+        r_refusal = _reset_ancestry_refusal(args, r_cwd if r_repo is None else r_repo, r_cannot)
+        if r_refusal is not None:
+            return _reset_ancestry_deny(r_refusal, alts)
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
         cwd_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
@@ -16320,7 +16529,12 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
+# The kind a caller of _gate_weakening_fallback passes when it has not read _gate_weakening_fallback_kind of the
+# command (whose own results include None), so the fallback reads it itself.
+_GATE_KIND_UNREAD = object()
+
+
+def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind=_GATE_KIND_UNREAD):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -16337,8 +16551,10 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies."""
-    kind = _gate_weakening_fallback_kind(command)
+    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command)
+    as the caller has just read it, so the raw probes are not run over the command a second time."""
+    if kind is _GATE_KIND_UNREAD:
+        kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -16569,9 +16785,11 @@ def _gate_weakening_fallback_kind(command):
         return "no-verify"
     if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
         return "short-n"
-    if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
-            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+    # The swallow and sink probes are read first: each is a short literal scan, where the checker keyword
+    # alternation tries every word start, so a command with no such spelling skips that scan.
+    if ((_RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command)))
+            and _RAW_CHECKER_RE.search(command)):
         return "swallow"
     return None
 
@@ -16680,6 +16898,8 @@ _GATE_BASH_ESCAPE_RE = re.compile(
     r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
     r"|c(\\\\|.)|(.))", re.S)
 _GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
+# A run of characters _gate_shell_level keeps as they stand: none is a backslash, a quote or a '$'.
+_GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
 
 # Where the bash-model readings split words: bash's blanks (space, tab and newline, not the other characters
 # Python's str.split() treats as whitespace) and every shell operator character and opener (; & | ( ) < > and
@@ -16755,8 +16975,15 @@ def _gate_shell_level(text):
                 i += 1
             i += 1
         else:
-            out.append(c)
-            i += 1
+            # A run of characters none of which opens anything at this level is kept as it stands, in one copy
+            # rather than one step per character; a '$' before no quote is kept on its own.
+            run = _GATE_SHELL_LEVEL_PLAIN_RE.match(text, i)
+            if run is None:
+                out.append(c)
+                i += 1
+            else:
+                out.append(run.group())
+                i = run.end()
     return "".join(out)
 
 
@@ -16765,8 +16992,18 @@ def _gate_reading_words(text):
     stands, a '$' before a quote and every quote character and backslash left in text removed, the rest split at
     _GATE_WORD_BREAK_RE, and a 'git' word added after an option word whose attached value names git, as in
     _gate_dequoted_words."""
+    return _gate_plain_words(_gate_reading_plain(text))
+
+
+def _gate_reading_plain(text):
+    """The text _gate_reading_words splits into words: env -S's \\_ read as a blank, then a '$' before a quote and
+    every quote character and backslash removed."""
     plain = re.sub(r"\$(?=['\"])", "", text.replace("\\_", " "))
-    plain = plain.replace("'", "").replace('"', "").replace(chr(92), "")
+    return plain.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+def _gate_plain_words(plain):
+    """The words of _gate_reading_words for its text made plain (_gate_reading_plain)."""
     words = []
     for w in _GATE_WORD_BREAK_RE.split(plain):
         if not w:
@@ -16784,12 +17021,20 @@ def _gate_bash_readings(text):
     """The word lists of the bash-model readings of text, its line continuations joined first: the text at its
     own quoting level as bash reads it (_gate_shell_level), that result read once more as the shell it is handed
     to reads it (sh -c, eval or env -S, one level in), and the text with every ANSI-C $'...' quote the raw match
-    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words."""
+    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words.
+    Readings that are the same text once made plain (_gate_reading_plain) have the same words, so those words are
+    split once and the one list stands for each such reading; no reader of the lists changes one."""
     joined = _join_continuations(text)[0]
     outer = _gate_shell_level(joined)
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _gate_ansi_c_text(m.group(1)), joined)
-    return (_gate_reading_words(outer), _gate_reading_words(_gate_shell_level(outer)),
-            _gate_reading_words(decoded))
+    split = {}
+    readings = []
+    for reading in (outer, _gate_shell_level(outer), decoded):
+        plain = _gate_reading_plain(reading)
+        if plain not in split:
+            split[plain] = _gate_plain_words(plain)
+        readings.append(split[plain])
+    return tuple(readings)
 
 
 def _gate_any_word_bypass(words, first=None):
@@ -16812,7 +17057,8 @@ def _gate_any_word_bypass(words, first=None):
                 found = (w, "a --no-verify spelling")
             elif short_at is not None and w in _NOVERIFY_SHORT_N_VERBS:
                 found = (w, "the short -n (--no-verify) in {!r}".format(words[short_at][:40]))
-        if _has_long_prefix((w,), "no-verify"):
+        # _has_long_prefix reads only a word starting with '--', so the test before it skips the call for any other.
+        if w[:2] == "--" and _has_long_prefix((w,), "no-verify"):
             long_at = p
         elif w[:1] == "-" and w[1:2] != "-" and "n" in w:
             short_at = p
@@ -16857,7 +17103,13 @@ def _gate_text_bypass(text, skip_own=False):
     readings."""
     if not _gate_text_may_name_git(text):
         return None
+    walked = []
     for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
+        # The walk below reads nothing but the words, so a reading whose words equal those of one already walked
+        # (which gave None, or this would have returned) gives None again and is not walked a second time.
+        if words in walked:
+            continue
+        walked.append(words)
         if skip_own:
             k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
             words = words[k + 1:]
@@ -17772,7 +18024,8 @@ def gate_weakening(data):
             # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
-            if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
+            raw_kind = _gate_weakening_fallback_kind(command)
+            if (raw_kind not in _GATE_FALLBACK_DENIES
                     and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
                             for text in _decoded_readings(command))):
                 return _deny(
@@ -17789,7 +18042,7 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True)
+            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -17948,8 +18201,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True)
+        raw_kind = _gate_weakening_fallback_kind(command)
+        if raw_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=raw_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
@@ -18599,7 +18853,7 @@ _SECSEC_PREFIX_SOURCES = [
     ('https://hooks\\.slack\\.com/services/T[A-Z0-9]{8,}/B[A-Z0-9]{8,}/[A-Za-z0-9]{24,}', 'Slack webhook URL'),
 ]
 _SECSEC_ASSIGN_SOURCE = '(?ix)\n    (?:^|[^A-Za-z0-9])                       # start, or a non-alphanumeric\n    [A-Za-z0-9]*[_-]?                        # optional prefix such as aws_ or my-\n    (passwd|password|secret|token|api[_-]?key|access[_-]?key|\n       client[_-]?secret|auth[_-]?token|private[_-]?key|credential)\n    \\s*[:=]\\s*\n    (?:\n        (?P<q>[\'"])(?P<qvalue>(?:(?!(?P=q))[^\\n]){12,})(?P=q)  # quoted; qvalue excludes only the OPENING\n                                                     # delimiter (not both quotes), so a value that embeds\n                                                     # the other quote, e.g. "ab\'cd...", is not truncated\n      | (?P<value>[A-Za-z0-9+/=_.\\-]{16,})              # or unquoted; charset excludes {$<( so\n                                                     # templates and f-string holes cannot match\n    )\n    '
-_SECSEC_PLACEHOLDER_SOURCE = '(?i)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
+_SECSEC_PLACEHOLDER_SOURCE = '(?ai)^(x{3,}|\\.{3,}|\\*{3,}|<[^>]+>|\\$\\{[^}]+\\}|\\$[A-Z_]+|(your|my|the)[_-]?\\w*|change[_-]?me|placeholder|example|sample|dummy|redacted|fake|test|todo|none|null|n/?a|actual_password_here)$'
 _SECSEC_ENTROPY_ASSIGN_SOURCE = '(?x)\n    (?:^|[^A-Za-z0-9])\n    (?P<name>[A-Za-z][A-Za-z0-9_.\\-]*)\n    \\s*[:=]\\s*\n    (?:\n        # QUOTED: the WHOLE inter-quote value must be alphabet (closing quote required), so a value that\n        # embeds a non-alphabet char (an email\'s @, a URL\'s :) does NOT partially match on its prefix; no\n        # upper cap here because the closing quote bounds it, so a >150-char quoted secret still fires.\n        (?P<q>[\'"])(?P<qvalue>[A-Za-z0-9_./+=\\-]{40,})(?P=q)\n        # UNQUOTED: a possessive run (no backtracking) of 40 OR MORE alphabet chars that is NOT followed by @ or\n        # : (which would make it a prefix of a larger structured value such as an email or a URL); a longer\n        # all-alphabet unquoted value still fires on its 150-char prefix (char 151 is alphabet, not @/:).\n      | (?P<value>[A-Za-z0-9_./+=\\-]{40,}+)(?![@:])\n    )\n    '
 _SECSEC_ENTROPY_MIN_LEN = 40
 _SECSEC_ENTROPY_MAX_LEN = 150
@@ -28945,7 +29199,7 @@ _RWH_READ_ONLY_OPTS = {
 }
 # The history-walking verbs also take a bare -<n> count shorthand (git log -1).
 _RWH_COUNT_VERBS = frozenset(("log", "show", "whatchanged", "shortlog", "rev-list", "stash"))
-_RWH_COUNT_RE = re.compile(r"-\d+")
+_RWH_COUNT_RE = re.compile(r"-\d+", re.ASCII)
 # The program-running git forms the hold rule refuses while any hold it can see is live, beyond the
 # curated model _rwh_program_word reads (every global option other than a literal -C, -c and
 # --config-env included, and _rdp_git_runs_program's options, words and subcommands). Each runs a
