@@ -5976,8 +5976,9 @@ def _deadline_defer_failures():
     _caller_countdown_bounds); and no window may be left armed or broken. Unlike dl-defer-countdown, the
     rows judge every run whatever its bound's width: a host stall inside a bracketed timer call widens that
     run's bound by the stall, and a restore off by less than it can pass that run (direction and position
-    in the bound decide), so a row refuses a wrong restore only through its runs no such stall widened
-    (dl-defer-countdown and dl-defer-countdown-stall judge only a run whose bound is narrower than the
+    in the bound decide): widening can hide a wrong restore in that run but need not, since an error the
+    widened bound does not cover is still refused (dl-defer-countdown and dl-defer-countdown-stall judge
+    only a run whose bound is narrower than the
     window's time, the stall variant only one whose window time is below the stall). Not swept: the
     instructions of __exit__ before its first statement and the return instruction of __enter__, where no
     code of the window can run (the class docstring states that limit)."""
@@ -6172,9 +6173,12 @@ def _deadline_defer_countdown_failures(stall=0.0):
     stall: a run the window outran is retried like one whose bound is too wide, and the vector fails,
     naming each run's bound and time, when none of the 3 qualifies. The bound is anchored on that read and
     on the re-arm, so it stays as narrow as its two timer calls take: a restore off by the window's time
-    is refused, and the correct one, re-armed late by the stall, is accepted. A bound as wide as the time
+    is refused, and the correct one, re-armed late by the stall, is accepted when some run's window time is
+    under the stall; when none of the 3 is, the vector fails as cannot-tell. A bound as wide as the time
     from the restore's clock read to the final read is at least the stall wide, so it is never narrower
-    than a judged run's window time: no run under it qualifies, and the vector fails instead of passing."""
+    than a judged run's window time: no run under it qualifies, and the vector fails instead of passing.
+    Which runs are taken and which is judged is _countdown_judged's, which dl-defer-countdown-judging drives
+    with recorded runs."""
     out = []
     calls = []
     label = "dl-defer-countdown-stall" if stall else "dl-defer-countdown"
@@ -6208,6 +6212,25 @@ def _deadline_defer_countdown_failures(stall=0.0):
         used = clock.reads[-1] - window._began if window._began is not None else 0.0
         return window, handler, timer, low, high, problem, used, len(calls)
 
+    _runs, low, high, problems = _countdown_judged(attempt, stall, counting)
+    edges = [(low - 1e-6, False), (low, False), (low + 1e-6, True),
+             (high - 1e-6, True), (high, True), (high + 1e-6, False)]
+    wrong = [value for value, want in edges if _countdown_within(low, high, value) != want]
+    if wrong:
+        problems.append("the bound ({!r}, {!r}] must hold just inside each end and the high end itself, and "
+                        "refuse the low end itself and just outside each, got wrong {!r}".format(low, high, wrong))
+    if problems:
+        out.append("({}) {}".format(label, "; ".join(problems)))
+    return out
+
+
+def _countdown_judged(attempt, stall, counting):
+    """The judging of dl-defer-countdown (stall 0) and dl-defer-countdown-stall: runs from attempt(), each
+    (window, handler, timer, low, high, problem, used, delivered), are taken until one can tell a correct
+    restore from one off by the window's time (at most 3), and the first such run is judged, its caller
+    handler to be counting. Returns the runs taken, the bound judged (the last run's when none could tell)
+    and the problems found."""
+
     def can_tell(run):
         # A bound as wide as the stall can be narrower than an outrun window's time, so the stall variant
         # judges only a run whose window time stayed below the stall.
@@ -6237,14 +6260,48 @@ def _deadline_defer_countdown_failures(stall=0.0):
                   and not _countdown_within(low, high, timer[0] - used)):
             problems.append("the bound ({!r}, {!r}] must refuse the countdown {!r} moved by the window's {!r} "
                             "seconds either way".format(low, high, timer[0], used))
-    edges = [(low - 1e-6, False), (low, False), (low + 1e-6, True),
-             (high - 1e-6, True), (high, True), (high + 1e-6, False)]
-    wrong = [value for value, want in edges if _countdown_within(low, high, value) != want]
-    if wrong:
-        problems.append("the bound ({!r}, {!r}] must hold just inside each end and the high end itself, and "
-                        "refuse the low end itself and just outside each, got wrong {!r}".format(low, high, wrong))
-    if problems:
-        out.append("({}) {}".format(label, "; ".join(problems)))
+    return runs, low, high, problems
+
+
+def _deadline_defer_countdown_judging_failures():
+    """(dl-defer-countdown-judging) _countdown_judged under a 1-second stall, driven with recorded runs (no
+    clock is read, nothing sleeps): three runs whose window outran the stall, each under a bound as wide as
+    the time from the restore's clock read to the final read (wider than the stall, narrower than the
+    window's time) with its countdown inside, are none judged and fail as cannot-tell after 3; a run that
+    outran the stall with its countdown outside its bound, then a run under the stall with a correct
+    countdown, pass on the second; a run whose window time is exactly the stall, or one microsecond over
+    it, with its countdown outside a 0.2-millisecond bound is not judged, and the correct run after it
+    passes on the second; one a microsecond under the stall with that countdown is judged, and refused, on
+    the first."""
+    out = []
+
+    def counting(signum, frame):
+        pass
+
+    closed = types.SimpleNamespace(armed=False, broken=False)
+
+    def run(low, width, countdown, used):
+        return closed, counting, (countdown, 30.0), low, low + width, "", used, 0
+
+    overrun = run(27.85, 1.0002, 28.35, 1.1002)
+    right = run(28.4, 2e-4, 28.4001, 0.6001)
+    cases = [
+        ("three runs the window outran", [overrun] * 3, 3, "none of 3 runs could tell"),
+        ("an outrun run with a wrong countdown, then a correct run",
+         [run(27.85, 1.0002, 28.95, 1.1002), right, right], 2, ""),
+        ("a window time exactly the stall with a wrong countdown, then a correct run",
+         [run(28.0, 2e-4, 28.95, 1.0), right, right], 2, ""),
+        ("a window time a microsecond over the stall with a wrong countdown, then a correct run",
+         [run(28.0, 2e-4, 28.95, 1.000001), right, right], 2, ""),
+        ("a window time a microsecond under the stall with a wrong countdown",
+         [run(28.0, 2e-4, 28.95, 0.999999), right, right], 1, "a correct restore in a run"),
+    ]
+    for name, recorded, taken, want in cases:
+        runs, _low, _high, problems = _countdown_judged(iter(recorded).__next__, 1.0, counting)
+        got = "; ".join(problems)
+        if len(runs) != taken or (not got.startswith(want) if want else got):
+            out.append("(dl-defer-countdown-judging) {}: want {} runs taken and {}, got {} and {!r}".format(
+                name, taken, repr(want) if want else "a pass", len(runs), got))
     return out
 
 
@@ -7604,7 +7661,8 @@ def _deadline_child(tmp):
     process; returns their failures."""
     return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
             + _deadline_take_failures() + _deadline_defer_failures() + _deadline_defer_countdown_failures()
-            + _deadline_defer_countdown_failures(1.0) + _deadline_enclosing_restore_failures()
+            + _deadline_defer_countdown_failures(1.0) + _deadline_defer_countdown_judging_failures()
+            + _deadline_enclosing_restore_failures()
             + _deadline_rearm_failures() + _deadline_discard_failures() + _deadline_alarm_failures()
             + _deadline_mask_failures() + _deadline_mask_thread_failures() + _deadline_no_c_mask_failures()
             + _deadline_outer_deadline_failures() + _deadline_restore_fault_failures()
