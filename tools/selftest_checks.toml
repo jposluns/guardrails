@@ -4672,11 +4672,4 @@ expected-check-ids = [
   "png/chunk-count-bound-ends",
   "png/inflate-bound-ends",
   "png/wired-gate-exit-codes",
-  # ---------- the temporary content-pinned role-rule exemption (path and bytes bound, reported) ----------
-  "pinned-exempt/shipped-list-pinned",
-  "pinned-exempt/matching-bytes-exempt-and-named",
-  "pinned-exempt/changed-bytes-exit-2",
-  "pinned-exempt/unlisted-png-exit-2",
-  "pinned-exempt/missing-listed-path-exit-2",
-  "pinned-exempt/symlinked-listed-path-exit-2",
 ]

@@ -106,31 +106,22 @@ ROLE-NAME RULE, WHOLE TRACKED TREE. The internal role-name pattern is a separate
 scope, INDEPENDENT of SCOPE_RELPATHS and of SKIP_NAMES: it reads every file `git ls-files -z --cached` lists
 under the repository root (code, Markdown, site HTML, generated outputs that are committed, and this gate's
 own source alike), decoded as UTF-8, and also runs inside the scoped scan above (so an untracked scoped
-surface is still covered). The internal-allow marker exempts the ONE line that carries it; this gate's own
-self-test vectors carry that marker on each line that holds the word. The one by-path exemption is the
-TEMPORARY, CONTENT-PINNED list ROLE_RULE_PINNED_EXEMPT (the site's link-preview card images, each a path
-plus the sha256 of its bytes), to be removed when the PNG rule merges: a tracked listed path whose raw
-bytes match its record is NOT SCANNED and is named as exempt in the gate's output on every outcome the
-scan reaches (exit 0, exit 1, and exit 2 for a tracked file the rule cannot evaluate); a read error that
-stops the scan first (also exit 2) prints the error alone, with no exempt list. A listed path whose bytes
-differ, that is absent from the working tree, or whose own entry is a symbolic link (checked with lstat
-before any read, since the read follows a link and a link to a file holding the recorded bytes would
-otherwise be exempted) cannot be evaluated (exit 2). Every tracked file whose suffix is
-TRACKED_ARCHIVE_SUFFIX (.zip, the format of the committed skill archives) first goes through the leak
-gate's archive rule, whether or not its bytes decode as UTF-8: check_leaks.verify_archive, the predicate
-built from the same functions the leak gate's scan applies (the archive-size bound on a read that stops
-one byte past it, the parsed records covering the file exactly, and every member read in full under
-zipfile's CRC and header checks; nothing is extracted to disk). A .zip that fails it CANNOT BE EVALUATED
-and fails closed at exit 2, named with the leak gate's reason. A .zip that passes is scanned when it
-decodes as UTF-8 and is otherwise skipped as binary, the only non-UTF-8 tracked file the role rule skips
-apart from a pinned exemption above. Every tracked file whose suffix is TRACKED_PNG_SUFFIX (.png, in
+surface is still covered). The only exemption is the internal-allow marker, which exempts the ONE line that
+carries it; this gate's own self-test vectors carry that marker on each line that holds the word, and no
+file is exempt by name. Every tracked file whose suffix is TRACKED_ARCHIVE_SUFFIX (.zip, the format of the
+committed skill archives) first goes through the leak gate's archive rule, whether or not its bytes decode
+as UTF-8: check_leaks.verify_archive, the predicate built from the same functions the leak gate's scan
+applies (the archive-size bound on a read that stops one byte past it, the parsed records covering the
+file exactly, and every member read in full under zipfile's CRC and header checks; nothing is extracted to
+disk). A .zip that fails it CANNOT BE EVALUATED and fails closed at exit 2, named with the leak gate's
+reason. A .zip that passes is scanned when it decodes as UTF-8 and is otherwise skipped as binary, the only
+non-UTF-8 tracked file the role rule skips. Every tracked file whose suffix is TRACKED_PNG_SUFFIX (.png, in
 lower case only) goes through the PNG rule, verify_png (stated beside TRACKED_PNG_SUFFIX): a .png it refuses
 (malformed, truncated, over a size, chunk-count or inflate bound) CANNOT BE EVALUATED and fails closed at exit
 2, named with its reason. In a .png it accepts, the text of every textual chunk (tEXt, zTXt, iTXt) is
 scanned as a text file's text is; the iCCP profile name and profile, and every chunk the rule cannot
 classify, are scanned as binary (no internal-allow exemption, a byte above 0x7F never part of a word); and
 the pixel data, PLTE and the standard non-text ancillary chunks are unread.
-A pinned exemption above is decided first, by its bytes, and never reaches the PNG rule.
 Any other non-UTF-8 tracked file whatever its suffix (a malformed
 .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working tree, or
 a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2, the
@@ -141,8 +132,7 @@ WHAT THE ROLE RULE CANNOT SEE: an untracked or git-ignored file (outside the sco
 output that is not committed and is not handed to it as a tracked file (a built release archive, a rendered
 site that is not checked in), the content of a tracked .zip's members, which the archive rule reads in
 memory to verify the archive but this rule never scans (the leak gate scans them), text drawn in a tracked
-.png's pixels or held in a chunk the PNG rule skips (see TRACKED_PNG_SUFFIX), any content of a file
-exempted by ROLE_RULE_PINNED_EXEMPT (not read for this rule at all, only hashed), a staged change that
+.png's pixels or held in a chunk the PNG rule skips (see TRACKED_PNG_SUFFIX), a staged change that
 differs from the working-tree copy (it reads the working tree), and the word split or encoded (an HTML
 entity, a zero-width character) so the plain pattern does not match.
 
@@ -288,23 +278,6 @@ _PNG_SKIPPED_SIZES = {
 # The skipped types that may occur more than once (one fcTL per animation frame); every other may occur once.
 _PNG_REPEATABLE = frozenset((b"IDAT", b"fcTL", b"fdAT"))
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
-# TEMPORARY, CONTENT-PINNED EXEMPTION from the role-name and review-round label rule for the site's
-# link-preview card images, which are not valid UTF-8 and so cannot be evaluated until a rule that reads a
-# tracked .png lands. REMOVE THIS CONSTANT (and its branch in scan_tracked_roles) WHEN THE PNG RULE MERGES.
-# Each entry is a repository path and the sha256 of its exact on-disk bytes. A tracked listed path whose
-# raw bytes hash to its record is NOT SCANNED: no byte of it is read for a role name or a review-round
-# label, so text inside those images is unseen, and the gate names each one as exempt in its output. A
-# listed path whose bytes differ from the record, that is absent from the working tree, or whose own entry
-# is a symbolic link (the read follows a link, so the record cannot bind the entry itself) cannot be
-# evaluated (exit 2); an unlisted file that is not valid UTF-8 is refused as before. A listed path that is
-# not tracked is not read at all.
-ROLE_RULE_PINNED_EXEMPT = (
-    ("site/images/aiqt-card.png", "83ef43f91fbd57daf2d9eb7fe0d1445bda17e8467b10a8bed6406c66c86e13bc"),
-    ("tools/card/card-safe.png", "f44c06dbbe037ca343ba21fecff167d793711db80e48a518a57b2814b8692a26"),
-    ("tools/card/compare.png", "79f0062b591480c4912b6a40f329d25cab6381881937d984e7a2e6a638cfcb57"),
-    ("tools/card/platforms.png", "208dfcecb84d46ae024e17968daebb419fb9b1bff6a9e9cc92352e4eb61821de"),
-    ("tools/card/sizes.png", "805da294024f32e25d5379d620bdc65d700027fd259196f09c1e6d75e3c99543"),
-)
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
 # directly; directories are walked fail-closed. Absent entries are skipped (a not-yet-created future
@@ -982,9 +955,9 @@ def scan_role_text(text, honour_marker=True):
     return found
 
 
-def scan_tracked_roles(root, relpaths, pinned=None):
-    """Return (findings, unevaluable, exempt) for the role rule (the role name and the review-round labels)
-    over the tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file whose suffix is
+def scan_tracked_roles(root, relpaths):
+    """Return (findings, unevaluable) for the role rule (the role name and the review-round labels) over the
+    tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file whose suffix is
     TRACKED_ARCHIVE_SUFFIX goes through check_leaks.verify_archive, the leak gate's archive rule, whether or
     not its bytes decode as UTF-8: one the rule refuses is unevaluable, named with the leak gate's reason (and
     the member, when one member is the cause); one it accepts is scanned when its bytes decode as UTF-8 and is
@@ -997,38 +970,11 @@ def scan_tracked_roles(root, relpaths, pinned=None):
     and the line within its text. Any other file that is not valid UTF-8,
     whatever its suffix, and a tracked path absent from the working tree are unevaluable too. A tracked path
     that is present but not a regular file raises OSError (exit 2) through _present, before any open, and so
-    does a read error. A path listed
-    in `pinned` (ROLE_RULE_PINNED_EXEMPT by default) is decided by its raw bytes before any decode: bytes
-    that hash to its record make it exempt and unscanned (returned in `exempt`), and bytes that differ or a
-    path absent from the working tree make it unevaluable. A listed path whose own entry is a symbolic link
-    (by lstat) is unevaluable before any read, since the read would follow the link."""
-    findings, unevaluable, exempt = [], [], []
-    cannot ="; the role-name and review-round label rule cannot evaluate it"
-    pinned_map = dict(ROLE_RULE_PINNED_EXEMPT if pinned is None else pinned)
+    does a read error."""
+    findings, unevaluable = [], []
+    cannot = "; the role-name and review-round label rule cannot evaluate it"
     for rel in relpaths:
         path = root / rel
-        if rel in pinned_map:
-            import hashlib
-            # The read below follows a symbolic link, so a listed entry that is a link to any file holding
-            # the recorded bytes would be exempted through its target; it is refused before any read. An
-            # lstat error other than absence raises (exit 2); an absent entry is reported as absent below.
-            try:
-                listed_mode = os.lstat(path).st_mode
-            except FileNotFoundError:
-                listed_mode = 0
-            if stat.S_ISLNK(listed_mode):
-                unevaluable.append("{}: listed as a pinned exemption but is a symbolic link, which the recorded "
-                                   "sha256 cannot bind{}".format(rel, cannot))
-                continue
-            raw = _read_present_bytes(path)
-            if raw is None:
-                unevaluable.append("{}: tracked file is absent from the working tree{}".format(rel, cannot))
-            elif hashlib.sha256(raw).hexdigest() != pinned_map[rel]:
-                unevaluable.append("{}: listed as a pinned exemption but its bytes do not match the recorded "
-                                   "sha256{}".format(rel, cannot))
-            else:
-                exempt.append(rel)
-            continue
         if path.suffix == TRACKED_PNG_SUFFIX:
             try:
                 sections = verify_png(path) if _present(path) else None
@@ -1066,19 +1012,18 @@ def scan_tracked_roles(root, relpaths, pinned=None):
             continue
         for number, label in scan_role_text(text):
             findings.append("{}:{}: {}".format(rel, number, label))
-    return findings, unevaluable, exempt
+    return findings, unevaluable
 
 
-def run_gate(root, pinned=None):
+def run_gate(root):
     """The real scan of the tree at `root`: the scoped layers over SCOPE_RELPATHS, the role rule over every
-    tracked file, and the decision-id layer over the whole tree. Returns the exit code and prints the report.
-    `pinned` replaces ROLE_RULE_PINNED_EXEMPT for the self-test's fixture repositories only."""
+    tracked file, and the decision-id layer over the whole tree. Returns the exit code and prints the report."""
     try:
         hashes, maxn, findings = load_hashes(root)
         findings = list(findings)
         findings += scan_scope(root, SCOPE_RELPATHS, hashes, maxn)
         tracked = tracked_files(root)
-        role_findings, unevaluable, exempt = scan_tracked_roles(root, tracked, pinned)
+        role_findings, unevaluable = scan_tracked_roles(root, tracked)
         findings += role_findings
         findings += scan_tree_decision_ids(root)
         findings += scan_shipped_tracker_labels(root, tracked)
@@ -1088,16 +1033,6 @@ def run_gate(root, pinned=None):
         return 2
     # A role-name hit inside a tracked scoped file is reported by both scans in the same form; report it once.
     findings = sorted(set(findings))
-    if exempt:
-        # The residue of ROLE_RULE_PINNED_EXEMPT, printed on every outcome the scan reaches (exit 0, 1 or
-        # the exit 2 below) so a pass never hides it. A read error above returns 2 before this point, and
-        # prints no exempt list: the role rule may not have run yet, and that exit is never a pass.
-        print("EXEMPT (not scanned): {} tracked file(s) whose bytes match a pinned sha256 in "
-              "ROLE_RULE_PINNED_EXEMPT were skipped by the role-name and review-round label rule; their "
-              "content is unseen by this gate, and the exemption is to be removed when the PNG rule "
-              "merges".format(len(exempt)))
-        for rel in exempt:
-            print("  exempt, not scanned: " + rel)
     if findings:
         print("FAIL: {} finding(s): internal-name leak(s) in the scanned surfaces, decision id(s) in the "
               "tree, or tracker-label count(s) off the shipped ratchet baseline".format(len(findings)))
@@ -2920,7 +2855,7 @@ def _self_test(caller_env=None):
             def tracked_verdict(module, name, data):
                 (pngdir / name).write_bytes(data)
                 try:
-                    found, unevaluable, _exempt = module.scan_tracked_roles(pngdir, [name])
+                    found, unevaluable = module.scan_tracked_roles(pngdir, [name])
                 except Exception as exc:  # a mutant may fail another way; that is a verdict too
                     return "error: {}: {}".format(type(exc).__name__, exc)
                 finally:
@@ -3187,136 +3122,6 @@ def _self_test(caller_env=None):
             check("png/wired-gate-exit-codes", not wired, wired)
         finally:
             shutil.rmtree(pngdir, ignore_errors=True)
-
-        # 33. DISCRIMINATING (the temporary pinned role-rule exemption is bound to its listed paths AND
-        #     their exact bytes, and is reported): in a fixture git repository with one listed path whose
-        #     record is the sha256 of its non-UTF-8 bytes, the real gate passes and names it as exempt, not
-        #     scanned; the same path with one byte changed, an unlisted copy of the very same bytes, the
-        #     listed path deleted from the working tree, and the listed path replaced by a symbolic link to
-        #     an untracked file holding the recorded bytes each exit 2. Each vector is also run on copies of
-        #     this gate with its guard removed (scratch modules loaded through _load_ratchet_mutant, each
-        #     anchor required to occur exactly once and split here so it does not match itself), and every
-        #     copy turns its vector red: no exemption branch or no naming fails the matching case, no digest
-        #     comparison exempts the changed bytes, an exemption by suffix and any recorded digest exempts
-        #     the unlisted copy, a missing listed path taken as exempt passes the deleted one, and no lstat
-        #     refusal follows the link and exempts it. A platform that cannot create the link fails the
-        #     symlink vector rather than skipping it.
-        pinned_list_ok = (len(ROLE_RULE_PINNED_EXEMPT) == 5
-                          and len({p for p, _d in ROLE_RULE_PINNED_EXEMPT}) == 5
-                          and all(p.endswith(".png") and re.fullmatch(r"[0-9a-f]{64}", d)
-                                  for p, d in ROLE_RULE_PINNED_EXEMPT))
-        check("pinned-exempt/shipped-list-pinned", pinned_list_ok, ROLE_RULE_PINNED_EXEMPT)
-        pinlab = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-pinned-"))
-        mdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-pinned-mutant-"))
-        try:
-            (pinlab / ".aiqt").mkdir()
-            (pinlab / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
-                                                            encoding="utf-8")
-            (pinlab / "img").mkdir()
-            card = pinlab / "img" / "card.png"
-            card_bytes = b"\x89PNG\r\n\x1a\n\xff\xfe pinned card bytes \xff\n"
-            changed_bytes = card_bytes[:-2] + b"\xfe\n"
-            pin = (("img/card.png", hashlib.sha256(card_bytes).hexdigest()),)
-            card.write_bytes(card_bytes)
-            fixenv = _git_fixture_env.git_fixture_env()
-
-            def pin_git(*args):
-                return subprocess.run(["git", "-C", str(pinlab), *args], capture_output=True, text=True,
-                                      env=fixenv, timeout=60)
-
-            init, add = pin_git("init", "-q"), pin_git("add", "--", "img/card.png")
-            if init.returncode != 0 or add.returncode != 0:
-                failures.append("the case 33 fixture could not be built: init rc={} add rc={} {!r}".format(
-                    init.returncode, add.returncode, init.stderr + add.stderr))
-
-            def pinned_gate(module):
-                out, err = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    rc = module.run_gate(pinlab, pin)
-                return rc, out.getvalue() + err.getvalue()
-
-            def pinned_vectors(module):
-                results, seen = {}, []
-                card.write_bytes(card_bytes)
-                rc, report = pinned_gate(module)
-                seen.append((rc, report))
-                results["match"] = rc == 0 and "exempt, not scanned: img/card.png" in report
-                card.write_bytes(changed_bytes)
-                rc, report = pinned_gate(module)
-                seen.append((rc, report))
-                results["changed"] = rc == 2 and ("img/card.png: listed as a pinned exemption but its bytes do "
-                                                  "not match the recorded sha256") in report
-                card.write_bytes(card_bytes)
-                (pinlab / "img" / "other.png").write_bytes(card_bytes)
-                added = pin_git("add", "--", "img/other.png")
-                rc, report = pinned_gate(module)
-                seen.append((rc, report))
-                results["unlisted"] = (added.returncode == 0 and rc == 2
-                                       and "img/other.png: tracked .png fails the PNG rule" in report
-                                       and "exempt, not scanned: img/other.png" not in report)
-                removed = pin_git("rm", "-q", "-f", "--", "img/other.png")
-                card.unlink()
-                rc, report = pinned_gate(module)
-                seen.append((rc, report))
-                results["missing"] = (removed.returncode == 0 and rc == 2
-                                      and "img/card.png: tracked file is absent from the working tree" in report)
-                # The listed entry replaced by a symbolic link to an untracked file holding the recorded bytes.
-                target = pinlab / "img" / "target.png"
-                target.write_bytes(card_bytes)
-                try:
-                    os.symlink("target.png", str(card))
-                    linked = True
-                except (OSError, NotImplementedError, AttributeError):
-                    linked = False
-                rc, report = pinned_gate(module)
-                seen.append((rc, report))
-                results["symlink"] = (linked and rc == 2
-                                      and ("img/card.png: listed as a pinned exemption but is a symbolic "
-                                           "link") in report
-                                      and "exempt, not scanned: img/card.png" not in report)
-                if card.is_symlink():
-                    card.unlink()
-                target.unlink()
-                card.write_bytes(card_bytes)
-                return results, seen
-
-            intact, intact_seen = pinned_vectors(sys.modules[__name__])
-            gate_source = Path(__file__).resolve().read_text(encoding="utf-8")
-            branch = "if rel in " + "pinned_map:"
-            mutants = (
-                ("match", "pinned_no_branch", ((branch, "if " + "False:"),)),
-                ("match", "pinned_no_naming", (("exempt.append(" + "rel)", "pass"),)),
-                ("changed", "pinned_no_digest",
-                 (("elif hashlib.sha256(raw).hexdigest() != " + "pinned_map[rel]:", "elif " + "False:"),)),
-                ("unlisted", "pinned_by_suffix",
-                 ((branch, "if path.suffix == '.png' or rel in " + "pinned_map:"),
-                  ("!= " + "pinned_map[rel]:", "not in " + "pinned_map.values():"))),
-                ("missing", "pinned_missing_exempt",
-                 (("if raw is " + "None:\n                unevaluable",
-                   "if raw is " + "None:\n                exempt.append(" + "rel)\n                continue\n"
-                   "                unevaluable"),)),
-                ("symlink", "pinned_symlink_followed", (("if stat.S_ISLNK(" + "listed_mode):", "if " + "False:"),)))
-            flipped = {"match": [], "changed": [], "unlisted": [], "missing": [], "symlink": []}
-            for vector, tag, edits in mutants:
-                source = gate_source
-                for anchor, replacement in edits:
-                    if gate_source.count(anchor) != 1:
-                        flipped[vector].append("{} anchor {!r} occurs {} times".format(
-                            tag, anchor, gate_source.count(anchor)))
-                    source = source.replace(anchor, replacement)
-                module = _load_ratchet_mutant(source, mdir, tag)
-                mutant, _unused = pinned_vectors(module)
-                if mutant[vector]:
-                    flipped[vector].append("{} copy still passes the {} vector".format(tag, vector))
-            for vector, check_id in (("match", "pinned-exempt/matching-bytes-exempt-and-named"),
-                                     ("changed", "pinned-exempt/changed-bytes-exit-2"),
-                                     ("unlisted", "pinned-exempt/unlisted-png-exit-2"),
-                                     ("missing", "pinned-exempt/missing-listed-path-exit-2"),
-                                     ("symlink", "pinned-exempt/symlinked-listed-path-exit-2")):
-                check(check_id, intact[vector] and not flipped[vector], (intact_seen, flipped[vector]))
-        finally:
-            shutil.rmtree(pinlab, ignore_errors=True)
-            shutil.rmtree(mdir, ignore_errors=True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -3469,12 +3274,7 @@ def _self_test(caller_env=None):
           "to every byte from 0x7F to 0xFF and in an iCCP profile after 0xC0 and an iCCP profile name "
           "before 0xFF, still cannot evaluate a .PNG or a .gif, holds the "
           "file-size, chunk-count and inflate bounds one unit inside, at and outside, and each of its "
-          "twenty-seven paired checks, removed in a copy of the gate, turns its vector red; "
-          "and the temporary content-pinned role-rule exemption passes a listed path whose bytes "
-          "match its sha256 and names it as exempt, not scanned, while the same path with changed bytes, "
-          "an unlisted copy of the same bytes, the listed path missing from the working tree and the "
-          "listed path replaced by a symbolic link to a file holding the recorded bytes each exit 2, "
-          "every vector turning red on a copy with its guard removed.")
+          "twenty-seven paired checks, removed in a copy of the gate, turns its vector red.")
     return 0
 
 
