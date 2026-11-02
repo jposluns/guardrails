@@ -2593,7 +2593,7 @@ def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import
     not (the index was not listed, or its read failed), the probe's bytes are kept although no record
     comes from them. A file that could not be read or parsed has no bytes and a problem names it.
 
-    Each problem names the check the doctor files it under, so the problems are not the doctor's
+    A problem the doctor files under another check names that check, so the problems are not the doctor's
     C-ARCHIVE-ENUM list alone: a non-terminal archived record, or a bucket that rotates records with no
     worklog span, is a C-ROTATION message, as the doctor reports it; an archived id seated more than once
     is a C-ID-SPACE message, which the doctor reports under C-ID-SPACE in its own wording. archive_read
