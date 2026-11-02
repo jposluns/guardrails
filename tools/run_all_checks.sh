@@ -2,7 +2,13 @@
 # Run every quality gate, in the same order CI runs them.
 # Never pipe this to a truncating sink: a masked exit code defeats the gate.
 set -uo pipefail
-cd "$(dirname "$0")/.." || exit 2
+# The repository root, resolved in checked steps: a dirname that fails or prints nothing exits 2 here,
+# before any gate, rather than leaving the runner in the calling directory's parent or at /. CDPATH is
+# cleared for the cd, as in opf/enforcement/ci/opf-ci.sh: a relative start (tools/run_all_checks.sh)
+# would otherwise resolve through a CDPATH entry holding a tools directory and run that tree's gates.
+dir=$(dirname -- "$0") || exit 2
+[ -n "$dir" ] || exit 2
+CDPATH= cd -- "$dir/.." || exit 2
 
 # Every gate below launches isolated: `python3 -I -B tools/<gate>.py`. `-I` (isolated mode) drops the
 # script's own directory from sys.path so a tool-written sibling (a stray tools/os.py) cannot shadow a
@@ -137,6 +143,7 @@ run_gate "opf-adopt-hook-selftest" python3 -I -B opf/tools/_opf_adopt_hook.py --
 run_gate "opf-adopt-complete-selftest" python3 -I -B opf/tools/_opf_adopt_complete.py --self-test
 run_gate "opf-import-batch-selftest" python3 -I -B opf/tools/_opf_import_batch.py --self-test
 run_gate "opf-import-complete-selftest" python3 -I -B opf/tools/_opf_import_complete.py --self-test
+run_gate "opf-release-history-selftest" python3 -I -B opf/tools/_opf_release_history.py --self-test
 run_gate "opf-pack-manifest-selftest" python3 -I -B opf/tools/_opf_pack_manifest.py --self-test
 run_gate "opf-adopt-observe-selftest" python3 -I -B opf/tools/_opf_adopt_observe.py --self-test
 run_gate "opf-adopt-discover-selftest" python3 -I -B opf/tools/_opf_adopt_discover.py --self-test
@@ -155,11 +162,13 @@ run_gate "opf-standalone-closure-selftest-b" python3 -I -B tools/check_opf_stand
 run_gate "opf-standalone-closure-selftest-c" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-c
 run_gate "opf-standalone-closure-selftest-d" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-d
 run_gate "opf-standalone-closure-selftest-e" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-e
+run_gate "opf-standalone-closure-selftest-f" python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-f
 run_gate "opf-standalone-closure-a" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-a
 run_gate "opf-standalone-closure-b" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-b
 run_gate "opf-standalone-closure-c" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-c
 run_gate "opf-standalone-closure-d" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-d
 run_gate "opf-standalone-closure-e" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-e
+run_gate "opf-standalone-closure-f" python3 -I -B tools/check_opf_standalone_closure.py --ci-job opf-closure-f
 run_gate "aiqt-corpus-selftest" python3 -I -B tools/selftest_aiqt_corpus.py
 run_gate "roadmap-drift"   python3 -I -B tools/gen_roadmap.py --check
 run_gate "changelog-drift" python3 -I -B tools/gen_changelog.py --check

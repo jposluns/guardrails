@@ -2289,6 +2289,16 @@ def self_test():
           sum_only(sum_ver(sum_row(covers="1.0.0")), "cover only imported release rows; '1.0.0' not"))
     check("sum-imported-range-mixed-refused",
           sum_only(sum_ver(sum_row(covers="0.9.0..1.0.0")), "cover only imported release rows; '1.0.0' not"))
+    # A release row whose flag is the integer 1 is not an imported row (its own row finding), so a flagged
+    # summary covering it covers a row that is not imported and is refused beside that finding: the summary
+    # flag reads the release flag as exactly true, never as merely truthy.
+    _sum_int_rel = validate_version({"schema": 1, "release": [imp_row("0.8.0"), imp_row("0.9.0", imported=1),
+                                                              _imp_wit], "summary": [sum_row()]})
+    check("sum-imported-over-int-1-release-refused",
+          _sum_int_rel.status == INVALID and len(_sum_int_rel.findings) == 2
+          and _sum_int_rel.findings[0].startswith("release #2: imported must be exactly true")
+          and _sum_int_rel.findings[1].startswith("summary #1: ")
+          and "cover only imported release rows; '0.9.0' not" in _sum_int_rel.findings[1])
     # Admitting the optional key leaves the summary keyset closed: any other key is still refused, beside a
     # legal flag or without one.
     check("sum-other-unknown-key-still-refused",

@@ -2344,6 +2344,236 @@ def _test_cannot_evaluate_paths(failures, tmp):
                             "the case; got made={!r} recorded={!r}".format(name, made, probe))
 
 
+def _git_out(repo, *args):
+    """Run a fixture git command against repo with the fixed test identity and return its stripped stdout,
+    raising on failure."""
+    cmd = ["git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+           "-c", "commit.gpgsign=false"] + list(args)
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=30,
+                          env=git_fixture_env()).stdout.strip()
+
+
+def _make_ancestry_fixture(path):
+    """A repository whose checked-out branch 'topic' forked from the seed commit before main advanced, with
+    refs/remotes/origin/main at the advanced main. Returns a dict of the commit ids: seed (the merge base),
+    main (the advanced main), sib (a sibling branch tip), pre (the commit 'git commit --amend' replaced, so
+    HEAD@{1}), topic (HEAD) and desc (a descendant of HEAD). Raises on any git failure."""
+    repo = _init_repo(path)
+    ids = {"seed": _git_out(repo, "rev-parse", "HEAD")}
+    _git_out(repo, "checkout", "-q", "-b", "sib")
+    (repo / "sib.txt").write_text("sibling\n", encoding="utf-8")
+    _git_out(repo, "add", "sib.txt")
+    _git_out(repo, "commit", "-q", "-m", "sibling")
+    ids["sib"] = _git_out(repo, "rev-parse", "HEAD")
+    _git_out(repo, "checkout", "-q", "main")
+    (repo / "main.txt").write_text("main advance\n", encoding="utf-8")
+    _git_out(repo, "add", "main.txt")
+    _git_out(repo, "commit", "-q", "-m", "main advance")
+    ids["main"] = _git_out(repo, "rev-parse", "HEAD")
+    _git_out(repo, "update-ref", "refs/remotes/origin/main", ids["main"])
+    _git_out(repo, "checkout", "-q", "-b", "topic", ids["seed"])
+    (repo / "topic.txt").write_text("topic\n", encoding="utf-8")
+    _git_out(repo, "add", "topic.txt")
+    _git_out(repo, "commit", "-q", "-m", "topic draft")
+    ids["pre"] = _git_out(repo, "rev-parse", "HEAD")
+    _git_out(repo, "commit", "-q", "--amend", "-m", "topic")
+    ids["topic"] = _git_out(repo, "rev-parse", "HEAD")
+    ids["desc"] = _git_out(repo, "commit-tree", ids["topic"] + "^{tree}", "-p", ids["topic"], "-m", "desc")
+    _git_out(repo, "update-ref", "refs/heads/desc", ids["desc"])
+    return ids
+
+
+def _test_reset_ancestry(failures, tmp):
+    """git_discard judges a git reset that moves HEAD to one commit (--soft, --mixed or no mode) against
+    HEAD's ancestry: a target that is not an ancestor of HEAD, or one the probe cannot evaluate, denies, so a
+    fold onto a newer main cannot carry the older tree into the next commit. A reset with no commit operand,
+    a path reset and --hard/--keep/--merge keep their decisions. The handler runs in-process; no submitted
+    command is executed."""
+    handler = aiqt_hooks.git_discard
+    ra = tmp / "reset-ancestry"
+    rb = tmp / "reset-ancestry-other"
+    try:
+        ids = _make_ancestry_fixture(ra)
+        _init_repo(rb)
+        _git_out(rb, "update-ref", "refs/remotes/origin/main", "HEAD")
+        broken = tmp / "reset-ancestry-broken"
+        _make_ancestry_fixture(broken)
+        tree = _git_out(ra, "rev-parse", ids["topic"] + "^{tree}")
+        # A real shallow clone: HEAD is topic and origin/sib is a sibling whose parent was not fetched.
+        shallow = tmp / "reset-ancestry-shallow"
+        _git_out(tmp, "clone", "-q", "--depth", "1", "--no-single-branch", ra.as_uri(), str(shallow))
+        # An unborn HEAD on main beside a branch 'other' that names a real commit.
+        unborn = tmp / "reset-ancestry-unborn"
+        unborn.mkdir()
+        _git_out(unborn, "init", "-q", "-b", "main")
+        (unborn / "u.txt").write_text("unborn\n", encoding="utf-8")
+        _git_out(unborn, "add", "u.txt")
+        u_commit = _git_out(unborn, "commit-tree", _git_out(unborn, "write-tree"), "-m", "other")
+        _git_out(unborn, "update-ref", "refs/heads/other", u_commit)
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(ra-fixture) could not build the reset ancestry fixtures: {}".format(exc))
+        return
+    rp = str(ra)
+
+    def reason(command, cwd=rp):
+        data = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command},
+                "cwd": cwd}
+        code, stdout_obj, _stderr = handler(data)
+        got = _reduce_result(code, stdout_obj)
+        spec = stdout_obj.get("hookSpecificOutput") if isinstance(stdout_obj, dict) else None
+        text = spec.get("permissionDecisionReason", "") if isinstance(spec, dict) else ""
+        return got, text
+
+    def expect(label, command, want, cwd=rp, has=None):
+        got, text = reason(command, cwd)
+        if got != want:
+            failures.append("{}: expected {}, got {}".format(label, want, got))
+        elif has is not None and has not in text:
+            failures.append("{}: the reason lacks {!r}: {!r}".format(label, has, text))
+
+    anc = "is not an ancestor of HEAD"
+    expect("(ra-soft-advanced) reset --soft to an advanced origin/main denies", "git reset --soft origin/main",
+           "deny", has=anc)
+    expect("(ra-mixed-advanced) reset --mixed to an advanced origin/main denies",
+           "git reset --mixed origin/main", "deny", has=anc)
+    expect("(ra-nomode-advanced) reset with no mode to an advanced origin/main denies", "git reset origin/main",
+           "deny", has=anc)
+    expect("(ra-sibling-sha) reset --soft to a sibling's full sha denies",
+           "git reset --soft {}".format(ids["sib"]), "deny", has=anc)
+    expect("(ra-descendant) reset --soft forward to a descendant denies", "git reset --soft desc", "deny",
+           has=anc)
+    expect("(ra-undo-amend) the quoted undo-amend reset --soft 'HEAD@{1}' denies",
+           "git reset --soft 'HEAD@{1}'", "deny", has=anc)
+    expect("(ra-dash-c) git -C <abs> reset --soft origin/main denies on the -C repository",
+           "git -C {} reset --soft origin/main".format(rp), "deny", cwd=str(rb), has=anc)
+    expect("(ra-dash-c-nonrepo) git -C <non-repo> reset --soft with an operand denies",
+           "git -C {} reset --soft HEAD~1".format(str(tmp / "reset-ancestry-nonrepo")), "deny",
+           has="could not be checked")
+    expect("(ra-earlier-move) a reset after an earlier HEAD-moving segment denies",
+           "git switch sib && git reset --soft {}".format(ids["seed"]), "deny", has="earlier segment")
+    expect("(ra-compound-ancestor) a compound reset --soft to an ancestor still allows with a note",
+           "true && git reset --soft {}".format(ids["seed"]), "allow-note")
+    expect("(ra-compound-advanced) a compound reset --soft to an advanced origin/main denies",
+           "true && git reset --soft origin/main", "deny", has=anc)
+    expect("(ra-recipe) the deny gives the portable merge-base recipe", "git reset --soft origin/main", "deny",
+           has="run git merge-base HEAD <ref> and then git reset --soft <printed sha>")
+    expect("(ra-soft-no-commit) reset --soft to an operand that is no commit denies",
+           "git reset --soft no-such-ref", "deny", has="resolves to no commit")
+    # Everything after ':/' is a commit-message pattern, so the operand is resolved alone before it is peeled
+    # to a commit; with '^{commit}' appended the pattern searched for the suffix too, found nothing, and a
+    # mixed reset passed as a path reset.
+    expect("(ra-search-mixed) a mixed reset to a ':/<text>' sibling denies", "git reset :/sibling", "deny",
+           has=anc)
+    expect("(ra-search-quiet) a -q reset to a ':/<text>' sibling denies", "git reset -q :/sibling", "deny",
+           has=anc)
+    expect("(ra-search-compound) a compound reset to a ':/<text>' sibling denies",
+           "git status && git reset :/sibling", "deny", has=anc)
+    expect("(ra-search-quoted) a reset to a quoted ':/<text>' advanced main denies", "git reset ':/main advance'",
+           "deny", has=anc)
+    expect("(ra-tree-mixed) a mixed reset to a tree denies", "git reset {}".format(tree), "deny",
+           has="an object that is no commit")
+    expect("(ra-tree-soft) reset --soft to a tree denies", "git reset --soft {}".format(tree), "deny",
+           has="an object that is no commit")
+    # Each probe that cannot evaluate denies with its own reason.
+    expect("(ra-shallow) a shallow repository that answers not an ancestor denies",
+           "git reset --soft origin/sib", "deny", cwd=str(shallow), has="the repository is shallow")
+    expect("(ra-unborn) a reset on an unborn HEAD denies", "git reset --soft other", "deny", cwd=str(unborn),
+           has="HEAD resolves to no commit")
+    redirect = "a --git-dir, --work-tree or --bare redirect"
+    expect("(ra-git-dir) a --git-dir redirect denies", "git --git-dir={}/.git reset --soft HEAD~1".format(rp),
+           "deny", has=redirect)
+    expect("(ra-work-tree) a --work-tree redirect denies", "git --work-tree={} reset --soft HEAD~1".format(rp),
+           "deny", has=redirect)
+    expect("(ra-git-dir-env) a leading GIT_DIR assignment denies",
+           "GIT_DIR={}/.git git reset --soft HEAD~1".format(rp), "deny", has=redirect)
+    expect("(ra-dash-c-opaque) an empty -C target denies", "git -C '' reset --soft HEAD~1", "deny",
+           has="its -C target cannot be resolved")
+    # The grammar itself denies a mixed reset after a cd it cannot follow, so only --soft reaches the
+    # unprovable-directory refusal.
+    expect("(ra-grammar-dir) a reset --soft after a cd joined by ';' denies",
+           "cd {} ; git reset --soft {}".format(rp, ids["seed"]), "deny",
+           has="the directory it runs in cannot be established")
+    os.environ["GIT_FUTURE_THING"] = "1"
+    try:
+        expect("(ra-ambient) an ambient GIT_* override with an operand denies", "git reset --soft HEAD~1",
+               "deny", has="ambient GIT_*")
+        expect("(ra-ambient-no-operand) an ambient GIT_* override with no operand keeps its noted allow",
+               "git reset --soft", "allow-note")
+    finally:
+        os.environ.pop("GIT_FUTURE_THING", None)
+    # A missing parent object: HEAD and the target both resolve, but the ancestry walk cannot read the
+    # history it needs and exits with neither 0 nor 1, so the probe cannot evaluate and the reset denies.
+    seed_obj = _git_out(broken, "rev-parse", "HEAD~1")
+    sib_obj = _git_out(broken, "rev-parse", "sib")
+    (broken / ".git" / "objects" / seed_obj[:2] / seed_obj[2:]).unlink()
+    expect("(ra-walk-fails) an ancestry walk that cannot read history denies",
+           "git reset --soft {}".format(sib_obj), "deny", cwd=str(broken), has="could not be checked")
+    real_git = aiqt_hooks._branch_root_git
+    aiqt_hooks._branch_root_git = lambda repo, *args: None
+    try:
+        expect("(ra-probe-unlaunched) a probe that cannot launch or finish denies", "git reset --soft HEAD~1",
+               "deny", has="did not finish")
+    finally:
+        aiqt_hooks._branch_root_git = real_git
+
+    def peel_unlaunched(repo, *args):
+        if args[-1].endswith("^{commit}") and args[-1] != "HEAD^{commit}":
+            return None
+        return real_git(repo, *args)
+
+    aiqt_hooks._branch_root_git = peel_unlaunched
+    try:
+        expect("(ra-peel-unlaunched) a peel to a commit that cannot launch or finish denies",
+               "git reset --soft HEAD~1", "deny", has="did not finish")
+    finally:
+        aiqt_hooks._branch_root_git = real_git
+
+    expect("(ra-search-soft-ancestor) reset --soft to a ':/<text>' ancestor allows", "git reset --soft :/seed",
+           "allow")
+    expect("(ra-search-mixed-ancestor) a mixed reset to a ':/<text>' ancestor allows", "git reset :/seed",
+           "allow")
+    expect("(ra-head-parent) reset --soft HEAD~1 allows", "git reset --soft HEAD~1", "allow")
+    expect("(ra-merge-base) reset --soft to the merge-base sha allows",
+           "git reset --soft {}".format(ids["seed"]), "allow")
+    expect("(ra-head-self) reset --soft HEAD allows", "git reset --soft HEAD", "allow")
+    expect("(ra-bare-soft) a bare reset --soft allows", "git reset --soft", "allow")
+
+    expect("(ra-path-reset) git reset file.txt keeps its path-reset decision", "git reset file.txt", "allow")
+    expect("(ra-dashdash) git reset -- origin/main reads a path, not a commit", "git reset -- origin/main",
+           "allow")
+    expect("(ra-hard) reset --hard origin/main is outside the ancestry check", "git reset --hard origin/main",
+           "allow")
+    expect("(ra-unquoted-reflog) the unquoted HEAD@{1} keeps its grammar reason", "git reset --soft HEAD@{1}",
+           "deny", has="outside the closed allowlist grammar")
+
+    unit = [
+        (["--soft", "origin/main"], ("soft", "origin/main")),
+        (["origin/main"], ("mixed", "origin/main")),
+        (["origin/main", "--soft"], ("soft", "origin/main")),
+        (["--m", "x"], ("mixed", "x")),
+        (["-q", "--end-of-options", "x"], ("mixed", "x")),
+        (["x", "--"], ("mixed", "x")),
+        (["-"], ("mixed", "@{-1}")),
+        (["--soft"], None),
+        ([], None),
+        (["--hard", "x"], None),
+        (["--keep", "x"], None),
+        (["--merge", "x"], None),
+        (["--soft", "--hard", "x"], None),
+        (["--hard", "--soft", "x"], ("soft", "x")),
+        (["x", "y"], None),
+        (["x", "--", "p"], None),
+        (["--", "x"], None),
+        (["-p", "x"], None),
+        (["--pathspec-from-file=f", "x"], None),
+    ]
+    for args, want in unit:
+        got = aiqt_hooks._reset_commit_operand(args)
+        if got != want:
+            failures.append("(ra-operand) _reset_commit_operand({!r}): expected {!r}, got {!r}"
+                            .format(args, want, got))
+
+
 def _test_git_stash_ref(failures):
     """Direct, warn-distinct checks; no submitted Bash command is executed."""
     handler = aiqt_hooks.git_stash_ref
@@ -7679,8 +7909,9 @@ def _heredoc_text_mark_failures():
 
 
 def main():
-    from _git_fixture_env import fixture_git_lifecycle, scrub_git_environment
-    scrub_git_environment()
+    # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
+    # scrub before it would make it save, and so restore, the already scrubbed values.
+    from _git_fixture_env import fixture_git_lifecycle
     with fixture_git_lifecycle():
         return _main_with_recorder()
 
@@ -27157,6 +27388,7 @@ def _main_isolated(monitor):
         _test_stop_field_claim_check(failures, tmp)
         _test_deadline_posture(failures, tmp)
         _test_cannot_evaluate_paths(failures, tmp)
+        _test_reset_ancestry(failures, tmp)
 
         # === write_scope_guard (wrtscp, EN-8): confine guarded-tool writes to a per-slice scope =========
         # declaration; hard-deny writes to the frozen floor and to other/nested repos as an un-lowerable
@@ -28096,6 +28328,11 @@ def _main_isolated(monitor):
     failures.extend(_ask_label_failures())
     failures.extend(_duplicate_label_failures())
     failures.extend(_stop_field_claim_failures())
+    # An in-process call of main() hands the caller's environment back exactly (HOME,
+    # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
+    # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.
+    from _entry_restore_selftest import entry_restore_failures
+    failures.extend(entry_restore_failures(__file__, "main", "_main_with_recorder"))
 
     verdict = _selftest_exit_code(failures, cannot_evaluate)
     if verdict == 1:
