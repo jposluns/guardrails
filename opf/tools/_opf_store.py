@@ -1505,13 +1505,34 @@ def _read_pointer_inputs(product_root_fd):
     return override_present, store["target"]
 
 
+def _verify_held_root(fd, path, what):
+    """Confirm a held directory descriptor still names the object at its path: the descriptor's fstat
+    identity (st_dev, st_ino) must equal a no-follow lstat of the path. Both roots are opened O_NOFOLLOW,
+    so the path named a real directory when the descriptor opened; a path that is now absent, or that
+    names a different object, means the held directory was renamed away or swapped by path while the
+    identity was evaluated. StoreError naming the moved root (a cannot-evaluate); never raises OSError.
+    A point check: a root moved and restored before it runs is not detected (disclosed residual)."""
+    try:
+        held = os.fstat(fd)
+        now = os.lstat(str(path))
+    except OSError as exc:
+        raise StoreError("{} is no longer the directory its path names: {} was renamed or removed while "
+                         "the identity was evaluated ({})".format(what, path, exc))
+    if (held.st_dev, held.st_ino) != (now.st_dev, now.st_ino):
+        raise StoreError("{} was swapped by path while the identity was evaluated: {} no longer names "
+                         "the held directory".format(what, path))
+
+
 def _read_committed_init_digest(target, product_root):
     """Resolve the committed pointer's target string to its store root the way resolve_store resolves a
     committed pointer (never the override, never default discovery), discover the single machine store
     through that store-root descriptor, and hash init.toml beneath the SAME descriptor, so a store root
-    swapped by path after discovery is never the one hashed. Returns (machine_rel, digest): the SHA-256 hex
+    swapped by path after discovery is never the one hashed; after the read, the store-root path must
+    still name the held descriptor (_verify_held_root), so the swap itself is refused rather than graded.
+    Returns (machine_rel, digest): the SHA-256 hex
     digest of the raw bytes of init.toml, read no-follow, singly-linked and capped. StoreError when the
-    target does not resolve to exactly one machine store, or init.toml is absent or unreadable."""
+    target does not resolve to exactly one machine store, init.toml is absent or unreadable, or the store
+    root moved."""
     store_root = _target_store_root(classify_target(target), product_root)
     try:
         store_root_fd = _open_store_root_fd(store_root, True)
@@ -1525,6 +1546,10 @@ def _read_committed_init_digest(target, product_root):
         machine_rel = "{}/{}".format(WORKING_DIRNAME, machine_dir)
         relpath = "{}/{}".format(machine_rel, INIT_NAME)
         data = _read_store_bytes_contained(store_root_fd, relpath)
+        # init.toml was read beneath the HELD store-root descriptor, but the root was resolved by PATH
+        # once: a store root renamed away or swapped by path after it opened would grade a directory the
+        # path no longer names, so the path must still name the held root.
+        _verify_held_root(store_root_fd, store_root, "store root")
     finally:
         inflight = _journal._in_flight_in(sys._getframe())
         try:
@@ -1557,13 +1582,17 @@ def check_store_identity(product_root):
     the store-root descriptor discovery ran through. After init.toml is hashed, the pointer and the
     override's presence are read again through the same product-root descriptor: a pointer that no longer
     evaluates, a decoded target that differs from the first read, or an override that appeared or
-    disappeared is CANNOT-EVALUATE, naming what changed. Residual (disclosed): the product root and the store
-    root are each opened by path once and then held, so either one renamed or swapped by path after its
-    descriptor opened is not detected; the machine directory and init.toml are found by name beneath the
+    disappeared is CANNOT-EVALUATE, naming what changed. Each root was resolved by PATH once, so after the
+    hash each held descriptor must still be the directory its path names (fstat identity against a
+    no-follow lstat, _verify_held_root): a product root or store root renamed away or swapped by path
+    after its descriptor opened is CANNOT-EVALUATE naming which root moved. Residual (disclosed): the
+    pinned expectation file is read once, before the digest, so a pin rewritten after that read grades
+    against the first read; the machine directory and init.toml are found by name beneath the
     held store-root descriptor, so a rename inside the store between discovery and the read is not
-    detected; and the pointer and the override are compared at two reads, not held between them, so a
+    detected; the pointer and the override are compared at two reads, not held between them, so a
     change undone before the second read, a pointer rewritten to the same decoded target, or a change after
-    the second read is not detected."""
+    the second read is not detected; and the root confirmations are point checks, so a root moved and
+    restored before its check runs is likewise not detected."""
     product_root = Path(product_root)
     notes = []
     try:
@@ -1597,8 +1626,19 @@ def check_store_identity(product_root):
         digest_ok = digest == expected_digest
         notes.append("init_sha256: {} (pinned {}, {}/{} {})".format(
             "match" if digest_ok else "DIFFERS", expected_digest, machine_rel, INIT_NAME, digest))
+        # The digest resolved a relative dir: target against the product-root PATH while the pointer was
+        # read through the held descriptor, so the path must still name the held product root: renamed
+        # away or swapped by path after it opened is refused, never graded.
+        try:
+            _verify_held_root(product_root_fd, product_root, "product root")
+        except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+            notes.append(str(exc))
+            return StoreIdentity(CANNOT_EVALUATE, notes)
         # Read the pointer and the override again through the same descriptor: a pointer rewritten, removed or
         # corrupted, or an override created or removed, while the store was read never grades as the first read.
+        # Two point reads, not a hold: a rewrite to the same decoded target, or a change undone before the
+        # second read, still grades as the first read (disclosed residual).
         try:
             override_again, target_again = _read_pointer_inputs(product_root_fd)
         except StoreError as exc:
@@ -5582,8 +5622,9 @@ def self_test():
             check("identity-override-uninspectable", id_says(prod, "cannot inspect {}".format(LOCAL_POINTER_REL)))
         finally:
             _journal._lstat_contained = real_lstat
-        # A present override never hides an input that cannot be evaluated: every other input is still read,
-        # and cannot-evaluate outranks the override's mismatch.
+        # A present override never hides an input that cannot be evaluated: evaluation continues past the
+        # override up to the FIRST input that cannot be evaluated (a malformed pointer ends it before the
+        # digest is read), and cannot-evaluate outranks the override's mismatch.
         prod, store, _mdir = id_fixture()
         (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
         os.unlink(str(prod / POINTER_REL))
@@ -5601,8 +5642,11 @@ def self_test():
               got != "RAISED" and got.status == IDENTITY_MISMATCH
               and any(n.startswith("target: DIFFERS") for n in got.notes)
               and any(LOCAL_POINTER_REL in n for n in got.notes))
-        # init.toml is read beneath the store root discovery ran through: a store root swapped by path right
-        # after discovery, for one whose init.toml matches the pin, is never the one hashed.
+        # init.toml is read beneath the store root discovery ran through, and after the read the store-root
+        # path must still name that held root: a store root swapped by path right after discovery, for one
+        # whose init.toml matches the pin, is never the one hashed, and the swap itself is cannot-evaluate
+        # naming the moved root; a matching store root renamed away after discovery is refused the same way,
+        # never graded as a match of a store its path no longer names.
         prod, store, _mdir = id_fixture(init=id_init + b"#\n")
         _prod2, swap_in, _mdir2 = id_fixture()
         real_discover = discover_machine_store
@@ -5614,7 +5658,20 @@ def self_test():
             return found
         globals()["discover_machine_store"] = discover_then_swap
         try:
-            check("identity-store-root-swapped-after-discovery", id_code(prod) == 1)
+            check("identity-store-root-swapped-after-discovery",
+                  id_says(prod, "store root was swapped by path"))
+        finally:
+            globals()["discover_machine_store"] = real_discover
+        prod, store, _mdir = id_fixture()
+
+        def discover_then_move(store_root_fd, store_root):
+            found = real_discover(store_root_fd, store_root)
+            os.rename(str(store), str(base / "identity-store-moved-{:02d}".format(id_seq[0])))
+            return found
+        globals()["discover_machine_store"] = discover_then_move
+        try:
+            check("identity-store-root-renamed-after-discovery",
+                  id_says(prod, "store root is no longer the directory"))
         finally:
             globals()["discover_machine_store"] = real_discover
         # The pointer and the override are read again after init.toml is hashed: each change below, made right
@@ -5646,6 +5703,81 @@ def self_test():
             lambda prod, _store: (prod / POINTER_REL).write_text("not toml {{\n", encoding="utf-8"),
             "re-read after hashing {}".format(INIT_NAME)))
         check("identity-override-created-after-read", id_changed_after_read(
+            lambda prod, store: (prod / LOCAL_POINTER_REL).write_text(
+                '[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8"),
+            "{} appeared".format(LOCAL_POINTER_REL)))
+        # An override present at the first read that disappears before the second is cannot-evaluate too,
+        # never the first read's mismatch: a hidden override is as undecidable as an injected one.
+        prod, store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        unprod = prod
+
+        def inputs_then_unoverride(product_root_fd):
+            got = real_inputs(product_root_fd)
+            os.unlink(str(unprod / LOCAL_POINTER_REL))
+            return got
+        globals()["_read_identity_inputs"] = inputs_then_unoverride
+        try:
+            check("identity-override-removed-after-read",
+                  id_says(prod, "{} disappeared".format(LOCAL_POINTER_REL)))
+        finally:
+            globals()["_read_identity_inputs"] = real_inputs
+        # After the hash, each held root must still be the directory its path names: a product root renamed
+        # away (its pointer still reads through the held descriptor) or swapped by path for one holding a
+        # matching store (a relative dir: target resolves against the PATH) is cannot-evaluate naming the
+        # moved root, never a MATCH graded across two different roots.
+        check("identity-product-root-renamed-after-read", id_changed_after_read(
+            lambda prod, _store: os.rename(str(prod), str(base / "identity-prod-moved-{:02d}".format(id_seq[0]))),
+            "product root is no longer the directory"))
+
+        def id_rel_fixture():
+            id_seq[0] += 1
+            prod = base / "identity-rel-{:02d}".format(id_seq[0])
+            mdir = prod / "st" / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR
+            mdir.mkdir(parents=True)
+            (mdir / MANIFEST_NAME).write_text(manifest_text(), encoding="utf-8")
+            (mdir / INIT_NAME).write_bytes(id_init)
+            (prod / ".github").mkdir()
+            (prod / POINTER_REL).write_text('[store]\ntarget = "dir:st"\n', encoding="utf-8")
+            (prod / IDENTITY_REL).write_text('schema = 1\ntarget = "dir:st"\ninit_sha256 = "{}"\n'.format(
+                hashlib.sha256(id_init).hexdigest()), encoding="utf-8")
+            return prod
+        prod = id_rel_fixture()
+        check("identity-relative-target-match", id_code(prod) == 0)
+        prod = id_rel_fixture()
+        swap_prod = id_rel_fixture()
+
+        def inputs_then_swap_root(product_root_fd):
+            got = real_inputs(product_root_fd)
+            os.rename(str(prod), str(base / "identity-prod-swapped-out"))
+            os.rename(str(swap_prod), str(prod))
+            return got
+        globals()["_read_identity_inputs"] = inputs_then_swap_root
+        try:
+            check("identity-product-root-swapped-after-read",
+                  id_says(prod, "product root was swapped by path"))
+        finally:
+            globals()["_read_identity_inputs"] = real_inputs
+        # The re-read runs AFTER the digest: a pointer removed or an override created in the instant the
+        # digest returns is still cannot-evaluate, so a re-read moved before the digest fails here.
+        real_digest = _read_committed_init_digest
+
+        def id_changed_after_digest(change, text):
+            prod, store, _mdir = id_fixture()
+
+            def digest_then_change(target, product_root):
+                got = real_digest(target, product_root)
+                change(prod, store)
+                return got
+            globals()["_read_committed_init_digest"] = digest_then_change
+            try:
+                return id_says(prod, text)
+            finally:
+                globals()["_read_committed_init_digest"] = real_digest
+        check("identity-pointer-removed-after-digest", id_changed_after_digest(
+            lambda prod, _store: os.unlink(str(prod / POINTER_REL)),
+            "re-read after hashing {}: {} is absent".format(INIT_NAME, POINTER_REL)))
+        check("identity-override-created-after-digest", id_changed_after_digest(
             lambda prod, store: (prod / LOCAL_POINTER_REL).write_text(
                 '[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8"),
             "{} appeared".format(LOCAL_POINTER_REL)))
