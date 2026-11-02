@@ -22205,6 +22205,87 @@ def _main_isolated(monitor):
             failures.append("(gw-ct-msg4) the relative capture form is expected to deny under "
                             "bash_absolute_paths; got {}".format(_ct_rel))
 
+        # gatdis status-trailer deny tier (the gw-st battery): a checker whose status a status-only
+        # trailer masks before a step chained by '&&' or '||'. Every deny row keeps comments and quotes
+        # out of its git segment, so no earlier station (the closed grammar) decides it.
+        gdeny_names("(gw-st-r1) the incident shape: a secrets scan, an echoed status, then chained git steps",
+                    "gitleaks protect --staged; echo gl=$? && git commit -m x && git push origin main",
+                    "status-only trailer")
+        gexpect("(gw-st-r2) an echoed status before a chained push denies",
+                "pytest; echo rc=$? && git push origin main", "deny")
+        gexpect("(gw-st-r3) a bare true trailer before a chained deploy denies",
+                "make test; true && ./deploy.sh", "deny")
+        gexpect("(gw-st-r4) a ':' trailer before a chained commit denies",
+                "pytest; : && git commit -m x", "deny")
+        gexpect("(gw-st-r5) a printf trailer denies (printf is in the status-only set)",
+                "ruff check .; printf ok && git commit -m x", "deny")
+        gdeny_names("(gw-st-r6) a $?-capturing assignment nothing later reads still denies",
+                    "pytest; rc=$? && git push origin main", "status-only trailer")
+        gexpect("(gw-st-r7) a two-trailer chain denies",
+                "pytest; echo a; echo b && git push origin main", "deny")
+        gexpect("(gw-st-r8) a non-git chained step denies too",
+                "pytest; echo rc && ./alert.sh", "deny")
+        gexpect("(gw-st-r8b) an '||'-gated step after the trailer denies",
+                "pytest; true || ./alert.sh", "deny")
+        gexpect("(gw-st-r9) a pipeline head checker is followed to its last stage",
+                "pytest | tee /abs/log; echo ok && git push origin main", "deny")
+        gexpect("(gw-st-r10) a benign prefix does not exempt the shape",
+                "cd /abs && pytest; echo ok && git push origin main", "deny")
+        gexpect("(gw-st-r11) the '||' sibling entry denies",
+                "pytest || echo failed && git push origin main", "deny")
+        gexpect("(gw-st-r12) a redirected trailer still masks, denies",
+                "pytest; echo ok > /abs/rc && git push origin main", "deny")
+        gexpect("(gw-st-r13) a deny candidate wins over another candidate's newline note",
+                "pytest\necho a && ls /abs; ruff check .; echo b && git push origin main", "deny")
+        gexpect("(gw-st-r14) a skipped empty newline segment does not downgrade the tier",
+                "pytest;\necho ok && git push origin main", "deny")
+        gexpect("(gw-st-f1) disclosed flip: '|| true' with a chained step moves from note to deny",
+                "pytest || true && git push origin main", "deny")
+        gexpect("(gw-st-f2) disclosed flip: '|| :' with a chained step moves from note to deny",
+                "pytest || : && git push origin main", "deny")
+        gexpect("(gw-st-f3) disclosed flip: '|| true' then a chained step after ';' denies",
+                "pytest || true; echo done && ls /abs", "deny")
+        gexpect("(gw-st-dfp1) disclosed installer false positive: a runner-operand install line denies",
+                "uv pip install pytest; echo ok && pytest -q", "deny")
+        gexpect("(gw-st-a1) the saved status tested before the step allows (the re-raise form)",
+                "pytest; rc=$?; [ $rc -eq 0 ] && git push origin main", "allow")
+        gexpect("(gw-st-a2) direct '&&' gating on the check allows",
+                "pytest && git push origin main", "allow")
+        gexpect("(gw-st-a3) a trailer with nothing chained allows",
+                "pytest; echo done", "allow")
+        gexpect("(gw-st-a4) 'pytest ; true' stays an allow (the gw-aw pair, unchanged)",
+                "pytest ; true", "allow")
+        gexpect("(gw-st-a5) a fully '&&'-chained list allows",
+                "pytest && echo ok && git push origin main", "allow")
+        gexpect("(gw-st-a6) an if compound is not the shape",
+                "if pytest; then echo ok && git push origin main; fi", "allow")
+        gexpect("(gw-st-a7) 'exit' is not status-only, so the re-raise guard shape allows",
+                "pytest || exit 1; echo ok && git push origin main", "allow")
+        gexpect("(gw-st-a8) a non-checker head allows",
+                "cd /x; echo start && make build", "allow")
+        gexpect("(gw-st-a9) a status-only chained step never closes the chain",
+                "pytest; echo a && echo b", "allow")
+        gexpect("(gw-st-a10) the shape inside quoted data with no git word allows",
+                "echo \"pytest; echo x && ./deploy.sh\"", "allow")
+        gexpect("(gw-st-a11) a brace group is not a status-only trailer",
+                "pytest || { echo failed; exit 1; } && git push origin main", "allow")
+        gexpect("(gw-st-a12) a substitution assignment is not status-only",
+                "pytest; x=$(date) && git push origin main", "allow")
+        gexpect("(gw-st-a13) a subshell breaks the chain",
+                "pytest; (echo x) && git push origin main", "allow")
+        gexpect("(gw-st-a14) a saved status read by the next chained test allows (re-raise)",
+                "pytest; rc=$? && [ $rc -eq 0 ] && git push origin main", "allow")
+        gexpect("(gw-st-a15) a saved status echoed and re-raised allows",
+                "pytest; rc=$?; echo \"pytest exited $rc\" && exit $rc", "allow")
+        gexpect("(gw-st-a16) a saved status tested two steps later allows (re-raise)",
+                "make test; status=$?; echo done && test $status -eq 0 && git push origin main", "allow")
+        gexpect("(gw-st-a17) pip is on no runner list, so the install line allows (the dfp1 pair)",
+                "pip install pytest; echo ok && pytest -q", "allow")
+        gexpect("(gw-st-n2) a newline at the entry downgrades to a note",
+                "pytest\necho ok && git push origin main", "allow-note")
+        gexpect("(gw-st-n3) a newline on an in-chain trailer downgrades to a note",
+                "pytest; echo a\necho b && git push origin main", "allow-note")
+
         # GD-124: this BEST-EFFORT, ASK-only guard scans every token after a recognized git commit
         # subcommand. The handler reads _lex_command's per-token opacity without Git option binding; it
         # does not regex-scan the primary path. No repository fixture or probe is involved.

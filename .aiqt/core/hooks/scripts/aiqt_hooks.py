@@ -14,7 +14,7 @@ handler function per control declared in .aiqt/core/hooks/manifest.toml:
   git_explicit_binding PreToolUse expbnd allow+note an ambient git target or broad scope before relocation/publish
   git_discard         PreToolUse  prsunc  allow / snapshot-then-allow / deny a git command that discards work
   branch_root         PreToolUse  brnrot  deny branch creation from an orphaned or unprovable start point
-  gate_weakening      PreToolUse  gatdis  deny a git hook bypass and a verification run piped into a truncating sink; allow+note another swallowed or truncated checker
+  gate_weakening      PreToolUse  gatdis  deny a git hook bypass, a verification run piped into a truncating sink, and a checker whose status a status-only trailer masks before a '&&'/'||' step; allow+note another swallowed or truncated checker
   commit_msg_subst    PreToolUse  sectvl  deny shell substitution in a git commit argument
   secrets_shift_left  PreToolUse  secsec  deny a Write/Edit/MultiEdit/Bash writing an obvious hardcoded secret
   gensrc_guard        PreToolUse  gensrc  a Write/Edit/MultiEdit that hand-edits a registered generated artefact
@@ -15137,6 +15137,15 @@ _NAME_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 _EXIT_SWALLOWS = frozenset(("true", ":"))
 _TRUNCATING_SINKS = frozenset(("head", "tail"))
 
+# The CLOSED set of status-only trailer commands for the status-trailer deny tier
+# (_gate_status_trailer): a command whose own exit status is what a following '&&' or '||' reads,
+# whatever it prints. This set is deliberately not _GATE_BENIGN_ALONE: printf is excluded THERE
+# because a printf format can assign a variable ('printf %n PATH' sets PATH to 0), a different
+# hazard; HERE the only question is whether the trailer's own exit masks the checker's before a
+# chained step, and printf's does, so including it only adds denies (the safe direction), and echo
+# is included for the same reason.
+_GATE_STATUS_ONLY = frozenset(("echo", "printf", "true", ":"))
+
 # The safe alternative named in every deny/ask reason (mirrors _PROTECTED_ALTS): the rule IS the route.
 _GATE_ALTS = (
     "Safe route: run the gate as-is and let its exit status stand; a failing gate is signal, so fix "
@@ -16359,6 +16368,153 @@ def _verification_sink_message(hit):
         "command's own exit status, then read the file in a separate step.".format(word, label, effect, held),
         "AIQT guardrail: denied a known verification run piped into a truncating sink ({}) (rule gatdis); "
         "write the full output to a file and read it.".format(label))
+
+
+# --- gatdis deny tier: a checker whose status a STATUS-ONLY TRAILER masks before a chained step ------------
+def _gate_status_only(seg, later_raws):
+    """How a candidate trailer segment of the status-trailer chain reads. True when the segment is
+    STATUS-ONLY: a simple command (_gate_simple; redirections are permitted, the deny-safe direction,
+    since 'echo ok > /abs/rc' still masks the checker's status) whose command word is in
+    _GATE_STATUS_ONLY, or an ASSIGNMENT-ONLY segment (every token a leading-assignment shape, so
+    'rc=$?' and 'x=1' qualify while 'x=$(date)' is already outside: _gate_simple refuses a '$(' in the
+    raw text). None for the RE-RAISE EXEMPTION, which ends the chain with no finding: an assignment
+    that captures '$?' and whose variable the raw text of any later segment of the same reading reads
+    ('$name' or '${name' anywhere in it, so an occurrence inside quoted data or a kept comment counts
+    too, a disclosed under-deny of this best-effort tier) may re-raise the checker's saved exit, the
+    rule's own propagation form. False otherwise: the segment is a candidate gated step, not a
+    trailer."""
+    if not _gate_simple(seg):
+        return False
+    word = _command_word(seg.argv)
+    if word:
+        return word in _GATE_STATUS_ONLY
+    names, captures = [], False
+    for tok in seg.argv:
+        m = _ENV_ASSIGN_RE.match(tok)
+        if m is None:
+            return False   # defensive: a '' command word means every token matched this shape
+        names.append(tok[:m.end() - 1].rstrip("+"))
+        if "$?" in tok[m.end():] or "${?" in tok[m.end():]:
+            captures = True
+    if captures and any("$" + name in raw or "${" + name in raw for name in names for raw in later_raws):
+        return None
+    return True
+
+
+def _gate_status_trailer(reading):
+    """gatdis status-trailer deny tier: (tier, checker word, trailer word as typed, gating separator)
+    for the first deny-tier hit of one reading, else its first note-tier hit, else None. Judged PER
+    READING, exactly as _verification_sink is, never over stitched readings, so two readings of an
+    uncertain '#' are never spliced into one shape. A CANDIDATE is every segment at case depth 0
+    (_gate_case_depths) that is checker-shaped (_is_checker_segment) or a known verification run
+    (_is_verification_run) and is the first stage of its pipeline (the nearest earlier segment with a
+    word or a redirection does not end in a pipe); when the candidate's pipeline continues, the walk
+    follows _gate_simple stages to the pipeline's LAST stage and gives up on the candidate at any
+    non-simple stage, so 'pytest | tee /abs/log; echo ok && git push origin main' is read from the tee
+    stage's separator. The ENTRY separator (';' or '||' deny-eligible; a newline, with the rest of the
+    reading still to walk, note-eligible; anything else no shape, so 'pytest && git push origin main'
+    is correct gating) starts a TRAILER CHAIN of consecutive status-only segments (_gate_status_only;
+    its re-raise exemption ends the chain with no finding); an in-chain ';', '&&' or '||' keeps deny
+    eligibility, an in-chain newline on a non-empty trailer downgrades the hit to a note, and '&' or a
+    pipe on a trailer breaks the chain. An EMPTY segment (no word, no redirection) with a newline or
+    ';' separator is skipped and contributes no separator, so its newline never changes the tier; one
+    with any other separator (a '(' included) breaks the chain, so 'pytest; (echo x) | tail' never
+    stitches into the subshell. A HIT needs at least one status-only trailer and a first
+    non-status-only, non-empty segment joined by the last trailer's '&&' or '||'; a chain that reaches
+    the end of the reading, or a next step joined by ';' or a newline, is no finding (the disclosed
+    unconditional 'G; N' residual). EVERY candidate is evaluated and a deny-tier hit anywhere wins over
+    every note-tier hit (the first of each, for a stable message)."""
+    records = list(reading)
+    n = len(records)
+    note_hit = None
+    for (i, seg), case_depth in zip(enumerate(records), _gate_case_depths(records)):
+        if case_depth or not seg.argv:
+            continue
+        if not (_is_checker_segment(seg.argv) or _is_verification_run(seg.argv)):
+            continue
+        prev = next((records[j] for j in range(i - 1, -1, -1)
+                     if records[j].argv or records[j].redirects), None)
+        if prev is not None and prev.sep_after in _GATE_PIPES:
+            continue   # not the first stage of its pipeline
+        last, failed = i, False
+        while records[last].sep_after in _GATE_PIPES:
+            nxt = next((j for j in range(last + 1, n)
+                        if records[j].argv or records[j].redirects or records[j].sep_after), None)
+            if nxt is None or not _gate_simple(records[nxt]):
+                failed = True
+                break
+            last = nxt
+        if failed:
+            continue
+        entry = records[last].sep_after
+        if entry not in (";", "||", ""):
+            continue
+        noted = entry == ""
+        count = 0
+        join = entry
+        trailer_word = ""
+        t = last + 1
+        while t < n:
+            nxt_seg = records[t]
+            if not nxt_seg.argv and not nxt_seg.redirects:
+                if nxt_seg.sep_after in ("", ";"):
+                    t += 1
+                    continue   # skipped, contributing no separator
+                break   # a '(' or another separator on an empty segment: the chain ends here
+            status = _gate_status_only(nxt_seg, [records[j].raw for j in range(t + 1, n)])
+            if status is None:
+                break   # the re-raise exemption: no finding for this candidate
+            if not status:
+                if count and join in ("&&", "||"):
+                    hit = ("note" if noted else "deny", _command_word(seg.argv), trailer_word, join)
+                    if hit[0] == "deny":
+                        return hit
+                    if note_hit is None:
+                        note_hit = hit
+                break
+            count += 1
+            idx = _command_word_index(nxt_seg.argv)
+            trailer_word = nxt_seg.argv[idx] if idx < len(nxt_seg.argv) else nxt_seg.argv[0]
+            join = nxt_seg.sep_after
+            if join == "":
+                noted = True
+            elif join not in (";", "&&", "||"):
+                break   # '&' or a pipe on a trailer: the chain ends with no finding
+            t += 1
+    return note_hit
+
+
+def _gate_status_trailer_messages(hit):
+    """The (reason, banner) of the status-trailer deny. The reason claims only the lexical shape: it
+    names the checker's word, the trailer word as typed and the gating separator, and says that a
+    command list reports the last command's status, so the '&&'/'||' gates the next step on the
+    trailer's exit, not the check's. The fix never suggests an exit-status echo (the rule's propagation
+    clause, as _verification_sink_message also holds): chain the step directly on the check, gate it on
+    the check's own exit, or save '$?' and test the saved value before the step."""
+    _tier, g_word, trailer_word, gate_sep = hit
+    return (
+        "AIQT rule gatdis (gate-discipline): {!r} looks like a verification gate, and the step after "
+        "the status-only trailer {!r} is chained to that trailer by '{}'. A command list reports the "
+        "last command's status, so the '{}' gates the next step on the trailer's exit, not the check's, "
+        "and a failing check still lets the gated step run. Chain the step directly on the check "
+        "('{} && <step>'), or run the check alone and gate the next step on the check's own exit "
+        "status, or save that status into a variable and test the variable before the step. {}"
+        .format(g_word, trailer_word, gate_sep, gate_sep, g_word, _GATE_ALTS),
+        "AIQT guardrail: denied a checker whose status a status-only trailer masks before a "
+        "'&&'/'||' step (rule gatdis).")
+
+
+def _gate_status_trailer_note(hit):
+    """The note text of a status-trailer hit a newline downgraded: the same shape read across a line
+    break, so it stays a note, not a refusal."""
+    _tier, g_word, trailer_word, gate_sep = hit
+    return (
+        "AIQT guardrail (rule gatdis, gate-discipline): {!r} looks like a verification gate, and a "
+        "later step is chained by '{}' to the status-only trailer {!r}, not to the check, with a line "
+        "break inside the shape. A command list reports the last command's status, so that '{}' gates "
+        "the step on the trailer's exit. If the check gates this work, chain the step directly on the "
+        "check or test the check's own saved exit status; if the trailer is deliberate, this is "
+        "allowed.".format(g_word, gate_sep, trailer_word, gate_sep))
 
 
 # The note tier's view of a checker or a sink the canonical deny cannot prove: wrappers beyond the four the
@@ -17850,7 +18006,24 @@ def gate_weakening(data):
     forbids piping a check to a truncating sink without conditions, and 'set -o pipefail' gives no exemption
     (it makes the pipeline fail when any stage fails, though not always with the check's own status, and the
     output is still cut). The deny is held until the segment loop ends so a
-    --no-verify deny keeps its own message, and it suppresses the note. NOTE tier: every
+    --no-verify deny keeps its own message, and it suppresses the note.
+    A SECOND deny shape, the STATUS-ONLY TRAILER (_gate_status_trailer, judged per reading, after every
+    other deny so each keeps its message): a checker-shaped segment or known verification run that is
+    the first stage of its pipeline (followed through _gate_simple stages to the pipeline's last stage),
+    then after ';' or '||' one or more status-only trailers (echo, printf, true, ':' or an
+    assignment-only segment; _GATE_STATUS_ONLY and _gate_status_only), then a step chained to the last
+    trailer by '&&' or '||', DENIES: a command list reports the last command's status, so the '&&'/'||'
+    gates that step on the trailer's exit, not the check's. A newline at the entry or on a non-empty
+    trailer downgrades the hit to a note held below the broad tier's; an empty segment with a newline or
+    ';' separator is skipped and contributes no separator; a '$?'-capturing assignment whose variable
+    the raw text of a later segment of the same reading reads ends the chain with no finding (the rule's
+    re-raise form: 'pytest; rc=$?; [ $rc -eq 0 ] && git push origin main' allows while 'pytest; rc=$? &&
+    git push origin main' denies); every candidate is evaluated and a deny anywhere wins over any note.
+    Disclosed costs of this tier: '|| true'/'|| :' with a '&&'/'||'-chained step after it moves from the
+    broad tier's note to this deny; the broad checker heuristic feeds it, so a checker-shaped name that
+    gates nothing ('test -f x; echo ok && next') and a package-runner install line ('uv pip install
+    pytest; echo ok && pytest -q', where the runner operand scan sees the checker word, while pip is on
+    no runner list) deny too. NOTE tier: every
     other checker-shaped segment (the broad heuristic) whose failure signal is swallowed by a following
     '|| true'/'|| :', or piped into an adjacent head/tail, ALLOWS-WITH-NOTE, and so does a shape outside the
     canonical deny that _gate_flow_note sees (an unlisted tool, mode or option, a compound or grouped stage,
@@ -17913,7 +18086,15 @@ def gate_weakening(data):
     xargs body; R2 an alias defined in a configuration file, or a shell function; R3 a gate whose name and
     options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
-    counted as truncating sinks."""
+    counted as truncating sinks; R5, for the status-trailer tier: an always-succeeding trailer outside
+    the closed set (sleep, date, cd, pwd, logger, wait, export, local), an 'x=$(date)'-style
+    substitution assignment (not status-only), an unconditional 'G; N' with no '&&'/'||' on the trailer,
+    a checker entered by '&&' ('pytest && echo passed; echo done && git push origin main'), a
+    backgrounded checker, a trailer that itself pipes, a trailer carrying a here-string (the parse-error
+    path, where this tier does not run, as on the floor-fallback-only and unjudged-'#' paths), and a
+    '$?'-capturing assignment whose variable is named only in a later segment's quoted data or kept
+    comment (the read is sought in the raw text, an under-deny), only in another reading, or through a
+    name built at run time."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -18160,7 +18341,9 @@ def gate_weakening(data):
         # ('| head/tail') HEURISTIC is too broad - a benign optional probe ('test -d /cache || true', 'pytest
         # || true' while iterating, 'make | head' to glance at output) is common and is not a gate bypass - so
         # it stays an ALLOW-WITH-NOTE. The narrow deny tier (a verification run whose output reaches a
-        # truncating sink, _verification_sink below) and the CONFIRMED --no-verify bypass above DENY.
+        # truncating sink, _verification_sink below) and the CONFIRMED --no-verify bypass above DENY, and so
+        # does a status-only trailer with a step chained to it by '&&' or '||' (_gate_status_trailer below):
+        # there the swallow is no longer a bare probe, since the chained step reads the trailer's exit.
         if sep_after == "||" and _command_word(nxt) in _EXIT_SWALLOWS:
             if pending_note is None:
                 pending_note = (
@@ -18211,8 +18394,24 @@ def gate_weakening(data):
     runtime_hit = _gate_runtime_bypass(command)
     if runtime_hit is not None:
         return _gate_runtime_deny(runtime_hit)
+    # The status-trailer tier (_gate_status_trailer) is judged per reading, as the sink deny is, and runs
+    # after every deny above, so each keeps its own message; a deny-tier hit in any reading wins over
+    # every note-tier hit, and the downgraded note is held BELOW the broad-tier note (pending_note), so
+    # the established notes keep precedence and the flow note stays weakest.
+    trailer_note = None
+    for reading in readings:
+        trailer_hit = _gate_status_trailer(reading)
+        if trailer_hit is None:
+            continue
+        if trailer_hit[0] == "deny":
+            reason, banner = _gate_status_trailer_messages(trailer_hit)
+            return _deny(reason, banner)
+        if trailer_note is None:
+            trailer_note = trailer_hit
     if pending_note is not None:
         return _allow_note(pending_note)
+    if trailer_note is not None:
+        return _allow_note(_gate_status_trailer_note(trailer_note))
     flow_note = _gate_flow_note(records, command)
     if flow_note is not None:
         return _allow_note(flow_note)
