@@ -630,7 +630,7 @@ mechanisms = []
 [[rule]]
 corpus-id = "trkasy"
 status = "enforced"
-mechanisms = ["hook:orch-dispatch-ledger", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-truncation-guard", "hook:orch-untracked-wait-loop", "hook:pgrep-self-match"]
+mechanisms = ["hook:orch-dispatch-ledger", "hook:orch-stop-guard", "hook:orch-teammate-idle-guard", "hook:orch-truncation-guard", "hook:orch-untracked-wait-loop", "hook:pgrep-self-match", "hook:python-stdin-program"]
 
 [[rule]]
 corpus-id = "trsrcv"

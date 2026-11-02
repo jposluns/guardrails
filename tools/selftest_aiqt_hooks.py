@@ -3010,6 +3010,152 @@ def _test_pgrep_self_match(failures):
         failures.append("(psm-wiring) pgrep_self_match handler/event wiring is missing or wrong")
 
 
+# python_stdin_program rows (trkasy): each deny row runs python with program `-` and nothing feeding its
+# standard input, so it would wait on the session's input; each deny row is red with the detector disabled.
+_SPG_DENY_ROWS = (
+    ("(spg-d1) bare python3 -", "python3 -"),
+    ("(spg-d2) python3 -I -", "python3 -I -"),
+    ("(spg-d3) python -", "python -"),
+    ("(spg-d4) python3.12 with an option", "python3.12 -B -"),
+    ("(spg-d5) a path to python3", "/usr/bin/python3 -"),
+    ("(spg-d6) inside an unquoted command substitution", "x=$(python3 -)"),
+    ("(spg-d7) after a list separator", "echo a; python3 -"),
+    ("(spg-d8) behind timeout", "timeout 60 python3 -"),
+    ("(spg-d9) behind env with an option", "env -i python3 -"),
+    ("(spg-d10) after an option value", "python3 -W ignore -"),
+    ("(spg-d11) after --", "python3 -- -"),
+    ("(spg-d12) a redirect on another fd", "python3 - 3< prog.py"),
+    ("(spg-d13) with script arguments", "python3 - a b"),
+    ("(spg-d14) inside backticks", "x=`python3 -`"),
+    ("(spg-d15) after a here-document body", "python3 - <<'EOF'\nprint(1)\nEOF\npython3 -"),
+    ("(spg-d16) a pipe ended by a list separator", "cat prog.py | true; python3 -"),
+    ("(spg-d17) inside an if", "if true; then python3 -I -; fi"))
+# Fed forms: each is allowed, and each is red with the fed exception removed.
+_SPG_FED_ROWS = (
+    ("(spg-f1) a quoted here-document", "python3 - <<'EOF'\nprint(1)\nEOF"),
+    ("(spg-f2) an unquoted here-document", "python3 -I - <<EOF\nprint(1)\nEOF"),
+    ("(spg-f3) a tab-stripped here-document", "python3 - <<-'EOF'\n\tprint(1)\n\tEOF"),
+    ("(spg-f4) a pipe", "echo 'print(1)' | python3 -"),
+    ("(spg-f5) a |& pipe", "echo 'print(1)' |& python3 -I -"),
+    ("(spg-f6) a pipe into a subshell", "echo 'print(1)' | (python3 -)"),
+    ("(spg-f7) a < redirect", "python3 - < prog.py"),
+    ("(spg-f8) a 0< redirect", "python3 - 0< prog.py"),
+    ("(spg-f9) a here-string", "python3 - <<< 'print(1)'"),
+    ("(spg-f10) a duplicated fd", "python3 - <&3"))
+# Allow rows that read no program from standard input.
+_SPG_ALLOW_ROWS = (
+    ("(spg-a1) python3 -c", "python3 -c 'print(1)'"),
+    ("(spg-a2) a script file", "python3 file.py"),
+    ("(spg-a3) -c in a cluster", "python3 -Ic 'print(1)'"),
+    ("(spg-a4) python3 -m", "python3 -m json.tool f.json"),
+    ("(spg-a5) python3 - as echo text", "echo python3 -"),
+    ("(spg-a6) python3 - in a quoted message", "git commit -m 'python3 -'"),
+    ("(spg-a7) --version", "python3 --version"),
+    ("(spg-a8) a here-document body naming python3 -", "cat <<'EOF'\npython3 -\nEOF"),
+    ("(spg-a9) a script after an option value", "python3 -W ignore f.py"))
+# Real-bash oracle rows: (label, command, whether it blocks). bash runs each with its standard input an open
+# pipe that nothing writes or closes, as the session's input is; the hook must deny exactly the rows that block.
+_SPG_ORACLE_ROWS = (
+    ("(spg-o1) bare python3 -", "python3 -", True),
+    ("(spg-o2) python3 -I -", "python3 -I -", True),
+    ("(spg-o3) a here-document", "python3 - <<'EOF'\nprint('fed')\nEOF", False),
+    ("(spg-o4) a pipe", "echo \"print('fed')\" | python3 -", False))
+_SPG_ORACLE_WAIT = 4
+
+
+def _spg_oracle(failures, handler):
+    """Run each _SPG_ORACLE_ROWS command under real bash, standard input an open pipe that is never written,
+    in its own session under _SPG_ORACLE_WAIT seconds; a run still waiting then is killed by its process group
+    and counts as blocked. The hook must deny exactly the rows that block, and each must block as stated."""
+    if shutil.which("bash") is None or shutil.which("python3") is None:
+        failures.append("(spg-oracle) the real-bash oracle needs bash and python3 on PATH")
+        return
+    for label, command, expected in _SPG_ORACLE_ROWS:
+        denied = _decision(handler, command) == "deny"
+        read_end, write_end = os.pipe()
+        try:
+            try:
+                proc = subprocess.Popen(["bash", "-c", command], stdin=read_end, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, start_new_session=True)
+            finally:
+                os.close(read_end)
+            try:
+                proc.communicate(timeout=_SPG_ORACLE_WAIT)
+                blocked = False
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate()
+                blocked = True
+        finally:
+            os.close(write_end)
+        if denied != blocked or blocked != expected:
+            failures.append("{}: hook deny {} but real bash blocked {} (expected {}), exit {}".format(
+                label, denied, blocked, expected, proc.returncode))
+
+
+def _test_python_stdin_program(failures):
+    """python_stdin_program rows; only the real-bash oracle rows (_spg_oracle) execute a command. Each deny row
+    must be red with the detector _stdin_py_hit patched to find nothing, and each fed row red with the fed
+    exception (_STDIN_PY_FEEDS and _STDIN_PY_PIPES) emptied."""
+    handler = aiqt_hooks.python_stdin_program
+    _spg_oracle(failures, handler)
+    for label, command in _SPG_DENY_ROWS:
+        got = _decision(handler, command)
+        if got != "deny":
+            failures.append("{}: expected deny, got {}".format(label, got))
+    for label, command in _SPG_FED_ROWS + _SPG_ALLOW_ROWS:
+        got = _decision(handler, command)
+        if got != "allow":
+            failures.append("{}: expected silent allow, got {}".format(label, got))
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "tool_input": {"command": "python3 -I -"}})
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    if "here-document" not in reason or "in a file" not in reason or "'python3 -I -'" not in reason:
+        failures.append("(spg-reason) the deny reason must name the command and both fixes (a here-document, "
+                        "a program file), got {!r}".format(reason))
+    saved = aiqt_hooks._stdin_py_hit
+    aiqt_hooks._stdin_py_hit = lambda command: None
+    try:
+        disabled = [(label, _decision(handler, command)) for label, command in _SPG_DENY_ROWS]
+    finally:
+        aiqt_hooks._stdin_py_hit = saved
+    for label, got in disabled:
+        if got != "allow":
+            failures.append("{}: with the hook disabled this deny row must go red (allow), got {}"
+                            .format(label, got))
+    saved = aiqt_hooks._STDIN_PY_FEEDS, aiqt_hooks._STDIN_PY_PIPES
+    aiqt_hooks._STDIN_PY_FEEDS = aiqt_hooks._STDIN_PY_PIPES = frozenset()
+    try:
+        unfed = [(label, _decision(handler, command)) for label, command in _SPG_FED_ROWS]
+    finally:
+        aiqt_hooks._STDIN_PY_FEEDS, aiqt_hooks._STDIN_PY_PIPES = saved
+    for label, got in unfed:
+        if got != "deny":
+            failures.append("{}: with the fed exception removed this allow row must go red (deny), got {}"
+                            .format(label, got))
+    for label, data in (
+            ("(spg-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
+                                            "tool_input": {"command": "python3 -"}}),
+            ("(spg-m2) None tool_name", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
+                                         "tool_input": {"command": "python3 -"}})):
+        if handler(data) != aiqt_hooks._deny_missing_tool_name("trkasy"):
+            failures.append("{}: expected the shared missing-tool deny".format(label))
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}):
+        code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                             "tool_input": tool_input})
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(spg-unreadable) a non-string command {!r} must deny fail-safe".format(tool_input))
+    if _decision(handler, "python3 -", tool="Read") != "allow":
+        failures.append("(spg-other-tool) a different tool must silently allow")
+    code, stdout_obj, stderr = handler({"hook_event_name": "Stop", "tool_name": "Bash",
+                                        "tool_input": {"command": "python3 -"}})
+    if not (code == 2 and stdout_obj is None and "python_stdin_program wired to unexpected event" in (stderr or "")):
+        failures.append("(spg-event) an unexpected event must use the sibling hard-block contract")
+    if (aiqt_hooks.HANDLERS.get("python_stdin_program") is not handler or
+            aiqt_hooks.HANDLER_EVENT.get("python_stdin_program") != aiqt_hooks.PRETOOL):
+        failures.append("(spg-wiring) python_stdin_program handler/event wiring is missing or wrong")
+
+
 # === PreToolUse deadline posture ======================================================================
 # main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
 # PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
@@ -4944,6 +5090,12 @@ _DEADLINE_SHAPES = {
     "pgrep_distinct": lambda n, base: ("Bash", {"command": "".join(
         "pgrep -x p{:07d}; ".format(k) for k in range(n // 19))}),
     "pgrep_self_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "pgrep -f job7 || run job7")}),
+    # python_stdin_program: many fed here-documents (each body skipped, none denied), long runs of pipes and
+    # of an unbalanced quote, and an unfed python3 - after a long prefix.
+    "stdin_py_heredocs": lambda n, base: ("Bash", {"command": _repeat("python3 - <<E\nx\nE\n", n)}),
+    "stdin_py_pipes": lambda n, base: ("Bash", {"command": _repeat("x | ", n, "python3 -")}),
+    "stdin_py_open_quote": lambda n, base: ("Bash", {"command": "'" + _repeat("a ", n - 1)}),
+    "stdin_py_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "python3 -")}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -5001,6 +5153,8 @@ _DEADLINE_CASES = {
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
     "pgrep_self_match": ("git_words", "nest_parens", "pgrep_distinct", "pgrep_self_after"),
+    "python_stdin_program": ("nest_parens", "stdin_py_heredocs", "stdin_py_pipes", "stdin_py_open_quote",
+                             "stdin_py_after"),
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
@@ -5022,7 +5176,7 @@ _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
-    ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
+    ("python_stdin_program", "stdin_py_after"), ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
     ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
 # a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
@@ -5048,7 +5202,7 @@ _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs"),
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
-    ("pgrep_self_match", "pgrep_distinct")))
+    ("pgrep_self_match", "pgrep_distinct"), ("python_stdin_program", "stdin_py_heredocs")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -27381,6 +27535,7 @@ def _main_isolated(monitor):
 
         _test_git_stash_ref(failures)
         _test_pgrep_self_match(failures)
+        _test_python_stdin_program(failures)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)

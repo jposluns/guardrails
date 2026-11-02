@@ -18811,7 +18811,163 @@ def pgrep_self_match(data):
         "completion file captured at launch.")
 
 
-# --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
+# --- trkasy: a python interpreter told to read its program from a stdin nothing feeds ----------------
+# python3 - (or python3 -I -) reads its program from standard input until end of file. With no here-document,
+# here-string, < redirection or pipe feeding it, that input is the session's own, which the Bash tool holds open
+# and never closes, so the call waits until its timeout instead of running anything. The scan is lexical over
+# the raw text: a quoted string is one word, a here-document body is skipped, and every simple command is read,
+# one inside an unquoted $( ) or backticks included.
+_STDIN_PY_TOKEN_RE = re.compile(
+    r"(?P<space>[ \t\r\f\v]+|\\\n)"
+    r"|(?P<redir>\d*(?:&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||[<>]))"
+    r"|(?P<op>\|&|\|\||&&|;;|[|&;()`\n])"
+    r"|(?P<word>(?:[^\s<>|&;()`'\"\\]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)"
+    r"|(?P<stray>.)", re.S)
+# The redirects that feed a command's standard input (fd 0, written or implied).
+_STDIN_PY_FEEDS = frozenset(("<", "<<", "<<-", "<<<", "<>", "<&"))
+_STDIN_PY_PIPES = frozenset(("|", "|&"))
+_STDIN_PY_NAME_RE = re.compile(r"python(?:[0-9]+(?:\.[0-9]+)?)?")
+# Wrappers read past to the interpreter, with their options, a duration word and any word after an option.
+_STDIN_PY_WRAPPERS = frozenset(("env", "timeout", "command", "exec", "nohup", "nice", "stdbuf", "time", "sudo",
+                                "setsid", "ionice", "doas"))
+# CPython options: the letters that take a value (glued or as the next word), and the letters whose value is
+# the program (-c, -m), so no program is read from standard input.
+_STDIN_PY_VALUE_LETTERS = frozenset("WX")
+_STDIN_PY_PROGRAM_LETTERS = frozenset("cm")
+_STDIN_PY_EXITING = frozenset(("-h", "-?", "--help", "-V", "--version", "--help-env", "--help-xoptions",
+                               "--help-all"))
+
+
+def _stdin_py_reads_stdin(words):
+    """Whether the simple command words (de-quoted) run a python interpreter whose program argument is `-`: the
+    command word past leading reserved words, VAR=value words and the wrappers in _STDIN_PY_WRAPPERS (with their
+    options and values) names python, python3 or python3.N (a path ending in one included), and its options are
+    followed by a lone `-`. -c and -m, a script operand, and an option that exits at once read no program from
+    standard input."""
+    wrapped = value = False
+    at = None
+    for k, word in enumerate(words):
+        name = word.rsplit("/", 1)[-1]
+        if _STDIN_PY_NAME_RE.fullmatch(name):
+            at = k
+            break
+        if wrapped and word.startswith("-") and len(word) > 1:
+            value = "=" not in word
+        elif name in _STDIN_PY_WRAPPERS:
+            wrapped, value = True, False
+        elif value or word in _CMTIDN_RESERVED or _ENV_ASSIGN_RE.match(word) or (
+                wrapped and _PSM_DURATION_RE.fullmatch(word)):
+            value = False
+        else:
+            return False
+    if at is None:
+        return False
+    rest, i = words[at + 1:], 0
+    while i < len(rest):
+        word = rest[i]
+        i += 1
+        if word == "-":
+            return True
+        if word == "--":
+            return i < len(rest) and rest[i] == "-"
+        if word in _STDIN_PY_EXITING or not word.startswith("-"):
+            return False
+        if word.startswith("--"):
+            i += 0 if "=" in word or word != "--check-hash-based-pycs" else 1
+            continue
+        for k, letter in enumerate(word[1:], 2):
+            if letter in _STDIN_PY_PROGRAM_LETTERS:
+                return False
+            if letter in _STDIN_PY_VALUE_LETTERS:
+                i += 0 if k < len(word) else 1
+                break
+    return False
+
+
+def _stdin_py_hit(command):
+    """The first simple command of the raw command text that runs python with program `-` and no input fed to
+    it (_stdin_py_reads_stdin), as its de-quoted words joined by blanks, or None. A command is fed when it
+    carries a <, <<, <<-, <<<, <> or <& redirect on fd 0 (written or implied), or stands after a | or |& (a
+    ( group opened right after the pipe keeps it). A here-document's body, from the newline after the
+    redirect to its delimiter line, is skipped as data."""
+    n, i = len(command), 0
+    words, fed, piped, pending, bodies = [], False, False, None, []
+    while i < n:
+        match = _STDIN_PY_TOKEN_RE.match(command, i)
+        kind, i = match.lastgroup, match.end()
+        if kind in ("word", "stray"):
+            word = match.group().translate(_PSM_UNQUOTE)
+            if pending is not None:
+                if pending in ("<<", "<<-"):
+                    bodies.append((word, pending == "<<-"))
+                pending = None
+            else:
+                words.append(word)
+        elif kind == "redir":
+            text = match.group()
+            op = text.lstrip("0123456789")
+            if op in _STDIN_PY_FEEDS and text[:len(text) - len(op)] in ("", "0"):
+                fed = True
+            pending = op
+        elif kind == "op":
+            op = match.group()
+            if words or op != "(":
+                if not (fed or piped) and _stdin_py_reads_stdin(words):
+                    return " ".join(words)
+                piped = op in _STDIN_PY_PIPES
+            words, fed, pending = [], False, None
+            if op == "\n":
+                for delimiter, tabs in bodies:
+                    while i < n:
+                        end = command.find("\n", i)
+                        end = n if end == -1 else end
+                        line = command[i:end]
+                        i = end + 1
+                        if (line.lstrip("\t") if tabs else line) == delimiter:
+                            break
+                bodies = []
+    if words and not (fed or piped) and _stdin_py_reads_stdin(words):
+        return " ".join(words)
+    return None
+
+
+def python_stdin_program(data):
+    """trkasy (integ/track-launched-work), PreToolUse/Bash. DENY-and-educate a simple command that runs python
+    (python, python3 or python3.N, with any options) with program `-` and no here-document, here-string, <
+    redirection or pipe from an earlier stage feeding it (_stdin_py_hit): it reads its program from the
+    session's standard input, which nothing writes or closes, so it waits until the call's timeout. python3 -c,
+    python3 file.py and every fed form are allowed. Hooks never ask. BEST EFFORT: a command built at run time is
+    not seen; the residue in the hook manifest states the shapes read and the misses. A missing tool_name takes
+    the shared deny and a non-string command denies fail-safe, as the sibling deny hooks do."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: python_stdin_program wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("trkasy")
+    if tool_name != "Bash":
+        return _allow()                     # a present-but-different tool is out of scope
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): the Bash payload carried no readable command string, so "
+            "the stdin program check could not run; it is denied fail-safe. Re-issue a well-formed Bash "
+            "command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-safe).")
+    hit = _stdin_py_hit(command)
+    if hit is None:
+        return _allow()
+    return _deny(
+        "AIQT rule trkasy (track-launched-work): {!r} tells python to read its program from standard input, and "
+        "nothing in the command feeds it, so it reads the session's own input, which is never closed: the call "
+        "waits until its timeout instead of running. Feed the program with a here-document (python3 - <<'EOF' "
+        "... EOF), or put the program in a file and run python3 FILE.".format(hit[:120]),
+        "AIQT guardrail: denied python reading its program from an unfed stdin (rule trkasy); feed it with a "
+        "here-document or put the program in a file.")
+
+
+# --- secsec:an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
 # A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
 # remain the real backstop), it moves the same high-signal detection to the moment a secret would be
 # written, so an accidental paste is caught before it ever lands on disk. The patterns are SINGLE-SOURCED
@@ -36148,6 +36304,7 @@ HANDLERS = {
     "gate_weakening": gate_weakening,
     "commit_msg_subst": commit_msg_subst,
     "pgrep_self_match": pgrep_self_match,
+    "python_stdin_program": python_stdin_program,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
     "write_scope_guard": write_scope_guard,
@@ -36189,6 +36346,7 @@ HANDLER_EVENT = {
     "gate_weakening": PRETOOL,
     "commit_msg_subst": PRETOOL,
     "pgrep_self_match": PRETOOL,
+    "python_stdin_program": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
     "write_scope_guard": PRETOOL,
