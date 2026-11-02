@@ -87,12 +87,19 @@
 #                        lower-the-ratchet note does not apply to it, and a later tidy-up must not remove
 #                        it. When a queued fold lands, record its measured cost here against the 559-unit
 #                        estimate.
+#                        Raised 134991 -> 135529 on 2026-11-01 under the maintainer's recorded decision of
+#                        2026-10-31 to raise the ratchet by exactly the measured delta, when change-carries-check
+#                        gained its paragraph on testing a fix to code that sorts text into verdicts
+#                        (chgchk.11): measured PACK 134422 at the PR base 6671928f -> 134960 (+538 units); rule
+#                        files 117926 -> 118464; managed block 360 and file headers 16136 unchanged. This queued
+#                        seed fold measured 538 units against the 559-unit estimate. The ratchet rises by the
+#                        measured delta, 134991 + 538 = 135529, rather than drawing on the estimate.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 134991
+ratchet = 135529
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
