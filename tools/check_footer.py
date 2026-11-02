@@ -734,7 +734,7 @@ def main():
 # threading's census and the runtime's live count of low-level _thread workers together, so a worker's
 # later fault is recorded instead of killed silently by the exit, and a thread or low-level worker still
 # running at the bound fails the verdict closed (exit 2). On Linux the settle also waits on the OS's own
-# thread list for this process (_os_threads_pending), which still shows a worker while the runtime clears
+# thread list for this process (_os_threads_state), which still shows a worker while the runtime clears
 # its thread state (its thread-local and context values' destructors run there, after the runtime's live
 # count and threading's census already dropped it), a faulthandler watchdog and a thread a C extension
 # starts. The verdict then ends the process with os._exit, so an
@@ -880,16 +880,32 @@ def _install_fault_hooks():
 _TASK_DIR = "/proc/self/task" if sys.platform.startswith("linux") else None
 
 
-def _os_threads_pending():
-    """True while the OS lists a thread of this process besides the calling one, and when that list
-    exists but cannot be read (fail-closed); False where the platform has no such list."""
+def _os_threads_state():
+    """The OS thread list's term by name: "OS thread list" while it lists a thread of this process besides
+    the calling one, "OS thread list unreadable" when it exists but cannot be read (fail-closed), None
+    otherwise and where the platform has no such list."""
     import os
     if _TASK_DIR is None:
-        return False
+        return None
     try:
-        return len(os.listdir(_TASK_DIR)) != 1
+        return "OS thread list" if len(os.listdir(_TASK_DIR)) != 1 else None
     except OSError:
-        return True
+        return "OS thread list unreadable"
+
+
+def _pending_terms():
+    """The names of the liveness terms besides threading's census still pending, in the settle's order:
+    the runtime's live count of low-level workers, a started worker's flag, and the OS thread list."""
+    import _thread as _lowlevel
+    terms = []
+    if _lowlevel._count():
+        terms.append("runtime count")
+    if any(_state[0] for _state in _LOADED_WORKERS):
+        terms.append("worker flag")
+    listed = _os_threads_state()
+    if listed is not None:
+        terms.append(listed)
+    return terms
 
 
 def _drain_pending_signals():
@@ -918,7 +934,6 @@ def _gate_exit(code):
     import os
     import threading as _threads
     import time
-    import _thread as _lowlevel
     if type(code) is bool:
         code = 1 if code else 0
     elif code is None:
@@ -941,12 +956,12 @@ def _gate_exit(code):
         code = low
     if code == 0:
         current = _threads.current_thread()
-        deadline = time.monotonic() + _SETTLE_SECONDS
+        started = time.monotonic()
+        deadline = started + _SETTLE_SECONDS
         while True:
             running = [worker for worker in _threads.enumerate()
                        if worker is not current and worker.is_alive()]
-            pending = (_lowlevel._count() or any(_state[0] for _state in _LOADED_WORKERS)
-                       or _os_threads_pending())
+            pending = _pending_terms()
             remaining = deadline - time.monotonic()
             if (not running and not pending) or remaining <= 0:
                 break
@@ -955,8 +970,12 @@ def _gate_exit(code):
             else:
                 time.sleep(min(remaining, 0.05))
         if running or pending:
-            sys.stderr.write("{}: a worker thread or low-level worker was still running at the verdict; "
-                             "fail-closed\n".format(_FAULT_MARKER))
+            # The terms still pending and the time spent settling are named, so a failing run says
+            # whether a worker outlasted the bound and which term still saw it.
+            sys.stderr.write("{}: a worker thread or low-level worker was still running at the verdict "
+                             "(pending: {}; settled {:.3f}s of {:.3f}s); fail-closed\n".format(
+                                 _FAULT_MARKER, ", ".join((["thread census"] if running else []) + pending),
+                                 time.monotonic() - started, _SETTLE_SECONDS))
             code = 2
     if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
         sys.stderr.write("{}: {} background fault(s) from loaded code over a passing verdict; "
@@ -981,13 +1000,16 @@ def _gate_exit(code):
             _drain_pending_signals()
         except BaseException:  # noqa: BLE001  a handler's own escape fails the verdict, never the exit
             code = 2
-        if (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False) or _lowlevel._count()
-                or any(_state[0] for _state in _LOADED_WORKERS) or _os_threads_pending()):
+        late = _pending_terms()
+        if _LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False):
+            late.insert(0, "fault record")
+        if late:
             code = 2
         if code != 0:
             try:
-                os.write(2, ("{}: a background fault or a worker was recorded during the exit flush; "
-                             "fail-closed\n".format(_FAULT_MARKER)).encode("utf-8"))
+                os.write(2, ("{}: a background fault or a worker was recorded during the exit flush "
+                             "(found: {}); fail-closed\n".format(
+                                 _FAULT_MARKER, ", ".join(late) or "signal handler escape")).encode("utf-8"))
             except OSError:
                 pass
     os._exit(code)
@@ -1013,7 +1035,7 @@ sys.path.insert(0, tool.rsplit("/", 1)[0])
 spec = importlib.util.spec_from_file_location("_fault_channel_probe_target", tool)
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
-gate._SETTLE_SECONDS = 2.0
+gate._SETTLE_SECONDS = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
 def load():
     case = importlib.util.spec_from_file_location("_fault_channel_fixture", fixture)
     module = importlib.util.module_from_spec(case)
@@ -1322,6 +1344,90 @@ def _entry_wiring_failures():
                         "fail-closed form")
     return failures
 
+
+# A failure whose child ran carries the child's LOADED-CODE-FAULT lines, cut to this many characters (the
+# " [cut]" suffix that then follows is outside the limit), so it says why the case failed without carrying
+# an unbounded stream.
+_FAULT_LINES_LIMIT = 600
+
+
+def _fault_lines(stderr):
+    """The child's LOADED-CODE-FAULT lines joined with " | "; when longer than _FAULT_LINES_LIMIT
+    characters, the first _FAULT_LINES_LIMIT of them followed by " [cut]", which the limit excludes."""
+    said = " | ".join(line for line in stderr.splitlines() if line.startswith(_FAULT_MARKER + ":"))
+    if len(said) > _FAULT_LINES_LIMIT:
+        said = said[:_FAULT_LINES_LIMIT] + " [cut]"
+    return said or "no {} line".format(_FAULT_MARKER)
+
+
+_SETTLE_PREFIX = (_FAULT_MARKER + ": a worker thread or low-level worker was still running at the verdict "
+                  "(pending: ")
+
+
+def _settle_report(stderr):
+    """The settle line's pending terms, seconds settled and bound, read from a child's stderr; ([], None, None)
+    without such a line, and None for the seconds when they do not parse."""
+    for line in stderr.splitlines():
+        if line.startswith(_SETTLE_PREFIX):
+            terms, _sep, rest = line[len(_SETTLE_PREFIX):].partition("; settled ")
+            settled, _sep, rest = rest.partition("s of ")
+            try:
+                return terms.split(", "), float(settled), float(rest.partition("s)")[0])
+            except ValueError:
+                return terms.split(", "), None, None
+    return [], None, None
+
+
+# The clean finishing rows pass only when the settle sees the worker's teardown end within the probe's
+# bound, so a host that stalls that teardown past the bound fails them. Such a failure is named from what
+# the child reported, never assumed: a child that failed closed with the settle line as its only marker,
+# the settle having reached its bound with only the worker's own liveness terms pending (never an
+# unreadable thread list), gets a prefix saying the worker was still pending at the bound. A finishing
+# fixture that regressed into a worker that never ends reports exactly the same, so the prefix names both
+# causes and cannot tell them apart. Either way the row still fails, never a pass; a settle that stops
+# waiting early leaves the re-read after the flushes to fail it under that re-read's own marker, unprefixed.
+_FINISHING_LABELS = ("finishing-thread", "lowlevel-finishing", "lowlevel-local-finishing",
+                     "runtime-count-return-finishing")
+_STALL_TERMS = ("thread census", "runtime count", "worker flag", "OS thread list")
+
+
+def _stall_name(label, code, stderr):
+    """A prefix for a clean finishing row's child that failed closed only because its worker was still
+    pending at the probe's settle bound, a host stall past the bound or a worker that no longer ends (see
+    _FINISHING_LABELS); "" otherwise. The row still fails."""
+    if label not in _FINISHING_LABELS or code != 2:
+        return ""
+    terms, settled, bound = _settle_report(stderr)
+    markers = [line for line in stderr.splitlines() if line.startswith(_FAULT_MARKER + ":")]
+    if (settled is None or bound is None or settled < bound or len(markers) != 1
+            or not terms or any(term not in _STALL_TERMS for term in terms)):
+        return ""
+    return ("worker still pending at the probe's {:.3f}s settle bound on this host (settled {:.3f}s, pending "
+            "{}), a host stall past the bound or a worker that no longer ends; this still fails: ".format(
+                bound, settled, ", ".join(terms)))
+
+
+# The settle names the term it still waited on. The fixture's low-level worker has a thread-local value
+# whose destructor blocks on an event nothing ever sets, so that teardown stays on the OS thread list until
+# the probe's own exit, however long the host stalls before the settle; the fixture returns only once the
+# destructor has begun. Under a 0.1s bound the child must fail closed naming that term (red when the
+# settle line names no pending term).
+_SETTLE_NAMED_TERM = "OS thread list"
+_SETTLE_NAMED_FIXTURE = ("import _thread, threading\n"
+                         "entered = threading.Event()\n"
+                         "never = threading.Event()\n"
+                         "store = threading.local()\n"
+                         "class Held:\n"
+                         "    def __del__(self):\n"
+                         "        entered.set()\n"
+                         "        never.wait()\n"
+                         "def worker():\n"
+                         "    store.value = Held()\n"
+                         "_thread.start_new_thread(worker, ())\n"
+                         "entered.wait()\n")
+_SETTLE_NAMED_ROW = ("settle-bound-named", _SETTLE_NAMED_FIXTURE, 2, True, None, ("0.1",))
+
+
 def _fault_channel_vectors():
     """One failure string per fault-channel case whose child did not end as required: the expected exit
     code, the fault marker exactly when a fault must be recorded, and for the atexit case no trace of the
@@ -1333,26 +1439,34 @@ def _fault_channel_vectors():
     import tempfile
     failures = []
     tool = str(Path(__file__).resolve())
+    rows = [(label, body, expected, marked, absent, ())
+            for label, body, expected, marked, absent in _FAULT_CHANNEL_CASES]
+    rows.append(_SETTLE_NAMED_ROW)
     with tempfile.TemporaryDirectory(prefix="check-footer-fault-channel-") as tmp:
         probe = Path(tmp) / "probe.py"
         probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
-        for index, (label, body, expected, marked, absent) in enumerate(_FAULT_CHANNEL_CASES):
+        for index, (label, body, expected, marked, absent, bound) in enumerate(rows):
             case = Path(tmp) / "fault_channel_{}.py".format(index)
             case.write_text(body, encoding="utf-8")
             try:
-                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)] + list(bound),
                                        capture_output=True, text=True, timeout=120)
             except (OSError, subprocess.SubprocessError) as exc:
                 failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
                 continue
-            if child.returncode != expected:
-                failures.append("fault-channel/{}: expected exit {}, got {}".format(
-                    label, expected, child.returncode))
+            said = _fault_lines(child.stderr)
+            if label == _SETTLE_NAMED_ROW[0]:
+                if child.returncode != 2 or _SETTLE_NAMED_TERM not in _settle_report(child.stderr)[0]:
+                    failures.append("fault-channel/{}: expected exit 2 naming {!r} as pending, got exit {}; "
+                                    "child said: {}".format(label, _SETTLE_NAMED_TERM, child.returncode, said))
+            elif child.returncode != expected:
+                failures.append("fault-channel/{}: {}expected exit {}, got {}; child said: {}".format(
+                    label, _stall_name(label, child.returncode, child.stderr), expected, child.returncode, said))
             elif marked != ((_FAULT_MARKER + ":") in child.stderr):
-                failures.append("fault-channel/{}: fault marker {}".format(
-                    label, "absent" if marked else "present"))
+                failures.append("fault-channel/{}: fault marker {}; child said: {}".format(
+                    label, "absent" if marked else "present", said))
             elif absent is not None and absent in child.stderr:
-                failures.append("fault-channel/{}: the atexit callback ran".format(label))
+                failures.append("fault-channel/{}: the atexit callback ran; child said: {}".format(label, said))
     failures.extend(_flush_window_failures())
     failures.extend(_entry_wiring_failures())
     return failures
