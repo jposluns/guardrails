@@ -23692,6 +23692,36 @@ def _orch_lexed_amp_places(command, amps):
     return kinds
 
 
+# Runtime start forms: words and forms that can start a background job in a command with no '&' byte, so
+# an open quote or an uncertain '#' in such a command still denies (_orch_foreground_detach_lexed). coproc
+# runs its command asynchronously; eval reads a string, and an '&' built in it at run time, as code;
+# setsid can return before its command finishes (always under -f); disown leaves a job no one waits for;
+# source and a lone '.' (one at the start, or after a blank, newline, ';', '|', '(', '{' or backquote, with
+# a blank after it) read a file as code, and a here-string (<<<) fed to a shell is code too; a process
+# substitution, <( ) or >( ), runs its command asynchronously. The search reads two texts, each with every
+# quote and backslash removed, so e'v'al, "eval" and \eval match as well: the command as written, and the
+# command with every backslash-newline pair removed first, so a form split by a pair bash joins
+# (ev\<newline>al is eval, <\<newline>( a process substitution) is read whole. Not every pair is one bash
+# joins (one whose backslash is itself escaped, one ending a comment line, one inside single quotes), and
+# removing such a pair can glue a start word on the next line to the word before it, so a start form in
+# EITHER text keeps the scan's verdict: removing the pairs never lifts a deny the first text gives. A word
+# that matches only after a removal, or one in a body or comment, reads as a start form all the same, which
+# only keeps the scan's verdict. A '.' right after a ')' is not read (prose ends a sentence that way far
+# more often than a case pattern runs '.'), nor is a start word built at run time (from a variable or an
+# ANSI-C escape).
+_ORCH_RUNTIME_START_RE = re.compile(
+    r"(?<![\w.-])(?:coproc|eval|setsid|disown|source)(?![\w.-])|(?<![^\s;|({`])\.(?=[ \t])|<<<|[<>]\(")
+_ORCH_RUNTIME_START_UNQUOTE = str.maketrans("", "", "'\"\\")
+
+
+def _orch_runtime_start_readings(command):
+    """The two texts the runtime start search (_ORCH_RUNTIME_START_RE) reads, a start form in either keeping
+    the scan's verdict: the command with every quote and backslash removed, and the command with every
+    backslash-newline pair removed first, then every quote and backslash."""
+    return (command.translate(_ORCH_RUNTIME_START_UNQUOTE),
+            command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
+
+
 def _orch_foreground_detach_lexed(command, lifts=None):
     """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
     scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
@@ -23725,14 +23755,20 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
     caller that must know whether it did reads the list instead of running the scan again.
 
-    COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
-    scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
-    cost more than both scan rules together) is not run; a command that also holds no '#' and no quote
-    gives None from both scan rules (they return anything else only at one of those four characters, or
-    at the end inside a quote one of them opened), so the scan is not run either. The verdict is the same
-    either way."""
+    NO '&': a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for
+    the scan, so the lex (which can cost more than both scan rules together) is not run. Its "unbalanced"
+    (an open quote or an uncertain '#') says only that a LATER '&' might be hidden, and there is none, so
+    it is None without the scan (an apostrophe in a quoted here-document body the scan reads as code, ahead
+    of any later command, was denied as a possible detach although the command holds no '&' at all), UNLESS
+    the command holds a runtime start form (_ORCH_RUNTIME_START_RE) that can start a background job with no
+    '&' byte: there the scan decides as it does for any command, so an open quote or an uncertain '#' still
+    denies. A command that also holds no '#' and no quote gives None from both scan rules (they return
+    anything else only at one of those four characters, or at the end inside a quote one of them opened),
+    so the scan is not run either. The verdict is the same either way."""
     if "&" not in command:
         if "#" not in command and "'" not in command and '"' not in command:
+            return None
+        if not any(_ORCH_RUNTIME_START_RE.search(text) for text in _orch_runtime_start_readings(command)):
             return None
         return _orch_foreground_detach_kind(command)
     try:
@@ -23826,12 +23862,14 @@ def _orch_foreground_detach(command):
     b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
     body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
     to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
-    is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
-    lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
-    inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
-    is to quote the delimiter and write the content with `cat > file` in a call of its own that holds
-    nothing but such writes, then run any other command in a separate call, or to write the text to a file
-    and pass the file.
+    is still DENIED although nothing detaches where the command holds an `&` or a runtime start form
+    (_ORCH_RUNTIME_START_RE), and so is a body `&` under an unquoted delimiter, which the lexer refuses; the
+    guard allows such a body in a command that holds neither (_orch_foreground_detach_lexed), where the
+    open quote has no `&` to hide. The commit-message form's body is NOT denied for an unbalanced
+    apostrophe: it sits inside the outer double quotes, where the scan reads an apostrophe as a literal
+    character. The remedy is to quote the delimiter and write the content with `cat > file` in a call of its
+    own that holds nothing but such writes, then run any other command in a separate call, or to write the
+    text to a file and pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
