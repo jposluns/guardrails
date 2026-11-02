@@ -1390,6 +1390,9 @@ jobs:
       - name: Cited standards repository corpus contract
         shell: bash
         run: python3 -I -B .github/check_cited_standards_contract.py
+      - name: TOML restoration checker self-test
+        shell: bash
+        run: python3 -I -B .github/check_toml_restoration.py --self-test
       - name: Cited standards self-test
         shell: bash
         run: python3 -I -B tools/check_cited_standards.py --self-test
