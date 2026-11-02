@@ -23725,16 +23725,13 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
     caller that must know whether it did reads the list instead of running the scan again.
 
-    COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
-    scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
-    cost more than both scan rules together) is not run; a command that also holds no '#' and no quote
-    gives None from both scan rules (they return anything else only at one of those four characters, or
-    at the end inside a quote one of them opened), so the scan is not run either. The verdict is the same
-    either way."""
+    NO '&': a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for
+    the scan, so it is None, and neither the lex nor the scan is run. Its "unbalanced" (an open quote or
+    an uncertain '#') says only that a LATER '&' might be hidden, and there is none: an apostrophe in a
+    quoted here-document body the scan reads as code, ahead of any later command, was denied as a
+    possible detach although the command holds no '&' at all."""
     if "&" not in command:
-        if "#" not in command and "'" not in command and '"' not in command:
-            return None
-        return _orch_foreground_detach_kind(command)
+        return None
     try:
         segments = _lex_command(command)
     except ValueError:

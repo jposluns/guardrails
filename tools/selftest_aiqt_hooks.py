@@ -2939,6 +2939,64 @@ def _psm_oracle(failures, handler):
                                                  run.stdout[:200], run.stderr[:200]))
 
 
+# Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
+# reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
+# command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
+# a '#' heading) written with cat, then hashed.
+_TRKASY_NOAMP_FULL = (
+    "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (row 66: ci-status)\n\n"
+    "You are an independent reviewer. Check that the findings are fixed; do not just confirm.\n\n"
+    "## Target\n\nRead MANIFEST.txt first: it lists what main/ and prev/ hold (with their sha256 values).\n"
+    "1. `bash tools/test-ci-status.sh` (claim: 216 ok, exit 0).\n"
+    "2. A present null head_sha was reported as \"missing required field\".\n"
+    "Keep this well under one hour; this round's fix is the last commit.\nEOF\n"
+    "sha256sum /abs/qa/brief.md")
+_TRKASY_NOAMP_ALLOW_ROWS = (
+    ("trkasy-noamp-min", "'"),
+    ("trkasy-noamp-heredoc-min", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/f"),
+    ("trkasy-noamp-full", _TRKASY_NOAMP_FULL),
+)
+_TRKASY_REAL_AMP_DENY_ROWS = (
+    ("trkasy-amp-trailing", "sleep 5 &"),
+    ("trkasy-amp-then-command", "sleep 5 & echo done"),
+    ("trkasy-amp-unquoted-heredoc-compound", "while read x; do sleep 1 & done <<EOF\nit's\nEOF"),
+    ("trkasy-amp-after-noamp-full", _TRKASY_NOAMP_FULL + "\nsleep 5 &"),
+)
+
+
+def _test_trkasy_no_amp(failures, tmp):
+    """Foreground trkasy rows in registry scope: each no-'&' row allows, and is red with the no-'&' branch of
+    _orch_foreground_detach_lexed restored to the raw scan's verdict; each real bare-'&' row denies."""
+    root = tmp / "trkasy-noamp"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "allow":
+            failures.append("({}) a foreground command with no '&' must allow in registry scope; got {}"
+                            .format(label, got))
+    for label, command in _TRKASY_REAL_AMP_DENY_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "deny":
+            failures.append("({}) a real bare '&' must deny in registry scope; got {}".format(label, got))
+    fixed = aiqt_hooks._orch_foreground_detach_lexed
+
+    def unfixed(command, lifts=None):
+        if "&" not in command:
+            return aiqt_hooks._orch_foreground_detach_kind(command)
+        return fixed(command, lifts)
+    aiqt_hooks._orch_foreground_detach_lexed = unfixed
+    try:
+        for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+            got = _decision(handler, command, cwd=str(root))
+            if got != "deny":
+                failures.append("({}-flip) the row must deny with the no-'&' branch reading the raw scan, "
+                                "so it pins that branch; got {}".format(label, got))
+    finally:
+        aiqt_hooks._orch_foreground_detach_lexed = fixed
+
+
 def _test_pgrep_self_match(failures):
     """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
     must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
@@ -4979,6 +5037,23 @@ _DEADLINE_HASH_DECISIONS = {
 def _deadline_hash_decision(name, shape, size):
     """The decision a handler must reach on an uncertain '#' shape of that size (_DEADLINE_HASH_DECISIONS)."""
     return _DEADLINE_HASH_DECISIONS.get((name, shape, size), _DEADLINE_HASH_DECISIONS.get((name, shape), "allow"))
+# The truncation guard times each uncertain '#' shape with one '&' glued to its last '#' word, one separator
+# or parenthesis fewer keeping the size: that '&' is comment text where the '#' starts a comment and a bare
+# detach where it does not, so the guard scans the whole command and denies it as a detach, as the pinned
+# base commit does. A command with no '&' byte holds no detach, which the guard allows without a scan, so
+# the shapes as written would time no scan there. The other handlers keep the shapes as written.
+_DEADLINE_HASH_DETACH_SHAPES = {
+    ("orch_truncation_guard", "seps_hash"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 21)
+                                                                      + " #a #b #c #d&\n)"}),
+    ("orch_truncation_guard", "seps_hash_lines"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 27)
+                                                                            + " #a\n #b\n #c\n #d&\n)"}),
+    ("orch_truncation_guard", "seps_hash_nested"): lambda n, base: ("Bash", {"command": "(((" + ";" * (n - 25)
+                                                                             + " #a #b #c #d&\n)))"}),
+    ("orch_truncation_guard", "paren_hash4"): lambda n, base: ("Bash", {"command": "(" * ((n - 13) // 2)
+                                                                        + " #a #b #c #d&\n" + ")" * ((n - 13) // 2)}),
+    ("orch_truncation_guard", "seps_hash5"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 25)
+                                                                       + " #a #b #c #d #e&\n)"}),
+}
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
@@ -5110,7 +5185,7 @@ def _deadline_shape_case(name, shape, size, cwd):
     """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
     (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
     fired, "hard-block" for an exit 2, or "crash: <type>"."""
-    tool, tool_input = _DEADLINE_SHAPES[shape](size, cwd)
+    tool, tool_input = _DEADLINE_HASH_DETACH_SHAPES.get((name, shape), _DEADLINE_SHAPES[shape])(size, cwd)
     data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
             "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
     window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
@@ -27527,6 +27602,7 @@ def _main_isolated(monitor):
 
         _test_git_stash_ref(failures)
         _test_pgrep_self_match(failures)
+        _test_trkasy_no_amp(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
