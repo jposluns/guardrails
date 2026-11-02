@@ -4,44 +4,39 @@
 The checker compares the staged index against the pinned HEAD and reports whether any changed
 .toml key path returns to a value that recorded history moved away from. It reads index blobs,
 never the working tree, and it takes the pinned HEAD and protected base as explicit arguments:
-a missing or unresolvable base is cannot-evaluate, never a guessed fallback.
+a missing, abbreviated or unresolvable ID is cannot-evaluate, never a guessed fallback.
 
 Usage:
   check_toml_restoration.py --repo <absolute path> --head <full commit ID> --base <full commit ID>
   check_toml_restoration.py --self-test
 
-Each checking option is required exactly once. --head and --base are full lowercase hexadecimal
-object IDs of the repository's object-format length (sha1: 40; sha256: 64), never ref names or
-abbreviations; --head must equal the repository's HEAD commit, and --base must name a present
-commit object. -h, --help, an option prefix, a repeated option, a positional argument and any
-other argument are usage errors (exit 2). --self-test is accepted only as the sole argument.
+Each option is required exactly once; -h, --help, option prefixes, repeats and positional
+arguments are usage errors (exit 2). --head and --base are full lowercase hexadecimal object
+IDs of the repository's object-format length (sha1: 40; sha256: 64). --head must equal the
+repository's HEAD, and --base must name a present commit. Every git command runs with the
+inherited GIT_* environment removed, GIT_OPTIONAL_LOCKS=0 and --no-optional-locks, and the
+checker never writes the index or a tree.
 
 Exit codes:
   0  no restoration was found within the declared coverage
   1  a restoration was found and needs a maintainer decision
-  2  the checker could not evaluate, an availability restriction refused the input, or the
-     arguments were unusable; exit 2 takes precedence over exit 1 and cannot be overridden
+  2  the checker could not evaluate, or an availability restriction refused the input;
+     exit 2 takes precedence over exit 1 and cannot be overridden
 
-Report: stdout carries one machine-readable report whose first line states its kind:
-  report-kind: result          then zero or more "finding: ..." lines, zero or more "gap: ..."
-                               lines, and one "findings-set-digest: <sha256 hex>" line (the
-                               digest of the sorted finding lines joined by LF)
-  report-kind: refusal         then one or more "refusal: ..." lines naming the refused input
-                               (the snapshot or endpoint, the path and the error class where a
-                               parse was refused)
-  report-kind: internal-error  then one "internal-error: <class>: ..." line
-The one exit-2 path with no stdout report is the child-status guard's refusal at the entry
-line, which writes a single stderr line and exits before main() runs.
+Output: a machine-readable report on stdout stating its kind (result, refusal or
+internal-error). A result carries each finding (path, key-path tuple, candidate value digest
+and the witnessing transitions), the findings-set digest and the bridged gaps. A refusal names
+each refused input, including the snapshot or endpoint and the error class for a parse error.
+An internal error names the exception class. The one exit-2 path with no stdout report is the
+child-status guard's refusal, which writes one stderr line before main() runs.
 
-Every git command runs with -C <repo> and --no-optional-locks, in a child environment with
-every inherited GIT_* variable removed and GIT_OPTIONAL_LOCKS=0 set, so no read refreshes the
-index or takes its lock. The checker never writes the index and never runs write-tree.
-
-Parse errors are typed at each parse site: ValueError (TOMLDecodeError and UnicodeDecodeError
-included) means the snapshot does not parse (a bridged gap in history, a refusal at an
-endpoint); RecursionError and MemoryError mean the snapshot could not be evaluated and refuse
-the run at any snapshot, history included, because they depend on the host and a bridged gap
-could hide a departure.
+Parse errors: a historical snapshot whose UTF-8 decode or TOML parse raises ValueError is a
+gap, bridged and reported; at an endpoint (HEAD or the candidate) it is exit 2. RecursionError
+and MemoryError are host-dependent, and a bridged gap could hide a departure, so they are
+invalid input at any snapshot: exit 2 with a refusal naming the commit or endpoint, the path
+and the error class. Every import other than sys lives inside main(), whose one try maps any
+unhandled exception to exit 2 with an internal-error report, because an uncaught exception
+would end the process with status 1 and read as a finding.
 
 Scope of this first draft slice: the checker core only, that is the history rules (the boundary
 on HEAD's first-parent chain, the availability restriction over that whole chain down to the
@@ -54,7 +49,7 @@ slice.
 
 Known limits that apply to this core (fixed design choices, not defects):
   - Only paths ending in .toml are covered; a rename counts as a deletion plus an addition, so
-    moves across files or keys are not followed (--no-renames is passed explicitly).
+    moves across files or keys are not followed.
   - Values that mean the same thing but are spelled differently count as different values (an
     offset date-time for the same instant written with another offset among them); NaN spellings
     are normalized to one encoding.
@@ -65,6 +60,8 @@ Known limits that apply to this core (fixed design choices, not defects):
   - Changes made and undone entirely inside unparseable snapshots are not seen, and a boundary
     snapshot that does not parse leaves the starting values unknown until the first snapshot
     that parses; every bridged gap is reported.
+  - A historical snapshot whose parse raises RecursionError or MemoryError exits 2, so such a
+    refusal can depend on the host (its recursion limit or available memory).
   - The encoding sees only what tomllib returns, so parser precision bounds value identity.
   - If HEAD's version of a changed file does not parse, every candidate touching it exits 2;
     no repair route through the apply chain is defined.
@@ -75,13 +72,16 @@ Known limits that apply to this core (fixed design choices, not defects):
     resolved boundary; more than 1,000 distinct touching first-parent commits in the window,
     counted once over the union of evaluated paths, exits 2; neither first-parent walk is
     capped and their cost is unmeasured.
+  - A signal, a timeout kill and a stdout flush failure at interpreter exit end the process
+    outside these handlers; only the caller's validation of the report can map them to 2.
 
 --self-test builds hermetic git repositories under a temporary directory it creates and removes,
 runs the checker over them in child processes, and pairs each covered row with a mutant copy
-(one source region replaced, loaded through importlib) whose verdict must change. Its expected
-check ids are the module-level literal tuple _EXPECTED_CHECK_IDS, compared as an exact set with
-the executed ids at the end of each run (a disclosed deviation from the registry, which cannot
-hold a .github runner's ids).
+(one source region replaced, loaded through importlib) whose verdict must change. The expected
+check ids are held in the module-level literal tuple EXPECTED_CHECK_IDS, separate from the call
+sites; at the end of each run the executed ids are compared with that tuple as an exact set, and
+any difference fails the run with both counts printed. This self-listing stands in for the
+registry that tools under tools/ use, which cannot register a runner outside tools/.
 """
 import sys
 
@@ -90,6 +90,112 @@ HISTORY_CAP = 1000
 MISSING = object()   # a missing key, or a missing file, has a distinct value meaning "missing"
 GAP = object()       # a historical snapshot that does not parse (ValueError)
 _UNKNOWN_PARENT = object()
+
+# The expected self-test check ids, one module-level literal tuple separate from the call
+# sites that run the checks; the self-test fails on any difference between this set and the
+# ids it executed.
+EXPECTED_CHECK_IDS = (
+    "flips/targets-unique",
+    "rows/coverage",
+    "row/T10/strict", "row/T10/flip",
+    "row/T11/strict", "row/T11/flip",
+    "row/T12/strict", "row/T12/flip",
+    "row/T26/strict", "row/T26/flip",
+    "row/T27/strict", "row/T27/flip",
+    "row/T32/strict", "row/T32/flip",
+    "row/T33/strict", "row/T33/flip",
+    "row/T34/strict", "row/T34/flip",
+    "row/T35/strict", "row/T35/flip",
+    "row/T36/strict", "row/T36/flip",
+    "row/T50/strict", "row/T50/flip",
+    "row/T51a/strict", "row/T51a/flip",
+    "row/T51b/strict", "row/T51b/flip",
+    "row/T55a/strict", "row/T55a/flip",
+    "row/T55b/strict", "row/T55b/flip",
+    "row/T55c/strict", "row/T55c/flip",
+    "row/A1a/strict", "row/A1a/flip",
+    "row/A1b/strict", "row/A1b/flip",
+    "row/A2/strict", "row/A2/flip",
+    "row/A3a/strict", "row/A3a/flip",
+    "row/A3b/strict", "row/A3b/flip",
+    "row/A4/strict", "row/A4/flip",
+    "row/T56a/strict", "row/T56a/flip",
+    "row/T56b/strict", "row/T56b/flip",
+    "row/T56c/strict", "row/T56c/flip",
+    "row/T57a/strict", "row/T57a/flip",
+    "row/T57b/strict", "row/T57b/flip",
+    "row/T57c/strict", "row/T57c/flip",
+    "row/T58a/strict", "row/T58a/flip",
+    "row/T58b/strict", "row/T58b/flip",
+    "usage/no-arguments",
+    "usage/help-refused",
+    "usage/prefix-refused",
+    "usage/repeated-option",
+    "usage/positional-refused",
+    "usage/option-needs-value",
+    "usage/missing-options",
+    "usage/self-test-not-alone",
+    "usage/relative-repo-refused",
+    "ids/head-too-short",
+    "ids/head-too-long",
+    "ids/head-uppercase",
+    "ids/head-not-repository-head",
+    "ids/base-not-present",
+)
+
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py,
+# which tools/check_child_status_coverage.py pins this copy to by AST. This checker starts git
+# (and its self-test starts checker children) and reads their exit status, so under an ignored
+# SIGCHLD a failing child would read as a pass; the guard runs at the entry line, before main()
+# dispatches, and its refusal is exit 2 with one stderr line and no stdout report.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 
 class GitError(Exception):
@@ -100,40 +206,24 @@ class Unavailable(Exception):
     """A needed git object is missing (the availability restriction refuses the input)."""
 
 
-class Refused(Exception):
-    """The input is refused: the report is a refusal naming what could not be used."""
+class SnapshotUnevaluated(Exception):
+    """A historical snapshot whose decode or parse raised a host-dependent error (exit 2)."""
 
 
-class _Cannot:
-    """A snapshot that could not be evaluated (RecursionError or MemoryError at the parse)."""
+class Unevaluated:
+    """A parse result for a decode or parse that raised RecursionError or MemoryError: the
+    snapshot could not be evaluated on this host, which is invalid input at any snapshot,
+    never a gap (a bridged gap could hide a departure)."""
 
     def __init__(self, error_class):
         self.error_class = error_class
-
-
-def _bind_modules():
-    """Bind every module the checker needs other than sys as a module global. This runs inside
-    main()'s one try, so a failed import is an internal error (exit 2), never a bare traceback
-    read as a finding."""
-    global datetime, hashlib, importlib, math, os, signal, subprocess, tempfile, time, tomllib
-    import datetime
-    import hashlib
-    import importlib.util
-    import math
-    import os
-    import signal
-    import subprocess
-    import tempfile
-    import time
-    import tomllib
 
 
 # ---- git plumbing ----------------------------------------------------------------------------
 
 
 def _git_env():
-    """A child environment with every inherited GIT_* variable removed and optional locks off,
-    so the index and objects read are the --repo repository's own and no read takes a lock."""
+    """The environment for every git child: inherited GIT_* removed, optional locks off."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env["GIT_OPTIONAL_LOCKS"] = "0"
     return env
@@ -151,16 +241,29 @@ def _rev_parse(repo, ref):
     return probe.stdout.strip().decode("ascii", "replace")
 
 
+def _object_format_length(repo):
+    """40 for sha1, 64 for sha256, None for any other or unreadable answer (exit 2)."""
+    probe = _git(repo, ["rev-parse", "--show-object-format"])
+    if probe.returncode != 0:
+        return None
+    fmt = probe.stdout.strip()
+    if fmt == b"sha1":
+        return 40
+    if fmt == b"sha256":
+        return 64
+    return None
+
+
 class _ObjectReader:
     """One persistent `git cat-file --batch` child; commit and tree bodies are cached."""
 
     def __init__(self, repo, hash_bytes):
-        self.hash_bytes = hash_bytes
-        self._proc = subprocess.Popen(["git", "-C", repo, "--no-optional-locks",
-                                       "cat-file", "--batch"],
-                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL, env=_git_env())
+        self._proc = subprocess.Popen(
+            ["git", "-C", repo, "--no-optional-locks", "cat-file", "--batch"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            env=_git_env())
         self._cache = {}
+        self.hash_bytes = hash_bytes
 
     def get(self, sha):
         if sha in self._cache:
@@ -417,22 +520,27 @@ def flatten(doc):
 
 def parse_snapshot(blob_bytes):
     """A parsed document, {} for a missing file (a snapshot that parses, every key missing),
-    GAP where the bytes do not parse as UTF-8 TOML (ValueError, TOMLDecodeError and
-    UnicodeDecodeError included), or a _Cannot naming the error class where the parse could
-    not be evaluated on this host (RecursionError, MemoryError). Each class is handled at
-    this one parse site and never re-raised."""
+    GAP where the bytes do not parse as UTF-8 TOML (ValueError), or an Unevaluated marker
+    where the decode or parse raised a host-dependent RecursionError or MemoryError. Each of
+    the three classes is handled here, at the parse site, with no re-raise."""
     if blob_bytes is None:
         return {}
     try:
         text = blob_bytes.decode("utf-8")
-        return tomllib.loads(text)
-    except ValueError:
-        # the snapshot does not parse: a bridged gap in history, a refusal at an endpoint
-        return GAP
     except RecursionError:
-        return _Cannot("RecursionError")
+        return Unevaluated("RecursionError")
     except MemoryError:
-        return _Cannot("MemoryError")
+        return Unevaluated("MemoryError")
+    except ValueError:
+        return GAP
+    try:
+        return tomllib.loads(text)
+    except RecursionError:
+        return Unevaluated("RecursionError")
+    except MemoryError:
+        return Unevaluated("MemoryError")
+    except ValueError:
+        return GAP
 
 
 def _key_text(key_path):
@@ -453,11 +561,17 @@ def _counts(items):
     return counts
 
 
+def _digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 # ---- history evaluation (H3-H5, R1, R2) --------------------------------------------------------
 
 
-def _record_departure(departed, removed_pairs, key, old_value, new_value, old_enc):
-    departed.setdefault(key, set()).add(old_enc)
+def _record_departure(departed, removed_pairs, commit_sha, key, old_value, new_value,
+                      old_enc, new_enc):
+    witness = "commit {0}: {1} -> {2}".format(commit_sha, old_enc, new_enc)
+    departed.setdefault(key, {}).setdefault(old_enc, []).append(witness)
     old_items = _element_encodings(old_value)
     if not old_items:
         return
@@ -466,7 +580,8 @@ def _record_departure(departed, removed_pairs, key, old_value, new_value, old_en
     for enc, old_n in old_counts.items():
         new_n = new_counts.get(enc, 0)
         for rank in range(new_n + 1, old_n + 1):
-            removed_pairs.setdefault(key, set()).add((enc, rank))
+            removed_pairs.setdefault(key, {}).setdefault((enc, rank), []).append(
+                "commit {0}: removed element {1} rank {2}".format(commit_sha, enc, rank))
 
 
 def _record_commit_transitions(reader, entry, parent_doc, own_doc, path,
@@ -477,8 +592,11 @@ def _record_commit_transitions(reader, entry, parent_doc, own_doc, path,
             parsed = read_commit(reader, parent_sha)
             if parsed is None:
                 raise Unavailable("commit object missing for merge parent " + parent_sha)
-            other_doc = snapshot(path_blob(reader, parsed[0], path),
-                                 "merge parent {0}".format(parent_sha))
+            other_doc = snapshot(path_blob(reader, parsed[0], path))
+            if isinstance(other_doc, Unevaluated):
+                raise SnapshotUnevaluated(
+                    "historical snapshot could not be evaluated: {0} at merge parent {1} "
+                    "[{2}]".format(path, parent_sha, other_doc.error_class))
             if other_doc is not GAP:
                 other_flats.append(flatten(other_doc))
     parent_flat = flatten(parent_doc)
@@ -496,54 +614,57 @@ def _record_commit_transitions(reader, entry, parent_doc, own_doc, path,
                 # the merge imports the value; a departure is recorded only when the
                 # first-parent value was set by a branch commit
                 if provenance.get(key) == "branch":
-                    _record_departure(departed, removed_pairs, key, old_value, new_value, old_enc)
+                    _record_departure(departed, removed_pairs, entry["sha"], key,
+                                      old_value, new_value, old_enc, new_enc)
                 provenance[key] = "imported"
                 continue
-        _record_departure(departed, removed_pairs, key, old_value, new_value, old_enc)
+        _record_departure(departed, removed_pairs, entry["sha"], key,
+                          old_value, new_value, old_enc, new_enc)
         provenance[key] = "branch"
 
 
 def evaluate_history(reader, chain, boundary_index, path, touch_positions, kept_shas,
                      doc_cache, gap_notes):
-    """Departed value encodings and removed (element, rank) pairs per key, walking the
-    window's touching commits oldest to newest; each commit is compared with its own first
-    parent's snapshot, bridging unparseable snapshots back toward the boundary. A snapshot
-    that could not be evaluated (RecursionError, MemoryError) refuses the run (Refused)."""
+    """Departed value encodings and removed (element, rank) pairs per key, each with its
+    witnessing transitions, walking the window's touching commits oldest to newest; each
+    commit is compared with its own first parent's snapshot, bridging unparseable snapshots
+    back toward the boundary."""
     departed = {}
     removed_pairs = {}
     provenance = {}
     boundary_blob = path_blob(reader, chain[boundary_index]["tree"], path)
     touch_blobs = [path_blob(reader, chain[idx]["tree"], path) for idx in touch_positions]
 
-    def snapshot(blob_sha, context):
+    def snapshot(blob_sha):
         if blob_sha is None:
             return {}
         if blob_sha not in doc_cache:
             doc_cache[blob_sha] = parse_snapshot(blob_content(reader, blob_sha))
-        doc = doc_cache[blob_sha]
-        if isinstance(doc, _Cannot):
-            raise Refused("{0} at {1}: the snapshot could not be evaluated "
-                          "({2})".format(path, context, doc.error_class))
-        return doc
+        return doc_cache[blob_sha]
 
     for list_pos, idx in enumerate(touch_positions):
         entry = chain[idx]
         if entry["sha"] not in kept_shas:
             continue  # outside the evaluated commit set
-        own_doc = snapshot(touch_blobs[list_pos], "commit " + entry["sha"])
+        own_doc = snapshot(touch_blobs[list_pos])
+        if isinstance(own_doc, Unevaluated):
+            raise SnapshotUnevaluated(
+                "historical snapshot could not be evaluated: {0} at commit {1} [{2}]".format(
+                    path, entry["sha"], own_doc.error_class))
         if own_doc is GAP:
             continue  # an unparseable snapshot is a gap; the next parsing snapshot bridges it
         parent_doc = None
         gap_count = 0
         back = list_pos - 1
         while True:
-            if back >= 0:
-                blob = touch_blobs[back]
-                context = "commit " + chain[touch_positions[back]]["sha"]
-            else:
-                blob = boundary_blob
-                context = "the boundary commit " + chain[boundary_index]["sha"]
-            doc = snapshot(blob, context)
+            blob = touch_blobs[back] if back >= 0 else boundary_blob
+            doc = snapshot(blob)
+            if isinstance(doc, Unevaluated):
+                source_sha = (chain[touch_positions[back]]["sha"] if back >= 0
+                              else chain[boundary_index]["sha"])
+                raise SnapshotUnevaluated(
+                    "historical snapshot could not be evaluated: {0} at commit {1} "
+                    "[{2}]".format(path, source_sha, doc.error_class))
             if doc is not GAP:
                 parent_doc = doc
                 break
@@ -564,7 +685,8 @@ def evaluate_history(reader, chain, boundary_index, path, touch_positions, kept_
 
 
 def findings_for(path, head_doc, cand_doc, departed, removed_pairs):
-    """R1 and R2 findings for the key paths the candidate changes relative to HEAD."""
+    """R1 and R2 finding records (path, key-path tuple, candidate value digest and the
+    witnessing transitions) for the key paths the candidate changes relative to HEAD."""
     findings = []
     head_flat = flatten(head_doc)
     cand_flat = flatten(cand_doc)
@@ -575,11 +697,12 @@ def findings_for(path, head_doc, cand_doc, departed, removed_pairs):
         cand_enc = canon(cand_value)
         if cand_enc == head_enc:
             continue  # only key paths the candidate changes are evaluated
-        departed_encs = departed.get(key, set())
+        departed_encs = departed.get(key, {})
         if cand_enc in departed_encs:
-            findings.append("R1 restoration in {0}: key {1} returns to a value a recorded "
-                            "transition moved away from".format(path, _key_text(key)))
-        removed = removed_pairs.get(key, set())
+            findings.append({"rule": "R1", "path": path, "key": _key_text(key),
+                             "value_digest": _digest(cand_enc),
+                             "transitions": tuple(departed_encs.get(cand_enc, ()))})
+        removed = removed_pairs.get(key, {})
         if removed and isinstance(cand_value, list):
             head_counts = _counts(_element_encodings(head_value))
             cand_counts = _counts(_element_encodings(cand_value))
@@ -587,25 +710,37 @@ def findings_for(path, head_doc, cand_doc, departed, removed_pairs):
                 head_n = head_counts.get(enc, 0)
                 for rank in range(head_n + 1, cand_n + 1):
                     if (enc, rank) in removed:
-                        findings.append("R2 restoration in {0}: key {1} re-adds a removed array "
-                                        "element occurrence (rank {2})".format(
-                                            path, _key_text(key), rank))
+                        findings.append({"rule": "R2", "path": path, "key": _key_text(key),
+                                         "value_digest": _digest(cand_enc),
+                                         "transitions": tuple(removed[(enc, rank)])})
     return findings
 
 
-# ---- the check (P1, P3, P4, S1, S2, E1) --------------------------------------------------------
+# ---- the report (P1): one stdout report per run, stating its kind -----------------------------
 
 
-def _print_report(kind, lines):
-    """The machine-readable stdout report (one per run): the kind line, then the content."""
-    print("report-kind: " + kind)
+def _finding_line(finding):
+    return ("finding\trule={0}\tpath={1}\tkey={2}\tvalue_digest={3}\ttransitions={4}".format(
+        finding["rule"], finding["path"], finding["key"], finding["value_digest"],
+        "; ".join(finding["transitions"])))
+
+
+def _print_report(kind, findings=(), gaps=(), refusals=()):
+    """The machine-readable stdout report: kind result (findings, findings-set digest and
+    gaps) or refusal (each refused input). The internal-error kind is written by main()."""
+    print("toml-restoration-report\tkind=" + kind)
+    lines = sorted(_finding_line(finding) for finding in findings)
     for line in lines:
         print(line)
+    if kind == "result":
+        print("findings_digest\t" + _digest("\n".join(lines)))
+    for text in gaps:
+        print("gap\t" + text)
+    for text in refusals:
+        print("refusal\t" + text)
 
 
-def _findings_digest(findings):
-    """The findings-set digest: sha256 over the sorted finding lines joined by LF."""
-    return hashlib.sha256("\n".join(sorted(findings)).encode("utf-8")).hexdigest()
+# ---- the check (P1, P3, P4, S1, S2, E1) --------------------------------------------------------
 
 
 def _read_index(repo):
@@ -639,48 +774,44 @@ def _changed_toml_paths(repo, head_sha):
             if path and path.endswith(b".toml")}
 
 
-def run_check(repo, head, base, hash_bytes):
-    """The whole check; returns the exit code (0, 1 or 2) and prints the stdout report."""
-    try:
-        return _check(repo, head, base, hash_bytes)
-    except Refused as exc:
-        print("error: toml-restoration checker: refused: {0}".format(exc), file=sys.stderr)
-        _print_report("refusal", ["refusal: " + str(exc)])
-        return 2
-    except GitError as exc:
-        print("error: toml-restoration checker: {0}".format(exc), file=sys.stderr)
-        _print_report("refusal", ["refusal: the repository cannot be read: {0}".format(exc)])
-        return 2
-
-
-def _check(repo, head, base, hash_bytes):
+def run_check(repo, head, base):
+    """The whole check; prints the stdout report and returns the exit code (0, 1 or 2)."""
     problems = []
     findings = []
     gap_notes = []
+    id_length = _object_format_length(repo)
+    if id_length is None:
+        _print_report("refusal", refusals=(
+            "the repository object format cannot be read, or is neither sha1 nor sha256",))
+        return 2
+    hexdigits = "0123456789abcdef"
+    for name, value in (("--head", head), ("--base", base)):
+        if len(value) != id_length or any(ch not in hexdigits for ch in value):
+            _print_report("refusal", refusals=(
+                "{0} must be a full lowercase hexadecimal object ID of length {1}, never a "
+                "ref name or abbreviation: got {2!r}".format(name, id_length, value),))
+            return 2
     head_sha = _rev_parse(repo, "HEAD")
     if head_sha is None:
-        raise Refused("HEAD cannot be resolved to a commit in {0!r}".format(repo))
+        _print_report("refusal", refusals=("HEAD cannot be resolved to a commit",))
+        return 2
     if head_sha != head:
-        raise Refused("--head {0} does not equal the repository's HEAD commit {1}".format(
-            head, head_sha))
-    typed = _git(repo, ["cat-file", "-t", base])
-    if typed.returncode != 0 or typed.stdout.strip() != b"commit":
-        raise Refused("the protected base {0} is not a present commit object; no fallback "
-                      "is guessed".format(base))
-    base_sha = base
+        _print_report("refusal", refusals=(
+            "--head {0} does not equal the repository HEAD {1}".format(head, head_sha),))
+        return 2
+    if _rev_parse(repo, base) != base:
+        _print_report("refusal", refusals=(
+            "--base {0} does not name a present commit; no fallback is guessed".format(base),))
+        return 2
     stage_map, conflicts = _read_index(repo)
     for path in sorted(conflicts):
         problems.append("unresolved index entry (stage above 0): " + path)
     changed = _changed_toml_paths(repo, head_sha)
     if not changed:
         if problems:
-            for text in problems:
-                print("error: toml-restoration checker: " + text, file=sys.stderr)
-            _print_report("refusal", ["refusal: " + text for text in problems])
+            _print_report("refusal", refusals=problems)
             return 2
-        print("PASS: toml-restoration checker: no changed .toml path between HEAD and the "
-              "index", file=sys.stderr)
-        _print_report("result", ["findings-set-digest: " + _findings_digest([])])
+        _print_report("result")
         return 0
     shallow_probe = _git(repo, ["rev-parse", "--is-shallow-repository"])
     if shallow_probe.returncode != 0:
@@ -688,14 +819,15 @@ def _check(repo, head, base, hash_bytes):
     shallow_repo = shallow_probe.returncode == 0 and shallow_probe.stdout.strip() == b"true"
     if shallow_repo:
         problems.append("history availability: the repository history is shallow")
-    reader = _ObjectReader(repo, hash_bytes)
+    reader = _ObjectReader(repo, id_length // 2)
     try:
         parsed_head = read_commit(reader, head_sha)
         if parsed_head is None:
-            raise Refused("the HEAD commit object cannot be read")
+            _print_report("refusal", refusals=("the HEAD commit object cannot be read",))
+            return 2
         head_tree = parsed_head[0]
         chain, touched, chain_problems = analyze_chain(reader, head_sha, sorted(changed))
-        boundary_index = _boundary_index(repo, chain, base_sha)
+        boundary_index = _boundary_index(repo, chain, base)
         relevant = list(chain_problems)  # the whole first-parent chain, down to the root
         for _position, text in relevant:
             problems.append("history availability: " + text)
@@ -727,22 +859,20 @@ def _check(repo, head, base, hash_bytes):
                 cand_sha = stage_map.get(path)
                 cand_doc = parse_snapshot(blob_content(reader, cand_sha)
                                           if cand_sha else None)
-                if isinstance(head_doc, _Cannot):
-                    raise Refused("HEAD endpoint {0}: the snapshot could not be evaluated "
-                                  "({1})".format(path, head_doc.error_class))
-                if isinstance(cand_doc, _Cannot):
-                    raise Refused("candidate endpoint {0}: the snapshot could not be evaluated "
-                                  "({1})".format(path, cand_doc.error_class))
-                if head_doc is GAP:
-                    problems.append("HEAD endpoint does not parse: " + path)
-                    continue
-                if cand_doc is GAP:
-                    problems.append("candidate endpoint does not parse: " + path)
+                endpoint_bad = False
+                for endpoint, doc in (("HEAD", head_doc), ("candidate", cand_doc)):
+                    if doc is GAP:
+                        problems.append("endpoint does not parse: {0} ({1}) [ValueError]".format(path, endpoint))
+                        endpoint_bad = True
+                    elif isinstance(doc, Unevaluated):
+                        problems.append("endpoint could not be evaluated: {0} ({1}) [{2}]".format(path, endpoint, doc.error_class))
+                        endpoint_bad = True
+                if endpoint_bad:
                     continue
                 if path not in evaluated:
                     # Option A: a path with no history in the window (or none proven under an
                     # unresolved boundary) is evaluated against HEAD alone: no transitions, so
-                    # no finding; only the endpoint parse checks above apply.
+                    # no finding; only the endpoint parse checks apply.
                     continue
                 departed, removed_pairs = evaluate_history(
                     reader, chain, boundary_index, path, touch_positions[path],
@@ -752,107 +882,87 @@ def _check(repo, head, base, hash_bytes):
             except Unavailable as exc:
                 problems.append("object unavailable: {0} ({1})".format(path, exc))
                 continue
+            except SnapshotUnevaluated as exc:
+                problems.append(str(exc))
+                continue
     finally:
         reader.close()
-    for text in problems:
-        print("error: toml-restoration checker: " + text, file=sys.stderr)
-    for text in findings:
-        print("FAIL: toml-restoration checker: " + text, file=sys.stderr)
     if problems:
-        _print_report("refusal", ["refusal: " + text for text in problems])
+        _print_report("refusal", refusals=problems, gaps=gap_notes)
         return 2
-    report = ["finding: " + text for text in findings]
-    report += ["gap: " + text for text in gap_notes]
-    report.append("findings-set-digest: " + _findings_digest(findings))
-    _print_report("result", report)
     if findings:
+        _print_report("result", findings=findings, gaps=gap_notes)
         return 1
-    print("PASS: toml-restoration checker: no restoration finding within the declared coverage "
-          "({0} changed .toml path(s))".format(len(changed)), file=sys.stderr)
+    _print_report("result", gaps=gap_notes)
     return 0
 
 
-# ---- the command line --------------------------------------------------------------------------
+# ---- the command line (exit 2 on every usage error) --------------------------------------------
 
 
-def _parse_cli(args):
-    """(repo, head, base) for a checking run, or the usage-refusal text (a str). Each option
-    is required exactly once; -h, --help, a prefix, a repeat, a positional argument and any
-    other argument are usage errors."""
-    values = {"--repo": [], "--head": [], "--base": []}
+def _parse_args(args):
+    """("self-test", None), ("check", values) or (None, reason). A hand parser with no
+    abbreviation and no help path: -h, --help, an option prefix, a repeat, a positional
+    argument and a missing option are each a usage error, and --self-test is accepted only
+    as the sole argument."""
+    if args == ["--self-test"]:
+        return "self-test", None
+    values = {"--repo": None, "--head": None, "--base": None}
     index = 0
     while index < len(args):
         name = args[index]
-        if name in values:
-            if index + 1 >= len(args):
-                return "missing value for " + name
-            values[name].append(args[index + 1])
-            index += 2
-            continue
-        return "unknown or misplaced argument {0!r}".format(name)
-    for name in ("--repo", "--head", "--base"):
-        if len(values[name]) != 1:
-            return "option {0} is required exactly once (got {1})".format(
-                name, len(values[name]))
-    return values["--repo"][0], values["--head"][0], values["--base"][0]
-
-
-def _id_problems(repo, head, base):
-    """(None, hash_bytes) when --head and --base are full lowercase hexadecimal object IDs of
-    the repository's object-format length; otherwise (refusal text, None)."""
-    fmt = _git(repo, ["rev-parse", "--show-object-format"])
-    if fmt.returncode != 0:
-        return ("the repository at {0!r} cannot be read ({1})".format(
-            repo, fmt.stderr.decode("utf-8", "replace").strip()), None)
-    name = fmt.stdout.strip().decode("ascii", "replace")
-    length = {"sha1": 40, "sha256": 64}.get(name)
-    if length is None:
-        return "unsupported object format {0!r}".format(name), None
-    for option, value in (("--head", head), ("--base", base)):
-        if len(value) != length or any(c not in "0123456789abcdef" for c in value):
-            return ("{0} must be a full lowercase hexadecimal object ID of length {1} for "
-                    "object format {2} (got {3!r})".format(option, length, name, value)), None
-    return None, length // 2
-
-
-def _run_cli(args):
-    parsed = _parse_cli(args)
-    if isinstance(parsed, str):
-        _print_report("refusal", ["refusal: usage: " + parsed])
-        print("usage: check_toml_restoration.py --repo <absolute path> --head <full commit ID> "
-              "--base <full commit ID> | --self-test", file=sys.stderr)
-        return 2
-    repo, head, base = parsed
-    if not os.path.isabs(repo):
-        _print_report("refusal", ["refusal: --repo must be an absolute path "
-                                  "(got {0!r})".format(repo)])
-        return 2
-    problem, hash_bytes = _id_problems(repo, head, base)
-    if problem is not None:
-        _print_report("refusal", ["refusal: " + problem])
-        print("error: toml-restoration checker: " + problem, file=sys.stderr)
-        return 2
-    return run_check(repo, head, base, hash_bytes)
+        if name not in values:
+            return None, ("unknown argument {0!r}; the options are --repo, --head and --base, "
+                          "each exactly once, or --self-test alone".format(name))
+        if values[name] is not None:
+            return None, "repeated option " + name
+        if index + 1 >= len(args):
+            return None, "option {0} has no value".format(name)
+        values[name] = args[index + 1]
+        index += 2
+    missing = sorted(name for name, value in values.items() if value is None)
+    if missing:
+        return None, "missing required option(s): " + ", ".join(missing)
+    if not os.path.isabs(values["--repo"]):
+        return None, "--repo must be an absolute path"
+    return "check", values
 
 
 def main(argv=None):
-    args = list(sys.argv[1:] if argv is None else argv)
+    """Dispatch: parse, run the check or the self-test, flush stdout, and map any unhandled
+    exception to exit 2 with an internal-error report (an uncaught exception would end the
+    process with status 1, which reads as a finding)."""
+    global datetime, hashlib, importlib, math, os, signal, subprocess, tempfile, time, tomllib
     try:
-        _bind_modules()
-        if args == ["--self-test"]:
+        import datetime
+        import hashlib
+        import importlib.util
+        import math
+        import os
+        import signal
+        import subprocess
+        import tempfile
+        import time
+        import tomllib
+        args = list(sys.argv[1:] if argv is None else argv)
+        mode, parsed = _parse_args(args)
+        if mode is None:
+            _print_report("refusal", refusals=(
+                "usage error: {0}; usage: check_toml_restoration.py --repo <absolute path> "
+                "--head <full commit ID> --base <full commit ID> | --self-test".format(parsed),))
+            code = 2
+        elif mode == "self-test":
             code = self_test()
         else:
-            code = _run_cli(args)
+            code = run_check(parsed["--repo"], parsed["--head"], parsed["--base"])
         sys.stdout.flush()
         return code
-    except Exception as exc:  # noqa: BLE001  the one catch-all (entry-guard shape): an internal error is exit 2, never a bare traceback read as a finding
+    except Exception as exc:  # noqa: BLE001  the catch-all maps unhandled errors to exit 2
         try:
-            _print_report("internal-error",
-                          ["internal-error: {0}: {1!r}".format(type(exc).__name__, exc)])
-            print("error: toml-restoration checker: internal error ({0!r}); cannot "
-                  "evaluate".format(exc), file=sys.stderr)
+            sys.stdout.write("toml-restoration-report\tkind=internal-error\n")
+            sys.stdout.write("internal_error\t{0}: {1}\n".format(type(exc).__name__, exc))
             sys.stdout.flush()
-        except BaseException:
+        except Exception:
             pass
         return 2
 
@@ -860,22 +970,20 @@ def main(argv=None):
 # ---- self-test ---------------------------------------------------------------------------------
 
 _BAD_TOML = "k = [\n"
+_MARKER_TOML = 'marker = "raise"\n'
+_INVALID_UTF8 = b'k = "A"\n\xff\n'
 
-# Each flip removes one rule by replacing one exact source region of the checker code before
-# this self-test section; the self-test asserts the replaced text occurs exactly once and that
-# the mutant's verdict changes as the plan expects.
+# Each flip removes one rule by replacing one exact source region; the self-test asserts the
+# replaced text occurs exactly once and that the mutant's verdict changes as the plan expects.
 _FLIPS = {
     "skip_bad_endpoint": (
-        '                if head_doc is GAP:\n'
-        '                    problems.append("HEAD endpoint does not parse: " + path)\n'
-        '                    continue',
-        '                if head_doc is GAP:\n'
-        '                    continue'),
+        '                        problems.append("endpoint does not parse: {0} ({1}) [ValueError]".format(path, endpoint))',
+        '                        pass'),
     "first_finding": (
         '                findings.extend(file_findings)',
         '                findings.extend(file_findings)\n'
         '                if findings:\n'
-        '                    return 1'),
+        '                    break'),
     "start_oldest": (
         '        return None  # no commit on the first-parent chain is an ancestor of the protected base',
         '        return len(chain) - 1'),
@@ -910,7 +1018,7 @@ _FLIPS = {
     "ignore_missing": (
         '        if old_enc == new_enc:',
         '        if old_enc == new_enc or old_value is MISSING or new_value is MISSING:'),
-    "read_worktree": (
+    "read_working_tree": (
         '                cand_sha = stage_map.get(path)\n'
         '                cand_doc = parse_snapshot(blob_content(reader, cand_sha)\n'
         '                                          if cand_sha else None)',
@@ -920,16 +1028,12 @@ _FLIPS = {
         '                        cand_doc = parse_snapshot(handle.read())\n'
         '                except OSError:\n'
         '                    cand_doc = parse_snapshot(None)'),
-    "read_ours": (
-        '        if fields[2] != "0":\n'
-        '            conflicts.add(path)\n'
-        '        else:\n'
-        '            stage_map[path] = fields[1]',
-        '        if fields[2] == "0" or fields[2] == "2":\n'
-        '            stage_map[path] = fields[1]'),
-    "raw_text_values": (
+    "skip_unmerged": (
+        '            conflicts.add(path)',
+        '            pass'),
+    "raw_text_leaves": (
         '        return tomllib.loads(text)',
-        '        return {"__raw__": text}'),
+        '        return {"__raw_text__": text}'),
     "include_non_toml": (
         '            if path and path.endswith(b".toml")}',
         '            if path}'),
@@ -937,154 +1041,93 @@ _FLIPS = {
         '                if path not in evaluated:\n'
         '                    # Option A: a path with no history in the window (or none proven under an\n'
         '                    # unresolved boundary) is evaluated against HEAD alone: no transitions, so\n'
-        '                    # no finding; only the endpoint parse checks above apply.\n'
-        '                    continue\n'
-        '                departed, removed_pairs = evaluate_history(\n'
-        '                    reader, chain, boundary_index, path, touch_positions[path],\n'
-        '                    kept_shas, doc_cache, gap_notes)',
-        '                hist_path, hist_positions = path, touch_positions[path]\n'
+        '                    # no finding; only the endpoint parse checks apply.\n'
+        '                    continue',
         '                if path not in evaluated:\n'
-        '                    hist_path = None\n'
-        '                    for other in sorted(changed):\n'
-        '                        if (other != path and stage_map.get(other) is None\n'
-        '                                and touch_positions[other]):\n'
-        '                            hist_path, hist_positions = other, touch_positions[other]\n'
-        '                            break\n'
-        '                    if hist_path is None:\n'
-        '                        continue\n'
-        '                departed, removed_pairs = evaluate_history(\n'
-        '                    reader, chain, boundary_index, hist_path, hist_positions,\n'
-        '                    kept_shas, doc_cache, gap_notes)'),
-    "parse_errors_propagate": (
-        '    except ValueError:\n'
-        '        # the snapshot does not parse: a bridged gap in history, a refusal at an endpoint\n'
-        '        return GAP\n'
+        '                    donor_departed = {}\n'
+        '                    donor_removed = {}\n'
+        '                    for donor in sorted(evaluated):\n'
+        '                        dep, rem = evaluate_history(\n'
+        '                            reader, chain, boundary_index, donor, touch_positions[donor],\n'
+        '                            kept_shas, doc_cache, gap_notes)\n'
+        '                        donor_departed.update(dep)\n'
+        '                        donor_removed.update(rem)\n'
+        '                    findings.extend(findings_for(path, head_doc, cand_doc,\n'
+        '                                                 donor_departed, donor_removed))\n'
+        '                    continue'),
+    "propagate_parse_errors": (
+        '    try:\n'
+        '        text = blob_bytes.decode("utf-8")\n'
         '    except RecursionError:\n'
-        '        return _Cannot("RecursionError")\n'
+        '        return Unevaluated("RecursionError")\n'
         '    except MemoryError:\n'
-        '        return _Cannot("MemoryError")',
-        '    except FloatingPointError:\n'
-        '        return GAP'),
-    "drop_catch_all": (
-        '    except Exception as exc:  # noqa: BLE001  the one catch-all (entry-guard shape): an internal error is exit 2, never a bare traceback read as a finding',
-        '    except Exception as exc:  # noqa: BLE001  flip: the catch-all re-raises\n'
+        '        return Unevaluated("MemoryError")\n'
+        '    except ValueError:\n'
+        '        return GAP\n'
+        '    try:\n'
+        '        return tomllib.loads(text)\n'
+        '    except RecursionError:\n'
+        '        return Unevaluated("RecursionError")\n'
+        '    except MemoryError:\n'
+        '        return Unevaluated("MemoryError")\n'
+        '    except ValueError:\n'
+        '        return GAP',
+        '    text = blob_bytes.decode("utf-8")\n'
+        '    return tomllib.loads(text)'),
+    "no_catch_all": (
+        '    except Exception as exc:  # noqa: BLE001  the catch-all maps unhandled errors to exit 2\n'
+        '        try:\n'
+        '            sys.stdout.write("toml-restoration-report\\tkind=internal-error\\n")\n'
+        '            sys.stdout.write("internal_error\\t{0}: {1}\\n".format(type(exc).__name__, exc))\n'
+        '            sys.stdout.flush()\n'
+        '        except Exception:\n'
+        '            pass\n'
+        '        return 2',
+        '    except Exception:\n'
         '        raise'),
     "module_level_imports": (
-        '    import tomllib',
-        '    import tomllib\n'
-        '\n'
-        '\n'
-        '_bind_modules()'),
+        'import sys',
+        'import sys\n'
+        'import datetime\n'
+        'import hashlib\n'
+        'import importlib.util\n'
+        'import math\n'
+        'import os\n'
+        'import signal\n'
+        'import subprocess\n'
+        'import tempfile\n'
+        'import time\n'
+        'import tomllib'),
 }
 
+# The child runner: patches, where the row asks for one, are made in this -c text or inside
+# its functions in the child process, never at the checker's module scope. The recursion and
+# memory patches replace the callee, the tomllib.loads binding the parse site calls, so the
+# error starts inside the parse site's try; the runtime patch replaces an internal function
+# on the evaluation path; the noimport patch makes main()'s own import of tomllib fail.
 _CHILD_RUNNER = (
     "import importlib.util, sys\n"
-    "@PRE@\n"
+    "patch = sys.argv[5]\n"
+    "if patch == 'noimport':\n"
+    "    sys.modules['tomllib'] = None\n"
+    "if patch in ('recursion', 'memory'):\n"
+    "    import tomllib\n"
+    "    real_loads = tomllib.loads\n"
+    "    def _stub_loads(text, *args, **kwargs):\n"
+    "        if 'marker' in text:\n"
+    "            if patch == 'recursion':\n"
+    "                raise RecursionError('fixture parse error')\n"
+    "            raise MemoryError('fixture parse error')\n"
+    "        return real_loads(text, *args, **kwargs)\n"
+    "    tomllib.loads = _stub_loads\n"
     "spec = importlib.util.spec_from_file_location('toml_restoration_under_test', sys.argv[1])\n"
     "module = importlib.util.module_from_spec(spec)\n"
     "spec.loader.exec_module(module)\n"
-    "@POST@\n"
-    "sys.exit(module.main(['--repo', sys.argv[2], '--head', sys.argv[3], "
-    "'--base', sys.argv[4]]))\n"
-)
-
-# T56(a)/(b) and T57(a)/(b): patch the callee, the tomllib.loads binding the parse site calls,
-# as an attribute of the tomllib module in the child process (never at the checker's module
-# scope), so the error starts inside the parse site's own try.
-_PATCH_POISON = (
-    "import tomllib\n"
-    "_orig_loads = tomllib.loads\n"
-    "def _patched_loads(text, *args, **kwargs):\n"
-    "    if 'poison' in text:\n"
-    "        raise {0}('patched parse callee')\n"
-    "    return _orig_loads(text, *args, **kwargs)\n"
-    "tomllib.loads = _patched_loads"
-)
-
-# T58(a): patch an internal function on the evaluation path (the canonical encoder) as an
-# attribute of the loaded module, inside the child process.
-_PATCH_CANON = (
-    "def _patched_canon(*args, **kwargs):\n"
-    "    raise RuntimeError('patched internal error')\n"
-    "module.canon = _patched_canon"
-)
-
-# T58(b): before main() runs (and before the module loads, which the module-level-imports flip
-# turns into a load failure), make `import tomllib` fail in the child process.
-_PATCH_NO_TOMLLIB = "sys.modules['tomllib'] = None"
-
-# The expected self-test check ids (a module-level literal tuple, separate from the call sites;
-# a disclosed deviation from the tools/selftest_checks.toml registry, which cannot register a
-# .github runner's ids). The run exits 1 on any set difference with the executed ids.
-_EXPECTED_CHECK_IDS = (
-    "flip-unique:any_change_with_history",
-    "flip-unique:cap_ge",
-    "flip-unique:drop_catch_all",
-    "flip-unique:first_finding",
-    "flip-unique:follow_renames",
-    "flip-unique:ignore_missing",
-    "flip-unique:ignore_shallow",
-    "flip-unique:include_non_toml",
-    "flip-unique:keep_newest",
-    "flip-unique:missing_as_no_touch",
-    "flip-unique:module_level_imports",
-    "flip-unique:no_r1",
-    "flip-unique:parse_errors_propagate",
-    "flip-unique:raw_text_values",
-    "flip-unique:read_ours",
-    "flip-unique:read_worktree",
-    "flip-unique:root_touches_nothing",
-    "flip-unique:skip_bad_endpoint",
-    "flip-unique:start_oldest",
-    "flip-unique:unavailable_as_no_history",
-    "flip-unique:window_only_availability",
-    "rows:complete",
-    "row:A1a:strict", "row:A1a:flip",
-    "row:A1b:strict", "row:A1b:flip",
-    "row:A2:strict", "row:A2:flip",
-    "row:A3a:strict", "row:A3a:flip",
-    "row:A3b:strict", "row:A3b:flip",
-    "row:A4:strict", "row:A4:flip",
-    "row:T10:strict", "row:T10:flip",
-    "row:T11:strict", "row:T11:flip",
-    "row:T12:strict", "row:T12:flip",
-    "row:T26:strict", "row:T26:flip",
-    "row:T27:strict", "row:T27:flip",
-    "row:T32:strict", "row:T32:flip",
-    "row:T33:strict", "row:T33:flip",
-    "row:T34:strict", "row:T34:flip",
-    "row:T35:strict", "row:T35:flip",
-    "row:T36:strict", "row:T36:flip",
-    "row:T50:strict", "row:T50:flip",
-    "row:T51a:strict", "row:T51a:flip",
-    "row:T51b:strict", "row:T51b:flip",
-    "row:T55a:strict", "row:T55a:flip",
-    "row:T55b:strict", "row:T55b:flip",
-    "row:T55c:strict", "row:T55c:flip",
-    "row:T56a:strict", "row:T56a:flip",
-    "row:T56b:strict", "row:T56b:flip",
-    "row:T56c:strict", "row:T56c:flip",
-    "row:T57a:strict", "row:T57a:flip",
-    "row:T57b:strict", "row:T57b:flip",
-    "row:T57c:strict", "row:T57c:flip",
-    "row:T58a:strict", "row:T58a:flip",
-    "row:T58b:strict", "row:T58b:flip",
-    "usage:no-arguments",
-    "usage:missing-repo",
-    "usage:missing-head",
-    "usage:missing-base",
-    "usage:unknown-option",
-    "usage:short-help",
-    "usage:long-help",
-    "usage:option-prefix",
-    "usage:repeated-repo",
-    "usage:positional-argument",
-    "usage:self-test-with-extra",
-    "usage:relative-repo",
-    "ids:head-bad-length",
-    "ids:head-uppercase",
-    "ids:head-not-head",
-    "ids:base-absent",
+    "if patch == 'runtime':\n"
+    "    def _raise_internal(value):\n"
+    "        raise RuntimeError('fixture internal error')\n"
+    "    module.canon = _raise_internal\n"
+    "sys.exit(module.main(['--repo', sys.argv[2], '--head', sys.argv[3], '--base', sys.argv[4]]))\n"
 )
 
 
@@ -1151,10 +1194,6 @@ class _Fixture:
                 _run_fixture_git(self.root, ["update-index", "--add", "--cacheinfo",
                                              "100644,{0},{1}".format(sha, path)], self.env)
 
-    def index_info(self, lines):
-        _run_fixture_git(self.root, ["update-index", "--index-info"], self.env,
-                         input_bytes=lines.encode("utf-8"))
-
     def delete_object(self, sha):
         os.remove(os.path.join(self.root, ".git", "objects", sha[:2], sha[2:]))
 
@@ -1165,6 +1204,14 @@ class _Fixture:
 
 def _toml_k(value):
     return 'other = 0\nk = "{0}"\n'.format(value)
+
+
+def _row(row_id, repo, head, base, want, flip_name, flip_want, want_subs=(), want_absent=(),
+         flip_subs=(), flip_absent=(), patch="none"):
+    return {"id": row_id, "repo": repo, "head": head, "base": base, "want": want,
+            "flip": flip_name, "flip_want": flip_want, "want_subs": tuple(want_subs),
+            "want_absent": tuple(want_absent), "flip_subs": tuple(flip_subs),
+            "flip_absent": tuple(flip_absent), "patch": patch}
 
 
 def _linear_fixture(base_dir, env, name, contents, candidate_files):
@@ -1221,52 +1268,49 @@ def _long_fixture(base_dir, env, name, total):
 
 
 def _build_rows(base_dir, env, notes):
-    """One entry per covered row: (row id, repo root, head, base, want, flip name, flip want,
-    spec). The spec holds report assertions ("has", "not_has", "gaps" and their flip_ forms)
-    and the child patches ("pre", "post")."""
+    """One row per covered plan row, each with its fixture, flip and expected report parts."""
     rows = []
-
-    def row(row_id, fixture_root, head, base, want, flip_name, flip_want, **spec):
-        rows.append((row_id, fixture_root, head, base, want, flip_name, flip_want, spec))
 
     fixture, shas = _linear_fixture(base_dir, env, "t10",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
                                     {"a.toml": _toml_k("A")})
-    row("T10", fixture.root, shas[1], shas[0], 1, "no_r1", 0)
+    rows.append(_row("T10", fixture.root, shas[-1], shas[0], 1, "no_r1", 0,
+                     want_subs=("kind=result", "rule=R1", "value_digest=", "transitions=")))
 
     fixture, shas = _linear_fixture(base_dir, env, "t11",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
                                     {"a.toml": _toml_k("C")})
-    row("T11", fixture.root, shas[1], shas[0], 0, "any_change_with_history", 1)
+    rows.append(_row("T11", fixture.root, shas[-1], shas[0], 0, "any_change_with_history", 1))
 
     fixture, shas = _linear_fixture(base_dir, env, "t12",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": "other = 0\n"}],
                                     {"a.toml": _toml_k("A")})
-    row("T12", fixture.root, shas[1], shas[0], 1, "ignore_missing", 0)
+    rows.append(_row("T12", fixture.root, shas[-1], shas[0], 1, "ignore_missing", 0))
 
     fixture, shas = _linear_fixture(base_dir, env, "t26",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": _BAD_TOML}],
                                     {"a.toml": _toml_k("A")})
-    row("T26", fixture.root, shas[1], shas[0], 2, "skip_bad_endpoint", 0)
+    rows.append(_row("T26", fixture.root, shas[-1], shas[0], 2, "skip_bad_endpoint", 0,
+                     want_subs=("kind=refusal", "endpoint does not parse")))
 
     fixture, shas = _linear_fixture(
         base_dir, env, "t27",
         [{"a.toml": _toml_k("A"), "b.toml": 'k = "P"\n'},
          {"a.toml": _toml_k("B"), "b.toml": 'k = "P"\n'}],
         {"a.toml": _toml_k("A"), "b.toml": _BAD_TOML})
-    row("T27", fixture.root, shas[1], shas[0], 2, "first_finding", 1)
+    rows.append(_row("T27", fixture.root, shas[-1], shas[0], 2, "first_finding", 1))
 
     started = time.monotonic()
     fixture, head, base, build_seconds = _long_fixture(base_dir, env, "t32", 1000)
     notes.append("T32 fixture: 1,000 commits built with git fast-import in {0:.2f}s "
                  "(whole build {1:.2f}s)".format(build_seconds, time.monotonic() - started))
-    row("T32", fixture.root, head, base, 1, "cap_ge", 2)
+    rows.append(_row("T32", fixture.root, head, base, 1, "cap_ge", 2))
 
     started = time.monotonic()
     fixture, head, base, build_seconds = _long_fixture(base_dir, env, "t33", 1001)
     notes.append("T33 fixture: 1,001 commits built with git fast-import in {0:.2f}s "
                  "(whole build {1:.2f}s)".format(build_seconds, time.monotonic() - started))
-    row("T33", fixture.root, head, base, 2, "keep_newest", 0)
+    rows.append(_row("T33", fixture.root, head, base, 2, "keep_newest", 0))
 
     fixture = _Fixture(os.path.join(base_dir, "t34"), env)
     base = fixture.commit({"x.toml": "p = 0\n"}, message="p0")
@@ -1274,20 +1318,20 @@ def _build_rows(base_dir, env, notes):
     r1 = fixture.commit({"a.toml": _toml_k("B")}, parents=[r0], message="r1")
     fixture.set_main(r1)
     fixture.stage(r1, {"a.toml": _toml_k("A")})
-    row("T34", fixture.root, r1, base, 2, "start_oldest", 1)
+    rows.append(_row("T34", fixture.root, r1, base, 2, "start_oldest", 1))
 
     fixture, shas = _linear_fixture(base_dir, env, "t35",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
                                     {"a.toml": 'other = 0\nk = "A"\n# restored\n'})
     fixture.delete_object(fixture.blob(_toml_k("A")))
-    row("T35", fixture.root, shas[1], shas[0], 2, "unavailable_as_no_history", 0)
+    rows.append(_row("T35", fixture.root, shas[-1], shas[0], 2, "unavailable_as_no_history", 0))
 
     fixture, shas = _linear_fixture(base_dir, env, "t36",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
                                     {"a.toml": _toml_k("C")})
     with open(os.path.join(fixture.root, ".git", "shallow"), "w", encoding="ascii") as handle:
         handle.write(shas[0] + "\n")
-    row("T36", fixture.root, shas[1], shas[0], 2, "ignore_shallow", 0)
+    rows.append(_row("T36", fixture.root, shas[-1], shas[0], 2, "ignore_shallow", 0))
 
     fixture = _Fixture(os.path.join(base_dir, "t50"), env)
     base = fixture.commit({"x.toml": "p = 0\n"}, message="p0")
@@ -1296,7 +1340,7 @@ def _build_rows(base_dir, env, notes):
                         message="r1")
     fixture.set_main(r1)
     fixture.stage(r1, {"a.toml": _toml_k("B")})
-    row("T50", fixture.root, r1, base, 2, "root_touches_nothing", 0)
+    rows.append(_row("T50", fixture.root, r1, base, 2, "root_touches_nothing", 0))
 
     for variant, kind in (("a", "commit"), ("b", "tree")):
         fixture = _Fixture(os.path.join(base_dir, "t51" + variant), env)
@@ -1311,7 +1355,8 @@ def _build_rows(base_dir, env, notes):
         fixture.stage(shas[3], {"a.toml": _toml_k("B")})
         doomed = shas[2] if kind == "commit" else fixture.commit_tree_sha(shas[2])
         fixture.delete_object(doomed)
-        row("T51" + variant, fixture.root, shas[3], shas[0], 2, "missing_as_no_touch", 0)
+        rows.append(_row("T51" + variant, fixture.root, shas[3], shas[0], 2,
+                         "missing_as_no_touch", 0))
 
     for variant, kind, candidate in (
             ("a", "commit", {"a.toml": _toml_k("C")}),
@@ -1330,124 +1375,96 @@ def _build_rows(base_dir, env, notes):
         fixture.stage(shas[4], candidate)
         doomed = shas[1] if kind == "commit" else fixture.commit_tree_sha(shas[1])
         fixture.delete_object(doomed)
-        row("T55" + variant, fixture.root, shas[4], shas[2], 2,
-            "window_only_availability", 0)
+        rows.append(_row("T55" + variant, fixture.root, shas[4], shas[2], 2,
+                         "window_only_availability", 0))
 
-    # A1: the candidate is the index, never the working tree.
-    fixture, shas = _linear_fixture(base_dir, env, "a1a",
-                                    [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
-                                    {"a.toml": _toml_k("A")})
-    with open(os.path.join(fixture.root, "a.toml"), "w", encoding="ascii") as handle:
-        handle.write(_toml_k("C"))
-    row("A1a", fixture.root, shas[1], shas[0], 1, "read_worktree", 0)
+    for variant, staged, tree_text, want, flip_want in (
+            ("a", _toml_k("A"), _toml_k("C"), 1, 0),
+            ("b", _toml_k("C"), _toml_k("A"), 0, 1)):
+        fixture, shas = _linear_fixture(base_dir, env, "a1" + variant,
+                                        [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
+                                        {"a.toml": staged})
+        with open(os.path.join(fixture.root, "a.toml"), "w", encoding="ascii") as handle:
+            handle.write(tree_text)
+        rows.append(_row("A1" + variant, fixture.root, shas[-1], shas[0], want,
+                         "read_working_tree", flip_want))
 
-    fixture, shas = _linear_fixture(base_dir, env, "a1b",
-                                    [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
-                                    {"a.toml": _toml_k("C")})
-    with open(os.path.join(fixture.root, "a.toml"), "w", encoding="ascii") as handle:
-        handle.write(_toml_k("A"))
-    row("A1b", fixture.root, shas[1], shas[0], 0, "read_worktree", 1)
-
-    # A2: an unresolved index entry (stage above 0) is cannot-evaluate, whatever its stages
-    # would restore.
     fixture, shas = _linear_fixture(base_dir, env, "a2",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
                                     {})
-    blob_a = fixture.blob(_toml_k("A"))
-    fixture.index_info("0 {0} 0\ta.toml\n100644 {1} 2\ta.toml\n".format(
-        "0" * len(blob_a), blob_a))
-    row("A2", fixture.root, shas[1], shas[0], 2, "read_ours", 1,
-        has=["report-kind: refusal", "unresolved index entry"])
+    stage1 = fixture.blob(_toml_k("A"))
+    stage2 = fixture.blob(_toml_k("A"))
+    stage3 = fixture.blob(_toml_k("B"))
+    info = "".join("100644 {0} {1}\ta.toml\n".format(sha, stage)
+                   for stage, sha in ((1, stage1), (2, stage2), (3, stage3)))
+    _run_fixture_git(fixture.root, ["update-index", "--index-info"], fixture.env,
+                     input_bytes=info.encode("ascii"))
+    rows.append(_row("A2", fixture.root, shas[-1], shas[0], 2, "skip_unmerged", 0,
+                     want_subs=("kind=refusal", "unresolved index entry")))
 
-    # A3(a): a comment-only branch change undone by the candidate is no restoration (values,
-    # not raw text, are compared).
+    base_text = 'other = 0\nk = "A"\n'
     fixture, shas = _linear_fixture(base_dir, env, "a3a",
-                                    [{"a.toml": 'k = "A"\n'},
-                                     {"a.toml": 'k = "A" # note\n'}],
-                                    {"a.toml": 'k = "A"\n'})
-    row("A3a", fixture.root, shas[1], shas[0], 0, "raw_text_values", 1)
+                                    [{"a.toml": base_text},
+                                     {"a.toml": base_text + "# note\n"}],
+                                    {"a.toml": base_text})
+    rows.append(_row("A3a", fixture.root, shas[-1], shas[0], 0, "raw_text_leaves", 1))
 
-    # A3(b): a non-.toml path is out of scope even when its text restores.
     fixture, shas = _linear_fixture(base_dir, env, "a3b",
-                                    [{"notes.txt": _toml_k("A")},
-                                     {"notes.txt": _toml_k("B")}],
+                                    [{"a.toml": _toml_k("P"), "notes.txt": _toml_k("A")},
+                                     {"a.toml": _toml_k("P"), "notes.txt": _toml_k("B")}],
                                     {"notes.txt": _toml_k("A")})
-    row("A3b", fixture.root, shas[1], shas[0], 0, "include_non_toml", 1)
+    rows.append(_row("A3b", fixture.root, shas[-1], shas[0], 0, "include_non_toml", 1))
 
-    # A4: a rename counts as a deletion plus an addition; the new path has no history.
     fixture, shas = _linear_fixture(base_dir, env, "a4",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
                                     {"a.toml": None, "c.toml": _toml_k("A")})
-    row("A4", fixture.root, shas[1], shas[0], 0, "follow_renames", 1)
+    rows.append(_row("A4", fixture.root, shas[-1], shas[0], 0, "follow_renames", 1))
 
-    # T56: a historical snapshot whose parse raises; (a) and (b) via the patched callee, (c) a
-    # real blob that is not valid UTF-8.
-    poison_text = 'poison = 1\nother = 0\nk = "X"\n'
-    for variant, error_class in (("a", "RecursionError"), ("b", "MemoryError")):
-        fixture, shas = _linear_fixture(
-            base_dir, env, "t56" + variant,
-            [{"a.toml": _toml_k("A")}, {"a.toml": poison_text}, {"a.toml": _toml_k("B")}],
-            {"a.toml": _toml_k("C")})
-        row("T56" + variant, fixture.root, shas[2], shas[0], 2, "parse_errors_propagate", 2,
-            has=["report-kind: refusal", error_class, "a.toml", "commit"],
-            not_has=["report-kind: internal-error"],
-            flip_has=["report-kind: internal-error", error_class],
-            flip_not_has=["report-kind: refusal"], flip_gaps=0,
-            pre=_PATCH_POISON.format(error_class))
-    fixture, shas = _linear_fixture(
-        base_dir, env, "t56c",
-        [{"a.toml": _toml_k("A")}, {"a.toml": b'k = "\xff\xfe"\n'}, {"a.toml": _toml_k("B")}],
-        {"a.toml": _toml_k("C")})
-    row("T56c", fixture.root, shas[2], shas[0], 0, "parse_errors_propagate", 2,
-        has=["report-kind: result"], gaps=1,
-        flip_has=["report-kind: internal-error"],
-        flip_not_has=["report-kind: refusal"], flip_gaps=0)
+    for variant, patch, c1_content, want, want_subs in (
+            ("a", "recursion", _MARKER_TOML, 2, ("kind=refusal", "RecursionError")),
+            ("b", "memory", _MARKER_TOML, 2, ("kind=refusal", "MemoryError")),
+            ("c", "none", _INVALID_UTF8, 0, ("kind=result", "unparseable snapshot"))):
+        fixture, shas = _linear_fixture(base_dir, env, "t56" + variant,
+                                        [{"a.toml": _toml_k("A")}, {"a.toml": c1_content},
+                                         {"a.toml": _toml_k("B")}],
+                                        {"a.toml": _toml_k("C")})
+        subs = want_subs + ((shas[1], "a.toml") if variant != "c" else ())
+        rows.append(_row("T56" + variant, fixture.root, shas[-1], shas[0], want,
+                         "propagate_parse_errors", 2, want_subs=subs,
+                         want_absent=("kind=internal-error",),
+                         flip_subs=("kind=internal-error",),
+                         flip_absent=("kind=refusal", "kind=result"), patch=patch))
 
-    # T57: the candidate endpoint's parse raises; same patch route as T56.
-    for variant, error_class in (("a", "RecursionError"), ("b", "MemoryError")):
-        fixture, shas = _linear_fixture(
-            base_dir, env, "t57" + variant,
-            [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
-            {"a.toml": poison_text})
-        row("T57" + variant, fixture.root, shas[1], shas[0], 2, "parse_errors_propagate", 2,
-            has=["report-kind: refusal", "candidate endpoint", error_class, "a.toml"],
-            not_has=["report-kind: internal-error"],
-            flip_has=["report-kind: internal-error", error_class],
-            flip_not_has=["report-kind: refusal"],
-            pre=_PATCH_POISON.format(error_class))
-    fixture, shas = _linear_fixture(
-        base_dir, env, "t57c",
-        [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
-        {"a.toml": b'k = "\xff\xfe"\n'})
-    row("T57c", fixture.root, shas[1], shas[0], 2, "parse_errors_propagate", 2,
-        has=["report-kind: refusal", "candidate endpoint", "does not parse", "a.toml"],
-        not_has=["report-kind: internal-error"],
-        flip_has=["report-kind: internal-error"],
-        flip_not_has=["report-kind: refusal"])
+    for variant, patch, cand_content, subs in (
+            ("a", "recursion", _MARKER_TOML, ("kind=refusal", "candidate", "RecursionError")),
+            ("b", "memory", _MARKER_TOML, ("kind=refusal", "candidate", "MemoryError")),
+            ("c", "none", _INVALID_UTF8, ("kind=refusal", "candidate", "ValueError"))):
+        fixture, shas = _linear_fixture(base_dir, env, "t57" + variant,
+                                        [{"a.toml": _toml_k("A")}],
+                                        {"a.toml": cand_content})
+        rows.append(_row("T57" + variant, fixture.root, shas[-1], shas[0], 2,
+                         "propagate_parse_errors", 2, want_subs=subs,
+                         want_absent=("kind=internal-error",),
+                         flip_subs=("kind=internal-error",),
+                         flip_absent=("kind=refusal",), patch=patch))
 
-    # T58: the catch-all inside main() and the imports inside main().
-    fixture, shas = _linear_fixture(base_dir, env, "t58a",
+    fixture, shas = _linear_fixture(base_dir, env, "t58",
                                     [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
                                     {"a.toml": _toml_k("A")})
-    row("T58a", fixture.root, shas[1], shas[0], 2, "drop_catch_all", 1,
-        has=["report-kind: internal-error", "RuntimeError"],
-        flip_not_has=["report-kind: internal-error"],
-        post=_PATCH_CANON)
-    fixture, shas = _linear_fixture(base_dir, env, "t58b",
-                                    [{"a.toml": _toml_k("A")}, {"a.toml": _toml_k("B")}],
-                                    {"a.toml": _toml_k("A")})
-    row("T58b", fixture.root, shas[1], shas[0], 2, "module_level_imports", 1,
-        has=["report-kind: internal-error", "tomllib"],
-        flip_not_has=["report-kind: internal-error"],
-        pre=_PATCH_NO_TOMLLIB)
+    rows.append(_row("T58a", fixture.root, shas[-1], shas[0], 2, "no_catch_all", 1,
+                     want_subs=("kind=internal-error", "RuntimeError"),
+                     want_absent=("kind=refusal",), patch="runtime"))
+    rows.append(_row("T58b", fixture.root, shas[-1], shas[0], 2, "module_level_imports", 1,
+                     want_subs=("kind=internal-error", "tomllib"),
+                     want_absent=("kind=refusal",), patch="noimport"))
 
     return rows
 
 
-def _run_child(module_path, repo, head, base, env, children, pre="pass", post="pass"):
-    program = _CHILD_RUNNER.replace("@PRE@", pre).replace("@POST@", post)
+def _run_child(module_path, row, env, children):
     child = subprocess.Popen(
-        [sys.executable, "-I", "-B", "-c", program, module_path, repo, head, base],
+        [sys.executable, "-I", "-B", "-c", _CHILD_RUNNER, module_path, row["repo"],
+         row["head"], row["base"], row["patch"]],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
         start_new_session=True, text=True)
     children.append(child.pid)
@@ -1463,26 +1480,10 @@ def _run_child(module_path, repo, head, base, env, children, pre="pass", post="p
     return child.returncode, out, err
 
 
-def _report_issues(out, has, not_has, gaps):
-    """The report assertions a row's spec asks for, as a list of problems (empty when met)."""
-    issues = []
-    for text in has:
-        if text not in out:
-            issues.append("missing {0!r}".format(text))
-    for text in not_has:
-        if text in out:
-            issues.append("unexpected {0!r}".format(text))
-    if gaps is not None:
-        got = sum(1 for line in out.splitlines() if line.startswith("gap: "))
-        if got != gaps:
-            issues.append("{0} gap line(s), expected {1}".format(got, gaps))
-    return issues
-
-
 def self_test():
     try:
         return _self_test_cases()
-    except Exception as exc:  # noqa: BLE001  fail-closed self-test backstop, never a false 0
+    except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0
         print("toml-restoration checker self-test: cannot evaluate: unexpected error "
               "({0!r})".format(exc), file=sys.stderr)
         return 2
@@ -1509,159 +1510,103 @@ def _self_test_cases():
         mutants_dir = os.path.join(tmp, "mutants")
         os.makedirs(mutants_dir)
         mutant_paths = {}
-        # the flip table quotes its target regions, so uniqueness is counted (and the
+        # the flip table below quotes the target regions, so uniqueness is counted (and the
         # replacement applied) over the checker code before this self-test section only
         code_part, marker, tail_part = source.partition("# ---- self-test ")
+        bad_targets = []
         for flip_name, (old_text, new_text) in sorted(_FLIPS.items()):
             occurrences = code_part.count(old_text)
-            record("flip-unique:" + flip_name,
-                   occurrences == 1, "{0} occurrence(s)".format(occurrences))
+            if occurrences != 1:
+                bad_targets.append((flip_name, occurrences))
             mutant_path = os.path.join(mutants_dir, flip_name + ".py")
             with open(mutant_path, "w", encoding="utf-8") as handle:
                 handle.write(code_part.replace(old_text, new_text) + marker + tail_part)
             mutant_paths[flip_name] = mutant_path
+        record("flips/targets-unique", not bad_targets,
+               "each flip target must occur exactly once: {0!r}".format(bad_targets))
 
         rows = _build_rows(os.path.join(tmp, "repos"), env, notes)
-        covered = {entry[0] for entry in rows}
+        covered = {row["id"] for row in rows}
         wanted = {"T10", "T11", "T12", "T26", "T27", "T32", "T33", "T34", "T35", "T36",
-                  "T50", "T51a", "T51b", "T55a", "T55b", "T55c",
-                  "A1a", "A1b", "A2", "A3a", "A3b", "A4",
-                  "T56a", "T56b", "T56c", "T57a", "T57b", "T57c", "T58a", "T58b"}
-        record("rows:complete", covered == wanted,
+                  "T50", "T51a", "T51b", "T55a", "T55b", "T55c", "A1a", "A1b", "A2",
+                  "A3a", "A3b", "A4", "T56a", "T56b", "T56c", "T57a", "T57b", "T57c",
+                  "T58a", "T58b"}
+        record("rows/coverage", covered == wanted,
                "missing {0}, extra {1}".format(sorted(wanted - covered),
                                                sorted(covered - wanted)))
-        for row_id, repo, head, base, want, flip_name, flip_want, spec in rows:
+        for row in rows:
             started = time.monotonic()
-            pre = spec.get("pre", "pass")
-            post = spec.get("post", "pass")
-            code, out, err = _run_child(__file__, repo, head, base, env, children, pre, post)
-            issues = _report_issues(out, spec.get("has", ()), spec.get("not_has", ()),
-                                    spec.get("gaps"))
-            record("row:{0}:strict".format(row_id), code == want and not issues,
-                   "exit {0} (want {1}); report issues {2}; stdout {3!r}; stderr {4!r}".format(
-                       code, want, issues, out[-400:], err[-400:]))
-            code, out, err = _run_child(mutant_paths[flip_name], repo, head, base, env,
-                                        children, pre, post)
-            issues = _report_issues(out, spec.get("flip_has", ()), spec.get("flip_not_has", ()),
-                                    spec.get("flip_gaps"))
-            record("row:{0}:flip".format(row_id), code == flip_want and not issues,
-                   "flip {0}: exit {1} (want {2}); report issues {3}; stdout {4!r}; "
-                   "stderr {5!r}".format(flip_name, code, flip_want, issues, out[-400:],
-                                         err[-400:]))
+            code, out, err = _run_child(__file__, row, env, children)
+            ok = (code == row["want"]
+                  and all(sub in out for sub in row["want_subs"])
+                  and not any(sub in out for sub in row["want_absent"]))
+            record("row/{0}/strict".format(row["id"]), ok,
+                   "want {0} with {1!r} and without {2!r}; got {3}; stdout {4!r}; stderr "
+                   "{5!r}".format(row["want"], row["want_subs"], row["want_absent"], code,
+                                  out[-500:], err[-500:]))
+            code, out, err = _run_child(mutant_paths[row["flip"]], row, env, children)
+            ok = (code == row["flip_want"]
+                  and all(sub in out for sub in row["flip_subs"])
+                  and not any(sub in out for sub in row["flip_absent"]))
+            record("row/{0}/flip".format(row["id"]), ok,
+                   "flip {0}: want {1} with {2!r} and without {3!r}; got {4}; stdout {5!r}; "
+                   "stderr {6!r}".format(row["flip"], row["flip_want"], row["flip_subs"],
+                                         row["flip_absent"], code, out[-500:], err[-500:]))
             notes.append("{0}: strict and flip runs took {1:.2f}s together".format(
-                row_id, time.monotonic() - started))
+                row["id"], time.monotonic() - started))
 
-        # the command-line contract: every usage or ID problem exits 2 and never runs a check
-        t10_root, t10_head, t10_base = rows[0][1], rows[0][2], rows[0][3]
-        for check_id, argv in (
-                ("usage:no-arguments", []),
-                ("usage:missing-repo", ["--head", t10_head, "--base", t10_base]),
-                ("usage:missing-head", ["--repo", t10_root, "--base", t10_base]),
-                ("usage:missing-base", ["--repo", t10_root, "--head", t10_head]),
-                ("usage:unknown-option", ["--repo", t10_root, "--head", t10_head,
-                                          "--base", t10_base, "--bogus"]),
-                ("usage:short-help", ["-h"]),
-                ("usage:long-help", ["--help"]),
-                ("usage:option-prefix", ["--re", t10_root, "--head", t10_head,
-                                         "--base", t10_base]),
-                ("usage:repeated-repo", ["--repo", t10_root, "--repo", t10_root,
-                                         "--head", t10_head, "--base", t10_base]),
-                ("usage:positional-argument", ["--repo", t10_root, "--head", t10_head,
-                                               "--base", t10_base, t10_root]),
-                ("usage:self-test-with-extra", ["--self-test", "--repo", t10_root]),
-                ("usage:relative-repo", ["--repo", ".", "--head", t10_head,
-                                         "--base", t10_base]),
-                ("ids:head-bad-length", ["--repo", t10_root, "--head", t10_head[:12],
-                                         "--base", t10_base]),
-                ("ids:head-uppercase", ["--repo", t10_root, "--head", "A" + t10_head[1:],
-                                        "--base", t10_base]),
-                ("ids:head-not-head", ["--repo", t10_root, "--head", t10_base,
-                                       "--base", t10_base]),
-                ("ids:base-absent", ["--repo", t10_root, "--head", t10_head,
-                                     "--base", "0" * len(t10_head)])):
-            got = main(list(argv))
-            record(check_id, got == 2, "exit {0} (want 2) for argv {1!r}".format(got, argv))
+        # the command-line contract: each usage error and ID check exits 2 in process
+        t10 = next(row for row in rows if row["id"] == "T10")
+        repo = t10["repo"]
+        head = t10["head"]
+        base = t10["base"]
+        record("usage/no-arguments", main([]) == 2, "")
+        record("usage/help-refused", main(["--help"]) == 2 and main(["-h"]) == 2, "")
+        record("usage/prefix-refused",
+               main(["--re", repo, "--head", head, "--base", base]) == 2, "")
+        record("usage/repeated-option",
+               main(["--repo", repo, "--repo", repo, "--head", head, "--base", base]) == 2, "")
+        record("usage/positional-refused",
+               main(["--repo", repo, "--head", head, "--base", base, "extra"]) == 2, "")
+        record("usage/option-needs-value",
+               main(["--repo", repo, "--head", head, "--base"]) == 2, "")
+        record("usage/missing-options", main(["--repo", repo]) == 2, "")
+        record("usage/self-test-not-alone", main(["--self-test", "--repo", repo]) == 2, "")
+        record("usage/relative-repo-refused",
+               main(["--repo", ".", "--head", head, "--base", base]) == 2, "")
+        record("ids/head-too-short",
+               main(["--repo", repo, "--head", head[:-1], "--base", base]) == 2, "")
+        record("ids/head-too-long",
+               main(["--repo", repo, "--head", head + "0", "--base", base]) == 2, "")
+        record("ids/head-uppercase",
+               main(["--repo", repo, "--head", head.upper(), "--base", base]) == 2, "")
+        record("ids/head-not-repository-head",
+               main(["--repo", repo, "--head", base, "--base", base]) == 2, "")
+        absent = "0" * (len(base) - 1) + "1"
+        record("ids/base-not-present",
+               main(["--repo", repo, "--head", head, "--base", absent]) == 2, "")
 
     for note in notes:
         print("note: " + note)
     print("note: {0} checker child process(es) started in new sessions; each was waited on "
           "before the self-test ended".format(len(children)))
-    code = 0
+    expected = set(EXPECTED_CHECK_IDS)
+    duplicated = len(set(executed)) != len(executed)
+    if duplicated or set(executed) != expected:
+        print("SELF-TEST FAIL: the executed check-id set does not equal EXPECTED_CHECK_IDS: "
+              "expected {0} id(s), executed {1} ({2} unique); missing {3}; extra {4}".format(
+                  len(expected), len(executed), len(set(executed)),
+                  sorted(expected - set(executed)), sorted(set(executed) - expected)))
+        return 1
     if failures:
         print("SELF-TEST FAIL ({0} of {1} check(s)):".format(len(failures), len(executed)))
         for failure in failures:
             print("  - " + failure)
-        code = 1
-    expected = set(_EXPECTED_CHECK_IDS)
-    if len(set(executed)) != len(executed) or set(executed) != expected:
-        print("SELF-TEST FAIL: executed check ids do not reconcile with _EXPECTED_CHECK_IDS: "
-              "{0} expected, {1} executed; missing {2}; extra or duplicate {3}".format(
-                  len(_EXPECTED_CHECK_IDS), len(executed),
-                  sorted(expected - set(executed)),
-                  sorted(set(item for item in executed
-                             if item not in expected or executed.count(item) > 1))))
-        code = 1
-    if code == 0:
-        print("SELF-TEST PASS: {0} check(s) over {1} fixture row(s), each paired with its plan "
-              "flip as a source mutant loaded through importlib".format(
-                  len(executed), len(_EXPECTED_CHECK_IDS) and len(
-                      [item for item in _EXPECTED_CHECK_IDS if item.startswith("row:")]) // 2))
-    return code
-
-
-# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py,
-# which tools/check_child_status_coverage.py pins this copy to by AST. This checker starts git
-# children (subprocess) and reads their exit status, in its checking run and in its self-test,
-# so under an ignored SIGCHLD a failing child would read as a pass; the guard runs at the entry
-# line, before main() dispatches.
-_CHILD_STATUS_PROBE_CODE = 77
-
-
-def _child_status_refusal():
-    """None when this process can read a child's exit status, otherwise the reason it cannot."""
-    import os
-    import signal
-    if not hasattr(signal, "SIGCHLD"):
-        return None
-    disposition = signal.getsignal(signal.SIGCHLD)
-    if disposition is not signal.SIG_DFL:
-        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
-                else "SIGCHLD is not at its default disposition in this process")
-    if not hasattr(os, "fork"):
-        return None
-    try:
-        pid = os.fork()
-    except OSError as exc:
-        return "the child-status probe could not fork ({})".format(type(exc).__name__)
-    if pid == 0:
-        os._exit(_CHILD_STATUS_PROBE_CODE)
-    try:
-        waited, status = os.waitpid(pid, 0)
-    except ChildProcessError:
-        return "the probe child was reaped before its exit status could be read (ECHILD)"
-    except OSError as exc:
-        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
-    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
-        return "a probe child that exited {} was read back as wait status {}".format(
-            _CHILD_STATUS_PROBE_CODE, status)
-    return None
-
-
-def _child_status_refusal_exit(name):
-    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
-    (os._exit, so no exit-time stream flush can replace the status)."""
-    import os
-    reason = _child_status_refusal()
-    if reason is None:
-        return 0
-    try:
-        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
-                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
-                         "SIG_DFL.\n".format(name, reason))
-        sys.stderr.flush()
-    except BaseException:
-        pass
-    os._exit(2)
+        return 1
+    print("SELF-TEST PASS: {0} check(s) over {1} fixture row(s), each paired with its plan "
+          "flip as a source mutant loaded through importlib".format(
+              len(executed), len(wanted)))
+    return 0
 
 
 if __name__ == "__main__":
