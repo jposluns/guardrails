@@ -168,8 +168,9 @@ RECORD_NAMESPACES = (
 IMPORTED_PREFIX = "imported:"
 # The namespaces an imported id or counter may carry: imported history uses the same enabled types in a
 # separate series (spec 8.1 roster notes), so the baseline and module types. The importer-only
-# legacy_fragment (LF) is excluded, because new imports MUST use the imported series and not LF quarantine
-# (spec 8.1); the reserved TX and the unassigned CL are bound to no type and stay excluded (spec 8.1, 8.2).
+# legacy_fragment (LF) is excluded, because spec 8.1 reserves LF unassigned, used by no record type in
+# either series; the reserved TX and the unassigned CL are bound to no type and stay excluded (spec 8.1,
+# 8.2).
 IMPORTED_NAMESPACES = (
     frozenset(BASELINE_TYPES.values())
     | frozenset(ns for ns, _module in MODULE_TYPES.values())
@@ -2554,7 +2555,7 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     `imported:<NS>`, which allocates `imported:<NS>-<n>` from that key's own high-water and never reads the
     clean `<NS>` line (spec 8.2); the map may then hold both series. Without it, an imported key is refused
     exactly as before. An absent imported key is refused whatever `known_complete` says: spec 8.2
-    requires every imported counter row once the store declares 1.3.0 and lets only a genuinely first
+    requires the imported series' counter rows, one for each enabled type, and lets only a genuinely first
     adoption start at zero, written as an explicit zero row, and a clean-only known_namespaces proof says
     nothing about the imported line, so reading an absent row as high-water 0 would zero-seed prior
     ancestry and could reuse an imported id. On this series-aware path the
@@ -2585,7 +2586,7 @@ def next_id(high, ns, known_complete=False, imported_series=False):
     _validated_counter_map(high, "next_id", imported_series)
     if imported_series and ns.startswith(IMPORTED_PREFIX) and ns not in high:
         # The imported line accepts NO completeness proof for an absent key, known_complete=True included:
-        # spec 8.2 requires every imported counter row once the store declares 1.3.0 and lets only a
+        # spec 8.2 requires the imported series' counter rows, one for each enabled type, and lets only a
         # genuinely first adoption start at zero, written as an explicit zero row, so reading an absent
         # row as high-water 0 would zero-seed prior ancestry and could reuse an imported id. Fail closed;
         # the remedy is recording the counter row, never a proof flag.

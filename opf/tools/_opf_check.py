@@ -164,8 +164,8 @@ _ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
 
 # A record whose schema has not shipped in the baseline validator is a named CANNOT-EVALUATE deferral,
 # never graded INVALID (F4; round-5 F-2). This covers the module tier (schemas land in U2M) AND the
-# importer-only legacy_fragment type (deprecated for new stores, spec 8.1: no record schema ships in the
-# baseline validator, so records in an existing store stay readable as a named deferral).
+# importer-only legacy_fragment type (deprecated for new stores: no record schema ships in the baseline
+# validator, so records in an existing store stay readable as a named deferral).
 _SCHEMA_DEFERRAL = ("record schema not available to the baseline validator; deferred (module-tier schemas "
                     "land in U2M; legacy_fragment is deprecated for new stores and has no baseline "
                     "record schema)")
@@ -1519,8 +1519,9 @@ def _gather_imported_records(root_fd, machine_rel, enabled_types, registered_ven
     """C-IMPORTED-SCHEMA (spec 8.3): read the imported-series leaves inline (the first imported-series
     release keeps them inline in either store layout, spec 4.2) and validate every row through
     _opf_schema.validate_imported_record, the closed imported envelope and its missingness rules. The
-    leaves are one per enabled type except legacy_fragment, named through _opf_store.imported_leaf_names,
-    the authority the containment registration reads: <type>.imported.index.toml with [[record]] rows,
+    leaves are one per enabled type (spec 4.2), none for this tooling's legacy_fragment, named through
+    _opf_store.imported_leaf_names, the authority the containment registration reads:
+    <type>.imported.index.toml with [[record]] rows,
     and worklog.imported.toml with [[entry]] rows for the worklog ledger. An imported row NEVER enters the
     _SCHEMA_DEFERRAL seam (spec 8.3: a conforming imported series can reach VALID), so a type whose clean
     records defer (a module-tier type) is graded by the imported validator, which refuses a type it holds
@@ -1546,7 +1547,7 @@ def _gather_imported_records(root_fd, machine_rel, enabled_types, registered_ven
             continue
         if st == "absent":
             rep.finding("enabled type {!r} has no imported leaf {} (an imported-series store holds one for "
-                        "every enabled type except legacy_fragment; spec 4.2)".format(tname, leaf))
+                        "every enabled type; spec 4.2)".format(tname, leaf))
             complete = False
             continue
         rows = _imported_leaf_rows(data, leaf_rel, "entry" if tname in _LEDGER_TYPES else "record", rep)
@@ -2956,15 +2957,18 @@ def _check_worklog_contiguous(numbers, rep, skipped=frozenset()):
 
 def _imported_counter_namespaces(enabled_types):
     """The namespaces whose imported counter row the doctor requires once the imported series is active
-    (spec 8.2): one per enabled type except legacy_fragment, i.e. every enabled normative namespace the
-    imported series may carry (IMPORTED_NAMESPACES refuses LF, the reserved TX and the unassigned CL)."""
+    (spec 8.2: one for each enabled type), i.e. every enabled normative namespace the imported series may
+    carry, so this tooling's legacy_fragment owes none (IMPORTED_NAMESPACES refuses LF, the reserved TX and
+    the unassigned CL)."""
     return frozenset(ns for ns in enabled_types.values() if ns in IMPORTED_NAMESPACES)
 
 
 def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep, strays=None):
-    """Read the imported-series leaves for the per-series id checks (spec 8.2/8.3). Each enabled type except
-    legacy_fragment keeps its imported rows inline in the machine store in either layout (spec 4.2): the
-    [[record]] rows of <type>.imported.index.toml, and the [[entry]] rows of worklog.imported.toml.
+    """Read the imported-series leaves for the per-series id checks (spec 8.2/8.3). The imported series
+    holds one leaf per enabled type (spec 4.2): the [[record]] rows of <type>.imported.index.toml, and the
+    [[entry]] rows of worklog.imported.toml, which this tooling keeps inline in the machine store in
+    either layout. This tooling's legacy_fragment has no imported leaf (IMPORTED_NAMESPACES refuses LF),
+    so none is read for it.
     Returns (rows, unread): `rows` holds (counter_key, id, row) for every row whose id lies in its own leaf
     series, imported:<NS>-<n> over the leaf type namespace, in leaf then row order; `unread` holds the
     counter keys whose leaf could not be read (a CANNOT-EVALUATE is already recorded here, and every later
@@ -3121,9 +3125,10 @@ def _check_imported_ids(emitted, counters_data, cst, namespaces, rep):
     cannot disagree. A leaf that grading could not read is replayed as its CANNOT-EVALUATE. The imported
     counter rows are graded here from the one counters.toml read C-COUNTERS made (`counters_data`,
     `cst`), through validate_counters over the quoted "imported:<NS>" rows alone: one per enabled type
-    except legacy_fragment (`namespaces`), each a genuine high-water (spec 8.2). An absent counters.toml
-    owes every row (a finding); an unreadable one, or one whose [counters] is not a table under the
-    supported schema, is CANNOT-EVALUATE, never graded under assumptions it does not declare."""
+    (`namespaces`), each a genuine high-water (spec 8.2), and none for this tooling's legacy_fragment. An
+    absent counters.toml owes every row (a finding); an unreadable one, or one whose [counters] is not a
+    table under the supported schema, is CANNOT-EVALUATE, never graded under assumptions it does not
+    declare."""
     for kind, msg in emitted:
         if kind == "cant":
             rep.cant("C-IMPORTED-IDS: " + msg)
@@ -4127,10 +4132,10 @@ def _legacy_import_staging(machine_rel):
 
 
 def _adoption_state(root_fd, machine_rel, in_repo, rep):
-    """The homes-1 adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17),
-    or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never a silent
-    fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no top-level
-    import of the adoption modules."""
+    """The adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17), on
+    homes 1, or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never
+    a silent fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no
+    top-level import of the adoption modules."""
     try:
         import _opf_adopt_state
         return _opf_adopt_state.adoption_state(root_fd, machine_rel, in_repo=in_repo)
@@ -5014,13 +5019,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                     "8.2)".format(_rel(machine_rel, COUNTERS_NAME)))
     elif cst == "ok":
         # Importer/quarantine namespaces (IMPORTER_TYPES, i.e. LF) are ACCEPTED-if-present but NOT
-        # REQUIRED: a store scaffolded before LF's deprecation (spec 8.1) carries an LF counter from
+        # REQUIRED: a store scaffolded before this tooling deprecated LF carries an LF counter from
         # opf init while legacy_fragment stays out of the manifest [types] (schema-deferred), so LF is
         # absent from known_ns; passing it as optional keeps such a store clean without requiring LF on
         # a store that lacks it, as a new store does (spec 8.2).
-        # With the imported series active (spec 8.2) the doctor also REQUIRES one "imported:<NS>" row per
-        # enabled type except legacy_fragment, each an independent number line; inactive, an imported key
-        # stays a finding exactly as before.
+        # With the imported series active the doctor also REQUIRES one "imported:<NS>" row per enabled
+        # type (spec 8.2), each an independent number line, and none for this tooling's legacy_fragment;
+        # inactive, an imported key stays a finding exactly as before.
         high, cfindings = validate_counters(
             counters_data, known_namespaces=known_ns,
             optional_namespaces=frozenset(IMPORTER_TYPES.values()),
@@ -6976,7 +6981,7 @@ def self_test():
         # SUPPORTED_HOMES to 2 and SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION (the per-vector patch
         # idiom check_opf_homes uses for SUPPORTED_HOMES), and the store declares the 2.0.0 pair, so the
         # driver-derived flag is True end to end. act_machine() is that store with every imported leaf
-        # present and empty: one per enabled type except legacy_fragment (spec 4.2), the worklog's as
+        # present and empty: one per enabled type (spec 4.2), none for legacy_fragment, the worklog's as
         # worklog.imported.toml, plus the zero high-water every imported counter needs once active
         # (spec 8.2). _is2_prior() is the prior with the empty imported baseline the across-time
         # checks need on an active store.
@@ -7302,7 +7307,7 @@ def self_test():
                   and any(m.startswith("cannot read .working/toml/backlog_item.imported.index.toml")
                           for m in imp_msgs(_up_run)))
             # An absent leaf of an enabled type is an INVALID finding (spec 4.2: every enabled type
-            # but legacy_fragment holds one); a declared legacy_fragment owes none (red when the
+            # holds one); a declared legacy_fragment owes none in this tooling (red when the
             # absence passes, or when LF is not excluded).
             _ab = act_machine()
             del _ab["finding.imported.index.toml"]
@@ -8242,8 +8247,9 @@ def self_test():
                           for f in _i3_msgs(_i3_none, "C-COUNTERS")) == len(_i3_ns) == 12
                   and sum("missing a high-water for imported namespace" in f
                           for f in _i3_msgs(_i3_none, "C-IMPORTED-IDS")) == len(_i3_ns))
-            # legacy_fragment has no imported counter row: its LF counter stays required as a clean row and
-            # no imported:LF row is asked for, while a present imported:LF row is refused (spec 8.2).
+            # In this tooling legacy_fragment has no imported counter row: its LF counter stays required as a
+            # clean row and no imported:LF row is asked for, while a present imported:LF row is refused
+            # (spec 8.2).
             _i3_lf = _i3_machine()
             _i3_lf["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
             _i3_lf["counters.toml"]["counters"]["LF"] = 0
