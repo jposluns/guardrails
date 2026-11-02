@@ -307,6 +307,8 @@ run_gate "mappings"       python3 -I -B tools/check_mappings.py
 # is a finding), and validates pack.toml with its owning validator (opf/tools/check_opf_prompt_pack.py).
 run_gate "cited-standards-repo-contract-selftest" python3 -I -B .github/check_cited_standards_contract.py --self-test
 run_gate "cited-standards-repo-contract" python3 -I -B .github/check_cited_standards_contract.py
+# Repository-only, like the contracts above: the private TOML restoration checker's hermetic self-test.
+run_gate "toml-restoration-selftest" python3 -I -B .github/check_toml_restoration.py --self-test
 run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test
 # This repository only: the reviewed corpus adds the OPF prompt-pack members to the rule corpus. The config and
 # the two .github contract scripts are not shipped, so in a tree without them this gate, the newtab-repo-contract

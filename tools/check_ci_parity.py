@@ -337,8 +337,10 @@ currency.yml, are not enumerated; only the checkout-credentials rule reads every
 workflow file, for its checkout steps alone. Argument order is identity-relevant,
 making a harmless reorder fail loud. Coordinated removal of both of this gate's own
 invocations cannot be detected if nobody runs the remaining file manually. The repository
-contracts (REPO_GATES) and the cited-standards contract's --self-test are
-MANDATORY_MEMBERS, so removing one of them from both runners together is a
+contracts (REPO_GATES) are MANDATORY_MEMBERS in the form their runners run them: the
+cited-standards contract also as its --self-test, and a self-test-only gate
+(SELF_TEST_ONLY_REPO_GATES) as its --self-test alone, its live line refused. Removing
+one of them from both runners together is a
 missing-mandatory finding, not a silent pass. The
 child-status probe (CHILD_STATUS_PROBE) and its coverage gate are MANDATORY_MEMBERS for
 the same reason: removing either from both runners together is a missing-mandatory
@@ -581,11 +583,21 @@ MASKED_REF_EXPRESSIONS = frozenset({
 })
 
 # The repository-local, non-shipped gates, each named; no general .github executable allowance.
-# Each is also a MANDATORY_MEMBERS entry (the cited-standards contract together with its
-# --self-test), so a both-runner removal is a missing-mandatory finding.
+# Each is a MANDATORY_MEMBERS entry in the form its runners run it: the cited-standards
+# contract together with its --self-test, and a self-test-only gate as its --self-test alone.
+# A both-runner removal of any of them is a missing-mandatory finding.
 REPO_GATES = frozenset({
     ".github/check_cited_standards_contract.py",
     ".github/check_newtab_contract.py",
+    ".github/check_toml_restoration.py",
+})
+
+# The repository gates that run in both runners only as their --self-test. A live line for one
+# of these has no staged candidate to act on in CI (a fresh checkout's index equals HEAD), so
+# it would be a vacuous gate; normalize() refuses a live line, bare or with arguments, for any
+# member. The set must be a subset of REPO_GATES, which the parity self-test enforces (01i).
+SELF_TEST_ONLY_REPO_GATES = frozenset({
+    ".github/check_toml_restoration.py",
 })
 
 # The one status branch protection requires. In a workflow with more than one job,
@@ -893,6 +905,7 @@ MANDATORY_MEMBERS = frozenset({
     ".github/check_cited_standards_contract.py",
     ".github/check_cited_standards_contract.py --self-test",
     ".github/check_newtab_contract.py",
+    ".github/check_toml_restoration.py --self-test",
     "tools/check_ci_parity.py",
     "tools/check_ci_parity.py --self-test",
     "tools/check_git_option_table.py",
@@ -1324,6 +1337,18 @@ def normalize(tokens, masked_ok=False, raws=None):
             )
         canonical.append(token)
         index += 1
+
+    # A self-test-only repository gate is reviewed only as its exact --self-test invocation:
+    # a live line, bare or with arguments, has no staged candidate to act on in CI and is not
+    # the identity held mandatory, so either shape is cannot-evaluate, never a pass.
+    if canonical and canonical[0] in SELF_TEST_ONLY_REPO_GATES and canonical[1:] != ["--self-test"]:
+        return Result(
+            False,
+            None,
+            "self-test-only-gate",
+            "{} runs only as its --self-test; a live gate line is outside the "
+            "reviewed forms".format(canonical[0]),
+        )
 
     # A whitespace-bearing token would make the space-joined identity ambiguous
     # (a quoted "a b" arg collides with two args a b), so it is outside the subset.
@@ -5173,6 +5198,7 @@ def self_test():
         "python3 -I -B .github/check_cited_standards_contract.py --self-test",
         "python3 -I -B .github/check_cited_standards_contract.py",
         "python3 -I -B .github/check_newtab_contract.py",
+        "python3 -I -B .github/check_toml_restoration.py --self-test",
         # The child-status probe and its coverage gate, mandatory as the contracts are.
         "python3 -I -B opf/tools/_child_status.py",
         "python3 -I -B tools/check_child_status_coverage.py",
@@ -5329,12 +5355,16 @@ def self_test():
     case("01b repository gates matched",
          evaluate(local_fixture(common), ci_fixture(common), ()), 0)
     for repo_gate in sorted(REPO_GATES):
+        # The dropped member and the expected missing identity are the form the runners run:
+        # a self-test-only gate as its --self-test, every other repository gate bare.
+        gate_member = (repo_gate + " --self-test"
+                       if repo_gate in SELF_TEST_ONLY_REPO_GATES else repo_gate)
         case("01c repository gate local-only: " + repo_gate,
-             evaluate(local_fixture(common), ci_fixture(drop(repo_gate)), ()),
-             1, ("local-only", "missing-mandatory"), (repo_gate,), ())
+             evaluate(local_fixture(common), ci_fixture(drop(gate_member)), ()),
+             1, ("local-only", "missing-mandatory"), (gate_member,), ())
         case("01d repository gate ci-only: " + repo_gate,
-             evaluate(local_fixture(drop(repo_gate)), ci_fixture(common), ()),
-             1, ("ci-only", "missing-mandatory"), (), (repo_gate,))
+             evaluate(local_fixture(drop(gate_member)), ci_fixture(common), ()),
+             1, ("ci-only", "missing-mandatory"), (), (gate_member,))
         case("01e repository gate shadow scan: " + repo_gate,
              evaluate(local_fixture(common, ("echo " + repo_gate,)), ci_fixture(common), ()),
              2)
@@ -5345,6 +5375,25 @@ def self_test():
                  "      - name: Run " + repo_gate,
                  "        run: python3 -I -B tools/check_ci_parity.py",
              )), ()), 2)
+    # 01i: every self-test-only gate is a repository gate; a member outside REPO_GATES would
+    # leave its --self-test identity undroppable above and its live-line refusal unreachable.
+    count += 1
+    stray = sorted(SELF_TEST_ONLY_REPO_GATES - REPO_GATES)
+    if stray:
+        failures.append(
+            "01i self-test-only repository gates are repository gates: {} not in "
+            "REPO_GATES".format(stray))
+    # A live line for a self-test-only gate is refused even when both runners carry it the
+    # same way: bare (01j) and with arguments (01k), each cannot-evaluate, never a pass.
+    for live_name, live_line in (
+            ("01j self-test-only gate bare live line refused",
+             "python3 -I -B .github/check_toml_restoration.py"),
+            ("01k self-test-only gate live line with arguments refused",
+             "python3 -I -B .github/check_toml_restoration.py --repo /tmp/fixture")):
+        case(live_name,
+             evaluate(local_fixture(common + (live_line,)),
+                      ci_fixture(common + (live_line,)), ()),
+             2)
     # Each mandatory repository-contract member removed
     # from BOTH runners together is a missing-mandatory finding, never a silent pass. The
     # member list is spelled out rather than derived from MANDATORY_MEMBERS, so reverting
@@ -5355,6 +5404,7 @@ def self_test():
             ".github/check_cited_standards_contract.py",
             ".github/check_cited_standards_contract.py --self-test",
             ".github/check_newtab_contract.py",
+            ".github/check_toml_restoration.py --self-test",
             "opf/tools/_child_status.py",
             "tools/check_child_status_coverage.py"):
         count += 1
