@@ -83,9 +83,11 @@ APPEND MODE (opt-in, off by default)
     opts out of the destructions above); clearing AIQT_STORE_WRITE_ROUTE turns the mode off. A subagent's call
     is judged by the mode like any other call: nothing is exempted on agent_id or agent_type. The append
     checks have their own bound and budgets, the same sizes as the destruction checks' (128 target words,
-    2000 entries, 262144 characters; THREAT MODEL) and kept apart from them: an append target never counts
-    toward the destruction checks' bound or spends their budgets, so a destruction is judged in the mode
-    exactly as without it, and the work in one command is at most twice those bounds. Past its own bound or
+    2000 entries, 262144 characters; THREAT MODEL) and kept apart from them, with one exception: an append
+    target never counts toward the destruction checks' bound, and spends their budgets only when it is a tee
+    word holding an expansion, which is first expanded on those budgets, the mode on or off, to see whether
+    it makes an option (RESIDUAL COVERAGE). So a destruction is judged in the mode exactly as without it,
+    and the work in one command is at most twice those bounds. Past its own bound or
     budget an append is not judged (allowed), and the destructions after it still are.
     Not covered, in the mode as outside it: a write by an interpreter (python3, perl, and the like), an
     editor, the Write and Edit tools (this hook reads only Bash calls), `bash -c` and `sh -c` strings, eval, a
@@ -189,6 +191,11 @@ RESIDUAL COVERAGE.
     so far, a word whose expansion would pass it is not read at all, and what was not reached is allowed),
     and past the 262144-character expansion budget (a word or assignment whose expansion would pass it is not
     read; a word that expands nothing is still judged).
+    In the APPEND MODE, as with the mode off, each tee word holding an expansion (a variable, `~`, or a glob)
+    is first expanded on the destruction checks' entry and character budgets to see whether it makes an
+    option word (OUT OF SCOPE above), and only then read as an append target on the append checks' own; so a
+    tee -a target spends those budgets, and a destruction later in the same command is judged only as far as
+    what is left of them reaches (what was not reached is allowed).
     An argument word whose value cannot be read is taken as an operand, not an option, so a hidden --help
     there may be over-denied. The hook's environment may differ from the Bash tool's
     shell environment (for example a CLAUDE_ENV_FILE), so a variable or cwd the hook reads may not be what
@@ -1368,7 +1375,7 @@ def _glob(pattern, ctx):
     """The existing paths an absolute glob pattern (literal parts bracketed by _gesc) matches, as bash globs it: a
     component's `*`, `?`, and `[...]` match the names in its directory, a leading `.` only when the component
     starts with one, and directories on the way are followed; a trailing slash matches directories only (through
-    links) and each match keeps it. Complete, bounded only by the shared entry budget:
+    links) and each match keeps it. Complete, bounded only by the entry budget of the context passed in (ctx):
     past it the matches found so far are returned. None when a bracket form is not read (see _glob_unread)."""
     import fnmatch
     parts = [p for p in pattern.split("/") if p]
@@ -1410,10 +1417,11 @@ def _expand(tok, ctx, text, off, state, phys, assign=False):
     against the disk, a relative pattern in the directory phys (its matches relative names; no match leaves the
     word's text, as bash does). For an assignment word, the assigned value. Each value is built as a list of parts
     joined once, so the work is linear in the word's length; every piece's work beyond a single value is counted
-    against the shared budget, and when the budget runs out the word is not read (out of work, it is allowed, never
-    judged on part of its values); so too when the characters its expansions would make (each value's text, and each
-    copy of the text before it) exceed what is left of the per-command expansion budget, charged before they are
-    made. A word whose pieces make no characters is never refused by it. A word that uses one variable holding
+    against the entry budget of the context passed in (ctx), and when the budget runs out the word is not read (out
+    of work, it is allowed, never judged on part of its values); so too when the characters its expansions would
+    make (each value's text, and each copy of the text before it) exceed what is left of that context's expansion
+    character budget, charged before they are made. A word whose pieces make no characters is never refused by it.
+    A word that uses one variable holding
     several values (a `for` list) more than once is not read either: its references are not correlated."""
     _, value, _, start, end, subs = tok
     if subs or _SUB in value:
@@ -3150,11 +3158,15 @@ def _self_test():
                          "The append checks have their own bound and budgets",
                          "a destruction is judged in the mode exactly as without it",
                          "a second, separate set of these three bounds",
+                         "spends their budgets only when it is a tee word holding an expansion",
+                         "each tee word holding an expansion (a variable, `~`, or a glob) is first expanded on the "
+                         "destruction checks' entry and character budgets",
                          "up to 200 characters (a longer text is cut there and ends with `...`)"):
                 self.assertIn(item, doc, item)
 
         def test_27_flip_append_mode_own_budget(self):
-            # appends are read on their own bound and budgets: none spends what a later destruction is judged with
+            # these appends are read on their own bound and budgets: none spends what a later destruction is judged
+            # with (a tee word holding an expansion is the disclosed exception, test_27_append_mode_disclosed)
             for k in range(_MAX_WALK + 100):
                 self.x.put("other/big/%04d" % k, b"")
 

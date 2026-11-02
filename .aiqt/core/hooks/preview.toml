@@ -56,7 +56,9 @@ rules = []
 # record-remove-check has an opt-in append mode, off by default: only with AIQT_STORE_ROOT set AND
 # AIQT_STORE_WRITE_ROUTE naming the sanctioned route for store writes does it also deny >>, &>>, tee -a and
 # tee --append onto an existing regular file in the store, quoting up to 200 characters of that route. The
-# append checks have their own target bound and work budgets, kept apart from the removal checks'.
+# append checks have their own target bound and work budgets, kept apart from the removal checks', except
+# that a tee word holding an expansion is first expanded on the removal checks' budgets to see whether it
+# makes an option.
 # Interpreter, editor, Write and Edit tool writes, bash -c strings, eval and scripts stay uncovered, and the
 # mode trusts the environment it reads (whoever can set or clear either variable turns it on or off). Subagent
 # calls are judged like any other.
