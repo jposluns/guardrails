@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f690d57edacfef08cbb40a8b44a268ffec854e76a7adc5478a7d7ed94bdbd6c4"
+tree-sha256 = "731caea957031b7ac17d509cd8cc94290801194b478e12d848dfd87102dc0ec6"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2736,8 +2736,8 @@ sha256 = "7e2a33aeb02898da84fbb3e9aa956f9618a676f21c10982e73475e400cb8fd37"
 
 [[sources]]
 path = "opf/tools/_child_status.py"
-bytes = 14677
-sha256 = "c18de47d4f37e1fd507656b834f3e61b2bf8117a4ec559b55f9bcaaf1cd1558c"
+bytes = 14710
+sha256 = "c3b88ca1b2937d37c3ae62555662d0ede58e88b7bff8c2a9c52ca5569a905584"
 
 [[sources]]
 path = "opf/tools/_commonmark_headings.py"
@@ -2751,8 +2751,8 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 
 [[sources]]
 path = "opf/tools/_fail_closed_child.py"
-bytes = 33413
-sha256 = "6be5c4173a753fcc0e06ced1e9ea43aa0363005cf80d88c25a343c7306510b98"
+bytes = 42411
+sha256 = "e2ae5de4f26286f68e8d3133bd06d7ea7f7b9f5ad202c60ce0bada40de453888"
 
 [[sources]]
 path = "opf/tools/_journal.py"
@@ -3451,8 +3451,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 212429
-sha256 = "3fcbae4c392decafcb5fde6e76d4ec8e8f0f864a4a7076629cc74b4e1c34ff72"
+bytes = 212539
+sha256 = "54b5c5f562730568d825429b0acdd2a8f5b0fa067587030709adecee28c84bfd"
 
 [[sources]]
 path = "tools/check_ci_parity.py"

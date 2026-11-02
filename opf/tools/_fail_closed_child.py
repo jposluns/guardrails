@@ -15,7 +15,10 @@ whose code property lies about the slot cannot pass; an audit hook (which cannot
 as a fault every thread started through _thread directly, outside threading (a start is threading's
 own only when its target is exactly a bound method of threading.Thread._bootstrap on a real
 threading.Thread, read through the method type's own slots), the creation of another interpreter
-(cpython.PyInterpreterState_New) and the import of an interpreter-creating module; and _install
+where its documented event arrives (measured on CPython 3.14.4, _interpreters.create() delivered no
+cpython.PyInterpreterState_New event to an installed hook, so interpreter creation from Python is
+actually caught by the _interpreters refusals and the import fault, and the event leg is a backstop
+for deliveries that do occur) and the import of an interpreter-creating module; and _install
 replaces every non-query function of _interpreters with a refusal that records a fault first, so code
 in another interpreter, which no hook of this interpreter can observe, is refused at the attempt.
 
@@ -23,14 +26,24 @@ THE RECORD: the parent passes the record path and a fresh nonce on the child's a
 settles its verdict only through exit_with(code), which records the decided code (an int in 0 to 255;
 None is 0) and raises the exit that must end the process; a decided code outside 0 to 255 is a fault
 and settles nothing. At interpreter exit, after the other atexit callbacks and a bounded garbage
-collection, the finalizer creates the record EXCLUSIVELY (open "x", so a record already present is a
-refusal, never overwritten) as JSON {nonce, decided_code, check_ids, faults} and then calls
-os._exit(decided_code), so no loaded code runs after it. Any exit that settled nothing (a raw
-SystemExit, 0 included; an uncaught exception; an os._exit anywhere, which skips the finalizer and so
-leaves NO record) writes no record, and the finalizer's own refusing paths end with os._exit(2).
+collection, the finalizer refuses outright in any process other than the one arm() ran in (a forked
+process inherits the armed finalizer and the nonce, and its record would otherwise pass as the
+original's), creates the record EXCLUSIVELY (open "x", so a record already present is a refusal,
+never overwritten) as JSON {nonce, decided_code, check_ids, faults} and then RETURNS, so the process
+ends with the interpreter's OWN exit status, the one carried by the exception that really ended it:
+the parent refuses a record whose decided code differs from that real status, so a confirmation
+spoofed by loaded code (a frameless main-thread read it arranges, as from an atexit callback through
+a C caller) at most produces a record the real exit status then contradicts. Any exit that settled
+nothing (a raw SystemExit, 0 included; an uncaught exception; an os._exit anywhere, which skips the
+finalizer and so leaves NO record) writes no record, and the finalizer's refusing paths end with
+os._exit(2), which drops unflushed buffers on file objects other than sys.stdout, sys.stderr,
+sys.__stdout__ and sys.__stderr__ (those four the finalizer flushes first); a refusing path writes
+no record and exits 2, so an os._exit there can only lose refusal diagnostics, never turn into a
+pass, while the reporting path defers to the interpreter, whose own teardown flushes what remains.
 
-THE PARENT (minimal, this slice): run_child first calls _child_status._child_status_refusal_exit, as
-every parent must (with SIGCHLD ignored a failed child reads as exit 0), launches the child, captures
+THE PARENT (minimal, this slice): run_child first calls the canonical child-status guard, carried
+below as the inline copy tools/check_child_status_coverage.py pins by AST to opf/tools/_child_status.py,
+as every parent must (with SIGCHLD ignored a failed child reads as exit 0), launches the child, captures
 both streams, and passes ONLY when both streams are byte-empty (the "empty" streams mode of the
 existing contract), the record exists, parses, carries exactly the expected keys and the launch's
 nonce, lists no fault, its decided code is an int in 0 to 255 equal to the child's exit status, and
@@ -43,9 +56,14 @@ in-its-own-session launch); the stream-forwarding mode (this slice requires byte
 the extension-file identity layer and the trace/profile/monitoring audit events of
 tools/_selftest_exit_report.py; its bytecode-cache-refusing runner loader and its exit-time-join
 (threading._shutdown) wrap, so a thread still running at exit and an atexit registration made during
-the exit callbacks are not yet observed here. Deliberately hostile loaded code forging the record or
-replacing this module's state in the child is the reporting-machinery residual the stronger contracts
-disclose; it is not closed here either.
+the exit callbacks are not yet observed here. The reporting path RETURNS instead of ending with
+os._exit(decided_code), trading away the no-loaded-code-runs-after-the-record property: interpreter
+teardown (destructors of objects still alive) runs after the record exists, and deliberately hostile
+code there could still end the process with a matching os._exit; in exchange the record no longer
+fixes the exit status by construction, so a spoofed confirmation alone is contradicted by the real
+exit status at the parent, which the os._exit form could not refuse. Deliberately hostile loaded code
+forging the record (the nonce is readable in process) or replacing this module's state in the child
+is the reporting-machinery residual the stronger contracts disclose; it is not closed here either.
 
   _fail_closed_child.py --self-test   the contract's real-child vectors, each paired with one flip of
                                       this module observed red (the flipped copy runs real children
@@ -74,15 +92,10 @@ import importlib.util
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import tempfile
 import threading
 import types
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # for the sibling _child_status import
-
-import _child_status
 
 NAME = "_fail_closed_child.py"
 CHILD_TIMEOUT = 120
@@ -101,12 +114,66 @@ _BOOTSTRAP = threading.Thread._bootstrap   # every thread threading starts runs 
 # SystemExit's own code slot, read through the base descriptor so that a subclass's code property
 # (code the exception controls) never runs while a thread's end is classified.
 _SYSTEM_EXIT_CODE = SystemExit.__dict__["code"]
-_STATE = {"installed": False, "armed": False, "decided": None, "raised": None, "confirmed": None,
-          "main_ident": None, "record_path": None, "nonce": None, "check_ids": [], "faults": [],
-          "thread_hook": None}
+_STATE = {"installed": False, "armed": False, "armed_pid": None, "decided": None, "raised": None,
+          "confirmed": None, "main_ident": None, "record_path": None, "nonce": None, "check_ids": [],
+          "faults": [], "thread_hook": None}
 # The child bootstrap the parent launches: sys.argv is [-c, <module dir>, <payload>, <record>, <nonce>].
 _CHILD_SHIM = ("import sys; sys.path.insert(0, sys.argv[1]); "
                "import _fail_closed_child; _fail_closed_child._child_main()")
+
+# -------------------------------------------------------- the canonical child-status guard, inline
+# The inline copy of opf/tools/_child_status.py's guard, which tools/check_child_status_coverage.py
+# pins to the canonical text by AST, so this entry point refuses a direct launch from an ignoring
+# parent itself and both its children and its self-test need no sibling import.
+
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
 
 
 class _ChildExit(SystemExit):
@@ -246,21 +313,27 @@ def _install():
 
 
 def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collect, _dump=json.dump,
-              _exit=os._exit, _note=_note, _GC_PASSES=_GC_PASSES, sys=sys, open=open, list=list,
-              range=range, BaseException=BaseException):
+              _exit=os._exit, _getpid=os.getpid, _note=_note, _GC_PASSES=_GC_PASSES, sys=sys,
+              open=open, list=list, range=range, BaseException=BaseException):
     """The exit handler, the process's first atexit registration so it runs after every other exit
-    callback: run the bounded collection, flush both streams, and, ONLY when a decided code was
-    settled through exit_with and that very exception ended the process, create the record
-    exclusively and end with os._exit(decided_code), so no loaded code runs after it. Every refusing
-    path (nothing settled, a record already present, anything in here failing) ends with os._exit(2)
-    and writes no record."""
+    callback: refuse outright in any process other than the one that armed (a forked process inherits
+    this registration and the nonce, and its record would pass as the original's), run the bounded
+    collection, flush the four stream objects, and, ONLY when a decided code was settled through
+    exit_with and that very exception ended the process, create the record exclusively and RETURN,
+    deferring to the interpreter's own exit status so a record whose decided code the real status
+    contradicts is refused at the parent. Every refusing path (another process, nothing settled, a
+    record already present, anything in here failing) ends with os._exit(2) and writes no record."""
     status = 2
     try:
+        if _getpid() != _STATE["armed_pid"]:
+            _note("the finalizer ran in a process other than the one that armed; no record is written")
+            _exit(2)
         for _ in range(_GC_PASSES):
             if _collect() == 0:
                 break
-        sys.stdout.flush()
-        sys.stderr.flush()
+        for stream in (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__):
+            if stream is not None:
+                stream.flush()
         settled = (_STATE["decided"] is not None and _STATE["raised"] is not None
                    and _STATE["confirmed"] is _STATE["raised"])
         decided = _STATE["decided"] if settled else None
@@ -271,7 +344,7 @@ def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collec
                 _dump({"nonce": nonce, "decided_code": decided, "check_ids": list(executed),
                        "faults": list(_STATE["faults"])}, handle)
                 handle.write("\n")
-            status = decided
+            status = None   # defer to the interpreter's own exit status
             # drop the exit exception: its traceback holds the payload's frames, which must not
             # outlive the record as cyclic garbage destructed after the verdict
             _STATE["raised"] = _STATE["confirmed"] = None
@@ -279,13 +352,16 @@ def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collec
         status = 2
         _note("cannot finalize the fail-closed-child record; no record is written")
     finally:
-        _exit(status)
+        if status is not None:
+            _exit(status)
 
 
 def arm(record_path, nonce, executed):
-    """Register the finalizer as the process's FIRST atexit callback, or exit 2 at once. Arming twice,
-    after any other registration, or in a process whose observation hooks were not installed before
-    the loaded code ran, is refused before anything is registered."""
+    """Register the finalizer as the process's FIRST atexit callback, or exit 2 at once, recording the
+    arming process id, which the finalizer requires back (a forked process inherits the registration
+    and settles nothing). Arming twice, after any other registration, or in a process whose
+    observation hooks were not installed before the loaded code ran, is refused before anything is
+    registered."""
     if _STATE["armed"] or atexit._ncallbacks() != 0:
         _note("the record finalizer must be the first atexit registration")
         sys.exit(2)
@@ -293,6 +369,7 @@ def arm(record_path, nonce, executed):
         _note("the observation hooks were not installed before any loaded code ran")
         sys.exit(2)
     _STATE["armed"] = True
+    _STATE["armed_pid"] = os.getpid()
     _STATE["record_path"] = record_path
     _STATE["nonce"] = nonce
     _STATE["check_ids"] = executed
@@ -362,7 +439,9 @@ def _read_record(record_path):
         return None, True
     try:
         record = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError, RecursionError, MemoryError):
+        # RecursionError: json's refusal of deep nesting; MemoryError: a record too large to parse
+        # under pressure: such a record is malformed like any other, never a pass and never a raise
         return None, True
     return record, True
 
@@ -401,7 +480,7 @@ def run_child(payload, record_path, module_dir=None, timeout=CHILD_TIMEOUT):
     child-status guard runs FIRST, as it must in every parent (with SIGCHLD ignored a failed child
     reads as exit 0, so nothing here could be trusted). The detail carries the raw status, both
     streams, the parsed record (or None) and whether anything exists at the record path."""
-    _child_status._child_status_refusal_exit(NAME)
+    _child_status_refusal_exit(NAME)
     nonce = secrets.token_hex(16)
     directory = os.path.dirname(os.path.abspath(__file__)) if module_dir is None else str(module_dir)
     command = [sys.executable, "-I", "-B", "-c", _CHILD_SHIM, directory, str(payload),
@@ -516,6 +595,70 @@ import _fail_closed_child as fcc
 sys.stderr.write("noise\\n")
 fcc.exit_with(0)
 """
+_FORK_WAITED = """import os
+import _fail_closed_child as fcc
+pid = os.fork()
+if pid == 0:
+    fcc.exit_with(0)
+os.waitpid(pid, 0)
+os._exit(0)
+"""
+_FORK_UNWAITED = """import os
+import time
+import _fail_closed_child as fcc
+pid = os.fork()
+if pid == 0:
+    fcc.exit_with(0)
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    if os.path.exists(fcc._STATE["record_path"]):
+        break
+    time.sleep(0.05)
+os._exit(0)
+"""
+_CONFIRM_FROM_ATEXIT = """import atexit
+import sys
+import _fail_closed_child as fcc
+try:
+    fcc.exit_with(0)
+except SystemExit as exc:
+    saved = exc
+atexit.register(getattr, saved, "code")
+sys.exit(1)
+"""
+_SETTLED_THREE = """import _fail_closed_child as fcc
+fcc.exit_with(3)
+"""
+_CAUGHT_EXIT = """import _fail_closed_child as fcc
+try:
+    fcc.exit_with(0)
+except SystemExit:
+    pass
+"""
+_THREAD_SETTLE = """import threading
+import _fail_closed_child as fcc
+box = []
+
+
+def run():
+    try:
+        fcc.exit_with(0)
+    except SystemExit as exc:
+        box.append(exc)
+
+
+worker = threading.Thread(target=run)
+worker.start()
+worker.join()
+raise box[0]
+"""
+_DEEP_RECORD = """import _fail_closed_child as fcc
+with open(fcc._STATE["record_path"], "x", encoding="utf-8") as handle:
+    handle.write("[" * 100000)
+    handle.write("]" * 100000)
+import os
+os._exit(0)
+"""
 
 # One flip per vector family, each an exact single occurrence in this module's source, each written
 # here as adjacent string literals so the table's own text never matches the code it names.
@@ -559,6 +702,27 @@ FLIPS = {
     "stream-rule-ignored": (
         '    if stdout or std' 'err:\n        return 2',
         '    if False and (stdout or stderr):\n        return 2'),
+    "fork-settle-accepted": (
+        '        if _getpid() != _STATE["armed' '_pid"]:',
+        '        if False and _getpid() != _STATE["armed_pid"]:'),
+    "status-decided-mismatch-ignored": (
+        '    if status != deci' 'ded:\n        return 2',
+        '    if False and status != decided:\n        return 2'),
+    "record-then-forced-exit": (
+        '            status = None   # defer to the inter' "preter's own exit status",
+        '            status = decided'),
+    "any-decided-code-passes": (
+        '    if decided in (0, ' '1):\n        return decided\n    return 2',
+        '    return decided'),
+    "caught-exit-still-settles": (
+        '                   and _STATE["confirmed"] is _STATE["rai' 'sed"])',
+        '                   )'),
+    "thread-settle-accepted": (
+        '    if threading.current_thread() is not threading.main_th' 'read():',
+        '    if False and threading.current_thread() is not threading.main_thread():'),
+    "deep-record-raises": (
+        '    except (UnicodeDecodeError, ValueError, Recursion' 'Error, MemoryError):',
+        '    except (UnicodeDecodeError, ValueError):'),
 }
 
 # (check id, payload source, sidecar file or None, expected summary, flip key). A summary is
@@ -589,6 +753,21 @@ VECTORS = (
     ("contract/preexisting-record-refused", _PREEXISTING, None, (2, True, False),
      "record-create-not-exclusive"),
     ("contract/stderr-noise-refused", _NOISE, None, (2, True, False), "stream-rule-ignored"),
+    ("contract/fork-settle-reaped-refused", _FORK_WAITED, None, (2, False, False),
+     "fork-settle-accepted"),
+    ("contract/fork-settle-unreaped-refused", _FORK_UNWAITED, None, (2, False, False),
+     "fork-settle-accepted"),
+    ("contract/spoofed-confirm-raw-exit-refused", _CONFIRM_FROM_ATEXIT, None, (2, True, False),
+     "status-decided-mismatch-ignored"),
+    ("contract/record-defers-to-real-status", _CONFIRM_FROM_ATEXIT, None, (2, True, False),
+     "record-then-forced-exit"),
+    ("contract/settled-three-refused", _SETTLED_THREE, None, (2, True, False),
+     "any-decided-code-passes"),
+    ("contract/caught-exit-settles-nothing", _CAUGHT_EXIT, None, (2, False, False),
+     "caught-exit-still-settles"),
+    ("contract/thread-settle-rethrown-refused", _THREAD_SETTLE, None, (2, False, False),
+     "thread-settle-accepted"),
+    ("contract/deep-record-refused", _DEEP_RECORD, None, (2, True, False), "deep-record-raises"),
 )
 
 
@@ -600,9 +779,9 @@ def _summary(verdict, detail):
 
 
 def _load_mutant(tmp, key, source, old, new):
-    """Load a copy of this module with one flip applied, written to its own scratch directory next to
-    a copy of _child_status.py (so its children import both from there): (module, None), or
-    (None, the reason) when the flip does not match the source exactly once."""
+    """Load a copy of this module with one flip applied, written to its own scratch directory (the
+    copy carries the inline child-status guard, so its children import nothing else from there):
+    (module, None), or (None, the reason) when the flip does not match the source exactly once."""
     if source.count(old) != 1:
         return None, "flip {} matches {} times, not once".format(key, source.count(old))
     mutant_dir = os.path.join(tmp, "flip-" + key)
@@ -610,7 +789,6 @@ def _load_mutant(tmp, key, source, old, new):
     path = os.path.join(mutant_dir, "_fail_closed_child.py")
     with open(path, "x", encoding="utf-8") as handle:
         handle.write(source.replace(old, new))
-    shutil.copy(_child_status.__file__, os.path.join(mutant_dir, "_child_status.py"))
     spec = importlib.util.spec_from_file_location("_fail_closed_child_flip_" + key.replace("-", "_"),
                                                   path)
     module = importlib.util.module_from_spec(spec)
@@ -645,8 +823,14 @@ def self_test_results():
             if mutant is None:
                 out.append((check_id + "-flip-red", False, reason))
                 continue
-            flip_verdict, flip_detail = mutant.run_child(payload,
-                                                         os.path.join(vector_dir, "flip.json"))
+            try:
+                flip_verdict, flip_detail = mutant.run_child(payload,
+                                                             os.path.join(vector_dir, "flip.json"))
+            except (RecursionError, MemoryError) as exc:
+                # a flip that makes run_child raise instead of returning a verdict is observed red
+                out.append((check_id + "-flip-red", True,
+                            (flip_key, "run_child raised " + type(exc).__name__, expected)))
+                continue
             flip_got = _summary(flip_verdict, flip_detail)
             out.append((check_id + "-flip-red", flip_got != expected,
                         (flip_key, flip_got, expected, flip_detail)))
@@ -656,7 +840,7 @@ def self_test_results():
 def self_test():
     """The contract's real-child vectors, green against this module and each observed red under its
     paired flip: 0 all hold, 1 otherwise."""
-    _child_status._child_status_refusal_exit(NAME)
+    _child_status_refusal_exit("_fail_closed_child.py")
     results = self_test_results()
     failed = [(check_id, detail) for check_id, ok, detail in results if not ok]
     if failed:
@@ -667,8 +851,10 @@ def self_test():
         return 1
     print("SELF-TEST PASS: fail-closed-child {} checks (a clean run passes with a record and a "
           "recorded 1 stays 1; a raw SystemExit, an os._exit at import, in main or in atexit, a "
-          "decided code outside 0 to 255, a dirty or lying thread exit, a raw _thread start, a wrong "
-          "nonce, a record already present and stderr noise each read 2; every paired flip of this "
+          "decided code outside 0 to 255, a settled 3, a dirty or lying thread exit, a raw _thread "
+          "start, a wrong nonce, a record already present, stderr noise, a settle from a forked "
+          "process, a caught exit, a spoofed confirmation before a raw exit 1, a thread's settle "
+          "rethrown from main and a record too deep to parse each read 2; every paired flip of this "
           "module is red)".format(len(results)))
     return 0
 
@@ -682,4 +868,4 @@ def main():
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         sys.exit(self_test())
-    sys.exit(_child_status._child_status_refusal_exit(NAME) or main())
+    sys.exit(_child_status_refusal_exit("_fail_closed_child.py") or main())
