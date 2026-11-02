@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "572c639c062a97f1351bbe7ee1ce56d9570c1a99b446392d2331edfe67db6718"
+tree-sha256 = "80cab8954e0f50429ba87fdaec463a81d41f2bf5c1e9a70666d2552d58bafc0f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -41,8 +41,8 @@ sha256 = "15d8d9d85050558c0be30c9b5b591818f94d9a2aca057db681aa3ff0ba069c75"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 313438
-sha256 = "fd772930089738fa0020775ca91f7f0884128813b848b4a5ff0ceac0e555129b"
+bytes = 314583
+sha256 = "a694c7411186b4415c7ac18e8a61d7002329f97b2add76ec87a8b9dff9bc6de1"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -96,8 +96,8 @@ sha256 = "0a41f25327774308e3029e56f0e03d86334aa28169e4e51a33f8e9691316d78e"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 39113
-sha256 = "086770d6f52266a95de44146791c0822cebec09ec689207a2d4692d5dbb8f6bf"
+bytes = 39263
+sha256 = "9fea682ad1be7bc2b739a54d1cd4071c4925c3022f5ef7e9a4d31396530defb1"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
@@ -191,8 +191,8 @@ sha256 = "3550444e0122d5ca683c921040aa575f5c5d3d62dcf9d5ee0c0c87b1e1741802"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-guard-input-soundness.md"
-bytes = 5173
-sha256 = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
+bytes = 5556
+sha256 = "36adcaba94930997dca6086fe2118e6f45663e93192065abea33989dfbf8db1c"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-measured-and-estimated-figures-stay-separate.md"
@@ -846,8 +846,8 @@ sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
 
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
-bytes = 1104
-sha256 = "97ef3e3e028647942952c2884e4fdbc29c473cdcdcfd0f75909fbe88924c1e1d"
+bytes = 1080
+sha256 = "cadc7a6bee650627d57c82d8649dd578d3b88ceb24a09ebd13c6a1eac522efce"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -996,8 +996,8 @@ sha256 = "3550444e0122d5ca683c921040aa575f5c5d3d62dcf9d5ee0c0c87b1e1741802"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-guard-input-soundness.md"
-bytes = 5173
-sha256 = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
+bytes = 5556
+sha256 = "36adcaba94930997dca6086fe2118e6f45663e93192065abea33989dfbf8db1c"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md"
@@ -1666,8 +1666,8 @@ sha256 = "a1a0be86792a8b0e3f5d60cc27995a91e5654ab8c77dbc0568e55373b2f2e749"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-guard-input-soundness.mdc"
-bytes = 5002
-sha256 = "31711042b10244ae04fdb28149180af06ea1119f0f1528d8694dc70f9d83effe"
+bytes = 5385
+sha256 = "e26cb6b7706a7ecd5400a40f6ff708907b699d65d7f821137ef18864f27fcf4b"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.mdc"
@@ -2296,8 +2296,8 @@ sha256 = "04d52068854db4533dce5822a1b50ca93250c90a0fdd9df4ea3f71ad46e6124d"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 118075
-sha256 = "8eeffa5889f381c11aed8de7c4f847a90e22bfeb879e81a5c5b174c6567db60c"
+bytes = 118458
+sha256 = "45820c26245d340020e4caa982a8650200d75e7a771c964d9d59261eb5491bf0"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2361,8 +2361,8 @@ sha256 = "35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 118036
-sha256 = "12329310ef40b4f7f09c485ced8b3732ab0aed7c21aaae2dca4bab8add0f81ac"
+bytes = 118419
+sha256 = "b70b1b6aeb3f3b8714c07fc50f465681f9d9c3e86a869a30201e4c1ab9c3a941"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2381,8 +2381,8 @@ sha256 = "c09e5af1c0c6793cd32cc8717b4bb49ee215461f90404892547eb67179890e64"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 118071
-sha256 = "7bcd0bafe6b731980864faaa9b2f1b2cc744a4262d3305b93e81b0916c7a678b"
+bytes = 118454
+sha256 = "c2975bafde29f1462f6481ee5c6dd81144bee6f89c40b2fadaa63b5c61f4572f"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
@@ -4047,7 +4047,7 @@ sha256 = "3550444e0122d5ca683c921040aa575f5c5d3d62dcf9d5ee0c0c87b1e1741802"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-guard-input-soundness.md"
 path = ".claude/rules/aiqt/10-ACCUR-guard-input-soundness.md"
 kind = "file"
-sha256 = "696b25910d8b7cb8c47949f717464d72032e4e3a897917c5fae89cb927f9253f"
+sha256 = "36adcaba94930997dca6086fe2118e6f45663e93192065abea33989dfbf8db1c"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.md"
@@ -4851,7 +4851,7 @@ sha256 = "a1a0be86792a8b0e3f5d60cc27995a91e5654ab8c77dbc0568e55373b2f2e749"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-guard-input-soundness.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-guard-input-soundness.mdc"
 kind = "file"
-sha256 = "31711042b10244ae04fdb28149180af06ea1119f0f1528d8694dc70f9d83effe"
+sha256 = "e26cb6b7706a7ecd5400a40f6ff708907b699d65d7f821137ef18864f27fcf4b"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-measured-and-estimated-figures-stay-separate.mdc"
@@ -5601,13 +5601,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "8eeffa5889f381c11aed8de7c4f847a90e22bfeb879e81a5c5b174c6567db60c"
+sha256 = "45820c26245d340020e4caa982a8650200d75e7a771c964d9d59261eb5491bf0"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "12329310ef40b4f7f09c485ced8b3732ab0aed7c21aaae2dca4bab8add0f81ac"
+sha256 = "b70b1b6aeb3f3b8714c07fc50f465681f9d9c3e86a869a30201e4c1ab9c3a941"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -5620,7 +5620,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "7bcd0bafe6b731980864faaa9b2f1b2cc744a4262d3305b93e81b0916c7a678b"
+sha256 = "c2975bafde29f1462f6481ee5c6dd81144bee6f89c40b2fadaa63b5c61f4572f"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"

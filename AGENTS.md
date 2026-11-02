@@ -160,7 +160,11 @@ is handed rather than measures, a caller-supplied count, size, or work-list, or 
 threshold, or configuration, is itself such an input: validate a passed premise against the real source or
 authoritative evidence, and treat a malformed, contradictory, or out-of-range control as a failure rather
 than running the guard
-mis-sized or disabled. When the source cannot answer, the guard treats that as a distinct cannot-evaluate
+mis-sized or disabled. A value an operator owns, such as a fleet operating mode, is read from the operator's
+own record, never from a copy the guarded actor can write; a legitimate local divergence, such as a hold
+taken on a timeout, is its own dated record, honoured only while newer than the operator record's set-at
+time; and a divergence the guard cannot date against that record is a cannot-evaluate.
+When the source cannot answer, the guard treats that as a distinct cannot-evaluate
 case rather than silently collapsing it into either definite verdict; a two-valued predicate cannot carry this third
 state, so route a cannot-evaluate to the safe outcome for that guard, a coverage check reporting failure and
 a consequential action withholding rather than firing on an unverified basis, never a silent clean pass or a
