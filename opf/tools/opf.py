@@ -1643,7 +1643,8 @@ def _watchdog_isolation_evidence_vectors():
     self-test, over the real run_status_owned with only the fixture process
     scripted (nothing is launched), must print that name in its FAIL report,
     and must print only a bounded tail of a runaway stdout (a name printed
-    before a flood stays unshown). Returns the misses."""
+    before a flood stays unshown) or of a runaway stderr (a name printed after
+    the flood still shown). Returns the misses."""
     import contextlib
     import io
     import subprocess
@@ -1661,13 +1662,14 @@ def _watchdog_isolation_evidence_vectors():
     # Over a megabyte of stdout per fixture; each FAIL report may add at most 8 KiB to its stderr.
     ceiling = cases * (len(stderr) + 8192)
     misses = []
-    for label, stdout, named in (("diagnostic", diagnostic, True),
-                                 ("diagnostic after a flood", line + "\n" + lines + diagnostic,
-                                  True),
-                                 ("diagnostic before many lines", diagnostic + lines, False),
-                                 ("diagnostic before one long line", diagnostic + line, False)):
+    for label, stdout, written, named in (
+            ("diagnostic", diagnostic, stderr, True),
+            ("diagnostic after a flood", line + "\n" + lines + diagnostic, stderr, True),
+            ("diagnostic before many lines", diagnostic + lines, stderr, False),
+            ("diagnostic before one long line", diagnostic + line, stderr, False),
+            ("stderr flood", "", line + "\n" + lines + stderr + name + "\n", True)):
         def scripted(argv, **kwargs):
-            return subprocess.CompletedProcess(argv, 1, stdout.encode(), stderr.encode())
+            return subprocess.CompletedProcess(argv, 1, stdout.encode(), written.encode())
 
         said = io.StringIO()
         with patch.object(emit, "_run_fixture_process", scripted), \

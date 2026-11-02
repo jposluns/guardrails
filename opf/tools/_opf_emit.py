@@ -3061,25 +3061,41 @@ def _fixture_main(nonce, fixture_id, argv, expected, process_fixture):
     sys.stdout.buffer.flush()
 
 
-# A failing fixture body names its failing check on its stdout (a timer case
-# prints its captured diagnostic there), so a completion refusal carries a
-# tail of that stdout beside the stderr. Both bounds hold whatever the child
-# wrote, so a runaway child cannot flood the log.
-_FIXTURE_STDOUT_TAIL_LINES = 20
-_FIXTURE_STDOUT_TAIL_CHARS = 4096
+# A failing timer case names its failing check on its stdout (it prints its
+# captured diagnostic there), so a completion refusal carries a tail of that
+# stdout beside the stderr. The stderr is bounded the same way, so whatever the
+# child wrote to either, a runaway child cannot flood the log through this refusal.
+_FIXTURE_TAIL_LINES = 20
+_FIXTURE_TAIL_CHARS = 4096
+
+
+def _fixture_tail(output):
+    """At most the last _FIXTURE_TAIL_LINES lines of a fixture's output and at most
+    _FIXTURE_TAIL_CHARS characters of them. Only the bytes the character bound can
+    use are decoded, so a large output costs no more than a small one."""
+    tail = output[-4 * _FIXTURE_TAIL_CHARS:].decode("utf-8", "replace")
+    return "\n".join(tail.splitlines()[-_FIXTURE_TAIL_LINES:])[-_FIXTURE_TAIL_CHARS:]
+
+
+def _fixture_stderr(stderr):
+    """The completion refusal's stderr: all of it when it is within both bounds,
+    else its _fixture_tail after a line giving the bounds and its size."""
+    if len(stderr) <= _FIXTURE_TAIL_CHARS:
+        whole = stderr.decode("utf-8", "replace")
+        if len(whole.splitlines()) <= _FIXTURE_TAIL_LINES:
+            return whole
+    return ("fixture stderr (last {} lines, at most {} characters; {} bytes in all):\n{}\n"
+            .format(_FIXTURE_TAIL_LINES, _FIXTURE_TAIL_CHARS, len(stderr), _fixture_tail(stderr)))
 
 
 def _fixture_stdout_tail(stdout):
-    """The completion refusal's suffix: at most the last _FIXTURE_STDOUT_TAIL_LINES
-    lines of the fixture's stdout and at most _FIXTURE_STDOUT_TAIL_CHARS characters
-    of them, or "" when that tail is blank. Only the bytes the character bound can
-    use are decoded, so a large stdout costs no more than a small one."""
-    tail = stdout[-4 * _FIXTURE_STDOUT_TAIL_CHARS:].decode("utf-8", "replace")
-    tail = "\n".join(tail.splitlines()[-_FIXTURE_STDOUT_TAIL_LINES:])[-_FIXTURE_STDOUT_TAIL_CHARS:]
+    """The completion refusal's suffix: the fixture's stdout as _fixture_tail bounds
+    it, or "" when that tail is blank."""
+    tail = _fixture_tail(stdout)
     if not tail.strip():
         return ""
     return ("\nfixture stdout (last {} lines, at most {} characters; {} bytes in all):\n{}"
-            .format(_FIXTURE_STDOUT_TAIL_LINES, _FIXTURE_STDOUT_TAIL_CHARS, len(stdout), tail))
+            .format(_FIXTURE_TAIL_LINES, _FIXTURE_TAIL_CHARS, len(stdout), tail))
 
 
 def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture=False,
@@ -3117,7 +3133,7 @@ def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture
     trailer = ("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode()
     if not result.stdout.endswith(trailer):
         raise FixtureIncomplete("missing/mismatched completion for " + fixture_id
-                                + ": " + result.stderr.decode("utf-8", "replace")
+                                + ": " + _fixture_stderr(result.stderr)
                                 + _fixture_stdout_tail(result.stdout))
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)

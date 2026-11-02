@@ -1666,11 +1666,14 @@ def _tail(output, keep=3):
     return "\n".join((output or b"").decode("utf-8", "replace").splitlines()[-keep:])
 
 
-# A failing leg's report shows, beside its last lines, the earlier lines of its output that report a
-# failure, so a passing tail cannot hide the failing case: at most _FAILURE_LINES_KEEP of them (the
-# first and the last half when there are more), each clipped to _FAILURE_LINE_CHARS characters.
+# A failing leg's report shows, beside its last lines, the earlier lines of its output that match FAIL,
+# FAILED or AssertionError, each with up to _FAILURE_CONTINUATION_KEEP indented lines that follow it
+# (a self-test's FAIL summary names its failing checks there), and each Traceback header with its final
+# line. Other lines are not shown. At most _FAILURE_LINES_KEEP of them are shown (the first and the last
+# half when there are more, the rest counted, not shown), each clipped to _FAILURE_LINE_CHARS characters.
 _FAILURE_LINES_KEEP = 12
 _FAILURE_LINE_CHARS = 300
+_FAILURE_CONTINUATION_KEEP = 5
 _FAILURE_LINE = re.compile(r"\bFAIL(?:ED)?\b|AssertionError")
 
 
@@ -1683,18 +1686,26 @@ class _LegOutput(str):
 
 def _failure_lines(lines):
     """The lines that report a failure, in order: a FAIL or FAILED line, an AssertionError line, and a
-    Traceback header with its final line (the first unindented line after it), bounded as
-    _FAILURE_LINES_KEEP and _FAILURE_LINE_CHARS say."""
-    found, in_traceback = [], False
+    Traceback header with its final line (the first unindented line after it), each but the header
+    followed by up to _FAILURE_CONTINUATION_KEEP nonblank indented lines that come straight after it,
+    bounded as _FAILURE_LINES_KEEP and _FAILURE_LINE_CHARS say. A Traceback's own indented frames are
+    not continuations."""
+    found, in_traceback, continuing = [], False, 0
     for line in lines:
-        if line.startswith("Traceback (most recent call last):"):
+        if continuing and line[:1] in (" ", "\t") and line.strip():
             found.append(line)
-            in_traceback = True
+            continuing -= 1
+        elif line.startswith("Traceback (most recent call last):"):
+            found.append(line)
+            in_traceback, continuing = True, 0
         elif in_traceback and line[:1].strip():
             found.append(line)
-            in_traceback = False
+            in_traceback, continuing = False, _FAILURE_CONTINUATION_KEEP
         elif _FAILURE_LINE.search(line):
             found.append(line)
+            continuing = 0 if in_traceback else _FAILURE_CONTINUATION_KEEP
+        else:
+            continuing = 0
     found = [line[:_FAILURE_LINE_CHARS] for line in found]
     if len(found) > _FAILURE_LINES_KEEP:
         half = _FAILURE_LINES_KEEP // 2
@@ -3443,6 +3454,45 @@ def _failure_lines_self_test():
           "length; the verdict still reads the last lines alone)")
 
 
+def _failure_continuation_self_test():
+    """A self-test's FAIL summary names its failing checks on the indented lines after it (the form
+    _opf_views.py prints, which reaches an opf watchdog isolation FAIL report through the fixture stdout
+    tail), so the BROKEN report keeps those lines. The output of a failing isolation leg, passing lines
+    after it, goes through the real _leg_output and _report: the report must show the failing check's
+    name. A FAIL line followed by ten long indented lines shows at most _FAILURE_CONTINUATION_KEEP of
+    them, each at most _FAILURE_LINE_CHARS characters, inside _FAILURE_LINES_KEEP lines in all."""
+    name = "named-check-under-test"
+    diagnostic = ("opf watchdog isolation: FAIL timer/views prof missing/mismatched completion for "
+                  "timer/views/prof: Traceback (most recent call last):\n"
+                  "AssertionError: fixture 'timer/views/prof': expected exit 0, observed 1\n"
+                  "fixture stdout (last 20 lines, at most 4096 characters; 120 bytes in all):\n"
+                  "views prof 1 (3599.0, 0.0) (3598.0, 0.0) [] [] "
+                  "OPF-VIEWS SELF-TEST FAIL (9 checks, 1 failed):\n  - " + name + "\n")
+    flood = "opf flood FAIL\n" + "".join("  - continued-{} {}\n".format(index, "z" * 1000)
+                                          for index in range(10))
+    passing = "".join("opf passing-{} PASS\n".format(index) for index in range(5))
+    for label, output in (("watchdog diagnostic", diagnostic), ("long continuation", flood)):
+        tail = _under_test("failed-leg-check-name-hidden", _leg_output, (output + passing).encode())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            got = _under_test("failed-leg-check-name-hidden", _report,
+                              [(_FLIP_LEG, 1, tail, 1.0, True, 60, [])])
+        said = out.getvalue()
+        shown = said.split("earlier lines reporting a failure:\n", 1)[-1].splitlines()
+        continued = [line for line in shown if "continued-" in line]
+        if (got != 1 or "STANDALONE CLOSURE: BROKEN" not in said
+                or (label == "watchdog diagnostic" and "      " + "  - " + name not in shown)
+                or (label == "long continuation"
+                    and (len(continued) != _FAILURE_CONTINUATION_KEEP or "continued-5" in said))
+                or len(shown) > _FAILURE_LINES_KEEP + 1
+                or any(len(line) > _FAILURE_LINE_CHARS + 6 for line in shown)):
+            raise _CheckFailure("closure/failed-leg-check-name-hidden ({}, exit {}): {!r}".format(
+                label, got, said[-2000:]))
+    print("PASS closure/failed-leg-check-name-shown (the indented lines after a failing leg's FAIL "
+          "line, where a self-test's FAIL summary names its failing checks, are reported, bounded in "
+          "count and length)")
+
+
 def _after_launch_fault_self_test():
     """An exception that ends _run_one's wait AFTER a successful launch (here an OSError from the first
     output read, injected through a real Popen subclass) leaves no leg running, on real processes, and
@@ -4986,6 +5036,7 @@ def _fast_vectors(root):
     _timeout_vectors_self_test(required)
     _after_launch_fault_self_test()
     _failure_lines_self_test()
+    _failure_continuation_self_test()
     return required
 
 
