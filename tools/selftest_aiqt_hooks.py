@@ -2546,7 +2546,7 @@ def _test_coauthor_replay(failures, base):
         (repo / "m.txt").write_text("m\n", encoding="utf-8")
         _git(repo, "add", "m.txt")
         _git(repo, "commit", "-q", "-m", "add m", env_identity=True)
-        for kind, subject, fname in (("dirty", "add s " + _CAB_UC + ": Claude <c@x>", "s.txt"),
+        for kind, subject, fname in (("dirty", "set s " + _CAB_UC + ": Claude <c@x>", "s.txt"),
                                      ("clean", "add t", "t.txt")):
             _git(repo, "checkout", "-q", "-b", "subject-" + kind, "main")
             (repo / fname).write_text(kind + "\n", encoding="utf-8")
