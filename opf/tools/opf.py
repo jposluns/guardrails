@@ -1644,7 +1644,10 @@ def _watchdog_isolation_evidence_vectors():
     scripted (nothing is launched), must print that name in its FAIL report,
     and must print only a bounded tail of a runaway stdout (a name printed
     before a flood stays unshown) or of a runaway stderr (a name printed after
-    the flood still shown). Returns the misses."""
+    the flood still shown). A runaway stderr stays bounded whether it floods
+    as many short lines, as one line far over the character bound, or as a
+    few lines totalling far over the byte bound; a name at the end of the
+    last line stays shown in each shape. Returns the misses."""
     import contextlib
     import io
     import subprocess
@@ -1659,7 +1662,8 @@ def _watchdog_isolation_evidence_vectors():
     lines = ("y" * 79 + "\n") * 10000
     line = "x" * (1 << 20)
     cases = len(_watchdog_isolation_cases())
-    # Over a megabyte of stdout per fixture; each FAIL report may add at most 8 KiB to its stderr.
+    # Over a megabyte of stdout or stderr per fixture; each FAIL report may
+    # add at most 8 KiB to its stderr.
     ceiling = cases * (len(stderr) + 8192)
     misses = []
     for label, stdout, written, named in (
@@ -1667,7 +1671,13 @@ def _watchdog_isolation_evidence_vectors():
             ("diagnostic after a flood", line + "\n" + lines + diagnostic, stderr, True),
             ("diagnostic before many lines", diagnostic + lines, stderr, False),
             ("diagnostic before one long line", diagnostic + line, stderr, False),
-            ("stderr flood", "", line + "\n" + lines + stderr + name + "\n", True)):
+            ("stderr flood", "", line + "\n" + lines + stderr + name + "\n", True),
+            # One line far over the character bound: red when only the line
+            # count bounds the tail, with the name at its end still shown.
+            ("stderr ending in one overlong line", "", stderr + line + " " + name + "\n", True),
+            # Few lines totalling far over the byte bound: red when a stderr
+            # of few lines is passed whole without the byte check.
+            ("stderr of few lines over the byte bound", "", stderr + line + "\n" + name + "\n", True)):
         def scripted(argv, **kwargs):
             return subprocess.CompletedProcess(argv, 1, stdout.encode(), written.encode())
 

@@ -1688,13 +1688,18 @@ def _failure_lines(lines):
     """The lines that report a failure, in order: a FAIL or FAILED line, an AssertionError line, and a
     Traceback header with its final line (the first unindented line after it), each but the header
     followed by up to _FAILURE_CONTINUATION_KEEP nonblank indented lines that come straight after it,
-    bounded as _FAILURE_LINES_KEEP and _FAILURE_LINE_CHARS say. A Traceback's own indented frames are
-    not continuations."""
+    bounded as _FAILURE_LINES_KEEP and _FAILURE_LINE_CHARS say. An indented failure line met among
+    those continuations restarts the allowance for its own block. The indented frames after a line
+    that begins with the Traceback header are not continuations; a traceback quoted mid-line after a
+    FAIL prefix is continued like any other failure line."""
     found, in_traceback, continuing = [], False, 0
     for line in lines:
         if continuing and line[:1] in (" ", "\t") and line.strip():
             found.append(line)
-            continuing -= 1
+            # An indented failure line anchors its own block: its allowance
+            # restarts instead of consuming the previous line's remainder.
+            continuing = (_FAILURE_CONTINUATION_KEEP if _FAILURE_LINE.search(line)
+                          else continuing - 1)
         elif line.startswith("Traceback (most recent call last):"):
             found.append(line)
             in_traceback, continuing = True, 0
@@ -3459,19 +3464,31 @@ def _failure_continuation_self_test():
     _opf_views.py prints, which reaches an opf watchdog isolation FAIL report through the fixture stdout
     tail), so the BROKEN report keeps those lines. The output of a failing isolation leg, passing lines
     after it, goes through the real _leg_output and _report: the report must show the failing check's
-    name. A FAIL line followed by ten long indented lines shows at most _FAILURE_CONTINUATION_KEEP of
-    them, each at most _FAILURE_LINE_CHARS characters, inside _FAILURE_LINES_KEEP lines in all."""
+    name. The diagnostic here is the isolation FAIL line as opf.py prints it (label and mode, then the
+    completion refusal with its traceback frames and its fixture-stdout tail). A FAIL line followed by
+    ten long indented lines shows at most _FAILURE_CONTINUATION_KEEP of them, each at most
+    _FAILURE_LINE_CHARS characters, inside _FAILURE_LINES_KEEP lines in all. An indented failure line
+    met while an earlier failure's continuations are being kept restarts the allowance, so the check
+    name listed under it still shows."""
     name = "named-check-under-test"
-    diagnostic = ("opf watchdog isolation: FAIL timer/views prof missing/mismatched completion for "
+    diagnostic = ("opf watchdog isolation: FAIL views prof missing/mismatched completion for "
                   "timer/views/prof: Traceback (most recent call last):\n"
+                  "  File \"<string>\", line 1, in <module>\n"
+                  "  File \"<opf-fixture>\", line 3, in _opf_fixture\n"
                   "AssertionError: fixture 'timer/views/prof': expected exit 0, observed 1\n"
+                  "\n"
                   "fixture stdout (last 20 lines, at most 4096 characters; 120 bytes in all):\n"
                   "views prof 1 (3599.0, 0.0) (3598.0, 0.0) [] [] "
                   "OPF-VIEWS SELF-TEST FAIL (9 checks, 1 failed):\n  - " + name + "\n")
     flood = "opf flood FAIL\n" + "".join("  - continued-{} {}\n".format(index, "z" * 1000)
                                           for index in range(10))
+    nested = ("FAIL outer\n  filler 0\n  filler 1\n  filler 2\n  filler 3\n"
+              "  FAIL inner\n  - inner-check\n")
     passing = "".join("opf passing-{} PASS\n".format(index) for index in range(5))
-    for label, output in (("watchdog diagnostic", diagnostic), ("long continuation", flood)):
+    wanted = {"watchdog diagnostic": ("      " + "  - " + name,),
+              "nested failure": ("      " + "  FAIL inner", "      " + "  - inner-check")}
+    for label, output in (("watchdog diagnostic", diagnostic), ("long continuation", flood),
+                          ("nested failure", nested)):
         tail = _under_test("failed-leg-check-name-hidden", _leg_output, (output + passing).encode())
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
@@ -3481,7 +3498,7 @@ def _failure_continuation_self_test():
         shown = said.split("earlier lines reporting a failure:\n", 1)[-1].splitlines()
         continued = [line for line in shown if "continued-" in line]
         if (got != 1 or "STANDALONE CLOSURE: BROKEN" not in said
-                or (label == "watchdog diagnostic" and "      " + "  - " + name not in shown)
+                or any(want not in shown for want in wanted.get(label, ()))
                 or (label == "long continuation"
                     and (len(continued) != _FAILURE_CONTINUATION_KEEP or "continued-5" in said))
                 or len(shown) > _FAILURE_LINES_KEEP + 1
@@ -3490,7 +3507,7 @@ def _failure_continuation_self_test():
                 label, got, said[-2000:]))
     print("PASS closure/failed-leg-check-name-shown (the indented lines after a failing leg's FAIL "
           "line, where a self-test's FAIL summary names its failing checks, are reported, bounded in "
-          "count and length)")
+          "count and length; an indented failure line among them restarts its own continuations)")
 
 
 def _after_launch_fault_self_test():
