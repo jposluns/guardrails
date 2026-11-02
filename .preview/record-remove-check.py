@@ -2085,8 +2085,10 @@ def _verdict(cmd, roots, env, cwd):
     if marked and route is None:
         return None
     # destroy: the destruction checks run (the marker opts out of them, never out of the append mode). meter: the
-    # append checks' own target bound and budgets, so reading an append never spends what a later destruction is
-    # read with, and a destruction is judged in the mode exactly as without it
+    # append checks' own target bound and budgets. An append target never counts toward the destruction checks'
+    # bound, and spends their budgets only when it is a tee word holding an expansion, which _command first
+    # expands on them, the mode on or off, to see whether it makes an option; so a destruction is judged in the
+    # mode exactly as without it
     ctx = {"roots": roots, "env": env, "count": 0, "stop": False, "budget": _MAX_WALK, "bytes": _MAX_EXPANDED,
            "hit": None, "route": route, "destroy": not marked,
            "meter": {"env": env, "count": 0, "stop": False, "budget": _MAX_WALK, "bytes": _MAX_EXPANDED}}
