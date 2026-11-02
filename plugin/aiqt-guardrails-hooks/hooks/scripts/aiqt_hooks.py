@@ -24381,14 +24381,74 @@ _NRD_SHELL_LONG_VALUE = frozenset(("--rcfile", "--init-file"))
 # The command-word wrappers peeled before a nested -c shell or eval: NAME=value prefixes, then any of
 # these words with their own options (timeout also takes a duration operand).
 _NRD_C_WRAPPERS = frozenset(("env", "command", "nohup", "timeout"))
+# The CLOSED SET of env option forms this guard fully parses; every env option word outside it makes
+# the env call unreadable, and an unreadable env call is denied in scope rather than guessed at
+# (_nrd_env_scan, _nrd_env_opaque). Bare flags taking no value: -i/--ignore-environment (and the lone
+# - spelling of -i), -0/--null, -v/--debug. Options taking one value, in the separate (-u VALUE),
+# attached (-uVALUE) and =-attached (--unset=VALUE) spellings: -u/--unset, -C/--chdir, -a/--argv0.
+# -S/--split-string carries a whole command line and is classified by _nrd_env_split_cmd. NOT parsed,
+# so unreadable: short-option clusters (-vS..., -vu, -iC), abbreviated long options (--uns, --ch),
+# the signal options (--block-signal and family), and any unknown option word.
+_NRD_ENV_BARE = frozenset(("-", "-i", "--ignore-environment", "-0", "--null", "-v", "--debug"))
+_NRD_ENV_VALUE = frozenset(("-u", "--unset", "-C", "--chdir", "-a", "--argv0"))
+_NRD_ENV_VALUE_EQ = ("--unset=", "--chdir=", "--argv0=")
+_NRD_ENV_VALUE_ATTACHED = ("-u", "-C", "-a")
+
+
+def _nrd_env_scan(argv, oq, i):
+    """Read an env word's following tokens at argv[i:] against the closed set of option forms this
+    guard fully parses (_NRD_ENV_BARE, _NRD_ENV_VALUE in their separate, attached and =-attached
+    spellings, NAME=value assignments, and a -- terminator). Returns ("cmd", j, None) when the options
+    parse and argv[j] is where env's command word starts (j may equal len(argv): no command);
+    ("split", j, value) when -S/--split-string was read in any of its four spellings, where value is
+    the command line it carries and argv[j:] are the words env appends to that line; and
+    ("opaque", None, None) for an opaque token, an option word or cluster outside the closed set, or a
+    value option missing its value: such an env call can run words this scan cannot place, so it is
+    treated as one the guard cannot read (fail closed), never guessed at."""
+    while i < len(argv):
+        if oq[i]:
+            return ("opaque", None, None)
+        tok = argv[i]
+        if tok == "--":
+            return ("cmd", i + 1, None)
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        if not tok.startswith("-"):
+            return ("cmd", i, None)
+        if tok in _NRD_ENV_BARE:
+            i += 1
+            continue
+        if tok in _NRD_ENV_VALUE:
+            if i + 1 >= len(argv) or oq[i + 1]:
+                return ("opaque", None, None)
+            i += 2
+            continue
+        if tok.startswith(_NRD_ENV_VALUE_EQ):
+            i += 1
+            continue
+        if tok in ("-S", "--split-string"):
+            if i + 1 >= len(argv) or oq[i + 1]:
+                return ("opaque", None, None)
+            return ("split", i + 2, argv[i + 1])
+        if tok.startswith("-S"):
+            return ("split", i + 1, tok[2:])
+        if tok.startswith("--split-string="):
+            return ("split", i + 1, tok[len("--split-string="):])
+        if len(tok) > 2 and tok[:2] in _NRD_ENV_VALUE_ATTACHED:
+            i += 1
+            continue
+        return ("opaque", None, None)
+    return ("cmd", i, None)
 
 
 def _nrd_c_peel(argv, oq):
     """The index of the effective command word of a segment after its NAME=value prefixes and the
-    _NRD_C_WRAPPERS words (env with its options: -u/--unset and -C/--chdir take their value in both the
-    separate -u VALUE and attached -uVALUE/--unset=VALUE spellings, other env options and assignments are
-    single tokens; command with its options; nohup; timeout with its options and duration), peeled
-    repeatedly; None when a peeled word or option is opaque. env's -S/--split-string, whose value is a
+    _NRD_C_WRAPPERS words (command with its single-token options; nohup; timeout with its options and
+    duration), peeled repeatedly; None when a peeled word or option is opaque or when an env word's
+    options fall outside the closed set this guard fully parses (_nrd_env_scan): the peel never
+    guesses a command word past an env option form it cannot place, and _nrd_env_opaque then puts such
+    a call in scope so it is denied rather than misread. env's -S/--split-string, whose value is a
     whole command line rather than a -c body, is read separately by _nrd_env_split_cmd. The index may
     equal len(argv) (no command word left)."""
     i = 0
@@ -24403,6 +24463,12 @@ def _nrd_c_peel(argv, oq):
         if word not in _NRD_C_WRAPPERS:
             break
         i += 1
+        if word == "env":
+            kind, j, _value = _nrd_env_scan(argv, oq, i)
+            if kind != "cmd":
+                return None
+            i = j
+            continue
         while i < len(argv):
             if oq[i]:
                 return None
@@ -24410,13 +24476,10 @@ def _nrd_c_peel(argv, oq):
             if tok == "--":
                 i += 1
                 break
-            if word == "env" and tok in ("-u", "--unset", "-C", "--chdir"):
-                i += 2
-                continue
             if word == "timeout" and tok in ("-k", "-s", "--kill-after", "--signal"):
                 i += 2
                 continue
-            if (tok.startswith("-") and tok != "-") or (word == "env" and _ENV_ASSIGN_RE.match(tok)):
+            if tok.startswith("-") and tok != "-":
                 i += 1
                 continue
             break
@@ -24543,13 +24606,16 @@ def _nrd_shell_c_prior_body(seg):
 
 
 def _nrd_env_split_cmd(seg):
-    """The command-line string carried by env's -S/--split-string option, for recursive classification
-    (env runs that value as a command line of its own, so a declared directory a quote splice hides from
-    the raw text is reached through it), else None. NAME=value prefixes and the command, nohup and
-    timeout wrappers are peeled to reach an env word (the spellings _nrd_c_peel reads); env's value is
-    read in all four spellings (-S VALUE, -SVALUE, --split-string VALUE, --split-string=VALUE). The value
-    is lexed with the shell lexer when it is scope-scanned, a deny-biased reading that does not reproduce
-    env's own -S splitting; an opaque token yields None."""
+    """The command line an env word's -S/--split-string makes env run, for recursive classification
+    (env splits the -S value into words and APPENDS the remaining argv words to them, running the
+    whole as one command line, so a declared directory a quote splice hides from the raw text is
+    reached through either part): the split value joined with the remaining words, else None.
+    NAME=value prefixes and the _NRD_C_WRAPPERS words are peeled to reach an env word, whose options
+    are read only against the closed set _nrd_env_scan parses; the -S value is read in all four
+    spellings (-S VALUE, -SVALUE, --split-string VALUE, --split-string=VALUE). The joined line is
+    lexed with the shell lexer when it is scope-scanned, a deny-biased reading that does not reproduce
+    env's own -S splitting; an opaque token among env's words or the remaining words yields None (the
+    opaque case is then _nrd_env_opaque's to deny)."""
     argv = seg.argv
     if not argv:
         return None
@@ -24566,6 +24632,16 @@ def _nrd_env_split_cmd(seg):
         if word not in _NRD_C_WRAPPERS:
             return None
         i += 1
+        if word == "env":
+            kind, j, value = _nrd_env_scan(argv, oq, i)
+            if kind == "split":
+                if any(oq[k] for k in range(j, len(argv))):
+                    return None
+                return " ".join([value] + argv[j:])
+            if kind != "cmd":
+                return None
+            i = j
+            continue
         while i < len(argv):
             if oq[i]:
                 return None
@@ -24573,28 +24649,69 @@ def _nrd_env_split_cmd(seg):
             if tok == "--":
                 i += 1
                 break
-            if word == "env":
-                if tok in ("-S", "--split-string"):
-                    if i + 1 >= len(argv) or oq[i + 1]:
-                        return None
-                    return argv[i + 1]
-                if tok.startswith("-S") and len(tok) > 2:
-                    return tok[2:]
-                if tok.startswith("--split-string="):
-                    return tok[len("--split-string="):]
-                if tok in ("-u", "--unset", "-C", "--chdir"):
-                    i += 2
-                    continue
             if word == "timeout" and tok in ("-k", "-s", "--kill-after", "--signal"):
                 i += 2
                 continue
-            if (tok.startswith("-") and tok != "-") or (word == "env" and _ENV_ASSIGN_RE.match(tok)):
+            if tok.startswith("-") and tok != "-":
                 i += 1
                 continue
             break
         if word == "timeout":
             i += 1
     return None
+
+
+def _nrd_env_opaque(seg):
+    """True when a segment reaches an env word this guard cannot fully read: an option word or cluster
+    outside the closed set _nrd_env_scan parses, a value option missing its value, an opaque token
+    among env's words, or a -S/--split-string whose remaining words carry an opaque token. env runs a
+    command through any of these, so the scope walk treats such a call as IN SCOPE (fail closed) and
+    only the closed read-only allowlist passes it, the same as a command the lexer cannot read. A
+    disclosed over-denial: an unparsed env option form denies even where its operands would run
+    nothing from a declared directory (env -vS'echo hi'). NAME=value prefixes and the other
+    _NRD_C_WRAPPERS words are peeled the way _nrd_env_split_cmd peels them; a segment that reaches no
+    env word is never opaque here."""
+    argv = seg.argv
+    if not argv:
+        return False
+    oq = seg.argv_opaque
+    i = 0
+    while i < len(argv):
+        if oq[i]:
+            return False
+        tok = argv[i]
+        if _ENV_ASSIGN_RE.match(tok):
+            i += 1
+            continue
+        word = tok.rsplit("/", 1)[-1]
+        if word not in _NRD_C_WRAPPERS:
+            return False
+        i += 1
+        if word == "env":
+            kind, j, _value = _nrd_env_scan(argv, oq, i)
+            if kind == "opaque":
+                return True
+            if kind == "split":
+                return any(oq[k] for k in range(j, len(argv)))
+            i = j
+            continue
+        while i < len(argv):
+            if oq[i]:
+                return False
+            tok = argv[i]
+            if tok == "--":
+                i += 1
+                break
+            if word == "timeout" and tok in ("-k", "-s", "--kill-after", "--signal"):
+                i += 2
+                continue
+            if tok.startswith("-") and tok != "-":
+                i += 1
+                continue
+            break
+        if word == "timeout":
+            i += 1
+    return False
 
 
 # The builtins that assign the variables their operands name (read's names, mapfile's or readarray's
@@ -24827,6 +24944,10 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
                 sub = _nrd_scope_scan(esplit, walk_cwd, dirs, _depth + 1)
                 if sub is not None:
                     return sub
+            if not scope and _nrd_env_opaque(seg):
+                # an env call whose option forms the closed set does not parse can run a command this
+                # guard cannot read: in scope, so only the read-only allowlist passes it (fail closed)
+                scope = True
             if not scope and (any(_nrd_match(tok, walk_cwd, dirs) is True for tok in seg.argv)
                               or any(_nrd_match(r.target, walk_cwd, dirs) is True
                                      for r in seg.redirects)):

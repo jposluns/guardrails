@@ -535,10 +535,17 @@ A command the lexer cannot read (an unquoted heredoc, a here-string, a process s
 unbalanced quote) has no segments to match and denies whole while in scope. A nested shell `-c` body is
 classified recursively through the wrapper spellings it reads (a bare or path-qualified shell word;
 `NAME=value` prefixes and the `env`, `command`, `nohup` and `timeout` wrappers, peeled repeatedly
-(`env`'s `-u`/`--unset` and `-C`/`--chdir` take their value in both the separate `--unset VALUE` and
-attached `-uVALUE`/`--unset=VALUE` spellings, and `timeout`'s `-k`/`-s`/`--kill-after`/`--signal` take
-theirs, so a value is never read as the command word; `env`'s `-S`/`--split-string`, whose value is
-itself a command line, is split off and classified as a nested command rather than read as a `-c` body);
+(`env`'s words are read ONLY against a closed set of option forms: the bare flags
+`-i`/`--ignore-environment` with the lone `-` spelling, `-0`/`--null` and `-v`/`--debug`, and the
+value options `-u`/`--unset`, `-C`/`--chdir` and `-a`/`--argv0` in their separate, attached and
+`=`-attached spellings, so a consumed value is not read as the command word; `env`'s
+`-S`/`--split-string`, whose value is itself a command line that env runs with the remaining words
+APPENDED to it, is classified as a nested command made of the split value together with the words
+after it, rather than read as a `-c` body; any OTHER `env` option word or cluster (`-vS'...'`,
+`-vu FOO`, an abbreviated long option such as `--uns`, a signal option, an unknown option, or a value
+option missing its value) makes the `env` call one the guard cannot read, which puts the command IN
+SCOPE by itself, so it is denied unless every segment is an allowlisted read-only form; `timeout`'s
+`-k`/`-s`/`--kill-after`/`--signal` take their values);
 the shell's options before the body, where `-c` counts only as a letter of a single-dash option cluster,
 each `o` or `O` letter of a cluster takes the next word, `--rcfile` and `--init-file` take the next word,
 and other long options are flags; and `eval`), so a declared directory a quote splice hides from the
@@ -568,7 +575,9 @@ hashlib/pathlib/json snippet, `python -m json.tool` or `-m tokenize`, `sed`, `aw
 registered grammar (`--color`, `--word-diff`), a patch tool other than `git apply` (`patch -p1`,
 `git am`), a reader behind a wrapper (`timeout`, `command`, `env`), `command -v`/`-V` before a `-c` shell
 (the wrapper peel reaches the `-c` body and classifies it, though `command -v`/`-V` then only prints the
-operand's name and runs nothing), a reader whose command word carries
+operand's name and runs nothing), an `env` call carrying an option word or cluster outside the closed
+set the peel parses, which denies even where its raw text names no declared directory and its operands
+would run nothing from one (`env -vS'echo hi'`, `env -iv ls`), a reader whose command word carries
 an option outside the tool's registered grammar, and a `python3 -I` reader script that resolves inside
 a Python standard-library directory (even a benign one) since stdlib programs run their argument. A
 `cd` INTO a declared directory is not an allowlisted move, so `cd <dir>; ls` denies; and the shell and

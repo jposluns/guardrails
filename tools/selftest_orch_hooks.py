@@ -15638,6 +15638,52 @@ def _main_isolated(report_path=None):
         check("nrd/c-env-split-string-denies",
               nrd_got("env -S'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp), run_cwd=outd),
               DENY_RAN)
+        # env runs the -S value's words FOLLOWED BY the remaining argv words as ONE command line, so
+        # the classified command is the split value together with the words after it: the shell word
+        # inside the -S value and the -c body after it (both spellings)
+        check("nrd/c-env-split-word-denies",
+              nrd_got("env -Sbash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd),
+              DENY_RAN)
+        check("nrd/c-env-split-rest-denies",
+              nrd_got("env -S'bash -c' 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd),
+              DENY_RAN)
+        # env option words OUTSIDE the closed set the peel parses: a short-option cluster hiding -S, a
+        # cluster ending in a value option, and abbreviated long options. env runs a command through
+        # each, so the unreadable call is denied in scope rather than read past; real bash runs the
+        # file for every one of these on this host
+        check("nrd/c-env-cluster-split-denies",
+              nrd_got("env -vS'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp), run_cwd=outd),
+              DENY_RAN)
+        for cid, wrap in (("nrd/c-env-cluster-unset-denies", "env -vu FOO"),
+                          ("nrd/c-env-cluster-chdir-denies", "env -vC " + outd),
+                          ("nrd/c-env-abbrev-unset-denies", "env --uns FOO"),
+                          ("nrd/c-env-abbrev-chdir-denies", "env --ch " + outd)):
+            check(cid, nrd_got("{} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(wrap, tmp),
+                               run_cwd=outd), DENY_RAN)
+        # -a/--argv0 take a value the peel consumes (closed set), so the real command word behind them
+        # is reached and its -c body classified
+        for cid, wrap in (("nrd/c-env-argv0-denies", "env -a foo"),
+                          ("nrd/c-env-argv0-long-denies", "env --argv0 foo")):
+            check(cid, nrd_got("{} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(wrap, tmp),
+                               run_cwd=outd), DENY_RAN)
+        # a lone - is env's historic -i spelling, read as a bare flag of the closed set, so the shell
+        # word behind it is reached; guard-only evidence (- empties the environment, so the marker
+        # variable never reaches the file and no marker can be written, as with -i)
+        check("nrd/c-env-dash-denies",
+              nrd_got("env - bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd),
+              DENY_INERT)
+        # out-of-scope env forms stay allowed: a parsed -S value, and a parsed value option, running
+        # nothing from a declared directory
+        check("nrd/env-split-inert-allows", nrd_got("env -S'echo hi'"), ALLOW_INERT)
+        check("nrd/env-argv0-inert-allows", nrd_got("env -a foo echo hi"), ALLOW_INERT)
+        # the disclosed command -v/-V over-deny, pinned: the wrapper peel reaches the -c body and
+        # classifies it, though command -v/-V then only prints the operand's name and runs nothing
+        check("nrd/command-v-denies",
+              nrd_got("command -v bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd),
+              DENY_INERT)
+        check("nrd/command-V-denies",
+              nrd_got("command -V bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp), run_cwd=outd),
+              DENY_INERT)
         # --- CDPATH assigned by read behind an assignment prefix or command, and by mapfile/readarray ---
         for cid, setter in (("nrd/cdpath-ifs-read-denies", "IFS= read -r CDPATH"),
                             ("nrd/cdpath-command-read-denies", "command read -r CDPATH"),
@@ -15922,21 +15968,155 @@ def _main_isolated(report_path=None):
             check(cid, _flip_verdict("_nrd_shell_c_operand", _nrd_prev_c_operand,
                                      "bash {} -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(opts, tmp)),
                   "allow")
-        # no wrapper peeling (the command word is argv[0]) lets the wrapped -c spellings through, the env
-        # --unset/--chdir separate-value forms among them (the value would be read as the command word)
+        # no wrapper peeling (the command word is argv[0]) lets the wrapped -c spellings through
         for cid, wrap in (("nrd/flip-c-assign-prefix-allows", "FOO=1"),
                           ("nrd/flip-c-command-allows", "command"),
                           ("nrd/flip-c-timeout-allows", "timeout 5"),
-                          ("nrd/flip-c-nohup-allows", "nohup"),
-                          ("nrd/flip-c-env-unset-allows", "env --unset FOO"),
-                          ("nrd/flip-c-env-chdir-allows", "env --chdir " + outd)):
+                          ("nrd/flip-c-nohup-allows", "nohup")):
             check(cid, _flip_verdict("_nrd_c_peel", lambda argv, oq: 0,
                                      "{} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(wrap, tmp)),
                   "allow")
-        # flipping the env -S classifier hides the command line the -S value carries
+
+        _nrd_real_env_scan = aiqt_hooks._nrd_env_scan
+
+        def _nrd_env_scan_valueless(argv, oq, i):
+            # the earlier reading of env's separate-value spellings, in which -u/--unset, -C/--chdir
+            # and -a/--argv0 did NOT consume their value word, so the value is read as the command
+            # word; every other option form keeps the current reading (the real scan, captured before
+            # the patch), isolating the value consumption
+            while i < len(argv) and not oq[i] and argv[i] in aiqt_hooks._NRD_ENV_VALUE:
+                i += 1
+            return _nrd_real_env_scan(argv, oq, i)
+
+        # the env value-option flips restore only the valueless reading above: the separate value is
+        # read as the command word again, so the -c body behind it is never classified
+        for cid, wrap in (("nrd/flip-c-env-unset-allows", "env --unset FOO"),
+                          ("nrd/flip-c-env-chdir-allows", "env --chdir " + outd)):
+            check(cid, _flip_verdict("_nrd_env_scan", _nrd_env_scan_valueless,
+                                     "{} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(wrap, tmp)),
+                  "allow")
+        # flipping the env -S classifier (the split value and the words env appends to it) hides the
+        # command line a -S env call runs
         check("nrd/flip-c-env-split-string-allows",
               _flip_verdict("_nrd_env_split_cmd", lambda seg: None,
                             "env -S'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp)), "allow")
+
+        def _nrd_prev_c_peel(argv, oq):
+            # the earlier enumerated peel: env options it does not know are skipped one token at a
+            # time, so an unknown option's separate value, or the words after a cluster, are misread
+            # as the command word
+            i = 0
+            while i < len(argv):
+                if oq[i]:
+                    return None
+                tok = argv[i]
+                if aiqt_hooks._ENV_ASSIGN_RE.match(tok):
+                    i += 1
+                    continue
+                word = tok.rsplit("/", 1)[-1]
+                if word not in aiqt_hooks._NRD_C_WRAPPERS:
+                    break
+                i += 1
+                while i < len(argv):
+                    if oq[i]:
+                        return None
+                    tok = argv[i]
+                    if tok == "--":
+                        i += 1
+                        break
+                    if word == "env" and tok in ("-u", "--unset", "-C", "--chdir"):
+                        i += 2
+                        continue
+                    if word == "timeout" and tok in ("-k", "-s", "--kill-after", "--signal"):
+                        i += 2
+                        continue
+                    if (tok.startswith("-") and tok != "-") \
+                            or (word == "env" and aiqt_hooks._ENV_ASSIGN_RE.match(tok)):
+                        i += 1
+                        continue
+                    break
+                if word == "timeout":
+                    i += 1
+            return i
+
+        def _nrd_prev_env_split_cmd(seg):
+            # the earlier -S classifier: only the -S value itself, never the words env appends to it,
+            # and only the exact -S/--split-string spellings (a cluster hiding -S is skipped)
+            argv = seg.argv
+            if not argv:
+                return None
+            oq = seg.argv_opaque
+            i = 0
+            while i < len(argv):
+                if oq[i]:
+                    return None
+                tok = argv[i]
+                if aiqt_hooks._ENV_ASSIGN_RE.match(tok):
+                    i += 1
+                    continue
+                word = tok.rsplit("/", 1)[-1]
+                if word not in aiqt_hooks._NRD_C_WRAPPERS:
+                    return None
+                i += 1
+                while i < len(argv):
+                    if oq[i]:
+                        return None
+                    tok = argv[i]
+                    if tok == "--":
+                        i += 1
+                        break
+                    if word == "env":
+                        if tok in ("-S", "--split-string"):
+                            if i + 1 >= len(argv) or oq[i + 1]:
+                                return None
+                            return argv[i + 1]
+                        if tok.startswith("-S") and len(tok) > 2:
+                            return tok[2:]
+                        if tok.startswith("--split-string="):
+                            return tok[len("--split-string="):]
+                        if tok in ("-u", "--unset", "-C", "--chdir"):
+                            i += 2
+                            continue
+                    if word == "timeout" and tok in ("-k", "-s", "--kill-after", "--signal"):
+                        i += 2
+                        continue
+                    if (tok.startswith("-") and tok != "-") \
+                            or (word == "env" and aiqt_hooks._ENV_ASSIGN_RE.match(tok)):
+                        i += 1
+                        continue
+                    break
+                if word == "timeout":
+                    i += 1
+            return None
+
+        # restoring the enumerated env peeling whole (the earlier peel and -S classifier, with the
+        # closed-set unreadable-env scope forcing removed, since that reading had none) reopens every
+        # env form the closed-set change closed
+        _nrd_prev_env_peel = (("_nrd_c_peel", _nrd_prev_c_peel),
+                              ("_nrd_env_split_cmd", _nrd_prev_env_split_cmd),
+                              ("_nrd_env_opaque", lambda seg: False))
+        for cid, cmd in (
+                ("nrd/flip-c-env-split-word-allows",
+                 "env -Sbash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)),
+                ("nrd/flip-c-env-split-rest-allows",
+                 "env -S'bash -c' 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)),
+                ("nrd/flip-c-env-cluster-split-allows",
+                 "env -vS'bash -c \"cd {}/nrd-sta\"\"ge; bash x.sh\"'".format(tmp)),
+                ("nrd/flip-c-env-cluster-unset-allows",
+                 "env -vu FOO bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)),
+                ("nrd/flip-c-env-cluster-chdir-allows",
+                 "env -vC {} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(outd, tmp)),
+                ("nrd/flip-c-env-abbrev-unset-allows",
+                 "env --uns FOO bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)),
+                ("nrd/flip-c-env-abbrev-chdir-allows",
+                 "env --ch {} bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(outd, tmp)),
+                ("nrd/flip-c-env-argv0-allows",
+                 "env -a foo bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)),
+                ("nrd/flip-c-env-argv0-long-allows",
+                 "env --argv0 foo bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp)),
+                ("nrd/flip-c-env-dash-allows",
+                 "env - bash -c 'cd {}/nrd-sta\"\"ge; bash x.sh'".format(tmp))):
+            check(cid, _flip_verdict_pair(_nrd_prev_env_peel, cmd), "allow")
         # no prefix or command peeling for the CDPATH builtins, and read as the only reader word
         for cid, setter in (("nrd/flip-cdpath-ifs-read-allows", "IFS= read -r CDPATH"),
                             ("nrd/flip-cdpath-command-read-allows", "command read -r CDPATH")):
