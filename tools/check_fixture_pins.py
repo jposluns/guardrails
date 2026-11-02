@@ -26,7 +26,8 @@ as well, which fails closed. Any store, augmented store or delete at module scop
 also runs at import) on a subscript or attribute that can reach the table is refused: one whose chain starts
 at the name (PINNED["k"] = ..., PINNED.attr = ..., del PINNED["k"]), or one with a link that names the table
 through any base, an attribute so named (sys.modules[__name__].PINNED = ...) or a subscript keyed by the name
-as a string literal (globals()["PINNED"] = ...); such a store on an unrelated object is refused too. Every key and
+as a string literal (globals()["PINNED"] = ...) or as an f-string whose parts are all constants
+(globals()[f"PINNED"] = ...); such a store on an unrelated object is refused too. Every key and
 value must be a string literal (a ** unpacking, an f-string, a computed path or a name is a non-literal
 entry), keys are checked for duplicates on the AST before any dict is built, and an empty table is refused.
 A key is a repo-relative POSIX path of the closed character set PIN_PATH_RE with no '.' or '..' component;
@@ -38,7 +39,12 @@ Each pin is then checked, every finding reported rather than the first:
               100755) whose bytes (git cat-file blob) hash to the pin. git cat-file does not check an
               object's content against its id, so the git object id of the bytes read is recomputed with the
               repository's object format (git rev-parse --show-object-format, read once: sha1 or sha256) and
-              compared with the tree entry's id; a mismatch (a rewritten object) is cannot evaluate;
+              compared with the tree entry's id; a mismatch (a rewritten object) is cannot evaluate. git
+              ls-tree reads each subtree object's entries without that check either, so before the ls-tree
+              read, every tree of HEAD (the root tree, read from the tree line of HEAD's commit object, and
+              each subtree reached through the 40000 entries) is read raw with git cat-file tree and its
+              object id recomputed the same way; a mismatch (a rewritten tree, which could name another blob
+              for a pinned path) is cannot evaluate;
   working     lstat of the path is not a symbolic link, its real path is the repository's real path joined
               with it (no ancestor symlink), and the file opened O_NOFOLLOW|O_NONBLOCK is regular and hashes to
               the pin.
@@ -52,7 +58,8 @@ self-test reads without a pin; the manifest itself is hand-written, so removing 
 only review can judge it. A rebinding or mutation of a table made inside a function body without a global
 declaration of it, by a call (setattr, globals().update, or a method such as PINNED.update or PINNED.pop),
 through an alias of the table, through a subscript whose key is computed rather than the name as a string
-literal (globals()[key] = ...), or from another module is not seen. A table source that is tracked and in
+literal or a constant-only f-string (globals()[key] = ..., and an f-string with any placeholder, even a
+constant one, is such a computed key), or from another module is not seen. A table source that is tracked and in
 HEAD is still read from the working tree, as the manifest is, so an uncommitted edit to a committed source
 decides the result. The legacy .git/info/grafts file is not disabled (--no-replace-objects does not cover
 it), but a graft changes only a commit's parents, and every read here goes through HEAD's own tree (ls-tree
@@ -76,8 +83,9 @@ Exit convention: 0 every declared table produced at least one pin and every pin 
 (untracked, not in HEAD, committed as a symlink or non-regular entry, HEAD blob mismatch, missing, symbolic
 link, ancestor symlink, non-regular, working-tree mismatch, conflicting pins); 2 cannot evaluate (a missing,
 unreadable, malformed or table-less manifest; a source not tracked, not committed in HEAD, unreadable or
-unparseable; a table not found, bound twice, altered by a subscript or attribute store, not a dict literal,
-empty, non-literal, holding a duplicate key, or holding a malformed path or digest; a HEAD blob whose bytes do
+unparseable; a table not found, bound twice, named by a refused subscript or attribute store, not a dict
+literal, empty, non-literal, holding a duplicate key, or holding a malformed path or digest; a HEAD blob or
+tree whose bytes do
 not hash to its object id; an object format other than sha1 or sha256; git unavailable, a git error or
 timeout; a read error other than a missing file; an unknown argument). 2 takes precedence over 1.
 """
@@ -280,9 +288,13 @@ def _module_bindings(tree, name):
 
 def _link_names(link, name):
     """Whether one attribute or subscript link names name through its base: an attribute so named
-    (sys.modules[__name__].name) or a subscript keyed by name as a string literal (globals()["name"])."""
+    (sys.modules[__name__].name), or a subscript keyed by name as a string literal (globals()["name"]) or as
+    an f-string whose parts are all constants (globals()[f"name"]); an f-string with a placeholder is a
+    computed key, which the disclosed residual covers."""
     if isinstance(link, ast.Attribute):
         return link.attr == name
+    if isinstance(link.slice, ast.JoinedStr) and all(isinstance(part, ast.Constant) for part in link.slice.values):
+        return "".join(str(part.value) for part in link.slice.values) == name
     return isinstance(link.slice, ast.Constant) and link.slice.value == name
 
 
@@ -342,11 +354,13 @@ def _table_pins(root, source, name, index, head):
     if not bindings:
         raise CannotEvaluate("{}: table not found".format(where))
     if len(bindings) > 1:
-        raise CannotEvaluate("{}: table bound {} times in the module scope".format(where, len(bindings)))
+        raise CannotEvaluate("{}: table bound {} times, counting module-scope bindings and global declarations "
+                             "anywhere in the file".format(where, len(bindings)))
     stores = _module_stores(tree, name)
     if stores:
-        raise CannotEvaluate("{}: table altered by a subscript or attribute store at module scope or in a class body, line {}".format(
-            where, stores[0].lineno))
+        raise CannotEvaluate("{}: refused store, augmented store or delete: a subscript or attribute chain at "
+                             "module scope or in a class body starts at or names the table, line {}".format(
+                                 where, stores[0].lineno))
     table = _literal_dict(tree, name)
     if table is None:
         raise CannotEvaluate("{}: table is not a dict literal assigned at the top level".format(where))
@@ -374,6 +388,45 @@ def _object_format(root, git, env):
     if fmt not in OBJECT_FORMATS:
         raise CannotEvaluate("git rev-parse: unknown object format {!r}".format(fmt[:40]))
     return fmt
+
+
+def _verify_head_trees(root, git, env, fmt):
+    """Recompute every tree object of HEAD against its id. git ls-tree and git cat-file read a tree object's
+    entries without checking its bytes against its id, so a rewritten tree object could name another blob for
+    a pinned path; each tree, from HEAD^{tree} down through the 40000 entries, is read raw (git cat-file
+    tree) and its object id recomputed in fmt. A mismatch (a rewritten tree) is CannotEvaluate."""
+    raw_len = 20 if fmt == "sha1" else 32
+    head_commit = _git(git, root, env, "rev-parse", "HEAD").decode("ascii", "replace").strip()
+    if OID_RE.fullmatch(head_commit) is None:
+        raise CannotEvaluate("git rev-parse: unexpected HEAD id {!r}".format(head_commit[:80]))
+    # The root tree id is read from the commit object's own tree line rather than by peeling HEAD^{tree}:
+    # git verifies a tree's bytes against its id when it peels, which would mask this check's report.
+    tree_line = _git(git, root, env, "cat-file", "commit", head_commit).split(b"\n", 1)[0].decode(
+        "ascii", "replace")
+    if not tree_line.startswith("tree ") or OID_RE.fullmatch(tree_line[5:]) is None:
+        raise CannotEvaluate("git cat-file commit: no tree line in HEAD {}".format(head_commit))
+    pending, seen = [tree_line[5:]], set()
+    while pending:
+        tree_oid = pending.pop()
+        if tree_oid in seen:
+            continue
+        seen.add(tree_oid)
+        data = _git(git, root, env, "cat-file", "tree", tree_oid)
+        actual = hashlib.new(fmt, b"tree %d\0" % len(data) + data).hexdigest()
+        if actual != tree_oid:
+            raise CannotEvaluate("HEAD tree {} does not hash to its object id ({} {})".format(
+                tree_oid, fmt, actual))
+        position = 0
+        while position < len(data):
+            nul = data.find(b"\0", position)
+            if nul < 0 or nul + 1 + raw_len > len(data):
+                raise CannotEvaluate("HEAD tree {}: malformed entry at byte {}".format(tree_oid, position))
+            mode, sep, _name = data[position:nul].partition(b" ")
+            if not sep:
+                raise CannotEvaluate("HEAD tree {}: malformed entry at byte {}".format(tree_oid, position))
+            if mode == b"40000":
+                pending.append(data[nul + 1:nul + 1 + raw_len].hex())
+            position = nul + 1 + raw_len
 
 
 def _blob_digest(root, git, env, rel, oid, fmt):
@@ -456,9 +509,10 @@ def evaluate(root, git, env):
         return 2, ["error: git unavailable on PATH (cannot evaluate)"]
     try:
         index = _index_paths(root, git, env)
+        fmt = _object_format(root, git, env)
+        _verify_head_trees(root, git, env, fmt)
         head = _head_entries(root, git, env)
         rows = _manifest_rows(root, index)
-        fmt = _object_format(root, git, env)
     except CannotEvaluate as exc:
         return 2, ["error: {} (cannot evaluate)".format(exc)]
     cannot, findings, pins = [], [], {}
@@ -507,13 +561,16 @@ SUITE_ID = "fixture-pins-selftest"
 CHECKS_MANIFEST = Path(__file__).resolve().parent / "selftest_checks.toml"
 # Flips that keep the vector's exit code and change only its report, because another leg of the gate still
 # fails the vector closed: an untracked fixture is also not in HEAD, a final-component link to another file
-# also fails the real-path leg, and a git that cannot launch or exits nonzero on every read leaves an empty
-# index, so the manifest reads as untracked. Every other flip must change the exit code. The tracked, lstat
-# and git-exit legs each have a second vector whose flip does (index-only-removal, symlink-loop,
-# head-blob-object-missing). The git launch-or-timeout leg has none: its handler also catches a timeout, which
-# could fail one read alone, but no vector makes a single read time out (it would wait out GIT_TIMEOUT).
+# also fails the real-path leg, a git that cannot launch or exits nonzero on every read leaves an empty
+# index, so the manifest reads as untracked, and a rewritten root tree also fails the ls-tree read, because
+# git itself verifies a root tree it resolves HEAD to (a rewritten subtree does not: ls-tree -r reads a
+# subtree's entries unverified, so that flip changes the exit code). Every other flip must change the exit
+# code. The tracked, lstat and git-exit legs each have a second vector whose flip does (index-only-removal,
+# symlink-loop, head-blob-object-missing). The git launch-or-timeout leg has none: its handler also catches a
+# timeout, which could fail one read alone, but no vector makes a single read time out (it would wait out
+# GIT_TIMEOUT).
 MESSAGE_ONLY_FLIPS = ("flip/untracked-as-tracked", "flip/symlink-lstat-dropped", "flip/git-launch-error-swallowed",
-                      "flip/git-exit-ignored")
+                      "flip/git-exit-ignored", "flip/root-tree-id-unchecked")
 FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
@@ -768,6 +825,41 @@ def _v_blob_rewritten(root):
     return root
 
 
+def _v_subtree_rewritten(root):
+    # HEAD holds BRAVO; HEAD's fx subtree loose object is rewritten in place, under its own id, to name the
+    # ALPHA blob, the pinned bytes, which git ls-tree follows without checking the tree's bytes.
+    import zlib
+    _repo(root)
+    alpha_oid = _fixture_git(root, "rev-parse", "HEAD:fx/a.txt").strip()
+    _write(root, "fx/a.txt", BRAVO)
+    _commit(root)
+    _write(root, "fx/a.txt", ALPHA)
+    body = b"100644 a.txt\0" + bytes.fromhex(alpha_oid)
+    oid = _fixture_git(root, "rev-parse", "HEAD:fx").strip()
+    path = root / ".git" / "objects" / oid[:2] / oid[2:]
+    path.chmod(0o644)
+    path.write_bytes(zlib.compress(b"tree %d\0" % len(body) + body))
+    return root
+
+
+def _v_root_tree_rewritten(root):
+    # HEAD holds BRAVO; HEAD's root tree loose object is rewritten in place, under its own id, to name the
+    # first commit's fx subtree, which names the ALPHA blob, the pinned bytes.
+    import zlib
+    _repo(root)
+    old_fx = _fixture_git(root, "rev-parse", "HEAD:fx").strip()
+    tools_oid = _fixture_git(root, "rev-parse", "HEAD:tools").strip()
+    _write(root, "fx/a.txt", BRAVO)
+    _commit(root)
+    _write(root, "fx/a.txt", ALPHA)
+    body = b"40000 fx\0" + bytes.fromhex(old_fx) + b"40000 tools\0" + bytes.fromhex(tools_oid)
+    oid = _fixture_git(root, "rev-parse", "HEAD^{tree}").strip()
+    path = root / ".git" / "objects" / oid[:2] / oid[2:]
+    path.chmod(0o644)
+    path.write_bytes(zlib.compress(b"tree %d\0" % len(body) + body))
+    return root
+
+
 def _v_clean_sha256(root):
     # The clean repository under the sha256 object format, so each blob id is recomputed with sha256.
     _repo(root, init=False)
@@ -916,6 +1008,10 @@ def _self_test_cases(base, git):
              "fx/a.txt: HEAD blob", "if actual != oid:", "if False:"),
             ("vector/clean-sha256", "flip/object-format-ignored", "control/clean-sha256", _v_clean_sha256, git, 0,
              "1 pin(s)", "    return fmt\n", '    return "sha1"\n'),
+            ("vector/subtree-rewritten", "flip/subtree-id-unchecked", "control/subtree-rewritten",
+             _v_subtree_rewritten, git, 2, "HEAD tree", "if actual != tree_oid:", "if False:"),
+            ("vector/root-tree-rewritten", "flip/root-tree-id-unchecked", "control/root-tree-rewritten",
+             _v_root_tree_rewritten, git, 2, "HEAD tree", "if actual != tree_oid:", "if False:"),
             ("vector/bound-by-class-body-global", "flip/class-body-global-unseen",
              "control/bound-by-class-body-global",
              _with_source("class C:\n    global PINNED\n    PINNED = {}\n"), git, 2, "table bound 2 times",
@@ -933,15 +1029,21 @@ def _self_test_cases(base, git):
              "if isinstance(node, ast.Global) and name in node.names]", "if False]"),
             ("vector/module-attribute-store", "flip/named-attribute-store-unseen", "control/module-attribute-store",
              _with_source("import sys\nsys.modules[__name__].PINNED = {}\n"), git, 2,
-             "table altered by a subscript or attribute store at module scope or in a class body, line 5",
+             "starts at or names the table, line 5",
              "return link.attr == name", "return False"),
             ("vector/globals-subscript-store", "flip/named-subscript-store-unseen", "control/globals-subscript-store",
              _with_source('globals()["PINNED"] = {}\n'), git, 2,
-             "table altered by a subscript or attribute store at module scope or in a class body, line 4",
+             "starts at or names the table, line 4",
              "return isinstance(link.slice, ast.Constant) and link.slice.value == name", "return False"),
+            ("vector/fstring-subscript-store", "flip/fstring-subscript-store-unseen",
+             "control/fstring-subscript-store",
+             _with_source('globals()[f"PINNED"] = {}\n'), git, 2,
+             "starts at or names the table, line 4",
+             "if isinstance(link.slice, ast.JoinedStr) and all(isinstance(part, ast.Constant) "
+             "for part in link.slice.values):", "if False:"),
             ("vector/class-body-store", "flip/class-body-store-unseen", "control/class-body-store",
              _with_source('class C:\n    PINNED["fx/a.txt"] = "%s"\n' % BRAVO_PIN), git, 2,
-             "table altered by a subscript or attribute store at module scope or in a class body, line 5",
+             "starts at or names the table, line 5",
              "if class_bodies:", "if False:"),
             ("vector/bound-by-match-as", "flip/match-as-binding-unseen", "control/bound-by-match-as",
              _with_source("match 0:\n    case PINNED:\n        pass\n"), git, 2, "table bound 2 times",
@@ -970,7 +1072,7 @@ def _self_test_cases(base, git):
              "stack.extend(node.decorator_list + node.bases + node.keywords)", "pass"),
             ("vector/subscript-store", "flip/store-check-dropped", "control/subscript-store",
              _with_source('PINNED["fx/a.txt"] = "%s"\n' % BRAVO_PIN), git, 2,
-             "table altered by a subscript or attribute store at module scope or in a class body, line 4", "if stores:", "if False:"),
+             "starts at or names the table, line 4", "if stores:", "if False:"),
             ("vector/source-index-removed", "flip/source-tracked-check-dropped", "control/source-index-removed",
              _v_source_index_removed, git, 2, "tools/fixture_tables.py:PINNED: source not tracked",
              "if source not in index:", "if False:"),
@@ -1006,13 +1108,13 @@ def _self_test_cases(base, git):
             ("vector/bound-by-walrus-lambda-default", _with_source("f = lambda x=(PINNED := 1): x\n"), 2,
              "table bound 2 times"),
             ("vector/subscript-augmented-store", _with_source('PINNED["fx/a.txt"] += ""\n'), 2,
-             "table altered by a subscript or attribute store at module scope or in a class body, line 4"),
+             "starts at or names the table, line 4"),
             ("vector/attribute-store", _with_source("PINNED.extra = 1\n"), 2,
-             "table altered by a subscript or attribute store at module scope or in a class body, line 4"),
+             "starts at or names the table, line 4"),
             ("vector/subscript-delete", _with_source('if True:\n    del PINNED["fx/a.txt"]\n'), 2,
-             "table altered by a subscript or attribute store at module scope or in a class body, line 5"),
+             "starts at or names the table, line 5"),
             ("vector/named-attribute-chain-store", _with_source("import sys\nsys.modules[__name__].PINNED.x = 1\n"), 2,
-             "table altered by a subscript or attribute store at module scope or in a class body, line 5"),
+             "starts at or names the table, line 5"),
             ("vector/source-untracked", _v_source_untracked, 2, "tools/loose_tables.py:LOOSE: source not tracked"),
     ):
         root = build(base / vector_id.partition("/")[2])

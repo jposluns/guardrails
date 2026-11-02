@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d306dd24ae19875ebfa2ed92fce42342d69b3fc8b15634b3180e8819a5af8c66"
+tree-sha256 = "e7382115da2c9e19fc19604fe83ddac3f12449e1ca00d869a09d5dcb3e2e7fca"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3511,8 +3511,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_fixture_pins.py"
-bytes = 60038
-sha256 = "ceea9f2ab41ac32f2b3defb2e17ffc8b121a5ea3da7f8003c54bab6afc71396a"
+bytes = 65846
+sha256 = "d87ca25004863fe3b0f7f50f25f6c0fffcbcc615f63d2e85038682166633d30a"
 
 [[sources]]
 path = "tools/check_footer.py"
@@ -3946,8 +3946,8 @@ sha256 = "dbd27322c775afe7fa9dfc9062c9828c186338fa52f8ba6e3f2d6ef2f3743935"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 199799
-sha256 = "00348c39a6ce43837a939d88e69de27dfd702b2cbf56465e341aa8007a469717"
+bytes = 200175
+sha256 = "4bd93e1a1019bda4c060dbaae7c7e3b85bc6ff93569c72ae91695b08ffa63f8c"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

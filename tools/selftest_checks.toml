@@ -4757,6 +4757,13 @@ expected-check-ids = [
   "vector/clean-sha256",
   "flip/object-format-ignored",
   "control/clean-sha256",
+  # ---------- HEAD tree bytes checked against the object id ----------
+  "vector/subtree-rewritten",
+  "flip/subtree-id-unchecked",
+  "control/subtree-rewritten",
+  "vector/root-tree-rewritten",
+  "flip/root-tree-id-unchecked",
+  "control/root-tree-rewritten",
   # ---------- global declarations anywhere, stores naming the table through any base ----------
   "vector/bound-by-class-body-global",
   "flip/class-body-global-unseen",
@@ -4776,6 +4783,9 @@ expected-check-ids = [
   "vector/globals-subscript-store",
   "flip/named-subscript-store-unseen",
   "control/globals-subscript-store",
+  "vector/fstring-subscript-store",
+  "flip/fstring-subscript-store-unseen",
+  "control/fstring-subscript-store",
   "vector/class-body-store",
   "flip/class-body-store-unseen",
   "control/class-body-store",
