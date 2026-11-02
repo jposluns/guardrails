@@ -2977,17 +2977,46 @@ _TRKASY_RUNTIME_START_FORMS = (
     ("procsub-in", ": <(sleep 5)"),
     ("procsub-out", ": >(sleep 5)"),
     ("disown", "coproc sleep 5\ndisown"),
+    ("disown-alone", "disown -a"),
 )
-_TRKASY_RUNTIME_START_DENY_ROWS = tuple(
-    row for label, form in _TRKASY_RUNTIME_START_FORMS
-    for row in (("trkasy-start-heredoc-apos-" + label, "cat <<'EOF'\nit's\nEOF\n" + form),
-                ("trkasy-start-uncertain-hash-" + label, "(true)# x\n" + form)))
+# The same forms split by a backslash-newline, which bash joins before it reads words, so each still runs.
+_TRKASY_RUNTIME_START_SPLIT_FORMS = (
+    ("split-eval", "ev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("split-coproc", "co\\\nproc sleep 5"),
+    ("split-procsub-in", ": <\\\n(sleep 5)"),
+    ("split-herestring", "bash <<\\\n< $'sleep 5 \\x26'"),
+    ("split-setsid", "set\\\nsid -f sleep 5"),
+    ("split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; sou\\\nrce /abs/j.sh"),
+)
+# eval spelled with quotes or a backslash, which bash removes before it runs the word.
+_TRKASY_RUNTIME_START_QUOTED_FORMS = (
+    ("quoted-eval-apos", "e'v'al \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-dq", "\"eval\" \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-backslash", "\\eval \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-inner-backslash", "ev\\al \"sleep 5 $(printf '\\x26')\""),
+)
+
+
+def _trkasy_start_rows(forms, contexts=("heredoc-apos", "uncertain-hash")):
+    """Deny rows for runtime start forms, each beside the named contexts: an apostrophe in a here-document body
+    read as code, and an uncertain '#'."""
+    prefixes = {"heredoc-apos": "cat <<'EOF'\nit's\nEOF\n", "uncertain-hash": "(true)# x\n"}
+    return tuple(("trkasy-start-" + context + "-" + label, prefixes[context] + form)
+                 for label, form in forms for context in contexts)
+
+
+_TRKASY_RUNTIME_START_DENY_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_FORMS)
+_TRKASY_RUNTIME_START_SPLIT_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_SPLIT_FORMS)
+_TRKASY_RUNTIME_START_QUOTED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_QUOTED_FORMS, ("heredoc-apos",))
 
 
 def _test_trkasy_no_amp(failures, tmp):
     """Foreground trkasy rows in registry scope: each no-'&' row allows, and is red with the no-'&' branch of
     _orch_foreground_detach_lexed restored to the raw scan's verdict; each real bare-'&' row denies; each
-    runtime start form row denies, and is red with that branch allowing every command with no '&'."""
+    runtime start form row denies, and is red with that branch allowing every command with no '&'; each row
+    split by a backslash-newline is red with the search not joining those pairs; the disown-alone rows are
+    red with disown removed from the pattern; and the e'v'al and ev\\al rows are red with the search reading
+    the raw command ("eval" and \\eval match there too, so those rows deny either way)."""
     root = tmp / "trkasy-noamp"
     (root / ".aiqt").mkdir(parents=True)
     (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
@@ -3001,11 +3030,40 @@ def _test_trkasy_no_amp(failures, tmp):
         got = _decision(handler, command, cwd=str(root))
         if got != "deny":
             failures.append("({}) a real bare '&' must deny in registry scope; got {}".format(label, got))
-    for label, command in _TRKASY_RUNTIME_START_DENY_ROWS:
+    start_rows = (_TRKASY_RUNTIME_START_DENY_ROWS + _TRKASY_RUNTIME_START_SPLIT_ROWS
+                  + _TRKASY_RUNTIME_START_QUOTED_ROWS)
+    for label, command in start_rows:
         got = _decision(handler, command, cwd=str(root))
         if got != "deny":
             failures.append("({}) a runtime start form beside an open quote or uncertain '#' must deny in "
                             "registry scope; got {}".format(label, got))
+    text = aiqt_hooks._orch_runtime_start_text
+    pattern = aiqt_hooks._ORCH_RUNTIME_START_RE
+    no_disown = re.compile(pattern.pattern.replace("|disown", ""))
+    if no_disown.pattern == pattern.pattern:
+        failures.append("(trkasy-start-disown-flip) the runtime start pattern no longer holds |disown")
+    quoted_raw_red = tuple(row for row in _TRKASY_RUNTIME_START_QUOTED_ROWS
+                           if row[0].endswith(("-quoted-eval-apos", "-quoted-eval-inner-backslash")))
+    flips = (
+        ("join", "_orch_runtime_start_text",
+         lambda command: command.translate(aiqt_hooks._ORCH_RUNTIME_START_UNQUOTE),
+         _TRKASY_RUNTIME_START_SPLIT_ROWS, "the search not joining backslash-newline pairs"),
+        ("raw", "_orch_runtime_start_text", lambda command: command, quoted_raw_red,
+         "the search reading the raw command"),
+        ("disown", "_ORCH_RUNTIME_START_RE", no_disown,
+         tuple(row for row in _TRKASY_RUNTIME_START_DENY_ROWS if row[0].endswith("-disown-alone")),
+         "disown removed from the runtime start pattern"))
+    for flip, name, stand_in, rows, how in flips:
+        setattr(aiqt_hooks, name, stand_in)
+        try:
+            for label, command in rows:
+                got = _decision(handler, command, cwd=str(root))
+                if got != "allow":
+                    failures.append("({}-{}-flip) the row must allow with {}, so it pins that; got {}"
+                                    .format(label, flip, how, got))
+        finally:
+            aiqt_hooks._orch_runtime_start_text = text
+            aiqt_hooks._ORCH_RUNTIME_START_RE = pattern
     fixed = aiqt_hooks._orch_foreground_detach_lexed
 
     def no_start_forms(command, lifts=None):
@@ -3014,7 +3072,7 @@ def _test_trkasy_no_amp(failures, tmp):
         return fixed(command, lifts)
     aiqt_hooks._orch_foreground_detach_lexed = no_start_forms
     try:
-        for label, command in _TRKASY_RUNTIME_START_DENY_ROWS:
+        for label, command in start_rows:
             got = _decision(handler, command, cwd=str(root))
             if got != "allow":
                 failures.append("({}-flip) the row must allow with the no-'&' branch allowing every command, "
@@ -5078,7 +5136,7 @@ def _deadline_hash_decision(name, shape, size):
     """The decision a handler must reach on an uncertain '#' shape of that size (_DEADLINE_HASH_DECISIONS)."""
     return _DEADLINE_HASH_DECISIONS.get((name, shape, size), _DEADLINE_HASH_DECISIONS.get((name, shape), "allow"))
 # The truncation guard times each uncertain '#' shape with one '&' glued to its last '#' word, one separator
-# fewer keeping the size (paren_hash4 drops one parenthesis and is one byte shorter, n where it was n + 1):
+# fewer keeping the size (paren_hash4 drops one '(' and one ')' and is one byte shorter, n where it was n + 1):
 # that '&' is comment text where the '#' starts a comment and a bare detach where it does not, so the guard
 # scans the whole command and denies it, as a detach on four shapes and, on seps_hash5, with the open-quote
 # or uncertain '#' reason. A command with no '&' byte and no runtime start form holds no detach, which the
