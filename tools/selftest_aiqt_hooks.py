@@ -5292,6 +5292,77 @@ def _deadline_shape_rerun_failures():
     return out
 
 
+class _WindowClocks:
+    """Stand-ins for aiqt_hooks.time (`time`) and aiqt_hooks.signal (`signal`), each passing everything
+    else to the module, that log in order each clock read a _DeadlineWindow makes, as ("read", the window,
+    the value), and a time.monotonic read made just after each setitimer returns, as ("set", that read). A
+    setitimer that raises logs nothing, but a stand-in that makes the call and raises once it has returned
+    (a _FaultySignal with `after`) leaves the entry; no case that logs through these stand-ins makes
+    setitimer fault that way, so in each the one that took or re-armed a timer is the next one logged."""
+
+    class _Through:
+        """A module with the functions given in place of its own."""
+
+        def __init__(self, module, **functions):
+            self.__dict__.update(functions)
+            self._module = module
+
+        def __getattr__(self, attr):
+            return getattr(self._module, attr)
+
+    def __init__(self):
+        self.log = []
+        self.time = self._Through(time, monotonic=self._monotonic)
+        self.signal = self._Through(signal, setitimer=self._setitimer)
+
+    def _monotonic(self):
+        window = sys._getframe(1).f_locals.get("self")
+        value = time.monotonic()
+        if isinstance(window, aiqt_hooks._DeadlineWindow):
+            self.log.append(("read", window, value))
+        return value
+
+    def _setitimer(self, *args):
+        result = signal.setitimer(*args)
+        self.log.append(("set", time.monotonic()))
+        return result
+
+    def windows(self):
+        """The windows that read the clock, in the order of their first read."""
+        return list(dict.fromkeys(entry[1] for entry in self.log if entry[0] == "read"))
+
+    def settled(self, window, read, sets=1):
+        """The time from window's clock read number `read` (0 its take's, 1 its restore's) to the monotonic
+        read just after the `sets`-th setitimer to return after it (at least the time from that clock read to
+        that setitimer), or None where there is no such read or setitimer."""
+        reads = [at for at, entry in enumerate(self.log) if entry[0] == "read" and entry[1] is window]
+        if read >= len(reads):
+            return None
+        after = [entry[1] for entry in self.log[reads[read] + 1:] if entry[0] == "set"]
+        return after[sets - 1] - self.log[reads[read]][2] if len(after) >= sets else None
+
+
+def _restored_countdown_bounds(seconds, armed, read, clocks=None, holder=None):
+    """(low, high) for a countdown of `seconds` set between the time.monotonic reads armed[0] and armed[1]
+    and read by getitimer between read[0] and read[1]: the countdown is right when low <= countdown <= high.
+    Left alone it has run on from its setting to its read, by at least read[0] - armed[1] and at most
+    read[1] - armed[0]. Borrowed meanwhile by the window `holder` (clocks the _WindowClocks standing in for
+    aiqt_hooks.time and aiqt_hooks.signal throughout), it comes back elapsed-aware: early by the time from
+    the take's clock read to the setitimer that takes it, which only the low end allows, and late by the time
+    from the restore's clock read to the setitimer that re-arms it, which only the high end allows, each
+    measured up to the monotonic read just after that setitimer returned. Rounding to the microsecond moves
+    the low end by two microseconds (getitimer, and a take's setitimer, read a countdown rounded down) and the
+    high end by one (a re-arming setitimer rounds up). Nothing else is allowed for: a host stall outside the
+    two gaps moves both ends with the reads, and one inside a gap widens only that gap's end, by the stall.
+    With either gap not measured, no countdown is in bounds."""
+    early = late = 0.0
+    if holder is not None:
+        early, late = clocks.settled(holder, 0), clocks.settled(holder, 1)
+        if early is None or late is None:
+            return float("inf"), float("-inf")
+    return (seconds - (read[1] - armed[0]) - early - 2e-6,
+            seconds - (read[0] - armed[1]) + late + 1e-6)
+
 _DEADLINE_PAYLOAD = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                 "tool_input": {"command": "git status"}, "cwd": "/"})
 
@@ -5434,19 +5505,59 @@ def _deadline_restore_failures():
                    "delivered once and resume its period, got exit {}, fired {!r}, timer {!r}".format(
                        code, fired, after))
 
-    outer = aiqt_hooks._DeadlineWindow(0.3)
-    began = time.monotonic()
-    try:
-        with outer:
-            with _stub_handler("diff_source_pretool", _sleeper(1.5)):
-                caught = "returned {}".format(_main_run("diff_source_pretool")[0])
-    except aiqt_hooks._HookDeadline as exc:
-        caught = "outer" if exc.args[:1] == (outer,) else "another window"
-    used = time.monotonic() - began
-    if (caught != "outer" or used >= 1.0 or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
-            or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
+    # The inner call's body reads the inner window's countdown, then sleeps 60 s, so once that read is made
+    # only a deadline ends the body: a sleep that returns means the outer deadline did not end the inner
+    # call, and a countdown that comes due after the outer window's (by more than the time from the inner
+    # window's clock read to its arming setitimer, and a microsecond of rounding) means the inner window
+    # outlives it. A host stall of over 0.3 s before that read lets the outer deadline end the run with
+    # nothing read; such a run is not judged on the countdown or the sleep, and the case runs again, up to
+    # three runs, failing when none reaches the read. In every run the outer deadline must reach its owner
+    # and the timer and the disposition must be left as found.
+    for run in range(1, 4):
+        outer = aiqt_hooks._DeadlineWindow(0.3)
+        clocks = _WindowClocks()
+        seen, slept = [], []
+
+        def outlives(_data):
+            seen.append((time.monotonic(), signal.getitimer(signal.ITIMER_REAL)))
+            time.sleep(60.0)
+            slept.append(True)
+            return (0, None, None)
+
+        began = entered = time.monotonic()
+        try:
+            aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
+            with outer:
+                entered = time.monotonic()
+                with _stub_handler("diff_source_pretool", outlives):
+                    caught = "returned {}".format(_main_run("diff_source_pretool")[0])
+        except aiqt_hooks._HookDeadline as exc:
+            caught = "outer" if exc.args[:1] == (outer,) else "another window"
+        finally:
+            aiqt_hooks.time, aiqt_hooks.signal = time, signal
+        used = time.monotonic() - began
+        inner = [window for window in clocks.windows() if window is not outer]
+        armed = clocks.settled(inner[0], 0, sets=2) if inner else None
+        # The outer countdown, armed before `entered`, has at most 0.3 s less the time since then left, and
+        # the inner window arms what it read of it at its take.
+        if (caught != "outer" or slept or len(seen) > 1
+                or seen and (armed is None
+                             or not 0.0 < seen[0][1][0] <= 0.3 - (seen[0][0] - entered) + armed + 1e-6)
+                or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
+                or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
+            problem = ("got {} after {:.2f}s in run {}, inner countdown {!r} with {!r}s from the inner window's "
+                       "clock read to its arming, sleep returned {}".format(
+                           caught, used, run, seen, armed, bool(slept)))
+            break
+        if seen:
+            problem = None
+            break
+    else:
+        problem = ("none of 3 runs reached the inner body's countdown read before the outer deadline (the last "
+                   "ended after {:.2f}s), so the inner countdown was never judged".format(used))
+    if problem:
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
-                   "the timer as found, got {} after {:.2f}s".format(caught, used))
+                   "the timer as found, {}".format(problem))
     with aiqt_hooks._DeadlineWindow(5.0):
         with _stub_handler("diff_source_pretool", _sleeper(1.0)):
             code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
@@ -6847,14 +6958,15 @@ class _FaultySignal:
     signal.ItimerError on its next `times` calls that `matches` accepts and that the function whose code is
     `caller` makes (by default _DeadlineWindow._twice, which makes each restore operation and no other call,
     so _fire's read of the pending signals is left alone), before the call runs or, with `after`, once it
-    has returned."""
+    has returned. Every call that runs goes to `base` (by default the signal module)."""
 
-    def __init__(self, name, matches, times, after=False, caller=None):
+    def __init__(self, name, matches, times, after=False, caller=None, base=None):
         self.name, self.matches, self.times, self.after = name, matches, times, after
         self.caller = aiqt_hooks._DeadlineWindow._twice.__code__ if caller is None else caller
+        self.base = signal if base is None else base
 
     def __getattr__(self, attr):
-        real = getattr(signal, attr)
+        real = getattr(self.base, attr)
         if attr != self.name:
             return real
 
@@ -6886,7 +6998,10 @@ def _deadline_restore_fault_failures():
     expiry) is made to raise signal.ItimerError by a _FaultySignal installed inside the window, for a
     caller's periodic 30-second timer (unnested) and for a 600-second outer window (nested), raising on its
     first call ("once") and on its first two calls ("twice"). Each operation runs in the scenario
-    _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body ends; "expired", a 0.2-second
+    _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body sleeps 0.05 s, so that a restore
+    that counts the window's time twice, or not at all, is off by at least that much, while a host stall
+    inside the restore's gap widens the bounds by only the stall (_restored_countdown_bounds) and passes
+    such a restore only when it lasts about as long as the body; "expired", a 0.2-second
     window whose body ends while the first instruction of _give_back waits (up to 1 s, from an opcode trace
     stage) until the window's own expiry is pending, so the restore discards it; "due", the window's own
     expiry at a caller timer due 0.05 s in. Each case is checked at return from the with statement, before
@@ -6909,19 +7024,35 @@ def _deadline_restore_fault_failures():
         fired.append(signum)
 
     def state():
-        return signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        """The disposition and timer, with the monotonic reads just before and just after them."""
+        began = time.monotonic()
+        seen = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        return seen, (began, time.monotonic())
 
-    def caller_back(handler, timer):
-        return handler is caller_alarm and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0
+    def ran_on(value, seconds, armed, read, clocks=None, holder=None):
+        """A countdown of `seconds` set between the reads `armed`, read as `value` between the reads `read`,
+        borrowed meanwhile by the window `holder` if one is given (_restored_countdown_bounds)."""
+        low, high = _restored_countdown_bounds(seconds, armed, read, clocks, holder)
+        return low <= value <= high
 
-    def outer_back(handler, timer, outer):
-        return getattr(handler, "__self__", None) is outer and timer[1] == 0.0 and 599.0 < timer[0] <= 600.0
+    def caller_back(seen, read, armed, due, clocks, holder):
+        # The caller's first expiry is 0.05 s after its arming when due, 30 s otherwise, then every 30 s.
+        handler, timer = seen
+        return (handler is caller_alarm and timer[1] == 30.0
+                and ran_on(timer[0], 30.05 if due else 30.0, armed, read, clocks, holder))
 
-    def unchanged(before, after):
-        """The same disposition and timer, the countdown only run on (by less than 10 ms), not re-armed."""
+    def outer_back(seen, read, outer, armed, clocks, holder):
+        handler, timer = seen
+        return (getattr(handler, "__self__", None) is outer and timer[1] == 0.0
+                and ran_on(timer[0], 600.0, armed, read, clocks, holder))
+
+    def unchanged(before, before_read, after, after_read):
+        """The same disposition and timer, the countdown only run on by the time between the reads, not
+        re-armed (the earlier reading, itself rounded down, set the countdown: _restored_countdown_bounds
+        allows that rounding on both ends)."""
         (handler, (value, interval)), (handler_after, (value_after, interval_after)) = before, after
         return (handler == handler_after and interval == interval_after
-                and (value == value_after == 0.0 or 0.0 <= value - value_after < 0.01))
+                and (value == value_after == 0.0 or ran_on(value_after, value, before_read, after_read)))
 
     def wait_pending():
         waited = time.monotonic() + 1.0
@@ -6943,26 +7074,35 @@ def _deadline_restore_fault_failures():
             fired.clear()
             signal.signal(signal.SIGALRM, caller_alarm)
             signal.setitimer(signal.ITIMER_REAL, 0)
+            armed = (time.monotonic(),)
             if due or not nested:
                 signal.setitimer(signal.ITIMER_REAL, 0.05 if due else 30.0, 30.0)
+            armed += (time.monotonic(),)
             outer = aiqt_hooks._DeadlineWindow(600.0) if nested else contextlib.nullcontext()
             inner = aiqt_hooks._DeadlineWindow(0.2 if scenario == "expired" else 5.0)
             tracer, at = _window_tracer(inner, (lambda frame: frame.f_code is give_back, wait_pending))
-            faulty = _FaultySignal(name, matches, times, after=after)
-            inside = armed_at_return = None
+            # Both windows read the clock and set the timer through `clocks`, which logs what bounds the
+            # countdowns they give back.
+            clocks = _WindowClocks()
+            faulty = _FaultySignal(name, matches, times, after=after, base=clocks.signal)
+            holder = outer if nested else inner
+            inside = inside_read = armed_at_return = None
+            outer_armed = (time.monotonic(),)
             try:
+                aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
                 with outer:
+                    outer_armed += (time.monotonic(),)
                     try:
                         with inner:
                             aiqt_hooks.signal = faulty
                             if scenario == "expired":
                                 sys.settrace(tracer)
-                            time.sleep(1.0 if due else 0.0)
+                            time.sleep(1.0 if due else 0.05 if scenario == "plain" else 0.0)
                     finally:
                         sys.settrace(None)
-                        aiqt_hooks.signal = signal
+                        aiqt_hooks.signal = clocks.signal
                         armed_at_return = inner.armed
-                        inside = state()
+                        inside, inside_read = state()
             except signal.ItimerError as exc:
                 escaped = str(exc)
             except aiqt_hooks._HookDeadline as exc:
@@ -6973,10 +7113,10 @@ def _deadline_restore_fault_failures():
                 escaped = None
             finally:
                 sys.settrace(None)
-                aiqt_hooks.signal = signal
-            first = state()
+                aiqt_hooks.time, aiqt_hooks.signal = time, signal
+            first, first_read = state()
             inner._give_back()
-            later, count = state(), len(fired)
+            (later, later_read), count = state(), len(fired)
             broken = getattr(inner, "broken", False) is True
             problems = []
             if scenario == "expired" and not at:
@@ -6986,28 +7126,34 @@ def _deadline_restore_fault_failures():
             if armed_at_return or inner.armed or broken != (times == 2) or (nested and outer.armed):
                 problems.append("inner armed {} at return from the with statement, broken {}".format(
                     armed_at_return, getattr(inner, "broken", None)))
-            if not unchanged(first, later):
-                problems.append("a later _give_back changed {!r} to {!r}".format(first, later))
+            if not unchanged(first, first_read, later, later_read):
+                problems.append("a later _give_back changed {!r} to {!r} in {:.6f}s".format(
+                    first, later, later_read[1] - first_read[0]))
             if due:
                 want_escaped = "the outer deadline" if nested and times == 1 else want
                 want_count = 0 if times == 2 and not nested else 1
-                if escaped != want_escaped or count != want_count or not caller_back(*first):
-                    problems.append("escaped {!r}, deliveries {}, state {!r}".format(escaped, count, first))
+                if (escaped != want_escaped or count != want_count
+                        or not caller_back(first, first_read, armed, due, clocks, holder)):
+                    problems.append("escaped {!r}, deliveries {}, state {!r}, want a countdown in {!r}".format(
+                        escaped, count, first,
+                        _restored_countdown_bounds(30.05, armed, first_read, clocks, holder)))
             else:
                 if escaped != want or count:
                     problems.append("escaped {!r}, deliveries {}".format(escaped, count))
                 if nested:
-                    if times == 1 and not outer_back(*inside, outer):
-                        problems.append("inside the outer window {!r}".format(inside))
+                    if times == 1 and not outer_back(inside, inside_read, outer, outer_armed, clocks, inner):
+                        problems.append("inside the outer window {!r}, want a countdown in {!r}".format(
+                            inside, _restored_countdown_bounds(600.0, outer_armed, inside_read, clocks, inner)))
                     if first != (caller_alarm, (0.0, 0.0)):
                         problems.append("after the outer window {!r}".format(first))
-                elif times == 1 and not caller_back(*first):
-                    problems.append("caller left {!r}".format(first))
+                elif times == 1 and not caller_back(first, first_read, armed, due, clocks, holder):
+                    problems.append("caller left {!r}, want a countdown in {!r}".format(
+                        first, _restored_countdown_bounds(30.0, armed, first_read, clocks, holder)))
             if problems:
                 out.append("{} {}".format(case, "; ".join(problems)))
     finally:
         sys.settrace(None)
-        aiqt_hooks.signal = signal
+        aiqt_hooks.time, aiqt_hooks.signal = time, signal
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
     return out
