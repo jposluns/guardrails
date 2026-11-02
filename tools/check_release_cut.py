@@ -77,6 +77,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import argparse
 import datetime
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -87,12 +88,12 @@ import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
-try:
-    from _semver import _parse  # noqa: E402
-except ImportError:
-    # A tree without the swept directory opf/tools (the home of _semver) cannot be evaluated: exit 2 naming
-    # it, never a traceback (exit 1) from this import.
-    import os
+if importlib.util.find_spec("_semver") is None:
+    # A tree without the swept directory opf/tools (the home of _semver), or without the module itself,
+    # cannot be evaluated: exit 2 naming it, never a traceback (exit 1) from the import below. Only the
+    # missing module is mapped, through this lookup: a _semver that is present but does not define _parse,
+    # or that fails on an import of its own, surfaces through the plain import as the error naming what is
+    # missing.
     _NO_SEMVER = ("CANNOT EVALUATE: cannot import _semver from the swept directory opf/tools; the tree "
                   "under check must hold it. Nothing was run (cannot evaluate).\n")
     try:
@@ -101,6 +102,7 @@ except ImportError:
     except BaseException:
         pass
     os._exit(2)
+from _semver import _parse  # noqa: E402
 
 CHANGELOG = "changelog.toml"
 DECLARATION = ".aiqt/release-cut.toml"
@@ -2430,6 +2432,15 @@ def _close_sweep_shapes_red():
          if _cs_robustness_failures([(kind, source)])]
 
 
+def _swept_read(root, rel):
+    """One swept source's text, read as _close_sweep reads it. A source that is not UTF-8 raises
+    CannotEvaluate naming it, so no reader of a swept source reports a decode error without the filename."""
+    try:
+        return (Path(root) / rel).read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise CannotEvaluate("swept sources: {} is not UTF-8: {}".format(rel, exc)) from exc
+
+
 def _swept_sources(root):
     """The swept sources beneath `root` as (relative path, text) rows: each _CLOSE_SWEEP_DIRS directory's
     top-level *.py files, sorted, not recursive, as _close_sweep reads them. A missing or unreadable swept
@@ -2448,10 +2459,7 @@ def _swept_sources(root):
             if not name.endswith(".py"):
                 continue
             rel = "{}/{}".format(directory, name)
-            try:
-                rows.append((rel, (base / name).read_text(encoding="utf-8")))
-            except UnicodeDecodeError as exc:
-                raise CannotEvaluate("swept sources: {} is not UTF-8: {}".format(rel, exc)) from exc
+            rows.append((rel, _swept_read(root, rel)))
     return rows
 
 
@@ -2526,6 +2534,13 @@ CENSUS_TIMEOUT = TIMEOUT * 4
 # at that load reads the cap of 16.
 # Reaching this bound stays exit 2 naming the timeout, never a failure.
 CENSUS_GENSRC_TIMEOUT = 900
+# The full-entry census vector runs this script's own --self-test as a child until its close stage reads the
+# doctored journal, so the child covers the fixture cases and one close-vector pass, never the census rows or
+# the entry vectors that follow them (no recursion). Measured once on an 80-CPU shared host with no busy
+# loops: 101.4 s to the exit-2 report. The bound leaves the same headroom for load as the census bounds above
+# (rule kill-timeout-exceeds-callee-wait covers the child's own 30 s fixture waits). Reaching it stays exit 2
+# naming the timeout, never a failure.
+CENSUS_ENTRY_TIMEOUT = 900
 # Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
 # caller that reaches its clause: (path, census caller, self-test arguments, bound on the run).
 _CENSUS_MAPPINGS = (
@@ -2557,13 +2572,31 @@ def _census_mapping_check(root):
     return failures, len(_CENSUS_MAPPINGS)
 
 
-def _census_clauses(rel, text):
-    """The cannot-evaluate clauses and the defined function names of a swept source, read with ast. A
-    cannot-evaluate clause is an except handler that catches the census error class (_StCensusError, named
-    directly, through an attribute, or through a name the source binds to it), minus the census probes: a
-    handler whose body asserts on str(<the caught error>) tests the census and maps nothing to
-    cannot-evaluate. A source that does not parse raises CannotEvaluate naming it."""
+_CENSUS_REQUIRED_CACHE = {}
+
+
+def _census_required(rel, text):
+    """The exact _CENSUS_MAPPINGS targets a swept source needs, read with ast: one per cannot-evaluate
+    clause, in source order, or None for a source whose only mention of the census error is a comment or a
+    string (no ast reference, so nothing to map). A cannot-evaluate clause is an except handler whose type
+    names the census error class (_StCensusError: directly, through an attribute, through a single-target
+    assignment, or through an import alias), minus the census probes. A probe is exactly this shape: the
+    handler binds the error and its body is one assignment of a conditional expression whose test reads
+    str(<the caught error>) and whose branches do not; the test consumes the message, so the handler tests
+    the census and maps nothing to cannot-evaluate. A handler that prints, formats or re-raises the message
+    is a clause, never a probe. The first clause in source order is the one the module-level self-test run
+    reaches first, so its target is "*"; each later clause's target is the one function, reached from that
+    clause's try body and from no other clause's, that holds a census probe, since a census read failing
+    under that function escapes to this clause alone. What cannot be derived raises CannotEvaluate naming
+    the source and the clause, never a count: a source that does not parse; one that handles the census
+    error only through isinstance inside a broader handler; clauses in different functions or in nested
+    trys (source order no longer gives the clause the module-level run reaches first); and a later clause
+    reaching no probe-holding function of its own, or more than one."""
     import ast
+    try:
+        return _CENSUS_REQUIRED_CACHE[(rel, text)]
+    except KeyError:
+        pass
 
     def terminal(node):
         return node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
@@ -2573,36 +2606,169 @@ def _census_clauses(rel, text):
     except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("census mapping: {} cannot be parsed: {}".format(rel, exc)) from exc
     aliases = {"_StCensusError"}
+    grew = True
+    while grew:
+        grew = False
+        for node in ast.walk(tree):
+            found = []
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name) and terminal(node.value) in aliases):
+                found.append(node.targets[0].id)
+            if isinstance(node, ast.ImportFrom):
+                found.extend(name.asname or name.name for name in node.names if name.name == "_StCensusError")
+            for name in found:
+                if name not in aliases:
+                    aliases.add(name)
+                    grew = True
+    if not any(isinstance(node, (ast.Name, ast.Attribute)) and terminal(node) in aliases
+               for node in ast.walk(tree)):
+        _CENSUS_REQUIRED_CACHE[(rel, text)] = None
+        return None
+
+    def named(handler):
+        kinds = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+        return handler.type is not None and any(terminal(kind) in aliases for kind in kinds)
+
+    def catches(try_node):
+        return any(handler.type is not None and named(handler) for handler in try_node.handlers)
+
+    def probe(handler):
+        if handler.name is None or len(handler.body) != 1:
+            return False
+        stmt = handler.body[0]
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name) and isinstance(stmt.value, ast.IfExp)):
+            return False
+
+        def reads(node):
+            return any(isinstance(call, ast.Call) and terminal(call.func) == "str" and len(call.args) == 1
+                       and isinstance(call.args[0], ast.Name) and call.args[0].id == handler.name
+                       for call in ast.walk(node))
+        return reads(stmt.value.test) and not reads(stmt.value.body) and not reads(stmt.value.orelse)
+
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
-                and terminal(node.value) == "_StCensusError"):
-            aliases.add(node.targets[0].id)
-    clauses = 0
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ExceptHandler) or node.type is None:
-            continue
-        kinds = node.type.elts if isinstance(node.type, ast.Tuple) else [node.type]
-        if not any(terminal(kind) in aliases for kind in kinds):
-            continue
-        probe = node.name is not None and any(
-            isinstance(call, ast.Call) and terminal(call.func) == "str" and len(call.args) == 1
-            and isinstance(call.args[0], ast.Name) and call.args[0].id == node.name
-            for stmt in node.body for call in ast.walk(stmt))
-        clauses += 0 if probe else 1
-    defined = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    return clauses, defined
+        if isinstance(node, ast.ExceptHandler) and not (node.type is not None and named(node)):
+            for call in (c for stmt in node.body for c in ast.walk(stmt)):
+                if (isinstance(call, ast.Call) and terminal(call.func) == "isinstance" and len(call.args) == 2
+                        and any(terminal(kind) in aliases for kind in
+                                (call.args[1].elts if isinstance(call.args[1], ast.Tuple) else [call.args[1]]))):
+                    raise CannotEvaluate(
+                        "census mapping: {} line {}: the census error is handled through isinstance inside a"
+                        " broader handler, so its clause cannot be derived".format(rel, node.lineno))
+
+    def census_calls(nodes):
+        """(called names, raises census) at the sites of `nodes` that no census-catching try there guards;
+        nested function bodies are excluded, lambda bodies are not."""
+        calls, raised = set(), [False]
+
+        def visit(node):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return
+            if isinstance(node, ast.Try) and catches(node):
+                for part in node.handlers + node.orelse + node.finalbody:
+                    visit(part)
+                return
+            if isinstance(node, ast.Call) and terminal(node.func) is not None:
+                calls.add(terminal(node.func))
+            if isinstance(node, ast.Raise) and node.exc is not None:
+                top = node.exc.func if isinstance(node.exc, ast.Call) else node.exc
+                if terminal(top) in aliases:
+                    raised[0] = True
+            for child in ast.iter_child_nodes(node):
+                visit(child)
+        for node in nodes:
+            visit(node)
+        return calls, raised[0]
+
+    def own(nodes):
+        stack = list(nodes)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            yield node
+            stack.extend(ast.iter_child_nodes(node))
+
+    functions = {}
+    probe_holders = set()
+    real = []
+    scopes = [(None, list(tree.body))]
+    scopes += [(node, list(node.body)) for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for fn, body in scopes:
+        if fn is not None:
+            calls, raised = census_calls(body)
+            prior = functions.get(fn.name, (set(), False))
+            functions[fn.name] = (prior[0] | calls, prior[1] or raised)
+        for node in own(body):
+            if isinstance(node, ast.Try) and catches(node):
+                for handler in node.handlers:
+                    if handler.type is None or not named(handler):
+                        continue
+                    if probe(handler):
+                        if fn is not None:
+                            probe_holders.add(fn.name)
+                    else:
+                        real.append((handler.lineno, fn, node))
+    real.sort(key=lambda row: row[0])
+    if not real:
+        result = ()
+    elif len(real) == 1:
+        result = ("*",)
+    else:
+        if any(fn is None for _, fn, _ in real) or len({id(fn) for _, fn, _ in real}) != 1:
+            raise CannotEvaluate(
+                "census mapping: {} line {}: its cannot-evaluate clauses sit in different functions, so"
+                " source order cannot give the clause the module-level run reaches first"
+                .format(rel, real[1][0]))
+        for _, _, outer in real:
+            for lineno, _, inner in real:
+                if inner is not outer and outer.lineno <= inner.lineno <= (outer.end_lineno or outer.lineno):
+                    raise CannotEvaluate("census mapping: {} line {}: nested cannot-evaluate clauses cannot"
+                                         " be ordered".format(rel, lineno))
+        escaping = {name for name, (_, raised) in functions.items() if raised}
+        grew = True
+        while grew:
+            grew = False
+            for name, (calls, _) in functions.items():
+                if name not in escaping and calls & escaping:
+                    escaping.add(name)
+                    grew = True
+
+        def reached(try_node):
+            seeds, _ = census_calls(list(try_node.body))
+            seen = set(seeds)
+            frontier = [name for name in seeds if name in escaping]
+            while frontier:
+                for callee in functions.get(frontier.pop(), (set(), False))[0]:
+                    if callee not in seen:
+                        seen.add(callee)
+                        if callee in escaping:
+                            frontier.append(callee)
+            return {name for name in seen if name in escaping}
+        reach = [reached(node) for _, _, node in real]
+        targets = ["*"]
+        for index in range(1, len(real)):
+            others = set().union(*(reach[i] for i in range(len(real)) if i != index))
+            holders = sorted((reach[index] - others) & probe_holders)
+            if len(holders) != 1:
+                raise CannotEvaluate(
+                    "census mapping: {} line {}: cannot derive the clause's row target (census probes"
+                    " reached only from this clause: {})".format(rel, real[index][0], holders or "none"))
+            targets.append(holders[0])
+        result = tuple(targets)
+    _CENSUS_REQUIRED_CACHE[(rel, text)] = result
+    return result
 
 
 def _census_mapping_completeness(root):
     """Every swept source (the top-level *.py files of _CLOSE_SWEEP_DIRS, not recursive, as _close_sweep reads
-    them) that names _StCensusError has the full set of _CENSUS_MAPPINGS rows it needs, derived from the
-    source with _census_clauses, and every row names such a source. A source needs one row per
-    cannot-evaluate clause, with pairwise-distinct targets, exactly one of them "*" (the census that runs
-    first is a run-time fact, so "*" maps the first-reached clause), and every other target a function the
-    source defines, so deleting any single row, or duplicating a target, fails. Exempt: _close_selftest.py,
-    which defines the census, and this tool, whose own mapping _close_stage_mapping_check runs. A missing or
-    unreadable swept directory, or a source that is not UTF-8 or does not parse, raises CannotEvaluate
-    naming it. Returns failures."""
+    them) that names _StCensusError holds exactly the _CENSUS_MAPPINGS rows _census_required derives from its
+    text, compared as whole row sets, and every row names such a source, so deleting a row, adding one, or
+    retargeting one to any other function fails. Exempt: _close_selftest.py, which defines the census, and
+    this tool, whose own mapping _close_stage_mapping_check runs. A missing or unreadable swept directory, a
+    source that is not UTF-8 or does not parse, and a source whose required rows cannot be derived each raise
+    CannotEvaluate naming them, never a pass. Returns failures."""
     exempt = {"tools/_close_selftest.py", "tools/check_release_cut.py"}
     rows = {}
     for rel, target, _argv, _bound in _CENSUS_MAPPINGS:
@@ -2612,25 +2778,16 @@ def _census_mapping_completeness(root):
     for rel, text in _swept_sources(root):
         if rel in exempt or "_StCensusError" not in text:
             continue
+        required = _census_required(rel, text)
+        if required is None:                 # only a comment or a string mentions it: nothing to map
+            continue
         naming.add(rel)
-        clauses, defined = _census_clauses(rel, text)
         targets = rows.get(rel, [])
         if not targets:
             failures.append("census mapping: {} names _StCensusError but has no _CENSUS_MAPPINGS row".format(rel))
-            continue
-        if len(targets) != clauses:
-            failures.append("census mapping: {} has {} cannot-evaluate clauses but {} _CENSUS_MAPPINGS rows"
-                            .format(rel, clauses, len(targets)))
-        for target in sorted(set(targets)):
-            if targets.count(target) > 1:
-                failures.append("census mapping: {} has {} rows with the duplicate target {}"
-                                .format(rel, targets.count(target), target))
-        if targets.count("*") != 1:
-            failures.append('census mapping: {} needs exactly one "*" row, found {}'
-                            .format(rel, targets.count("*")))
-        for target in sorted(set(targets) - {"*"} - defined):
-            failures.append("census mapping: the {} row's target {} is not a function the source defines"
-                            .format(rel, target))
+        elif sorted(targets) != sorted(required):
+            failures.append("census mapping: {} needs the rows {} but the table holds {}"
+                            .format(rel, sorted(required), sorted(targets)))
     failures.extend("census mapping: the _CENSUS_MAPPINGS row for {} names no source that names _StCensusError"
                     .format(rel) for rel in sorted(set(rows) - naming))
     return failures
@@ -2670,9 +2827,12 @@ def _census_completeness_unreadable(parent):
 
 
 def _census_completeness_red(root):
-    """_census_mapping_completeness over this tree with _CENSUS_MAPPINGS cut or doubled: deleting any single
-    row must fail naming its source, and replacing every named target with a second "*" must fail too; the
-    unmodified table must pass first, or the flips prove nothing. Returns failures."""
+    """_census_mapping_completeness over this tree with _CENSUS_MAPPINGS cut, doubled or retargeted: deleting
+    any single row must fail naming its source; replacing every named target with a second "*" must fail;
+    and retargeting each named row must fail, to "*" (a duplicate of its source's star row) and, for the
+    journal's row, to _st_fd_table (the census itself, on every clause's path, so a second effective "*")
+    and to _st_close_check (a census caller the star row's clause already maps); the unmodified table must
+    pass first, or the flips prove nothing. Returns failures."""
     failures = []
     if _census_mapping_completeness(root):
         return ["census mapping red: the unmodified table does not pass, so the flips prove nothing"]
@@ -2688,8 +2848,106 @@ def _census_completeness_red(root):
         this._CENSUS_MAPPINGS = doubled
         if doubled != saved and not _census_mapping_completeness(root):
             failures.append('census mapping red: replacing every named target with "*" still passes')
+        for index, row in enumerate(saved):
+            if row[1] == "*":
+                continue
+            wrongs = ["*"]
+            if row[0] == "opf/tools/_journal.py":
+                wrongs += ["_st_fd_table", "_st_close_check"]
+            for wrong in wrongs:
+                this._CENSUS_MAPPINGS = saved[:index] + ((row[0], wrong) + row[2:],) + saved[index + 1:]
+                if not _census_mapping_completeness(root):
+                    failures.append("census mapping red: retargeting the {} row from {} to {} still passes"
+                                    .format(row[0], row[1], wrong))
     finally:
         this._CENSUS_MAPPINGS = saved
+    return failures
+
+
+def _census_shape_vectors(parent, script):
+    """_census_mapping_completeness over one source of each shape its derivation claims to settle: a clause
+    that names the census error through an import alias is recognized (its row passes, no row fails); a
+    source whose only mention is a comment needs no row, and a row for it fails as naming no source; a
+    handler that reaches the census error only through isinstance inside a broader handler is CannotEvaluate
+    naming the source; and a handler that prints str(<the caught error>) is a clause, never a probe: the
+    real journal with its second clause's message reworded to "SELF-TEST ERROR: " + str(exc) still derives
+    both its rows, so the whole table still passes and deleting its named row still fails. Returns
+    failures."""
+    import shutil
+    this = sys.modules[__name__]
+    saved = this._CENSUS_MAPPINGS
+    failures = []
+    row = ("tools/zz_shape.py", "*", ("--self-test",), CENSUS_TIMEOUT)
+    aliased = (
+        "from _close_selftest import _StCensusError as CE\n"
+        "def helper():\n"
+        '    raise CE("boom")\n'
+        "def run():\n"
+        "    try:\n"
+        "        helper()\n"
+        "    except CE as exc:\n"
+        '        print("SELF-TEST ERROR: " + str(exc))\n'
+        "        return 2\n")
+    comment = "# the census error _StCensusError is only mentioned in this comment\nVALUE = 1\n"
+    shaped = (
+        "import _close_selftest\n"
+        "def run():\n"
+        "    try:\n"
+        "        _close_selftest._st_fd_table()\n"
+        "    except Exception as exc:\n"
+        "        if isinstance(exc, _close_selftest._StCensusError):\n"
+        "            return 2\n"
+        "        raise\n")
+    cases = (("alias-with-row", aliased, (row,), lambda got: got == "returned []"),
+             ("alias-without-row", aliased, (),
+              lambda got: "has no _CENSUS_MAPPINGS row" in got),
+             ("comment-without-row", comment, (), lambda got: got == "returned []"),
+             ("comment-with-row", comment, (row,),
+              lambda got: "names no source that names _StCensusError" in got),
+             ("isinstance-handler", shaped, (),
+              lambda got: got.startswith("CannotEvaluate: census mapping: tools/zz_shape.py")
+              and "isinstance" in got))
+    for case, source, table, expect in cases:
+        root = parent / "census-shapes" / case
+        for directory in _CLOSE_SWEEP_DIRS:
+            (root / directory).mkdir(parents=True)
+        (root / "tools" / "zz_shape.py").write_text(source, encoding="utf-8")
+        this._CENSUS_MAPPINGS = table
+        try:
+            got = "returned {!r}".format(_census_mapping_completeness(root))
+        except ValueError as exc:                     # CannotEvaluate, or an error that escaped it
+            got = "{}: {}".format(type(exc).__name__, exc)
+        finally:
+            this._CENSUS_MAPPINGS = saved
+        if not expect(got):
+            failures.append("census shape {}: got {}".format(case, got))
+    rel = "opf/tools/_journal.py"
+    text = _swept_read(script.parents[1], rel)
+    old = 'print("SELF-TEST ERROR: {}".format(exc), file=sys.stderr)'
+    require(text.count(old) == 2, "census shapes: the journal clause anchor must match exactly twice")
+    second = text.index(old, text.index(old) + 1)
+    reworded = (text[:second] + 'print("SELF-TEST ERROR: " + str(exc), file=sys.stderr)'
+                + text[second + len(old):])
+    root = parent / "census-shapes" / "reworded-clause"
+    for directory in _CLOSE_SWEEP_DIRS:
+        (root / directory).mkdir(parents=True)
+        for name in sorted(os.listdir(script.parents[1] / directory)):
+            if name.endswith(".py"):
+                shutil.copy(script.parents[1] / directory / name, root / directory / name)
+    (root / rel).write_text(reworded, encoding="utf-8")
+    whole = _census_mapping_completeness(root)
+    if whole:
+        failures.append("census shape reworded-clause: the full table no longer passes: {!r}".format(whole))
+    cut = tuple(entry for entry in saved if not (entry[0] == rel and entry[1] != "*"))
+    require(len(cut) == len(saved) - 1, "census shapes: the journal must hold exactly one named row")
+    this._CENSUS_MAPPINGS = cut
+    try:
+        still = _census_mapping_completeness(root)
+    finally:
+        this._CENSUS_MAPPINGS = saved
+    if not any(rel in failure for failure in still):
+        failures.append("census shape reworded-clause: the reworded second clause with its row deleted"
+                        " still passes: {!r}".format(still))
     return failures
 
 
@@ -2698,7 +2956,12 @@ def _census_entry_vectors(parent, script):
     swept source is not UTF-8, main() run over _close_stage there must exit 2 naming the file: the close
     sweep reads every swept source before the completeness check does, so the name must survive that earlier
     read. On a tree missing the swept directory opf/tools, this script run as a child must exit 2 naming the
-    directory, never a traceback (exit 1) from its _semver import. Returns failures."""
+    directory, never a traceback (exit 1) from its _semver import. On a full copy of the swept trees whose
+    opf/tools/_journal.py is not UTF-8, this script run as a child with --self-test (the real entry point,
+    nothing patched) must exit 2 naming that file: the close harness reads the journal before the sweep or
+    the completeness check does, so the name must survive that earliest read too. And on a tree whose
+    opf/tools/_semver.py does not define _parse, the import guard must not swallow the failure: the child
+    must exit 1 with the ImportError naming _semver, never the missing-directory report. Returns failures."""
     import io
     import shutil
     failures = []
@@ -2734,6 +2997,39 @@ def _census_entry_vectors(parent, script):
     if result.returncode != 2 or "opf/tools" not in err or "Traceback" in err:
         failures.append("census entry missing-directory: expected exit 2 naming opf/tools, got exit {}: {}"
                         .format(result.returncode, err.strip().splitlines()[-1:]))
+    tree = parent / "census-entry" / "invalid-utf8-journal"
+    for directory in _CLOSE_SWEEP_DIRS:
+        (tree / directory).mkdir(parents=True)
+        for name in sorted(os.listdir(script.parents[1] / directory)):
+            if name.endswith(".py"):
+                shutil.copy(script.parents[1] / directory / name, tree / directory / name)
+    journal = tree / "opf" / "tools" / "_journal.py"
+    journal.write_bytes(journal.read_bytes() + b"\n#\xff\n")
+    result = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / "check_release_cut.py"),
+                             "--self-test"], capture_output=True, cwd=tree, timeout=CENSUS_ENTRY_TIMEOUT)
+    err = result.stderr.decode("utf-8", "replace")
+    lines = result.stdout.decode("utf-8", "replace").strip().splitlines()
+    try:
+        got = json.loads(lines[-1]) if lines else {}
+    except ValueError:
+        got = {}
+    if (result.returncode != 2 or got.get("code") != 2
+            or "opf/tools/_journal.py" not in got.get("detail", "") or "Traceback" in err):
+        failures.append("census entry invalid-utf8-journal: expected exit 2 naming opf/tools/_journal.py,"
+                        " got exit {}: {!r}".format(result.returncode,
+                                                    (lines or err.strip().splitlines())[-1:]))
+    tree = parent / "census-entry" / "semver-without-parse"
+    (tree / "tools").mkdir(parents=True)
+    (tree / "opf" / "tools").mkdir(parents=True)
+    shutil.copy(script, tree / "tools" / "check_release_cut.py")
+    (tree / "opf" / "tools" / "_semver.py").write_text("# a stub that does not define _parse\n",
+                                                       encoding="utf-8")
+    result = subprocess.run([sys.executable, "-I", "-B", str(tree / "tools" / "check_release_cut.py")],
+                            capture_output=True, cwd=tree, timeout=TIMEOUT)
+    err = result.stderr.decode("utf-8", "replace")
+    if result.returncode != 1 or "_semver" not in err or "the tree under check must hold it" in err:
+        failures.append("census entry semver-without-parse: expected exit 1 with the ImportError naming"
+                        " _semver, got exit {}: {}".format(result.returncode, err.strip().splitlines()[-1:]))
     return failures
 
 
@@ -2745,8 +3041,8 @@ def _close_harness_checks(parent, script):
         print("FAIL " + failure, file=sys.stderr)
     check("close-vectors", not close_failures)
     print("PASS close-vectors runs=" + str(close_runs))
-    journal = (script.parents[1] / "opf" / "tools" / "_journal.py").read_text(encoding="utf-8")
-    copy = (script.parent / "_close_selftest.py").read_text(encoding="utf-8")
+    journal = _swept_read(script.parents[1], "opf/tools/_journal.py")
+    copy = _swept_read(script.parents[1], "tools/_close_selftest.py")
     check("close-harness-in-step", _close_harness_in_step(journal, copy))
     check("close-harness-census-eio", _close_census_eio(_close_selftest))
     check("close-harness-census-readlink-eio", _close_census_eio(_close_selftest, "readlink"))
@@ -2940,6 +3236,10 @@ def _self_test_isolated(red_on_revert):
         for failure in red_failures:
             print("FAIL " + failure, file=sys.stderr)
         check("census-mapping-complete-red", not red_failures)
+        shape_failures = _census_shape_vectors(parent, script)
+        for failure in shape_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("census-mapping-shapes", not shape_failures)
         entry_failures = _census_entry_vectors(parent, script)
         for failure in entry_failures:
             print("FAIL " + failure, file=sys.stderr)
