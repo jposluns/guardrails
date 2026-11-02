@@ -16371,34 +16371,43 @@ def _verification_sink_message(hit):
 
 
 # --- gatdis deny tier: a checker whose status a STATUS-ONLY TRAILER masks before a chained step ------------
-def _gate_status_only(seg, later_raws):
+def _gate_status_only(seg):
     """How a candidate trailer segment of the status-trailer chain reads. True when the segment is
     STATUS-ONLY: a simple command (_gate_simple; redirections are permitted, the deny-safe direction,
     since 'echo ok > /abs/rc' still masks the checker's status) whose command word is in
     _GATE_STATUS_ONLY, or an ASSIGNMENT-ONLY segment (every token a leading-assignment shape, so
     'rc=$?' and 'x=1' qualify while 'x=$(date)' is already outside: _gate_simple refuses a '$(' in the
-    raw text). None for the RE-RAISE EXEMPTION, which ends the chain with no finding: an assignment
-    that captures '$?' and whose variable the raw text of any later segment of the same reading reads
-    ('$name' or '${name' anywhere in it, so an occurrence inside quoted data or a kept comment counts
-    too, a disclosed under-deny of this best-effort tier) may re-raise the checker's saved exit, the
-    rule's own propagation form. False otherwise: the segment is a candidate gated step, not a
-    trailer."""
+    raw text). False otherwise: the segment is a candidate gated step, not a trailer."""
     if not _gate_simple(seg):
         return False
     word = _command_word(seg.argv)
     if word:
         return word in _GATE_STATUS_ONLY
-    names, captures = [], False
+    for tok in seg.argv:
+        if _ENV_ASSIGN_RE.match(tok) is None:
+            return False   # defensive: a '' command word means every token matched this shape
+    return True
+
+
+def _gate_saved_status(seg):
+    """The variable names an assignment-only status-only segment saves '$?' into ('rc' for 'rc=$?'),
+    else an empty list. They feed the RE-RAISE EXEMPTION of _gate_status_trailer."""
+    if _command_word(seg.argv):
+        return []
+    names = []
     for tok in seg.argv:
         m = _ENV_ASSIGN_RE.match(tok)
-        if m is None:
-            return False   # defensive: a '' command word means every token matched this shape
-        names.append(tok[:m.end() - 1].rstrip("+"))
-        if "$?" in tok[m.end():] or "${?" in tok[m.end():]:
-            captures = True
-    if captures and any("$" + name in raw or "${" + name in raw for name in names for raw in later_raws):
-        return None
-    return True
+        if m is not None and ("$?" in tok[m.end():] or "${?" in tok[m.end():]):
+            names.append(tok[:m.end() - 1].rstrip("+"))
+    return names
+
+
+def _gate_reads_saved(raw, names):
+    """True when the raw text of a segment reads one of names: '$name' or '${name' with no identifier
+    character after the name, so '$rcfile' is no read of 'rc' while '$rc', '${rc}' and '${rc:-1}' are.
+    The read is sought anywhere in the raw text, so an occurrence inside quoted data or a kept comment
+    counts too, a disclosed under-deny of this best-effort tier."""
+    return any(re.search(r"\$\{?" + re.escape(name) + r"(?![A-Za-z0-9_])", raw) for name in names)
 
 
 def _gate_status_trailer(reading):
@@ -16413,8 +16422,15 @@ def _gate_status_trailer(reading):
     non-simple stage, so 'pytest | tee /abs/log; echo ok && git push origin main' is read from the tee
     stage's separator. The ENTRY separator (';' or '||' deny-eligible; a newline, with the rest of the
     reading still to walk, note-eligible; anything else no shape, so 'pytest && git push origin main'
-    is correct gating) starts a TRAILER CHAIN of consecutive status-only segments (_gate_status_only;
-    its re-raise exemption ends the chain with no finding); an in-chain ';', '&&' or '||' keeps deny
+    is correct gating) starts a TRAILER CHAIN of consecutive status-only segments (_gate_status_only).
+    The RE-RAISE EXEMPTION ends the chain with no finding: once a trailer saves '$?' into a variable
+    (_gate_saved_status), a read of that variable (_gate_reads_saved) in a later segment of the chain,
+    up to and including the first non-status-only segment, which is the step the chain gates, may
+    re-raise or test the checker's saved exit, the rule's own propagation form ('pytest; rc=$? && [ $rc
+    -eq 0 ] && git push origin main'); a read only after that step ('pytest; rc=$?; echo hi && git
+    push origin main; exit $rc') comes after the step has already run and does not exempt. A read in
+    the gated step itself counts whatever the step does with it, so 'pytest; rc=$?; echo hi &&
+    ./deploy.sh $rc' allows, a disclosed under-deny. An in-chain ';', '&&' or '||' keeps deny
     eligibility, an in-chain newline on a non-empty trailer downgrades the hit to a note, and '&' or a
     pipe on a trailer breaks the chain. An EMPTY segment (no word, no redirection) with a newline or
     ';' separator is skipped and contributes no separator, so its newline never changes the tier; one
@@ -16453,18 +16469,18 @@ def _gate_status_trailer(reading):
         count = 0
         join = entry
         trailer_word = ""
+        saved = []
         t = last + 1
         while t < n:
             nxt_seg = records[t]
+            if saved and _gate_reads_saved(nxt_seg.raw, saved):
+                break   # the re-raise exemption: the saved status is read before the gated step
             if not nxt_seg.argv and not nxt_seg.redirects:
                 if nxt_seg.sep_after in ("", ";"):
                     t += 1
                     continue   # skipped, contributing no separator
                 break   # a '(' or another separator on an empty segment: the chain ends here
-            status = _gate_status_only(nxt_seg, [records[j].raw for j in range(t + 1, n)])
-            if status is None:
-                break   # the re-raise exemption: no finding for this candidate
-            if not status:
+            if not _gate_status_only(nxt_seg):
                 if count and join in ("&&", "||"):
                     hit = ("note" if noted else "deny", _command_word(seg.argv), trailer_word, join)
                     if hit[0] == "deny":
@@ -16472,6 +16488,7 @@ def _gate_status_trailer(reading):
                     if note_hit is None:
                         note_hit = hit
                 break
+            saved.extend(_gate_saved_status(nxt_seg))
             count += 1
             idx = _command_word_index(nxt_seg.argv)
             trailer_word = nxt_seg.argv[idx] if idx < len(nxt_seg.argv) else nxt_seg.argv[0]
@@ -16486,9 +16503,12 @@ def _gate_status_trailer(reading):
 
 def _gate_status_trailer_messages(hit):
     """The (reason, banner) of the status-trailer deny. The reason claims only the lexical shape: it
-    names the checker's word, the trailer word as typed and the gating separator, and says that a
-    command list reports the last command's status, so the '&&'/'||' gates the next step on the
-    trailer's exit, not the check's. The fix never suggests an exit-status echo (the rule's propagation
+    names the command word of the checker segment ('timeout' for 'timeout 60 pytest', 'python3' for
+    'python3 -m pytest'), the trailer word as typed and the gating separator, and says that a command
+    list reports the last command's status, so the '&&'/'||' gates the next step on the trailer's
+    exit, not the check's, and whether the step runs does not depend on the check's result (under
+    '&&' it runs when the trailer succeeds, under '||' only when the trailer fails, never because the
+    check failed). The fix never suggests an exit-status echo (the rule's propagation
     clause, as _verification_sink_message also holds): chain the step directly on the check, gate it on
     the check's own exit, or save '$?' and test the saved value before the step."""
     _tier, g_word, trailer_word, gate_sep = hit
@@ -16496,8 +16516,8 @@ def _gate_status_trailer_messages(hit):
         "AIQT rule gatdis (gate-discipline): {!r} looks like a verification gate, and the step after "
         "the status-only trailer {!r} is chained to that trailer by '{}'. A command list reports the "
         "last command's status, so the '{}' gates the next step on the trailer's exit, not the check's, "
-        "and a failing check still lets the gated step run. Chain the step directly on the check "
-        "('{} && <step>'), or run the check alone and gate the next step on the check's own exit "
+        "and whether that step runs does not depend on the check's result. Chain the step directly on "
+        "the check ('{} && <step>'), or run the check alone and gate the next step on the check's own exit "
         "status, or save that status into a variable and test the variable before the step. {}"
         .format(g_word, trailer_word, gate_sep, gate_sep, g_word, _GATE_ALTS),
         "AIQT guardrail: denied a checker whose status a status-only trailer masks before a "
@@ -18016,9 +18036,12 @@ def gate_weakening(data):
     gates that step on the trailer's exit, not the check's. A newline at the entry or on a non-empty
     trailer downgrades the hit to a note held below the broad tier's; an empty segment with a newline or
     ';' separator is skipped and contributes no separator; a '$?'-capturing assignment whose variable
-    the raw text of a later segment of the same reading reads ends the chain with no finding (the rule's
-    re-raise form: 'pytest; rc=$?; [ $rc -eq 0 ] && git push origin main' allows while 'pytest; rc=$? &&
-    git push origin main' denies); every candidate is evaluated and a deny anywhere wins over any note.
+    ('$rc' or '${rc' with no identifier character after the name, so '$rcfile' is no read of 'rc') the
+    raw text of a later segment of the chain reads, up to and including the step the chain gates, ends
+    the chain with no finding (the rule's re-raise form: 'pytest; rc=$?; [ $rc -eq 0 ] && git push
+    origin main' allows while 'pytest; rc=$? && git push origin main' and 'pytest; rc=$?; echo hi &&
+    git push origin main; exit $rc', whose only read follows the gated step, deny); every candidate is
+    evaluated and a deny anywhere wins over any note.
     Disclosed costs of this tier: '|| true'/'|| :' with a '&&'/'||'-chained step after it moves from the
     broad tier's note to this deny; the broad checker heuristic feeds it, so a checker-shaped name that
     gates nothing ('test -f x; echo ok && next') and a package-runner install line ('uv pip install
@@ -18087,14 +18110,18 @@ def gate_weakening(data):
     options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks; R5, for the status-trailer tier: an always-succeeding trailer outside
-    the closed set (sleep, date, cd, pwd, logger, wait, export, local), an 'x=$(date)'-style
+    the closed set (sleep, date, cd, pwd, logger, wait, export, local), a closed-set trailer behind a
+    wrapper word ('command', 'builtin', 'env' or 'nohup' before echo, printf, true or ':', such as
+    'pytest; command echo ok && git push origin main'), a 'test' or '[' trailer ('pytest; test -e / &&
+    git push origin main'), an 'x=$(date)'-style
     substitution assignment (not status-only), an unconditional 'G; N' with no '&&'/'||' on the trailer,
     a checker entered by '&&' ('pytest && echo passed; echo done && git push origin main'), a
     backgrounded checker, a trailer that itself pipes, a trailer carrying a here-string (the parse-error
     path, where this tier does not run, as on the floor-fallback-only and unjudged-'#' paths), and a
-    '$?'-capturing assignment whose variable is named only in a later segment's quoted data or kept
-    comment (the read is sought in the raw text, an under-deny), only in another reading, or through a
-    name built at run time."""
+    '$?'-capturing assignment whose variable is named in the quoted data or kept comment of a later
+    segment up to the gated step (the read is sought in the raw text, an under-deny), in the gated step
+    itself whatever it does with it ('pytest; rc=$?; echo hi && ./deploy.sh $rc'), only in another
+    reading, or through a name built at run time."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))

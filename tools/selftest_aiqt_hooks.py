@@ -22239,6 +22239,14 @@ def _main_isolated(monitor):
                 "pytest\necho a && ls /abs; ruff check .; echo b && git push origin main", "deny")
         gexpect("(gw-st-r14) a skipped empty newline segment does not downgrade the tier",
                 "pytest;\necho ok && git push origin main", "deny")
+        gexpect("(gw-st-r15) a saved status read only after the gated step does not exempt the chain",
+                "pytest; rc=$?; echo hi && git push origin main; exit $rc", "deny")
+        gexpect("(gw-st-r16) a longer name that starts with the saved name is no read of it",
+                "pytest; rc=$?; echo $rcfile && git push origin main", "deny")
+        gexpect("(gw-st-r17) a braced longer name ending in a digit is no read of the saved name",
+                "pytest; rc=$?; echo ${rc2} && git push origin main", "deny")
+        gdeny_names("(gw-st-r18) the reason says the step does not depend on the check, true under '||' too",
+                    "pytest; true || ./alert.sh", "does not depend on the check's result")
         gexpect("(gw-st-f1) disclosed flip: '|| true' with a chained step moves from note to deny",
                 "pytest || true && git push origin main", "deny")
         gexpect("(gw-st-f2) disclosed flip: '|| :' with a chained step moves from note to deny",
@@ -22281,10 +22289,14 @@ def _main_isolated(monitor):
                 "make test; status=$?; echo done && test $status -eq 0 && git push origin main", "allow")
         gexpect("(gw-st-a17) pip is on no runner list, so the install line allows (the dfp1 pair)",
                 "pip install pytest; echo ok && pytest -q", "allow")
+        gexpect("(gw-st-a18) a braced read of the saved name, closed by '}', still exempts",
+                "pytest; rc=$? && [ ${rc} -eq 0 ] && git push origin main", "allow")
         gexpect("(gw-st-n2) a newline at the entry downgrades to a note",
                 "pytest\necho ok && git push origin main", "allow-note")
         gexpect("(gw-st-n3) a newline on an in-chain trailer downgrades to a note",
                 "pytest; echo a\necho b && git push origin main", "allow-note")
+        gexpect("(gw-st-n4) a saved status read only after the gated step notes across line breaks",
+                "pytest\nrc=$?\necho hi && git push origin main\nexit $rc", "allow-note")
 
         # GD-124: this BEST-EFFORT, ASK-only guard scans every token after a recognized git commit
         # subcommand. The handler reads _lex_command's per-token opacity without Git option binding; it
