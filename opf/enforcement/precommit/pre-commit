@@ -56,9 +56,12 @@
 # MERGE_HEAD names as its parents, and comparing with HEAD alone would let a merge such as
 # git merge -s ours drop every record the merged branch added. So this hook carries every MERGE_HEAD
 # commit id into the snapshot as its MERGE_HEAD, and the doctor then compares the staged result with
-# EVERY parent: each record a parent holds must survive and no counter may fall below its value in any
-# parent, refusing on any dropped record or lowered counter, while a merge commit's status changes are
-# not graded (see Residuals). A MERGE_HEAD that cannot be read, or holds anything but commit ids of this
+# EVERY parent: each record a parent's type indexes hold must survive (a worklog entry is not an indexed
+# record, so a dropped entry is caught only as a lowered counter, and tied counters do not expose it),
+# no counter may fall below its value in any parent, and a record any parent holds at an unqualified
+# terminal state must keep that state in the result, refusing on any dropped record, lowered counter or
+# terminal-status resurrection, while a merge commit's non-terminal status changes are not graded (see
+# Residuals). A MERGE_HEAD that cannot be read, or holds anything but commit ids of this
 # repository, exits 2 before any check, never an unchecked merge.
 #
 # Residuals this hook does not close (spec 14.1):
@@ -79,10 +82,12 @@
 #     with git merge --abort. A pipeline that assumes git pull always exits 0 breaks at the first
 #     non-fast-forward merge.
 #   - Merge commits: concluding one (MERGE_HEAD present), the staged result is compared with every
-#     parent for dropped records and lowered counters (see Merge commits above), but a merge commit's
-#     status changes are not graded: transition legality is skipped for a merge commit, so a status a
-#     parent holds may change in the result unchecked (each branch's own transitions were graded when
-#     that branch committed them through this hook; one committed past it is not re-graded here).
+#     parent for dropped records, lowered counters and terminal-status resurrection (see Merge commits
+#     above), but a merge commit's non-terminal status changes are not graded: transition legality is
+#     skipped for a merge commit, so a non-terminal status a parent holds may change in the result
+#     unchecked (each branch's own transitions were graded when that branch committed them through this
+#     hook; one committed past it is not re-graded here), and a dropped worklog entry is caught only as
+#     a lowered counter (tied counters do not expose it).
 #   - The hook runs checked-out code: the stub runs the working-tree copy of this file, and this file
 #     runs the working-tree opf.py (OPF_TOOL), not the staged ones. Checking out a branch, merge or pull
 #     request that changes them runs the changed code, with the user's privileges, at the next git

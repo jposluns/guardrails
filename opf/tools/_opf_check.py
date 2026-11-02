@@ -3463,9 +3463,11 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, sourc
     never carries a worklog id (the worklog is a ledger, not a type index), so the worklog half of this
     gate is reached only by a caller that supplies the observations itself. With `grade_transitions`
     False (a merge commit: either branch's committed status changes would be graded as this commit's,
-    so a merge commit's status changes are not graded, the disclosed residual, and the mid-change
-    pending cannot-evaluate does not arise), a prior record whose status differs is not graded at all,
-    while id survival and the unchanged-status immutable-body comparison still run."""
+    so a merge commit's non-terminal status changes are not graded, the disclosed residual, and the
+    mid-change pending cannot-evaluate does not arise), a prior record whose status differs is not
+    graded for transition legality, while the unqualified-terminal finding (terminal states are
+    absorbing, so it misgrades no branch's own committed transition), id survival and the
+    unchanged-status immutable-body comparison still run."""
     unknown = set()
     for rid in sorted(prior_records):
         ptype, pstatus = prior_records[rid]
@@ -3493,12 +3495,14 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, sourc
         terminal_unqual = p_state in spec.terminal and p_qual is None
         cur_status = _status_string(cur.state, cur.qual)
         status_changed = cur_status is not None and cur_status != pstatus
-        if status_changed and not grade_transitions:
-            continue
+        # The unqualified-terminal finding is graded BEFORE the merge skip: a terminal state is
+        # absorbing, so no branch's own committed transition can be misgraded by it (spec 8.4).
         if terminal_unqual and status_changed:
             rep.finding("C-HISTORY-RESURRECTION: prior record {!r} was at unqualified terminal {!r} but is "
                         "now {!r}; a terminal record does not change (no resurrection; spec 8.4)".format(
                             rid, pstatus, cur_status))
+            continue
+        if status_changed and not grade_transitions:
             continue
         if immutable_body:
             # a created-terminal record keeps its status AND its body; verify the body against the prior
@@ -3527,25 +3531,50 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, sourc
                  "12/13)".format(", ".join(repr(t) for t in sorted(unknown))))
 
 
-def _check_merge_parent_survival(commit, prior, all_ids, rep, source_unread=frozenset()):
+def _check_merge_parent_survival(commit, prior, by_id, all_ids, rep, source_unread=frozenset()):
     """C-HISTORY-RESURRECTION over ONE merged commit (a merge parent beyond HEAD): every record id that
-    parent holds must survive into the merge result, active or archived, since a merge such as
-    `git merge -s ours` concludes without a conflict and would drop every record the merged branch added
-    (spec 12/13). Only id survival is graded here: a merge commit's status changes are not graded (the
-    disclosed residual), and the per-parent counter comparison runs under C-HISTORY-COUNTERS. A prior id
-    absent from a type whose record source could not be read is a named CANNOT-EVALUATE for that type,
-    never a false finding."""
+    parent's type indexes hold must survive into the merge result, active or archived, since a merge such
+    as `git merge -s ours` concludes without a conflict and would drop every record the merged branch added
+    (spec 12/13), and a record that parent holds at an UNQUALIFIED TERMINAL state must keep that state in
+    the result (terminal states are absorbing, so this misgrades no branch's own committed transition;
+    spec 8.4). Non-terminal status changes are not graded for a merge commit (the disclosed residual), the
+    per-parent counter comparison runs under C-HISTORY-COUNTERS, and a worklog ENTRY is not in any parent's
+    record set (the worklog is a ledger, not a type index), so a dropped entry is bounded by that counter
+    comparison alone. A prior id absent from a type whose record source could not be read is a named
+    CANNOT-EVALUATE for that type, never a false finding."""
     unknown = set()
     for rid in sorted(prior["records"]):
-        if rid in all_ids:
+        ptype, pstatus = prior["records"][rid]
+        if rid not in all_ids:
+            if ptype in source_unread:
+                unknown.add(ptype)
+                continue
+            rep.finding("C-HISTORY-RESURRECTION: record {!r}, held by merge parent {}, is absent from both "
+                        "the active store and the archive (a merge result must keep every record each parent "
+                        "holds; spec 12/13)".format(rid, commit))
             continue
-        ptype = prior["records"][rid][0]
-        if ptype in source_unread:
-            unknown.add(ptype)
+        cur = by_id.get(rid)
+        if cur is None:
+            continue     # archived or otherwise not an active record: status is not graded here
+        spec = BASELINE_SPECS.get(ptype)
+        if spec is None:
+            rep.cant("C-HISTORY-RESURRECTION: merge parent {} record {!r} names unsupported type "
+                     "{!r}".format(commit, rid, ptype))
             continue
-        rep.finding("C-HISTORY-RESURRECTION: record {!r}, held by merge parent {}, is absent from both "
-                    "the active store and the archive (a merge result must keep every record each parent "
-                    "holds; spec 12/13)".format(rid, commit))
+        pparsed, perr = parse_status(pstatus, spec)
+        if pparsed is None:
+            rep.cant("C-HISTORY-RESURRECTION: merge parent {} record {!r} status {!r} is unparseable "
+                     "({})".format(commit, rid, pstatus, perr))
+            continue
+        p_state, p_qual = pparsed
+        if p_state not in spec.terminal or p_qual is not None:
+            continue     # only the absorbing unqualified-terminal state is graded against a merged parent
+        cur_status = _status_string(cur.state, cur.qual)
+        if cur_status is None or cur_status == pstatus:
+            continue     # an unparseable current status is the schema check's; an unchanged status is clean
+        rep.finding("C-HISTORY-RESURRECTION: record {!r} was at unqualified terminal {!r} in merge parent "
+                    "{} but is now {!r}; a terminal record does not change (no resurrection; spec "
+                    "8.4)".format(rid, pstatus, commit, cur_status))
     if unknown:
         rep.cant("C-HISTORY-RESURRECTION: the records of {} could not all be read (see C-RECORDS and "
                  "C-ARCHIVE-ENUM); record survival from merge parent {} is not evaluated over a partial "
@@ -5574,10 +5603,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     prior_reason = ("the prior committed snapshot observation was supplied but malformed"
                     if prior_malformed else "no prior committed snapshot was supplied")
     # Concluding a merge (MERGE_HEAD present), the result is compared with EVERY parent: each record a
-    # parent holds must survive and no counter may fall below its value in any parent, while a merge
-    # commit's status changes are not graded (transition legality is skipped above, so either branch's
-    # committed changes are not misgraded as this commit's and the mid-change pending cannot-evaluate
-    # does not arise). A merge whose parents were observed but could not be normalized, or whose parent
+    # parent's type indexes hold must survive (a worklog entry is not an indexed record, so a dropped
+    # entry is bounded by the counter comparison alone), no counter may fall below its value in any
+    # parent, and a record any parent holds at an unqualified terminal state must keep that state, while
+    # a merge commit's non-terminal status changes are not graded (transition legality is skipped above,
+    # so either branch's committed changes are not misgraded as this commit's and the mid-change
+    # pending cannot-evaluate does not arise). A merge whose parents were observed but could not be
+    # normalized, or whose parent
     # snapshots fail the same imported-member gate as the HEAD prior, fails closed to named
     # CANNOT-EVALUATEs, never an unchecked merge.
     merge_parents = obs.get("merge_parents")
@@ -5649,7 +5681,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                  "record survival against the merged commit(s) is not evaluated (spec 12/13)")
     elif merge_parents is not None:
         for parent in merge_parents:
-            _check_merge_parent_survival(parent["commit"], parent["prior"], all_ids, rep, source_unread)
+            _check_merge_parent_survival(parent["commit"], parent["prior"], by_id, all_ids, rep,
+                                         source_unread)
 
     return evaluated_profiles, unevaluated_profiles
 

@@ -152,11 +152,21 @@ git commit then concludes it as a two-parent merge through the pre-commit check,
 result carries a tamper by doctor's finding; concluding a merge, the staged result is compared with every
 parent: a git merge -s ours of a branch that added a record and raised its counters is refused at the
 concluding git commit by doctor's per-parent findings (the dropped record and the lowered counters, each
-named against the merged parent) with HEAD unmoved, a clean merge whose result keeps both sides' added
-records concludes as a two-parent merge, and an octopus git merge -s ours of two branches (MERGE_HEAD
-naming two commits) is refused the same way; the same merges without the stubs commit. Run as
+named against the merged parent) with HEAD unmoved, a merge result that reopens a record at an
+unqualified terminal state is refused as terminal resurrection whether the reopen is staged in the merge
+resolution (both the HEAD-prior and the per-parent finding named) or carried by the merged branch, a
+clean merge whose result keeps both sides' added records concludes as a two-parent merge, a merged
+branch's own committed non-terminal status change (reaching a terminal state kept in the result)
+concludes ungraded, and an octopus git merge -s ours of two branches (MERGE_HEAD naming two commits) is
+refused the same way; the same merges without the stubs commit. The merge observation fails closed: a
+MERGE_HEAD the hook cannot validate (not hex, an unknown id, empty, a tree id) exits 2 at the hook by
+its own message, and one the hook passes but the observer cannot read back to usable snapshots (an
+oversized MERGE_HEAD of valid ids past the observer's bounded read, and a parent commit holding no
+store) is doctor's named CANNOT-EVALUATE, each with HEAD unmoved, never an unchecked merge. Run as
 pre-merge-commit, the hook runs no step and exits 2. The shipped files disclose that git merge --no-verify
-skips the stubs, that a merge commit's status changes are not graded, that a fast-forward merge or pull
+skips the stubs, that a merge commit's non-terminal status changes are not graded while a terminal state
+any parent holds must be kept (a dropped worklog entry caught only as a lowered counter), that a
+fast-forward merge or pull
 brings in commits with no hook run, and that the pre-merge-commit stop makes a scripted merge or pull
 exit 1 with MERGE_HEAD left behind.
 A SECOND, git-independent self-test leg verifies the enforcement pack's Claude Code deny hook
@@ -2470,6 +2480,134 @@ def _self_test_isolated():
                     "FINDING: C-HISTORY-COUNTERS: against merge parent " + octo_side1 in text,
                     "FINDING: C-HISTORY-COUNTERS: against merge parent " + octo_side2 in text),
                    (True, True, True, True, True))
+            # A merge result that RESURRECTS a record at an unqualified terminal state is refused at the
+            # concluding git commit, whether the reopen is staged as part of the merge resolution or
+            # carried by the merged branch: a terminal state in any parent keeps that state in the result
+            # (terminal states are absorbing, so no branch's own committed transition is misgraded),
+            # while non-terminal status changes stay ungraded for a merge commit (the control below).
+            def _machine_bi2(status):
+                m = clean_machine()
+                m["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, status)])
+                return m
+
+            reopen = _fixture("merge-reopen-resolution", machine=_machine_bi2("dropped"))
+            expect("merge-reopen-install", _install(reopen), EXIT_OK)
+            _git(reopen, home, "checkout", "-q", "-b", "side")
+            (reopen / "SIDE.md").write_text("side\n", encoding="utf-8")
+            _git(reopen, home, "add", "SIDE.md")
+            _git(reopen, home, "commit", "-q", "--no-verify", "-m", "side")
+            _git(reopen, home, "checkout", "-q", "main")
+            _advance_main(reopen, "MAIN.md")
+            reopen_side = _git_out(reopen, "rev-parse", "side")
+            before = _head(reopen)
+            rc, text = _merge(reopen)
+            expect("merge-reopen-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(reopen) == before),
+                   (True, True))
+            # The reopen is staged as part of the merge resolution, before the concluding commit: both
+            # parents hold BI-2 at 'dropped', so the HEAD-prior grading and the per-parent grading each
+            # name the resurrection.
+            _write_machine(reopen, {"backlog_item.index.toml": idx([bi(1, "done"), bi(2, "open")])})
+            _git(reopen, home, "add", "-A")
+            rc, text = _commit(reopen)
+            expect("merge-resolution-reopen-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(reopen) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: prior record 'BI-2' was at unqualified terminal "
+                    "'dropped' but is now 'open'" in text,
+                    "FINDING: C-HISTORY-RESURRECTION: record 'BI-2' was at unqualified terminal "
+                    "'dropped' in merge parent " + reopen_side in text,
+                    _git_out(reopen, "rev-parse", "-q", "--verify", "MERGE_HEAD") == reopen_side),
+                   (True, True, True, True, True))
+            # The reopen carried by the merged branch (committed past the hook): the merge result takes
+            # the branch's reopened record, and the concluding commit is refused against the HEAD prior.
+            carried = _fixture("merge-reopen-carried", machine=_machine_bi2("dropped"))
+            expect("merge-carried-install", _install(carried), EXIT_OK)
+            _record_branch(carried, "side", _machine_bi2("open"))
+            _advance_main(carried, "MAIN.md")
+            carried_side = _git_out(carried, "rev-parse", "side")
+            before = _head(carried)
+            rc, text = _merge(carried)
+            expect("merge-carried-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(carried) == before),
+                   (True, True))
+            rc, text = _commit(carried)
+            expect("merge-branch-reopen-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(carried) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: prior record 'BI-2' was at unqualified terminal "
+                    "'dropped' but is now 'open'" in text,
+                    _git_out(carried, "rev-parse", "-q", "--verify", "MERGE_HEAD") == carried_side),
+                   (True, True, True, True))
+            # The clean-merge control: a merged branch's own non-terminal status change (open -> dropped,
+            # committed on the branch) concludes with the reached terminal state kept in the result, so
+            # the terminal grading over-refuses nothing and no branch's own transition is graded as this
+            # commit's.
+            settle = _fixture("merge-settled-clean")
+            expect("merge-settled-install", _install(settle), EXIT_OK)
+            _record_branch(settle, "side", _machine_bi2("dropped"))
+            _advance_main(settle, "MAIN.md")
+            settle_side = _git_out(settle, "rev-parse", "side")
+            before = _head(settle)
+            rc, text = _merge(settle)
+            expect("merge-settled-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(settle) == before),
+                   (True, True))
+            rc, moved = _committed(settle)
+            expect("merge-settled-clean-concluded",
+                   (rc, moved, _git_out(settle, "rev-parse", "HEAD^2") == settle_side,
+                    '"dropped"' in (settle / machine_dir / "backlog_item.index.toml").read_text(
+                        encoding="utf-8")),
+                   (EXIT_OK, True, True, True))
+            # Fail-closed merge observation, end to end: a MERGE_HEAD the hook cannot validate exits 2 at
+            # the hook, before any check (the hook's own message pins the layer), and one the hook passes
+            # but the observer cannot read back to usable snapshots is doctor's named CANNOT-EVALUATE,
+            # each refusing the commit with HEAD unmoved: never an unchecked merge.
+            planted = _fixture("merge-head-planted")
+            expect("merge-planted-install", _install(planted), EXIT_OK)
+            (planted / "CHANGE.md").write_text("change\n", encoding="utf-8")
+            _git(planted, home, "add", "CHANGE.md")
+            planted_mh = _git_out(planted, "rev-parse", "--path-format=absolute", "--git-path",
+                                  "MERGE_HEAD")
+            planted_head = _head(planted)
+            cant = "a merge is in progress but its merged parents could not be observed"
+
+            def _planted_commit(content):
+                Path(planted_mh).write_text(content, encoding="utf-8")
+                prc, ptext = _commit(planted)
+                return prc != EXIT_OK, _head(planted) == planted_head, ptext
+
+            refused, still, text = _planted_commit("zz-not-hex\n")
+            # The hook's own unquoted message pins the layer: the observer's defence-in-depth note
+            # quotes the value ("holds 'zz-not-hex'"), so a hook that stops validating does not pass.
+            expect("merge-head-not-hex-refused-by-hook",
+                   (refused, still, "holds zz-not-hex, which is not a commit id" in text),
+                   (True, True, True))
+            refused, still, text = _planted_commit("1234567890abcdef1234567890abcdef12345678\n")
+            expect("merge-head-unknown-id-refused-by-hook",
+                   (refused, still, "which is not a commit of this repository" in text),
+                   (True, True, True))
+            refused, still, text = _planted_commit("")
+            expect("merge-head-empty-refused-by-hook",
+                   (refused, still, "names no commit" in text), (True, True, True))
+            tree_id = _git_out(planted, "rev-parse", "HEAD^{tree}")
+            refused, still, text = _planted_commit(tree_id + "\n")
+            expect("merge-head-tree-id-refused-by-hook",
+                   (refused, still, "which is not a commit of this repository" in text),
+                   (True, True, True))
+            # An oversized MERGE_HEAD of valid commit ids passes the hook's per-line validation; the
+            # observer's bounded read then refuses it, the engine's named CANNOT-EVALUATE.
+            lines_needed = (65536 // (len(planted_head) + 1)) + 1
+            refused, still, text = _planted_commit((planted_head + "\n") * lines_needed)
+            expect("merge-head-oversized-cannot-evaluate", (refused, still, cant in text),
+                   (True, True, True))
+            # A commit of this repository whose snapshot the observer cannot reconstruct (no store at
+            # that commit) passes the hook's validation and is the same named CANNOT-EVALUATE.
+            empty_tree = _git_out(planted, "hash-object", "-w", "-t", "tree", os.devnull)
+            storeless = _git_out(planted, "-c", "user.email=opf@example.invalid",
+                                 "-c", "user.name=OPF Self Test", "commit-tree", empty_tree,
+                                 "-m", "no store")
+            refused, still, text = _planted_commit(storeless + "\n")
+            expect("merge-storeless-parent-cannot-evaluate", (refused, still, cant in text),
+                   (True, True, True))
+            # Tolerant cleanup: a regression that ACCEPTS one of these commits makes git consume
+            # MERGE_HEAD, and the red vectors above must still be reported, not a harness error.
+            Path(planted_mh).unlink(missing_ok=True)
             hook_text = " ".join((pack / "pre-commit").read_text(encoding="utf-8").replace("#", " ").split())
             inst_text = " ".join((pack / "install.sh").read_text(encoding="utf-8").replace("#", " ").split())
             expect("residuals-disclosed", (
@@ -2480,9 +2618,12 @@ def _self_test_isolated():
                 in hook_text,
                 "no pre-commit hook for cherry-pick, revert, rebase or am" in inst_text
                 and "git merge --no-verify skip them" in inst_text
-                and "a merge commit's status changes are not graded" in inst_text
+                and "a merge commit's non-terminal status changes are not graded" in inst_text
                 and "git merge --no-verify (git pull --no-verify) skips the pre-merge-commit stub" in hook_text
-                and "a merge commit's status changes are not graded" in hook_text
+                and "a merge commit's non-terminal status changes are not graded" in hook_text
+                and "terminal-status resurrection" in hook_text
+                and "terminal-status resurrection" in inst_text
+                and "tied counters do not expose it" in hook_text
                 and "which the pack does not install" not in hook_text,
                 "so a missing hook is never silent" in hook_text,
                 "It never sets core.hooksPath" in inst_text,
@@ -2632,9 +2773,12 @@ def _self_test_isolated():
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
-              "status contract 1=assertion 2=harness; pre-commit floor: installer writes a stub in the "
-              "untracked hooks directory, sets no core.hooksPath, keeps other hooks, and refuses any "
-              "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
+              "status contract 1=assertion 2=harness; pre-commit floor: installer writes a pre-commit "
+              "and a pre-merge-commit stub in the "
+              "untracked hooks directory (a clone holding the pre-commit stub alone gains the second "
+              "with the first kept), sets no core.hooksPath, keeps other hooks, and refuses any "
+              "hooksPath (another linked worktree's included), an existing pre-commit or pre-merge-commit "
+              "hook (compared byte "
               "for byte, never through a symlink), a symlinked hooks destination, a git directory in any "
               "worktree's top level (from a linked worktree, from the main one, and equal to the top level) "
               "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back with what is left named by file type (after chmod, ln and the last rmdir nothing; after either mkdir that empty directory, and the hooks directory holding it when this run made that too; before the hooks mkdir no directory; an unreadable stub named; an unsearchable hooks directory named not known), a directory arriving at either mkdir kept, a stale private directory refused and kept, an unreadable worktree registry, a worktree entry git cannot read, a closed or broken stdout leaving a successful install at 0, an "
@@ -2644,6 +2788,18 @@ def _self_test_isolated():
               "a refusal, "
               "branch-added hooks not run, "
               "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
+              "real git merges: a merge git merge would record is stopped by the pre-merge-commit stub "
+              "(which runs no step and exits 2) with HEAD unmoved and MERGE_HEAD plus the staged result "
+              "left, and git commit concludes it as a two-parent merge through the pre-commit check, the "
+              "result compared with every parent: an -s ours drop of a merged branch's record and "
+              "counters refused (octopus included, each parent named), a reopen of an "
+              "unqualified-terminal record refused as terminal resurrection whether staged in the merge "
+              "resolution or carried by the merged branch, a clean merge keeping both sides' records "
+              "(and a merged branch's own non-terminal status change reaching a kept terminal state) "
+              "concluded, the same merges without the stubs committing; merge observation fails closed "
+              "(a MERGE_HEAD the hook cannot validate, not hex, an unknown id, empty or a tree id, exits "
+              "2 at the hook, while an oversized MERGE_HEAD of valid ids and a parent commit holding no "
+              "store are doctor's named CANNOT-EVALUATE), never an unchecked merge; "
               "git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
               "passes an unborn branch and a remote sync target; over an opf init store passes render "
