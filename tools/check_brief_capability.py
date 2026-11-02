@@ -17,7 +17,8 @@ RESIDUALS). Every rule that infers a request from free prose (R1, R5, R6, R7) is
 its hits are printed so a human sees them, and it never refuses. For a family that can execute (`yes` or
 `read-only-sandbox`) no execution rule applies; the PREFLIGHT rules below apply to every family.
 
-PREFLIGHT (the input paths a brief names; read over the whole brief, line by line, before scope is applied):
+PREFLIGHT (the input paths and run lines a brief names; read over the whole brief, line by line, before scope is
+applied):
 
   P1 relative input    ADVISORY. The brief names a workdir (the word workdir, work dir or working directory)
                        and an input by a relative path: a token with a slash whose last component has a file
@@ -287,6 +288,23 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
                        CommonMark reading (a no-break space accepted after a closing fence, for one).
+  P7 cwd run line      ADVISORY, for every family, as P1 is: both read a fault from the brief's words, never
+                       from the worker's shell. A line BANS cd or chained commands when a ban word (never, do
+                       not, don't, must not, not to, no, without, forbid, forbids, forbidden, ban, bans or
+                       banned, as a whole word, in any case) is followed on the line by the word cd (lower
+                       case, alone or in a code span), a chain phrase (chained commands, chaining commands,
+                       command chains and the like) or &&. A RUN LINE is a command line of the COMMAND LINE
+                       grammar below that is not a git one and that starts before the end of the first
+                       prohibition on its line (read lexically, as P2 reads it, so "never python3 -m <module>"
+                       is no run line). It depends on the working directory when it is python -m (alone or
+                       closing a flag cluster), a python, bash, sh or zsh script, a `.py` or `.sh` path with a
+                       flag, or ./x.sh named by a path that does not open with /, pytest with no absolute path
+                       after it on its line, or any such command line on a line that also says from or in
+                       and then a path, a <name> placeholder, the repository root, the workdir, the worktree
+                       or the clone. Where the brief has a ban line and such a run line, P7 prints the run
+                       line, the reason and the first ban line, and suggests the absolute script form
+                       (python3 -I -B /abs/path/to/script.py). python -c, bash -c and an absolute script path
+                       are no fault, nor is any run line in a brief with no ban line.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -357,7 +375,13 @@ can be read as refs; a reach whose own arguments wrap onto the next line with no
 at a line's end, main on the next) is read without them, so it is not judged, and a code span across a line break
 is read as two lines; a tag force-moved after the lint runs is not seen; a dispatch ref written by hand that
 --repo cannot resolve is only ADVISORY, and the worker then fails closed at the fetch; and, like every rule, it
-helps only where the sender refuses to send on exit 1 or 2.
+helps only where the sender refuses to send on exit 1 or 2. P7 is textual and sees only the brief's own words: a
+ban or a working directory set by the worker's policy, its harness or a standing text sent beside the brief is not
+seen; a ban phrased with no listed ban word before cd ("cd is refused") or a run line phrased with no listed command
+(a git command line, make, tox, npm or a script with no flag) is not read; a run line after a prohibition on its own
+line is silenced lexically, whatever the line goes on to ask; a from or in phrase anywhere on a run line's line
+counts, so an absolute run line beside "the output in tools/x.toml" is printed; and whether the worker can in fact
+run the line (a runner that sets its working directory, a tool that does not read it) is not known.
 
 TEXT. A brief holding a line separator other than LF anywhere (a carriage return, bare or in CRLF, U+0085
 NEXT LINE, U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR), or a format character (Unicode category Cf: a
@@ -1821,6 +1845,18 @@ LARGE_OUTPUT_RE = re.compile(r"(?<![\w-])(?:(?:whole|entire|full|complete)\s+(?:
                              r"output|transcript|listing)s?+|(?:unified\s+)?diffs?+|patch(?:es)?+)(?![\w-])", re.I)
 DELIVER_RE = re.compile(r"(?<![\w-])(?:return|give|paste|print|send|deliver|hand\s+back|show|produce|include|"
                         r"attach|provide|reply\s+with|quote)(?![\w-])", re.I)
+# P7: a line bans cd or chained commands when a ban word (CD_BAN_RE) is followed on it by a cd word (CD_WORD_RE) or a
+# chain phrase (CHAIN_WORD_RE); a run line that also holds a directory phrase (DIR_PHRASE_RE: from or in, then a path,
+# a <name> placeholder, the repository root, the workdir, the worktree or the clone) runs from that directory
+CD_BAN_RE = re.compile(r"(?<![\w-])(?:never|do\s++not|don['’]t|must\s++not|not\s++to|no|without|forbids?+|"
+                       r"forbidden|bans?+|banned)(?![\w-])", re.I)
+CD_WORD_RE = re.compile(r"(?<![\w./$-])cd(?![\w/-]|\.[\w./])")   # a sentence stop may follow cd
+CHAIN_WORD_RE = re.compile(r"(?<![\w-])(?:chain(?:ed|ing)?+\s++commands?+|command\s++chain(?:s|ing)?+)(?![\w-])|&&",
+                           re.I)
+DIR_PHRASE_RE = re.compile(r"(?<![\w-])(?:from|in)\s++(?:(?:the|your)\s++)?+(?:/|\.\.?+/|<[\w-]++>|[\w.-]++/|"
+                           r"(?:repo|repository|project)\s++root(?![\w-])|(?:workdir|worktree|clone|checkout)(?![\w-]))",
+                           re.I)
+CWD_SHELLS = frozenset(("bash", "sh", "zsh"))
 GIT_READ_TIMEOUT = 10
 # P5: the git subcommands that reach a ref (a reach), each with the options whose value is a separate word (or
 # follows `=`); worktree is a reach only as worktree add
@@ -2032,6 +2068,55 @@ def near_pin(line):
     return found.group(1) if found else None
 
 
+def cd_ban(line):
+    """Whether a line bans cd or chained commands (P7): a ban word (CD_BAN_RE) followed on the line by a cd word
+    (CD_WORD_RE) or a chain phrase (CHAIN_WORD_RE)."""
+    ban = CD_BAN_RE.search(line)
+    return bool(ban and (CD_WORD_RE.search(line, ban.end()) or CHAIN_WORD_RE.search(line, ban.end())))
+
+
+def cwd_reason(line, start, end, python):
+    """Why the command line line[start:end] (a python one when `python`, else one of COMMAND_FORMS) depends on the
+    working directory, or None: python -m finds its module from the working directory first, and a script, test
+    file or tests directory named by a relative path is looked up there; python -c, bash -c and a path that opens
+    with / do not depend on it, and pytest does unless an absolute path follows it on the line."""
+    words = line[start:end].split()
+    if python:
+        target = words[-1]
+        if target.startswith("-"):
+            return "python -m finds its module from the working directory" if target.endswith("m") else None
+        return None if target.startswith("/") else "a relative script path"
+    if words[0] in CWD_SHELLS:
+        return None if words[1] == "-c" or words[1].startswith("/") else "a relative script path"
+    if words[0] == "pytest":
+        if any(word.lstrip("\"'`").startswith("/") for word in line[end:].split()) or words[1].startswith("/"):
+            return None
+        return "pytest collects from the working directory"
+    return None if words[0].startswith("/") else "a relative script path"
+
+
+def cwd_run(line, negation):
+    """(reason, command line) for the first run line on `line` that depends on the working directory (P7), else
+    None. A run line is a command line of the S rules' grammar (option_commands, COMMAND_RE) that is not a git one
+    and that starts before the end of the first prohibition on its line (`negation`, PROHIBITION_RE read lexically,
+    as P2 reads it); it depends on the working directory when cwd_reason gives a reason, or when the line also holds
+    a directory phrase (DIR_PHRASE_RE: from <dir> or in <dir>)."""
+    commands = sorted([(start, end, True) for start, end in option_commands(line)]
+                      + [match.span() + (False,) for match in COMMAND_RE.finditer(line)])
+    phrase = DIR_PHRASE_RE.search(line) if commands else None
+    for start, end, optioned in commands:
+        if negation and start >= negation.end():
+            break
+        if optioned and line[start:end].split()[0].rsplit("/", 1)[-1] == "git":   # a git command line
+            continue
+        reason = cwd_reason(line, start, end, optioned)
+        if reason is None and phrase:
+            reason = "the line runs it from a named directory ({})".format(phrase.group(0))
+        if reason:
+            return reason, line[start:end]
+    return None
+
+
 class PreflightText:
     """The paths a brief names, found once: [(line, path)] for the path words P2 judges (see path_words), split
     into the absolute ones and the ones it cannot place (unplaced), each kept only when no prohibition
@@ -2048,7 +2133,8 @@ class PreflightText:
     top-level or list-item paragraph line of the parsed CommonMark document whose rendered, folded text
     begins with INPUT: declares one path, code declares nothing, and a rendered paragraph line, heading
     or table cell opening with the folded token INPUT or INPUTS and a colon (or a cell that is exactly
-    the token) is bad; and whether a
+    the token) is bad; the lines that ban cd or chained commands (cd_bans, see cd_ban) and the run lines that depend
+    on the working directory (cwd_runs, see cwd_run); and whether a
     hand-back file is named (the words hand-back file or path and an absolute path on one line). `raw` is the
     brief's text before decode_brief removes format characters, which the P5 cure reads (cure_lines); None stands
     for `text` itself."""
@@ -2063,6 +2149,8 @@ class PreflightText:
         self.reviewed_heads = []   # [(line, pin)] for the pin lines labelled REVIEWED HEAD
         self.near_pins = []   # [(line, commit id)] for the look-alike pin lines (near_pin)
         self.unclear = []   # [(line, reason)] for a declaration whose workdir cannot be read
+        self.cd_bans = []   # [line] for a line that bans cd or chained commands (cd_ban)
+        self.cwd_runs = []   # [(line, reason, command line)] for a run line that depends on the working directory
         # the INPUT declarations P6 checks and the malformed or look-alike INPUT lines, each [(line, ...)],
         # read from the raw text by the shared parser so P6 and C1 cannot disagree; a raw text that
         # parser cannot read is CannotEvaluate, never an empty reading
@@ -2083,6 +2171,11 @@ class PreflightText:
             for start, path, placed in words:
                 if not negation or start < negation.end():
                     (self.absolute if placed else self.unplaced).append((number, path))
+            if cd_ban(line):
+                self.cd_bans.append(number)
+            run = cwd_run(line, negation)
+            if run is not None:
+                self.cwd_runs.append((number,) + run)
             for match in REL_PATH_RE.finditer(line):
                 path = _path_token(match.group(0))
                 if inside(match.start()):
@@ -2419,6 +2512,18 @@ def rule_p4(names, row, repo):
                 findings.append(("P4", "ADVISORY", block.lines[bisect.bisect_right(line_starts, start) - 1][0],
                                  "large output asked for with no hand-back file named", _excerpt(raw)))
     return findings
+
+
+def rule_p7(names, row, repo):
+    """P7 ADVISORY: a line of the brief bans cd or chained commands (cd_bans) and a run line depends on the working
+    directory (cwd_runs), so the worker has no sanctioned way to run it and returns no evidence from it. Like P1 it
+    reads the brief's words, not the worker's shell, so it never refuses."""
+    if not names.cd_bans:
+        return []
+    return [("P7", "ADVISORY", line, "run line depends on the working directory ({}) while line {} bans cd or "
+             "chained commands, so the worker has no sanctioned way to run it; name the script or test file by its "
+             "absolute path (python3 -I -B /abs/path/to/script.py)".format(reason, names.cd_bans[0]),
+             _excerpt(command)) for line, reason, command in names.cwd_runs]
 
 
 def hex_ref(word):
@@ -3041,11 +3146,11 @@ def rule_p6(names, row, repo):
 
 
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P6) for a brief's text and its family's row; they apply to every family. `raw`
+    """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
     is the text before decode_brief removed format characters, which the P5 cure reads."""
     names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo)
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo) + rule_p7(names, row, repo)
 
 
 def can_execute(row):
@@ -3108,7 +3213,7 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 
@@ -3589,6 +3694,17 @@ P1_RELATIVE = "The workdir is /w/repo.\nRead docs/notes.md before you answer.\n"
 P1_ABSOLUTE = "The workdir is /w/repo.\nRead /w/repo/docs/notes.md before you answer.\n"
 P1_NO_WORKDIR = "Read docs/notes.md before you answer.\n"
 P1_NOT_A_PATH = "The workdir is /w/repo.\nAnswer yes/no on read/write access under Python 3.14/3.15.\n"
+# P7: a ban on cd or on chained commands, and a run line that needs a working directory
+P7_MODULE = "Never use cd or chained commands.\nRun python3 -I -B -m unittest discover.\n"
+P7_RELATIVE_TEST = "Do not cd.\nRun python3 -I -B tests/test_rule.py and give its exit code.\n"
+P7_PYTEST = "No cd and no chained commands.\nRun `pytest -q tests/`.\n"
+P7_FROM_DIR = "Never cd.\nFrom the repository root, run python3 -I -B /w/repo/tools/t.py --self-test.\n"
+P7_IN_DIR = "Do not chain commands.\nRun python3 -I -B /w/repo/tools/t.py --self-test in /w/repo.\n"
+# the run line before the ban word on the ban line itself is judged
+P7_BEFORE_BAN = "Run python3 -I -B -m unittest discover; never cd first.\n"
+P7_ABSOLUTE = "Never use cd or chained commands.\nRun python3 -I -B /w/repo/tests/test_rule.py and give its exit code.\n"
+P7_NO_BAN = "Run python3 -I -B -m unittest discover.\n"
+P7_PROHIBITED = "Never use cd or chained commands, and never python3 -m <module>.\n"
 P2_BRIEF = "The workdir is /w/repo.\nRead {} before you answer.\n"
 P2_OUTSIDE = P2_BRIEF.format("/etc/other/notes.md")
 P2_NO_WORKDIR = "Read /etc/other/notes.md before you answer.\n"
@@ -5608,6 +5724,16 @@ def self_test(report_path=None):
           ((0, [("P1", "ADVISORY")]), (0, [("P1", "ADVISORY")])))
     check("preflight/p1-clean-quiet", [_outcome(text, "alpha") for text in (P1_ABSOLUTE, P1_NO_WORKDIR, P1_NOT_A_PATH)],
           [(0, [])] * 3)
+    check("preflight/p7-cwd-run-advisory", [_outcome(text, "alpha") for text in (
+        P7_MODULE, P7_RELATIVE_TEST, P7_PYTEST, P7_FROM_DIR, P7_IN_DIR, P7_BEFORE_BAN)], [(0, [("P7", "ADVISORY")])] * 6)
+    check("preflight/p7-clean-quiet", [_outcome(text, "alpha") for text in (P7_ABSOLUTE, P7_NO_BAN, P7_PROHIBITED)],
+          [(0, [])] * 3)
+    # the finding names the run line and the ban line and gives the absolute script form
+    check("preflight/p7-names-line", [(line, "line 1 bans cd" in message, "/abs/path/to/script.py" in message, excerpt)
+                                      for rule, _, line, message, excerpt in evaluate(
+                                          P7_MODULE.encode("utf-8"), "alpha", parse_table(TABLE_FIXTURE.encode(
+                                              "utf-8")))[1] if rule == "P7"],
+          [(2, True, True, "python3 -I -B -m")])
     check("preflight/p2-outside-hard", (_outcome(P2_OUTSIDE), _outcome(P2_BRIEF.format("/w/repo/../x/a.md"))),
           ((1, [("P2", "HARD")]), (1, [("P2", "HARD")])))
     # the workdir boundary: just inside, exactly at, and just outside it on both sides of the name
@@ -6033,6 +6159,23 @@ def self_test(report_path=None):
         check("revert/p1-red", *flip([lambda: _outcome(P1_RELATIVE, "alpha")], [(0, [])], rule_p1=nothing))
         check("revert/p1-file-name-red", *flip([lambda: _outcome(P1_NOT_A_PATH, "alpha")],
                                                [(0, [("P1", "ADVISORY")])], FILE_SUFFIX_RE=re.compile(r"")))
+        p7_cases = [lambda text=text: _outcome(text, "alpha") for text in (
+            P7_MODULE, P7_RELATIVE_TEST, P7_PYTEST, P7_FROM_DIR, P7_IN_DIR, P7_BEFORE_BAN)]
+        check("revert/p7-red", *flip(p7_cases, [(0, [])] * 6, rule_p7=nothing))
+        check("revert/p7-cd-word-red", *flip([lambda: _outcome(P7_RELATIVE_TEST, "alpha")], [(0, [])],
+                                             CD_WORD_RE=never))
+        check("revert/p7-chain-word-red", *flip([lambda: _outcome(P7_IN_DIR, "alpha")], [(0, [])], CHAIN_WORD_RE=never))
+        check("revert/p7-dir-phrase-red", *flip([lambda: _outcome(P7_FROM_DIR, "alpha"),
+                                                 lambda: _outcome(P7_IN_DIR, "alpha")], [(0, [])] * 2,
+                                                DIR_PHRASE_RE=never))
+        # each guard of a clean shape patched out: every path read as relative, every line read as a ban, and no
+        # prohibition read
+        check("revert/p7-absolute-red", *flip([lambda: _outcome(P7_ABSOLUTE, "alpha")], [(0, [("P7", "ADVISORY")])],
+                                              cwd_reason=lambda line, start, end, python: "a relative script path"))
+        check("revert/p7-ban-red", *flip([lambda: _outcome(P7_NO_BAN, "alpha")], [(0, [("P7", "ADVISORY")])],
+                                         cd_ban=lambda line: True))
+        check("revert/p7-prohibition-red", *flip([lambda: _outcome(P7_PROHIBITED, "alpha")],
+                                                 [(0, [("P7", "ADVISORY")])], PROHIBITION_RE=never))
         check("revert/p2-red", *flip([code(P2_OUTSIDE)], [0], rule_p2=nothing))
         # a plain prefix test, with no component boundary and no `..` folded, reads both as under the workdir
         check("revert/p2-under-workdir-red", *flip(
@@ -6820,7 +6963,7 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 218)
+    check("revert/every-flip-ran", len(flipped), 225)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6850,7 +6993,8 @@ def self_test(report_path=None):
           "cannot place, unless the word starts after a prohibition on its line, and exits 2 on a workdir that "
           "normalises to / or holds `..` or on a workdir label line that is not a declaration; it prints a "
           "path missing at a pinned revision of 7 to 40 or 64 hex digits read with git cat-file after `..` is folded (P3; an unresolved pin, or a pin label with any "
-          "other value, exits 2), P1 and P4 as ADVISORY, refuses a pin reached by a git command line through a "
+          "other value, exits 2), P1 and P4 as ADVISORY, P7 as ADVISORY (a run line that needs a working directory "
+          "in a brief that bans cd or chained commands), refuses a pin reached by a git command line through a "
           "ref that can move (a branch, a clone's --branch value however it is spelt, a fetch with no refspec, "
           "FETCH_HEAD after a moving fetch, a merge, rebase, restore --source, archive or path restore of a "
           "branch, a reset in any mode, a reach split by a backslash or after a git word at a line's end, a "
