@@ -16,11 +16,12 @@ are reused, so the two gates agree and no plaintext internal name is re-typed he
      cannot catch, above all a sibling-repo name. Shipped EMPTY by default; the private generator fills it.
 
 SCOPE, deliberately narrow and explicit (all but the role-name rule and the decision-id layer, whose
-whole-tree scopes are described below). Layers 1 and 2 scan ONLY the QA-suite shipped surfaces plus the shipped
-gate-runner and CI-workflow files this PR modifies (tools/run_all_checks.sh and .github/workflows/quality.yml,
-both verified clean of provenance shapes), plus the public .preview/ channel, NOT the whole tree: the existing pack legitimately carries
-guardrail-decision ids in its hooks and a dogfood-adopter name in its site and docs, so a whole-tree
-provenance-id scan would be a wall of false positives. The scope is the surfaces listed in SCOPE_RELPATHS
+whole-tree scopes are described below). Layers 1 and 2 scan ONLY the QA-suite shipped surfaces plus the
+shipped gate-runner and CI-workflow files this PR modifies (tools/run_all_checks.sh and
+.github/workflows/quality.yml, both verified clean of provenance shapes), plus the public .preview/
+channel, NOT the whole tree: the existing pack legitimately carries guardrail-decision ids in its hooks
+and a dogfood-adopter name in its site and docs, so a whole-tree provenance-id scan would be a wall of
+false positives. The scope is the surfaces listed in SCOPE_RELPATHS
 (files scanned directly, directories walked fail-closed);
 absent future surfaces are skipped, a present one that cannot be read fails closed (an OSError is exit 2, a
 non-UTF-8/undecodable file is a fail-closed unscannable-surface finding). A BROKEN SYMLINK (a present dentry
@@ -78,8 +79,9 @@ skipped only when its bytes do not decode as UTF-8 (the committed .zip archives)
 existing decode-then-skip rule, so a decodable file is scanned whatever its suffix; the one by-name skip
 is the baseline file itself (its shape-key-next-to-count lines would
 match the review-round pattern by construction; its closed schema plus the canonical-render byte check
-above is what holds its content instead). DISCLOSED LIMITS of this layer: a label moved between shapes or between lines
-within the same per-file count is not caught; the baseline is trusted input like any configuration file;
+above is what holds its content instead). DISCLOSED LIMITS of this layer: a label moved between shapes or
+between lines within the same per-file count is not caught; the baseline is trusted input like any
+configuration file;
 a regeneration admits any raise, including one the same change adds (mixed changes included, where an
 added label is folded into the same count increase), so telling merged growth from added growth needs a
 recount against the merge parent in review;
@@ -120,10 +122,10 @@ lower case only) goes through the PNG rule, verify_png (stated beside TRACKED_PN
 scanned as a text file's text is; the iCCP profile name and profile, and every chunk the rule cannot
 classify, are scanned as binary (no internal-allow exemption, a byte above 0x7F never part of a word); and
 the pixel data, PLTE and the standard non-text ancillary chunks are unread.
-Any other non-UTF-8 tracked file whatever its suffix (a
-malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
-tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
-the way an unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed
+Any other non-UTF-8 tracked file whatever its suffix (a malformed
+.csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working tree, or
+a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2, the
+way an unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed
 file that decodes as UTF-8 is scanned. When git cannot list the tracked set (no git, not a repository, a
 failed or empty listing) the rule cannot run and the gate exits 2.
 WHAT THE ROLE RULE CANNOT SEE: an untracked or git-ignored file (outside the scoped scan), a generated

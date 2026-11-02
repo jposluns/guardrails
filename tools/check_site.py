@@ -20,6 +20,24 @@ validated (a deferred coverage gap). Non-nestable nesting IS detected (slice-2):
 <form>, and an interactive element (<a>/<button>) inside another interactive element, both of which the
 parser accepts as well-balanced but which break rendering/behaviour. Download-artifact checksums are
 tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
+
+Link-preview head block (site/ only): every site/*.html page, hand-maintained and generated alike, except
+the pages HEAD_TAG_EXEMPT names with their reasons, goes through gen_site._validate_head_tags, the one
+shared check, with that page's own URL (gen_site.page_url). The page set is read from the site/
+directory listing, so a new page is covered without editing a list; an unreadable listing or page fails
+closed (exit 2), and a *.html entry that is a symbolic link or not a regular file is a finding. This gate
+runs it because the CI workflow and tools/run_all_checks.sh both run this gate; gen_site.py --check
+runs in neither directly. Pages in subdirectories of site/ and the opf/site/ root are not checked for it.
+The block is aiqt.ai's, so the head check runs only when the site host (AIQT_SITE_HOST, default aiqt.ai)
+is gen_site.SITE_BASE_URL's host or that host with www. before it, and is skipped under any other
+AIQT_SITE_HOST, with a SKIP line saying so. The value is stripped of surrounding whitespace (empty or
+whitespace-only means the default) and lowercased; one that is then not a plain host name (a port, a
+trailing dot, or any character a host name cannot hold) is refused with exit 2 and the reason.
+Each block tag must write every spelling of its key exactly as the block does: each rel token naming
+canonical as `canonical` (other rel tokens may sit beside it) and each og: or twitter: property or name
+value carrying the key in the block's case with no surrounding whitespace. That is stricter than
+HTML for rel, whose tokens compare ASCII case-insensitively, so a rel="Canonical" a browser would honour
+fails here.
 """
 import sys
 
@@ -43,12 +61,46 @@ from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+import gen_site  # noqa: E402  the link-preview head block and its one shared per-page check
 
 EN, EM = "–", "—"
-# Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a
-# non-aiqt.ai adopter can vendor the pack unpatched. Unchanged when the variable is unset or empty.
-_SITE_HOST = (os.environ.get("AIQT_SITE_HOST", "aiqt.ai") or "aiqt.ai").lower()
+_HOST_LABEL_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+
+
+def _read_site_host(raw):
+    """(host, error) for an AIQT_SITE_HOST value (None when unset). Surrounding whitespace is stripped, a
+    value that is then empty means the default aiqt.ai, and the rest is lowercased. It must then be a
+    plain host name (dot-separated labels of ASCII letters, digits and inner hyphens); otherwise error
+    names why (a port, a trailing dot, an empty label, a character a host name cannot hold, or a label or
+    name too long), and the gate refuses to run on it (exit 2) rather than guess which site it means."""
+    host = (raw or "").strip(" \t\n\r\f\v").lower() or "aiqt.ai"
+    if ":" in host:
+        return host, "AIQT_SITE_HOST {!r} carries a port or a colon; give the plain host name".format(raw)
+    if host.endswith("."):
+        return host, "AIQT_SITE_HOST {!r} ends with a dot; give the host name without it".format(raw)
+    if len(host) > 253:
+        return host, "AIQT_SITE_HOST {!r} is longer than a host name can be (253)".format(raw)
+    for label in host.split("."):
+        bad = next((c for c in label if not (c.isascii() and (c.isalnum() or c == "-"))), None)
+        if not label:
+            return host, "AIQT_SITE_HOST {!r} has an empty label".format(raw)
+        if bad is not None:
+            return host, "AIQT_SITE_HOST {!r} holds {!r}, a character a host name cannot hold".format(raw, bad)
+        if not _HOST_LABEL_RE.match(label):
+            return host, ("AIQT_SITE_HOST {!r} has the label {!r}, which starts or ends with a hyphen or is "
+                          "longer than 63 characters".format(raw, label))
+    return host, None
+
+
+# Site host from AIQT_SITE_HOST (see _read_site_host), so a non-aiqt.ai adopter can vendor the pack
+# unpatched. Unchanged when the variable is unset, empty or whitespace. The value as given, when it
+# differs (padded), keeps its own pair too, so normalizing never turns a link this gate checked as
+# internal into one it skips.
+_SITE_HOST_RAW = os.environ.get("AIQT_SITE_HOST")
+_SITE_HOST, _SITE_HOST_ERROR = _read_site_host(_SITE_HOST_RAW)
 SITE_HOSTS = {_SITE_HOST, "www." + _SITE_HOST}
+if _SITE_HOST_RAW and _SITE_HOST_RAW.lower() != _SITE_HOST:
+    SITE_HOSTS |= {_SITE_HOST_RAW.lower(), "www." + _SITE_HOST_RAW.lower()}
 
 # Tags that never take an end tag; never pushed on the open-tag stack.
 VOID_ELEMENTS = {
@@ -89,6 +141,13 @@ AUTOCLOSERS = {
 # an interactive element (<a>/<button>) may not contain another interactive element. These nest silently
 # in the parser (well-balanced) but break rendering/behaviour, so open/close balance never catches them.
 INTERACTIVE = {"a", "button"}
+# The coverage root whose top-level pages carry the link-preview head block (tools/card/TAGS.md), and the
+# pages in it that do not, each with its reason. This is the one place a page is exempted.
+HEAD_TAG_ROOT = "site"
+HEAD_TAG_EXEMPT = {
+    "404.html": "a noindex page: it is served for any missing path, so it has no URL of its own to name "
+                "as canonical, and it is not meant to be indexed or shared",
+}
 
 
 class Page(HTMLParser):
@@ -262,6 +321,43 @@ def logo_findings(pages):
     return out
 
 
+def head_tag_findings(site, subdir):
+    """Findings for the link-preview head block over every top-level *.html page of `site` (named
+    `subdir` in messages) except HEAD_TAG_EXEMPT, each through gen_site._validate_head_tags with the
+    page's own URL. Returns (findings, error); error is set when the listing or a page cannot be read,
+    and the caller fails closed (exit 2) on it."""
+    try:
+        with os.scandir(site) as listing:
+            entries = sorted(listing, key=lambda e: e.name)
+    except OSError as exc:
+        return [], "cannot list {}/ for the head tag check ({})".format(subdir, exc)
+    findings = []
+    for entry in entries:
+        if not entry.name.endswith(".html") or entry.name in HEAD_TAG_EXEMPT:
+            continue
+        rel = "{}/{}".format(subdir, entry.name)
+        try:
+            regular = not entry.is_symlink() and entry.is_file(follow_symlinks=False)
+        except OSError as exc:
+            return [], "cannot stat {} ({})".format(rel, exc)
+        if not regular:
+            findings.append("{}: is a symbolic link or not a regular file; its head tags cannot be checked"
+                            .format(rel))
+            continue
+        try:
+            text = Path(entry.path).read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            findings.append("{}: could not read as UTF-8 for the head tag check".format(rel))
+            continue
+        except OSError as exc:
+            return [], "cannot read {} ({})".format(rel, exc)
+        try:
+            gen_site._validate_head_tags(text, gen_site.page_url(rel), rel)
+        except gen_site.SchemaError as exc:
+            findings.append(str(exc))
+    return findings, None
+
+
 def _self_test():
     good = '<a class="logo" href="/">L</a>'
     bad = '<a class="logo" href="/">L&trade;</a>'
@@ -309,6 +405,24 @@ def _self_test():
         got = hosts_under(env_val)
         if got != want:
             failures.append("SITE_HOSTS {}: expected {} got {}".format(label, sorted(want), sorted(got)))
+    # Each length and hyphen rule at its boundary: a name of 252 or 253 characters and a label of 62 or 63
+    # pass, one more fails; a hyphen inside a label passes, at either end fails.
+    long_name = ".".join(("a" * 63, "b" * 63, "c" * 63, "d" * 61))
+    host_rule_cases = (
+            ("name of 252", long_name[:-1], None),
+            ("name of 253", long_name, None),
+            ("name of 254", long_name + "d", "longer than a host name can be"),
+            ("label of 62", "a" * 62 + ".test", None),
+            ("label of 63", "a" * 63 + ".test", None),
+            ("label of 64", "a" * 64 + ".test", "longer than 63 characters"),
+            ("inner hyphen", "a-b.test", None),
+            ("leading hyphen", "-ab.test", "starts or ends with a hyphen"),
+            ("trailing hyphen", "ab-.test", "starts or ends with a hyphen"))
+    for label, raw, needle in host_rule_cases:
+        _host, err = _read_site_host(raw)
+        if (needle is None and err is not None) or (needle is not None and (err is None or needle not in err)):
+            failures.append("_read_site_host {}: expected {} got {!r}".format(
+                label, "no error" if needle is None else repr(needle), err))
 
     # Coverage-root integration: _scan_root treats opf/site as its own link-containment boundary, so a
     # nested draft page's relative link resolves within opf/site (clean) while a dangling one is a finding;
@@ -339,13 +453,117 @@ def _self_test():
         if quiet(run, Path(d2)) != 0:
             failures.append("coverage: neither root present did not pass clean")
 
+    # Link-preview head block over a site/ listing: every top-level page but the exempt 404 goes through
+    # gen_site's shared check, so a clean set passes, a hand-maintained page missing a tag and a new page
+    # with no block are each a finding naming the page, and an unreadable listing fails closed.
+    def page_with(url, drop=None):
+        tags = [t.format(url=url) for t in gen_site.HEAD_TAG_BLOCK if t != drop]
+        return ("<!doctype html><html><head><title>t</title>\n" + "\n".join(tags)
+                + "\n</head><body><p>x</p></body></html>")
+    twitter_card = '<meta name="twitter:card" content="summary_large_image">'
+    head_cases = 0
+    with tempfile.TemporaryDirectory() as d3:
+        r3 = Path(d3)
+        s3 = r3 / "site"
+        s3.mkdir()
+        (s3 / "index.html").write_text(page_with(gen_site.SITE_BASE_URL), encoding="utf-8")
+        (s3 / "mappings.html").write_text(page_with(gen_site.SITE_BASE_URL + "mappings"), encoding="utf-8")
+        (s3 / "404.html").write_text('<!doctype html><html><head><title>t</title><meta name="robots" '
+                                     'content="noindex"></head><body><p>x</p></body></html>', encoding="utf-8")
+        head_cases += 1
+        got = head_tag_findings(s3, "site")
+        if got != ([], None):
+            failures.append("head tags: a clean page set with the exempt 404 did not pass, got {}".format(got))
+        head_cases += 1
+        if quiet(_scan_root, r3, "site") != 0:
+            failures.append("head tags: a clean site/ tree did not pass the gate")
+        (s3 / "mappings.html").write_text(
+            page_with(gen_site.SITE_BASE_URL + "mappings", drop=twitter_card), encoding="utf-8")
+        head_cases += 1
+        got, err = head_tag_findings(s3, "site")
+        if err or len(got) != 1 or not got[0].startswith("site/mappings.html: ") or "twitter:card" not in got[0]:
+            failures.append("head tags: a hand-maintained page missing twitter:card was not named, got {} {}"
+                            .format(got, err))
+        head_cases += 1
+        if quiet(_scan_root, r3, "site") != 1:
+            failures.append("head tags: a hand-maintained page missing a tag did not fail the gate")
+        (s3 / "mappings.html").write_text(page_with(gen_site.SITE_BASE_URL + "mappings"), encoding="utf-8")
+        (s3 / "newpage.html").write_text("<!doctype html><html><head><title>t</title></head><body></body></html>",
+                                         encoding="utf-8")
+        head_cases += 1
+        got, err = head_tag_findings(s3, "site")
+        if err or len(got) != 1 or not got[0].startswith("site/newpage.html: "):
+            failures.append("head tags: a new page without the block was not named, got {} {}".format(got, err))
+        (s3 / "newpage.html").unlink()
+        head_cases += 1
+        got, err = head_tag_findings(s3 / "absent", "site")
+        if got or not err:
+            failures.append("head tags: an unreadable listing did not fail closed, got {} {}".format(got, err))
+        head_cases += 1
+        if quiet(_scan_root, r3, "site") != 0:
+            failures.append("head tags: the restored clean site/ tree did not pass the gate")
+
+    # The block is aiqt.ai's: _SITE_HOST is fixed at import, so in a child process under each env value,
+    # a site/ whose one page carries no block passes under another host (and its PASS line does not name
+    # the head block), and fails with the missing-block finding under the default host.
+    scan_probe = ("import sys; from pathlib import Path; sys.path.insert(0, {!r}); import check_site; "
+                  "sys.exit(check_site._scan_root(Path(sys.argv[1]), 'site'))".format(tools_dir))
+    with tempfile.TemporaryDirectory() as d4:
+        s4 = Path(d4) / "site"
+        s4.mkdir()
+        (s4 / "index.html").write_text("<!doctype html><html><head><title>t</title></head><body><p>x</p>"
+                                       "</body></html>", encoding="utf-8")
+        for label, env_val, want_rc, needle, absent in (
+                ("another host skips the head check", "example.test", 0, "PASS: site/", "head block"),
+                ("the default host checks the head block", None, 1, "page must carry exactly one element "
+                 "keyed", None)):
+            env = dict(os.environ)
+            if env_val is None:
+                env.pop("AIQT_SITE_HOST", None)
+            else:
+                env["AIQT_SITE_HOST"] = env_val
+            head_cases += 1
+            out = subprocess.run([sys.executable, "-I", "-c", scan_probe, d4], capture_output=True,
+                                 text=True, env=env)
+            if out.returncode != want_rc or needle not in out.stdout or (absent and absent in out.stdout):
+                failures.append("head tags: {}: expected exit {} with {!r}, got exit {}: {}".format(
+                    label, want_rc, needle, out.returncode, (out.stdout + out.stderr).strip()))
+        # A malformed AIQT_SITE_HOST never switches the head check off silently: padding and a whitespace-
+        # only value are normalized (the check runs), www. before the base host is the same site (it runs),
+        # a value that is not a plain host name is refused (exit 2, reason named), and another host prints
+        # a SKIP line. The block-less page fails wherever the check runs.
+        missing = "page must carry exactly one element keyed"
+        skipped = "SKIP: site/ link-preview head tags not checked"
+        for label, env_val, want_rc, needle in (
+                ("leading space checks", " aiqt.ai", 1, missing),
+                ("trailing space checks", "aiqt.ai ", 1, missing),
+                ("whitespace-only is the default and checks", "  ", 1, missing),
+                ("upper case checks", "AIQT.ai", 1, missing),
+                ("www. before the base host checks", "www.aiqt.ai", 1, missing),
+                ("a port is refused", "aiqt.ai:443", 2, "carries a port"),
+                ("a trailing dot is refused", "aiqt.ai.", 2, "ends with a dot"),
+                ("a character a host name cannot hold is refused", "aiqt_ai.test", 2, "cannot hold"),
+                ("an empty label is refused", "aiqt..ai", 2, "empty label"),
+                ("another host prints a skip line", "example.test", 0, skipped),
+                ("a padded other host prints a skip line", " example.test ", 0, skipped)):
+            env = dict(os.environ)
+            env["AIQT_SITE_HOST"] = env_val
+            head_cases += 1
+            out = subprocess.run([sys.executable, "-I", "-c", scan_probe, d4], capture_output=True,
+                                 text=True, env=env)
+            if out.returncode != want_rc or needle not in out.stdout + out.stderr:
+                failures.append("head tags: AIQT_SITE_HOST {!r}: {}: expected exit {} with {!r}, got exit {}: {}"
+                                .format(env_val, label, want_rc, needle, out.returncode,
+                                        (out.stdout + out.stderr).strip()))
+
     if failures:
         print("SELF-TEST FAIL:")
         for x in failures:
             print("  - " + x)
         return 1
-    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + coverage-root legs)".format(
-        len(cases), len(host_cases)))
+    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + {} host rule cases + "
+          "coverage-root legs + {} head tag cases)".format(len(cases), len(host_cases), len(host_rule_cases),
+                                                           head_cases))
     return 0
 
 
@@ -360,6 +578,9 @@ COVERAGE_ROOTS = ("site", "opf/site")
 def run(root):
     """Scan every present coverage root under `root`. Return the worst per-root exit code; roots are
     optional (absent is skipped), a present root is scanned, and an unreadable present root fails closed."""
+    if _SITE_HOST_ERROR:
+        print("error: {}; fail-closed".format(_SITE_HOST_ERROR), file=sys.stderr)
+        return 2
     present = [sub for sub in COVERAGE_ROOTS if (root / sub).is_dir()]
     if not present:
         print("PASS: no site/ or opf/site/ directory")
@@ -375,6 +596,9 @@ def main():
 
 
 def _scan_root(root, subdir):
+    if _SITE_HOST_ERROR:
+        print("error: {}; fail-closed".format(_SITE_HOST_ERROR), file=sys.stderr)
+        return 2
     site = root / subdir
     site_root = site.resolve()
     docs, ids_by_path, findings = [], {}, []
@@ -451,13 +675,25 @@ def _scan_root(root, subdir):
     # Logo consistency (M-04): the header logo block is duplicated per page (no page generator yet), so it
     # must stay byte-identical on every page that carries it; an outlier is drift.
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
+    # The block is the base host's; www. before it names the same site, so the check runs for that too.
+    base_host = urlsplit(gen_site.SITE_BASE_URL).hostname
+    head_checked = subdir == HEAD_TAG_ROOT and _SITE_HOST in (base_host, "www." + base_host)
+    if subdir == HEAD_TAG_ROOT and not head_checked:
+        print("SKIP: {}/ link-preview head tags not checked: the site host (AIQT_SITE_HOST {!r}) is {}, "
+              "not {}, whose tags they are".format(subdir, _SITE_HOST_RAW, _SITE_HOST, base_host))
+    if head_checked:
+        head_findings, error = head_tag_findings(site, subdir)
+        if error:
+            print("error: {}; fail-closed".format(error), file=sys.stderr)
+            return 2
+        findings.extend(head_findings)
     if findings:
         print("FAIL: {} {}/ site-integrity issue(s)".format(len(findings), subdir))
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: {}/ dashes, links, anchors, titles, unique ids, and tag structure all check out"
-          .format(subdir))
+    print("PASS: {}/ dashes, links, anchors, titles, unique ids, and tag structure{} all check out"
+          .format(subdir, ", and the link-preview head block" if head_checked else ""))
     return 0
 
 

@@ -350,6 +350,10 @@ path = "site/favicon.svg"
 class = "pack-immutable"
 
 [[release-class]]
+path = "site/images/aiqt-card.png"
+class = "pack-immutable"
+
+[[release-class]]
 path = "site/index.html"
 class = "pack-immutable"
 
@@ -476,7 +480,7 @@ note = "The documented adopter vendoring location; reserved, never a pack-immuta
 # manifest.
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml", "site/images/aiqt-card.png", "tools/card/card-safe.png", "tools/card/compare.png", "tools/card/platforms.png", "tools/card/sizes.png"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 

@@ -2,8 +2,6 @@
 title = "AIQT for Teams & Enterprise: one governance standard your whole team shares"
 description = "AIQT gives a team one shared governance standard for AI-assisted work, designed to be portable across the tools they use, with claims that trace to evidence and overrides that are logged. Plus the ideas we are considering for organizations."
 canonical = "https://aiqt.ai/teams"
-og-title = "AIQT for Teams & Enterprise: one governance standard your whole team shares"
-og-description = "AIQT gives a team one shared governance standard for AI-assisted work, designed to be portable across the tools they use, with claims that trace to evidence and overrides that are logged. Plus the ideas we are considering for organizations."
 og-url = "https://aiqt.ai/teams"
 sidebar-active = "teams"
 +++

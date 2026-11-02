@@ -2,8 +2,6 @@
 title = "About AIQT: origin, direction, and the maintainer"
 description = "Where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right. Created and led by Jeff Posluns."
 canonical = "https://aiqt.ai/about"
-og-title = "About AIQT: origin, direction, and the maintainer"
-og-description = "Where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right. Created and led by Jeff Posluns."
 og-url = "https://aiqt.ai/about"
 sidebar-active = "about"
 +++

@@ -2,8 +2,6 @@
 title = "The AIQT standard, in plain terms"
 description = "The AIQT standard in plain terms: the four things it holds your assistant to (Accuracy, Integrity, Quality, Trust) and the one priority ordering that decides every close call."
 canonical = "https://aiqt.ai/standard"
-og-title = "The AIQT standard, in plain terms"
-og-description = "The four things AIQT holds your assistant to, and the one priority ordering that decides every close call."
 og-url = "https://aiqt.ai/standard"
 sidebar-active = "standard"
 +++
