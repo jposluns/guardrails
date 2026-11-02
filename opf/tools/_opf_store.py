@@ -1523,17 +1523,20 @@ def _verify_held_root(fd, path, what):
                          "the held directory".format(what, path))
 
 
-def _read_committed_init_digest(target, product_root):
+def _read_committed_init_digest(target, product_root, product_root_fd):
     """Resolve the committed pointer's target string to its store root the way resolve_store resolves a
     committed pointer (never the override, never default discovery), discover the single machine store
     through that store-root descriptor, and hash init.toml beneath the SAME descriptor, so a store root
     swapped by path after discovery is never the one hashed; after the read, the store-root path must
     still name the held descriptor (_verify_held_root), so the swap itself is refused rather than graded.
-    Returns (machine_rel, digest): the SHA-256 hex
+    A store-root path beneath the product-root path (a relative dir: target) moves with the product root,
+    so the held product root (product_root_fd) is confirmed first and a product root that moved is named
+    as itself, never as the store root it carried. Returns (machine_rel, digest): the SHA-256 hex
     digest of the raw bytes of init.toml, read no-follow, singly-linked and capped. StoreError when the
-    target does not resolve to exactly one machine store, init.toml is absent or unreadable, or the store
-    root moved."""
+    target does not resolve to exactly one machine store, init.toml is absent or unreadable, or a root
+    moved."""
     store_root = _target_store_root(classify_target(target), product_root)
+    beneath_product = store_root.parts[:len(Path(product_root).parts)] == Path(product_root).parts
     try:
         store_root_fd = _open_store_root_fd(store_root, True)
     except OSError as exc:
@@ -1548,7 +1551,11 @@ def _read_committed_init_digest(target, product_root):
         data = _read_store_bytes_contained(store_root_fd, relpath)
         # init.toml was read beneath the HELD store-root descriptor, but the root was resolved by PATH
         # once: a store root renamed away or swapped by path after it opened would grade a directory the
-        # path no longer names, so the path must still name the held root.
+        # path no longer names, so the path must still name the held root. A store-root path beneath the
+        # product-root path fails that check whenever the product root moved, so the product root is
+        # confirmed first and the report names the root that actually moved.
+        if beneath_product:
+            _verify_held_root(product_root_fd, product_root, "product root")
         _verify_held_root(store_root_fd, store_root, "store root")
     finally:
         inflight = _journal._in_flight_in(sys._getframe())
@@ -1585,7 +1592,9 @@ def check_store_identity(product_root):
     disappeared is CANNOT-EVALUATE, naming what changed. Each root was resolved by PATH once, so after the
     hash each held descriptor must still be the directory its path names (fstat identity against a
     no-follow lstat, _verify_held_root): a product root or store root renamed away or swapped by path
-    after its descriptor opened is CANNOT-EVALUATE naming which root moved. Residual (disclosed): the
+    after its descriptor opened is CANNOT-EVALUATE naming which root moved (a store root beneath the
+    product-root path, as a relative dir: target resolves, is confirmed after the product root, so a
+    product root that moved is never reported as the store root moving). Residual (disclosed): the
     pinned expectation file is read once, before the digest, so a pin rewritten after that read grades
     against the first read; the machine directory and init.toml are found by name beneath the
     held store-root descriptor, so a rename inside the store between discovery and the read is not
@@ -1618,7 +1627,7 @@ def check_store_identity(product_root):
             notes.append("{} is present: an override must not substitute for the committed pointer {}".format(
                 LOCAL_POINTER_REL, POINTER_REL))
         try:
-            machine_rel, digest = _read_committed_init_digest(target, product_root)
+            machine_rel, digest = _read_committed_init_digest(target, product_root, product_root_fd)
         except StoreError as exc:
             _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
             notes.append("init_sha256: {}".format(exc))
@@ -1628,7 +1637,8 @@ def check_store_identity(product_root):
             "match" if digest_ok else "DIFFERS", expected_digest, machine_rel, INIT_NAME, digest))
         # The digest resolved a relative dir: target against the product-root PATH while the pointer was
         # read through the held descriptor, so the path must still name the held product root: renamed
-        # away or swapped by path after it opened is refused, never graded.
+        # away or swapped by path after it opened, and still moved when this check runs, is refused, never
+        # graded. A point check: a root moved and restored before it runs is not detected (disclosed residual).
         try:
             _verify_held_root(product_root_fd, product_root, "product root")
         except StoreError as exc:
@@ -5758,6 +5768,34 @@ def self_test():
                   id_says(prod, "product root was swapped by path"))
         finally:
             globals()["_read_identity_inputs"] = real_inputs
+
+        # A relative dir: store root lies beneath the product-root path, so a product root renamed away or
+        # swapped by path after the store root opened also fails the store-root check: the report names the
+        # product root, never the store root its move carried.
+        def id_product_root_named(prod, move, text):
+            def discover_then_move_product(store_root_fd, store_root):
+                found = real_discover(store_root_fd, store_root)
+                move()
+                return found
+            globals()["discover_machine_store"] = discover_then_move_product
+            try:
+                got = _guard(lambda: check_store_identity(prod))
+            finally:
+                globals()["discover_machine_store"] = real_discover
+            return (got != "RAISED" and got.status == CANNOT_EVALUATE and any(text in n for n in got.notes)
+                    and not any("store root" in n for n in got.notes))
+        prod = id_rel_fixture()
+        check("identity-product-root-renamed-after-store-opened", id_product_root_named(
+            prod, lambda: os.rename(str(prod), str(base / "identity-prod-moved-{:02d}".format(id_seq[0]))),
+            "product root is no longer the directory"))
+        prod = id_rel_fixture()
+        swap_prod = id_rel_fixture()
+
+        def swap_product_root():
+            os.rename(str(prod), str(base / "identity-prod-swapped-out-{:02d}".format(id_seq[0])))
+            os.rename(str(swap_prod), str(prod))
+        check("identity-product-root-swapped-after-store-opened",
+              id_product_root_named(prod, swap_product_root, "product root was swapped by path"))
         # The re-read runs AFTER the digest: a pointer removed or an override created in the instant the
         # digest returns is still cannot-evaluate, so a re-read moved before the digest fails here.
         real_digest = _read_committed_init_digest
@@ -5765,8 +5803,8 @@ def self_test():
         def id_changed_after_digest(change, text):
             prod, store, _mdir = id_fixture()
 
-            def digest_then_change(target, product_root):
-                got = real_digest(target, product_root)
+            def digest_then_change(target, product_root, product_root_fd):
+                got = real_digest(target, product_root, product_root_fd)
                 change(prod, store)
                 return got
             globals()["_read_committed_init_digest"] = digest_then_change

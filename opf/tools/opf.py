@@ -22067,7 +22067,9 @@ def _cli_self_test():
                     with open(os.path.join(prod, ".opf.local.toml"), "w", encoding="utf-8") as fh:
                         fh.write('[store]\ntarget = "dir:{}"\n'.format(store))
                     run("override present", prod, EXIT_FINDING, ".opf.local.toml is present")
-                    # Cannot-evaluate outranks the override: every other input is still evaluated.
+                    # Cannot-evaluate outranks the override: evaluation continues past the override up to the
+                    # FIRST input that cannot be evaluated (an absent or unparseable pointer ends it before the
+                    # digest is read), and that cannot-evaluate outranks the override's mismatch.
                     for label, kwargs in (("pointer absent", {}), ("init.toml missing", {"init_bytes": None}),
                                           ("pointer unparseable", {"pointer": "not toml {{\n"})):
                         prod, store, mdir = build(**kwargs)
