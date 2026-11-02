@@ -6102,6 +6102,12 @@ _CAB_PICK_LONG = {
 _CAB_REBASE_VALUE_LONG = ("onto", "strategy", "strategy-option", "exec", "whitespace", "empty")
 _CAB_REBASE_VALUE_FLAGS = frozenset("sXxC")
 _CAB_REBASE_STUCK_FLAGS = frozenset("Sr")
+# The git rebase mode words (--continue, --skip, --abort, --quit, --edit-todo, --show-current-patch), passed
+# over where this reading takes one as a long option name before any '--': git with one resumes, skips,
+# abandons or quits a rebase in progress, edits its todo list or shows its current patch, and takes no
+# revision from the command, but the reading can take a mode word from a comment, a here-document body or
+# de-quoted text that git never receives, so a mode word drops no revision read before or after it.
+_CAB_REBASE_MODES = frozenset(("continue", "skip", "abort", "quit", "edit-todo", "show-current-patch"))
 # The editors git edits a rebase todo list with: the settings, and the environment variables, in git's order.
 _CAB_TODO_EDITOR_KEYS = ("sequence.editor", "core.editor")
 _CAB_TODO_EDITOR_VARS = ("GIT_SEQUENCE_EDITOR", "GIT_EDITOR", "VISUAL", "EDITOR")
@@ -6903,8 +6909,17 @@ def _cab_replay_revs(verb, args, extra=()):
     with no message option reuses HEAD's); the revisions of git cherry-pick and git revert (_cab_pick_revs),
     with the lines of their --stdin (extra); and the range git rebase replays (the commits of <branch> not in
     <upstream>, the configured upstream when none is named; with --root all of the branch). A '-' operand is
-    the previous branch (@{-1}). walk is False where each rev names one commit (--no-walk). why, when not
-    None, is why the commits cannot be read, which refuses the stage."""
+    the previous branch (@{-1}). walk is False where each rev names one commit (--no-walk). A rebase mode
+    word (--continue, --skip, --abort, --quit, --edit-todo or --show-current-patch) read as a long option
+    name before any '--' is passed over and drops no revision: git with a mode word resumes, skips, abandons
+    or quits a rebase in progress, edits its todo list or shows its current patch, and takes no revision from
+    the command, but this reading can take such a word from a comment, a here-document body or de-quoted text
+    that git never receives, so every operand read before or after one still counts (a bare mode call, where
+    no operand is read at all, names no commits; a mode word beside an <upstream> or <branch> whose range
+    holds the token is an over-denial). After a '--' a mode word refuses the stage: git reads it there as
+    naming <upstream> or <branch>, a name it refuses, and where the '--' is a word this reading over-read,
+    what git receives cannot be told. why, when not None, is why the commits cannot be read, which refuses
+    the stage."""
     revs = []
     if verb == "commit":
         message, amend, j = False, False, 0
@@ -6933,18 +6948,22 @@ def _cab_replay_revs(verb, args, extra=()):
     # git rebase: a long option abbreviated (--exe for --exec) or a short cluster ending in a letter that
     # takes a value (-fs ort) takes the next word, as git's option reader does; the words after '--' are
     # operands. The range is passed as two revisions, so a '..' inside <upstream> is not read as its end.
-    words, j, root, ended = [], 0, False, False
+    words, j, root, ended, modes = [], 0, False, False, False
     while j < len(args):
         word = args[j]
         j += 1
-        if ended or not word.startswith("-"):
+        if word.startswith("--") and word[2:].partition("=")[0] in _CAB_REBASE_MODES:
+            if ended:
+                return [], False, ("git rebase takes the mode word {!r} after a '--', where git reads it as "
+                                   "naming the <upstream> or <branch> whose commits it replays, so they "
+                                   "cannot be read".format(word[:80]))
+            modes = True
+        elif ended or not word.startswith("-"):
             words.append(word)
         elif word == "-":
             words.append("@{-1}")
         elif word == "--":
             ended = True
-        elif word in ("--continue", "--skip", "--abort", "--quit", "--edit-todo", "--show-current-patch"):
-            return [], False, None
         elif word.startswith("--"):
             name, eq, _value = word[2:].partition("=")
             root = root or "root".startswith(name)
@@ -6958,6 +6977,8 @@ def _cab_replay_revs(verb, args, extra=()):
                     break
                 if letter in _CAB_REBASE_STUCK_FLAGS:
                     break
+    if modes and not words:  # a bare mode call: git takes no revision from the command
+        return [], False, None
     if root:  # git rebase --root [<branch>]
         return [words[0] if words else "HEAD"], True, None
     return ["^" + (words[0] if words else "@{upstream}"), words[1] if len(words) > 1 else "HEAD"], True, None

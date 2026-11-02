@@ -2513,8 +2513,8 @@ def _test_coauthor_replay(failures, base):
     or misreading it pins (a revision holding a blank dropped, one past the length bound or starting with '-'
     dropped, the --stdin text split at blanks or its '-' lines dropped, an unknown git cherry-pick option word
     skipped, a help word dropping every revision read, a mode word dropping every revision read, a git rebase
-    option read with no value, --root read as <upstream>), where the deny vector must allow and the twin
-    still allow."""
+    mode word dropping every revision read, a git rebase option read with no value, --root read as
+    <upstream>), where the deny vector must allow and the twin still allow."""
     root = base / "replay"
     root.mkdir(parents=True, exist_ok=True)
     land_env = git_fixture_env(GIT_AUTHOR_NAME="Test", GIT_AUTHOR_EMAIL="test@example.invalid",
@@ -2624,6 +2624,17 @@ def _test_coauthor_replay(failures, base):
             if word.startswith("--") and word[2:].partition("=")[0] in aiqt_hooks._CAB_PICK_MODES:
                 return [], None
         return pick_of(verb, args)
+
+    def rebase_mode_drops_all(verb, args, extra=()):
+        """The drop restored: a --continue, --skip, --abort, --quit, --edit-todo or --show-current-patch
+        word returns no revisions at all, so a mode word this reading takes from a comment, a here-document
+        body or de-quoted text that git never receives (git runs the command and replays) drops every
+        operand read."""
+        if verb == "rebase":
+            for word in args:
+                if word.startswith("--") and word[2:].partition("=")[0] in aiqt_hooks._CAB_REBASE_MODES:
+                    return [], False, None
+        return revs_of(verb, args, extra)
 
     blank = dropping(lambda rev: re.search(r"\s", rev))
     stdin_split = {"_cab_stdin_lines": split_stdin}
@@ -2738,6 +2749,44 @@ def _test_coauthor_replay(failures, base):
          "git checkout -q subject-dirty\ngit revert --no-edit subject-dirty # --quit",
          "git checkout -q subject-clean\ngit revert --no-edit subject-clean # --quit",
          {"_cab_pick_revs": mode_drops_all}),
+        # A rebase mode word (--continue, --skip, --abort, --quit, --edit-todo, --show-current-patch) only
+        # the hook reads (a # comment kept as words, a here-document body, de-quoted text): real git never
+        # receives it, runs the rebase and lands the token, so a mode word must drop no operand already read
+        # or read after it. The flip restores the drop of every revision.
+        ("cab-replay-rebase-mode-comment-continue", "git rebase main plain-dirty # --continue",
+         "git rebase main plain-clean # --continue", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-skip", "git rebase main plain-dirty # --skip",
+         "git rebase main plain-clean # --skip", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-abort", "git rebase main plain-dirty # --abort",
+         "git rebase main plain-clean # --abort", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-quit", "git rebase main plain-dirty # --quit",
+         "git rebase main plain-clean # --quit", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-edit-todo", "git rebase main plain-dirty # --edit-todo",
+         "git rebase main plain-clean # --edit-todo", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-show", "git rebase main plain-dirty # --show-current-patch",
+         "git rebase main plain-clean # --show-current-patch", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-word", "git rebase main plain-dirty #see --continue",
+         "git rebase main plain-clean #see --continue", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-tab", "git rebase main plain-dirty\t# --skip",
+         "git rebase main plain-clean\t# --skip", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-redirect", "git rebase main plain-dirty 2>&1 >/dev/null # --abort",
+         "git rebase main plain-clean 2>&1 >/dev/null # --abort", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-newline", "git rebase main plain-dirty # --quit\necho done",
+         "git rebase main plain-clean # --quit\necho done", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-continued", "git rebase main plain-dirty \\\n # --edit-todo",
+         "git rebase main plain-clean \\\n # --edit-todo", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-chdir", "git -C . rebase main plain-dirty # --show-current-patch",
+         "git -C . rebase main plain-clean # --show-current-patch", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-comment-quote", "git rebase main plain-dirty # it's --continue",
+         "git rebase main plain-clean # it's --continue", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-heredoc", "git rebase main plain-dirty <<EOF # --skip\nbody\nEOF",
+         "git rebase main plain-clean <<EOF # --skip\nbody\nEOF", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-quoted-target", "git rebase main plain-dirty 2>\"e --abort\" # it's",
+         "git rebase main plain-clean 2>\"e --abort\" # it's", {"_cab_replay_revs": rebase_mode_drops_all}),
+        ("cab-replay-rebase-mode-quoted-target-heredoc",
+         "git rebase main plain-dirty 2>\"e --quit\" <<EOF\nit's\nEOF",
+         "git rebase main plain-clean 2>\"e --quit\" <<EOF\nit's\nEOF",
+         {"_cab_replay_revs": rebase_mode_drops_all}),
     )
     for label, deny, twin, flip in rows:
         if not lands(deny):
@@ -2828,6 +2877,50 @@ def _test_coauthor_replay(failures, base):
             flipped = decision(mode_form)
         finally:
             aiqt_hooks._CAB_PICK_MODES = saved
+        if got != (want, "deny") or flipped != "deny":
+            failures.append("({}) expected {} for {!r} and deny for {!r}, and deny for the first with the mode "
+                            "words unread, got {} and {}".format(label, want, mode_form, neighbour, got, flipped))
+    # Every rebase mode form lands nothing ungated (git resumes, skips, abandons or quits a rebase in
+    # progress, edits its todo list, shows its current patch, or refuses the mode word beside an operand, and
+    # replays nothing here) and its neighbour lands the token. A mode word drops no operand, so only the bare
+    # forms, where no operand is read at all, allow; a mode word beside an <upstream> and <branch> whose
+    # range holds the token still denies, an over-denial disclosed in the residue, and after a '--' a mode
+    # word denies too. The decisions run on a checked-out branch whose configured upstream range holds the
+    # token, so with the mode words unread (the flip), where a bare rebase reads @{upstream}..HEAD, every
+    # mode form denies.
+    mode_repo = fixture()
+    _git(mode_repo, "checkout", "-q", "plain-dirty")
+    _git(mode_repo, "branch", "-q", "--set-upstream-to=main")
+
+    def mode_decision(command):
+        return _decision(aiqt_hooks.coauthor_bash, command, cwd=str(mode_repo))
+
+    for label, mode_form, neighbour, want in (
+            ("cab-replay-rebase-mode-bare-continue", "git rebase --continue", "git rebase main plain-dirty",
+             "allow"),
+            ("cab-replay-rebase-mode-bare-skip", "git rebase --skip", "git rebase main plain-dirty", "allow"),
+            ("cab-replay-rebase-mode-bare-abort", "git rebase --abort", "git rebase main plain-dirty", "allow"),
+            ("cab-replay-rebase-mode-bare-quit", "git rebase --quit", "git rebase main plain-dirty", "allow"),
+            ("cab-replay-rebase-mode-bare-edit-todo", "git rebase --edit-todo", "git rebase main plain-dirty",
+             "allow"),
+            ("cab-replay-rebase-mode-bare-show", "git rebase --show-current-patch", "git rebase main plain-dirty",
+             "allow"),
+            ("cab-replay-rebase-mode-after", "git rebase main plain-dirty --continue", "git rebase main plain-dirty",
+             "deny"),
+            ("cab-replay-rebase-mode-before", "git rebase --skip main plain-dirty", "git rebase main plain-dirty",
+             "deny"),
+            ("cab-replay-rebase-mode-dashdash", "git rebase main plain-dirty -- --abort",
+             "git rebase main plain-dirty", "deny")):
+        if lands(mode_form) or not lands(neighbour):
+            failures.append("({}) {!r} must land nothing and {!r} the token when run ungated".format(
+                label, mode_form, neighbour))
+        got = (mode_decision(mode_form), mode_decision(neighbour))
+        saved = aiqt_hooks._CAB_REBASE_MODES
+        aiqt_hooks._CAB_REBASE_MODES = frozenset()
+        try:
+            flipped = mode_decision(mode_form)
+        finally:
+            aiqt_hooks._CAB_REBASE_MODES = saved
         if got != (want, "deny") or flipped != "deny":
             failures.append("({}) expected {} for {!r} and deny for {!r}, and deny for the first with the mode "
                             "words unread, got {} and {}".format(label, want, mode_form, neighbour, got, flipped))
