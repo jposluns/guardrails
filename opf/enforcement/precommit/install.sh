@@ -87,7 +87,14 @@
 # --no-verify skip them; git runs no pre-commit hook for cherry-pick, revert, rebase or am, nor for a
 # fast-forward git merge or git pull, which brings in commits with no hook run; a merge
 # concluded with git commit is compared with every parent (HEAD and each MERGE_HEAD commit) for dropped
-# records, lowered counters and terminal-status resurrection, but a merge commit's non-terminal status
+# records, lowered counters and terminal-status resurrection, but the survival comparison covers each
+# parent's typed record indexes (a worklog entry is not an indexed record, so a dropped worklog entry is
+# caught only as a lowered counter, and tied counters do not expose it), a record a parent holds at an
+# unqualified terminal state keeps that state only while it stays active in the result (one the result
+# archives is not status-compared against a parent; two parents holding one record at different
+# unqualified terminal states refuse every result that keeps it active; a merged parent record with an
+# unparseable status or an unsupported type is a named cannot-evaluate), and a merge commit's
+# non-terminal status
 # changes are not graded; the pre-merge-commit
 # stop makes a scripted git merge or git pull (merge mode) exit 1 and leaves MERGE_HEAD and the staged
 # merge result behind, so a later git pull exits 128 until the merge is concluded with git commit or
@@ -515,5 +522,5 @@ trap - HUP INT TERM
 # must not turn the status into a failure or a signal death.
 trap '' PIPE
 printf '%s\n' "opf-pre-commit install: installed for this clone and its linked worktrees ($pc_stub runs ./$rel/pre-commit, and $pmc_stub runs it as pre-merge-commit, which refuses a merge commit git merge would record so that git commit concludes the merge through the check)."
-echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, git merge --no-verify, cherry-pick, revert, rebase, am and a fast-forward merge or pull commit or bring in commits without the hook, a merge commit's non-terminal status changes are not graded, a scripted git merge or git pull (merge mode) now exits 1 at the stop and leaves MERGE_HEAD behind (the next pull exits 128 until git commit or git merge --abort), and CI does not catch a history violation committed that way (see pre-commit)."
+echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, git merge --no-verify, cherry-pick, revert, rebase, am and a fast-forward merge or pull commit or bring in commits without the hook, a merge commit's non-terminal status changes are not graded (and a dropped worklog entry is caught only as a lowered counter: tied counters do not expose it), a scripted git merge or git pull (merge mode) now exits 1 at the stop and leaves MERGE_HEAD behind (the next pull exits 128 until git commit or git merge --abort), and CI does not catch a history violation committed that way (see pre-commit)."
 exit 0

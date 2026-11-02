@@ -59,7 +59,8 @@
 # EVERY parent: each record a parent's type indexes hold must survive (a worklog entry is not an indexed
 # record, so a dropped entry is caught only as a lowered counter, and tied counters do not expose it),
 # no counter may fall below its value in any parent, and a record any parent holds at an unqualified
-# terminal state must keep that state in the result, refusing on any dropped record, lowered counter or
+# terminal state must keep that state while it stays an active record in the result (see Residuals),
+# refusing on any dropped record, lowered counter or
 # terminal-status resurrection, while a merge commit's non-terminal status changes are not graded (see
 # Residuals). A MERGE_HEAD that cannot be read, or holds anything but commit ids of this
 # repository, exits 2 before any check, never an unchecked merge.
@@ -87,7 +88,12 @@
 #     skipped for a merge commit, so a non-terminal status a parent holds may change in the result
 #     unchecked (each branch's own transitions were graded when that branch committed them through this
 #     hook; one committed past it is not re-graded here), and a dropped worklog entry is caught only as
-#     a lowered counter (tied counters do not expose it).
+#     a lowered counter (tied counters do not expose it). The terminal-state comparison grades a record
+#     only while it is active in the result: one the result archives is not status-compared against a
+#     parent (its survival and the archive's own checks still apply). Two parents that hold one record
+#     at different unqualified terminal states refuse every merge result that keeps it active, whichever
+#     of the two states the result keeps. A merged parent's record with an unparseable status or an
+#     unsupported type is a named cannot-evaluate, never an ungraded record.
 #   - The hook runs checked-out code: the stub runs the working-tree copy of this file, and this file
 #     runs the working-tree opf.py (OPF_TOOL), not the staged ones. Checking out a branch, merge or pull
 #     request that changes them runs the changed code, with the user's privileges, at the next git
