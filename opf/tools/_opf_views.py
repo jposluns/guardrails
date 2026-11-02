@@ -506,6 +506,19 @@ def _importer_authored(record):
     return isinstance(actor, dict) and actor.get("kind") == "importer"
 
 
+def removes_authority(state, qualified, importer_authored):
+    """Whether a pending_decision's `supersedes` link removes its target's current authority, and equally
+    whether that decision can itself stand as a current effective resolution (spec 8.5/8.6): true only for
+    a decided, unqualified decision not authored by an importer. A link from an open, withdrawn or
+    `/proposed` decision, or from an importer-authored one, joins its chain but removes no authority, and
+    such a decision is never itself a current effective resolution. This is the ONE rule the resolution
+    join (join_resolution), the doctor's chain derivation (_opf_check.decision_chains) and the record
+    verb's pre-write chain checks (_opf_record._superseders and its planned-chain rule) all derive from,
+    so the three agree by construction. Takes the three facts as plain values so every caller's record
+    shape (a raw record table, or the doctor's seated view) adapts at its own site."""
+    return state == "decided" and not qualified and not importer_authored
+
+
 def _id_key(record):
     """A numeric sort key for a record ID (namespace, number), so IDs order by number not lexically
     (BI-2 before BI-10). A malformed ID sorts last under a sentinel, but records are validated before
@@ -757,9 +770,14 @@ def join_resolution(decisions):
     a newer one linking `supersedes`, and exactly one current effective resolution exists per chain.
     `decisions` is every pending decision a view reads, proposals and importer-authored ones included.
     Returns (current, superseded, supersedes_map) over the SETTLED (unqualified) decisions NOT authored by
-    an importer: current is the set of their IDs that no decided one of them supersedes (the chain heads),
-    superseded is the complementary set, and supersedes_map maps each decided one's ID to the sorted IDs
-    among them that it directly supersedes. An importer-authored decision is imported history outside
+    an importer: current is the set of their IDs that no authority-removing one of them supersedes (the
+    chain heads), superseded is the complementary set, and supersedes_map maps each authority-removing
+    one's ID to the sorted IDs among them that it directly supersedes. EVERYTHING here derives from the
+    ONE shared predicate, removes_authority (the doctor's decision_chains and the record verb's pre-write
+    chain checks derive from the same one, so the three agree by construction): a `supersedes` link
+    removes its target's current authority, and a decision stands as a current effective resolution, only
+    when that decision is decided, unqualified and not importer-authored (spec 8.5/8.6). An
+    importer-authored decision is imported history outside
     every current-state join (spec 8.5/8.6): the input is filtered through the registered
     `not_importer_authored` predicate, so such a decision never becomes a current effective resolution and
     lands in none of the returned sets (the DECISIONS renderer surfaces it only as history), and its
@@ -769,27 +787,30 @@ def join_resolution(decisions):
     link to the imported decision marks nothing superseded and is not listed in supersedes_map. A chain of
     importer-authored decisions only is therefore neither evaluated nor refused here, a fork or a cycle
     among them included: two importer-authored decisions superseding a third land in no set and raise
-    nothing, while the doctor's C-DECISION-CHAINS, which counts a chain's current resolutions whatever
-    their provenance, reports that chain's two current resolutions as a finding. A `/proposed` decision is
+    nothing, while the doctor's firewall arm (_check_importer_chains) reports where an importer-authored
+    decision stands as a chain's resolution. A `/proposed` decision is
     then filtered out through the registered `not_proposed` predicate: a proposal does not yet supersede
     anything, so it builds no edge, never becomes a head, and lands in no returned set. Over the remaining
-    decisions the edges come from decided decisions only; a FORK (a decision superseded by more than one
+    decisions the edges come from authority-removing decisions only (a link from an open or withdrawn
+    decision joins its chain but removes nothing, so it builds no edge and never marks its target
+    "Superseded"); a FORK (a decision superseded by more than one
     other) or a CYCLE among those edges raises ViewsError (a cannot-evaluate), and with neither, every chain
-    those edges connect has exactly one head; a fork or a cycle that runs through an importer-authored
+    those edges connect has exactly one head; a fork or a cycle that runs through a non-removing
     decision is neither here, since that decision builds no edge. Every chain is then judged as ONE
     chain, built over the WHOLE input as the doctor's decision_chains builds it (spec 8.8): a connected
     component over every `supersedes` link in either direction, whatever the linking decision's state or
-    `/proposed` qualifier, importer-authored decisions included. Such a link joins the chain but carries
-    and removes no current authority. When a chain keeps more than one current effective resolution (a
-    decided non-importer decision in `current`), the join raises ViewsError (a cannot-evaluate) naming the
-    chain's IDs and those resolutions, since spec 8.5 allows one per chain: a maintainer decision
-    superseding an importer-authored one that supersedes another maintainer decision leaves both
-    maintainer decisions current, and so does an open decision or a proposal superseding two decided
-    ones. A chain no link joins across importer provenance is refused only when the doctor's count over
-    it (a link from any non-importer decision removing its target) is not one, so a chain whose open
-    decision supersedes one of two decided heads still renders both. The refusal is of the whole join, so its caller gets no sets at all: a clean chain beside a
+    `/proposed` qualifier, importer-authored decisions included. Such a non-removing link joins the chain
+    but carries and removes no current authority, so a chain it joins can hold more than one current
+    effective resolution even with no fork or cycle among the edges above: a decided decision superseding
+    an open, withdrawn, proposed or importer-authored one that supersedes another decided decision leaves
+    both decided decisions current. EXACTLY those chains, the ones whose current effective resolutions
+    (authority-removing members that no authority-removing link supersedes) number more than one, raise
+    ViewsError (a cannot-evaluate) naming the chain's IDs, those resolutions, and what joined the chain
+    (importer, proposal, undecided, withdrawn); the doctor's C-DECISION-CHAINS grades the same chains by
+    the same count, as a finding naming the chain. A chain of decided links only still renders, its one
+    head the chain's one current effective resolution. The refusal is of the whole join, so its caller gets no sets at all: a clean chain beside a
     refused one is not rendered either, since a view cannot render part of a graph it cannot evaluate.
-    The doctor grades such a chain too, by its own count. The join sees only the decisions it is
+    The join sees only the decisions it is
     given, and the views read the active pending_decision index, never the archive, while the doctor's
     decision_chains also reads the decisions rotated to the archive. A `supersedes` link to an archived
     decision therefore links nothing here, and an archived decision's link to an active one is not seen: a
@@ -802,20 +823,23 @@ def join_resolution(decisions):
     supersedes_map = {}
     superseded = set()
     ids = {d.get("id") for d in decisions if isinstance(d.get("id"), str)}
-    # Build supersedes edges from state == "decided" decisions ONLY, matching the effective/gone filters
-    # and this join's fork/cycle ownership: a supersedes link on a non-decided (open/withdrawn) decision
-    # does not yet resolve anything, so it must not remove a decided effective resolution from `current`
+    # Build supersedes edges from authority-removing decisions ONLY (removes_authority, the shared rule):
+    # a supersedes link on a non-decided (open/withdrawn) decision, a proposal or an importer-authored one
+    # does not resolve anything, so it must not remove a decided effective resolution from `current`
     # and mislabel it "Superseded". Cross-record resolution GRADING otherwise remains U6 validate_store's
     # remit; this closes only the mislabel window. The all-decided case is unchanged.
+    imported = {d.get("id") for d in t_filter(every, "importer_authored")}
+    authority = {d.get("id") for d in decisions if isinstance(d.get("id"), str)
+                 and removes_authority(_state(d), _is_proposed(d), d.get("id") in imported)}
     for d in decisions:
         did = d.get("id")
-        if _state(d) != "decided":
+        if did not in authority:
             continue
         targets = _sorted_ids(t for t in _links_of(d, "supersedes") if t in ids)
         supersedes_map[did] = targets
         superseded.update(targets)
     # Spec 8.5/10.2: exactly ONE current effective resolution per supersession chain. Here a chain is a
-    # component connected by the edges built above (links from settled, decided non-importer decisions); a
+    # component connected by the edges built above (links from authority-removing decisions); a
     # chain any other link joins is counted over its whole membership below. A FORK is
     # a node with in-degree > 1. Refusing every fork and every CYCLE leaves exactly one head per such
     # chain, since an acyclic connected chain with no in-degree > 1 node has one node no edge reaches. Both
@@ -836,32 +860,37 @@ def join_resolution(decisions):
                          "chain is acyclic); fail-closed".format(cycle_id))
     current = {d.get("id") for d in decisions if isinstance(d.get("id"), str)} - superseded
     # Spec 8.5/8.6: the links of an importer-authored, a `/proposed` or a non-decided decision remove no
-    # authority, so a chain they join can keep more than one decided non-importer head even with no fork or
-    # cycle among the edges above (two maintainer decisions joined only through such a decision). Such a
-    # chain is one chain, so its heads are counted over its whole membership and more than one refuses.
-    # A chain no importer-authored link joins refuses only when the doctor grades it too: decision_chains
-    # lets a link from any non-importer decision remove its target, so a chain whose open decision
-    # supersedes one of two decided heads has its one resolution there and still renders here.
-    decided = {d.get("id") for d in decisions if _state(d) == "decided"}
-    heads = decided & current
-    imported = {d.get("id") for d in t_filter(every, "importer_authored")}
-    links = [(d.get("id"), t) for d in every for t in _links_of(d, "supersedes")]
-    gone = {t for a, t in links if a not in imported}
+    # authority (removes_authority, the shared rule), so a chain they join can keep more than one current
+    # effective resolution even with no fork or cycle among the edges above (two decided decisions joined
+    # only through such a decision). Such a chain is one chain, so its current effective resolutions
+    # (authority-removing members no authority-removing link supersedes) are counted over its whole
+    # membership, and more than one refuses, naming what joined the chain; the doctor's C-DECISION-CHAINS
+    # grades the same chains by the same count. A chain of decided links only has one head and renders.
+    by_every = {d.get("id"): d for d in every if isinstance(d.get("id"), str)}
 
-    def _refused(m):
+    def _joiners(m):
         ms = set(m)
-        if any(a in ms and t in ms and (a in imported) != (t in imported) for a, t in links):
-            return True
-        return len([i for i in m if i in decided and i not in gone]) != 1
+        kinds = set()
+        for i in m:
+            d = by_every.get(i)
+            if d is None or i in authority or not any(t in ms for t in _links_of(d, "supersedes")):
+                continue
+            kinds.add("importer" if i in imported else "proposal" if _is_proposed(d)
+                      else "withdrawn" if _state(d) == "withdrawn" else "undecided")
+        return sorted(kinds)
 
-    split = [(m, [i for i in m if i in heads]) for m in chains]
-    split = [(m, h) for m, h in split if len(h) > 1 and _refused(m)]
+    split = [(m, [i for i in m if i in authority and i not in superseded]) for m in chains]
+    split = [(m, h, _joiners(m)) for m, h in split if len(h) > 1]
     if split:
-        named = "; ".join("[{}] (current: {})".format(", ".join(m), ", ".join(h)) for m, h in split)
+        named = "; ".join("[{}] (current: {}; joined by: {})".format(
+            ", ".join(m), ", ".join(h), ", ".join(j) or "links between its members")
+            for m, h, j in split)
         raise ViewsError("decision supersession {} {} {} more than one current effective resolution: a "
-                         "`supersedes` link from an importer-authored decision (spec 8.6), a proposal or an "
-                         "undecided decision joins a chain but removes no current authority, and spec 8.5 "
-                         "requires exactly one current effective resolution per chain; "
+                         "`supersedes` link removes its target's authority only when its source is a "
+                         "decided, unqualified decision not authored by an importer (spec 8.5/8.6), so a "
+                         "link from an importer-authored, a proposed, an undecided or a withdrawn decision "
+                         "joins a chain but removes no current authority, and spec 8.5 requires exactly one "
+                         "current effective resolution per chain; "
                          "fail-closed".format("chain" if len(split) == 1 else "chains", named,
                                               "has" if len(split) == 1 else "each have"))
     return current, superseded, supersedes_map
@@ -3050,7 +3079,8 @@ def _self_test():
               _sw_join == ("ok", ({"PD-2"}, {"PD-1"}, {"PD-1": [], "PD-2": ["PD-1"]})))
         check("vocab-importer-split-registered-resolution-chains",
               _sw_mixed[0] == "refused"
-              and "chain [PD-1, PD-2, PD-3] (current: PD-1, PD-3) has more than one" in _sw_mixed[1])
+              and "chain [PD-1, PD-2, PD-3] (current: PD-1, PD-3; joined by: importer) has more than one"
+              in _sw_mixed[1])
         # TRANSFORM_VOCAB_VERSION names the registered vocabulary (spec 10.2) and init plans record it, so
         # the version and the registered name set are pinned together: adding, removing or renaming a
         # predicate, sort key, group field or projection column without a version bump fails here, and so
@@ -3321,9 +3351,9 @@ def _self_test():
         _shape_b = _shape_a + [{"id": "PD-3", "status": "decided", "actor": {"kind": "maintainer"},
                                 "links": [{"rel": "supersedes", "id": "PD-2"}]}]
 
-        def _refused_naming(outcome, ids, heads):
-            return (outcome[0] == "refused" and "chain [{}] (current: {}) has more than one".format(
-                ", ".join(ids), ", ".join(heads)) in outcome[1])
+        def _refused_naming(outcome, ids, heads, joined):
+            return (outcome[0] == "refused" and "chain [{}] (current: {}; joined by: {}) has more than one".format(
+                ", ".join(ids), ", ".join(heads), joined) in outcome[1])
 
         check("resolution-shape-a-importer-link-removes-no-authority",
               _outcome(join_resolution, _shape_a) == ("ok", ({"PD-1"}, set(), {"PD-1": []})))
@@ -3336,7 +3366,8 @@ def _self_test():
                    "links": [{"rel": "supersedes", "id": "PD-2"}]}])
               == ("ok", ({"PD-3"}, set(), {"PD-3": []})))
         check("resolution-shape-b-two-clean-heads-cannot-evaluate",
-              _refused_naming(_outcome(join_resolution, _shape_b), ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3")))
+              _refused_naming(_outcome(join_resolution, _shape_b), ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3"),
+                              "importer"))
         check("resolution-open-link-joins-two-clean-heads-cannot-evaluate",
               _refused_naming(_outcome(join_resolution, [
                   {"id": "PD-1", "status": "decided", "actor": {"kind": "importer"}, "links": []},
@@ -3346,7 +3377,7 @@ def _self_test():
                   {"id": "PD-3", "status": "decided", "actor": {"kind": "maintainer"}, "links": []},
                   {"id": "PD-4", "status": "decided", "actor": {"kind": "maintainer"}, "links": []},
                   {"id": "PD-10", "status": "decided", "actor": {"kind": "maintainer"}, "links": []}]),
-                  ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-3", "PD-4")))
+                  ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-3", "PD-4"), "undecided"))
         _two_b = _outcome(join_resolution, _shape_b + [
             {"id": "PD-4", "status": "decided", "actor": {"kind": "maintainer"}, "links": []},
             {"id": "PD-5", "status": "decided", "actor": {"kind": "importer"},
@@ -3354,8 +3385,9 @@ def _self_test():
             {"id": "PD-6", "status": "decided", "actor": {"kind": "maintainer"},
              "links": [{"rel": "supersedes", "id": "PD-5"}]}])
         check("resolution-two-chains-two-clean-heads-each-named",
-              _two_b[0] == "refused" and "chains [PD-1, PD-2, PD-3] (current: PD-1, PD-3); [PD-4, PD-5, PD-6] "
-              "(current: PD-4, PD-6) each have more than one" in _two_b[1])
+              _two_b[0] == "refused" and "chains [PD-1, PD-2, PD-3] (current: PD-1, PD-3; joined by: importer); "
+              "[PD-4, PD-5, PD-6] "
+              "(current: PD-4, PD-6; joined by: importer) each have more than one" in _two_b[1])
         # Both decision renderers read such a chain alike: DECISIONS hands every pending decision,
         # importer-authored ones included, to the join, and the DECISIONS.toml `[derived]` table is the same
         # join. Shape A renders the maintainer PD-1 as the effective resolution and the imported PD-2 only
@@ -3377,10 +3409,11 @@ def _self_test():
             return (_md == ("ok", "# DECISIONS\n\n## Pending decisions\n_No records._\n\n" + body)
                     and _tm[0] == "ok" and "\n[derived]\n{}\n".format(derived) in _tm[1])
 
-        def _both_refuse(shape, ids, heads):
+        def _both_refuse(shape, ids, heads, joined):
             return (_refused_naming(_outcome(render_decisions, dict(pending_decision=shape,
-                                                                    autonomous_decision=[])), ids, heads)
-                    and _refused_naming(_outcome(render_decisions_toml, {"pending_decision": shape}), ids, heads))
+                                                                    autonomous_decision=[])), ids, heads, joined)
+                    and _refused_naming(_outcome(render_decisions_toml, {"pending_decision": shape}), ids, heads,
+                                        joined))
 
         check("decisions-shape-a-renders-clean-decision-effective", _both_render(
             [_pd(1, "decided", "maintainer"), _pd(2, "decided", "importer", 1)],
@@ -3393,9 +3426,10 @@ def _self_test():
             + "- PD-1 (decided) t\n- PD-2 (decided) t\n", 'effective = ["PD-3"]\nsuperseded = []'))
         check("decisions-shape-b-two-clean-heads-cannot-evaluate", _refused_naming(_outcome(
             render_decisions, dict(pending_decision=_shape_b, autonomous_decision=[])),
-            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3")))
+            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3"), "importer"))
         check("projection-derived-shape-b-two-clean-heads-cannot-evaluate", _refused_naming(_outcome(
-            render_decisions_toml, {"pending_decision": _shape_b}), ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3")))
+            render_decisions_toml, {"pending_decision": _shape_b}), ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3"),
+            "importer"))
 
         # A chain joined through a `/proposed` decision is one chain too: the doctor's decision_chains builds
         # every chain over all pending decisions, proposals included, so both decision renderers hand the
@@ -3434,7 +3468,7 @@ def _self_test():
         check("decisions-chain-joined-through-proposal-two-clean-heads-cannot-evaluate", _both_refuse(
             [_pd(1, "decided", "maintainer"), _pd(2, "decided/proposed", "assistant", 1),
              _pd(3, "decided", "importer", 2), _pd(4, "decided", "maintainer", 3)],
-            ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-1", "PD-4")))
+            ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-1", "PD-4"), "importer, proposal"))
         # A chain of clean decisions joined only through an open decision is one chain too: the open PD-3
         # supersedes the decided PD-1 and PD-2, so the doctor's decision_chains sees one chain, and its link
         # removes no current authority here, so both renderers refuse it naming PD-1 and PD-2. The control:
@@ -3443,7 +3477,7 @@ def _self_test():
         # decisions' links only (the first then renders PD-1 and PD-2 as two effective resolutions).
         check("decisions-chain-joined-through-open-decision-two-clean-heads-cannot-evaluate", _both_refuse(
             [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer"), _pd(3, "open", "maintainer", 1, 2)],
-            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-2")))
+            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-2"), "undecided"))
         _ol_ctl = [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer"), _pd(3, "open", "maintainer")]
         _ol_md = _outcome(render_decisions, dict(pending_decision=_ol_ctl, autonomous_decision=[]))
         _ol_tm = _outcome(render_decisions_toml, {"pending_decision": _ol_ctl})
@@ -3454,6 +3488,43 @@ def _self_test():
                          "## Preference patterns\n_No records._\n")
               and _ol_tm[0] == "ok" and '\n[derived]\neffective = ["PD-1", "PD-2"' in _ol_tm[1]
               and "\nsuperseded = []\n" in _ol_tm[1])
+        # The authority ruling pinned end to end: only a decided, unqualified, non-importer decision's
+        # `supersedes` link removes its target's authority, so a chain joined through an undecided, a
+        # withdrawn or a proposed decision keeps two current effective resolutions and both renderers
+        # refuse it naming the chain, both resolutions and what joined it, while a chain of decided links
+        # only renders with its one head. Red when a non-decided link removes authority again (each refusal
+        # then renders with one head), or when a decided link stops removing (the last then refuses).
+        check("decisions-decided-over-open-over-decided-two-clean-heads-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "open", "maintainer", 1),
+             _pd(3, "decided", "maintainer", 2)],
+            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3"), "undecided"))
+        check("decisions-decided-over-two-opens-over-decided-two-clean-heads-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "open", "maintainer", 1),
+             _pd(3, "open", "maintainer", 2), _pd(4, "decided", "maintainer", 3)],
+            ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-1", "PD-4"), "undecided"))
+        check("decisions-decided-over-proposal-over-decided-two-clean-heads-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided/proposed", "assistant", 1),
+             _pd(3, "decided", "maintainer", 2)],
+            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3"), "proposal"))
+        check("decisions-decided-over-withdrawn-over-decided-two-clean-heads-cannot-evaluate", _both_refuse(
+            [_pd(1, "decided", "maintainer"), _pd(2, "withdrawn", "maintainer", 1),
+             _pd(3, "decided", "maintainer", 2)],
+            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3"), "withdrawn"))
+        check("resolution-withdrawn-successor-keeps-resolution-current", _outcome(join_resolution, [
+            _pd(1, "decided", "maintainer"), _pd(2, "withdrawn", "maintainer", 1)])
+            == ("ok", ({"PD-1", "PD-2"}, set(), {"PD-1": []})))
+        check("resolution-decided-links-only-chain-one-head", _outcome(join_resolution, [
+            _pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer", 1),
+            _pd(3, "decided", "maintainer", 2)])
+            == ("ok", ({"PD-3"}, {"PD-1", "PD-2"}, {"PD-1": [], "PD-2": ["PD-1"], "PD-3": ["PD-2"]})))
+        check("decisions-decided-links-only-chain-renders-one-head", _both_render(
+            [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer", 1),
+             _pd(3, "decided", "maintainer", 2)],
+            "## Effective resolutions\n- PD-3 t (supersedes PD-2)\n\n"
+            "## Superseded resolutions\n- PD-1 t\n- PD-2 t\n\n"
+            "## Autonomous decisions\n_No records._\n\n## Maintainer decisions\n_No records._\n\n"
+            "## Preference patterns\n_No records._\n",
+            'effective = ["PD-3"]\nsuperseded = ["PD-1", "PD-2"]'))
         # A refused chain refuses the whole view: a clean chain (PD-2 supersedes PD-1) beside a chain with two
         # current resolutions (the maintainer PD-5 supersedes the importer-authored PD-4, which supersedes
         # the maintainer PD-3) renders nothing in either renderer, and the refusal names only that chain.
@@ -3463,7 +3534,7 @@ def _self_test():
         check("decisions-clean-chain-beside-two-head-chain-refuses-whole-view", _both_refuse(
             [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer", 1),
              _pd(3, "decided", "maintainer"), _pd(4, "decided", "importer", 3),
-             _pd(5, "decided", "maintainer", 4)], ("PD-3", "PD-4", "PD-5"), ("PD-3", "PD-5")))
+             _pd(5, "decided", "maintainer", 4)], ("PD-3", "PD-4", "PD-5"), ("PD-3", "PD-5"), "importer"))
         check("decisions-clean-chain-beside-shape-a-chain-renders-both", _both_render(
             [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer", 1),
              _pd(3, "decided", "maintainer"), _pd(4, "decided", "importer", 3)],

@@ -2479,7 +2479,13 @@ def decision_chains(recs, by_id, firewall=True):
     pairs in record order. A chain is the connected component section 8.8 defines: every clean
     pending_decision is seated, importer-authored ones included, and every `supersedes` link joins its two
     members, whatever its direction and whoever authored it. A current effective resolution is a decided
-    (unqualified) pending_decision that no other supersedes. A chain with no decided member has no
+    (unqualified) pending_decision that no AUTHORITY-REMOVING other supersedes: both sides of that count
+    derive from the one shared predicate, _opf_views.removes_authority (spec 8.5/8.6, the maintainer
+    ruling), true only for a decided, unqualified decision not authored by an importer, so a `supersedes`
+    link from an open, withdrawn or `/proposed` decision joins the chain but removes no current authority,
+    and such a decision is never itself a resolution. The views' resolution join and the record verb's
+    pre-write chain checks derive from the same predicate, so the three agree by construction. A chain
+    with no decided member has no
     resolution yet and is not listed. The section 8.6 firewall applies here as in every current-state
     join, keyed on provenance alone (the maintainer ruling: OPF has never been released, so no store
     predates the firewall): an importer-authored pending_decision is never a current effective resolution,
@@ -2520,7 +2526,8 @@ def decision_chains(recs, by_id, firewall=True):
         for rel, tid in r.links:
             if rel == "supersedes" and isinstance(tid, str) and tid in parent:
                 union(r.id, tid)
-                if not firewall or r.actor_kind != "importer":
+                if _opf_views.removes_authority(r.state, r.qual is not None,
+                                                firewall and r.actor_kind == "importer"):
                     superseded.add(tid)
     components = {}
     for pid in parent:
@@ -2528,8 +2535,8 @@ def decision_chains(recs, by_id, firewall=True):
     chains = []
     for _root, members in components.items():
         decided = [m for m in members if by_id.get(m) is not None
-                   and by_id[m].state == "decided" and by_id[m].qual is None
-                   and (not firewall or by_id[m].actor_kind != "importer")]
+                   and _opf_views.removes_authority(by_id[m].state, by_id[m].qual is not None,
+                                                    firewall and by_id[m].actor_kind == "importer")]
         if not decided:
             continue     # a chain with no decided member has no resolution yet: zero current is legitimate
         chains.append((members, [m for m in decided if m not in superseded]))
@@ -2555,10 +2562,14 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
     """C-DECISION-CHAINS (R3): exactly one current effective resolution per pending_decision supersession
     chain THAT HAS A RESOLUTION (OPF-SPEC 8.5), over the chains decision_chains derives. For a chain
     carrying at least one decided member, the count of current resolutions must be exactly one, in BOTH
-    directions: zero (the sole resolution superseded by a withdrawn or still-open successor) is a fail-open
-    the count-only-over-one form missed (F14). A wholly-undecided chain legitimately has zero and is not
-    flagged. The section 8.6 provenance firewall lives in decision_chains itself, so the writer's
-    pre-publication chain check applies it identically. When the pending_decision records could not all
+    directions: zero (every decided member's authority removed, a supersedes cycle among decided
+    resolutions) is a fail-open the count-only-over-one form missed (F14), and more than one (a chain
+    joined only through an open, withdrawn, proposed or importer-authored decision, whose link removes no
+    authority) is the two-heads finding, the chain and its resolutions named. A wholly-undecided chain
+    legitimately has zero and is not
+    flagged. The authority rule and the section 8.6 provenance firewall live in decision_chains itself
+    (_opf_views.removes_authority, the shared predicate), so the writer's
+    pre-publication chain check applies them identically. When the pending_decision records could not all
     be read or confirmed (`unread`, from the collectors), or a seated one's status or links could not be
     interpreted (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run: a member not read or
     not interpreted can split, join or resolve a chain. A pending_decision whose actor kind is absent,
@@ -2579,11 +2590,11 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
                  "interpreted (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the chains are not "
                  "evaluated over a partial set (spec 8.5)")
         return
-    for _members, current in decision_chains(recs, by_id):
+    for members, current in decision_chains(recs, by_id):
         if len(current) != 1:
-            rep.finding("C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution "
-                        "has {} current effective resolutions; exactly one exists per chain (spec 8.5)".format(
-                            len(current)))
+            rep.finding("C-DECISION-CHAINS: the pending_decision supersession chain [{}] with a decided "
+                        "resolution has {} current effective resolutions ({}); exactly one exists per chain "
+                        "(spec 8.5)".format(", ".join(members), len(current), ", ".join(current) or "none"))
 
 
 def _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets, unread=frozenset(),
@@ -8915,8 +8926,9 @@ def self_test():
                   _i3_jtr is not None and _i3_jtr.status != VALID
                   and _i3_jtr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
                   and _i3_msgs(_i3_jtr, "C-DECISION-CHAINS")
-                  == ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution "
-                      "has 2 current effective resolutions; exactly one exists per chain (spec 8.5)"]
+                  == ["C-DECISION-CHAINS: the pending_decision supersession chain [PD-1, PD-2, PD-3] with a "
+                      "decided resolution has 2 current effective resolutions (PD-1, PD-3); exactly one "
+                      "exists per chain (spec 8.5)"]
                   and _i3_bad(_i3_jtr) == {"C-DECISION-CHAINS"})
             check("imported-segregation-clean-resolution-passes",
                   _i3_clean_active(_i3_run(_i3_chain()))
@@ -10531,19 +10543,20 @@ def self_test():
               and _r1_two.by_check.get("C-RECEIPTS")
               == ["C-RECEIPTS: backlog_item 'BI-1' has 2 done receipts; the receipt is one-to-one "
                   "(spec 8.5)"])
-        # An importer-authored decided pending_decision confers no resolution: a chain whose only
-        # non-superseded decided member is importer-authored has zero current effective resolutions
-        # (red when the chain derivation reads the importer record as the resolution).
+        # An importer-authored decided pending_decision confers no resolution and its link removes no
+        # authority: a clean decided PD-1 that an importer-authored decided PD-2 supersedes stays current,
+        # so the clean decided PD-3 superseding PD-2 is a second current resolution of the same chain
+        # (red when the chain derivation reads the importer record as the resolution or lets its link
+        # remove authority, which leaves PD-3 the one current resolution).
         f = clean_machine()
-        _r3_imppd = pd(3, supersedes="PD-2")
+        _r3_imppd = pd(2, supersedes="PD-1")
         _r3_imppd["actor"] = {"kind": "importer", "id": "import-assistant"}
-        f["pending_decision.index.toml"] = idx([pd(1), pd(2, status="withdrawn", supersedes="PD-1"),
-                                                _r3_imppd])
+        f["pending_decision.index.toml"] = idx([pd(1), _r3_imppd, pd(3, supersedes="PD-2")])
         f["counters.toml"] = counters(PD=3)
         _r3_imp = run(f)
         check("r3-importer-authored-resolution-confers-no-authority",
               _r3_imp is not None and _r3_imp.status == INVALID
-              and any("has 0 current effective resolutions" in f_
+              and any("has 2 current effective resolutions (PD-1, PD-3)" in f_
                       for f_ in _r3_imp.by_check.get("C-DECISION-CHAINS", [])))
         # ... and an importer-authored supersedes link removes no current authority: a clean decided PD-1
         # that an importer-authored withdrawn PD-2 supersedes stays its chain's one current resolution,
@@ -10611,8 +10624,8 @@ def self_test():
               and all(_r13_recs[k].actor_kind is None and "actor" in _r13_recs[k].unparsed
                       for k in _r13_kinds))
         check("r3-importer-lookalike-kinds-resolve-chain",
-              _r3_kind_current("importer") == [[]]
-              and all(_r3_kind_current(k) == [["PD-3"]] for k in _r13_kinds))
+              _r3_kind_current("importer") == [["PD-1"]]
+              and all(_r3_kind_current(k) == [["PD-1", "PD-3"]] for k in _r13_kinds))
         # An imported-series row neither confers nor owes a receipt, and resolves no chain, whatever its
         # actor (the series half of each filter, the backstop for a direct caller, since the doctor never
         # routes an imported row into these joins; red when either filter reads imported rows).
@@ -10740,7 +10753,7 @@ def self_test():
                      _make_rec(pd(2, status="withdrawn", supersedes="PD-1"), "pending_decision", "active"),
                      _make_rec(pd(3, supersedes="PD-2"), "pending_decision", "imported")]
         check("r3-imported-series-row-resolves-no-chain",
-              [cur for _members, cur in decision_chains(_r3_srecs, {r.id: r for r in _r3_srecs})] == [[]])
+              [cur for _members, cur in decision_chains(_r3_srecs, {r.id: r for r in _r3_srecs})] == [["PD-1"]])
         # The section 8.6 firewall is keyed on provenance, so it applies on this inactive store too, where
         # C-IMPORTED-SEGREGATION is off the roster: the receipt arm reports under C-RECEIPTS and the
         # decision-chain arm under C-DECISION-CHAINS (each red when the driver runs them only with the
@@ -10811,18 +10824,22 @@ def self_test():
         # PD-2 joins, a C-DECISION-CHAINS finding (spec 8.5, 8.8), never two one-member chains that each
         # pass (red when the derivation drops importer-authored decisions again). The same holds with PD-2
         # rotated to the archive, since the chain reads active and archived decisions together (spec 12).
-        _fw_two = ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution has 2 "
-                   "current effective resolutions; exactly one exists per chain (spec 8.5)"]
+        def _fw_two(members):
+            return ["C-DECISION-CHAINS: the pending_decision supersession chain [{}] with a decided "
+                    "resolution has 2 current effective resolutions (PD-1, PD-3); exactly one exists per "
+                    "chain (spec 8.5)".format(members)]
         _fw_jh = run(_fw_shape(head=True))
         check("firewall-inactive-importer-joined-two-heads-finding",
               _fw_jh is not None and _fw_jh.status == INVALID
               and {c for c, v in _fw_jh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
-              and _fw_jh.by_check.get("C-DECISION-CHAINS") == _fw_two and _fw_disclosed(_fw_jh))
+              and _fw_jh.by_check.get("C-DECISION-CHAINS") == _fw_two("PD-1, PD-2, PD-3")
+              and _fw_disclosed(_fw_jh))
         _fw_ajh = run(_fw_shape(head=True, archived=True))
         check("firewall-inactive-archived-importer-joined-two-heads-finding",
               _fw_ajh is not None and _fw_ajh.status == INVALID
               and {c for c, v in _fw_ajh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
-              and _fw_ajh.by_check.get("C-DECISION-CHAINS") == _fw_two and _fw_disclosed(_fw_ajh))
+              and _fw_ajh.by_check.get("C-DECISION-CHAINS") == _fw_two("PD-1, PD-3, PD-2")
+              and _fw_disclosed(_fw_ajh))
         # A chain no non-importer decision resolves (an importer-authored PD-1 decided alone) is the arm's
         # finding: resolving it now takes a new clean decision linking back (spec 8.6; red when the arm
         # skips every chain, or is dropped).
@@ -10906,8 +10923,9 @@ def self_test():
         check("firewall-inactive-unreadable-kind-chain-still-counted",
               _fw_c2 is not None and _fw_c2.checks.get("C-DECISION-CHAINS") == "CANNOT-EVALUATE"
               and [m for m in _fw_c2.findings if m.startswith("C-DECISION-CHAINS:")]
-              == ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution has 2 "
-                  "current effective resolutions; exactly one exists per chain (spec 8.5)"]
+              == ["C-DECISION-CHAINS: the pending_decision supersession chain [PD-1, PD-2, PD-3] with a "
+                  "decided resolution has 2 current effective resolutions (PD-2, PD-3); exactly one exists "
+                  "per chain (spec 8.5)"]
               and any(_fw_pd_kind in m and "the chains are not evaluated as a pass" in m
                       for m in _fw_c2.by_check.get("C-DECISION-CHAINS", [])))
         # A lookalike kind the schema does not admit is unknown provenance on this store too, and never the
@@ -11006,10 +11024,17 @@ def self_test():
         f["counters.toml"] = counters(PD=3)
         check("r3-two-current-resolutions-invalid", run(f).status == INVALID)
         f = clean_machine()
-        # a sole decided resolution superseded by a WITHDRAWN successor -> zero current (F14)
-        f["pending_decision.index.toml"] = idx([pd(1), pd(2, status="withdrawn", supersedes="PD-1")])
+        # every decided member's authority removed (a supersedes cycle between two decided resolutions)
+        # -> zero current (F14)
+        f["pending_decision.index.toml"] = idx([pd(1, supersedes="PD-2"), pd(2, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=2)
         check("r3-zero-current-resolution-invalid", run(f).status == INVALID)
+        f = clean_machine()
+        # a WITHDRAWN successor's link removes no authority (the maintainer ruling): the sole decided
+        # resolution stays its chain's one current effective resolution
+        f["pending_decision.index.toml"] = idx([pd(1), pd(2, status="withdrawn", supersedes="PD-1")])
+        f["counters.toml"] = counters(PD=2)
+        check("r3-withdrawn-successor-keeps-resolution-valid", run(f).status == VALID)
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1, supersedes="PD-99")])
         f["counters.toml"] = counters(PD=1)
@@ -11053,7 +11078,8 @@ def self_test():
         f["counters.toml"] = counters(PD=2)
         check("pd-wholly-undecided-chain-valid", run(f).status == VALID)
         # Two decided decisions joined only through an open decision's `supersedes` links are ONE chain
-        # (spec 8.8), graded here, where the views refuse it as a cannot-evaluate; with the open decision
+        # (spec 8.8) holding both as current effective resolutions (the open decision's links remove no
+        # authority), graded here, where the views refuse it as a cannot-evaluate; with the open decision
         # linking nothing they are two chains, each with its one resolution. Red when the chains are built
         # from decided decisions' links only (the first then passes as two one-member chains).
         f = clean_machine()
@@ -11066,14 +11092,44 @@ def self_test():
               _ol_r is not None and _ol_r.status == INVALID
               and {c for c, v in _ol_r.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
               and _ol_r.by_check.get("C-DECISION-CHAINS")
-              == ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution has 0 "
-                  "current effective resolutions; exactly one exists per chain (spec 8.5)"])
+              == ["C-DECISION-CHAINS: the pending_decision supersession chain [PD-1, PD-2, PD-3] with a "
+                  "decided resolution has 2 current effective resolutions (PD-1, PD-2); exactly one exists "
+                  "per chain (spec 8.5)"])
         f = clean_machine()
         f["pending_decision.index.toml"] = idx([pd(1), pd(2), pd(3, status="open")])
         f["counters.toml"] = counters(PD=3)
         _ol_c = run(f)
         check("pd-open-decision-linking-nothing-two-chains-valid",
               _ol_c is not None and _ol_c.status == VALID and _ol_c.checks.get("C-DECISION-CHAINS") == "PASS")
+        # The authority ruling's chain shapes, each ONE chain whose two current effective resolutions the
+        # finding names: decided over open over decided, decided over two opens over decided, decided over
+        # proposal over decided, and decided over withdrawn over decided (the importer-joined shapes are
+        # pinned beside the firewall vectors; the views refuse the same chains naming the same members).
+        # Red when a non-decided successor's link removes authority again (each shape then keeps one
+        # current resolution and passes).
+        _rl_prop = pd(2, supersedes="PD-1")
+        _rl_prop["status"] = "decided/proposed"
+        for _rl_label, _rl_rows, _rl_members, _rl_current in (
+                ("open", [pd(1), pd(2, status="open", supersedes="PD-1"), pd(3, supersedes="PD-2")],
+                 "PD-1, PD-2, PD-3", "PD-1, PD-3"),
+                ("two-opens", [pd(1), pd(2, status="open", supersedes="PD-1"),
+                               pd(3, status="open", supersedes="PD-2"), pd(4, supersedes="PD-3")],
+                 "PD-1, PD-2, PD-3, PD-4", "PD-1, PD-4"),
+                ("proposal", [pd(1), _rl_prop, pd(3, supersedes="PD-2")],
+                 "PD-1, PD-2, PD-3", "PD-1, PD-3"),
+                ("withdrawn", [pd(1), pd(2, status="withdrawn", supersedes="PD-1"),
+                               pd(3, supersedes="PD-2")],
+                 "PD-1, PD-2, PD-3", "PD-1, PD-3")):
+            f = clean_machine()
+            f["pending_decision.index.toml"] = idx(_rl_rows)
+            f["counters.toml"] = counters(PD=len(_rl_rows))
+            _rl_r = run(f)
+            check("pd-decided-over-{}-over-decided-two-heads-finding".format(_rl_label),
+                  _rl_r is not None and _rl_r.status == INVALID
+                  and _rl_r.by_check.get("C-DECISION-CHAINS")
+                  == ["C-DECISION-CHAINS: the pending_decision supersession chain [{}] with a decided "
+                      "resolution has 2 current effective resolutions ({}); exactly one exists per chain "
+                      "(spec 8.5)".format(_rl_members, _rl_current)])
 
         # --- id space / counters ----------------------------------------------------------------------
         f = clean_machine()

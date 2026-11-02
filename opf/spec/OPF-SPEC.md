@@ -1098,7 +1098,7 @@ Baseline types:
 | done | `recorded` | Created terminal, immutable. Links `receipt_of` to its backlog item. |
 | worklog | `recorded` | Durable operational record with release-keyed terminality: the unreleased tail is pre-terminal and mutable, a released-frozen span is terminal and immutable (sections 6.2 and 8.4). Takes no `/proposed` qualifier whatever the actor. Mutability governed by section 6.2, not by transition. |
 | finding | `open` > `fixed`, `routed`, `refuted`, or `accepted` | Severity MUST be graded at or after the fix decision, never before. |
-| pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision MUST carry none of `decision`, `decided_at`, `decided_by`; a decided one MUST carry all. A decided record MAY be superseded by a new decision linking `supersedes`; exactly one current effective resolution MUST exist per chain. |
+| pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision MUST carry none of `decision`, `decided_at`, `decided_by`; a decided one MUST carry all. A decided record MAY be superseded by a new decision linking `supersedes`; exactly one current effective resolution MUST exist per chain. A `supersedes` link removes its target's authority only when its source is a decided, unqualified pending_decision not authored by an importer (section 8.6), so a chain joined through an undecided, withdrawn or proposed decision can hold two current effective resolutions and is invalid. |
 | autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning MUST be a new record (or maintainer decision) linking it. |
 | block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it MUST NOT count toward blocked-ness or justify a stop until a maintainer ratifies it. |
 | handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act; at most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). |
@@ -1225,23 +1225,30 @@ linking back (section 8.6). Its subcommands:
   `decided/proposed`, MAY supersede the current resolution of a chain in the same act: `transition`
   then appends the `supersedes` link (section 8.5) to the record's `links`. Before anything is
   written, the superseded record MUST be another pending_decision at unqualified `decided`,
-  schema-valid, and the head of its chain (no pending_decision not authored by an importer already
-  links `supersedes` to it), and its own chain MUST NOT lead back to the superseding record. An
-  importer-authored pending_decision's `supersedes` link is left out of that test: such a record
-  discharges no supersession and confers nothing now (section 8.6). These target checks MUST read
+  schema-valid, and the head of its chain (no pending_decision whose link removes authority, a
+  decided, unqualified one not authored by an importer,
+  already links `supersedes` to it), and its own chain MUST NOT lead back to the superseding
+  record. A `supersedes` link from an undecided, withdrawn, proposed or importer-authored
+  pending_decision is left out of that test: such a link
+  discharges no supersession and removes nothing now (sections 8.5 and 8.6). These target checks MUST read
   the same records as the chain rule below, the active index together with every archived record
   (section 12), so a decided, schema-valid chain head rotated to the archive can be superseded, and
   an archived pending_decision that already supersedes the target or leads back to the superseding
   record is counted. `transition` MUST refuse the link on every other transition, a `/proposed`
-  landing included, because the doctor counts a `supersedes` link from a proposal too and would
-  then find the superseded chain without a current resolution. Every transition that lands a
+  landing included, because a `supersedes` link removes its target's authority only from a decided,
+  unqualified pending_decision (section 8.5), so written anywhere else it would join the chain
+  while removing nothing. Every transition that lands a
   pending_decision at unqualified `decided`, with or without a supersession, MUST then apply the
   doctor's chain rule (section 8.5) to the planned index together with every archived record before
   anything is written: the chain the record belongs to afterwards, a connected component over
   `supersedes` links in either direction, MUST have exactly one current effective resolution. So
-  `transition` also refuses to decide a record that a pending_decision not at unqualified `decided`
-  already supersedes when no other member of its chain is a current resolution, and a supersession
-  that passes the checks above but still leaves the chain without a current resolution. The rule
+  `transition` refuses to decide a record that a decided, unqualified, non-importer
+  pending_decision already supersedes (the landed resolution's authority would be removed on
+  arrival), while a record that only an undecided, withdrawn or proposed pending_decision
+  supersedes MAY be decided when the planned chain keeps exactly one current effective resolution
+  and MUST be refused when it would keep two or none; a supersession
+  that passes the checks above but still leaves the joined chain with two current effective
+  resolutions or none refuses too. The rule
   MUST read the records the doctor reads for that check, the planned index together with every
   archived record (section 12), so a chain member rotated to the archive is judged before anything
   is written. With no archive tree nothing has rotated; an archive input that the doctor's archive

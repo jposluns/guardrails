@@ -35,18 +35,23 @@ maintainer's ratification of `decided/proposed`) may supersede the current resol
 act: --supersedes PD-n appends the `supersedes` link to the record's `links` (spec 8.5). Before anything is
 planned further, the target must be a pending_decision seated once in the index or the archive, schema-valid,
 at unqualified `decided` (so never the record itself, which is not yet decided), and the head of its chain (no
-pending_decision not authored by an importer already links `supersedes` to it, so the chain never forks; an
-importer-authored one's link removes no current authority, spec 8.6, and a row whose actor kind is not exactly
+pending_decision whose link removes current authority already links `supersedes` to it, so the chain never
+forks; only a decided, unqualified, non-importer decision's link removes authority, the one shared rule
+_opf_views.removes_authority, spec 8.5/8.6, so an open, withdrawn, `/proposed` or importer-authored one's link
+holds nothing, and a decided row whose actor kind is not exactly
 `importer` counts), and its own chain must not lead back to the record (no cycle); these target checks read
 the chain rule's record set below, so a decided chain head rotated to the archive can be superseded.
---supersedes is refused on every other transition, a `/proposed` landing included: the doctor counts a
-`supersedes` link from a proposal too, so it would leave the superseded chain with no current resolution.
+--supersedes is refused on every other transition, a `/proposed` landing included: a proposal's `supersedes`
+link removes no authority, and the link belongs with the authority it exercises, so it is written only on the
+transition that lands the decision at unqualified `decided`.
 Every landing at unqualified `decided`, with or without
 --supersedes, then recomputes the doctor's own chain rule (_opf_check.decision_chains, C-DECISION-CHAINS) over
-the planned index and every archived record: the chain the record belongs to afterwards must have exactly one
-current effective resolution, or the transition refuses with every byte untouched. That also refuses the
-decide of a record already superseded by a pending_decision that is not decided when no other member of its
-chain is current, and a link the target checks pass that still leaves its chain with none. The rule reads the
+the planned index and every archived record: the record must not itself be superseded by a decided,
+unqualified, non-importer decision (its authority would be removed on arrival), and the chain the record
+belongs to afterwards must have exactly one
+current effective resolution, or the transition refuses with every byte untouched. A record only an open,
+withdrawn or `/proposed` decision supersedes may therefore be decided while the planned chain keeps one
+current resolution, and refuses, the chain named, when it would keep two or none. The rule reads the
 records the doctor's chain check reads, the planned index and every archived record through the doctor's own
 archive walk (_opf_check.archived_records), so a chain member rotated to the archive (spec 12) is judged
 before anything is written, and an archive input that is missing, unreadable or malformed refuses with every
@@ -1341,15 +1346,16 @@ def _proposal_keys(rtype, cur_state, rejection):
 
 def _require_supersedes_landing(req, rid, rtype, current, to_status):
     """--supersedes is legal only on a transition that lands a pending_decision at unqualified `decided`: a
-    maintainer's `open -> decided`, or a maintainer's ratification of `decided/proposed`. The doctor counts
-    a `supersedes` link from every pending_decision, a proposal included (C-DECISION-CHAINS, spec 8.5), so
-    a link written at `decided/proposed` would leave the chain it supersedes with no current resolution.
-    Refused before anything is planned."""
+    maintainer's `open -> decided`, or a maintainer's ratification of `decided/proposed`. Only a decided,
+    unqualified, non-importer decision's `supersedes` link removes its target's authority (spec 8.5,
+    _opf_views.removes_authority), so the link belongs with the authority it exercises: written anywhere
+    else it would join the chain while removing nothing. Refused before anything is planned."""
     if "--supersedes" in req.values and not (rtype == PENDING_DECISION and to_status == "decided"):
         raise RecordError("--supersedes applies only to a transition that lands a pending_decision at unqualified "
                           "decided (a maintainer's open -> decided, or a maintainer's ratification of "
-                          "decided/proposed), not {} {} -> {}: a supersedes link on a proposal would leave the "
-                          "chain it supersedes with no current resolution (spec 8.5); fail-closed".format(
+                          "decided/proposed), not {} {} -> {}: a supersedes link removes its target's authority "
+                          "only from a decided, unqualified decision, so written anywhere else it would join the "
+                          "chain while removing nothing (spec 8.5); fail-closed".format(
                               rid, current, to_status))
 
 
@@ -1362,14 +1368,21 @@ def _require_superseded_decided(trow, target):
 
 
 def _superseders(rows, target):
-    """The ids of the rows that already link `supersedes` to `target`, whatever their status (the doctor
-    counts every one), apart from an importer-authored row: the doctor's firewalled chain derivation
-    (_opf_check.decision_chains) lets an importer-authored pending_decision's `supersedes` link remove no
-    current authority (spec 8.6), so a target only such rows supersede is still its chain's current
-    resolution, and a head a new decision may supersede (spec 8.8). Only the exact kind `importer` is
-    exempt, as there: a row whose actor kind is absent, unreadable or a lookalike counts, fail-closed."""
+    """The ids of the rows whose `supersedes` link to `target` REMOVES its current authority
+    (_opf_views.removes_authority, the one rule the doctor's chain derivation and the views' resolution
+    join also derive from, spec 8.5/8.6): a decided, unqualified row not authored by an importer. A row at
+    open or withdrawn, or one carrying the `/proposed` qualifier, joins the chain but removes nothing, so
+    a target only such rows link is still its chain's current resolution and a head a new decision may
+    supersede (spec 8.8); whether the whole planned chain then keeps exactly one current resolution is the
+    planned-chain rule (_require_one_current_resolution). Only the exact actor kind `importer` is exempt:
+    a row whose actor kind is absent, unreadable or a lookalike counts when decided, fail-closed. A row
+    whose status cannot be read as unqualified `decided` removes nothing, exactly as the doctor's
+    derivation reads it (it seats such a row as not decided), so the two never disagree on a head."""
     return [r.get("id") for r in rows if isinstance(r, dict)
-            and not (isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer") and any(
+            and _opf_views.removes_authority(
+                str(r.get("status", "")).split("/", 1)[0],
+                str(r.get("status", "")).endswith("/proposed"),
+                isinstance(r.get("actor"), dict) and r["actor"].get("kind") == "importer") and any(
                 isinstance(link, dict) and link.get("rel") == SUPERSEDES and link.get("id") == target
                 for link in (r.get("links") if isinstance(r.get("links"), list) else []))]
 
@@ -1409,10 +1422,11 @@ def _head_remedy(rows, target):
 
 
 def _require_chain_head(rows, target, rel):
-    """The superseded resolution must be the head of its chain: no pending_decision not authored by an
-    importer already supersedes it (_superseders), so the new link never forks the chain into two current
-    resolutions (spec 8.5, C-DECISION-CHAINS). The refusal names a target in its place only when that
-    target is a head this same check accepts (_head_remedy)."""
+    """The superseded resolution must be the head of its chain: no pending_decision whose link removes
+    current authority (_superseders: decided, unqualified, non-importer) already supersedes it, so the new
+    link never forks the chain into two superseders of one head (spec 8.5, C-DECISION-CHAINS); a link from
+    an open, withdrawn or `/proposed` decision holds nothing. The refusal names a target in its place only
+    when that target is a head this same check accepts (_head_remedy)."""
     held = _superseders(rows, target)
     if held:
         raise RecordError("{} in {} is already superseded by {}; exactly one current effective resolution exists "
@@ -1512,13 +1526,18 @@ def _chain_records(ctx, rows):
 
 
 def _require_one_current_resolution(ctx, rows, rid, rel):
-    """A landing at unqualified `decided` must leave the chain the record belongs to with exactly one
-    current effective resolution (spec 8.5): the doctor's own derivation (_opf_check.decision_chains over
-    _opf_check._make_rec views, the C-DECISION-CHAINS rule) run over the records the doctor reads
+    """A landing at unqualified `decided` must land a resolution whose authority stands, and leave the
+    chain the record belongs to with exactly one current effective resolution (spec 8.5): the doctor's own
+    derivation (_opf_check.decision_chains over
+    _opf_check._make_rec views, the C-DECISION-CHAINS rule, itself derived from the one shared predicate
+    _opf_views.removes_authority) run over the records the doctor reads
     (_chain_records: `rows`, the planned index, then every archived record), before anything is written.
-    It catches what the target checks cannot see: the record itself already superseded by a
-    pending_decision that is not decided, with no other current member in its chain (its decide leaves the
-    chain with none), and a link to a chain head that still leaves the joined chain with none. A chain
+    It catches what the target checks cannot see: the record itself already superseded by a decided,
+    unqualified, non-importer pending_decision (the decide would land a resolution with no current
+    authority), and a link to a chain head that still leaves the joined chain with two current resolutions
+    or none. A record only an open, withdrawn or `/proposed` decision supersedes is NOT held here (such a
+    link removes no authority, the maintainer ruling): its decide passes exactly when the planned chain
+    keeps one current resolution, and refuses, naming the chain, when it would keep two or none. A chain
     member rotated to the archive (spec 12) is judged here as the doctor judges it, and an archive the
     doctor's walk does not pass refuses (_chain_records)."""
     recs = _chain_records(ctx, rows)
@@ -1526,15 +1545,23 @@ def _require_one_current_resolution(ctx, rows, rid, rel):
     for rec in recs:
         if isinstance(rec.id, str):
             by_id.setdefault(rec.id, rec)    # the first seated record, active first, as the doctor's map keeps it
-    for members, current in _opf_check.decision_chains(recs, by_id):
+    chains = _opf_check.decision_chains(recs, by_id)
+    held = [r.id for r in recs if r.rtype == PENDING_DECISION and (SUPERSEDES, rid) in r.links
+            and _opf_views.removes_authority(r.state, r.qual is not None, r.actor_kind == "importer")]
+    if held:
+        members = next((m for m, _current in chains if rid in m), [rid])
+        raise RecordError("deciding {} would land a resolution whose current authority is already removed: {} "
+                          "is itself already superseded by {} (a decided resolution supersedes it) in its "
+                          "supersession chain in {} and the archive ({}); exactly one current effective "
+                          "resolution exists per chain (spec 8.5, C-DECISION-CHAINS). Nothing written; "
+                          "fail-closed".format(rid, rid, ", ".join(map(str, held)), rel,
+                                               ", ".join(map(str, members))))
+    for members, current in chains:
         if rid in members and len(current) != 1:
-            held = [r.id for r in recs if r.rtype == PENDING_DECISION and (SUPERSEDES, rid) in r.links]
             raise RecordError("deciding {} would leave its supersession chain in {} and the archive ({}) with {} "
-                              "current effective resolutions ({}); exactly one exists per chain (spec 8.5, C-DECISION-CHAINS){}. "
+                              "current effective resolutions ({}); exactly one exists per chain (spec 8.5, C-DECISION-CHAINS). "
                               "Nothing written; fail-closed".format(
-                                  rid, rel, ", ".join(members), len(current), ", ".join(current) or "none",
-                                  "; {} is itself already superseded by {}".format(rid, ", ".join(map(str, held)))
-                                  if held else ""))
+                                  rid, rel, ", ".join(members), len(current), ", ".join(current) or "none"))
 
 
 def _require_sole_current_handoff(ctx, rows, rid, rel):
@@ -4711,7 +4738,6 @@ def _self_test_supersession(check, plan, post, full, now):
             (sup + ["PD-3"], base + [dict(pd(3, "decided"), decision="   ")], "not schema-valid"),
             (sup + ["PD-3"], base + [dict(pd(3, "decided"), type=BACKLOG)], "not schema-valid"),
             (m_argv, base + [pd(3, "decided", links=[("supersedes", "PD-1")])], "already superseded by PD-3"),
-            (m_argv, base + [pd(3, "open", links=[("supersedes", "PD-1")])], "already superseded by PD-3"),
             (sup + ["PD-3"], base + [pd(3, "decided", links=[("supersedes", "PD-2")])], "close a cycle"),
             (sup + ["PD-3"], [pd(1, "decided", links=[("supersedes", "PD-2")]), pd(2, "open"),
                               pd(3, "decided", links=[("supersedes", "PD-1")])], "close a cycle")):
@@ -4722,33 +4748,46 @@ def _self_test_supersession(check, plan, post, full, now):
     p, c, op = plan(m_argv, rows=odd, counters=counters)
     check("the cycle walk follows string ids only, so a malformed row elsewhere never crashes the plan",
           op.new_model["record"][1]["links"] == [{"rel": SUPERSEDES, "id": "PD-1"}])
-    # The doctor's chain rule over the planned index, on every landing at unqualified decided: the record
-    # already superseded by an open successor (with or without --supersedes, and on a ratification), a
-    # link to a chain head that still leaves the joined chain with none, and a plain decide
-    # that would make a second current resolution each refuse; the same shapes keeping one current pass.
+    # The doctor's chain rule over the planned index, on every landing at unqualified decided: deciding a
+    # record a DECIDED successor already supersedes refuses, its authority removed on arrival (with or
+    # without --supersedes, and on a ratification), a link to a chain head that leaves the joined chain
+    # with two current resolutions, and a plain decide
+    # that would make a second current resolution each refuse; a record only an open, withdrawn or
+    # proposed successor supersedes (such a link removes no authority) decides whenever the planned chain
+    # keeps exactly one current resolution, and the same shapes keeping one current pass.
     plain = ["transition", "PD-2", "decided", "--actor", "maintainer"] + decide
-    shadowed = [pd(1, "decided"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-2")])]
-    joined = [pd(1, "open"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-2"), ("supersedes", "PD-1")]),
-              pd(4, "decided", links=[("supersedes", "PD-1")])]
+    shadowed = [pd(1, "decided"), pd(2, "open"), pd(3, "decided", links=[("supersedes", "PD-2")])]
+    joined = [pd(1, "decided"), pd(2, "open"), pd(4, "decided"),
+              pd(5, "open", links=[("supersedes", "PD-1"), ("supersedes", "PD-4")])]
     for label, argv, rows, needle in (
             ("a superseded record, with --supersedes", m_argv, shadowed, "PD-2 is itself already superseded by PD-3"),
             ("a superseded record, without the link", plain, shadowed, "PD-2 is itself already superseded by PD-3"),
             ("a superseded record, on a ratification", r_argv,
-             [pd(1, "decided"), filed, pd(3, "open", links=[("supersedes", "PD-2")])],
+             [pd(1, "decided"), filed, pd(3, "decided", links=[("supersedes", "PD-2")])],
              "PD-2 is itself already superseded by PD-3"),
-            ("a link to a chain head that leaves the chain none", sup + ["PD-4"], joined,
-             "(PD-1, PD-2, PD-3, PD-4) with 0 current effective resolutions (none)"),
+            ("a link to a chain head that leaves the joined chain two", sup + ["PD-4"], joined,
+             "(PD-1, PD-2, PD-4, PD-5) with 2 current effective resolutions (PD-1, PD-2)"),
+            ("a link to a chain head a decided successor already supersedes", sup + ["PD-4"],
+             [pd(1, "decided"), pd(2, "open"), pd(4, "decided"), pd(5, "decided", links=[("supersedes", "PD-4")])],
+             "is already superseded by PD-5"),
             ("a second current resolution", plain, [pd(1, "decided"), pd(2, "open", links=[("supersedes", "PD-1")]),
                                                     pd(3, "decided", links=[("supersedes", "PD-1")])],
              "with 2 current effective resolutions (PD-2, PD-3)")):
         check("a decide refuses {} ({})".format(label, needle), _refuses(
             lambda argv=argv, rows=rows: plan(argv, rows=rows, counters=counters), needle))
-    for label, rows in (("the plain decide of that joined chain's record", joined),
-                        ("a record a decided successor already supersedes",
-                         [pd(1, "decided"), pd(2, "open"), pd(3, "decided", links=[("supersedes", "PD-2")])])):
-        p, c, op = plan(plain, rows=rows, counters=counters)
+    for label, argv, rows in (
+            ("with --supersedes, over an open successor of the record", m_argv,
+             [pd(1, "decided"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-2")])]),
+            ("with --supersedes, the target held only by an open link", m_argv,
+             [pd(1, "decided"), pd(2, "open"), pd(3, "open", links=[("supersedes", "PD-1")])]),
+            ("without the link, over a withdrawn successor of the record", plain,
+             [pd(1, "decided"), pd(2, "open"), pd(3, "withdrawn", links=[("supersedes", "PD-2")])]),
+            ("on a ratification, over a proposed successor of the record", r_argv,
+             [pd(1, "decided"), filed,
+              pd(3, "decided/proposed", links=[("supersedes", "PD-2")], proposed_from="open")])):
+        p, c, op = plan(argv, rows=rows, counters=counters)
         check("a decide that leaves one current resolution passes: {}".format(label),
-              op.new_model["record"][1]["status"] == "decided" and post(p, c, plain) is None)
+              op.new_model["record"][1]["status"] == "decided" and post(p, c, argv) is None)
     # An importer-authored decision's `supersedes` link removes no current authority (spec 8.6, the doctor's
     # firewalled decision_chains), so it never makes its target a non-head (spec 8.8). With a maintainer
     # PD-1 decided and an importer-authored PD-2 decided superseding it, PD-1 is the chain's one current
@@ -4814,7 +4853,7 @@ def _self_test_supersession(check, plan, post, full, now):
             return False
 
     def odd(actor):
-        return pd(2, "open", links=[("supersedes", "PD-1")], actor=actor)
+        return pd(2, "decided", links=[("supersedes", "PD-1")], actor=actor)
 
     def kind_of(actor):
         return actor.get("kind") if isinstance(actor, dict) else None
@@ -4845,7 +4884,7 @@ def _self_test_supersession(check, plan, post, full, now):
     # derivation does not seat it, so PD-3 stays current there, but the head check refuses PD-3 as a
     # target, and the refusal must not name it as the head this check accepts (red when the remedy names
     # the one current resolution without asking the head check).
-    shadow = forked + [dict(pd(5, "open", links=[("supersedes", "PD-3")], actor=mine), id=["PD-5"])]
+    shadow = forked + [dict(pd(5, "decided", links=[("supersedes", "PD-3")], actor=mine), id=["PD-5"])]
 
     def shadowed_remedy_named_none():
         named_none = _refuses(lambda: plan(m_argv, rows=shadow, counters=counters),
@@ -4876,8 +4915,9 @@ def _self_test_supersession(check, plan, post, full, now):
           "that plans",
           remedy_accepted())
     check("the head-check refusal of a chain with no current resolution names no target",
-          _refuses(lambda: plan(m_argv, rows=base + [pd(3, "open", links=[("supersedes", "PD-1")])],
-                                counters=counters),
+          _refuses(lambda: plan(m_argv, rows=base + [
+              pd(3, "decided", links=[("supersedes", "PD-1"), ("supersedes", "PD-4")]),
+              pd(4, "decided", links=[("supersedes", "PD-3")])], counters=counters),
                    "The chain has 0 current effective resolutions (none) under the doctor's chain rule "
                    "(C-DECISION-CHAINS), so no target is named in its place; fail-closed"))
     check("the head-check refusal names no target when the chain's one current resolution is itself "
