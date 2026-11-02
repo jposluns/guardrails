@@ -2988,6 +2988,12 @@ _TRKASY_RUNTIME_START_SPLIT_FORMS = (
     ("split-setsid", "set\\\nsid -f sleep 5"),
     ("split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; sou\\\nrce /abs/j.sh"),
 )
+# A start word after a backslash-newline pair bash does not join (its backslash escaped, or ending a comment
+# line), so the word runs as written; removing the pair would glue it to the word before it.
+_TRKASY_RUNTIME_START_UNJOINED_FORMS = (
+    ("unjoined-escaped-backslash-eval", ": x\\\\\neval \"sleep 5 $(printf '\\x26')\""),
+    ("unjoined-comment-eval", "# note\\\neval \"sleep 5 $(printf '\\x26')\""),
+)
 # eval spelled with quotes or a backslash, which bash removes before it runs the word.
 _TRKASY_RUNTIME_START_QUOTED_FORMS = (
     ("quoted-eval-apos", "e'v'al \"sleep 5 $(printf '\\x26')\""),
@@ -3007,6 +3013,7 @@ def _trkasy_start_rows(forms, contexts=("heredoc-apos", "uncertain-hash")):
 
 _TRKASY_RUNTIME_START_DENY_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_FORMS)
 _TRKASY_RUNTIME_START_SPLIT_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_SPLIT_FORMS)
+_TRKASY_RUNTIME_START_UNJOINED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_UNJOINED_FORMS)
 _TRKASY_RUNTIME_START_QUOTED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_QUOTED_FORMS, ("heredoc-apos",))
 
 
@@ -3014,9 +3021,11 @@ def _test_trkasy_no_amp(failures, tmp):
     """Foreground trkasy rows in registry scope: each no-'&' row allows, and is red with the no-'&' branch of
     _orch_foreground_detach_lexed restored to the raw scan's verdict; each real bare-'&' row denies; each
     runtime start form row denies, and is red with that branch allowing every command with no '&'; each row
-    split by a backslash-newline is red with the search not joining those pairs; the disown-alone rows are
-    red with disown removed from the pattern; and the e'v'al and ev\\al rows are red with the search reading
-    the raw command ("eval" and \\eval match there too, so those rows deny either way)."""
+    split by a backslash-newline is red with the search reading only the text with no pair removed; each row
+    with a start word after a pair bash does not join is red with the search reading only the text with
+    every pair removed; the disown-alone rows are red with disown removed from the pattern; and the e'v'al
+    and ev\\al rows are red with the search reading the raw command ("eval" and \\eval match there too, so
+    those rows deny either way)."""
     root = tmp / "trkasy-noamp"
     (root / ".aiqt").mkdir(parents=True)
     (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
@@ -3031,24 +3040,27 @@ def _test_trkasy_no_amp(failures, tmp):
         if got != "deny":
             failures.append("({}) a real bare '&' must deny in registry scope; got {}".format(label, got))
     start_rows = (_TRKASY_RUNTIME_START_DENY_ROWS + _TRKASY_RUNTIME_START_SPLIT_ROWS
-                  + _TRKASY_RUNTIME_START_QUOTED_ROWS)
+                  + _TRKASY_RUNTIME_START_UNJOINED_ROWS + _TRKASY_RUNTIME_START_QUOTED_ROWS)
     for label, command in start_rows:
         got = _decision(handler, command, cwd=str(root))
         if got != "deny":
             failures.append("({}) a runtime start form beside an open quote or uncertain '#' must deny in "
                             "registry scope; got {}".format(label, got))
-    text = aiqt_hooks._orch_runtime_start_text
+    readings = aiqt_hooks._orch_runtime_start_readings
     pattern = aiqt_hooks._ORCH_RUNTIME_START_RE
     no_disown = re.compile(pattern.pattern.replace("|disown", ""))
     if no_disown.pattern == pattern.pattern:
         failures.append("(trkasy-start-disown-flip) the runtime start pattern no longer holds |disown")
     quoted_raw_red = tuple(row for row in _TRKASY_RUNTIME_START_QUOTED_ROWS
                            if row[0].endswith(("-quoted-eval-apos", "-quoted-eval-inner-backslash")))
+    unquote = aiqt_hooks._ORCH_RUNTIME_START_UNQUOTE
     flips = (
-        ("join", "_orch_runtime_start_text",
-         lambda command: command.translate(aiqt_hooks._ORCH_RUNTIME_START_UNQUOTE),
-         _TRKASY_RUNTIME_START_SPLIT_ROWS, "the search not joining backslash-newline pairs"),
-        ("raw", "_orch_runtime_start_text", lambda command: command, quoted_raw_red,
+        ("join", "_orch_runtime_start_readings", lambda command: (command.translate(unquote),),
+         _TRKASY_RUNTIME_START_SPLIT_ROWS, "the search reading only the text with no pair removed"),
+        ("joined-only", "_orch_runtime_start_readings",
+         lambda command: (command.replace("\\\n", "").translate(unquote),),
+         _TRKASY_RUNTIME_START_UNJOINED_ROWS, "the search reading only the text with every pair removed"),
+        ("raw", "_orch_runtime_start_readings", lambda command: (command,), quoted_raw_red,
          "the search reading the raw command"),
         ("disown", "_ORCH_RUNTIME_START_RE", no_disown,
          tuple(row for row in _TRKASY_RUNTIME_START_DENY_ROWS if row[0].endswith("-disown-alone")),
@@ -3062,7 +3074,7 @@ def _test_trkasy_no_amp(failures, tmp):
                     failures.append("({}-{}-flip) the row must allow with {}, so it pins that; got {}"
                                     .format(label, flip, how, got))
         finally:
-            aiqt_hooks._orch_runtime_start_text = text
+            aiqt_hooks._orch_runtime_start_readings = readings
             aiqt_hooks._ORCH_RUNTIME_START_RE = pattern
     fixed = aiqt_hooks._orch_foreground_detach_lexed
 
