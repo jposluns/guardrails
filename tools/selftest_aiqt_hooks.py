@@ -2704,8 +2704,11 @@ def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound
     way and is re-raised. While the row is built, every signal with a Python-level handler is blocked in the
     calling thread and unblocked inside the try that stops the row's group, so a stop delivered to this thread
     during construction stays pending until the stop is in place (its handler runs inside the pthread_sigmask
-    call that unblocks it); bash and the row's commands inherit the blocked set. started, when given, is
-    called with the row's Popen right after construction, inside that blocked window. Not covered: a stop
+    call that unblocks it); bash and the row's commands inherit the blocked set. A Popen that raises builds
+    no group to stop, so the saved mask is restored before the construction error reaches the caller (a stop
+    blocked meanwhile is delivered then). started, when given, is called with the row's Popen right after
+    construction, inside that blocked window; an exception leaving it kills the row's group and restores the
+    mask before it is re-raised, like any other exception leaving the row. Not covered: a stop
     signal another thread takes during construction, and an end of the suite that raises no exception
     (SIGKILL, or a signal left at its default action such as SIGTERM) leaves the row's group running until
     the row ends by itself. An exception arriving after bash is reaped stops nothing: a group's id stays
@@ -2722,12 +2725,18 @@ def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound
         denied = _decision(handler, command) == "deny"
         handled = {sig for sig in signal.valid_signals() if callable(signal.getsignal(sig))}
         unmasked = signal.pthread_sigmask(signal.SIG_BLOCK, handled)
-        proc = subprocess.Popen(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, start_new_session=True)
-        if started is not None:
-            started(proc)
+        try:
+            proc = subprocess.Popen(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, start_new_session=True)
+        except BaseException:
+            # A Popen that raises built no group to stop, so only the saved mask needs restoring; a stop
+            # blocked meanwhile is delivered by this call, before the construction error reaches the caller.
+            signal.pthread_sigmask(signal.SIG_SETMASK, unmasked)
+            raise
         with proc:
             try:
+                if started is not None:
+                    started(proc)
                 signal.pthread_sigmask(signal.SIG_SETMASK, unmasked)
                 try:
                     stdout, stderr = proc.communicate(timeout=bound)
@@ -2758,16 +2767,21 @@ def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound
                     continue
             except BaseException:
                 # The new session keeps a terminal's or an outer timeout's group signal from the row, so an
-                # exception leaving the body (an interrupt, an outer stop raised as an exception) stops the
-                # row's group here. Only while bash is unreaped: its pid then still names the group. An
-                # exception can land after a wait reaped bash but before returncode was set, so the kill can
-                # find the group gone; that ProcessLookupError is swallowed so the original exception is
-                # always the one re-raised (a PermissionError is not caught).
-                if proc.returncode is None:
-                    try:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                # exception leaving the body (an interrupt, an outer stop raised as an exception, a started
+                # callback that raised while the mask was still blocked) stops the row's group here. Only
+                # while bash is unreaped: its pid then still names the group. An exception can land after a
+                # wait reaped bash but before returncode was set, so the kill can find the group gone; that
+                # ProcessLookupError is swallowed so the original exception is always the one re-raised (a
+                # PermissionError is not caught). The saved mask is restored after the kill, even when the
+                # kill raises, so no path out of the row leaves the handled signals blocked.
+                try:
+                    if proc.returncode is None:
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, unmasked)
                 raise
         matched = stdout.strip() != ""
         if denied != matched or matched != expected:
@@ -2874,7 +2888,10 @@ def _psm_oracle_raised_failures(handler, cannot_evaluate):
     is cannot-evaluate. A further check (psm-raised-built) sends SIGALRM to this thread from the oracle's
     started callback, right after the row's Popen is constructed: the signal must stay pending until the stop
     is in place, so the exception still reaches the caller with bash gone. A stop signal another thread takes
-    during construction is not covered."""
+    during construction is not covered. Two further checks: (psm-built-error) a Popen patched to raise hands
+    the caller the construction error with the thread's signal mask equal to the mask before the row, and
+    (psm-started-error) a started callback that raises hands the caller its exception with bash gone and the
+    mask restored."""
     out = []
     for raised in (KeyboardInterrupt, _PsmOuterStop):
         label = "(psm-raised) {} leaving a row".format(raised.__name__)
@@ -2947,6 +2964,68 @@ def _psm_oracle_raised_failures(handler, cannot_evaluate):
         elif spent > 15 or not gone:
             out.append("{}: a stop taken during construction must stay pending until the stop is in place, "
                        "got the exception after {:.2f} s, bash {} gone {}".format(label, spent, built[0], gone))
+    label = "(psm-built-error) a Popen that raises during a row's construction"
+
+    def failing_popen(*args, **kwargs):
+        raise OSError(24, "Too many open files")
+
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    saved_popen = subprocess.Popen
+    subprocess.Popen = failing_popen
+    caught = None
+    try:
+        _psm_oracle([], [], handler, rows=((label, "exec sleep 30", False),), bound=30)
+    except OSError as exc:
+        caught = exc
+    finally:
+        subprocess.Popen = saved_popen
+    after = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    if after != before:
+        # Repair the thread for the checks that follow before reporting the leak.
+        signal.pthread_sigmask(signal.SIG_SETMASK, before)
+    if caught is None or caught.errno != 24:
+        out.append("{}: the construction error must reach the caller, got {!r}".format(label, caught))
+    elif after != before:
+        out.append("{}: a failed construction must leave the mask it found, got signals {} left blocked"
+                   .format(label, sorted(int(sig) for sig in after ^ before)))
+    label = "(psm-started-error) a started callback that raises right after a row's construction"
+    built = []
+    callback_error = RuntimeError("the started callback failed")
+
+    def raising_started(proc):
+        built.append(proc.pid)
+        raise callback_error
+
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    caught = None
+    try:
+        _psm_oracle([], [], handler, rows=((label, "exec sleep 30", False),), bound=30,
+                    started=raising_started)
+    except RuntimeError as exc:
+        caught = exc
+    after = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    if after != before:
+        signal.pthread_sigmask(signal.SIG_SETMASK, before)
+    if caught is not callback_error:
+        out.append("{}: the callback's exception must reach the caller, got {!r}".format(label, caught))
+    elif not built:
+        out.append("{}: the oracle never called the started callback with the row's Popen".format(label))
+    else:
+        gone = _psm_gone(built[0], 3)
+        if gone is None:
+            cannot_evaluate.append("{}: /proc cannot tell whether the row's bash {} is still running".format(
+                label, built[0]))
+        elif not gone or after != before:
+            if not gone:
+                # The row's group was started by this check, so stopping it here leaks nothing of anyone
+                # else's; without the stop a red run would leave bash sleeping out its 30 s.
+                try:
+                    os.killpg(built[0], signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            out.append("{}: an exception leaving the callback must stop the row's group and restore the "
+                       "mask before it is re-raised, got bash {} gone {}, mask restored {}".format(
+                           label, built[0], gone, after == before))
     return out
 
 

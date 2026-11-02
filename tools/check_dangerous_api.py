@@ -348,6 +348,10 @@ ALLOWLIST = (
     ("tools/selftest_git_fixture_env_config_system.py", "_lifecycle_probe", "shell", 1,
      _SAVED + " (the injectable runner default of the lifecycle probe, whose call passes its own"
      " sys.executable -I -B -c argv list)"),
+    ("tools/selftest_aiqt_hooks.py", "_psm_oracle_raised_failures", "shell", 1,
+     "self-test fault injector: keeps the real subprocess.Popen only to restore it after the"
+     " construction-failure probe patches in a stand-in that raises OSError and starts nothing;"
+     " no call in this file turns shell on"),
     ("tools/check_python_floor.py", "_tomllib_catches", "code", 1,
      "static analysis: getattr(builtins, name) resolves an except-clause name in a scanned"
      " file's AST and accepts it only as an exception class for issubclass; never called"),
