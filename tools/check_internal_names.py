@@ -122,10 +122,10 @@ lower case only) goes through the PNG rule, verify_png (stated beside TRACKED_PN
 scanned as a text file's text is; the iCCP profile name and profile, and every chunk the rule cannot
 classify, are scanned as binary (no internal-allow exemption, a byte above 0x7F never part of a word); and
 the pixel data, PLTE and the standard non-text ancillary chunks are unread.
-Any other non-UTF-8 tracked file whatever its suffix (a malformed
-.csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working tree, or
-a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2, the
-way an unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed
+Any other non-UTF-8 tracked file whatever its suffix (a
+malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
+tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
+the way an unreadable input does. A .gitattributes `binary` attribute is NOT a skip: a binary-attributed
 file that decodes as UTF-8 is scanned. When git cannot list the tracked set (no git, not a repository, a
 failed or empty listing) the rule cannot run and the gate exits 2.
 WHAT THE ROLE RULE CANNOT SEE: an untracked or git-ignored file (outside the scoped scan), a generated
@@ -2825,7 +2825,8 @@ def _self_test(caller_env=None):
         #     vector a verdict other than the expected one. The marker, high-byte and skipped-chunk length and
         #     repeat rules are then swept over their cases, the three bounds are checked one unit
         #     inside, exactly at and one unit outside, and the real gate on a fixture git repository exits
-        #     0 on a clean tracked .png, 1 on one whose tEXt carries the role name and 2 on a .PNG.
+        #     0 on a clean tracked .png, 1 on one whose tEXt carries the role name and 2 on a .PNG, and reads
+        #     the five card-image paths as it reads any other tracked .png.
         import struct
 
         def png_chunk(ctype, body):
@@ -3120,6 +3121,67 @@ def _self_test(caller_env=None):
                     wired.append("{}: expected exit {} with {!r}, got rc={} {!r}".format(
                         name, want_rc, want, rc, report))
             check("png/wired-gate-exit-codes", not wired, wired)
+
+            # The five link-preview card images get no by-path treatment: in a fixture git repository with a
+            # valid PNG at each of their paths, the real gate exits 1 with a finding at every path when the
+            # tEXt carries the role name and 0 when it is clean (bytes no shipped image has), printing no
+            # exempt line either way. A copy of this gate that skips the five paths unconditionally (loaded
+            # through _load_ratchet_mutant, the anchor required to occur exactly once and split here so it
+            # does not match itself) must turn the role-name vector red.
+            card_paths = ("site/images/aiqt-card.png", "tools/card/card-safe.png", "tools/card/compare.png",
+                          "tools/card/platforms.png", "tools/card/sizes.png")
+            card_hit = png_with((b"tEXt", b"Comment\x00" + role_text))
+            card_clean = png_with((b"tEXt", b"Comment\x00" + plain_text))
+            cardrepo = tmp / "png-card-repo"
+            (cardrepo / ".aiqt").mkdir(parents=True)
+            (cardrepo / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
+                                                              encoding="utf-8")
+            for rel in card_paths:
+                (cardrepo / rel).parent.mkdir(parents=True, exist_ok=True)
+                (cardrepo / rel).write_bytes(card_hit)
+            card_setup = []
+            for args in (["init", "-q"], ["add", "--"] + list(card_paths)):
+                step = subprocess.run(["git", "-C", str(cardrepo)] + args, capture_output=True, text=True,
+                                      env=_git_fixture_env.git_fixture_env(), timeout=60)
+                if step.returncode != 0:
+                    card_setup.append("git {} failed: {!r}".format(args[0], step.stderr))
+
+            def card_vectors(module):
+                faults = {}
+                for vector, content, want_rc, wants in (
+                        ("role-name", card_hit, 1, [rel + ":chunk 2 tEXt:2: " + role for rel in card_paths]),
+                        ("clean", card_clean, 0, ["PASS"])):
+                    for rel in card_paths:
+                        (cardrepo / rel).write_bytes(content)
+                    out, err = io.StringIO(), io.StringIO()
+                    try:
+                        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                            rc = module.run_gate(cardrepo)
+                    except Exception as exc:  # a mutant may fail another way; that is a verdict too
+                        rc = "error: {}: {}".format(type(exc).__name__, exc)
+                    report = out.getvalue() + err.getvalue()
+                    if rc != want_rc or "exempt" in report.lower() or not all(w in report for w in wants):
+                        faults[vector] = "expected exit {} with {!r} and no exempt line, got rc={} {!r}".format(
+                            want_rc, wants, rc, report)
+                return faults
+
+            card_faults = card_vectors(this)
+            check("png/card-paths-scanned", not card_setup and not card_faults, (card_setup, card_faults))
+            skip_anchor = "    for rel in " + "relpaths:\n        path = root / rel\n"
+            skip_faults = []
+            if gate_source.count(skip_anchor) != 1:
+                skip_faults.append("anchor {!r} occurs {} times".format(skip_anchor, gate_source.count(skip_anchor)))
+            mdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-card-mutant-"))
+            try:
+                module = _load_ratchet_mutant(gate_source.replace(skip_anchor, "    for rel in relpaths:\n"
+                                                                  "        if rel in {!r}:\n            continue\n"
+                                                                  "        path = root / rel\n".format(card_paths)),
+                                              mdir, "card_paths_skipped")
+                if "role-name" not in card_vectors(module):
+                    skip_faults.append("the role-name vector still holds with the five paths skipped")
+            finally:
+                shutil.rmtree(mdir, ignore_errors=True)
+            check("png/card-paths-scanned-flip", not skip_faults, skip_faults)
         finally:
             shutil.rmtree(pngdir, ignore_errors=True)
     finally:
@@ -3274,7 +3336,9 @@ def _self_test(caller_env=None):
           "to every byte from 0x7F to 0xFF and in an iCCP profile after 0xC0 and an iCCP profile name "
           "before 0xFF, still cannot evaluate a .PNG or a .gif, holds the "
           "file-size, chunk-count and inflate bounds one unit inside, at and outside, and each of its "
-          "twenty-seven paired checks, removed in a copy of the gate, turns its vector red.")
+          "twenty-seven paired checks, removed in a copy of the gate, turns its vector red; and the five "
+          "card-image paths get no by-path treatment: a role name in their tEXt exits 1 and a clean changed "
+          "image exits 0, with no exempt line, and a copy of the gate that skips them turns the first red.")
     return 0
 
 

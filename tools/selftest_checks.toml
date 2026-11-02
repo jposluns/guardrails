@@ -4672,4 +4672,6 @@ expected-check-ids = [
   "png/chunk-count-bound-ends",
   "png/inflate-bound-ends",
   "png/wired-gate-exit-codes",
+  "png/card-paths-scanned",
+  "png/card-paths-scanned-flip",
 ]
