@@ -205,6 +205,10 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
 
+      - name: OPF release import-history parser self-test (inert until the imported-release writer lands)
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_release_history.py --self-test
+
       - name: OPF source-only init gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init.py --self-test
@@ -409,6 +413,28 @@ jobs:
       - name: OPF standalone-closure gate self-test
         shell: bash
         run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-e
+
+  opf-closure-f:
+    name: OPF standalone closure self-test F
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF standalone-closure gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_standalone_closure.py --self-test --ci-job opf-closure-f
 
   release:
     name: Corpus, release and versioning self-tests
