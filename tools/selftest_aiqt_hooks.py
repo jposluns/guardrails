@@ -2689,7 +2689,8 @@ _PSM_ORACLE_ROWS = (
 _PSM_ORACLE_BOUND = 30
 
 
-def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound=_PSM_ORACLE_BOUND):
+def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound=_PSM_ORACLE_BOUND,
+                started=None):
     """Run each oracle row (rows, default _PSM_ORACLE_ROWS) under real bash with a fresh random pattern, and
     require the hook to deny exactly the commands whose check matched its own shell, and each to match as the
     row states. A row that runs past bound wall seconds is judged on what is known without its result: a hook
@@ -2700,9 +2701,16 @@ def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound
     member or a background child); a process that moved itself to another group or session is not reached.
     The session also shields the row from a stop aimed at the suite's own group, so any exception leaving a
     row (KeyboardInterrupt, or an outer stop's signal turned into an exception) kills the row's group the same
-    way and is re-raised. Not covered: an end of the suite that raises no exception (SIGKILL, or a signal
-    left at its default action such as SIGTERM) leaves the row's group running until the row ends by itself,
-    and an exception arriving after bash is reaped stops nothing, as its pid no longer names the group.
+    way and is re-raised. While the row is built, every signal with a Python-level handler is blocked in the
+    calling thread and unblocked inside the try that stops the row's group, so a stop delivered to this thread
+    during construction stays pending until the stop is in place (its handler runs inside the pthread_sigmask
+    call that unblocks it); bash and the row's commands inherit the blocked set. started, when given, is
+    called with the row's Popen right after construction, inside that blocked window. Not covered: a stop
+    signal another thread takes during construction, and an end of the suite that raises no exception
+    (SIGKILL, or a signal left at its default action such as SIGTERM) leaves the row's group running until
+    the row ends by itself. An exception arriving after bash is reaped stops nothing: a group's id stays
+    allocated while any member lives, but once bash is reaped the code cannot tell whether the group still
+    exists, and a reused pid may name another group, so no kill is sent.
     Returns the stdout captured from each row that ran past the bound, keyed by its label."""
     overrun = {}
     if shutil.which("bash") is None or shutil.which("ps") is None or shutil.which("pidwait") is None:
@@ -2712,9 +2720,15 @@ def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound
         pattern = "zq" + os.urandom(6).hex()
         command = template.replace("@P@", pattern).replace("@B@", "[" + pattern[0] + "]" + pattern[1:])
         denied = _decision(handler, command) == "deny"
-        with subprocess.Popen(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE, text=True, start_new_session=True) as proc:
+        handled = {sig for sig in signal.valid_signals() if callable(signal.getsignal(sig))}
+        unmasked = signal.pthread_sigmask(signal.SIG_BLOCK, handled)
+        proc = subprocess.Popen(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, start_new_session=True)
+        if started is not None:
+            started(proc)
+        with proc:
             try:
+                signal.pthread_sigmask(signal.SIG_SETMASK, unmasked)
                 try:
                     stdout, stderr = proc.communicate(timeout=bound)
                 except subprocess.TimeoutExpired:
@@ -2745,9 +2759,15 @@ def _psm_oracle(failures, cannot_evaluate, handler, rows=_PSM_ORACLE_ROWS, bound
             except BaseException:
                 # The new session keeps a terminal's or an outer timeout's group signal from the row, so an
                 # exception leaving the body (an interrupt, an outer stop raised as an exception) stops the
-                # row's group here. Only while bash is unreaped: its pid then still names the group.
+                # row's group here. Only while bash is unreaped: its pid then still names the group. An
+                # exception can land after a wait reaped bash but before returncode was set, so the kill can
+                # find the group gone; that ProcessLookupError is swallowed so the original exception is
+                # always the one re-raised (a PermissionError is not caught).
                 if proc.returncode is None:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 raise
         matched = stdout.strip() != ""
         if denied != matched or matched != expected:
@@ -2763,8 +2783,10 @@ def _psm_oracle_overrun_failures(handler, cannot_evaluate):
     contradicts the row's expected match is a failure; a row that printed its match before the stop, which
     the hook allows, is a failure; and a completed row whose match contradicts the hook is still a failure.
     Each of those long rows ends in exec sleep, so bash is alone in its group; a further row (psm-ov-group)
-    leaves a background child in bash's group holding the output pipes, and the stop must reach it: the row
-    returns within about one bound and the child, by the pid the row printed, is gone. An exception leaving a
+    leaves a background child in bash's group holding the output pipes, and the stop must reach it: the
+    child, by the pid the row printed, is gone. A child still running is a failure whatever the time; a row
+    whose child is gone but that returned past one and a half bounds (host load) is cannot-evaluate
+    (psm-group-slow), never a pass. An exception leaving a
     row must stop its group too (_psm_oracle_raised_failures). A row whose failure
     rests on its output, and whose output had not arrived when the injected bound fired (a loaded host, seen
     as empty captured stdout), is itself cannot-evaluate, never a pass and never a failure of the handling;
@@ -2807,11 +2829,14 @@ def _psm_oracle_overrun_failures(handler, cannot_evaluate):
         if gone is None:
             cannot_evaluate.append("(psm-group-blind) {}: /proc cannot tell whether the row's child {} "
                                    "is still running".format(label, child))
-        elif not (len(failed) == 1 and failed[0].startswith(label + ":") and not unjudged
-                  and spent <= 3 * 1.5 and gone):
-            out.append("(psm-group) {}: the stop must reach the row's whole group, so the row returns within "
-                       "about one 3 s bound with its child {} gone, got {:.2f} s, child gone {}, failures {!r} "
+        elif not (len(failed) == 1 and failed[0].startswith(label + ":") and not unjudged and gone):
+            out.append("(psm-group) {}: the stop must reach the row's whole group, so the row returns with "
+                       "its child {} gone, got {:.2f} s, child gone {}, failures {!r} "
                        "and cannot-evaluate {!r}".format(label, child, spent, gone, failed, unjudged))
+        elif spent > 3 * 1.5:
+            cannot_evaluate.append("(psm-group-slow) {}: the row's child {} is gone and the row was judged, "
+                                   "but the row returned after {:.2f} s, past one and a half 3 s bounds (host "
+                                   "load), not judged".format(label, child, spent))
     out.extend(_psm_oracle_raised_failures(handler, cannot_evaluate))
     return out
 
@@ -2846,7 +2871,10 @@ def _psm_oracle_raised_failures(handler, cannot_evaluate):
     KeyboardInterrupt, then another exception) 2 s into a row whose background child, in bash's group and
     recording its own pid in a file, would run 30 s. The exception must reach the caller well inside the
     row's 30 s bound and the child must be gone. The pid file not written when the alarm fired (a loaded host)
-    is cannot-evaluate."""
+    is cannot-evaluate. A further check (psm-raised-built) sends SIGALRM to this thread from the oracle's
+    started callback, right after the row's Popen is constructed: the signal must stay pending until the stop
+    is in place, so the exception still reaches the caller with bash gone. A stop signal another thread takes
+    during construction is not covered."""
     out = []
     for raised in (KeyboardInterrupt, _PsmOuterStop):
         label = "(psm-raised) {} leaving a row".format(raised.__name__)
@@ -2887,6 +2915,38 @@ def _psm_oracle_raised_failures(handler, cannot_evaluate):
         elif spent > 15 or not gone:
             out.append("{}: the row's group must be stopped before the exception is re-raised, got the exception "
                        "after {:.2f} s, child {} gone {}".format(label, spent, child, gone))
+    label = "(psm-raised-built) SIGALRM taken by this thread during a row's construction"
+    built = []
+
+    def send_alarm(proc):
+        built.append(proc.pid)
+        signal.raise_signal(signal.SIGALRM)
+
+    def raising_built(signum, frame):
+        raise _PsmOuterStop("a stop taken during construction")
+
+    caught = None
+    saved = signal.signal(signal.SIGALRM, raising_built)
+    start = time.monotonic()
+    try:
+        _psm_oracle([], [], handler, rows=((label, "sleep 30 & wait", False),), bound=30, started=send_alarm)
+    except _PsmOuterStop as exc:
+        caught = exc
+    finally:
+        signal.signal(signal.SIGALRM, saved)
+    spent = time.monotonic() - start
+    if caught is None:
+        out.append("{}: the injected exception did not reach the caller".format(label))
+    elif not built:
+        out.append("{}: the oracle never called the started callback with the row's Popen".format(label))
+    else:
+        gone = _psm_gone(built[0], 3)
+        if gone is None:
+            cannot_evaluate.append("{}: /proc cannot tell whether the row's bash {} is still running".format(
+                label, built[0]))
+        elif spent > 15 or not gone:
+            out.append("{}: a stop taken during construction must stay pending until the stop is in place, "
+                       "got the exception after {:.2f} s, bash {} gone {}".format(label, spent, built[0], gone))
     return out
 
 
