@@ -500,6 +500,10 @@ DYNAMIC_LOADS_REVIEWED = (
     ("opf/tools/check_opf_init_contract.py", (),
      ("opf/tools/_opf_init_contract.py",), "runpy.run_path of opf/tools/_opf_init_contract.py inside the child "
      "script it launches, a string the scan does not parse"),
+    ("tools/_selftest_exit_report.py", ("loader.exec_module(main)",), (),
+     "the registered runner named in its own argv, run as __main__ by _bootstrap_main, which only the execution "
+     "gate's launch shim calls; every registered runner is an entry point classified on its own, so the row "
+     "follows nothing"),
     ("tools/check_opf_enforce_platforms.py",
      ("importlib.util.spec_from_file_location('_opf_enforce_platforms_hook', str(path))",
       "spec.loader.exec_module(module)"),

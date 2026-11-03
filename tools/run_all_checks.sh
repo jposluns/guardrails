@@ -101,7 +101,7 @@ run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
 run_gate "dashes-selftest" python3 -I -B tools/check_no_dashes.py --self-test
 run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --default-parity
 run_gate "links"     python3 -I -B tools/check_links.py
-run_gate "site-selftest" python3 -I -B tools/check_site.py --self-test
+run_gate "site-selftest" python3 -I -B tools/check_selftest_execution.py --suite site-selftest
 run_gate "site"      python3 -I -B tools/check_site.py
 run_gate "overclaim-selftest" python3 -I -B tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 -I -B tools/check_overclaim.py
@@ -115,6 +115,12 @@ run_gate "newtab-selftest" python3 -I -B tools/check_newtab.py --self-test
 run_gate "newtab" python3 -I -B tools/check_newtab.py
 run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
+run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
+run_gate "security-txt" python3 -I -B tools/check_security_txt.py
+run_gate "sitemap-selftest" python3 -I -B tools/check_selftest_execution.py --suite sitemap-selftest
+run_gate "sitemap" python3 -I -B tools/check_sitemap.py
+run_gate "headers-selftest" python3 -I -B tools/check_selftest_execution.py --suite headers-selftest
+run_gate "headers" python3 -I -B tools/check_headers.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ced211f6391a845bc7c2834f912a7287d7a04df8b237856252ad537fa29aeb4c"
+tree-sha256 = "21215caa2c5105cd15835bacfab06aa6059cae745d2441d6c4f16aea515c1a99"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 575533
-sha256 = "c8bc57eb72b874cad03d24c03ea7dade5e210a0797d12341a78e298c9eb861eb"
+bytes = 578815
+sha256 = "42b6c4f03f56aae5fa0de3e17a0ea1a95761841ed7d7f52ee16940c4579d54e6"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 20920
-sha256 = "23ad6a6c57f853ce497581ae8a66188001143683aaef7438cc0a14f26388f5e0"
+bytes = 21804
+sha256 = "4aefac1fd4e455adc169b1c3a774171770fae8e47d21d342f81ef982f9ef79d0"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -131,8 +131,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9230
-sha256 = "543106c1f52149a4bd1fe004fc6e1980646793fad14b69961cde7dec52bcc253"
+bytes = 9325
+sha256 = "ad13c8fb8d772e6524908be9bc71fd7901757589350e4d2967536cf08e4268fd"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2291,8 +2291,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 44988
-sha256 = "04d52068854db4533dce5822a1b50ca93250c90a0fdd9df4ea3f71ad46e6124d"
+bytes = 45465
+sha256 = "87f67148a46076db615410ccf50a68b5eed0c5c40aa399db8e975bd29d939c61"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2402,7 +2402,7 @@ sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "41fad4ed1af0917d0f0aeddc1e073f2b0f96cb2bf1091acacc8e97980f3765bc"
+sha256 = "14c5f2d48438c5dc2964c7856643f8b288a11d3fc669be55675bc9c359bc4f11"
 
 [[sources]]
 path = "RELEASING.md"
@@ -2451,8 +2451,8 @@ sha256 = "51898c16c9b7e27efa3def2cfc7f9e995f72103515b195b8507ee5e2a8c08038"
 
 [[sources]]
 path = "docs/_shell.html"
-bytes = 4040
-sha256 = "48a28b04ef26a052023b570623aa30918c4a5ef49666695a7c7dd8a0ad79a9dd"
+bytes = 4115
+sha256 = "00d088eb000dd71b637bdd1d7aa3d9df9c60f679fb27970d177235ae79ad519d"
 
 [[sources]]
 path = "docs/about.md"
@@ -2630,19 +2630,34 @@ bytes = 3994
 sha256 = "df583a369748d0c5f15c2eb61325552c3017f47602f7f6eedaf4667d8699cd48"
 
 [[sources]]
+path = "opf/site/.well-known/security.txt"
+bytes = 234
+sha256 = "3a50b56c27e838cd2af9bd215543a51c6e369d38cc50e3f34d9f89bf2e379807"
+
+[[sources]]
+path = "opf/site/404.html"
+bytes = 4363
+sha256 = "ffbff81707fe0dacadb54d3ae8296180812d8bd710647b316b034a556b99c28c"
+
+[[sources]]
+path = "opf/site/_headers"
+bytes = 1009
+sha256 = "d3cad7bde216afb88008c28bb4ba02c3e33b824fbb1aefd1d549d859e558885e"
+
+[[sources]]
 path = "opf/site/_redirects"
-bytes = 1285
-sha256 = "c20179ba1112b772147d104d5fb975adb473c158442bfc49b449d69a9320ac9b"
+bytes = 1225
+sha256 = "147c683a1095fb19fad389ad9bf89b5f70b9bc76c1e6330fc4d56b53e324557b"
 
 [[sources]]
 path = "opf/site/about.html"
-bytes = 5079
-sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
+bytes = 5157
+sha256 = "aee1a1989608bfaaaaed7c48381dac49acfc23cdcb3a1e6a9d425a75a176392f"
 
 [[sources]]
 path = "opf/site/adopt.html"
-bytes = 44897
-sha256 = "f6d117491ee8f9ce7c3aa0441b98d07d51668ba44503f8502b3c1154f2a827fd"
+bytes = 44975
+sha256 = "6bba516ae918b2d700b3ba3f962dfde7949a41cd5281d564ce87d2134b2f8d39"
 
 [[sources]]
 path = "opf/site/adopt.md"
@@ -2651,18 +2666,23 @@ sha256 = "bf0355135a2d4d8f51f9a67d32815bd70119e5abb9bc84863ff0a4b2702d8b7f"
 
 [[sources]]
 path = "opf/site/aiqt.html"
-bytes = 10616
-sha256 = "eaed62d078dfb77eadaa53369fe653325fe15c6b9303c390e9846b0deb03ab76"
+bytes = 10694
+sha256 = "e25c70f7a8e139e2a9fd4e4c909f896bdb173c974bb00c3b711623e329e10097"
+
+[[sources]]
+path = "opf/site/assets/baseline/logos/opfiles-touch.png"
+bytes = 5292
+sha256 = "f55098b6da69f606b347f53553f59fdc8d3275ade45793a562a6bff767b1b2f3"
 
 [[sources]]
 path = "opf/site/core-files.html"
-bytes = 34090
-sha256 = "9dc0946a4618004bff8930f1454aa2400366b06d798f85479d78b680a92092d4"
+bytes = 34168
+sha256 = "3703da873cdef3bf5dbde2c7e0dc63fa39edb4b1d5610c313f1c4ed66417a84d"
 
 [[sources]]
 path = "opf/site/disclosure.html"
-bytes = 12522
-sha256 = "a348bc33dd66939a2080e1e4645a4414350f78e214e95d5627ca5cc3b6c41ac1"
+bytes = 12600
+sha256 = "d3821bab62de48c90fd62dc80dc7ad7f766188ee9055de533dc00b40120b2dca"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -2671,8 +2691,8 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "opf/site/index.html"
-bytes = 23745
-sha256 = "8fd235d5b775231a6cd0512498397048ec6f86e8d43c170edb73adc438f2e8d2"
+bytes = 23823
+sha256 = "df674995b9be7c6fda21d52c03c867490f066ba856e9ad03e1288ee1131a2fa1"
 
 [[sources]]
 path = "opf/site/llms.txt"
@@ -2681,28 +2701,33 @@ sha256 = "49c7cc84d6331b8d1c574b68945263fc0185412df9b354a816d060f5cd49f5e9"
 
 [[sources]]
 path = "opf/site/record-indexes.html"
-bytes = 71590
-sha256 = "c847b4a66286fc419cc4798928b6a6d88944c955cc82544561df749d1a931038"
+bytes = 71668
+sha256 = "4f902a212862cbd0d59fad59dcc40bb6f417cc41d53e841c3287d1dabf0fbb0a"
 
 [[sources]]
 path = "opf/site/roadmap.html"
-bytes = 6341
-sha256 = "455e9ade35c89e25408229b0148beb951e12b1aab6de810c5b7b78ec0f53adb4"
+bytes = 6419
+sha256 = "6ba45a0ed29ffa253814d05bb5226242b0b8c57e1d0ce0f34c752ef17f94f7cd"
 
 [[sources]]
 path = "opf/site/robots.txt"
-bytes = 37
-sha256 = "c2612ca82a1165f8517bed2e5a5ee00efb558f5e6c813822545607b7a5cf850c"
+bytes = 77
+sha256 = "eba10c258c8ce46ab3a85417f3d6968ca17b6cfb283afc8ccf357de667428dbc"
+
+[[sources]]
+path = "opf/site/sitemap.xml"
+bytes = 1136
+sha256 = "de0b70d9f42af6eb3382e5f0b5f5e2184e857a86fbb3e83dfce5aa2ce63af2db"
 
 [[sources]]
 path = "opf/site/standard.html"
-bytes = 7350
-sha256 = "87bdc663c9f18f398335c6102468d295a4cc007445f41a6a1b4ad083d720c690"
+bytes = 7428
+sha256 = "f6b10a48b873c7a8dca1d932c4ee5daea14011db84517c527064c985ad196380"
 
 [[sources]]
 path = "opf/site/store-meta.html"
-bytes = 18823
-sha256 = "be26df2f7127617f57fbfdc481276d6f6f32d4ea93d5b9d59aaf8b8c49f1150b"
+bytes = 18901
+sha256 = "f022c8e8ce3d3c750fb3c562f8695b51cdc5d1607ad0c736751e2fa7db99a16e"
 
 [[sources]]
 path = "opf/site/styles.css"
@@ -2716,8 +2741,8 @@ sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
 
 [[sources]]
 path = "opf/site/tooling.html"
-bytes = 14601
-sha256 = "5e3b766d717789719d62f0a7b00a163076021e8f650bcdaa9fb8ae2e4dd56d4b"
+bytes = 14679
+sha256 = "6863c6d9f1e8b0d229e378b1c5c5ae0b86dcaa0c2897967fbf3ebb33463f477c"
 
 [[sources]]
 path = "opf/spec/OPF-IMPLEMENTATION-PROMPT.md"
@@ -3200,29 +3225,44 @@ bytes = 1744
 sha256 = "07bb5c6991deeb24d767ac2cba8b36ac0355947a5a5350619e0055f9b4bda031"
 
 [[sources]]
+path = "site/.well-known/security.txt"
+bytes = 231
+sha256 = "fa3cf1540bf6cd48215de57bdb4148aec97bf44717c3909e4f445967535588ad"
+
+[[sources]]
 path = "site/404.html"
-bytes = 4215
-sha256 = "3e21e9bf33381b8e3c14005bdcccd68796384c1d14c34add58bb71581ba08140"
+bytes = 4290
+sha256 = "22517b93e8c4fed1cff0b6b69dcb297a3ed40b31f7dc25427d0b3cf45bd15867"
+
+[[sources]]
+path = "site/_headers"
+bytes = 1009
+sha256 = "d3cad7bde216afb88008c28bb4ba02c3e33b824fbb1aefd1d549d859e558885e"
 
 [[sources]]
 path = "site/_redirects"
-bytes = 296
-sha256 = "4d099b360f7f3eedef41572525006f7d6be3c67abad9fb08b487fc1f1afb5c09"
+bytes = 283
+sha256 = "9d65b2fe84f9023d72c9dd6775fbb1e0c02ecdc8b8f103893da8d49cd4a4ee9b"
 
 [[sources]]
 path = "site/about.html"
-bytes = 10050
-sha256 = "9bf194d541fdc879d05ca10d4bf71a97658822ab75bea64ed8bbbd490248cd72"
+bytes = 10125
+sha256 = "7f027e8b1dce48e51ef5f9c27c34a19e4ef564d4f51af9ba1bdecc0622b3ab37"
+
+[[sources]]
+path = "site/assets/baseline/logos/aiqt-touch.png"
+bytes = 5625
+sha256 = "600f0ca0d03b23eccb36670313a573644a5642277a684df5bfb5c3a684f44ec5"
 
 [[sources]]
 path = "site/development.html"
-bytes = 14677
-sha256 = "c16df5707630ccdc0e4450a6c98de69da51facf271be662b2f53f5feb62fa949"
+bytes = 14752
+sha256 = "0f40a3f32d4d8c35efeb19a22478d9464b5f35d6d8398833fa5ef5c9c873c9a0"
 
 [[sources]]
 path = "site/disclosure.html"
-bytes = 17593
-sha256 = "7eef97107b9fc25383dcb9b0e87cb187a3177c17f2dbf11fadc17bb562494f60"
+bytes = 17668
+sha256 = "895dcc1c2e8243a4aded6678c72b886a283eeebd6cfb4a1315e46a49c9e35e13"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3281,18 +3321,18 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 698053
-sha256 = "5e5f6c25fcca6345971f2e98d940aafd0959ea33a2c5460f1ce0b081f86052ee"
+bytes = 698128
+sha256 = "372c6809ab4bc4427351fe8b85394fb1baa4dc8dc1be7d04b0ccf5c9a195d55c"
 
 [[sources]]
 path = "site/evidence.html"
-bytes = 9239
-sha256 = "e65178cebf5bd5ad74004096bb77bb69e07154b0d986060f44008b0028b998b1"
+bytes = 9314
+sha256 = "cde3e3e4d4a803341b407f285f28bdaa6108e91c30c35f3fe8d497a46f03c385"
 
 [[sources]]
 path = "site/examples.html"
-bytes = 20591
-sha256 = "e0612b4b25763a20a86da9d47eb1c727e4dab1d19cb9158424ba4764d24a868d"
+bytes = 20666
+sha256 = "9c27d10de2839df2529eca53475ef0cdc7dae6c77443919180af76f70867b18e"
 
 [[sources]]
 path = "site/favicon.svg"
@@ -3301,13 +3341,13 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/index.html"
-bytes = 17364
-sha256 = "3b5b6f10c4c139ad180e05502cb9b7bbca267a540ea7493f5ee1a0844e243e6d"
+bytes = 17439
+sha256 = "74a72de8433d64b2467b454935cf8b80460ce7bacfc4fc4964493f4ddf102c4e"
 
 [[sources]]
 path = "site/install.html"
-bytes = 24273
-sha256 = "7e9e29d3a67b8a6571325fe1db672d1a6bcd56eac16efbd23a0186aeb0d4647b"
+bytes = 24348
+sha256 = "cb148f5bfca2164d118e07db37a3cf9c32994b05c6686cf32758fd7cff4aa0a2"
 
 [[sources]]
 path = "site/js/install.js"
@@ -3316,33 +3356,43 @@ sha256 = "2d7a781ba483087accec69cc0142ad40c4b50b90509889f043d7f23a48eb7253"
 
 [[sources]]
 path = "site/learn.html"
-bytes = 6660
-sha256 = "809e486f5de8fb67c38a1c1d5dd106b9696a562c9e17c607653cac1aed0d12fc"
+bytes = 6735
+sha256 = "a3ff8c33ad7965c2795fb83f09010735478bd038203025dd73d0c25a8d3af71b"
+
+[[sources]]
+path = "site/llms.txt"
+bytes = 3118
+sha256 = "3b4e4a1fcfe2650701cf315cf6f8ab9f9cd75f25efb099b6b93f05a37ef82ea7"
 
 [[sources]]
 path = "site/mappings.html"
-bytes = 487233
-sha256 = "78d35151c4e66fe4d9dd91444ac439b8d79f20ffa5f87a33ec8c4bb4e86d1705"
+bytes = 487308
+sha256 = "7f9f49fb3d1fd9bf5f106b7e575fa7265394fb43be88286dddde12937d80f9f0"
 
 [[sources]]
 path = "site/roadmap.html"
-bytes = 7439
-sha256 = "bc03b190cd386ad5f1542032511619726047770228edd94cb981d6684ecec773"
+bytes = 7514
+sha256 = "ffa605ca3b1d08f1ceca74331cd8c49f81a4f6a8034206c01f60ceadf626b150"
 
 [[sources]]
 path = "site/robots.txt"
-bytes = 34
-sha256 = "e6ba55a1a23472e554deec7b68202c21e911525451f1dc1c5611dfd570873a5d"
+bytes = 71
+sha256 = "fd49919e451ce851893074027b8073b76e87a4d9ba7888fa734d4d5dc970b362"
 
 [[sources]]
 path = "site/rules.html"
-bytes = 21086
-sha256 = "8a3dbc2dd4db87ee46728bae5ea8d90e1da4778481cd67b21c995300025fe000"
+bytes = 21161
+sha256 = "85168b00ee2df4c0c5eaf4e2242cc18f5ba951fe62878388e37c9eccd962f59f"
+
+[[sources]]
+path = "site/sitemap.xml"
+bytes = 1465
+sha256 = "ed102a9ccb78142982642146abd34540e250942a65d8999c1a430dab6331d0e8"
 
 [[sources]]
 path = "site/standard.html"
-bytes = 9368
-sha256 = "0cbfe0d3947ccb007b79a296d05c7da33ed2b977990ef05868fabe4bc7160782"
+bytes = 9443
+sha256 = "99f3ecb649d54c5d6947c179642e29cd51867c067f2b06110b24b74de56e33f3"
 
 [[sources]]
 path = "site/styles.css"
@@ -3351,13 +3401,13 @@ sha256 = "3a7c8983ab9fca0e04dc69f88afef82b0ff9e533dc150c86f250aae2c3a4d3d3"
 
 [[sources]]
 path = "site/teams.html"
-bytes = 13887
-sha256 = "b92f3ad68ff7fc20fa7c9f8100b1692575471961fdbd833dd114a806c36a23e5"
+bytes = 13962
+sha256 = "180a70499a1f93f98ae73ab183acf622e482ac66f946aded2631e5732106aad7"
 
 [[sources]]
 path = "site/tech-details.html"
-bytes = 22974
-sha256 = "6a0c94397f100fa9a467ce9bc55fd503795461bfcafa1211fab86e5458fd857d"
+bytes = 23049
+sha256 = "1361aa9ff22db34002c19efe6c81ca119186b097e413cc4c5e50deb9661305a3"
 
 [[sources]]
 path = "site/theme.js"
@@ -3471,8 +3521,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 212462
-sha256 = "96456854e7249e27d5535cf9811e518f1ccefc0bc6b4405a65d41dfd088586b0"
+bytes = 212785
+sha256 = "0e78ce0234a10efb11bfd2ab6c95249b96c350a749a3674498f667dcf4d3021c"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3511,8 +3561,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 80037
-sha256 = "7372eab5f5ba3aa4d8b664ba3c9fe4113d5a7f81f1a5d852427a05b6ea3daeb9"
+bytes = 82720
+sha256 = "40aad6f6f9f1285ca596938187785ed11db4327c355ccadb70dcea1b0585a5c7"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3528,6 +3578,11 @@ sha256 = "8159e6df7ecfede91c36922f70a870b9a480a6f94d29ae3da0e3076d3e0517a1"
 path = "tools/check_gitleaks_pin.py"
 bytes = 55773
 sha256 = "034c0c5acd6ebf7916e7c72ae184e86d0a70ea1baafc93cb86015461fd18f2d8"
+
+[[sources]]
+path = "tools/check_headers.py"
+bytes = 32132
+sha256 = "7de00bde82268e3d13fe503a84ccbcbc1042cb96e9d91df6cd0781bee044b841"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
@@ -3685,19 +3740,29 @@ bytes = 69413
 sha256 = "853c49e22dc8bcd1a7f8457ce16be36c558d717f5e101261abec730fe7fe97bd"
 
 [[sources]]
+path = "tools/check_security_txt.py"
+bytes = 15851
+sha256 = "3421fe6941ea1cf9dbf1cea5fa9f96fda6c643ffd18ed1c014e2ab4853a0d04a"
+
+[[sources]]
 path = "tools/check_selftest_execution.py"
 bytes = 158431
 sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 22339
-sha256 = "e8b76e12aea5b311603589c8da51cd343988e61d847e13a0215c866cd497dd56"
+bytes = 69779
+sha256 = "abcdecfdd03b62be88309ae4ca314f2732748f2066b40a59dcc551a841720534"
 
 [[sources]]
 path = "tools/check_site_versions.py"
 bytes = 22186
 sha256 = "1175d7eaddb28a6c59696b2ef6501b576ce1c92fd21d35507ec5d10912be411f"
+
+[[sources]]
+path = "tools/check_sitemap.py"
+bytes = 23332
+sha256 = "250fe7e3c86bc5ab7da725b90290f26ed5b1aadc9a4b11544de64bcb96cc103f"
 
 [[sources]]
 path = "tools/check_sized_instructions.py"
@@ -3921,8 +3986,8 @@ sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 28243
-sha256 = "d1abc34f1bf8fdb2cb5b25462d7f9c15a57820d6ee2bfaac1eb2a44845086bcc"
+bytes = 28758
+sha256 = "10c0b8a514422c4387d245078f17050483806ad6955a594777544c35d2aa183a"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -3936,8 +4001,8 @@ sha256 = "f9bfcb410fcf35ffebe60ed237f03c4cd862393a81bb2f3043cccc1a9e183d3e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 198722
-sha256 = "22c63cfdd41b01357e79b7716b6aa5a7594963fce66fa775daba8896e37c90fe"
+bytes = 207404
+sha256 = "2c693fff07ec3a5b23dd8d60323e797ac9701d741b1878698c194156a46ceb8e"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3946,8 +4011,8 @@ sha256 = "541dd76db02d8933cde43260fbfb48af6baf5f418e923dd5245c4eb139b5785c"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 457115
-sha256 = "7a0c6095d8b5bdb63eb141dfbfa2ff32c824c4f13fb04339aecb03f778824a36"
+bytes = 458152
+sha256 = "a837f3d33e42f43b5aae8ec7eb93e75b3ecb55fed2d07c59a6c6f42f0bd9fa5f"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
@@ -3967,7 +4032,7 @@ sha256 = "99ab55b196362e770f00811e84c2a9f962c1d1ea1d7f871169ca2464d0f84d67"
 [[sources]]
 path = "tools/selftest_git_fixture_env_core.py"
 bytes = 195385
-sha256 = "599f7680b223cff53e514d1ab340232635b603e34808615a1d49a6c758d1bca5"
+sha256 = "2afd04c2c0fee41ded0e8bb56e4f2366a1cb659c13344d30b0597ac90a0039fe"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"

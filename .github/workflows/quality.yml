@@ -208,9 +208,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_links.py
 
-      - name: Site logo-consistency self-test
+      - name: Site integrity self-test (execution-reconciled)
         shell: bash
-        run: python3 -I -B tools/check_site.py --self-test
+        run: python3 -I -B tools/check_selftest_execution.py --suite site-selftest
 
       - name: Site integrity
         shell: bash
@@ -259,6 +259,30 @@ jobs:
       - name: Site version currency
         shell: bash
         run: python3 -I -B tools/check_site_versions.py
+
+      - name: Site security.txt self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
+
+      - name: Site security.txt
+        shell: bash
+        run: python3 -I -B tools/check_security_txt.py
+
+      - name: Site sitemap self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite sitemap-selftest
+
+      - name: Site sitemap
+        shell: bash
+        run: python3 -I -B tools/check_sitemap.py
+
+      - name: Site headers self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite headers-selftest
+
+      - name: Site headers
+        shell: bash
+        run: python3 -I -B tools/check_headers.py
 
       - name: Render driver behaviour self-test
         shell: bash

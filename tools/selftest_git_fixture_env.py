@@ -1231,7 +1231,8 @@ def _config_poison_fixture(base):
 # exited 0 with no hook, fsmonitor or exposure record in every run. Each entry below gives its
 # lane time per run.
 # SIZING_ACCOUNT_ROSTER is the set _registered_selftests() returns at commit e5191908, the parent
-# of the commit that recorded these runs; a member registered later is outside the account.
+# of the commit that recorded these runs, with one member's argv replaced by its later launch
+# (below); a member registered later is outside the account.
 # The closure gate's leg-bounds change, merged with main on 2026-10-15, 2026-10-17, 2026-10-18,
 # 2026-10-19 and 2026-10-20, registers two such members, tools/check_opf_standalone_closure.py
 # --self-test --ci-job opf-closure-a and --ci-job opf-closure-b (its CI steps, one per closure CI
@@ -1250,6 +1251,15 @@ def _config_poison_fixture(base):
 # opf/tools self-tests, timed in every run), was later removed with the store-upgrade engine, so
 # the account constants below omit it: 100 account members, 88 timed, 10 measured in the
 # combined lane and 9 in the malformed lane. The runs and times recorded here are unchanged.
+# One account member, tools/check_site.py --self-test, was later relaunched: commit 64ffed7c5
+# changed its registered step in tools/run_all_checks.sh and quality.yml to
+# tools/check_selftest_execution.py --suite site-selftest, which runs the same self-test entry
+# point (check_site.py _self_test, now with the touch-icon vectors that commit added) through the
+# execution gate. SIZING_ACCOUNT_ROSTER holds the suite argv in its place, so the account still
+# names every member it covers and keeps its counts (100 members, 88 timed): the account does not
+# say whether this member was among its timed ones, so neither removing it nor moving the count
+# would be known to be right. Whatever the account recorded for it was a direct launch at commit
+# e5191908; no lane time of the suite launch is known.
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
 # malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
 # and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
@@ -1413,7 +1423,8 @@ CONFIG_MEMBER_BOUNDS = {
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
 # from them and config/member-roster-figures pins them against _registered_selftests().
-# SIZING_ACCOUNT_ROSTER: every argv the whole-roster run covered, as registered when it was taken.
+# SIZING_ACCOUNT_ROSTER: every argv the whole-roster run covered, as registered when it was taken
+# but for the one relaunched member SIZING names.
 SIZING_ACCOUNT_ROSTER = frozenset({
     ("opf/tools/_journal.py", "--self-test"),
     ("opf/tools/_opf_adopt.py", "--self-test"),
@@ -1484,7 +1495,8 @@ SIZING_ACCOUNT_ROSTER = frozenset({
     ("tools/check_selftest_execution.py", "--suite", "instruction-budget-selftest"),
     ("tools/check_selftest_execution.py", "--suite", "orch-behaviour-selftest"),
     ("tools/check_selftest_execution.py", "--suite", "python-floor-selftest"),
-    ("tools/check_site.py", "--self-test"),
+    # Registered as tools/check_site.py --self-test when the account was taken (see SIZING).
+    ("tools/check_selftest_execution.py", "--suite", "site-selftest"),
     ("tools/check_site_versions.py", "--self-test"),
     ("tools/check_sized_instructions.py", "--self-test"),
     ("tools/check_standards_currency.py", "--self-test"),
