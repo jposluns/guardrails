@@ -509,6 +509,9 @@ DYNAMIC_LOADS_REVIEWED = (
      ("tools/check_python_floor.py", "tools/check_python_host_pin.py"),
      "its own source, whole or with one check changed, and the python-floor gate's source for the names it "
      "shares, loaded in its self-test"),
+    ("tools/_selftest_exit_report.py", ("loader.exec_module(main)",), (),
+     "the registered self-test runner, loaded as __main__ by _bootstrap_main only in the child the execution "
+     "gate launches, never in a process that imports this module to arm its report"),
     ("tools/gen_crosswalk.py",
      ("importlib.util.spec_from_file_location('_crosswalk_fdopen_flip_' + flip_path.stem, flip_path)",
       "spec.loader.exec_module(reverted)"),

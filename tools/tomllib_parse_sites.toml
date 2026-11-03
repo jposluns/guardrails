@@ -1072,6 +1072,16 @@ count = 1
 class = "EXEMPT"
 reason = "valueerror-passthrough"
 
+# the self-test saves tomllib.loads and restores it around an injected RecursionError and MemoryError at
+# the pin parse call (neither can be provoked safely), so the handler at the parse site is exercised
+[[site]]
+path = "tools/check_baseline_pin.py"
+function = "_self_test"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 # the self-test seam that reads tomllib.loads and tomllib.load as bound: the injection saves and restores
 # them around an injected MemoryError at the parse call (real memory exhaustion cannot be provoked
 # safely), and the restoration checks compare them with the pair bound at import

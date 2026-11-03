@@ -383,6 +383,30 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py"
+      ],
+      "target": "site/draft/disclosure/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py"
+      ],
+      "target": "site/draft/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py"
+      ],
+      "target": "site/draft/license/index.html"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_enforcement_register.py",
       "sources": [
         "docs/_shell.html",

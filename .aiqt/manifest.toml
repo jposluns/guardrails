@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ced211f6391a845bc7c2834f912a7287d7a04df8b237856252ad537fa29aeb4c"
+tree-sha256 = "4f991b6fa000bc6f66fb0636ad175f23f73c0feecc889cd2649b97d46d02769b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -16,8 +16,8 @@ sha256 = "9bf86b7a1a51656b13907f3422bf3bf974d3d41fa6cf2c9bc4b04686ee8f8190"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
-bytes = 11109
-sha256 = "52275f88fbcb6c310a13d4e4ec3a9fc18b9959ac9a5e390c4ec1b8d385f3395c"
+bytes = 12085
+sha256 = "1514d03ae624597764d09346743b36259c7f97bd8377b5c04ca81c097e0f803d"
 
 [[sources]]
 path = ".aiqt/core/adapter-blocks.toml"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 575533
-sha256 = "c8bc57eb72b874cad03d24c03ea7dade5e210a0797d12341a78e298c9eb861eb"
+bytes = 576455
+sha256 = "62880bc8b3d77300ed014ce92e18e518277807627091429d14243c50574cc74b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 20920
-sha256 = "23ad6a6c57f853ce497581ae8a66188001143683aaef7438cc0a14f26388f5e0"
+bytes = 22770
+sha256 = "c239bcabfc2e530958a67eb48c8309791ba1aecb7c9470fb912d616195dcd003"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -131,8 +131,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9230
-sha256 = "543106c1f52149a4bd1fe004fc6e1980646793fad14b69961cde7dec52bcc253"
+bytes = 9296
+sha256 = "87ac5f9aa6199cac3e52f40a6e2d3119c414924949c48a5e1d8155a4098a0f02"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -836,8 +836,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 11636
-sha256 = "657cce3844484eed0b683dd2beac8206ae1eddf8cbac9b09e7d19c6f9a024e96"
+bytes = 12231
+sha256 = "ad6fee209fdf819ced3e652aff78cb041db8cf68c6144b8ef2aa1bda53c56983"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -943,6 +943,11 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 path = ".aiqt/tracker-label-baseline.toml"
 bytes = 5110
 sha256 = "6776098bcc3e8a873b832556493dbf8f34c5b3ef6967705bfb44a9958888fd2a"
+
+[[sources]]
+path = ".baseline/pin.toml"
+bytes = 7069
+sha256 = "5dad8283adc8bdf16e1f1c0ddaa5903ff53ac22f51310f802ff2fd97b91801ef"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
@@ -2291,8 +2296,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 44988
-sha256 = "04d52068854db4533dce5822a1b50ca93250c90a0fdd9df4ea3f71ad46e6124d"
+bytes = 48628
+sha256 = "35fd42422e8a629cbe55c539ddf1dac9c0b98fa4aca85bbc5071de79fdd2d0f4"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2396,13 +2401,13 @@ sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 [[sources]]
 path = "NOTICE"
-bytes = 11026
-sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
+bytes = 11862
+sha256 = "23d7889c3ea95a5ecf0714803fb7dd381f8559716f7d73a2d1c50b7c5df47e9a"
 
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "41fad4ed1af0917d0f0aeddc1e073f2b0f96cb2bf1091acacc8e97980f3765bc"
+sha256 = "5d4d3d8ca2968c92f5b39a9c472dbd13778c05f5b6a1eceb82a57e7367d8f8de"
 
 [[sources]]
 path = "RELEASING.md"
@@ -3280,6 +3285,291 @@ bytes = 404567
 sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
+path = "site/draft/assets/baseline/LICENSE"
+bytes = 7048
+sha256 = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+
+[[sources]]
+path = "site/draft/assets/baseline/NOTICE.md"
+bytes = 1218
+sha256 = "08b26141bb2ecf0f4cd76e599c21f888fc71c4b3ab7ba769e954f6eea37ac7f3"
+
+[[sources]]
+path = "site/draft/assets/baseline/baseline.css"
+bytes = 46672
+sha256 = "2eca5c37df53360a3edcf29f2baf78eaa26b7da423dccbfc84e849636cbe1f18"
+
+[[sources]]
+path = "site/draft/assets/baseline/copy.js"
+bytes = 1337
+sha256 = "9bf99b50471889b768c795af5a4f84f526cecf7622a1f1265ca3d088b31339a4"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts.css"
+bytes = 1611
+sha256 = "a309a8ff4026a67fb5d10dea2c02e5b9ea2c1b32d4b18d7892015e038397396a"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt"
+bytes = 4442
+sha256 = "c02c0002d3bbd41a16933c162888c400469c7029f1362ca9d60d5ed20ea7d157"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2"
+bytes = 42708
+sha256 = "51acdc0e009e1d84cca6b654c4218275d8ee33dd243f3df25f7412a824a78d99"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/jetbrains-mono-LICENSE.txt"
+bytes = 4524
+sha256 = "403581b69dac5cff4079205e01c6b467e56af449ecbd7247693ddb1baafa005b"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2"
+bytes = 42964
+sha256 = "a8afa085e9ca5e53434e2ee918ba6b65c7dd4dda56509976b36591478c99d62e"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2"
+bytes = 40404
+sha256 = "18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/newsreader-LICENSE.txt"
+bytes = 4520
+sha256 = "26028ec4e13b650065fa525a09532176f8a668b76ff849ea01c564a7480f91e7"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2"
+bytes = 64520
+sha256 = "48bc8861b9b2ca9300747cad4fd6a3b4ac3028d364df00bd1b72097baa75e509"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2"
+bytes = 58084
+sha256 = "62981321d9a3cc7a61a73792729043703fd6112da86e8ec848bb57f088578757"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/public-sans-LICENSE.txt"
+bytes = 4503
+sha256 = "705a497c781f6463ff819abb513bb495f3fb05256f1d20321e3275813c0bafa5"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2"
+bytes = 28292
+sha256 = "16dc93252adb78785ae56a6465494f73b604b39817760ea92bd4046521bb5a35"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2"
+bytes = 26832
+sha256 = "5ed4d31c988e73b258894244f209069ebe77dc7e564861954b21198b6de90d68"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt-card.svg"
+bytes = 1181
+sha256 = "9192924345aeb6c086bc096c5e59f3bc1dbe74df06f44406be7a90520b9565aa"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt-favicon.svg"
+bytes = 540
+sha256 = "8a082befc210b86f795cecce1141ff813940652a5ecabb900214f27976352965"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt-mono.svg"
+bytes = 1152
+sha256 = "dc2718f4cf579ffe9b3e02bd4edce71c51e1c4954e915d59660964cceadc4118"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt-touch.png"
+bytes = 5625
+sha256 = "600f0ca0d03b23eccb36670313a573644a5642277a684df5bfb5c3a684f44ec5"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt.svg"
+bytes = 1171
+sha256 = "66ab34a8a0c03ef260e73cec128f53a714183cd8ba3c675969e9a04feb222781"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis-card.svg"
+bytes = 2158
+sha256 = "187d433274a30812c978b492895245ac728f6b9e3d73e17ca07504e1a9f57fb6"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis-favicon.svg"
+bytes = 774
+sha256 = "41ea619415ab55ff13aea87ddd9d1ed5cdeae6300e54501d30a70ae55560f504"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis-mono.svg"
+bytes = 1973
+sha256 = "198aa04cb150ddcee4c2130218c81e61bd52f23983903e2e16f7ec03dd7797d4"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis-touch.png"
+bytes = 6539
+sha256 = "2730c58989818670116a40a199741cb17e9635020cc6e2cca43ffec0da47d0e2"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis.svg"
+bytes = 2148
+sha256 = "0f2fb19cd2917e8d39e57c08172987bbc72ca0597a096d892aaed44ff5374572"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage-card.svg"
+bytes = 1702
+sha256 = "ace7ce40a3bd16f66e136739853dd81fe0f8058412580cacf8af5948da773751"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage-favicon.svg"
+bytes = 618
+sha256 = "3ebe565b9e5d7ec0eef1ae7092f92cafa56985fcca31a3499abc6fda23b1fa1d"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage-mono.svg"
+bytes = 2096
+sha256 = "3d9c927bbe57ed53c724da4c24eae84682878d06b693188059c4a6a8d70bad1d"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage-touch.png"
+bytes = 6138
+sha256 = "b75fdf0780b168595b01dda57185bce0778e09d1093739be4b8c8239c722957e"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage.svg"
+bytes = 1692
+sha256 = "285c37c1d77bc24206e31c3eb99837a79ba79f6c16b4ccbd7470f1fbfc58f985"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary-card.svg"
+bytes = 1961
+sha256 = "6c8add330f2a99263df464055fdd6635c0163ba850f2c2572152d1aa41a5884b"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary-favicon.svg"
+bytes = 675
+sha256 = "f1fe54a61a9c75d5e588bea38c7378cd397eaf7466d32642bf2f283df1d39588"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary-mono.svg"
+bytes = 1704
+sha256 = "3a5495b7d810fc95ddffef3dcc9a03c1e7751bf370c93940b9118e79a2c0db90"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary-touch.png"
+bytes = 5288
+sha256 = "4b191cd0f40bd836d8e0e6c254ccfd7460fa5c1f33853853e4f61de50ce0d9ca"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary.svg"
+bytes = 1951
+sha256 = "8ad4d338a68ce7afc781c02be91ee7e87ce464d44d0ed56eb10d5cddf80b45f8"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles-card.svg"
+bytes = 2741
+sha256 = "1b605de22dc5b2f8a86fe82c58a0e22092ea3c5fc2c566e9b88f2f2617ab61ef"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles-favicon.svg"
+bytes = 691
+sha256 = "e48c0de54ea7f31ffe5af118a803791fc5e4b469143bdcf80261944b77e3c17a"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles-mono.svg"
+bytes = 3091
+sha256 = "3886f2eec2739e0dcaf4e6e9c02b67be142d63ab7ccd3f5626e1d15d7ea995eb"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles-touch.png"
+bytes = 5292
+sha256 = "f55098b6da69f606b347f53553f59fdc8d3275ade45793a562a6bff767b1b2f3"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles.svg"
+bytes = 2731
+sha256 = "f294e493b3ad949b72e8f25500a507fa8f47e41f58247904f44b0434637d4f0c"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig-card.svg"
+bytes = 1911
+sha256 = "21f74d06b216d72d1e8d483a444d3e439847ede8e523427c147ba2ba59cd553e"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig-favicon.svg"
+bytes = 555
+sha256 = "526ca1f3606625306c4876bf8fe6ba5af86e87f622729cf003ef60949e26ccbd"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig-mono.svg"
+bytes = 1924
+sha256 = "5fd490079642b41ab12863bc1692e5481a737cc4f8f764319dd31f13a2037b86"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig-touch.png"
+bytes = 5758
+sha256 = "5897da9f6f9a556358584faee1d33b210a96de56b7ef6177d32a5bd940f0c0c7"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig.svg"
+bytes = 1901
+sha256 = "a74c1604acb4032e763afe0cf0a9ed9b4e5f4bdb76790d24a3de16a48eda5c1b"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/NOTICE.md"
+bytes = 2892
+sha256 = "b39a747fb9f73ec9373bd2329060af372e14185fcdc7f91fa67ea2cda3b6dd20"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/github-invertocat-black.svg"
+bytes = 1559
+sha256 = "693d7abe6f899646cc2e96856723b45e95f71885a54910b2749f6decdf7e1ee1"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/github-invertocat-white.svg"
+bytes = 1559
+sha256 = "ccd84c89b1056345608fc3489357f8acc7397e49a3cdc2d418b6c8016911d47b"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/linkedin-in-bug.png"
+bytes = 8375
+sha256 = "3c0149f26168b5fe0f43e68664abe40341a6443b3cd435d18a73e12f64f8b600"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/orcid-id.svg"
+bytes = 2016
+sha256 = "195be086656233fc1a0089086d9190d28dc6abce39c2290612d1893233e1f166"
+
+[[sources]]
+path = "site/draft/assets/baseline/palettes.css"
+bytes = 17493
+sha256 = "c67ffe38a93d266150a0bd82ce141fb6e8b544ff6a8d210f70b3d84032650bf7"
+
+[[sources]]
+path = "site/draft/assets/baseline/search.js"
+bytes = 1575
+sha256 = "4f106660b503af5c770a05472f733ababb3a01f3514cd9d1bfe03b983490d88f"
+
+[[sources]]
+path = "site/draft/assets/baseline/select.js"
+bytes = 2954
+sha256 = "2c4e1f1a2cc00c49dc013fd421b16c14cdc89eb873fc57f7768be90604d4bf90"
+
+[[sources]]
+path = "site/draft/disclosure/index.html"
+bytes = 4642
+sha256 = "3f88ef5702b7a48a3b04f9669d6c94d0350a49792e5e19ae744e375d037636bd"
+
+[[sources]]
+path = "site/draft/index.html"
+bytes = 5244
+sha256 = "8b70adb66e87a811bed47e3bbd27b30ece7314072aeed2f02cb491fa434007b1"
+
+[[sources]]
+path = "site/draft/license/index.html"
+bytes = 4638
+sha256 = "acb986da11c14889e9b29db3ea90bf52c3b71d8a833c3cf495a802f6722b9d3c"
+
+[[sources]]
 path = "site/enforcement.html"
 bytes = 698053
 sha256 = "5e5f6c25fcca6345971f2e98d940aafd0959ea33a2c5460f1ce0b081f86052ee"
@@ -3455,6 +3745,11 @@ bytes = 26351
 sha256 = "670497debf8f21b516b24f4d4647f9ac0f2b165a7cd930f7a5d67e3c8f7b5ed0"
 
 [[sources]]
+path = "tools/check_baseline_pin.py"
+bytes = 20981
+sha256 = "e87821889cbd42d871b89f2b67cde8e7552f03a7b1da302693095515851409f6"
+
+[[sources]]
 path = "tools/check_branch_root.py"
 bytes = 92920
 sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
@@ -3471,8 +3766,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 212462
-sha256 = "96456854e7249e27d5535cf9811e518f1ccefc0bc6b4405a65d41dfd088586b0"
+bytes = 212733
+sha256 = "865d28781210582275e41cc7fd1479a31b055c2e171b768ec6b3ef56b62419d0"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -3511,8 +3806,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 80037
-sha256 = "7372eab5f5ba3aa4d8b664ba3c9fe4113d5a7f81f1a5d852427a05b6ea3daeb9"
+bytes = 87011
+sha256 = "c6bf06ef086c486299e05b3020a636909ea3cb1d6747d76a3b58b566a00d0e55"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3546,8 +3841,8 @@ sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 230734
-sha256 = "1aa473a81111e35ce4b87455014b220aa1cabedd38c2c156a0d36614b1e2059d"
+bytes = 239507
+sha256 = "fd606702f9b49af5ec849d5b0623be38231ab001fdea206a2be0ffc97eea2005"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -3785,6 +4080,11 @@ bytes = 31140
 sha256 = "ee37d7b4db8fb441ddb3fb07e4003c94a5b36124e9714bca2f84ad4e7bb1b199"
 
 [[sources]]
+path = "tools/gen_draft_site.py"
+bytes = 22304
+sha256 = "24f382c19b4421c162b9fed3238f2345df49f7a6979169f340a1c9c974753dba"
+
+[[sources]]
 path = "tools/gen_enforceability.py"
 bytes = 88687
 sha256 = "86d55d3f474a61803df772ded86a9f9d1ffe74bc9f83b2f36fb1a643bf706ab5"
@@ -3921,8 +4221,8 @@ sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 28243
-sha256 = "d1abc34f1bf8fdb2cb5b25462d7f9c15a57820d6ee2bfaac1eb2a44845086bcc"
+bytes = 28420
+sha256 = "1554857e7cefa752600f838fcc8a886031372d5e9f6c5871b30fb3cff68a84f3"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -3936,8 +4236,8 @@ sha256 = "f9bfcb410fcf35ffebe60ed237f03c4cd862393a81bb2f3043cccc1a9e183d3e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 198722
-sha256 = "22c63cfdd41b01357e79b7716b6aa5a7594963fce66fa775daba8896e37c90fe"
+bytes = 200421
+sha256 = "d21bfad478c8d7570d8b02fdbc83054a571fc74c4abb779815350c2127d9a5e2"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -3986,8 +4286,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 28568
-sha256 = "66b12879804332b0deab4812abe036e48ee0263607fdd2e3bb2b7397079299e6"
+bytes = 28908
+sha256 = "c91535fda3fb121cae4d1576da07374601d1c060ee8030fc485325bc2aa8fd5c"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"

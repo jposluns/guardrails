@@ -12,6 +12,11 @@ so an anchor is attributed to the nav only while one is open.
 (Historically this gate required the link in the <footer>; B-10 moved the canonical disclosure link
 into the site nav and repurposed this gate accordingly. The filename is retained as its gate identity.)
 
+The staged draft under site/draft/ follows the shared site template, whose top bar has no Disclosure item,
+so a draft rule covers it instead (stated beside DRAFT_SUBDIR): exactly one /draft/disclosure/ link in the
+draft landing page's "About this project" region, none required on the other draft pages. The draft rule
+replaces the live rule for site/ at promotion.
+
 Coverage spans TWO required roots: site/ (the aiqt.ai site, absolute /disclosure) and opf/site/ (the
 opfiles.ai site, served from opf/site as its own root, whose pages link ./disclosure relative so it
 resolves within opf/site; every opf/site page carries the nav, so nothing is exempt). Each tree is a REQUIRED
@@ -69,6 +74,16 @@ COVERAGE_ROOTS = (
     ("opf/site", "./disclosure", frozenset()),
 )
 
+# The staged draft under site/draft/ follows the shared site template (baseline 1.2.1), whose top bar has no
+# Disclosure item: the draft landing page links the disclosure page from its "About this project" region
+# (p.about), and the inner draft pages carry no disclosure link. So the live rule above covers every site/
+# page outside site/draft/, unchanged, and the draft rule covers the pages under it: exactly one
+# DRAFT_DISCLOSURE_HREF link inside the About region of DRAFT_LANDING, and none required elsewhere. At
+# promotion the draft moves to the root and the draft rule replaces the live rule for site/.
+DRAFT_SUBDIR = "draft"
+DRAFT_LANDING = "draft/index.html"
+DRAFT_DISCLOSURE_HREF = "/draft/disclosure/"
+
 
 class _Anchors(HTMLParser):
     """Collect the href of every <a> that sits INSIDE a <nav> element. <nav> nesting is tracked so an
@@ -90,6 +105,53 @@ class _Anchors(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "nav" and self._nav_depth:
             self._nav_depth -= 1
+
+
+class _AboutAnchors(HTMLParser):
+    """Collect the href of every <a> inside a <p class="about">, the landing page's "About this project"
+    line (template specification section 7.24). A <p> cannot nest, so the region closes at its </p>."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hrefs = []
+        self._open = False
+
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        if tag == "p":
+            self._open = "about" in (d.get("class") or "").split()
+        elif tag == "a" and self._open and d.get("href") is not None:
+            self.hrefs.append(d["href"].strip())
+
+    def handle_endtag(self, tag):
+        if tag == "p":
+            self._open = False
+
+
+def check_draft_pages(pages):
+    """pages: {name under site/: html_text} for the pages under site/draft/. Return a sorted list of
+    findings for the draft rule: DRAFT_LANDING must exist once any draft page does and carry exactly one
+    DRAFT_DISCLOSURE_HREF link inside its About region; the other draft pages need none."""
+    if not pages:
+        return []
+    if DRAFT_LANDING not in pages:
+        return ["{}: missing; the draft rule needs the draft landing page".format(DRAFT_LANDING)]
+    parser = _AboutAnchors()
+    parser.feed(pages[DRAFT_LANDING])
+    count = sum(1 for h in parser.hrefs if h == DRAFT_DISCLOSURE_HREF)
+    if count == 0:
+        return ["{}: missing the {} link in its About region".format(DRAFT_LANDING, DRAFT_DISCLOSURE_HREF)]
+    if count > 1:
+        return ["{}: carries {} {} links in its About region (expected exactly one)".format(
+            DRAFT_LANDING, count, DRAFT_DISCLOSURE_HREF)]
+    return []
+
+
+def check_site_pages(pages, allowlist, href=DISCLOSURE_HREF):
+    """The site/ root: the live rule (check_pages) over every page outside site/draft/ and the draft rule
+    (check_draft_pages) over the pages under it."""
+    draft = {name: text for name, text in pages.items() if Path(name).parts[0] == DRAFT_SUBDIR}
+    live = {name: text for name, text in pages.items() if name not in draft}
+    return sorted(check_pages(live, allowlist, href) + check_draft_pages(draft))
 
 
 def disclosure_link_count(text, href=DISCLOSURE_HREF):
@@ -204,14 +266,22 @@ def _run_one(root, subdir, href, allowlist):
             print("error: cannot load {} ({}); a symlink, non-regular, unreadable, or undecodable page is "
                   "fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
-    findings = check_pages(pages, allowlist, href)
+    if subdir == "site":
+        findings = check_site_pages(pages, allowlist, href)
+    else:
+        findings = check_pages(pages, allowlist, href)
     if findings:
         print("FAIL: {} nav-coverage issue(s) under {}/".format(len(findings), subdir))
         for finding in sorted(set(findings)):
             print("  {}/{}".format(subdir, finding))
         return 1
     allow_str = ", ".join(sorted(allowlist)) or "none"
-    print("PASS: every {}/ page carries the {} nav link (allowlist: {})".format(subdir, href, allow_str))
+    draft_note = ""
+    if subdir == "site" and any(Path(name).parts[0] == DRAFT_SUBDIR for name in pages):
+        draft_note = "; under {}/{}/ the landing page carries the {} About link".format(
+            subdir, DRAFT_SUBDIR, DRAFT_DISCLOSURE_HREF)
+    print("PASS: every {}/ page carries the {} nav link (allowlist: {}){}".format(
+        subdir, href, allow_str, draft_note))
     return 0
 
 
@@ -621,9 +691,44 @@ def _self_test():
         ("stale allowlist entry is drift", {"about.html": nav}, frozenset({"gone.html"}),
          ["gone.html: allowlisted for the nav link but no such page exists (allowlist drift)"]),
     ]
+    # The draft rule beside the live rule (check_site_pages, the site/ root): the live rule still binds every
+    # page outside draft/, and under draft/ only the landing page's About region link is required.
+    about = ('<div class="region"><p class="lbl">About this project</p><div><p class="about">'
+             '<a href="/draft/disclosure/">Disclosure</a><span class="dot" aria-hidden="true">&middot;</span>'
+             '<a href="/draft/license/">Licence</a></p></div></div>')
+    draft_nav = '<nav><a href="/draft/install/">Install</a></nav>'
+    site_cases = [
+        ("live page without the nav link fails beside a good draft",
+         {"about.html": "<nav></nav>", "draft/index.html": draft_nav + about},
+         ["about.html: missing the /disclosure nav link"]),
+        ("live page with only an About link still fails",
+         {"about.html": about.replace("/draft/disclosure/", "/disclosure")},
+         ["about.html: missing the /disclosure nav link"]),
+        ("draft landing without the About link fails",
+         {"about.html": nav, "draft/index.html": draft_nav},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("draft landing with the link only in its nav fails",
+         {"about.html": nav, "draft/index.html": '<nav><a href="/draft/disclosure/">Disclosure</a></nav>'},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("draft landing with 2 About links fails",
+         {"about.html": nav, "draft/index.html": about + about},
+         ["draft/index.html: carries 2 /draft/disclosure/ links in its About region (expected exactly one)"]),
+        ("draft inner page passes with no disclosure link",
+         {"about.html": nav, "draft/index.html": draft_nav + about, "draft/license/index.html": draft_nav}, []),
+        ("draft pages without the draft landing page fail",
+         {"about.html": nav, "draft/license/index.html": draft_nav},
+         ["draft/index.html: missing; the draft rule needs the draft landing page"]),
+        ("a live page named draft.html stays under the live rule",
+         {"about.html": nav, "draft.html": "<nav></nav>"},
+         ["draft.html: missing the /disclosure nav link"]),
+    ]
     failures = []
     for label, pages, allow, expected in cases:
         got = sorted(check_pages(pages, allow))
+        if got != sorted(expected):
+            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    for label, pages, expected in site_cases:
+        got = check_site_pages(pages, frozenset())
         if got != sorted(expected):
             failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
     # run() fail-closed on a missing/empty/unreadable required input; clean on a good tree (exit codes).
@@ -657,6 +762,17 @@ def _self_test():
         (root / "site" / "zz-undecodable.html").write_bytes(b"\xff\xfe<nav></nav>")
         if quiet_one(root) != 2:
             failures.append("an undecodable page did not fail closed (expected exit 2, not a traceback)")
+    with tempfile.TemporaryDirectory() as d1:
+        root1 = Path(d1)
+        (root1 / "site" / "draft" / "license").mkdir(parents=True)
+        (root1 / "site" / "about.html").write_text(nav, encoding="utf-8")
+        (root1 / "site" / "draft" / "index.html").write_text(draft_nav + about, encoding="utf-8")
+        (root1 / "site" / "draft" / "license" / "index.html").write_text(draft_nav, encoding="utf-8")
+        if quiet_one(root1) != 0:
+            failures.append("a site/ tree with a good draft did not pass (expected exit 0)")
+        (root1 / "site" / "draft" / "index.html").write_text(draft_nav, encoding="utf-8")
+        if quiet_one(root1) != 1:
+            failures.append("a draft landing page without its About link did not report a finding (expected 1)")
     with tempfile.TemporaryDirectory() as d2:
         root2 = Path(d2)
         (root2 / "site").mkdir()
@@ -712,8 +828,9 @@ def _self_test():
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs + {} #378 close-vector "
-          "runs + {} close-vector guard cases)".format(len(cases), close_runs, guard_cases))
+    print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + run() exit-code legs + {} "
+          "#378 close-vector runs + {} close-vector guard cases)".format(len(cases), len(site_cases), close_runs,
+                                                                         guard_cases))
     return 0
 
 

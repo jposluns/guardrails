@@ -380,6 +380,15 @@ class = "c"
 residue = "It checks that every `AIQT X.Y.Z` product-version token on the site's HTML pages names a currently-valid version (the released pack version read from changelog.toml, plus a hand-maintained in-development allowlist), so a version left stale after a release bump is caught and the release process is forced to update the site. It covers a recognizable SUBSET (class c, partial): it matches ONLY the `AIQT X.Y.Z` pattern, so it does not catch a stale version in another phrasing - some of which are MATERIALIZED current references that would go stale at the next bump (the dev-track `(1.1.0, in development)` in titles, `1.0.0 chat`/`1.0.0 pack`, `the 1.0.0 release` in the evidence-page meta), a bare number with no AIQT prefix, or a third-party framework version - and it also does not catch a token separated from AIQT by a MARKUP TAG (`AIQT <strong>1.0.0</strong>`) or a SOURCE-LINE WRAP, an HTML entity, a `v` prefix, a different case, or a 4th-segment, pre-release, or build-suffixed form such as `AIQT 1.0.0.0`, `AIQT 1.0.0-rc1`, or `AIQT 1.0.0+build` (unmatched, out of scope; no gate scans the site for those malformed forms), while a leading-zero form like `AIQT 01.0.0` IS matched and flagged as unknown (the safe direction); and it enforces set-membership (is the version currently valid) rather than per-page context correctness. A symlinked page fails closed, but a symlinked directory inside site/ is not descended by the shared walker (a committed symlink anywhere is itself rejected repo-wide by the manifest gate, gen_manifest). The in-development version is a hand-maintained constant until it ships in changelog.toml. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "baseline-pin"
+script = "tools/check_baseline_pin.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It checks that every file .baseline/pin.toml lists under each copy root (site/draft/assets/baseline/ today) exists as a regular file whose SHA-256 equals the pinned value, that no other file, symbolic link or non-regular entry sits under a copy root, and that the pin itself is well formed; a missing, unreadable, oversized, non-UTF-8, non-TOML or misshapen pin, or an unreadable copied file, fails closed. It covers a recognizable SUBSET (class c, partial): it reads the repository only, so it does not show that the pinned hashes match the published baseline SHA256SUMS at posluns.ca (that comparison is made by hand when the pin moves), that the pages load the copied files, or that Cloudflare serves them. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "install-page"
 script = "tools/check_install_page.py"
 rules = []
