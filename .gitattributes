@@ -190,6 +190,7 @@
 .aiqt/standards/owasp-proactive.toml text eol=lf
 .aiqt/standards/owasp-web.toml text eol=lf
 .aiqt/tracker-label-baseline.toml text eol=lf
+.baseline/check_palette.py text eol=lf
 .baseline/opfiles-pin.toml text eol=lf
 .baseline/pin.toml text eol=lf
 .claude/RULES-INDEX.md text eol=lf
@@ -600,6 +601,7 @@ opf/site/draft/assets/baseline/marks/linkedin-in-bug.png binary
 opf/site/draft/assets/baseline/marks/orcid-id.svg binary
 opf/site/draft/assets/baseline/palettes.css binary
 opf/site/draft/assets/baseline/rail.js text eol=lf
+opf/site/draft/assets/baseline/scheme.js text eol=lf
 opf/site/draft/assets/baseline/search.js text eol=lf
 opf/site/draft/assets/baseline/select.js text eol=lf
 opf/site/draft/core-files/index.html text eol=lf
@@ -793,6 +795,7 @@ site/draft/assets/baseline/marks/linkedin-in-bug.png binary
 site/draft/assets/baseline/marks/orcid-id.svg binary
 site/draft/assets/baseline/palettes.css binary
 site/draft/assets/baseline/rail.js text eol=lf
+site/draft/assets/baseline/scheme.js text eol=lf
 site/draft/assets/baseline/search.js text eol=lf
 site/draft/assets/baseline/select.js text eol=lf
 site/draft/disclosure/index.html text eol=lf

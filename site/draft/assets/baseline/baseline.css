@@ -1,4 +1,4 @@
-/* baseline.css 1.5.1: the shared stylesheet of the project sites (the Atrium direction).
+/* baseline.css 1.6.0: the shared stylesheet of the project sites (the Atrium direction).
    Newsreader for text and headings, Public Sans for labels and navigation, JetBrains Mono for code,
    Dancing Script for the signature; the fonts are declared in fonts.css.
    Scale: perfect fourth (1.333) on a 1.1875rem base. No rules except the table header hairline.
@@ -19,6 +19,9 @@
    selector hid on screen (1.0.0 to 1.5.0). The older per-component [hidden] rules below are kept. */
 [hidden] { display: none !important; }
 :root { color-scheme: light dark; }
+/* A forced scheme (the switch in the top bar, scheme.js) also sets the browser's own colours: scrollbars and form controls. */
+:root[data-scheme="light"] { color-scheme: light; }
+:root[data-scheme="dark"] { color-scheme: dark; }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0;
@@ -64,10 +67,13 @@ a:hover { color: var(--link-hover); text-decoration-color: currentColor; }
    row cannot hold the links it scrolls sideways, and a shadow at the scrolled edge (background-attachment: local,
    no script) shows that more links follow. Disclosure and Licence are not in the bar; the landing page's
    "About this project" line links them. The bar is positioned so that the visually hidden "(opens in a new tab)"
-   span of the GitHub link is clipped inside the scrolling row instead of widening the page. */
-.mast { display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "brand pages"; align-items: center; column-gap: clamp(1.2rem, 2.5vw, 2.5rem); padding: 1rem var(--pad) 0.9rem; }
+   span of the GitHub link is clipped inside the scrolling row instead of widening the page. From 1.6.0 a 3rd
+   column holds the light and dark switch (button.scheme, scheme.js) after the links, outside the scrolling row,
+   so it never scrolls away. The gap after the wordmark is its margin, not a column gap, so that the 3rd column
+   takes no space when the switch is absent or hidden (no script, or a page on 1.5.1 markup). */
+.mast { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "brand pages scheme"; align-items: center; column-gap: 0; padding: 1rem var(--pad) 0.9rem; }
 /* The wordmark, in the style of the link-preview cards: bold name, gold .ai, gold rule beneath */
-.brand { grid-area: brand; display: inline-grid; gap: 0.3rem; color: var(--text); text-decoration: none; font: 700 clamp(1.6rem, 1.9vw, 2.2rem)/1 "Public Sans", system-ui, sans-serif; letter-spacing: -0.015em; padding: 0.35rem 0 0.1rem; white-space: nowrap; }
+.brand { grid-area: brand; margin-right: clamp(1.2rem, 2.5vw, 2.5rem); display: inline-grid; gap: 0.3rem; color: var(--text); text-decoration: none; font: 700 clamp(1.6rem, 1.9vw, 2.2rem)/1 "Public Sans", system-ui, sans-serif; letter-spacing: -0.015em; padding: 0.35rem 0 0.1rem; white-space: nowrap; }
 .brand .tld { color: var(--gold); }
 .brand .rule { display: block; height: 3px; background: var(--gold-rule); border-radius: 2px; }
 .brand:hover .name { color: var(--text); }
@@ -77,6 +83,21 @@ a:hover { color: var(--link-hover); text-decoration-color: currentColor; }
 .nav a { color: var(--text-muted); text-decoration: none; padding: 0.7rem 0; display: inline-block; white-space: nowrap; }
 .nav a:hover { color: var(--text); }
 .nav a[aria-current="page"] { color: var(--accent); }
+/* The light and dark switch: a 24 px sun or moon glyph (inline SVG in the markup) in a 44 by 44 px target,
+   --text-muted at rest and --text on hover, the standard focus ring. The glyph shows the scheme a press leads to:
+   the moon while light shows, the sun while dark shows; aria-pressed carries the state. The negative right margin
+   lines the glyph up with the gutter while the target reaches into it; the negative block margins keep the bar at
+   its 1.5.1 height. */
+.scheme { grid-area: scheme; position: relative; display: inline-grid; place-items: center; width: 2.75rem; height: 2.75rem; margin: -0.25rem -0.625rem -0.25rem 0.6rem; padding: 0; border: 0; border-radius: 0.3rem; background: transparent; color: var(--text-muted); cursor: pointer; }
+.scheme:hover { color: var(--text); }
+.scheme svg { display: block; width: 1.5rem; height: 1.5rem; }
+.scheme .sun { display: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-scheme="light"]) .scheme .sun { display: block; }
+  :root:not([data-scheme="light"]) .scheme .moon { display: none; }
+}
+[data-scheme="dark"] .scheme .sun { display: block; }
+[data-scheme="dark"] .scheme .moon { display: none; }
 
 /* Hero: 1 section. The logo sits beside the title block, over a soft glow, at a size that supports the heading. */
 .hero { display: grid; grid-template-columns: minmax(0, 1fr) var(--art); grid-template-areas: "text art"; column-gap: clamp(2.5rem, 5vw, 6rem); align-items: center; padding: 1.2rem max(0px, calc(var(--art) * 0.5 - var(--pad))) 2.4rem 0; }
@@ -554,7 +575,8 @@ mark.marker { color: inherit; padding: 0 0.08em; background: linear-gradient(tra
 
 /* iPad portrait and narrower: 1 column, labels above content, rail under the h1 */
 @media (max-width: 1000px) {
-  .mast { grid-template-columns: minmax(0, 1fr); grid-template-areas: "brand" "pages"; row-gap: 0.2rem; }
+  .mast { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "brand scheme" "pages pages"; row-gap: 0.2rem; }
+  .brand { margin-right: 0; }
   .nav { justify-content: flex-start; padding-bottom: 0.1rem; }
   .doc { grid-template-columns: minmax(0, 1fr); gap: 0; }
   :is(.doc, .doc > section, .doc > article) > *, :is(.doc, .doc > section, .doc > article) > .lbl, :is(.doc, .doc > section, .doc > article) > .wide, :is(.doc, .doc > section, .doc > article) > .full { grid-column: 1; }

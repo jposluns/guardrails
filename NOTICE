@@ -203,12 +203,12 @@ Vendored unchanged and used parse-only. The full MIT licence text is retained ve
 opf/tools/_vendor/licenses/marko-MIT.txt; provenance is recorded in
 opf/tools/_vendor/marko-2.2.4.provenance.toml.
 
-Shared site template (baseline package) (version 1.5.1)
+Shared site template (baseline package) (version 1.6.0)
   Pinned copy of the site template's runtime and licence files, under site/draft/assets/baseline/
 Licence: CC0 1.0 Universal, except the fonts and marks named below
 (https://creativecommons.org/publicdomain/zero/1.0/)
 Jeff Posluns, dedicated to the public domain under CC0 1.0
-Source: https://posluns.ca/baseline/baseline-1.5.1.tar.gz
+Source: https://posluns.ca/baseline/baseline-1.6.0.tar.gz
 The 4 fonts (Newsreader, Public Sans, JetBrains Mono, Dancing Script) are licensed by their
 authors under the SIL Open Font License 1.1; each family's licence file is copied beside the
 fonts. The GitHub Invertocat, LinkedIn [in] bug and ORCID iD marks are trademarks of their owners,

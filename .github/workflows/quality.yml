@@ -276,6 +276,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_baseline_pin.py
 
+      - name: Site palette contrast (aiqt.ai draft)
+        shell: bash
+        run: python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
+
+      - name: Site palette contrast (opfiles.ai draft)
+        shell: bash
+        run: python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
+
       - name: Render driver behaviour self-test
         shell: bash
         run: python3 -I -B tools/selftest_opf_render.py

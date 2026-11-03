@@ -423,6 +423,13 @@ class = "pack-immutable"
 path = ".baseline/opfiles-pin.toml"
 class = "pack-immutable"
 
+# The site template's palette gate, copied byte for byte from the template package's tools/check_palette.py and
+# pinned in both baseline pins; run by tools/run_all_checks.sh, the Quality workflow and the Pages build command,
+# never served.
+[[release-class]]
+path = ".baseline/check_palette.py"
+class = "pack-immutable"
+
 # --- concern-1: the opfiles.ai site subtree (opf/site) -------------------------------------------------
 # The opfiles.ai website: the served site pages live directly under opf/site (Cloudflare Pages builds
 # opf/site as the site root). Hand-authored shippable site content, same class as the site/ pages above.

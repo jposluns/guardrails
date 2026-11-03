@@ -119,6 +119,8 @@ run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
 run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
 run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
 run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
+run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py

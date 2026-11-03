@@ -14,8 +14,15 @@ a pin or a root, are cannot-evaluate, so 2 pins can never validate the same copy
 unchecked. For each registered pair the gate hashes every pinned file under the copy root and reports a
 file whose bytes differ, a
 pinned file that is missing, a file under a copy root that the pin does not list (a stray), and a
-symbolic link or other non-regular entry anywhere in a copy root, including the root itself (exit 1). A
-pin that is missing, unreadable, over MAX_PIN_BYTES, not UTF-8, not TOML or not of the pinned shape, and
+symbolic link or other non-regular entry anywhere in a copy root, including the root itself (exit 1).
+
+The one exception to the copy-root rule is BUILD_TOOLS: the template's build tools that a site copies outside
+its served tree and pins in the same [files] table (only .baseline/check_palette.py, the palette gate). A
+pin may list such a path at its own repository path, beside its copy-root files; the gate hashes it as 1
+regular file, never following a symbolic link, and reports it missing, a symbolic link, not a regular file
+or differing (exit 1), or unreadable (exit 2). Its directory gets no stray scan, since .baseline/ also holds
+the pins. Any other path outside a copy root is still cannot-evaluate, and a pin must list at least 1
+copy-root file. A pin that is missing, unreadable, over MAX_PIN_BYTES, not UTF-8, not TOML or not of the pinned shape, and
 a copied file that cannot be read, are cannot-evaluate (exit 2), never a pass.
 
 Every registered pin must name the same version, and that version must equal the site template version
@@ -68,6 +75,9 @@ TOP_KEYS = {"version", "files"}
 # The copy root's own last components: a pinned path is <prefix>assets/baseline/<file>, and its copy root is
 # <prefix>assets/baseline.
 COPY_DIR = "assets/baseline"
+# The build tools a pin may list outside any copy root, each at exactly this repository path: the template's
+# palette gate, copied from the package's tools/ and run from the build command, never served.
+BUILD_TOOLS = (".baseline/check_palette.py",)
 # The in-tree record of the template version every pin must name: the [vendored."site-template"] table of
 # the attribution file tools/gen_notice.py renders the root NOTICE from, read under the scanned root.
 ATTRIBUTION_REL = ".aiqt/attribution.toml"
@@ -93,7 +103,8 @@ def _read_pin_bytes(path):
 
 
 def parse_pin(data, where):
-    """The pin as (version, [(root, {path: sha256})]); CannotEvaluate on any malformed input."""
+    """The pin as (version, [(root, {path: sha256})], {build tool path: sha256}); CannotEvaluate on any
+    malformed input."""
     if len(data) > MAX_PIN_BYTES:
         raise CannotEvaluate("{}: larger than {} bytes".format(where, MAX_PIN_BYTES))
     try:
@@ -116,8 +127,13 @@ def parse_pin(data, where):
     files = doc.get("files")
     if not isinstance(files, dict) or not files:
         raise CannotEvaluate("{}: a non-empty [files] table is required".format(where))
-    root, pinned = None, {}
+    root, pinned, tools = None, {}, {}
     for path, digest in files.items():
+        if path in BUILD_TOOLS:
+            if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
+                raise CannotEvaluate("{}: {}: the SHA-256 must be 64 lowercase hex digits".format(where, path))
+            tools[path] = digest
+            continue
         if not _safe_rel(path):
             raise CannotEvaluate("{}: unsafe file path {!r}".format(where, path))
         head, sep, rel = path.partition(COPY_DIR + "/")
@@ -130,7 +146,9 @@ def parse_pin(data, where):
         if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest):
             raise CannotEvaluate("{}: {}: the SHA-256 must be 64 lowercase hex digits".format(where, path))
         pinned[rel] = digest
-    return version, [(root, pinned)]
+    if root is None:
+        raise CannotEvaluate("{}: no file under an {} copy root".format(where, COPY_DIR))
+    return version, [(root, pinned)], tools
 
 
 def _read_attribution_bytes(path):
@@ -278,7 +296,7 @@ def _scan_pin(root, pin_rel, assigned, findings, errors, versions):
         if not stat.S_ISREG(mode):
             raise CannotEvaluate("{}: not a regular file".format(pin_rel))
         data = _read_pin_bytes(pin_path)
-        version, roots = parse_pin(data, pin_rel)
+        version, roots, tools = parse_pin(data, pin_rel)
         versions.append((pin_rel, version))
     except FileNotFoundError:
         errors.append("{}: missing".format(pin_rel))
@@ -323,6 +341,35 @@ def _scan_pin(root, pin_rel, assigned, findings, errors, versions):
             if got != pinned[rel]:
                 findings.append("{}/{}: SHA-256 {} differs from the pinned {}".format(
                     copy_root, rel, got, pinned[rel]))
+    for rel in sorted(tools):
+        _check_tool(root, rel, tools[rel], findings, errors)
+
+
+def _check_tool(root, rel, digest, findings, errors):
+    """Check 1 pinned build tool: a regular file at its own path, never followed through a symbolic link,
+    whose bytes match the pin."""
+    path = Path(root) / rel
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        findings.append("{}: missing".format(rel))
+        return
+    except OSError as exc:
+        errors.append("{}: cannot stat ({})".format(rel, exc))
+        return
+    if stat.S_ISLNK(mode):
+        findings.append("{}: is a symbolic link".format(rel))
+        return
+    if not stat.S_ISREG(mode):
+        findings.append("{}: not a regular file".format(rel))
+        return
+    try:
+        got = _sha256(path)
+    except OSError as exc:
+        errors.append("{}: unreadable ({})".format(rel, exc))
+        return
+    if got != digest:
+        findings.append("{}: SHA-256 {} differs from the pinned {}".format(rel, got, digest))
 
 
 def run_gate(root, pins=PINS):
@@ -336,7 +383,7 @@ def run_gate(root, pins=PINS):
     if findings:
         return 1
     print("PASS: every file pinned in {} matches its SHA-256 under its registered copy root, with no stray "
-          "or linked entry, and every pin names the site template version recorded in {}".format(
+          "or linked entry, every pinned build tool is a regular file with its pinned SHA-256, and every pin names the site template version recorded in {}".format(
               ", ".join(pin_rel for pin_rel, _root in pins), ATTRIBUTION_WHERE))
     return 0
 
@@ -365,6 +412,9 @@ FIXTURE_PINS = ((PIN_REL, FIXTURE_ROOT),)
 SECOND_PIN = PINS[1][0]
 SECOND_ROOT = PINS[1][1]
 TWO_PINS = ((PIN_REL, FIXTURE_ROOT), (SECOND_PIN, SECOND_ROOT))
+# The build tool a fixture pins outside its copy root, at the registered path.
+TOOL_REL = BUILD_TOOLS[0]
+FIXTURE_TOOLS = {TOOL_REL: b"import sys\n"}
 
 
 # The fixture's template version, named by every fixture pin and by the fixture attribution file; it
@@ -372,8 +422,10 @@ TWO_PINS = ((PIN_REL, FIXTURE_ROOT), (SECOND_PIN, SECOND_ROOT))
 FIXTURE_VERSION = "1.2.1"
 
 
-def _pin_text(files, root=FIXTURE_ROOT, version=FIXTURE_VERSION, extra=""):
+def _pin_text(files, root=FIXTURE_ROOT, version=FIXTURE_VERSION, extra="", tools=None):
     lines = ['version = "{}"'.format(version), extra, "", "[files]"]
+    for rel in sorted(tools or {}):
+        lines.append('"{}" = "{}"'.format(rel, hashlib.sha256(tools[rel]).hexdigest()))
     for rel in sorted(files):
         lines.append('"{}/{}" = "{}"'.format(root, rel, hashlib.sha256(files[rel]).hexdigest()))
     return "\n".join(lines) + "\n"
@@ -386,10 +438,15 @@ def _attribution_text(version=FIXTURE_VERSION, block=ATTRIBUTION_BLOCK):
             'verified = true\n').format(block, version)
 
 
-def _fixture(tmp, files=None, pin=None, root=FIXTURE_ROOT, pin_rel=PIN_REL, attribution=None):
+def _fixture(tmp, files=None, pin=None, root=FIXTURE_ROOT, pin_rel=PIN_REL, attribution=None, tools=None):
     """A fixture tree under tmp: the copied files under root, the pin at pin_rel (text, bytes, None for
-    the exact pin of FIXTURE_FILES under root, or False for absent) and the attribution file (text, bytes,
-    None for one recording FIXTURE_VERSION, or False to write none)."""
+    the exact pin of FIXTURE_FILES under root, or False for absent), the attribution file (text, bytes,
+    None for one recording FIXTURE_VERSION, or False to write none) and tools ({repository path: bytes}
+    written at their own paths, outside the copy root)."""
+    for rel, data in (tools or {}).items():
+        os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+        with open(Path(tmp) / rel, "wb") as handle:
+            handle.write(data)
     if attribution is None:
         attribution = _attribution_text()
     if attribution is not False:
@@ -411,10 +468,11 @@ def _fixture(tmp, files=None, pin=None, root=FIXTURE_ROOT, pin_rel=PIN_REL, attr
     return tmp
 
 
-def _scan_case(files=None, pin=None, mutate=None, pins=FIXTURE_PINS, second=None, attribution=None):
-    """scan() over a fixture; second, when given, is (files, pin) for the second registered pair."""
+def _scan_case(files=None, pin=None, mutate=None, pins=FIXTURE_PINS, second=None, attribution=None, tools=None):
+    """scan() over a fixture; second, when given, is (files, pin) for the second registered pair; tools
+    are build-tool files written at their own paths."""
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
-        _fixture(tmp, files, pin, attribution=attribution)
+        _fixture(tmp, files, pin, attribution=attribution, tools=tools)
         if second is not None:
             _fixture(tmp, second[0], second[1], root=SECOND_ROOT, pin_rel=SECOND_PIN, attribution=False)
         if mutate is not None:
@@ -619,6 +677,68 @@ def _self_test():
         findings, errors = _scan_case(pins=pins, second=(None, None))
         check(name, findings == [] and len(errors) == 1 and "registry" in errors[0], (findings, errors))
 
+    # A build tool pinned outside the copy root: hashed as 1 regular file at its own path, with no stray scan
+    # of its directory (the pin itself sits beside it); only a BUILD_TOOLS path may sit outside a copy root.
+    check("tool/registered-path", BUILD_TOOLS == (".baseline/check_palette.py",), BUILD_TOOLS)
+    tool_pin = _pin_text(FIXTURE_FILES, tools=FIXTURE_TOOLS)
+    findings, errors = _scan_case(pin=tool_pin, tools=FIXTURE_TOOLS)
+    check("tool/pinned-passes", findings == [] and errors == [], (findings, errors))
+
+    findings, errors = _scan_case(pins=TWO_PINS, pin=tool_pin, tools=FIXTURE_TOOLS,
+                                  second=(None, _pin_text(FIXTURE_FILES, root=SECOND_ROOT, tools=FIXTURE_TOOLS)))
+    check("tool/both-pins-pass", findings == [] and errors == [], (findings, errors))
+
+    findings, errors = _scan_case(pin=tool_pin, tools={TOOL_REL: b"import os\n"})
+    check("tool/differing-refused", errors == [] and len(findings) == 1
+          and findings[0].startswith(TOOL_REL + ": SHA-256"), (findings, errors))
+
+    findings, errors = _scan_case(pin=tool_pin)
+    check("tool/missing-refused", errors == [] and findings == [TOOL_REL + ": missing"], (findings, errors))
+
+    def _link_tool(tmp):
+        real = tmp / "real-tool.py"
+        os.rename(tmp / TOOL_REL, real)
+        os.symlink(real, tmp / TOOL_REL)
+
+    findings, errors = _scan_case(pin=tool_pin, tools=FIXTURE_TOOLS, mutate=_link_tool)
+    check("tool/symlink-refused", errors == [] and findings == [TOOL_REL + ": is a symbolic link"],
+          (findings, errors))
+
+    def _fifo_tool(tmp):
+        os.unlink(tmp / TOOL_REL)
+        os.mkfifo(tmp / TOOL_REL)
+
+    findings, errors = _scan_case(pin=tool_pin, tools=FIXTURE_TOOLS, mutate=_fifo_tool)
+    check("tool/fifo-not-regular-refused", errors == [] and findings == [TOOL_REL + ": not a regular file"],
+          (findings, errors))
+
+    def _deny_tool_hash(path):
+        if str(path).endswith(TOOL_REL):
+            raise PermissionError(13, "read refused by the self-test", str(path))
+        return original_hash(path)
+
+    globals()["_sha256"] = _deny_tool_hash
+    try:
+        findings, errors = _scan_case(pin=tool_pin, tools=FIXTURE_TOOLS)
+    finally:
+        globals()["_sha256"] = original_hash
+    check("tool/unreadable-cannot-evaluate", findings == [] and len(errors) == 1
+          and errors[0].startswith(TOOL_REL + ": unreadable"), (findings, errors))
+
+    # Only the registered path is exempt: a sibling under .baseline/, a near-miss name and a copy-root-less
+    # pin stay cannot-evaluate; a malformed tool digest is refused like any other.
+    tool_digest = hashlib.sha256(FIXTURE_TOOLS[TOOL_REL]).hexdigest()
+    for name, pin in (
+            ("tool/other-baseline-path-malformed",
+             tool_pin.replace('"{}"'.format(TOOL_REL), '".baseline/check_other.py"')),
+            ("tool/near-miss-path-malformed",
+             tool_pin.replace('"{}"'.format(TOOL_REL), '"baseline/check_palette.py"')),
+            ("tool/only-tool-malformed",
+             'version = "{}"\n\n[files]\n"{}" = "{}"\n'.format(FIXTURE_VERSION, TOOL_REL, tool_digest)),
+            ("tool/upper-digest-malformed", tool_pin.replace(tool_digest, tool_digest.upper()))):
+        findings, errors = _scan_case(pin=pin, tools=FIXTURE_TOOLS)
+        check(name, findings == [] and len(errors) == 1 and errors[0].startswith(PIN_REL + ":"), (findings, errors))
+
     # The version rule: every pin names the version the attribution file records, and the pins agree. Each
     # case's digests all match, so only the version can refuse it.
     findings, errors = _scan_case(attribution=_attribution_text(version="1.2.2"))
@@ -713,7 +833,9 @@ def _self_test():
           "unreadable copied file are cannot-evaluate; the pin size bound holds one byte under, at and "
           "over; 2 registered pairs pass together, a second copy's defect is reported against its own root "
           "and pin, and a pin naming another root or a registry repeating a pin or a root is "
-          "cannot-evaluate; a pin whose version differs from the attribution file's site template version, "
+          "cannot-evaluate; a pinned build tool passes in 1 or both pins and fails when differing, missing, "
+          "a symbolic link or not a regular file, is cannot-evaluate when unreadable, and any other path "
+          "outside a copy root, a tool-only pin or a misshapen tool digest is cannot-evaluate; a pin whose version differs from the attribution file's site template version, "
           "2 pins naming different versions, and an attribution file that is missing, unreadable, not a "
           "regular file, non-UTF-8, non-TOML, over its size bound, without the site template table or with "
           "a missing or misshapen version there are cannot-evaluate; the exit codes are 0, 1 and 2; the "

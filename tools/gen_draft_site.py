@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the staged draft sites (shared site template, baseline 1.5.1) under each site's draft/ root.
+"""Generate the staged draft sites (shared site template, baseline 1.6.0) under each site's draft/ root.
 
   gen_draft_site.py              write every registered page
   gen_draft_site.py --check      exit 1 if any target differs from a fresh build, 2 if one cannot be read
@@ -7,8 +7,10 @@
 
 Every page is built from 1 shell (template specification section 5): `<html lang="en" class="site-<name>">`,
 the head (charset, viewport, the robots noindex meta while the site's base is the draft path, the title
-`<Page> | <Name>.ai`, the favicon, the touch icon, fonts.css, palettes.css, baseline.css, then the page's
-scripts with defer), the skip link, the top bar (the site's page links, then GitHub last; section 7.1),
+`<Page> | <Name>.ai`, the favicon, the touch icon, scheme.js with data-cfasync="false" and no defer or async,
+fonts.css, palettes.css, baseline.css, then the page's scripts with defer), the skip link, the top bar (the
+site's page links, then GitHub last; section 7.1; then the light and dark switch, hidden until scheme.js
+shows it; section 7.33),
 `main#main-content`, the family footer (section 7.19) and the `#copy-status` live region. The home page
 carries the "About this project" region (section 7.24), the one place that links the Disclosure and Licence
 pages. Each site's base (SITES) is the one base path for every internal href and src of that site; it
@@ -73,6 +75,19 @@ from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order fo
 DRAFT_BASE = "/draft/"
 ASSETS = "assets/baseline/"
 MAX_PAGE_BYTES = 1 << 20
+# The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,
+# before the stylesheets, with data-cfasync="false" before src and no defer or async, so a stored scheme
+# applies before the first paint; the button is the last child of header.mast, after nav.nav, and stays
+# hidden until the script shows it. The markup is the reference header's, byte for byte.
+SCHEME_SCRIPT = "scheme.js"
+_SCHEME_GLYPH = ('viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" '
+                 'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"')
+SCHEME_BUTTON = (
+    '<button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden>'
+    '<svg class="moon" ' + _SCHEME_GLYPH + '><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg>'
+    '<svg class="sun" ' + _SCHEME_GLYPH + '><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 '
+    '12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>'
+    '<span class="vh">Dark mode</span></button>')
 
 GENSRC_OUTPUTS = (
     {"target": "site/draft/index.html", "kind": "file",
@@ -1120,7 +1135,8 @@ def _body_html(site, page):
 # The link guard is a structural pass (html.parser) over each rendered page, so it sees every element and
 # attribute whatever its case or quoting. It enforces: no element that loads, embeds, submits or redirects
 # outside the link rules (LINK_REFUSED_TAGS, and a meta carrying http-equiv), except each script element
-# the shell itself writes (exactly src plus defer, with a src the shell chose); every URL attribute
+# the shell itself writes (exactly src plus defer, with a src the shell chose, and once the head's scheme
+# script: exactly data-cfasync="false" then src, with the scheme src the shell chose); every URL attribute
 # (LINK_URL_ATTRS) is an https URL, a #fragment, a path under the site's base or one of its kept live
 # paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no "." or
 # ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
@@ -1141,10 +1157,11 @@ _URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f\\]")
 
 
 class _LinkGuard(HTMLParser):
-    def __init__(self, site, scripts):
+    def __init__(self, site, scripts, scheme_src=None):
         super().__init__(convert_charrefs=True)
         self.site = site
         self.scripts = list(scripts)
+        self.scheme_src = scheme_src
         self.found = []
         self._anchor = None
 
@@ -1171,6 +1188,9 @@ class _LinkGuard(HTMLParser):
         if tag == "script" and len(attrs) == 2 and attrs[0][0] == "src" and attrs[1] == ("defer", None) \
                 and attrs[0][1] in self.scripts:
             self.scripts.remove(attrs[0][1])
+        elif tag == "script" and self.scheme_src is not None \
+                and attrs == [("data-cfasync", "false"), ("src", self.scheme_src)]:
+            self.scheme_src = None
         elif tag in LINK_REFUSED_TAGS:
             self.found.append("<{}> element".format(tag))
         if tag == "meta" and "http-equiv" in first:
@@ -1203,10 +1223,12 @@ class _LinkGuard(HTMLParser):
             self._anchor = None
 
 
-def _link_findings(site, html, scripts=()):
+def _link_findings(site, html, scripts=(), scheme_src=None):
     """Every link-rule finding on a built page (see the link guard comment above). `scripts` is the list of
-    script src values the shell wrote; each allows 1 script element with exactly that src and defer."""
-    guard = _LinkGuard(site, scripts)
+    script src values the shell wrote; each allows 1 script element with exactly that src and defer.
+    `scheme_src` is the head's scheme script src; it allows 1 script element with exactly
+    data-cfasync="false" then that src, and nothing else."""
+    guard = _LinkGuard(site, scripts, scheme_src)
     guard.feed(html)
     guard.close()
     if guard._anchor is not None:
@@ -1224,6 +1246,8 @@ def render_page(site, pages, page):
         _asset(site, "logos/{}-favicon.svg".format(site["key"]))))
     head.append('<link rel="apple-touch-icon" href="{}">'.format(
         _asset(site, "logos/{}-touch.png".format(site["key"]))))
+    scheme_src = _asset(site, SCHEME_SCRIPT)
+    head.append('<script data-cfasync="false" src="{}"></script>'.format(scheme_src))
     for sheet in ("fonts.css", "palettes.css", "baseline.css"):
         head.append('<link rel="stylesheet" href="{}">'.format(_asset(site, sheet)))
     scripts = [_asset(site, script) for script in _page_scripts(page)]
@@ -1236,7 +1260,8 @@ def render_page(site, pages, page):
         "</head>",
         "<body>",
         '<a class="skip" href="#main-content">Skip to content</a>',
-        '<header class="mast">{}{}</header>'.format(_brand(site), _nav(site, pages, _page_url(site, rel))),
+        '<header class="mast">{}{}{}</header>'.format(
+            _brand(site), _nav(site, pages, _page_url(site, rel)), SCHEME_BUTTON),
         '<main id="main-content">',
         _body_html(site, page),
         "</main>",
@@ -1245,7 +1270,7 @@ def render_page(site, pages, page):
         "</body>",
         "</html>",
     ]) + "\n"
-    refusals = refusals_for(html) + _link_findings(site, html, scripts)
+    refusals = refusals_for(html) + _link_findings(site, html, scripts, scheme_src)
     if refusals:
         raise RefusedPage("{}/{}: {}".format(site["root"], rel, "; ".join(refusals)))
     return html
@@ -1411,6 +1436,21 @@ def _self_test():
     expect("shell/robots-meta", page.count('<meta name="robots" content="noindex, nofollow">') == 1)
     order = [page.find(_asset(site, sheet)) for sheet in ("fonts.css", "palettes.css", "baseline.css")]
     expect("shell/stylesheet-order", -1 not in order and order == sorted(order), order)
+    # Every page of both sites: scheme.js once in the head, before the first stylesheet, and the switch
+    # once, as the last child of header.mast right after nav.nav.
+    scheme_tag = '<script data-cfasync="false" src="{}"></script>'
+    for target, built in sorted(outputs.items()):
+        built_site = next(s for s in SITES if target.startswith(s["root"] + "/"))
+        tag = scheme_tag.format(_asset(built_site, SCHEME_SCRIPT))
+        head = built.split("</head>", 1)[0]
+        expect("shell/scheme-script-once " + target, built.count(tag) == 1 and tag in head)
+        expect("shell/scheme-script-before-stylesheets " + target,
+               -1 < head.find(tag) < head.find('<link rel="stylesheet"'))
+        expect("shell/scheme-button-last-in-mast " + target, built.count(SCHEME_BUTTON) == 1
+               and re.search(r'<header class="mast">.*?</nav>' + re.escape(SCHEME_BUTTON) + "</header>", built))
+    expect("shell/scheme-button-hidden", SCHEME_BUTTON.startswith(
+        '<button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden>')
+           and SCHEME_BUTTON.endswith('<span class="vh">Dark mode</span></button>'))
     expect("shell/no-site-css", "site.css" not in page)
     expect("shell/favicon", '<link rel="icon" href="/draft/assets/baseline/logos/aiqt-favicon.svg"' in page)
     for rel in ("index.html", "disclosure/index.html", "license/index.html"):
@@ -1759,8 +1799,9 @@ def _self_test():
 
     # Every link on a built page stays under BASE or is an https link with the new-tab attributes.
     railed_scripts = [_asset(site, "rail.js")]
-    expect("links/clean-page-passes", _link_findings(site, railed_html, railed_scripts) == [],
-           _link_findings(site, railed_html, railed_scripts))
+    railed_scheme = _asset(site, SCHEME_SCRIPT)
+    expect("links/clean-page-passes", _link_findings(site, railed_html, railed_scripts, railed_scheme) == [],
+           _link_findings(site, railed_html, railed_scripts, railed_scheme))
     expect("links/internal-outside-base", _link_findings(site, '<a href="/live/">x</a>') != [])
     expect("links/non-https-external", _link_findings(site, '<a href="http://example.com/">x</a>') != [])
     expect("links/external-without-newtab", _link_findings(site, '<a href="https://example.com/">x</a>') != [])
@@ -2136,6 +2177,25 @@ def _self_test():
         [shell_src]) != [])
     expect("guard/shell-script-extra-attr", _link_findings(
         site, '<script src="{}" defer async></script>'.format(shell_src), [shell_src]) != [])
+    # The head's scheme script passes only in its exact form: data-cfasync="false" then the shell's src,
+    # once, with no other attribute; each near miss is refused.
+    scheme_src = _asset(site, SCHEME_SCRIPT)
+    expect("guard/scheme-script-passes", _link_findings(
+        site, '<script data-cfasync="false" src="{}"></script>'.format(scheme_src), (), scheme_src) == [])
+    for name, text in (
+            ("guard/scheme-script-once", '<script data-cfasync="false" src="{0}"></script>'
+             '<script data-cfasync="false" src="{0}"></script>'),
+            ("guard/scheme-script-async", '<script data-cfasync="false" src="{0}" async></script>'),
+            ("guard/scheme-script-defer", '<script data-cfasync="false" src="{0}" defer></script>'),
+            ("guard/scheme-src-before-cfasync", '<script src="{0}" data-cfasync="false"></script>'),
+            ("guard/scheme-cfasync-not-false", '<script data-cfasync="true" src="{0}"></script>'),
+            ("guard/scheme-cfasync-missing", '<script src="{0}"></script>'),
+            ("guard/scheme-cross-origin", '<script data-cfasync="false" src="https://example.com/scheme.js">'
+             '</script>'),
+            ("guard/scheme-other-asset", '<script data-cfasync="false" src="{1}"></script>')):
+        expect(name, _link_findings(site, text.format(scheme_src, shell_src), (), scheme_src) != [], text)
+    expect("guard/scheme-script-not-shell", _link_findings(
+        site, '<script data-cfasync="false" src="{}"></script>'.format(scheme_src)) != [])
     expect("guard/coded-page-passes", "copy.js" in render_page(site, [coded], coded))
     for name, html in (("guard/inline-single-quoted-refused", "<a href='/elsewhere/'>x</a>"),
                        ("guard/inline-iframe-refused", '<iframe src=\\"https://example.com/\\"></iframe>'),
@@ -2181,7 +2241,8 @@ def _self_test():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: gen_draft_site (shell order, robots meta, footer cycle, base path, every "
+    print("SELF-TEST PASS: gen_draft_site (shell order, the scheme script and switch, robots meta, footer "
+          "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
           "switch, text-field escaping, the structural link guard, the checked title and meta keys and "
