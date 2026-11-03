@@ -20,6 +20,11 @@ validated (a deferred coverage gap). Non-nestable nesting IS detected (slice-2):
 <form>, and an interactive element (<a>/<button>) inside another interactive element, both of which the
 parser accepts as well-balanced but which break rendering/behaviour. Download-artifact checksums are
 tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
+
+Logo consistency: within a root, every page's header logo block must be byte-identical to the majority
+block of the pages not named 404.html. A 404 page is served at any missing URL, however deep, so it may
+open its logo with the root-absolute home link href="/" where that block opens with the relative
+href="./"; every other byte must still match, and no other page gets this allowance.
 """
 import sys
 
@@ -238,27 +243,41 @@ def classify(v):
 
 
 _LOGO_RE = re.compile(r'<a class="logo".*?</a>', re.S)
+# A 404 page is served at any missing URL, however deep, so a relative home link there resolves below the
+# root. On a page named NOT_FOUND_PAGE the logo may therefore open with the root-absolute home link where
+# the canonical opens with the relative one; every other byte must still match.
+NOT_FOUND_PAGE = "404.html"
+_LOGO_RELATIVE_HOME = '<a class="logo" href="./"'
+_LOGO_ROOT_HOME = '<a class="logo" href="/"'
 
 
 def logo_findings(pages):
     """Findings for header-logo drift across pages. `pages` is a list of (rel, text). The logo block is
-    duplicated per page (no page generator yet), so every page that carries one must carry the SAME bytes;
-    any block differing from the majority (canonical) is reported. A page without a logo is not a finding."""
-    logos = {}
+    duplicated per page (no page generator yet), so every page that carries one must carry the SAME bytes
+    as the majority (canonical) block of the pages not named 404.html (of all pages when only 404 pages
+    carry one); any other block is reported. The one exception: a 404 page may carry the canonical block
+    with its relative home link href="./" written as the root-absolute href="/". A page without a logo is
+    not a finding."""
+    found = []
     for rel, text in pages:
         match = _LOGO_RE.search(text)
         if match:
-            logos.setdefault(match.group(0), []).append(rel)
-    if len(logos) <= 1:
+            found.append((rel, match.group(0), Path(rel).name == NOT_FOUND_PAGE))
+    counts = {}
+    for _rel, block, _not_found in [item for item in found if not item[2]] or found:
+        counts[block] = counts.get(block, 0) + 1
+    if not counts:
         return []
-    canonical = max(logos, key=lambda block: len(logos[block]))
+    canonical = max(counts, key=lambda block: counts[block])
+    accepted_not_found = {canonical}
+    if canonical.startswith(_LOGO_RELATIVE_HOME):
+        accepted_not_found.add(_LOGO_ROOT_HOME + canonical[len(_LOGO_RELATIVE_HOME):])
     out = []
-    for block, rels in logos.items():
-        if block == canonical:
+    for rel, block, not_found in found:
+        if block in (accepted_not_found if not_found else {canonical}):
             continue
-        for rel in rels:
-            out.append("{}: header logo block differs from the canonical logo (logos must be "
-                       "byte-identical across pages)".format(rel))
+        out.append("{}: header logo block differs from the canonical logo (logos must be "
+                   "byte-identical across pages)".format(rel))
     return out
 
 
@@ -280,6 +299,28 @@ def _self_test():
     named = logo_findings([("keep.html", good), ("keep2.html", good), ("drift.html", bad)])
     if not (len(named) == 1 and named[0].startswith("drift.html")):
         failures.append("outlier naming: expected drift.html named, got {}".format(named))
+    # A 404 page may open its logo with the root-absolute home link where the canonical is relative; any
+    # other page may not, and a 404 page that differs in any other byte is still drift.
+    rel_logo = '<a class="logo" href="./">L</a>'
+    root_logo = '<a class="logo" href="/">L</a>'
+    not_found_cases = [
+        ("404 page with root-absolute home on a relative site", [("a.html", rel_logo), ("404.html", root_logo)],
+         []),
+        ("nested 404 page with root-absolute home", [("a.html", rel_logo), ("b/404.html", root_logo)], []),
+        ("404 page with the canonical relative home", [("a.html", rel_logo), ("404.html", rel_logo)], []),
+        ("404 page with root-absolute home on a root-absolute site",
+         [("a.html", root_logo), ("404.html", root_logo)], []),
+        ("non-404 page with root-absolute home on a relative site",
+         [("a.html", rel_logo), ("b.html", rel_logo), ("c.html", root_logo)], ["c.html"]),
+        ("404 page with root-absolute home and other drift",
+         [("a.html", rel_logo), ("404.html", '<a class="logo" href="/">L&trade;</a>')], ["404.html"]),
+        ("404 majority does not set the canonical",
+         [("a.html", rel_logo), ("404.html", bad), ("x/404.html", bad)], ["404.html", "x/404.html"]),
+    ]
+    for label, pages, want in not_found_cases:
+        got = [line.split(":")[0] for line in logo_findings(pages)]
+        if got != want:
+            failures.append("{}: expected {} named, got {}".format(label, want, got))
     # AIQT_SITE_HOST derives SITE_HOSTS at import, so probe it in a child process under each env value.
     # Unset/empty -> default aiqt.ai (unchanged from today); a set host -> that host and its www.; the
     # env host is lowercased; a no-dot host derives its own exact pair.
@@ -344,8 +385,8 @@ def _self_test():
         for x in failures:
             print("  - " + x)
         return 1
-    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + coverage-root legs)".format(
-        len(cases), len(host_cases)))
+    print("PASS: check_site self-test ({} logo cases + {} 404-page logo cases + {} SITE_HOSTS env cases + "
+          "coverage-root legs)".format(len(cases), len(not_found_cases), len(host_cases)))
     return 0
 
 

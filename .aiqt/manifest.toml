@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "25a08153a9ecf8595a5c3be56e9407b6332a14a907153824cdac1214ed844468"
+tree-sha256 = "9a4b77fdf8a3beebf026bef33c814052306b74b96edc435c0db4c1914708ed35"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2636,8 +2636,8 @@ sha256 = "3a50b56c27e838cd2af9bd215543a51c6e369d38cc50e3f34d9f89bf2e379807"
 
 [[sources]]
 path = "opf/site/404.html"
-bytes = 4288
-sha256 = "577d5f03916e50f719bcea7a9060777f547683ba024e0504fbe178351dc15876"
+bytes = 4285
+sha256 = "c9a57ab9634862741c44041c818a5b894b4b05a78a70418ab12167b93e3246e2"
 
 [[sources]]
 path = "opf/site/_headers"
@@ -3551,8 +3551,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 80037
-sha256 = "7372eab5f5ba3aa4d8b664ba3c9fe4113d5a7f81f1a5d852427a05b6ea3daeb9"
+bytes = 82537
+sha256 = "678336790039a07c42da0b4a26188d92548aac8676221a86c18813ae699116b7"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3731,8 +3731,8 @@ sha256 = "853c49e22dc8bcd1a7f8457ce16be36c558d717f5e101261abec730fe7fe97bd"
 
 [[sources]]
 path = "tools/check_security_txt.py"
-bytes = 13783
-sha256 = "2fb917e7be8013461fc83c67c46cbe5e9992844448d1c541e4f2e06724df17f6"
+bytes = 15851
+sha256 = "3421fe6941ea1cf9dbf1cea5fa9f96fda6c643ffd18ed1c014e2ab4853a0d04a"
 
 [[sources]]
 path = "tools/check_selftest_execution.py"
@@ -3741,8 +3741,8 @@ sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 22339
-sha256 = "e8b76e12aea5b311603589c8da51cd343988e61d847e13a0215c866cd497dd56"
+bytes = 25266
+sha256 = "fde578ff24c8e0c3b798d57d8605227b8443434f61e91e40fe4767b4090ef114"
 
 [[sources]]
 path = "tools/check_site_versions.py"
@@ -3751,8 +3751,8 @@ sha256 = "1175d7eaddb28a6c59696b2ef6501b576ce1c92fd21d35507ec5d10912be411f"
 
 [[sources]]
 path = "tools/check_sitemap.py"
-bytes = 17871
-sha256 = "881b9b8292daf41e8a514b5f4a338ea98a5b295865d43cc8fa58af9dd7752416"
+bytes = 23332
+sha256 = "250fe7e3c86bc5ab7da725b90290f26ed5b1aadc9a4b11544de64bcb96cc103f"
 
 [[sources]]
 path = "tools/check_sized_instructions.py"
@@ -3991,8 +3991,8 @@ sha256 = "f9bfcb410fcf35ffebe60ed237f03c4cd862393a81bb2f3043cccc1a9e183d3e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 201888
-sha256 = "bb4898c2807e31195519a15ea51685e015f517b75b9f2e3b2520780f2639f8cc"
+bytes = 202482
+sha256 = "d6bfa17d9fc2ca56398cb5e9761bcb40a290624b683d3e1d2985fd21db1aa919"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

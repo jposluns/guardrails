@@ -4,14 +4,16 @@
   check_security_txt.py              exit 0 clean, 1 finding, 2 cannot evaluate
   check_security_txt.py --self-test  assert every refusal and a pass over tempdir fixtures
   check_security_txt.py [--self-test] --execution-report ABS_PATH
+  any other argument list is refused with exit 2
 
 Each site root (site/ for aiqt.ai, opf/site/ for opfiles.ai) must carry .well-known/security.txt as a
 regular file whose lines are exactly the owner's 6 fields, in order, each once, with the owner's values
 and the Canonical URL of that root's own domain. A missing file, a non-regular file (a directory, a
 symlink, a FIFO), a missing, duplicated, unknown or out-of-order field, a wrong value and a wrong
-Canonical are findings (exit 1). An unreadable file, one over MAX_BYTES, one that is not UTF-8, or one
-carrying a line that is not a `Name: value` field, a CR or a NUL is cannot-evaluate (exit 2), never a
-pass. The gate reads only the repository; it never fetches the live files.
+Canonical are findings (exit 1). A file that cannot be stat'ed or read, one over MAX_BYTES, one that is
+not UTF-8 (decoded strictly), or one carrying a line that is not a `Name: value` field, a CR anywhere
+(a lone CR included) or a NUL is cannot-evaluate (exit 2), never a pass. The gate reads only the
+repository; it never fetches the live files.
 """
 import sys
 
@@ -268,6 +270,36 @@ def _self_test():
         findings, errors = _scan_case((body, good[1]))
         check(name, findings == [] and len(errors) == 1, (findings, errors))
 
+    # Each body below is refused by the check its needle names, not by the line-shape check after it.
+    for name, body, needle in (
+            ("refuse/lone-cr-in-value", good[0].replace("en, fr", "en,\rfr"), "carries a CR or NUL"),
+            ("refuse/nul-in-value", good[0].replace("en, fr", "en,\x00fr"), "carries a CR or NUL"),
+            ("refuse/not-utf8-strict", good[0].encode("utf-8").replace(b"en, fr", b"en, fr\xff"),
+             "not UTF-8")):
+        findings, errors = _scan_case((body, good[1]))
+        check(name, findings == [] and len(errors) == 1 and needle in errors[0], (findings, errors))
+
+    real_lstat = os.lstat
+
+    def _lstat_denied(path, *args, **kwargs):
+        if Path(path).name == "security.txt":
+            raise PermissionError(13, "stat refused by the self-test", str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="security-txt-selftest-") as tmp:
+        _fixture(tmp, good)
+        os.lstat = _lstat_denied
+        try:
+            findings, errors = scan(tmp)
+        finally:
+            os.lstat = real_lstat
+    check("refuse/cannot-stat", findings == [] and len(errors) == 2
+          and all("cannot stat" in line for line in errors), (findings, errors))
+
+    got = [_main_exit(argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
+                                         ["--execution-report", "relative/report"])]
+    check("refuse/unrecognized-argument", got == [2, 2, 2], got)
+
     # The size bound at its ends: one byte under, exactly at, and one byte over MAX_BYTES.
     pad = MAX_BYTES - len(good[0].encode("utf-8"))
     for name, extra, refused in (("bound/size-under", pad - 1, False), ("bound/size-at", pad, False),
@@ -291,10 +323,24 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_security_txt {} checks (both exact files pass; a missing file, a "
           "directory in its place, a missing field, a wrong value, a duplicate field, a swapped Canonical, "
-          "an unknown field and a reordered pair each fail; an unreadable file, a non-UTF-8 body, a line "
-          "without the field separator, CRLF line ends and a missing final line feed are cannot-evaluate; "
-          "the size bound holds one byte under, at and over; the live tree passes)".format(len(EXECUTED)))
+          "an unknown field and a reordered pair each fail; a file that cannot be stat'ed or read, a "
+          "non-UTF-8 body, a line without the field separator, CRLF line ends, a lone CR, a NUL and a "
+          "missing final line feed are cannot-evaluate; an unrecognized argument exits 2; the size bound "
+          "holds one byte under, at and over; the live tree passes)".format(len(EXECUTED)))
     return 0
+
+
+def _main_exit(argv):
+    """main()'s exit code for the argument list argv, its output captured."""
+    import contextlib
+    import io
+    saved = sys.argv
+    sys.argv = [saved[0]] + list(argv)
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return main()
+    finally:
+        sys.argv = saved
 
 
 def main():
