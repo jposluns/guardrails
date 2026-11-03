@@ -846,6 +846,23 @@ def _mappings_data():
     return _MAPPINGS_DATA
 
 
+_COMMIT_HASH = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+
+
+def _label_html(value):
+    """Element text for a framework label, each full commit hash in it shown as its first 7 characters
+    with the full hash in the title (the registry cell's form), so a 40-character run cannot widen a
+    narrow page."""
+    text = gen_mappings._text
+    out, pos = [], 0
+    for m in _COMMIT_HASH.finditer(value):
+        out.append(text(value[pos:m.start()]))
+        out.append('<code class="hash" title="{}">{}</code>'.format(m.group(), m.group()[:7]))
+        pos = m.end()
+    out.append(text(value[pos:]))
+    return "".join(out)
+
+
 def _mappings_by_rule(rows):
     """The draft By rule body: every mapped rule disclosed with its frameworks and identifiers, in the
     live page's canonical order, in the draft page's plain-details markup."""
@@ -860,7 +877,8 @@ def _mappings_by_rule(rows):
                                  key=lambda item: gen_mappings._framework_sort_key(item[1][0])):
             head = frows[0]
             parts.append("<li>{} ({}): {}<ul>".format(
-                text(head["framework_name"]), text(head["edition"]), text(head["relation"])))
+                _label_html(head["framework_name"]), _label_html(head["edition"]),
+                text(head["relation"])))
             for row in frows:
                 parts.append("<li>{}: {} ({})</li>".format(
                     text(row["identifier"]), text(row["identifier_title"]), text(row["fit"])))
@@ -882,7 +900,7 @@ def _mappings_by_framework(rows, reg):
         if not frows:
             continue
         parts = ["<details><summary>{} ({})</summary><p>{}. {}.</p><ul>".format(
-            text(r["name"]), text(r["edition"]), text(r["relation"]),
+            _label_html(r["name"]), _label_html(r["edition"]), text(r["relation"]),
             text(gen_mappings._coverage_line(r)))]
         by_id = {}
         for row in frows:
@@ -1525,6 +1543,24 @@ def _self_test():
             '</span></a> (tight)</li></ul></li></ul></details></div>'), by_framework)
         expect("refuse/mappings-bad-view", "view" in refused(
             "refuse/mappings-bad-view", rendered, 'component = "mappings"\nview = "sideways"\n'))
+        # A 40-character commit hash in a framework label renders as the registry cell's short form,
+        # the full hash only in the title, in both views; a 39- or 41-character hex run is left as text.
+        full = "f54d8ded2764010ecacd0deb87e1586da32d41dd"
+        short = '<code class="hash" title="{}">f54d8de</code>'.format(full)
+        edition = "commit {} (2026-07-04)".format(full)
+        _MAPPINGS_DATA = ([dict(_MAPPINGS_DATA[0][0], edition=edition)],
+                          [dict(_MAPPINGS_DATA[1][0], edition=edition)])
+        hashed_framework = rendered('component = "mappings"\nview = "by-framework"\n')
+        expect("component/mappings-hash-by-framework",
+               '<summary>Alpha &lt;F&gt; (commit {} (2026-07-04))</summary>'.format(short) in hashed_framework
+               and hashed_framework.count(full) == 1, hashed_framework)
+        hashed_rule = rendered('component = "mappings"\nview = "by-rule"\n')
+        expect("component/mappings-hash-by-rule",
+               '<li>Alpha &lt;F&gt; (commit {} (2026-07-04)): supports control<ul>'.format(short) in hashed_rule
+               and hashed_rule.count(full) == 1, hashed_rule)
+        expect("component/mappings-hash-bounds",
+               _label_html(full[:39]) == full[:39] and _label_html(full + "0") == full + "0"
+               and _label_html("<{}>".format(full)) == "&lt;{}&gt;".format(short), _label_html(full[:39]))
     finally:
         _MAPPINGS_DATA = saved_mappings
 
