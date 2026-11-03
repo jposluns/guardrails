@@ -51,6 +51,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _standards import load_manifests, ManifestError  # noqa: E402
+import gen_mappings  # noqa: E402  (the one mappings rendering source: rows, registry and wording)
+import gen_rules  # noqa: E402  (the one frontmatter parser and corpus loader)
+from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
+
 # The one base path for every internal href and src: "/draft/" while staging, "/" at promotion.
 BASE = "/draft/"
 DRAFT_BASE = "/draft/"
@@ -63,11 +69,27 @@ GENSRC_OUTPUTS = (
     {"target": "site/draft/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/draft/404.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/404.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/draft/disclosure/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/disclosure.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/draft/install/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/install.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/draft/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/draft/mappings/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/mappings.toml",
+                 ".aiqt/standards/", ".aiqt/core/rules/"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/draft/rules/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/rules.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/draft/standard/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
 )
 
@@ -91,6 +113,25 @@ SITES = (
      "github": "https://github.com/jposluns/guardrails",
      "nav": (("install/", "Install"), ("standard/", "The standard"), ("rules/", "The 5 rules"),
              ("mappings/", "Mappings"))},
+)
+
+
+# Kept live paths (template SPECIFICATION 4.1): the root-relative live targets a draft page may link,
+# each of which exists under site/ today and keeps its path at promotion. A kept link renders as a plain
+# root-relative anchor with no new-tab hint. Every other root-relative or absolute internal target stays
+# refused, so a draft page cannot grow a live link this list has not reviewed.
+KEPT_LIVE_PATHS = (
+    "/development",
+    "/downloads/aiqt-instructions-1_5k.txt",
+    "/downloads/aiqt-instructions-5k.txt",
+    "/downloads/aiqt-instructions-8k.txt",
+    "/downloads/aiqt-instructions.txt",
+    "/downloads/aiqt-skill-1.0.6.zip",
+    "/downloads/mappings.csv",
+    "/downloads/mappings.json",
+    "/enforcement",
+    "/evidence",
+    "/tech-details",
 )
 
 
@@ -234,9 +275,25 @@ def _items(doc, where, key, required, optional=()):
     return out
 
 
+def _kept_live(target):
+    """True only for a root-relative target whose path (before an optional #fragment) is a kept live
+    path; both ends of the shape are checked, so "/evidence2" and a malformed fragment stay refused."""
+    if not isinstance(target, str) or not target.startswith("/"):
+        return False
+    path, sep, frag = target.partition("#")
+    if path not in KEPT_LIVE_PATHS:
+        return False
+    return not sep or ID_RE.fullmatch(frag) is not None
+
+
 def _internal_href(href, where):
-    """BASE + href for a site-relative target ("" is the home page); refused outside that shape."""
-    if not isinstance(href, str) or href.startswith("/") or href.lower().startswith("http") \
+    """BASE + href for a site-relative target ("" is the home page), or a kept live path unchanged;
+    refused outside those shapes."""
+    if isinstance(href, str) and href.startswith("/"):
+        if _kept_live(href):
+            return href
+        raise RefusedPage("{}: {!r} is not a site-relative href or a kept live path".format(where, href))
+    if not isinstance(href, str) or href.lower().startswith("http") \
             or ".." in href or INTERNAL_HREF_RE.fullmatch(href) is None:
         raise RefusedPage("{}: {!r} is not a site-relative href".format(where, href))
     return _url(href)
@@ -532,11 +589,14 @@ def _c_lead(site, doc, where):
 
 
 def _c_label(site, doc, where):
-    spec = _need(doc, where, ("component", "text"), ("variant",))
+    spec = _need(doc, where, ("component", "text"), ("variant", "id"))
     variant = _text(spec, where, "variant", "blk")
     if variant not in ("blk", "sec", "accent blk"):
         raise RefusedPage("{}: variant must be blk, sec or accent blk".format(where))
-    return '<p class="lbl {}">{}</p>'.format(variant, _text(spec, where, "text"))
+    attr = ""
+    if "id" in spec:
+        attr = ' id="{}"'.format(_checked_id(spec, where))
+    return '<p class="lbl {}"{}>{}</p>'.format(variant, attr, _text(spec, where, "text"))
 
 
 def _c_section(site, doc, where):
@@ -564,6 +624,92 @@ def _c_prose(site, doc, where):
     return _inline(_text(spec, where, "html"))
 
 
+_MAPPINGS_VIEWS = ("by-rule", "by-framework")
+_MAPPINGS_DATA = None
+
+
+def _mappings_data():
+    """(rows, registry) derived from the same corpus and manifests tools/gen_mappings.py renders the
+    live page from, loaded once per process, so the draft bodies cannot drift from the mappings data."""
+    global _MAPPINGS_DATA
+    if _MAPPINGS_DATA is None:
+        try:
+            manifests = load_manifests(ROOT / ".aiqt" / "standards", root=ROOT)
+            corpus = gen_rules.load_corpus(ROOT / ".aiqt" / "core" / "rules")
+            corpus.sort(key=lambda item: sort_key(item[1]))
+            rows = gen_mappings.build_rows(corpus, manifests)
+            reg = gen_mappings.registry_rows(manifests, rows)
+        except (ManifestError, ValueError, OSError, KeyError) as exc:
+            raise RefusedPage("mappings data: {}".format(exc)) from exc
+        _MAPPINGS_DATA = (rows, reg)
+    return _MAPPINGS_DATA
+
+
+def _mappings_by_rule(rows):
+    """The draft By rule body: every mapped rule disclosed with its frameworks and identifiers, in the
+    live page's canonical order, in the draft page's plain-details markup."""
+    text = gen_mappings._text
+    blocks = []
+    for _rid, rrows in gen_mappings._group_ordered(rows, "rule_id").items():
+        parts = ["<details><summary>{}</summary><p>{}</p><ul>".format(
+            text(rrows[0]["rule_title"]),
+            _external(gen_mappings._attr(rrows[0]["rule_source"]), "View this rule on GitHub"))]
+        groups = gen_mappings._group_ordered(rrows, "framework")
+        for _fw, frows in sorted(groups.items(),
+                                 key=lambda item: gen_mappings._framework_sort_key(item[1][0])):
+            head = frows[0]
+            parts.append("<li>{} ({}): {}<ul>".format(
+                text(head["framework_name"]), text(head["edition"]), text(head["relation"])))
+            for row in frows:
+                parts.append("<li>{}: {} ({})</li>".format(
+                    text(row["identifier"]), text(row["identifier_title"]), text(row["fit"])))
+            parts.append("</ul></li>")
+        parts.append("</ul></details>")
+        blocks.append("".join(parts))
+    return '<div class="wide">{}</div>'.format("".join(blocks))
+
+
+def _mappings_by_framework(rows, reg):
+    """The draft By framework body: each cited framework disclosed with its identifiers and the rules
+    that cite them, the coverage sentence worded by the catalogue invariant, in the draft markup."""
+    text = gen_mappings._text
+    export_rows = sorted(rows, key=gen_mappings._framework_sort_key)
+    by_fw = gen_mappings._group_ordered(export_rows, "framework")
+    blocks = []
+    for r in reg:
+        frows = by_fw.get(r["framework"])
+        if not frows:
+            continue
+        parts = ["<details><summary>{} ({})</summary><p>{}. {}.</p><ul>".format(
+            text(r["name"]), text(r["edition"]), text(r["relation"]),
+            text(gen_mappings._coverage_line(r)))]
+        by_id = {}
+        for row in frows:
+            by_id.setdefault(row["identifier"], []).append(row)
+        for cid in sorted(by_id, key=gen_mappings.natkey):
+            idrows = by_id[cid]
+            parts.append("<li>{}: {}<ul>".format(text(cid), text(idrows[0]["identifier_title"])))
+            for row in idrows:
+                parts.append("<li>{} ({})</li>".format(
+                    _external(gen_mappings._attr(row["rule_source"]), text(row["rule_title"])),
+                    text(row["fit"])))
+            parts.append("</ul></li>")
+        parts.append("</ul></details>")
+        blocks.append("".join(parts))
+    return '<div class="wide">{}</div>'.format("".join(blocks))
+
+
+def _c_mappings(site, doc, where):
+    spec = _need(doc, where, ("component", "view"))
+    view = _text(spec, where, "view")
+    if view not in _MAPPINGS_VIEWS:
+        raise RefusedPage("{}: view must be one of {}".format(where, ", ".join(_MAPPINGS_VIEWS)))
+    rows, reg = _mappings_data()
+    if view == "by-rule":
+        return _mappings_by_rule(rows)
+    return _mappings_by_framework(rows, reg)
+
+
 def _checked_id(spec, where):
     value = spec.get("id")
     if not isinstance(value, str) or ID_RE.fullmatch(value) is None:
@@ -577,7 +723,7 @@ COMPONENTS = {
     "callout": _c_callout, "figures": _c_figures, "table": _c_table, "register": _c_register,
     "code": _c_code, "picker": _c_picker, "family": _c_family, "download": _c_download, "plan": _c_plan,
     "scope": _c_scope, "next": _c_next, "lead": _c_lead, "label": _c_label, "section": _c_section,
-    "entry": _c_entry, "prose": _c_prose,
+    "entry": _c_entry, "prose": _c_prose, "mappings": _c_mappings,
 }
 # Components whose rail key lists the section on the page's rail (specification section 7.6).
 RAIL_BEARING = ("clause", "section", "entry")
@@ -720,7 +866,7 @@ def _link_findings(html):
     external URL, or an external anchor without the new-tab attributes and hint."""
     found = []
     for target in LINK_RE.findall(html):
-        if target.startswith(BASE) or target.startswith("#"):
+        if target.startswith(BASE) or target.startswith("#") or _kept_live(target):
             continue
         if not target.startswith("https://"):
             found.append("{!r} is neither under {} nor an https URL".format(target, BASE))
@@ -817,10 +963,27 @@ def refusals_for(html):
     return found
 
 
+def _kept_live_missing():
+    """Every kept live path with no target under site/: the path as-is for a file target, or the path
+    plus ".html" for an extensionless page, matching how the live site serves it."""
+    missing = []
+    for path in KEPT_LIVE_PATHS:
+        rel = path.lstrip("/")
+        candidates = [ROOT / "site" / rel]
+        if "." not in rel.rsplit("/", 1)[-1]:
+            candidates.append(ROOT / "site" / (rel + ".html"))
+        if not any(candidate.is_file() for candidate in candidates):
+            missing.append(path)
+    return missing
+
+
 def build(pages=None):
     """{target path: text} for every registered output. With the default page set (the data files under
     SRC_REL), the built set must match the GENSRC_OUTPUTS declaration, so a page cannot land or vanish
-    without its registry entry."""
+    without its registry entry. Every kept live path must exist under site/ before anything renders."""
+    missing = _kept_live_missing()
+    if missing:
+        raise RefusedPage("kept live path(s) with no target under site/: {}".format(", ".join(missing)))
     declared = pages is None
     if pages is None:
         pages = _load_pages(ROOT / SRC_REL)
@@ -921,7 +1084,17 @@ def _self_test():
     expect("footer/current-card", page.count('aria-current="page"><img src="/draft/assets/baseline/logos/aiqt.svg"') == 1)
     navs = [re.search(r'<nav class="nav" aria-label="Site">(.*?)</nav>', outputs["site/draft/" + rel]).group(1)
             for rel in ("index.html", "disclosure/index.html", "license/index.html")]
-    expect("nav/unregistered-items-absent", all('href="/draft/install/"' not in nav for nav in navs), navs)
+    # The unregistered set is derived from the site nav against the loaded pages, so the check follows
+    # the pages as they land instead of hard-coding one path as absent.
+    registered_urls = {_page_url(page["rel"]) for page in _load_pages(ROOT / SRC_REL)}
+    nav_urls = [_url(path) for path, _label in site["nav"]]
+    unregistered = [href for href in nav_urls if href not in registered_urls]
+    expect("nav/unregistered-items-absent",
+           all('href="{}"'.format(href) not in nav for nav in navs for href in unregistered),
+           (unregistered, navs))
+    expect("nav/registered-items-present",
+           all('href="{}"'.format(href) in nav for nav in navs
+               for href in nav_urls if href in registered_urls), navs)
     expect("nav/no-disclosure-or-licence", all("disclosure" not in nav and "license" not in nav for nav in navs),
            navs)
     expect("nav/github-last", all(nav.endswith('GitHub<span class="vh"> (opens in a new tab)</span></a>')
@@ -934,13 +1107,18 @@ def _self_test():
              '<a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">Security'
              '<span class="vh"> (opens in a new tab)</span></a></p></div></div>')
     expect("about/landing-exact-markup", page.count(about) == 1)
-    expect("about/after-paragraph", page.find("arrive here one at a time.</p>") < page.find(about))
+    expect("about/after-paragraph", 0 < page.find("arrive with 1.1.0.</p>") < page.find(about))
     expect("about/inner-pages-none", all('class="about"' not in outputs["site/draft/" + rel]
                                          for rel in ("disclosure/index.html", "license/index.html")))
-    for rel, heading in (("disclosure/index.html", "Disclosure"), ("license/index.html", "Licence")):
+    expect("placeholder/index.html", page.count("<h1") == 1
+           and '<h1 class="statement two">Rules your AI follows. <em>Controls that catch what slips.'
+               '</em></h1>' in page
+           and "<title>Home | AIQT.ai</title>" in page)
+    for rel, title, heading in (("disclosure/index.html", "Disclosure", "Disclosure"),
+                                ("license/index.html", "Licence", "Apache License 2.0")):
         inner = outputs["site/draft/" + rel]
         expect("placeholder/" + rel, inner.count("<h1") == 1 and "<h1>{}</h1>".format(heading) in inner
-               and "<title>{} | AIQT.ai</title>".format(heading) in inner)
+               and "<title>{} | AIQT.ai</title>".format(title) in inner)
     hrefs = re.findall(r'(?:href|src)="([^"]*)"', page)
     internal = [h for h in hrefs if not h.startswith("https://") and not h.startswith("#")]
     expect("base/every-internal-path", internal and all(h.startswith(BASE) for h in internal), internal)
@@ -1095,6 +1273,60 @@ def _self_test():
         '<p><strong>Limitation:</strong> L</p>\n<p><strong>Evidence:</strong> E</p>'), entry)
     prose = rendered('component = "prose"\nhtml = "<p>P</p>"\n')
     expect("component/prose", prose == "<p>P</p>", prose)
+    labelled = rendered('component = "label"\ntext = "Pick your assistant"\nid = "pick"\n')
+    expect("component/label-id", labelled == '<p class="lbl blk" id="pick">Pick your assistant</p>',
+           labelled)
+
+    # The mappings component renders the two generated bodies from one synthetic (rows, registry) pair,
+    # so the draft markup for each view is pinned exactly, escaping included.
+    global _MAPPINGS_DATA
+    saved_mappings = _MAPPINGS_DATA
+    _MAPPINGS_DATA = ([{
+        "rule_id": "r1", "rule_title": "R & T", "rule_source": "https://example.com/r1",
+        "framework": "alpha", "framework_name": "Alpha <F>", "publisher": "P", "edition": "1.0",
+        "kind": "control", "relation": "supports control", "status": "stable", "fit": "tight",
+        "identifier": "ST01", "identifier_title": "one",
+    }], [{
+        "framework": "alpha", "name": "Alpha <F>", "publisher": "P", "edition": "1.0",
+        "kind": "control", "relation": "supports control", "status": "stable",
+        "citation_unit": "control", "source_artefact": "fixture", "retrieved": "2026-01-01",
+        "catalogue": "full", "ids_cited": 1, "ids_total": 1,
+    }])
+    try:
+        by_rule = rendered('component = "mappings"\nview = "by-rule"\n')
+        expect("component/mappings-by-rule", by_rule == (
+            '<div class="wide"><details><summary>R &amp; T</summary><p><a href="https://example.com/r1" '
+            'target="_blank" rel="noopener noreferrer">View this rule on GitHub<span class="vh"> (opens '
+            'in a new tab)</span></a></p><ul><li>Alpha &lt;F&gt; (1.0): supports control<ul>'
+            '<li>ST01: one (tight)</li></ul></li></ul></details></div>'), by_rule)
+        by_framework = rendered('component = "mappings"\nview = "by-framework"\n')
+        expect("component/mappings-by-framework", by_framework == (
+            '<div class="wide"><details><summary>Alpha &lt;F&gt; (1.0)</summary><p>supports control. '
+            '1 of 1 identifiers referenced.</p><ul><li>ST01: one<ul><li><a href="https://example.com/r1" '
+            'target="_blank" rel="noopener noreferrer">R &amp; T<span class="vh"> (opens in a new tab)'
+            '</span></a> (tight)</li></ul></li></ul></details></div>'), by_framework)
+        expect("refuse/mappings-bad-view", "view" in refused(
+            "refuse/mappings-bad-view", rendered, 'component = "mappings"\nview = "sideways"\n'))
+    finally:
+        _MAPPINGS_DATA = saved_mappings
+
+    # Kept live paths: a listed root-relative target renders unchanged with no new-tab hint; an unlisted
+    # one, a prefix overrun and a malformed fragment are refused.
+    kept_next = rendered('component = "next"\ntext = "Evidence"\nhref = "/evidence"\n')
+    expect("links/kept-live-plain", kept_next == (
+        '<div class="next"><p class="lbl">Next</p><a class="start" href="/evidence">Evidence '
+        '<span class="arrow" aria-hidden="true">&rarr;</span></a></div>'), kept_next)
+    kept_download = rendered('component = "download"\nhref = "/downloads/mappings.csv"\n'
+                             'filename = "mappings.csv"\nsize = "s"\nhtml = "D"\n')
+    expect("links/kept-live-download",
+           '<a href="/downloads/mappings.csv">mappings.csv</a>' in kept_download, kept_download)
+    expect("refuse/unkept-root-path", "kept live path" in refused(
+        "refuse/unkept-root-path", rendered, 'component = "next"\ntext = "T"\nhref = "/elsewhere"\n'))
+    expect("refuse/kept-path-prefix", "kept live path" in refused(
+        "refuse/kept-path-prefix", rendered, 'component = "next"\ntext = "T"\nhref = "/evidence2"\n'))
+    expect("refuse/kept-bad-fragment", "kept live path" in refused(
+        "refuse/kept-bad-fragment", rendered, 'component = "next"\ntext = "T"\nhref = "/evidence#a b"\n'))
+    expect("links/kept-fragment-passes", _link_findings('<a href="/evidence#limits">x</a>') == [])
 
     # The data model refuses what it does not know, with every key named.
     expect("refuse/unknown-component", "unknown component" in refused(
@@ -1228,6 +1460,22 @@ def _self_test():
             expect(name, got and refused_run == over, (len(body), refused_run))
         os.unlink(src / "home.toml")
 
+    # Every kept live path has its target under site/ today; a kept entry with no target refuses the
+    # build before anything renders.
+    expect("kept/all-targets-exist", _kept_live_missing() == [], _kept_live_missing())
+    global KEPT_LIVE_PATHS
+    saved_kept = KEPT_LIVE_PATHS
+    KEPT_LIVE_PATHS = KEPT_LIVE_PATHS + ("/absent-page",)
+    try:
+        expect("kept/missing-detected", _kept_live_missing() == ["/absent-page"], _kept_live_missing())
+        try:
+            build([plain])
+            expect("refuse/kept-missing-build", False)
+        except RefusedPage as exc:
+            expect("refuse/kept-missing-build", "kept live path" in str(exc), str(exc))
+    finally:
+        KEPT_LIVE_PATHS = saved_kept
+
     BASE = "/"
     try:
         pages = _load_pages(ROOT / SRC_REL)
@@ -1259,7 +1507,8 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: gen_draft_site (shell order, robots meta, footer cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
-          "the rail lists sections, the link rules, promotion switch and --check exit codes)")
+          "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
+          "switch and --check exit codes)")
     return 0
 
 

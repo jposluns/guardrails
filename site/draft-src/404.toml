@@ -1,0 +1,16 @@
+# The aiqt.ai draft 404 page: the label, the fixed heading, a lead naming what the top bar links to, the
+# logo-only rail and a Next block to the home page (template specification section 7.17).
+path = "404.html"
+title = "Page not found"
+kind = "document"
+label = "404"
+heading = "That page is not here."
+
+[[body]]
+component = "lead"
+html = "Install, The standard, The 5 rules and Mappings are linked from the bar above."
+
+[[body]]
+component = "next"
+text = "Home"
+href = ""

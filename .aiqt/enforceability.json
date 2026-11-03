@@ -769,6 +769,14 @@
         {
           "class": "a",
           "default": "block",
+          "id": "draft-site-drift",
+          "platform": "ci",
+          "residue": "A byte-identity drift gate over the artefact tools/gen_draft_site.py generates from its declared source: it fails when the generated target differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.",
+          "script": "tools/gen_draft_site.py"
+        },
+        {
+          "class": "a",
+          "default": "block",
           "id": "enforceability-drift",
           "platform": "ci",
           "residue": "A byte-identity drift gate over the artefact tools/gen_enforceability.py generates from its declared source: it fails when the generated ledger differs from a fresh regeneration. It guards the generated artefact against a hand-edit or a stale source landing apart from it; it does not judge the semantic correctness of the source or of the generator, and it covers only the targets that generator declares.",

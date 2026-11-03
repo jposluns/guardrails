@@ -386,6 +386,15 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
+        "site/draft-src/404.toml"
+      ],
+      "target": "site/draft/404.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
         "site/draft-src/disclosure.toml"
       ],
       "target": "site/draft/disclosure/index.html"
@@ -404,9 +413,47 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
+        "site/draft-src/install.toml"
+      ],
+      "target": "site/draft/install/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
         "site/draft-src/license.toml"
       ],
       "target": "site/draft/license/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/mappings.toml",
+        ".aiqt/standards/",
+        ".aiqt/core/rules/"
+      ],
+      "target": "site/draft/mappings/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/rules.toml"
+      ],
+      "target": "site/draft/rules/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/standard.toml"
+      ],
+      "target": "site/draft/standard/index.html"
     },
     {
       "kind": "file",

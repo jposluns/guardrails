@@ -115,6 +115,8 @@ run_gate "newtab-selftest" python3 -I -B tools/check_newtab.py --self-test
 run_gate "newtab" python3 -I -B tools/check_newtab.py
 run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
+run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
+run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
 run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
 run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py

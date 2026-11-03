@@ -260,6 +260,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_site_versions.py
 
+      - name: Draft site self-test
+        shell: bash
+        run: python3 -I -B tools/gen_draft_site.py --self-test
+
+      - name: Draft site drift
+        shell: bash
+        run: python3 -I -B tools/gen_draft_site.py --check
+
       - name: Site baseline pin self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
