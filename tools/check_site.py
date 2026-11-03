@@ -22,15 +22,16 @@ parser accepts as well-balanced but which break rendering/behaviour. Download-ar
 tracked separately (they need a final content baseline). Exit 0 clean, 1 on any finding, 2 on a read error (unreadable dir/file, fail-closed).
 
 Logo consistency: within a root, every page's header logo block must be byte-identical to the majority
-block of the pages not named 404.html. A 404 page is served at any missing URL, however deep, so it may
+block of the pages not named 404.html. A 404 page is served at any missing URL, however deep, so it must
 open its logo with the root-absolute home link href="/" where that block opens with the relative
-href="./"; every other byte must still match, and no other page gets this allowance.
+href="./" (the relative form is a finding there); every other byte must still match, and no other page
+gets this allowance.
 
-Apple touch icon: every live page (one not under a draft/ directory of its root, 404 pages included)
-must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root, taken as
-the exact path (no .html or index.html fallback); a missing link, or one naming a missing file, a
-directory, an external URL or a path escaping the root, is a finding. Draft pages are built under the
-site template's own rules and are not checked here.
+Apple touch icon: every live page (one not under the top-level draft/ directory of its root, 404 pages
+included) must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root,
+taken as the exact path (no .html or index.html fallback); a missing link, or one naming a missing file, a
+directory, an external URL or a path escaping the root, is a finding, and so is a relative href on a 404
+page. Draft pages are built under the site template's own rules and are not checked here.
 """
 import sys
 
@@ -257,7 +258,7 @@ def classify(v):
 
 _LOGO_RE = re.compile(r'<a class="logo".*?</a>', re.S)
 # A 404 page is served at any missing URL, however deep, so a relative home link there resolves below the
-# root. On a page named NOT_FOUND_PAGE the logo may therefore open with the root-absolute home link where
+# root. On a page named NOT_FOUND_PAGE the logo must therefore open with the root-absolute home link where
 # the canonical opens with the relative one; every other byte must still match.
 NOT_FOUND_PAGE = "404.html"
 _LOGO_RELATIVE_HOME = '<a class="logo" href="./"'
@@ -268,9 +269,9 @@ def logo_findings(pages):
     """Findings for header-logo drift across pages. `pages` is a list of (rel, text). The logo block is
     duplicated per page (no page generator yet), so every page that carries one must carry the SAME bytes
     as the majority (canonical) block of the pages not named 404.html (of all pages when only 404 pages
-    carry one); any other block is reported. The one exception: a 404 page may carry the canonical block
-    with its relative home link href="./" written as the root-absolute href="/". A page without a logo is
-    not a finding."""
+    carry one); any other block is reported. The one exception: a 404 page carries the canonical block
+    with its relative home link href="./" written as the root-absolute href="/", and the relative form is
+    reported there. A page without a logo is not a finding."""
     found = []
     for rel, text in pages:
         match = _LOGO_RE.search(text)
@@ -284,7 +285,7 @@ def logo_findings(pages):
     canonical = max(counts, key=lambda block: counts[block])
     accepted_not_found = {canonical}
     if canonical.startswith(_LOGO_RELATIVE_HOME):
-        accepted_not_found.add(_LOGO_ROOT_HOME + canonical[len(_LOGO_RELATIVE_HOME):])
+        accepted_not_found = {_LOGO_ROOT_HOME + canonical[len(_LOGO_RELATIVE_HOME):]}
     out = []
     for rel, block, not_found in found:
         if block in (accepted_not_found if not_found else {canonical}):
@@ -310,16 +311,27 @@ def _touch_icon_file(href, page_dir, site_root):
 
 def touch_icon_findings(label, page_rel, icons, page_dir, site_root):
     """Findings for one page's Apple touch icon links. `label` names the page in a finding, `page_rel` is
-    its path relative to its root, `icons` its (href, line) list. A page under a draft/ directory is not
-    checked; any other page needs at least one link, and every link must name an existing file."""
-    if DRAFT_DIR in Path(page_rel).parts[:-1]:
+    its path relative to its root, `icons` its (href, line) list. A page under the root's top-level draft/
+    directory (the /draft/* of _headers) is not checked; any other page needs at least one link, and every
+    link must name an existing file. A 404 page is served at any missing URL, however deep, so its links
+    must be root-absolute: a relative one resolves below the root there."""
+    parts = Path(page_rel).parts
+    if len(parts) > 1 and parts[0] == DRAFT_DIR:
         return []
     if not icons:
         return ['{}: missing <link rel="{}"> (every live page links the touch icon)'.format(
             label, TOUCH_ICON_REL)]
-    return ["{}:{}: {} names a file that does not exist under the root -> {!r}".format(
-        label, line, TOUCH_ICON_REL, href)
-        for href, line in icons if _touch_icon_file(href, page_dir, site_root) is None]
+    out = []
+    for href, line in icons:
+        classified = classify(href)
+        if parts[-1] == NOT_FOUND_PAGE and classified is not None and classified[0] != "" \
+                and not classified[0].startswith("/"):
+            out.append("{}:{}: {} on a 404 page is relative; a 404 page is served at any path, so it must "
+                       "be root-absolute -> {!r}".format(label, line, TOUCH_ICON_REL, href))
+        elif _touch_icon_file(href, page_dir, site_root) is None:
+            out.append("{}:{}: {} names a file that does not exist under the root -> {!r}".format(
+                label, line, TOUCH_ICON_REL, href))
+    return out
 
 
 def _self_test():
@@ -340,7 +352,7 @@ def _self_test():
     named = logo_findings([("keep.html", good), ("keep2.html", good), ("drift.html", bad)])
     if not (len(named) == 1 and named[0].startswith("drift.html")):
         failures.append("outlier naming: expected drift.html named, got {}".format(named))
-    # A 404 page may open its logo with the root-absolute home link where the canonical is relative; any
+    # A 404 page must open its logo with the root-absolute home link where the canonical is relative; any
     # other page may not, and a 404 page that differs in any other byte is still drift.
     rel_logo = '<a class="logo" href="./">L</a>'
     root_logo = '<a class="logo" href="/">L</a>'
@@ -348,7 +360,12 @@ def _self_test():
         ("404 page with root-absolute home on a relative site", [("a.html", rel_logo), ("404.html", root_logo)],
          []),
         ("nested 404 page with root-absolute home", [("a.html", rel_logo), ("b/404.html", root_logo)], []),
-        ("404 page with the canonical relative home", [("a.html", rel_logo), ("404.html", rel_logo)], []),
+        ("404 page with the canonical relative home", [("a.html", rel_logo), ("404.html", rel_logo)],
+         ["404.html"]),
+        ("nested 404 page with the canonical relative home", [("a.html", rel_logo), ("b/404.html", rel_logo)],
+         ["b/404.html"]),
+        ("only 404 pages, relative home", [("404.html", rel_logo), ("b/404.html", rel_logo)],
+         ["404.html", "b/404.html"]),
         ("404 page with root-absolute home on a root-absolute site",
          [("a.html", root_logo), ("404.html", root_logo)], []),
         ("non-404 page with root-absolute home on a relative site",
@@ -500,6 +517,13 @@ def _touch_icon_self_test(quiet):
         check("touch-icon/page-named-draft-checked", len(got) == 1, got)
         got = findings("drafts/a.html", [])
         check("touch-icon/drafts-directory-checked", len(got) == 1, got)
+        got = findings("guide/draft/a.html", [])
+        check("touch-icon/nested-draft-directory-checked", len(got) == 1 and "missing <link" in got[0], got)
+        got = findings("404.html", [("assets/logos/t.png", 3)])
+        check("touch-icon/404-relative-href-fails", len(got) == 1 and "must be root-absolute" in got[0], got)
+        got = findings("sub/404.html", [("../assets/logos/t.png", 3)])
+        check("touch-icon/nested-404-relative-href-fails", len(got) == 1 and "must be root-absolute" in got[0],
+              got)
 
         page = Page()
         page.feed('<link rel="icon" href="/f.svg"><link rel="Apple-Touch-Icon" href=" /t.png ">'

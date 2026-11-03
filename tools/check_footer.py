@@ -224,7 +224,11 @@ def _run_one(root, subdir, href, allowlist):
             print("  {}/{}".format(subdir, finding))
         return 1
     allow_str = ", ".join(sorted(allowlist)) or "none"
-    print("PASS: every {}/ page carries the {} nav link (allowlist: {})".format(subdir, href, allow_str))
+    if href == DISCLOSURE_HREF:
+        carried = "the {} nav link".format(href)
+    else:
+        carried = "the {} nav link ({} pages carry {})".format(href, NOT_FOUND_PAGE, DISCLOSURE_HREF)
+    print("PASS: every {}/ page carries {} (allowlist: {})".format(subdir, carried, allow_str))
     return 0
 
 

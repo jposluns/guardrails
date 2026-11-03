@@ -4,6 +4,7 @@
   check_headers.py              exit 0 clean, 1 finding, 2 cannot evaluate
   check_headers.py --self-test  assert every refusal and a pass over tempdir fixtures
   check_headers.py [--self-test] --execution-report ABS_PATH
+  any other argument list is refused with exit 2
 
 Each site root (site/ for aiqt.ai, opf/site/ for opfiles.ai) must carry _headers as a regular file holding
 exactly 2 rule blocks, in order. `/*` sets Content-Security-Policy (the site's live policy),
@@ -11,13 +12,15 @@ X-Frame-Options: DENY, Permissions-Policy and Cross-Origin-Opener-Policy: same-o
 the live policy with `! Content-Security-Policy`, then sets Content-Security-Policy to the shared draft
 policy and X-Robots-Tag: noindex. Each header appears once per block; the Permissions-Policy and the draft
 policy are byte-identical to the constants below; the live policy keeps every directive of the draft policy
-with every one of its sources and may only add sources. X-Content-Type-Options, Referrer-Policy and
-Strict-Transport-Security are never set here (Cloudflare sends them). A missing file, a non-regular file, a
-missing, duplicated, unknown or out-of-order block or header, a forbidden header, a wrong value and a live
-policy that drops a directive or a source are findings (exit 1). An unreadable file, one over MAX_BYTES, one
-that is not UTF-8, or one carrying a CR, a NUL, no final line feed, or a line that is not blank, a rule
-path, an indented `Name: value` header or an indented `! Name` removal is cannot-evaluate (exit 2), never a
-pass. The gate reads only the repository; it never fetches the live headers.
+with every one of its sources and adds no directive and no source except the recorded widenings in
+LIVE_CSP_WIDENINGS. X-Content-Type-Options, Referrer-Policy and Strict-Transport-Security are never set
+here (Cloudflare sends them). A missing file, a non-regular file, a missing, duplicated, unknown or
+out-of-order block or header, a forbidden header, a wrong value and a live policy that drops a directive or
+a source, or adds one that is not recorded, are findings (exit 1). A file that cannot be stat'ed or read,
+one over MAX_BYTES, one that is not UTF-8 (decoded strictly), or one carrying a CR (a lone CR included), a
+NUL, no final line feed, or a line that is not blank, a rule path, an indented `Name: value` header or an
+indented `! Name` removal is cannot-evaluate (exit 2), never a pass; cannot-evaluate outranks a finding.
+The gate reads only the repository; it never fetches the live headers.
 """
 import sys
 
@@ -44,7 +47,7 @@ REL = "_headers"
 MAX_BYTES = 8192
 SITE_ROOTS = ("site", "opf/site")
 
-# Both strings are copied byte for byte from the shared site template, baseline 1.2.1, section 9
+# Both strings are copied byte for byte from the shared site template, baseline 1.3.1, section 9
 # (Security headers baseline): the shared draft policy and the Permissions-Policy value.
 DRAFT_CSP = ("default-src 'none'; script-src 'self' 'unsafe-inline' https://ajax.cloudflare.com "
              "https://static.cloudflareinsights.com; connect-src 'self' https://cloudflareinsights.com; "
@@ -55,8 +58,14 @@ PERMISSIONS_POLICY = ("accelerometer=(), autoplay=(), bluetooth=(), browsing-top
                       "magnetometer=(), microphone=(), midi=(), payment=(), serial=(), usb=()")
 
 CSP = "Content-Security-Policy"
-# The live policy has no fixed value (LIVE_CSP marks it); judge_live_csp() holds it to the draft policy.
+# The live policy has no fixed value (LIVE_CSP marks it); judge_live_csp() holds it to the draft policy
+# plus LIVE_CSP_WIDENINGS.
 LIVE_CSP = None
+# Every source the live policy may add to a draft directive, as (directive, source) pairs. Section 9 lets
+# a site's live policy widen the draft policy only where its live pages need it and records each
+# widening; the live pages carry inline styles, so style-src 'unsafe-inline' is the only one. Any other
+# added source, and any added directive, is a finding.
+LIVE_CSP_WIDENINGS = (("style-src", "'unsafe-inline'"),)
 # (kind, name, value) per entry, in file order; kind is "set" or "remove".
 EXPECTED_BLOCKS = (
     ("/*", (
@@ -148,6 +157,13 @@ def judge_live_csp(value, where):
         for source in sources:
             if source not in got:
                 findings.append("{}: live policy narrows {}: lacks {}".format(where, name, source))
+        for live_name, live_sources in live:
+            if live_name != name:
+                continue
+            for source in live_sources:
+                if source not in sources and (name, source) not in LIVE_CSP_WIDENINGS:
+                    findings.append("{}: live policy widens {}: adds {}, which is not a recorded "
+                                    "widening".format(where, name, source))
     known = {name for name, _sources in draft}
     for name in names:
         if name not in known:
@@ -385,10 +401,32 @@ def _self_test():
         ("refuse/live-csp-adds-directive", good.replace(live_line, live_line.replace(
             "\n", "; worker-src 'self'\n")), "live policy adds directive worker-src"),
         ("refuse/live-csp-duplicate-directive", good.replace(live_line, live_line.replace(
-            "\n", "; img-src 'self' data:\n")), "live policy directive img-src appears 2 times"),
+            "\n", "; img-src 'self'\n")), "live policy directive img-src appears 2 times"),
     ):
         ok, detail = _one_finding(body, fragment)
         check(name, ok, detail)
+
+    # The live policy may add only the recorded widenings: each added source below is refused, one finding
+    # per source, and the recorded source is refused on any other directive.
+    for name, old, new, fragments in (
+        ("refuse/live-csp-widens-script-src-unsafe-eval", "static.cloudflareinsights.com;",
+         "static.cloudflareinsights.com 'unsafe-eval';", ["widens script-src: adds 'unsafe-eval'"]),
+        ("refuse/live-csp-widens-default-src-wildcard", "default-src 'none';", "default-src 'none' *;",
+         ["widens default-src: adds *"]),
+        ("refuse/live-csp-widens-frame-ancestors-https", "frame-ancestors 'none'\n",
+         "frame-ancestors 'none' https:\n", ["widens frame-ancestors: adds https:"]),
+        ("refuse/live-csp-widens-img-src-data-https", "img-src 'self';", "img-src 'self' data: https:;",
+         ["widens img-src: adds data:", "widens img-src: adds https:"]),
+        ("refuse/live-csp-widens-connect-src-wildcard", "connect-src 'self' https://cloudflareinsights.com;",
+         "connect-src 'self' https://cloudflareinsights.com *;", ["widens connect-src: adds *"]),
+        ("refuse/live-csp-widens-form-action-wildcard", "form-action 'none';", "form-action 'none' *;",
+         ["widens form-action: adds *"]),
+        ("refuse/live-csp-recorded-source-on-other-directive", "font-src 'self';",
+         "font-src 'self' 'unsafe-inline';", ["widens font-src: adds 'unsafe-inline'"]),
+    ):
+        findings, errors = _scan_case((good.replace(live_line, live_line.replace(old, new)), good))
+        check(name, errors == [] and len(findings) == len(fragments)
+              and all(fragment in line for fragment, line in zip(fragments, findings)), (findings, errors))
 
     live_anchor, draft_anchor = "  Cross-Origin-Opener-Policy: same-origin\n", "  X-Robots-Tag: noindex\n"
     nosniff = "X-Content-Type-Options: nosniff"
@@ -428,6 +466,44 @@ def _self_test():
         findings, errors = _scan_case((body, good))
         check(name, findings == [] and len(errors) == 1, (findings, errors))
 
+    # Each body below is refused by the check its needle names, not by the line-shape check after it.
+    for name, body, needle in (
+            ("refuse/lone-cr-in-value", good.replace("DENY", "DE\rNY"), "carries a CR or NUL"),
+            ("refuse/nul-in-value", good.replace("DENY", "DE\x00NY"), "carries a CR or NUL"),
+            ("refuse/not-utf8-strict", good.encode("utf-8").replace(b"DENY", b"DE\xffNY"), "not UTF-8")):
+        findings, errors = _scan_case((body, good))
+        check(name, findings == [] and len(errors) == 1 and needle in errors[0], (findings, errors))
+
+    real_lstat = os.lstat
+
+    def _lstat_denied(path, *args, **kwargs):
+        if Path(path).name == REL:
+            raise PermissionError(13, "stat refused by the self-test", str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    with tempfile.TemporaryDirectory(prefix="headers-selftest-") as tmp:
+        _fixture(tmp, (good, good))
+        os.lstat = _lstat_denied
+        try:
+            findings, errors = scan(tmp)
+        finally:
+            os.lstat = real_lstat
+    check("refuse/cannot-stat", findings == [] and len(errors) == 2
+          and all("cannot stat" in line for line in errors), (findings, errors))
+
+    # The gate's exit code: 1 for a finding alone, 2 for cannot-evaluate alone and for both together.
+    for name, bodies, want in (("exit/finding-is-1", (None, good), 1),
+                               ("exit/cannot-evaluate-is-2", (good.replace("DENY", "DE\rNY"), good), 2),
+                               ("exit/cannot-evaluate-outranks-finding",
+                                (good.replace("DENY", "DE\rNY"), None), 2)):
+        with tempfile.TemporaryDirectory(prefix="headers-selftest-") as tmp:
+            got = _quiet(run_gate, _fixture(tmp, bodies))
+        check(name, got == want, got)
+
+    got = [_main_exit(argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
+                                         ["--execution-report", "relative/report"])]
+    check("refuse/unrecognized-argument", got == [2, 2, 2], got)
+
     # The size bound at its ends: one byte under, exactly at, and one byte over MAX_BYTES.
     pad = MAX_BYTES - len(good.encode("utf-8"))
     for name, extra, refused in (("bound/size-under", pad - 1, False), ("bound/size-at", pad, False),
@@ -454,11 +530,31 @@ def _self_test():
           "reordered rule block, a missing, duplicated, unknown or reordered header, each forbidden header in "
           "either block, a wrong X-Frame-Options, Cross-Origin-Opener-Policy or X-Robots-Tag, a "
           "Permissions-Policy or draft policy that is not byte-identical, a missing or misplaced removal, and "
-          "a live policy that drops a directive or a source, adds a directive or repeats one each fail; an "
-          "unreadable file, a non-UTF-8 body, CRLF line ends, a NUL, a missing final line feed and a line "
-          "outside the _headers grammar are cannot-evaluate; the size bound holds one byte under, at and "
-          "over; the live tree passes)".format(len(EXECUTED)))
+          "a live policy that drops a directive or a source, adds a directive or an unrecorded source or "
+          "repeats a directive each fail; a file that cannot be stat'ed or read, a non-UTF-8 body, CRLF "
+          "line ends, a lone CR, a NUL, a missing final line feed and a line outside the _headers grammar "
+          "are cannot-evaluate; the gate exits 1 on a finding and 2 on cannot-evaluate; an unrecognized "
+          "argument exits 2; the size bound holds one byte under, at and over; the live tree "
+          "passes)".format(len(EXECUTED)))
     return 0
+
+
+def _quiet(fn, *args):
+    """fn(*args), its output captured."""
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return fn(*args)
+
+
+def _main_exit(argv):
+    """main()'s exit code for the argument list argv, its output captured."""
+    saved = sys.argv
+    sys.argv = [saved[0]] + list(argv)
+    try:
+        return _quiet(main)
+    finally:
+        sys.argv = saved
 
 
 def main():
