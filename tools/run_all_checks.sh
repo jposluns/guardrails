@@ -103,6 +103,7 @@ run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --defaul
 run_gate "links"     python3 -I -B tools/check_links.py
 run_gate "site-selftest" python3 -I -B tools/check_site.py --self-test
 run_gate "site"      python3 -I -B tools/check_site.py
+run_gate "site-scope-selftest" python3 -I -B tools/ci_site_scope.py --self-test
 run_gate "overclaim-selftest" python3 -I -B tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 -I -B tools/check_overclaim.py
 run_gate "license-qual-selftest" python3 -I -B tools/check_license_qualification.py --self-test
@@ -246,6 +247,7 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "ci-site-scope-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
 run_gate "git-fixture-env-core" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
 run_gate "git-fixture-env-config-combined" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
 run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
