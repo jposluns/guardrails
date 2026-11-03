@@ -31,19 +31,27 @@ gets this allowance.
 from its raw markup, not from the parsed page: every occurrence of href, src, srcset (each candidate URL),
 poster, data, action and xlink:href, duplicates and those inside svg and math included, must start with
 exactly one "/" (followed by a character other than "/", a backslash, a tab or a newline, or nothing), or
-with "#", "?" or "https://". The value is tested as written and again with its character references
-decoded, and is never percent-decoded, so "%2F..." is refused. Anything else (a relative path, "./",
-"../", an empty value, "//host", any other scheme) is a finding naming the attribute and value. A relative
-touch icon on a 404 page is reported by this rule and by the touch-icon rule below, so it is listed twice.
+with "#" or "?". The two loading pairs the live 404 pages use, script src and link href (any rel: they
+load a stylesheet, an icon and a touch icon there), must be root-absolute in that one-"/" form only: a
+fragment-only or query-only value resolves against the request URL, and https:// names another host. The
+one other "https://" the live 404 pages write is on a href, so https:// is accepted on a href and on no
+other attribute. The value is tested as written and again with its character references decoded, and is
+never percent-decoded, so "%2F..." is refused. Anything else (a relative path, "./", "../", an empty value,
+"//host", any other scheme) is a finding naming the attribute and value. A relative touch icon on a 404
+page is reported by this rule and by the touch-icon rule below, so it is listed twice.
 
 404 structure: that list of attributes cannot name every way markup loads a resource, so a 404 page is also
 held, fail closed, to the element and attribute names the live 404 pages use: any other name the raw scan
 finds is a finding naming the page, line and name. On the allowed names, any value and any script or style
 text containing "url(" (any case, as written or decoded) is a finding, a meta element may carry only the
 attributes the live pages use on meta, onclick and the SVG presentation attributes only the values they use,
-and a script without src only a body whose sha256 is pinned. The rule reads markup only: it cannot analyse
-what an allowlisted inline script does at run time (it trusts the pinned bodies), nor what a script or
-stylesheet loaded from a root-absolute URL contains.
+a script without src only a body whose sha256 is pinned, and a script with src only an empty body. A
+script start tag at or after the first svg start tag is refused outright: that covers every script inside
+svg (where src is not a script attribute, so the body runs), whatever comment or end-tag markup sits
+between them, and it also refuses an HTML script placed after an svg, which neither live 404 page has.
+The rule reads markup only: it cannot analyse what an allowlisted inline script does at run time (it
+trusts the pinned bodies), nor what the same-origin script, stylesheet or icon a root-absolute URL loads
+contains, nor where an https:// a href leads once followed (a navigation, not a load).
 
 Apple touch icon: every live page (one not under the top-level draft/ directory of its root, 404 pages
 included) must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root,
@@ -361,6 +369,11 @@ def touch_icon_findings(label, page_rel, icons, page_dir, site_root):
 # The URL-bearing attributes a 404 page is held to (srcset is split into its candidate URLs), and the ASCII
 # whitespace that separates attributes and srcset candidates in HTML.
 NOT_FOUND_URL_ATTRS = {"href", "src", "srcset", "poster", "data", "action", "xlink:href"}
+# The (element, attribute) pairs the live 404 pages load a resource through: these must be root-absolute (a
+# fragment-only or query-only value resolves against the request URL, https:// names another host). The one
+# pair the live 404 pages write https:// on is a href, so no other pair accepts it.
+NOT_FOUND_LOADING_PAIRS = frozenset((("link", "href"), ("script", "src")))
+NOT_FOUND_HTTPS_PAIRS = frozenset((("a", "href"),))
 _HTML_SPACE = "\t\n\f\r "
 _RAW_TAG_RE = re.compile(r"<[A-Za-z]")
 # After a leading "/", a browser reads a backslash as a second slash and drops tabs and newlines, so any of
@@ -449,10 +462,10 @@ def raw_tags(text):
 
 
 def raw_url_attributes(text):
-    """Every (name, value, line) of a URL-bearing attribute that raw_tags finds, the value as written,
-    duplicates included. It reads only the names in NOT_FOUND_URL_ATTRS; not_found_structure_findings holds
-    every other name on a 404 page to an allowlist."""
-    return [(name, value, line) for _element, _line, attributes, _end in raw_tags(text)
+    """Every (element, name, value, line) of a URL-bearing attribute that raw_tags finds, the value as
+    written, duplicates included. It reads only the names in NOT_FOUND_URL_ATTRS; not_found_structure_findings
+    holds every other name on a 404 page to an allowlist."""
+    return [(element, name, value, line) for element, _line, attributes, _end in raw_tags(text)
             for name, value, line in attributes if name in NOT_FOUND_URL_ATTRS and value is not None]
 
 
@@ -484,11 +497,14 @@ def srcset_urls(value):
     return urls
 
 
-def not_found_reference_ok(value):
-    """Whether a URL value, taken as written, is safe on a 404 page (served at any path): fragment-only,
-    query-only, https://, or exactly one leading "/" followed by a safe character or nothing. Nothing is
-    percent-decoded, so "%2F..." is not a slash."""
-    if value.startswith(("#", "?", "https://")):
+def not_found_reference_ok(element, name, value):
+    """Whether a URL value of attribute `name` on `element`, taken as written, is safe on a 404 page (served
+    at any path): exactly one leading "/" followed by a safe character or nothing; also fragment-only or
+    query-only unless the pair loads a resource (NOT_FOUND_LOADING_PAIRS); also https:// on a pair in
+    NOT_FOUND_HTTPS_PAIRS. Nothing is percent-decoded, so "%2F..." is not a slash."""
+    if (element, name) not in NOT_FOUND_LOADING_PAIRS and value.startswith(("#", "?")):
+        return True
+    if (element, name) in NOT_FOUND_HTTPS_PAIRS and value.startswith("https://"):
         return True
     return value.startswith("/") and value[1:2] not in _SECOND_SLASH
 
@@ -498,16 +514,26 @@ def not_found_reference_findings(label, text):
     (each srcset candidate) that fails not_found_reference_ok as written or with its character references
     decoded, as a browser decodes them before reading the URL."""
     out = []
-    for name, raw, line in raw_url_attributes(text):
+    for element, name, raw, line in raw_url_attributes(text):
         decoded = unescape(raw)
         if name == "srcset":
             candidates = dict.fromkeys(srcset_urls(raw) + srcset_urls(decoded))
-            bad = [url for url in candidates if not not_found_reference_ok(url)]
+            bad = [url for url in candidates if not not_found_reference_ok(element, name, url)]
         else:
-            bad = [] if not_found_reference_ok(raw) and not_found_reference_ok(decoded) else [raw]
+            bad = [] if not_found_reference_ok(element, name, raw) and not_found_reference_ok(
+                element, name, decoded) else [raw]
         for value in bad:
-            out.append("{}:{}: {} on a 404 page must be root-absolute (one leading /), fragment-only, query-only "
-                       "or https://; a 404 page is served at any path -> {!r}".format(label, line, name, value))
+            if (element, name) in NOT_FOUND_LOADING_PAIRS:
+                rule = ("<{}> {} on a 404 page must be root-absolute (one leading /) only; it loads a resource, "
+                        "so a fragment-only or query-only value (resolved against the request URL) and another "
+                        "host are refused").format(element, name)
+            elif (element, name) in NOT_FOUND_HTTPS_PAIRS:
+                rule = ("{} on a 404 page must be root-absolute (one leading /), fragment-only, query-only or "
+                        "https://; a 404 page is served at any path").format(name)
+            else:
+                rule = ("{} on a 404 page must be root-absolute (one leading /), fragment-only or query-only (https:// "
+                        "only on a href); a 404 page is served at any path").format(name)
+            out.append("{}:{}: {} -> {!r}".format(label, line, rule, value))
     return out
 
 
@@ -523,12 +549,20 @@ def not_found_structure_findings(label, text):
     element or attribute name raw_tags finds that is not in NOT_FOUND_ELEMENTS or NOT_FOUND_ATTRIBUTES, a meta
     attribute outside NOT_FOUND_META_ATTRIBUTES, an onclick or SVG presentation value the live 404 pages do
     not use, any value or script or style text that contains "url(" (any case, as written or with its
-    character references decoded), and a script without src whose body's sha256 is not pinned in
-    NOT_FOUND_INLINE_SCRIPT_SHA256. Residual: the rule reads markup only. It cannot analyse what an allowlisted
-    inline script does at run time (it trusts the pinned script bodies), nor what a script or stylesheet
-    loaded from a root-absolute URL contains."""
+    character references decoded), a script without src whose body's sha256 is not pinned in
+    NOT_FOUND_INLINE_SCRIPT_SHA256, a script with src whose body is not empty, and any script start tag at or
+    after the first svg start tag (inside svg, src is not a script attribute and the body runs; taking every
+    later script, not only those before a matching end tag, means no comment or stray end tag can hide one).
+    Residual: the rule reads markup only. It cannot analyse what an allowlisted inline script does at run time
+    (it trusts the pinned script bodies), nor what the same-origin script, stylesheet or icon a root-absolute
+    URL loads contains."""
     out = []
+    svg_seen = False
     for element, line, attributes, end in raw_tags(text):
+        if element == "script" and svg_seen:
+            out.append("{}:{}: <script> at or after an <svg> start tag on a 404 page is refused (inside svg, src "
+                       "is not a script attribute and the body runs)".format(label, line))
+        svg_seen = svg_seen or element == "svg"
         if element not in NOT_FOUND_ELEMENTS:
             out.append("{}:{}: element <{}> is not in the 404-page element allowlist".format(label, line, element))
         for name, value, attr_line in attributes:
@@ -553,7 +587,11 @@ def not_found_structure_findings(label, text):
             if _URL_FUNCTION in body.lower() or _URL_FUNCTION in unescape(body).lower():
                 out.append("{}:{}: <{}> text on a 404 page contains url(, which loads relative to the page".format(
                     label, line, element))
-            if element == "script" and not any(name == "src" for name, _value, _line in attributes):
+            has_src = any(name == "src" for name, _value, _line in attributes)
+            if element == "script" and has_src and body:
+                out.append("{}:{}: <script> with src on a 404 page must have an empty body (the body runs "
+                           "wherever src is not read)".format(label, line))
+            if element == "script" and not has_src:
                 digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
                 if digest not in NOT_FOUND_INLINE_SCRIPT_SHA256:
                     out.append("{}:{}: inline <script> on a 404 page is not a pinned script body (sha256 {})".format(
@@ -779,8 +817,9 @@ def _touch_icon_self_test(quiet):
 
 def _not_found_links_self_test():
     """The 404-page reference allowlist: every URL-bearing attribute value on a page named 404.html, top-level
-    or nested, that is not root-absolute, fragment-only, query-only or https:// is a finding even where it
-    resolves from the page's own directory, and the same relative links pass on any other page."""
+    or nested, that is not root-absolute, fragment-only or query-only (https:// too on a href; root-absolute
+    only on script src and link href) is a finding even where it resolves from the page's own directory, and
+    the same relative links pass on any other page."""
     import contextlib
     import io
     import tempfile
@@ -840,7 +879,7 @@ def _not_found_links_self_test():
 
         absolute = page(icon + '<link rel="stylesheet" href="/s.css"><link rel="icon" href="/f.svg">'
                         '<script src="/j.js"></script>',
-                        '<p id="top"><img src="https://aiqt.ai/i.png" alt=""></p><nav><a href="/b">B</a>'
+                        '<p id="top"><img src="/i.png" alt=""></p><nav><a href="/b">B</a>'
                         '<a href="#top">T</a></nav><a class="logo" href="/"><img src="/l.png" alt=""></a>')
         (root / "404.html").write_text(absolute, encoding="utf-8")
         (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
@@ -897,7 +936,31 @@ def _not_found_links_self_test():
                  "src", "/\\aiqt.ai/i.png", 1),
                 ("404-links/empty-href-fails", "404.html", icon, '<a href="">E</a>', "href", "", 1),
                 ("404-links/other-scheme-fails", "404.html", icon, '<a href="http://aiqt.ai/b">B</a>',
-                 "href", "http://aiqt.ai/b", 1)):
+                 "href", "http://aiqt.ai/b", 1),
+                # A resource load from another host, and https:// on any attribute but a href.
+                ("404-links/cross-host-script-src-fails", "404.html",
+                 icon + '<script src="https://evil.example/x.js"></script>', "", "src", "https://evil.example/x.js", 1),
+                ("404-links/cross-host-stylesheet-fails", "404.html",
+                 icon + '<link rel="stylesheet" href="https://evil.example/s.css">', "", "href",
+                 "https://evil.example/s.css", 1),
+                ("404-links/cross-host-icon-fails", "404.html",
+                 icon + '<link rel="icon" href="https://evil.example/f.svg">', "", "href",
+                 "https://evil.example/f.svg", 1),
+                ("404-links/cross-host-prefetch-fails", "404.html",
+                 icon + '<link rel="prefetch" href="https://evil.example/p">', "", "href", "https://evil.example/p", 1),
+                ("404-links/cross-host-preconnect-fails", "404.html",
+                 icon + '<link rel="preconnect" href="https://evil.example">', "", "href", "https://evil.example", 1),
+                ("404-links/https-img-src-fails", "404.html", icon, '<img src="https://example.test/i.png" alt="">',
+                 "src", "https://example.test/i.png", 1),
+                # A query-only or fragment-only load resolves against the request URL.
+                ("404-links/query-only-script-src-fails", "404.html", icon + '<script src="?x"></script>', "",
+                 "src", "?x", 1),
+                ("404-links/fragment-only-script-src-fails", "404.html", icon + '<script src="#x"></script>', "",
+                 "src", "#x", 1),
+                ("404-links/query-only-stylesheet-fails", "404.html", icon + '<link rel="stylesheet" href="?v=1">',
+                 "", "href", "?v=1", 1),
+                ("404-links/fragment-only-icon-fails", "404.html", icon + '<link rel="icon" href="#">', "",
+                 "href", "#", 1)):
             (root / page_rel).write_text(page(head, body), encoding="utf-8")
             got = scan(base)
             (root / page_rel).unlink()
@@ -910,8 +973,7 @@ def _not_found_links_self_test():
                  '<svg><use href="#top"></use></svg>'),
                 ("404-links/root-absolute-passes", '<a href="/">H</a><img src="/i.png" srcset="/i.png 1x, /i.png 2x" '
                  'alt=""><video poster="/i.png"></video><object data="/f.svg"></object><form action="/b"></form>'),
-                ("404-links/https-passes", '<a href="https://aiqt.ai/b">B</a><img src="https://example.test/i.png" '
-                 'srcset="https://example.test/i.png 2x" alt="">')):
+                ("404-links/https-passes", '<a href="https://aiqt.ai/b">B</a><a href="https://example.test/b">E</a>')):
             (root / "404.html").write_text(page(icon, body), encoding="utf-8")
             got = scan(base)
             (root / "404.html").unlink()
@@ -964,11 +1026,27 @@ def _not_found_links_self_test():
                 ("404-structure/iframe-srcdoc-fails", page(icon, '<iframe srcdoc="&lt;img src=i.png&gt;"></iframe>'),
                  "attribute srcdoc on <iframe> is not in the 404-page attribute allowlist"),
                 ("404-structure/base-href-fails", page('<base href="/sub/">' + icon, ""),
-                 "element <base> is not in the 404-page element allowlist")):
+                 "element <base> is not in the 404-page element allowlist"),
+                ("404-structure/svg-script-with-src-and-body-fails",
+                 page(icon, '<svg><script src="/j.js">fetch("x")</script></svg>'),
+                 "<script> at or after an <svg> start tag on a 404 page is refused"),
+                ("404-structure/svg-script-after-comment-end-tag-fails",
+                 page(icon, '<svg><!-- </svg> --><script src="/j.js"></script></svg>'),
+                 "<script> at or after an <svg> start tag on a 404 page is refused"),
+                ("404-structure/script-with-src-and-body-fails",
+                 page(icon + '<script src="/j.js">fetch("x")</script>', ""),
+                 "<script> with src on a 404 page must have an empty body")):
             (root / "404.html").write_text(raw, encoding="utf-8")
             got = scan(base)
             (root / "404.html").unlink()
             check(name, got[0] == 1 and message in got[1], got)
+        # The edges of the two script rules: a script just before the first svg is not refused by the svg rule,
+        # and a script with src whose body is one space is refused by the empty-body rule.
+        got = not_found_structure_findings("404.html", '<script src="/j.js"></script><svg></svg>')
+        check("404-structure/script-before-svg-passes", not any("at or after an <svg>" in f for f in got), got)
+        got = not_found_structure_findings("404.html", '<script src="/j.js"> </script>')
+        check("404-structure/script-with-src-and-space-body-fails",
+              any("must have an empty body" in f for f in got), got)
 
         # A 404 page the parser rejects still gets both raw-markup rules (the parse failure is simulated: no
         # input tried makes this parser raise).
