@@ -801,8 +801,8 @@ def _self_test():
     # stays a finding on a live one, a name neither uses is a finding on both, and a live-only presentation
     # value is a finding on a draft 404 page. Through _scan_root, only a 404.html directly under the root's
     # top-level draft/ takes the draft list (a nested draft/ directory, and a 404.html in a subdirectory of
-    # the top-level draft/, keep the live list), and the reference rule still holds a draft 404 page to
-    # root-absolute URLs.
+    # the top-level draft/, keep the live list) under both site/ and opf/site/, and the reference rule still
+    # holds a draft 404 page to root-absolute URLs.
     draft_404_cases = (
         ("draft-404/draft-name-passes-on-draft", '<img src="/t.png" alt="">', True, ""),
         ("draft-404/draft-name-fails-on-live", '<img src="/t.png" alt="">', False,
@@ -828,28 +828,35 @@ def _self_test():
         (r / "site" / "draft").mkdir(parents=True)
         (r / "site" / "sub" / "draft").mkdir(parents=True)
         (r / "site" / "draft" / "x" / "y").mkdir(parents=True)
-        (r / "site" / "t.png").write_bytes(b"png")
-        (r / "site" / "index.html").write_text(
-            '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png">', encoding="utf-8")
+        (r / "opf" / "site" / "draft" / "x" / "y").mkdir(parents=True)
+        for subdir in COVERAGE_ROOTS:
+            (r / subdir / "t.png").write_bytes(b"png")
+            (r / subdir / "index.html").write_text(
+                '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png">', encoding="utf-8")
         draft_page = '<!doctype html><title>t</title><img src="/t.png" alt="">'
         scan_cases = (
-            ("draft-404/scan-top-level-draft-passes", "draft/404.html", draft_page, 0, ""),
-            ("draft-404/scan-nested-draft-keeps-live-list", "sub/draft/404.html", draft_page, 1,
+            ("draft-404/scan-top-level-draft-passes", "site", "draft/404.html", draft_page, 0, ""),
+            ("draft-404/scan-nested-draft-keeps-live-list", "site", "sub/draft/404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
-            ("draft-404/scan-draft-subdir-keeps-live-list", "draft/x/404.html", draft_page, 1,
+            ("draft-404/scan-draft-subdir-keeps-live-list", "site", "draft/x/404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
-            ("draft-404/scan-draft-deep-subdir-keeps-live-list", "draft/x/y/404.html", draft_page, 1,
+            ("draft-404/scan-draft-deep-subdir-keeps-live-list", "site", "draft/x/y/404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
-            ("draft-404/scan-draft-relative-src-fails", "draft/404.html",
+            ("draft-404/scan-draft-relative-src-fails", "site", "draft/404.html",
              '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
              "src on a 404 page must be root-absolute"),
+            ("draft-404/opf-scan-top-level-draft-passes", "opf/site", "draft/404.html", draft_page, 0, ""),
+            ("draft-404/opf-scan-draft-subdir-keeps-live-list", "opf/site", "draft/x/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/opf-scan-draft-deep-subdir-keeps-live-list", "opf/site", "draft/x/y/404.html",
+             draft_page, 1, "element <img> is not in the 404-page element allowlist"),
         )
-        for label, page_rel, markup, want, message in scan_cases:
-            (r / "site" / page_rel).write_text(markup, encoding="utf-8")
+        for label, subdir, page_rel, markup, want, message in scan_cases:
+            (r / subdir / page_rel).write_text(markup, encoding="utf-8")
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                got = _scan_root(r, "site")
-            (r / "site" / page_rel).unlink()
+                got = _scan_root(r, subdir)
+            (r / subdir / page_rel).unlink()
             if got != want or message not in out.getvalue():
                 failures.append("{}: expected exit {} and {!r}, got {} {!r}".format(
                     label, want, message, got, out.getvalue()))
