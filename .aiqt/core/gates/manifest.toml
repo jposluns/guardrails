@@ -335,6 +335,15 @@ class = "c"
 residue = "It checks the published site surface for integrity (dashes, link and anchor resolution, basic HTML validity and tag structure). It covers a recognizable SUBSET: per its own docstring (tools/check_site.py) the subtrees of svg/math and of textarea are not structurally validated and links and ids inside them are not resolved (a self-described deferred coverage gap), so a defect inside such a subtree passes (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "site-scope"
+script = "tools/ci_site_scope.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It decides the Quality workflow's site fast lane (the maintainer's recorded decision of 2026-11-03): true only when every changed path of a pull request, read from git against the merge base the workflow gives it with rename detection off, is strictly below site/ or opf/site/ or is exactly one of the three files a site-only change regenerates (.aiqt/manifest.toml, .aiqt/release/root.txt, .aiqt/release/announce-snippet.txt), excluding the six site-tree pages a heavy suite reads as a verdict input (the five OPF homes contract pages and opf/site/tooling.html), which always take the full suite; an empty list, any other path shape, or any error reading the diff decides false, so the heavy jobs run (fail-closed toward the full suite). It is a routing decision, not a content check: it does not itself prove that an allowlisted path cannot change a heavy suite's verdict (that coverage account is recorded with the change and in the scope job's comment block in .github/workflows/quality.yml); it trusts git's diff output for the revision pair it is given, so a merge base the workflow passes that is not the pull request's true merge base widens or narrows the list it reads; and the skip it enables is enforced by the heavy jobs' pinned if: line and the Quality gates aggregation, both pinned by tools/check_ci_parity.py and tools/check_python_host_pin.py, not by this tool. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "overclaim"
 script = "tools/check_overclaim.py"
 rules = []

@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.20** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.21** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -104,6 +104,22 @@ up-to-date, labelled `merge-train-*` pull request, whose run is the full suite, 
 runs it again. A newer run of the same pull request cancels its superseded run; a push run has a
 concurrency group of its own and is never cancelled. `tools/check_ci_parity.py` and
 `tools/check_python_host_pin.py` accept exactly the pinned `concurrency` block and `if:` line.
+
+The site fast lane (maintainer's recorded decision, 2026-11-03): a `scope` job runs first in every
+Quality run and decides, with `tools/ci_site_scope.py`, whether every path the pull request changes is
+in the site allowlist: under `site/` or `opf/site/`, or exactly one of the three files a site-only
+change regenerates (`.aiqt/manifest.toml`, `.aiqt/release/root.txt`,
+`.aiqt/release/announce-snippet.txt`), except the six site-tree pages a heavy suite reads as a verdict
+input (the five OPF homes contract pages and `opf/site/tooling.html`), which always take the full
+suite. When, and only when, that decision is true (`site_only=true`),
+the heavy jobs skip (their pinned `if:` reads the scope output) and the `Quality gates` job passes
+those jobs as skipped; site-only pull requests therefore ride site-only trains, whose Quality run is
+the site fast lane rather than the full suite. Everything else is fail-closed: an empty changed-path
+list, any path outside the allowlist, a rename out of those trees, or any error reading the diff
+decides false and the full suite runs; a heavy job that is skipped, fails, is cancelled, or reports no
+result outside a true decision still fails `Quality gates`. A push to `main` NEVER takes the fast
+lane: on a push the scope job writes `site_only=false` without reading any diff, so the post-merge
+push run is always the full suite, also after a site-only train merges.
 Every `actions/checkout` step in `.github/workflows` sets `persist-credentials: false`, so the job token
 stays out of the checkout's git config (no job pushes or fetches after its checkout);
 `tools/check_ci_parity.py` reads each workflow file there as parsed YAML and refuses a checkout step

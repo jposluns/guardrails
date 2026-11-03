@@ -79,7 +79,76 @@ jobs:
   # trigger above, which already keeps a member head from running at all. In any other pull request
   # run (a label added to a pull request that is not a train) the heavy jobs are skipped
   # and Quality gates fails by design (skipped is not success): such a change merges only by riding a
-  # train. tools/check_ci_parity.py accepts that if: line exactly, and only on those jobs.
+  # train, except a site-only train, whose heavy jobs the scope job below skips under the maintainer's
+  # recorded fast-lane authorization. tools/check_ci_parity.py accepts that if: line exactly, and only
+  # on those jobs.
+
+  # Site fast lane. The maintainer's recorded decision (2026-11-03) authorizes skipping the heavy jobs
+  # when, and only when, every path a pull request changes is in the site allowlist: under site/ or
+  # opf/site/, or one of the three files a site-only change regenerates (.aiqt/manifest.toml,
+  # .aiqt/release/root.txt, .aiqt/release/announce-snippet.txt), EXCEPT the six site-tree pages a
+  # heavy suite reads as a verdict input (the five OPF homes contract pages
+  # opf/tools/check_opf_homes.py reads and the opf/site/tooling.html page
+  # tools/check_opf_declaration.py reads), which always take the full suite. tools/ci_site_scope.py
+  # decides from the changed-path list read against the merge base this job gives it; an empty list,
+  # any path outside the allowlist, a rename out of those trees (read with rename detection off, so
+  # both sides appear), or any error reading the diff reads as site_only=false, the full suite. A
+  # push to main never takes the fast lane: on a push this job emits site_only=false without reading
+  # any diff. Adding a NEW site file also runs the full suite by construction: gen_manifest.py pins
+  # every file in .gitattributes, which is outside the allowlist, so such a change is never
+  # site-only; the fast lane covers edits to existing site files and the records they regenerate.
+  # Coverage account (gate discipline), from each heavy job's own steps and the files its suites read:
+  # opf-tooling-a, opf-tooling-b, opf-tooling-c, opf-host-patch and selftest-execution run the
+  # self-tests of tools under tools/ and opf/tools/ over synthetic fixtures those modules build
+  # themselves; their only site-tree verdict inputs are the six excluded pages above.
+  # git-fixture-env-core and the four git-fixture-env host jobs run the git-fixture-env
+  # suites, whose inputs are tools/ modules and generated fixtures; none of those suites reads
+  # site/ or opf/site/ as an input that can change its verdict. The three regenerated records are
+  # validated by the always-run registry and release jobs (gen_manifest.py --check,
+  # check_manifest.py, check_release_delta.py, check_release_build.py). byte-canon-matrix scans
+  # tree bytes under a hostile core.autocrlf checkout; a site-only change CAN add bytes there, and
+  # that overlap is covered by the surviving siblings: the registry job's unconditioned
+  # check_byte_canon run scans the same bytes in every run, and the platform leg's subject,
+  # .gitattributes eol=lf pinning, is outside the allowlist, so a site-only change cannot alter it.
+  # The Quality gates job passes a SKIPPED heavy job only when site_only is true; any other skip,
+  # failure, cancellation or missing result still fails the run.
+  scope:
+    name: Site fast-lane scope
+    runs-on: ubuntu-latest
+    outputs:
+      site_only: ${{ steps.decide.outputs.site_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: Site scope self-test
+        shell: bash
+        run: python3 -I -B tools/ci_site_scope.py --self-test
+
+      # --ci-decide reads EVENT_NAME, BASE_SHA and GITHUB_OUTPUT itself and appends site_only=true
+      # or site_only=false to GITHUB_OUTPUT: on any event but pull_request, and on any error reading
+      # the diff (the CLI's exit 2, cannot-evaluate), it writes false, so the full suite runs; it
+      # exits nonzero only when it cannot write the output at all, which fails this job and so fails
+      # Quality gates.
+      - name: Site fast-lane scope decision
+        id: decide
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python3 -I -B tools/ci_site_scope.py --ci-decide
+
   secrets:
     name: Secrets and leaks
     runs-on: ubuntu-latest
@@ -276,7 +345,8 @@ jobs:
   # exactly one line here, in a heavy job.
   opf-tooling-a:
     name: OPF tooling gates A (3.14)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -339,7 +409,8 @@ jobs:
 
   opf-tooling-b:
     name: OPF tooling gates B (3.14)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -406,7 +477,8 @@ jobs:
 
   opf-tooling-c:
     name: OPF tooling gates C (3.14)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -977,7 +1049,8 @@ jobs:
 
   selftest-execution:
     name: Execution-reconciled self-tests
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1001,6 +1074,10 @@ jobs:
       - name: Orchestrator-integrity behaviour self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
+
+      - name: Site-scope self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
 
       - name: CI-status behaviour self-test (execution-reconciled)
         shell: bash
@@ -1049,7 +1126,8 @@ jobs:
 
   git-fixture-env-core:
     name: Git-fixture-env core self-test
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1100,7 +1178,8 @@ jobs:
   # request's title or body starts no Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -1131,7 +1210,8 @@ jobs:
 
   git-fixture-env-core-host-patch:
     name: Git-fixture-env core self-test (host patch)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -1158,7 +1238,8 @@ jobs:
 
   git-fixture-env-config-combined-host-patch:
     name: Git-fixture-env combined config lane (host patch)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -1185,7 +1266,8 @@ jobs:
 
   git-fixture-env-config-malformed-host-patch:
     name: Git-fixture-env malformed config lane (host patch)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -1212,7 +1294,8 @@ jobs:
 
   git-fixture-env-config-system-host-patch:
     name: Git-fixture-env system config lane (host patch)
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -1483,7 +1566,8 @@ jobs:
   # would surface as a carriage-return finding, failing the job.
   byte-canon-matrix:
     name: Byte canon vectors (${{ matrix.os }})
-    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: scope
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -1515,13 +1599,16 @@ jobs:
   # a plain needs: dependency is not enough: when a needed job fails or is cancelled, a job without
   # if: always() is skipped and the required status would read green. if: always() makes this job
   # run whatever the needed jobs concluded, also when the run is cancelled, and its step passes
-  # only when every needed job concluded success; failure, cancelled, skipped, or any other
-  # result fails it. needs: must list every other job in this workflow;
+  # only when every needed job concluded success, with one authorized exception: a HEAVY job that
+  # concluded skipped passes only when the scope job's site_only output is true (the site fast
+  # lane); any other skip, failure, cancellation, or missing result fails it. needs: must list
+  # every other job in this workflow;
   # tools/check_ci_parity.py holds that coverage and the if: always() guard.
   quality:
     name: Quality gates
     if: always()
     needs:
+      - scope
       - secrets
       - site
       - opf-tooling-a
@@ -1550,14 +1637,28 @@ jobs:
         shell: bash
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          SITE_ONLY: ${{ needs.scope.outputs.site_only }}
+          OTHER_RESULTS: ${{ needs.scope.result || 'missing' }} ${{ needs.secrets.result || 'missing' }} ${{ needs.site.result || 'missing' }} ${{ needs.opf-closure-a.result || 'missing' }} ${{ needs.opf-closure-b.result || 'missing' }} ${{ needs.opf-closure-c.result || 'missing' }} ${{ needs.opf-closure-d.result || 'missing' }} ${{ needs.opf-closure-e.result || 'missing' }} ${{ needs.opf-closure-f.result || 'missing' }} ${{ needs.release.result || 'missing' }} ${{ needs.generated.result || 'missing' }} ${{ needs.registry.result || 'missing' }}
+          HEAVY_RESULTS: ${{ needs.opf-tooling-a.result || 'missing' }} ${{ needs.opf-tooling-b.result || 'missing' }} ${{ needs.opf-tooling-c.result || 'missing' }} ${{ needs.selftest-execution.result || 'missing' }} ${{ needs.git-fixture-env-core.result || 'missing' }} ${{ needs.opf-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-host-patch.result || 'missing' }} ${{ needs.byte-canon-matrix.result || 'missing' }}
         run: |
           set -euo pipefail
           echo "Needed job results: ${RESULTS}"
-          rest="${RESULTS:-none}"
-          rest="${rest//success/}"
-          rest="${rest// /}"
-          if [ -n "$rest" ]; then
-            echo "Quality gates: FAILED, every needed job must conclude success"
+          echo "site_only: ${SITE_ONLY:-unset}"
+          other="${OTHER_RESULTS:-missing}"
+          other="${other//success/}"
+          other="${other// /}"
+          if [ -n "$other" ]; then
+            echo "Quality gates: FAILED, every always-run job must conclude success"
             exit 1
           fi
-          echo "Quality gates: PASS, every needed job concluded success"
+          heavy="${HEAVY_RESULTS:-missing}"
+          heavy="${heavy//success/}"
+          if [ "${SITE_ONLY:-false}" = "true" ]; then
+            heavy="${heavy//skipped/}"
+          fi
+          heavy="${heavy// /}"
+          if [ -n "$heavy" ]; then
+            echo "Quality gates: FAILED, a heavy job must conclude success, or be skipped only when site_only is true"
+            exit 1
+          fi
+          echo "Quality gates: PASS, every needed job concluded as required"

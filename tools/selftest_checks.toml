@@ -1961,6 +1961,66 @@ expected-check-ids = [
   "ci/finalise-harness-error-keeps-failures",
 ]
 [[suite]]
+id = "ci-site-scope-selftest"
+runner = "tools/ci_site_scope.py"
+expected-check-ids = [
+  # ---------- the pure decision, every branch ----------
+  "decide/empty-list-false",
+  "decide/not-iterable-false",
+  "decide/site-file-true",
+  "decide/site-nested-true",
+  "decide/opf-site-file-true",
+  "decide/regen-manifest-true",
+  "decide/regen-root-true",
+  "decide/regen-announce-true",
+  "decide/every-allowlisted-true",
+  "decide/non-site-path-false",
+  "decide/one-outside-poisons-false",
+  "decide/tree-boundary",
+  "decide/opf-tree-boundary",
+  "decide/heavy-read-page-false",
+  "decide/heavy-read-poisons-false",
+  "decide/regen-exact-only",
+  "decide/absolute-false",
+  "decide/parent-climb-false",
+  "decide/dot-segment-false",
+  "decide/empty-segment-false",
+  "decide/backslash-false",
+  "decide/drive-colon-false",
+  "decide/empty-string-false",
+  "decide/non-string-false",
+  # ---------- revert cases: each rule patched out flips its vector ----------
+  "revert/allowlist-dropped-red",
+  "revert/nonempty-rule-dropped-red",
+  "revert/path-shape-rule-dropped-red",
+  "revert/tree-widened-red",
+  "revert/regenerated-widened-red",
+  "revert/heavy-read-exclusion-dropped-red",
+  # ---------- the CLI over synthetic repos ----------
+  "cli/site-only-true-exit-0",
+  "cli/empty-diff-false-exit-0",
+  "cli/bad-revision-exit-2",
+  "cli/option-revision-exit-2",
+  "cli/mixed-change-false-exit-0",
+  "cli/rename-out-of-tree-false-exit-0",
+  "cli/rename-into-tree-false-exit-0",
+  "cli/outside-repo-exit-2",
+  # ---------- the --ci-decide entry the scope job runs ----------
+  "cidecide/pull-request-site-only-true",
+  "cidecide/pull-request-mixed-false",
+  "cidecide/push-false",
+  "cidecide/bad-base-false-exit-0",
+  "cidecide/missing-base-false-exit-0",
+  "cidecide/no-output-exit-1",
+  "cidecide/unwritable-output-exit-1",
+  # ---------- launch shapes ----------
+  "launch/no-arguments-exit-2",
+  "launch/unknown-flag-exit-2",
+  "launch/merge-base-missing-value-exit-2",
+  "launch/empty-merge-base-exit-2",
+]
+
+[[suite]]
 # Everything outside the three config-injection lanes: the shared scrub itself, routing/scope/
 # trust checks, roster checks, member-timeout/close controls, the
 # gen-manifest setup guards and the end-to-end leak probe.
