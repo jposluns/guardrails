@@ -100,6 +100,14 @@ evidence = '''<a href="https://github.com/jposluns/guardrails/blob/main/opf/spec
 
 [[body]]
 component = "label"
+text = "Your browser"
+
+[[body]]
+component = "prose"
+html = '''<p>If you use the light and dark switch, your choice is kept in your browser's local storage under the name scheme, so the site opens in that scheme next time. It is not sent to this site, and nothing is stored until you press the switch.</p>'''
+
+[[body]]
+component = "label"
 text = "Security"
 
 [[body]]
