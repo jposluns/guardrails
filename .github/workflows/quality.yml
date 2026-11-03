@@ -260,6 +260,22 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_site_versions.py
 
+      - name: Site security.txt self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
+
+      - name: Site security.txt
+        shell: bash
+        run: python3 -I -B tools/check_security_txt.py
+
+      - name: Site sitemap self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite sitemap-selftest
+
+      - name: Site sitemap
+        shell: bash
+        run: python3 -I -B tools/check_sitemap.py
+
       - name: Render driver behaviour self-test
         shell: bash
         run: python3 -I -B tools/selftest_opf_render.py

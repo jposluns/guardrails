@@ -401,6 +401,14 @@ class = "pack-immutable"
 path = "site/js/install.js"
 class = "pack-immutable"
 
+[[release-class]]
+path = "site/sitemap.xml"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/.well-known/security.txt"
+class = "pack-immutable"
+
 # --- concern-1: the opfiles.ai site subtree (opf/site) -------------------------------------------------
 # The opfiles.ai website: the served site pages live directly under opf/site (Cloudflare Pages builds
 # opf/site as the site root). Hand-authored shippable site content, same class as the site/ pages above.

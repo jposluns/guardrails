@@ -4754,3 +4754,62 @@ expected-check-ids = [
   "png/inflate-bound-ends",
   "png/wired-gate-exit-codes",
 ]
+
+[[suite]]
+id = "security-txt-selftest"
+runner = "tools/check_security_txt.py"
+expected-check-ids = [
+  "pass/both-roots-exact",
+  "refuse/missing-file",
+  "refuse/not-regular-file",
+  "refuse/missing-field",
+  "refuse/wrong-value",
+  "refuse/wrong-value-one-second-late",
+  "refuse/duplicate-field",
+  "refuse/wrong-canonical",
+  "refuse/unknown-field",
+  "refuse/wrong-order",
+  "refuse/unreadable-cannot-evaluate",
+  "refuse/malformed-not-utf8",
+  "refuse/malformed-no-separator",
+  "refuse/malformed-crlf",
+  "refuse/malformed-no-final-newline",
+  "bound/size-under",
+  "bound/size-at",
+  "bound/size-over",
+  "live/real-tree-passes",
+]
+
+[[suite]]
+id = "sitemap-selftest"
+runner = "tools/check_sitemap.py"
+expected-check-ids = [
+  "pass/both-roots-exact",
+  "pages/excludes-404-draft-downloads",
+  "refuse/page-missing-from-sitemap",
+  "refuse/url-without-page",
+  "refuse/duplicate-url",
+  "refuse/wrong-origin",
+  "lastmod/2026-02-28",
+  "lastmod/2026-02-29",
+  "lastmod/2026-02-30",
+  "lastmod/unpadded",
+  "lastmod/timestamp",
+  "lastmod/empty",
+  "refuse/draft-root",
+  "refuse/draft-page",
+  "refuse/robots-lacks-sitemap",
+  "refuse/robots-wrong-host",
+  "refuse/robots-duplicate-sitemap",
+  "refuse/sitemap-missing",
+  "refuse/robots-missing",
+  "refuse/unreadable-cannot-evaluate",
+  "refuse/malformed-not-xml",
+  "refuse/malformed-not-urlset",
+  "refuse/malformed-doctype",
+  "refuse/malformed-not-utf8",
+  "bound/size-under",
+  "bound/size-at",
+  "bound/size-over",
+  "live/real-tree-passes",
+]
