@@ -82,7 +82,12 @@ with exit 2). This gate holds where it runs:
      one workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
      between setup-python and the probe (tools/check_python_host_pin.py holds that step as the one right
      after setup-python there), and the probe step right after it is then exactly HOST_PROBE_STEP (the same
-     shape, its name saying it runs after that gate); no other step, and no other spelling of either step,
+     shape, its name saying it runs after that gate); in the scope job SCOPE_JOB_ID of that same workflow
+     only, the fast-lane decision step, matched as SCOPE_DECIDE_STEP (tools/check_ci_parity.py pins that
+     job's whole body line for line), may stand there instead, because the decision must run before any
+     step that runs the checkout's own code, and the probe step right after it is then exactly
+     SCOPE_PROBE_STEP (the same shape, its name saying it runs after the decision); no other step, and no
+     other spelling of any of these steps,
      is passed over. The job carries
      no continue-on-error, and the
      interpreter words are python3 or python only. A value before the probe, in a step with no run: key or
@@ -310,6 +315,18 @@ HOST_PIN_STEP = (("name", "Python host pin"), ("shell", "bash"),
                  ("run", "python3 -I -B tools/check_python_host_pin.py"))
 HOST_PROBE_STEP = (("name", "Child exit status observable (after the host pin gate)"), ("shell", "bash"),
                    ("run", "python3 -I -B " + CANONICAL_REL))
+# The scope job of that same workflow runs its fast-lane decision step between setup-python and the
+# probe: the decision must run before any step that runs the checkout's own code (the probe runs
+# opf/tools/_child_status.py from the checkout), and tools/check_ci_parity.py pins that job's whole
+# body (SCOPE_JOB) line for line, so the exact body is that pin's bound. Here the step is matched by
+# its key/value pairs (its env: block and run: block scalar read as nested values), in the scope job
+# of HOST_PATCH_WORKFLOW only, and the probe step right after it is then SCOPE_PROBE_STEP, the probe
+# with the name that placement makes true.
+SCOPE_JOB_ID = "scope"
+SCOPE_DECIDE_STEP = (("name", "Site fast-lane scope decision"), ("id", "decide"), ("shell", "bash"),
+                     ("env", None), ("run", "|"))
+SCOPE_PROBE_STEP = (("name", "Child exit status observable (after the scope decision)"), ("shell", "bash"),
+                    ("run", "python3 -I -B " + CANONICAL_REL))
 SETUP_PYTHON_USES = "actions/setup-python@"
 JOBS_INDENT = 2
 # The closed workflow grammar (read_workflow): a key line, and the one-line scalars a value may be (quoted and
@@ -1043,7 +1060,9 @@ def workflow_findings(rel, text):
     every value that names Python must sit in a step with a run: key after its job's one setup-python step and
     the probe step right after that, which is exactly PROBE_STEP; in a HOST_PATCH_JOBS job of the workflow
     HOST_PATCH_WORKFLOW only, the step right after setup-python may instead be exactly HOST_PIN_STEP, with
-    exactly HOST_PROBE_STEP right after it; the
+    exactly HOST_PROBE_STEP right after it; in the SCOPE_JOB_ID job of that workflow only, it may instead
+    be the fast-lane decision step, matched as SCOPE_DECIDE_STEP, with exactly SCOPE_PROBE_STEP right
+    after it; the
     job carries no continue-on-error, and every
     interpreter word is one of PLAIN_INTERPRETERS."""
     try:
@@ -1068,14 +1087,18 @@ def workflow_findings(rel, text):
             out.append("{}: job {} launches Python with {} setup-python steps, not one".format(rel, job, len(setups)))
             continue
         probe = setups[0] + 1
-        pin, want_probe = None, PROBE_STEP
+        pin, want_probe, before = None, PROBE_STEP, "setup-python"
         if (rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS and probe < len(steps)
                 and _step_pairs(steps[probe]) == HOST_PIN_STEP):
             pin, probe, want_probe = probe, probe + 1, HOST_PROBE_STEP
+            before = "the Python host pin step"
+        elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe < len(steps)
+                and _step_pairs(steps[probe]) == SCOPE_DECIDE_STEP):
+            pin, probe, want_probe = probe, probe + 1, SCOPE_PROBE_STEP
+            before = "the scope decision step"
         if probe == len(steps) or _step_pairs(steps[probe]) != want_probe:
             out.append("{}: job {}: the step right after {} is not the child-status probe step exactly "
-                       "(its name, shell: bash and run, and no other key)".format(
-                           rel, job, "setup-python" if pin is None else "the Python host pin step"))
+                       "(its name, shell: bash and run, and no other key)".format(rel, job, before))
             continue
         if any(key == "continue-on-error" for _index, key, _value, _child in entries):
             out.append("{}: job {} launches Python and carries continue-on-error, which would mask a probe "
@@ -1973,6 +1996,19 @@ def _inputs():
     host_probe_lines = ["{}: {}".format(key, value) for key, value in HOST_PROBE_STEP]
     host_probe = ("      - " + host_probe_lines[0] + "\n"
                   + "".join("        " + line + "\n" for line in host_probe_lines[1:]))
+    # The scope job's decision step, as SCOPE_DECIDE_STEP matches it (its env: block and run:
+    # block scalar are nested values, so their contents are the parity pin's bound, not this
+    # gate's), and the probe named for the placement right after it.
+    scope_decide = ("      - name: Site fast-lane scope decision\n"
+                    "        id: decide\n"
+                    "        shell: bash\n"
+                    "        env:\n"
+                    "          EVENT_NAME: event\n"
+                    "        run: |\n"
+                    '          python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide\n')
+    scope_probe_lines = ["{}: {}".format(key, value) for key, value in SCOPE_PROBE_STEP]
+    scope_probe = ("      - " + scope_probe_lines[0] + "\n"
+                   + "".join("        " + line + "\n" for line in scope_probe_lines[1:]))
     # Each a workflow the closed grammar does not classify at one line: an anchor, a merge key, a tag, a folded
     # value, a flow mapping, a repeated key, a tab, a literal line less indented than its first, a document
     # marker, a quoted scalar continued, a step that is not a mapping, and a trailing comment.
@@ -2029,6 +2065,18 @@ def _inputs():
                            + "        timeout-minutes: 5\n" + host_probe + gate + launch,
         "host-pin-old-probe": "jobs:\n  opf-host-patch:\n" + head + setup + pin_step + step + gate + launch,
         "host-probe-ahead": "jobs:\n  opf-host-patch:\n" + head + setup + step + pin_step + gate + launch,
+        # The order the scope job of quality.yml runs: the fast-lane decision step right after
+        # setup-python, the probe named for that placement right after it; the same order under
+        # any other job id, or in any other workflow, is a finding. The departures: the decision
+        # followed by the probe named for the plain placement, and the probe ahead of the
+        # decision, which this gate accepts (the decision's own placement is the parity pin's to
+        # hold).
+        "scope-decide-before-probe": "jobs:\n  scope:\n" + head + setup + scope_decide + scope_probe
+                                     + gate + launch,
+        "scope-decide-other-job": "jobs:\n  lone:\n" + head + setup + scope_decide + scope_probe
+                                  + gate + launch,
+        "scope-decide-old-probe": "jobs:\n  scope:\n" + head + setup + scope_decide + step + gate + launch,
+        "scope-probe-ahead": "jobs:\n  scope:\n" + head + setup + step + scope_decide + gate + launch,
         "later-job-key": "jobs:\n  one:\n" + head + setup + step + "   two:\n" + head + gate + launch,
         "targets-hash": guarded + gate + "        run: echo a#b; python3 -I -B tools/child.py\n",
         "block-hash-line": "jobs:\n  lone:\n" + head + gate + "        run: |\n          echo x\\\n"
@@ -2345,6 +2393,14 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/workflow-host-pin-job-config-combined", lambda: host_job_held(host_jobs[2])),
         ("launchers/workflow-host-pin-job-config-malformed", lambda: host_job_held(host_jobs[3])),
         ("launchers/workflow-host-pin-job-config-system", lambda: host_job_held(host_jobs[4])),
+        ("launchers/workflow-scope-decide-before-probe", lambda: not quality_workflow("scope-decide-before-probe")),
+        ("launchers/workflow-scope-decide-other-job", lambda: quality_workflow("scope-decide-other-job")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "lone")]),
+        ("launchers/workflow-scope-decide-other-workflow", lambda: workflow("scope-decide-before-probe")
+         == [not_probe_in("w", "scope")]),
+        ("launchers/workflow-scope-decide-old-probe-name", lambda: quality_workflow("scope-decide-old-probe")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "scope", "the scope decision step")]),
+        ("launchers/workflow-scope-probe-ahead-of-decide", lambda: not quality_workflow("scope-probe-ahead")),
         ("launchers/workflow-block-hash-line", lambda: workflow("block-hash-line")
          == ["w:9: job lone: names Python before the child-status probe step"]),
         ("launchers/workflow-defaults-after-steps", lambda: workflow("defaults-after-steps") == ["w:14: " + outside]),
@@ -2601,7 +2657,7 @@ MUTANTS = (
      "rel == HOST_PATCH_WORKFLOW and probe", "launchers/workflow-host-pin-other-job"),
     ("workflow-host-pin-workflow-scope", "rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS",
      "job in HOST_PATCH_JOBS", "launchers/workflow-host-pin-opf-job-other-workflow"),
-    ("workflow-host-pin-workflow-true", "if (rel == HOST_PATCH_WORKFLOW and", "if (True and",
+    ("workflow-host-pin-workflow-true", "        if (rel == HOST_PATCH_WORKFLOW and", "        if (True and",
      "launchers/workflow-host-pin-git-job-other-workflow"),
     ("workflow-host-pin-prefix", "_step_pairs(steps[probe]) == HOST_PIN_STEP",
      "_step_pairs(steps[probe])[:len(HOST_PIN_STEP)] == HOST_PIN_STEP",
@@ -2621,6 +2677,16 @@ MUTANTS = (
      "launchers/workflow-host-pin-job-config-malformed"),
     ("host-patch-job-config-system", ', "git-fixture-env-config-system-host-patch")', ")",
      "launchers/workflow-host-pin-job-config-system"),
+    ("workflow-scope-decide-accept",
+     "elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe < len(steps)\n"
+     "                and _step_pairs(steps[probe]) == SCOPE_DECIDE_STEP):",
+     "elif False:", "launchers/workflow-scope-decide-before-probe"),
+    ("workflow-scope-decide-job", "rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe",
+     "rel == HOST_PATCH_WORKFLOW and probe", "launchers/workflow-scope-decide-other-job"),
+    ("workflow-scope-decide-workflow", "elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID",
+     "elif (job == SCOPE_JOB_ID", "launchers/workflow-scope-decide-other-workflow"),
+    ("workflow-scope-probe-name", "pin, probe, want_probe = probe, probe + 1, SCOPE_PROBE_STEP",
+     "pin, probe, want_probe = probe, probe + 1, PROBE_STEP", "launchers/workflow-scope-decide-old-probe-name"),
     ("workflow-setup", "        if len(setups) != 1:\n", "        if False:\n", "launchers/workflow-no-setup"),
     ("workflow-py-word", "return bool(PYTHON_WORD_RE.search(text) or PY_WORD_RE.search(text))",
      "return bool(PYTHON_WORD_RE.search(text))", "launchers/workflow-names-py-file"),
@@ -2713,7 +2779,7 @@ MUTANTS = (
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "entries/entry-function-real-pass",
              "launchers/real-launchers-pass",
              "launchers/real-workflows-in-grammar", "launchers/workflow-host-probe-ahead-of-pin",
-             "completeness/scan-clean-module"}
+             "launchers/workflow-scope-probe-ahead-of-decide", "completeness/scan-clean-module"}
 
 
 def _load_mutant(source, directory, number):
@@ -3079,6 +3145,11 @@ def self_test(lane, report_path=None):
                                 ("launchers/workflow-host-pin-job-config-combined", 0),
                                 ("launchers/workflow-host-pin-job-config-malformed", 0),
                                 ("launchers/workflow-host-pin-job-config-system", 0),
+                                ("launchers/workflow-scope-decide-before-probe", 0),
+                                ("launchers/workflow-scope-decide-other-job", 0),
+                                ("launchers/workflow-scope-decide-other-workflow", 0),
+                                ("launchers/workflow-scope-decide-old-probe-name", 0),
+                                ("launchers/workflow-scope-probe-ahead-of-decide", 0),
                                 ("launchers/workflow-block-hash-line", 0),
                                 ("launchers/workflow-defaults-after-steps", 0),
                                 ("launchers/workflow-python-outside-run-step", 0),

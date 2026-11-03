@@ -765,13 +765,16 @@ HEAVY_JOBS = frozenset({
 })
 
 # The scope job, pinned line for line after its job-id line as REQUIRED_STATUS_JOB pins
-# the Quality gates job (module docstring, LANES). Its decision step runs the BASE
-# commit's copy of tools/ci_site_scope.py (git show BASE_SHA:... into the runner's
-# temporary directory), never the copy under test, so a pull request cannot widen its
-# own lane by editing the tool; when the base has no readable copy the step writes
+# the Quality gates job (module docstring, LANES). Its decision step runs FIRST, before
+# any step that runs the checkout's own code, and extracts the base tree's copy of
+# tools/ci_site_scope.py (git --no-replace-objects show HEAD^1:... into the runner's
+# temporary directory), so an ordinary train cannot repoint the decision from inside
+# this job (a train that edits the workflow itself is outside what any pull_request
+# workflow covers); when the base has no readable copy the step writes
 # site_only=false, the full suite. Any departure in the job body (outputs:, env:, a
-# step, a run line) is a lane finding, because those lines choose which copy of the
-# tool decides and which inputs it reads.
+# step, a run line, the step ORDER) is a lane finding, because those lines choose
+# which copy of the tool decides, which inputs it reads and what runs before it. This
+# pin is a consistency check within the reviewed repository, not an authorization.
 SCOPE_JOB = (
     "    name: Site fast-lane scope",
     "    runs-on: ubuntu-latest",
@@ -786,45 +789,44 @@ SCOPE_JOB = (
     "      - uses: actions/setup-python@v5",
     "        with:",
     "          python-version: '3.14'",
-    "      - name: Child exit status observable (before any gate)",
-    "        " + STEP_SHELL_LINE,
-    "        run: python3 -I -B opf/tools/_child_status.py",
-    "      - name: Site scope self-test",
-    "        " + STEP_SHELL_LINE,
-    "        run: python3 -I -B tools/ci_site_scope.py --self-test",
     "      - name: Site fast-lane scope decision",
     "        id: decide",
     "        " + STEP_SHELL_LINE,
     "        env:",
     "          EVENT_NAME: ${{ github.event_name }}",
-    "          BASE_SHA: ${{ github.event.pull_request.base.sha }}",
     "          HEAD_REF: ${{ github.head_ref }}",
     "          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}",
     "          BASE_REPO: ${{ github.repository }}",
+    "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
     "        run: |",
     "          set -euo pipefail",
     '          decided="no"',
-    '          if [ -n "${BASE_SHA:-}" ]; then',
-    '            if git show "${BASE_SHA}:tools/ci_site_scope.py" > '
+    '          if git --no-replace-objects show "HEAD^1:tools/ci_site_scope.py" > '
     '"${RUNNER_TEMP}/ci_site_scope_base.py"; then',
-    '              python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
-    '              decided="yes"',
-    "            fi",
+    '            python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
+    '            decided="yes"',
     "          fi",
     '          if [ "${decided}" = "no" ]; then',
     '            echo "site_only=false" >> "${GITHUB_OUTPUT}"',
     '            echo "site_only=false (the base commit has no readable scope tool)"',
     "          fi",
+    "      - name: Child exit status observable (after the scope decision)",
+    "        " + STEP_SHELL_LINE,
+    "        run: python3 -I -B opf/tools/_child_status.py",
+    "      - name: Site scope self-test",
+    "        " + STEP_SHELL_LINE,
+    "        run: python3 -I -B tools/ci_site_scope.py --self-test",
 )
 # The decide step's run lines that the generic grammar would refuse, admitted exactly
 # as written because the SCOPE_JOB pin holds them in place: the base-copy extraction
-# (a git show with a redirect), the base-copy launch (a runtime-derived target path)
+# (a git show with a redirect, replace refs disabled), the base-copy launch (a
+# runtime-derived target path)
 # and the fail-closed fallback write. The git show line names tools/ci_site_scope.py,
 # so that path is recorded as this line's extraction origin for the shadow scan; the
 # step contributes no parity member (the tool's self-test member comes from its own
 # step, and no local leg runs --ci-decide).
 SCOPE_DECIDE_SHOW_LINE = (
-    'if git show "${BASE_SHA}:tools/ci_site_scope.py" > '
+    'if git --no-replace-objects show "HEAD^1:tools/ci_site_scope.py" > '
     '"${RUNNER_TEMP}/ci_site_scope_base.py"; then')
 SCOPE_DECIDE_RUN_LINES = frozenset({
     SCOPE_DECIDE_SHOW_LINE,
@@ -8946,12 +8948,15 @@ def self_test():
              "      site_only: ${{ steps.decide.outputs.site_only }}\n",
              "      site_only: 'true'\n"),
             ("the decision run from the checkout's own copy",
-             '              python3 -I -B "${RUNNER_TEMP}/'
+             '            python3 -I -B "${RUNNER_TEMP}/'
              'ci_site_scope_base.py" --ci-decide\n',
-             "              python3 -I -B tools/ci_site_scope.py "
+             "            python3 -I -B tools/ci_site_scope.py "
              "--ci-decide\n"),
             ("a dropped HEAD_REF env line",
              "          HEAD_REF: ${{ github.head_ref }}\n",
+             ""),
+            ("a dropped HEAD_SHA env line",
+             "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
              ""),
             ("a dropped fallback write",
              '            echo "site_only=false" >> "${GITHUB_OUTPUT}"\n',
@@ -8970,6 +8975,23 @@ def self_test():
                   "lane finding: " + label,
                   evaluate(multi_local, mutated_ci, ()), 1,
                   "departs from the pinned scope job")
+
+    # 39m STEP ORDER: the decision step is pinned FIRST after checkout and setup-python, before
+    # the probe and the scope self-test, the steps that run the checkout's own code. A pure
+    # reorder keeps every pinned line present, so only the line-for-line order pin catches it;
+    # the vector fails on revert to any set-based or per-step comparison.
+    scope_block = "\n".join(("  scope:",) + SCOPE_JOB) + "\n"
+    reordered_block = "\n".join(
+        ("  scope:",) + SCOPE_JOB[:13] + SCOPE_JOB[-6:] + SCOPE_JOB[13:-6]) + "\n"
+    reordered_ci = lane_ci().replace(scope_block, reordered_block, 1)
+    count += 1
+    if reordered_ci == lane_ci():
+        failures.append("39m mutation did not apply: the probe and self-test reordered "
+                        "ahead of the decision")
+    lane_case("39m a scope job departing from the pinned SCOPE_JOB is a lane finding: "
+              "the probe and self-test reordered ahead of the decision",
+              evaluate(multi_local, reordered_ci, ()), 1,
+              "departs from the pinned scope job")
 
     # 39j HEAVY PRESENCE and HEAVY COMMANDS: every HEAVY_JOBS job must be
     # present in quality.yml, and a HEAVY_COMMANDS member may run only in a

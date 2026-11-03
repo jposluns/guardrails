@@ -91,13 +91,19 @@ jobs:
   # SKIPPABLE heavy suite reads as a verdict input (the five OPF homes contract pages
   # opf/tools/check_opf_homes.py reads and the opf/site/tooling.html declaration surface
   # tools/check_opf_declaration.py reads), which always take the full suite. The scope job decides
-  # with the BASE commit's copy of tools/ci_site_scope.py (git show BASE_SHA:... into the runner's
-  # temporary directory), never the copy under test, so a pull request cannot widen its own lane by
-  # editing the tool; the base having no readable copy decides false. The tool reads the
-  # changed-path list against HEAD^1, the tested merge commit's first parent; an empty list,
+  # with the base tree's copy of tools/ci_site_scope.py (git --no-replace-objects show HEAD^1:...
+  # into the runner's temporary directory), extracted and run as the job's first step after
+  # checkout and Python setup, before any step that runs the pull request's own code, so an
+  # ordinary train cannot repoint the decision from inside this job by editing the tool or by
+  # planting a replace ref in an earlier step; a same-repository train can still edit this
+  # workflow itself, which no pull_request workflow covers, so that ordering is merge-lane
+  # discipline, not isolation from a hostile train. The base having no readable copy decides
+  # false. The tool requires the checked-out HEAD to be the documented two-parent test merge
+  # (HEAD^2 must equal the event's head SHA; GitHub-documented behaviour, not verified here) and
+  # reads the changed-path list against HEAD^1, that merge's first parent; an empty list,
   # any path outside the allowlist, a rename out of those trees (read with rename detection off, so
-  # both sides appear), a non-train or fork head, or any error reading the diff reads as
-  # site_only=false, the full suite. A
+  # both sides appear), a non-train or fork head, a HEAD that is not such a merge, or any error
+  # reading the diff reads as site_only=false, the full suite. A
   # push to main never takes the fast lane: on a push this job emits site_only=false without reading
   # any diff. Adding a NEW site file also runs the full suite by construction: gen_manifest.py pins
   # every file in .gitattributes, which is outside the allowlist, so such a change is never
@@ -106,18 +112,28 @@ jobs:
   # opf-tooling-a, opf-tooling-b, opf-tooling-c, opf-host-patch and selftest-execution run the
   # self-tests of tools under tools/ and opf/tools/ over synthetic fixtures those modules build
   # themselves, with these site-tree verdict inputs: opf/tools/check_opf_homes.py (live gate AND
-  # self-test, opf-tooling-a) reads the five excluded homes pages; tools/check_opf_declaration.py
+  # self-test, opf-tooling-a) reads the five excluded homes pages and has no always-run sibling,
+  # so those five exclusions are load-bearing; tools/check_opf_declaration.py
   # (live gate AND self-test, selftest-execution) reads opf/site/tooling.html and walks the whole
   # tree decoding every .md and .html file, site pages included, so that gate and its self-test
   # also run in the always-run site job below and a site-only change that turns them red fails
-  # every lane (the execution-reconciled registration stays in selftest-execution).
+  # every lane (the execution-reconciled registration stays in selftest-execution; the
+  # tooling.html exclusion is retained as a deliberate conservative margin, not because an
+  # always-run read is missing).
   # git-fixture-env-core runs the core suite, whose inputs are tools/ modules and generated
-  # fixtures, never site/ or opf/site/; the three git-fixture-env config host jobs rerun the
-  # registered roster against the real checkout, so they inherit the opf-declaration and
+  # fixtures, never site/ or opf/site/; git-fixture-env-core-host-patch is that same core suite
+  # repeated on the pinned host Python. The three git-fixture-env config host jobs rerun the
+  # registered roster against the real checkout under hostile git configurations (combined,
+  # malformed and system config injection), so they inherit the opf-declaration and
   # opf-homes reads above plus tools/check_python_floor.py, whose live gate reads
-  # site/development.html, site/install.html, opf/site/adopt.md and opf/site/adopt.html; the
+  # site/development.html, site/install.html, opf/site/adopt.md and opf/site/adopt.html and runs
+  # in two of the three config lanes (the malformed lane excludes its bare launch, which stays in
+  # the combined and system lanes); the
   # python-floor live gate also runs in the always-run registry job in every run, so a site-only
-  # change that turns it red fails every lane. The three regenerated records are
+  # change that turns it red fails every lane. What the fast lane deliberately gives up for a
+  # site-only train is the skipped jobs' host, configuration and platform repetitions of those
+  # checks: the host-patch jobs' exact host Python, the config lanes' hostile git configurations
+  # and byte-canon-matrix's platforms. The three regenerated records are
   # validated by the always-run registry and release jobs (gen_manifest.py --check,
   # check_manifest.py, check_release_delta.py, check_release_build.py). byte-canon-matrix scans
   # tree bytes under a hostile core.autocrlf checkout; a site-only change CAN add bytes there, and
@@ -143,46 +159,49 @@ jobs:
         with:
           python-version: '3.14'
 
-      - name: Child exit status observable (before any gate)
+      # The decision runs FIRST, before any step that runs the pull request's own code (the
+      # child-status probe and the scope self-test run files from the checkout, so they follow
+      # it), and extracts the base tree's copy of the tool with git --no-replace-objects show
+      # from HEAD^1, the same revision the diff is read against, so an ordinary train cannot
+      # repoint the decision from inside this job; when HEAD^1 has no readable copy, the decision
+      # is false, the full suite. --ci-decide reads EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO,
+      # HEAD_SHA and GITHUB_OUTPUT itself and appends site_only=true or site_only=false to
+      # GITHUB_OUTPUT: on any event but pull_request, any head that is not a merge-train-* branch
+      # of this repository, a checked-out HEAD whose second parent is missing or is not HEAD_SHA,
+      # and on any error reading the diff against HEAD^1 (that merge's first parent), it writes
+      # false, so the full suite runs; it exits nonzero only when it cannot write the output at
+      # all, which fails this job and so fails Quality gates. tools/check_ci_parity.py pins this
+      # job's whole body (SCOPE_JOB), the step order included; that pin is a consistency check
+      # within this reviewed repository, not an authorization (the maintainer's recorded decision
+      # above is the authorization).
+      - name: Site fast-lane scope decision
+        id: decide
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          decided="no"
+          if git --no-replace-objects show "HEAD^1:tools/ci_site_scope.py" > "${RUNNER_TEMP}/ci_site_scope_base.py"; then
+            python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide
+            decided="yes"
+          fi
+          if [ "${decided}" = "no" ]; then
+            echo "site_only=false" >> "${GITHUB_OUTPUT}"
+            echo "site_only=false (the base commit has no readable scope tool)"
+          fi
+
+      - name: Child exit status observable (after the scope decision)
         shell: bash
         run: python3 -I -B opf/tools/_child_status.py
 
       - name: Site scope self-test
         shell: bash
         run: python3 -I -B tools/ci_site_scope.py --self-test
-
-      # The decision runs the BASE commit's copy of the tool (git show BASE_SHA:...), never the
-      # copy under test, so a pull request cannot widen its own lane by editing the tool; when the
-      # base has no readable copy, the decision is false, the full suite. --ci-decide reads
-      # EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO and GITHUB_OUTPUT itself and appends
-      # site_only=true or site_only=false to GITHUB_OUTPUT: on any event but pull_request, any
-      # head that is not a merge-train-* branch of this repository, and on any error reading the
-      # diff against HEAD^1 (the tested merge commit's first parent), it writes false, so the full
-      # suite runs; it exits nonzero only when it cannot write the output at all, which fails this
-      # job and so fails Quality gates. tools/check_ci_parity.py pins this job's whole body
-      # (SCOPE_JOB), so none of these lines can drift unreviewed.
-      - name: Site fast-lane scope decision
-        id: decide
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_REF: ${{ github.head_ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          BASE_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          decided="no"
-          if [ -n "${BASE_SHA:-}" ]; then
-            if git show "${BASE_SHA}:tools/ci_site_scope.py" > "${RUNNER_TEMP}/ci_site_scope_base.py"; then
-              python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide
-              decided="yes"
-            fi
-          fi
-          if [ "${decided}" = "no" ]; then
-            echo "site_only=false" >> "${GITHUB_OUTPUT}"
-            echo "site_only=false (the base commit has no readable scope tool)"
-          fi
 
   secrets:
     name: Secrets and leaks

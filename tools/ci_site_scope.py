@@ -6,10 +6,14 @@ jobs when, and only when, the run is a pull request whose head is a merge-train-
 repository and every path it changes is in the site allowlist: under site/ or opf/site/, or one
 of the three files a site-only change regenerates (.aiqt/manifest.toml, .aiqt/release/root.txt,
 .aiqt/release/announce-snippet.txt). This tool makes that decision and nothing else; the scope
-job of .github/workflows/quality.yml runs the BASE commit's copy of this tool (git show
-BASE_SHA:tools/ci_site_scope.py into the runner's temporary directory), never the copy under
-test, so a pull request cannot widen its own lane by editing this file; the Quality gates job
-passes a skipped heavy job only when this decision read true and the run is such a train.
+job of .github/workflows/quality.yml runs the base tree's copy of this tool (git
+--no-replace-objects show HEAD^1:tools/ci_site_scope.py into the runner's temporary directory,
+as that job's first step after checkout and Python setup, before any step that runs the tested
+tree's code), so editing this file inside a train changes the decision only after that edit
+merges; a same-repository train can still edit the workflow itself, which no pull_request
+workflow covers, so this ordering is merge-lane discipline, not isolation from a hostile train.
+The Quality gates job passes a skipped heavy job only when this decision read true and the run
+is such a train.
 
 The decision is a pure function over the changed-path list, fail-closed: an EMPTY list, any path
 outside the allowlist, a path that is not a plain repo-relative file path (absolute, empty, parent
@@ -25,18 +29,21 @@ It prints exactly one line, site_only=true or site_only=false, and exits 0 only 
 decision; it exits 2 on cannot-evaluate (a bad revision, a git failure, undecodable path bytes, a
 missing git), which the workflow treats as site_only=false.
 
-The scope job runs --ci-decide: it reads EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO and
-GITHUB_OUTPUT from the environment, appends site_only=true or site_only=false to GITHUB_OUTPUT,
-and exits 0. Any event but pull_request, a head ref that is not a merge-train-* branch, a head
-repository that is empty or not the base repository, and any cannot-evaluate from the diff read,
-each writes false, so the full suite runs. The diff is read against HEAD^1, the first parent of
-the checked-out commit: on a pull_request event the checkout is the tested merge commit
-(refs/pull/N/merge), whose first parent is the base-branch tip that merge was built on, so
-HEAD^1..HEAD is exactly what the tested tree changes over the base it was actually merged with
-(the event's base.sha can lag that tip). The repository read is the process working directory,
-because the scope job runs this file from outside the tree. It exits nonzero only when it cannot
-write the decision at all, which fails the scope job and so fails Quality gates (fail-closed,
-never a silent fast lane).
+The scope job runs --ci-decide: it reads EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO, HEAD_SHA
+and GITHUB_OUTPUT from the environment, appends site_only=true or site_only=false to
+GITHUB_OUTPUT, and exits 0. Any event but pull_request, a head ref that is not a merge-train-*
+branch, a head repository that is empty or not the base repository, a checked-out HEAD whose
+second parent is missing or is not HEAD_SHA (the pull request's head commit), and any
+cannot-evaluate from the diff read, each writes false, so the full suite runs. The diff is read
+against HEAD^1, the first parent of the checked-out commit: GitHub documents the pull_request
+checkout as a test merge commit (refs/pull/N/merge) whose parents are the base-branch tip the
+merge was built on and the pull request's head (documented behaviour, not verified here), and
+requiring HEAD^2 to equal HEAD_SHA checks that shape instead of assuming it, so HEAD^1..HEAD is
+read as the tested tree's change over its base only when the checkout really is such a merge.
+The repository read is the process working directory, because the scope job runs this file from
+outside the tree; this entry imports nothing beside the standard library, so the one extracted
+file runs alone. It exits nonzero only when it cannot write the decision at all, which fails the
+scope job and so fails Quality gates (fail-closed, never a silent fast lane).
 
 Usage:
   ci_site_scope.py --merge-base REV        decide against REV, print site_only=true|false
@@ -77,8 +84,18 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
         pass
     os._exit(2)
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _selftest_exit_report  # noqa: E402
+# No further import here: the scope job extracts this file ALONE from the base tree and runs
+# --ci-decide outside the repository, so the decision path must need nothing beside the standard
+# library. The self-test's exit-report sibling is imported lazily (_exit_report), never on the
+# --ci-decide path.
+
+
+def _exit_report():
+    """The self-test's exit-report sibling, imported only when a self-test entry runs."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import _selftest_exit_report
+    return _selftest_exit_report
+
 
 ROOT = Path(__file__).resolve().parents[1]
 EXIT_OK, EXIT_CANNOT_EVALUATE = 0, 2
@@ -96,16 +113,22 @@ SITE_REGENERATED = frozenset({
 # Site-tree files a suite that can be SKIPPED reads as a verdict input, enumerated by the
 # gate-discipline coverage account recorded with this change: opf/tools/check_opf_homes.py (live
 # gate and self-test, the opf-tooling-a job and the git-fixture-env config lanes) reads the five
-# OPF homes contract pages, and tools/check_opf_declaration.py (live gate and self-test) reads
+# OPF homes contract pages and has no always-run sibling, so those five exclusions are
+# load-bearing. tools/check_opf_declaration.py (live gate and self-test) reads
 # opf/site/tooling.html as a declaration surface AND walks the whole tree decoding every .md and
-# .html file (restating_documents), site pages included. Because of that whole-tree walk, the
+# .html file (restating_documents), site pages included; because of that whole-tree walk, the
 # opf-declaration live gate and its self-test also run in the always-run site job, so a
-# site-only change that turns them red fails every lane; the execution-reconciled registration
-# stays in the selftest-execution job. tools/check_python_floor.py reads site/development.html,
-# site/install.html, opf/site/adopt.md and opf/site/adopt.html in the config lanes, and its live
-# gate also runs in the always-run registry job, so those pages need no exclusion either. The
-# six exclusions remain: a change to one of these pages can change a skipped heavy job's result
-# with no always-run sibling reading it, so it runs the full suite.
+# site-only change that turns them red fails every lane (the execution-reconciled registration
+# stays in the selftest-execution job), and the tooling.html exclusion is retained as a
+# deliberate conservative margin, not because an always-run read is missing.
+# tools/check_python_floor.py reads site/development.html, site/install.html, opf/site/adopt.md
+# and opf/site/adopt.html; its live gate runs in the always-run registry job in every run and in
+# two of the three config lanes (the malformed lane excludes the bare launch, which stays in the
+# combined and system lanes), so those pages need no exclusion either. What the fast lane
+# deliberately gives up for a site-only train is the skipped jobs' host, configuration and
+# platform repetitions: the host-patch jobs' exact host Python
+# (git-fixture-env-core-host-patch is the core suite repeated on that Python), the config
+# lanes' hostile git configurations, and byte-canon-matrix's platforms.
 SITE_HEAVY_READ = frozenset({
     "opf/site/adopt.html",
     "opf/site/adopt.md",
@@ -124,6 +147,10 @@ TRAIN_PREFIX = "merge-train-"
 # pull_request event the checkout is the tested merge commit, whose first parent is the
 # base-branch tip it was built on (module docstring).
 MERGE_FIRST_PARENT = "HEAD^1"
+# The second parent --ci-decide requires: it must exist and be exactly the pull request's head
+# commit (HEAD_SHA), or the decision is cannot-evaluate, false. A HEAD with no second parent is
+# not the documented two-parent test merge, so the fast lane never engages on it.
+MERGE_SECOND_PARENT = "HEAD^2"
 
 
 def _plain_relative(path):
@@ -202,6 +229,25 @@ def changed_paths(root, merge_base):
     return [item for item in text.split("\0") if item], None
 
 
+def second_parent(root):
+    """(the revision MERGE_SECOND_PARENT resolves to, None), or (None, reason) when HEAD has no
+    second parent or git cannot answer: the checked-out commit is then not the documented
+    two-parent test merge, so the caller treats it as cannot-evaluate."""
+    argv = ["git", "-C", str(root), "rev-parse", "--verify", MERGE_SECOND_PARENT]
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, "cannot run git: {}".format(exc)
+    if proc.returncode != 0:
+        return None, ("HEAD has no second parent, so the checkout is not the tested two-parent "
+                      "merge commit")
+    try:
+        text = proc.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return None, "undecodable revision bytes: {}".format(exc)
+    return text.strip(), None
+
+
 def decide(root, merge_base):
     """The CLI decision: print site_only=true|false; exit 0 on a clean decision, 2 otherwise."""
     paths, problem = changed_paths(root, merge_base)
@@ -214,13 +260,15 @@ def decide(root, merge_base):
 
 
 def ci_decide():
-    """The scope job entry: read EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO and GITHUB_OUTPUT
-    from the environment, append site_only=true or site_only=false to GITHUB_OUTPUT, print the
-    decision, exit 0. Any event but pull_request, a non-train or fork head (train_head), and any
+    """The scope job entry: read EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO, HEAD_SHA and
+    GITHUB_OUTPUT from the environment, append site_only=true or site_only=false to
+    GITHUB_OUTPUT, print the decision, exit 0. Any event but pull_request, a non-train or fork
+    head (train_head), a HEAD whose second parent is missing or is not HEAD_SHA, and any
     cannot-evaluate, each decides false (the full suite). The diff is read against HEAD^1 in the
-    process working directory, because the scope job runs the base commit's copy of this file
-    from outside the tree (module docstring). Exits 1 only when the decision cannot be written at
-    all, which fails the scope job."""
+    process working directory, because the scope job runs the base tree's copy of this file from
+    outside the tree (module docstring); this function must stay import-free beyond the standard
+    library, because that copy is extracted alone. Exits 1 only when the decision cannot be
+    written at all, which fails the scope job."""
     output = os.environ.get("GITHUB_OUTPUT", "")
     if not output:
         print("cannot write the decision: GITHUB_OUTPUT is not set", file=sys.stderr)
@@ -229,18 +277,27 @@ def ci_decide():
     head_ref = os.environ.get("HEAD_REF", "")
     head_repo = os.environ.get("HEAD_REPO", "")
     base_repo = os.environ.get("BASE_REPO", "")
+    head_sha = os.environ.get("HEAD_SHA", "")
     verdict = False
     if not train_head(event, head_ref, head_repo, base_repo):
         note = ("event {!r} with head ref {!r} of repository {!r} (base {!r}) is not a "
                 "merge-train-* pull request of this repository, so it never takes the fast "
                 "lane".format(event, head_ref, head_repo, base_repo))
     else:
-        paths, problem = changed_paths(os.getcwd(), MERGE_FIRST_PARENT)
+        merged_head, problem = second_parent(os.getcwd())
         if problem is not None:
             note = "cannot evaluate, treated as false: {}".format(problem)
+        elif not head_sha or merged_head != head_sha:
+            note = ("cannot evaluate, treated as false: the checked-out merge commit's second "
+                    "parent {!r} is not the pull request's head commit {!r}".format(
+                        merged_head, head_sha))
         else:
-            verdict = site_only(paths)
-            note = "clean decision over {} changed paths".format(len(paths))
+            paths, problem = changed_paths(os.getcwd(), MERGE_FIRST_PARENT)
+            if problem is not None:
+                note = "cannot evaluate, treated as false: {}".format(problem)
+            else:
+                verdict = site_only(paths)
+                note = "clean decision over {} changed paths".format(len(paths))
     line = "site_only=true" if verdict else "site_only=false"
     try:
         with open(output, "a", encoding="utf-8") as handle:
@@ -381,12 +438,15 @@ def _cli_outcome(repo, merge_base):
 
 
 def _ci_decide_outcome(repo, event, output, head_ref="merge-train-1",
-                       head_repo="example/repo", base_repo="example/repo"):
-    """Run the planted copy's --ci-decide with a controlled environment (a merge-train head of
-    this repository unless a case overrides it; None leaves a variable unset); (exit code, what
-    the output file holds afterwards, or None when it does not exist)."""
+                       head_repo="example/repo", base_repo="example/repo", head_sha=None,
+                       tool=None):
+    """Run the planted copy's --ci-decide (or the copy at tool, for the extracted-alone cases)
+    with a controlled environment (a merge-train head of this repository unless a case overrides
+    it; None leaves a variable unset); (exit code, what the output file holds afterwards, or None
+    when it does not exist)."""
     env = _git_env()
-    for name in ("GITHUB_OUTPUT", "EVENT_NAME", "HEAD_REF", "HEAD_REPO", "BASE_REPO"):
+    for name in ("GITHUB_OUTPUT", "EVENT_NAME", "HEAD_REF", "HEAD_REPO", "BASE_REPO",
+                 "HEAD_SHA"):
         env.pop(name, None)
     if event is not None:
         env["EVENT_NAME"] = event
@@ -396,10 +456,13 @@ def _ci_decide_outcome(repo, event, output, head_ref="merge-train-1",
         env["HEAD_REPO"] = head_repo
     if base_repo is not None:
         env["BASE_REPO"] = base_repo
+    if head_sha is not None:
+        env["HEAD_SHA"] = head_sha
     if output is not None:
         env["GITHUB_OUTPUT"] = str(output)
+    target = repo / "tools" / "ci_site_scope.py" if tool is None else tool
     proc = subprocess.run(
-        [sys.executable, "-I", "-B", str(repo / "tools" / "ci_site_scope.py"), "--ci-decide"],
+        [sys.executable, "-I", "-B", str(target), "--ci-decide"],
         capture_output=True, text=True, timeout=GIT_TIMEOUT, cwd=str(repo), env=env)
     recorded = None
     if output is not None and os.path.isfile(str(output)):
@@ -412,7 +475,7 @@ def self_test(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
         # (tools/_selftest_exit_report.py); nothing writes it in band.
-        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
+        _exit_report().arm(report_path, SUITE_ID, EXECUTED)
     expected = _expected_check_ids()
     if expected is None:
         return 2
@@ -522,12 +585,14 @@ def self_test(report_path=None):
             check("cli/option-revision-exit-2", _cli_outcome(repo, "--cached"),
                   (2, "site_only=false"))
             # ---------- the --ci-decide entry the scope job runs ----------
-            # the head still holds only site-allowlisted changes over HEAD^1 here, and the
-            # controlled environment is a merge-train head of this repository by default
-            check("cidecide/pull-request-site-only-true",
+            # the head still holds only site-allowlisted changes over HEAD^1 here, but it is a
+            # LINEAR commit: with no second parent the checkout is not the tested two-parent
+            # merge, so the decision is cannot-evaluate, false, whatever the paths say
+            check("cidecide/linear-head-no-second-parent-false",
                   _ci_decide_outcome(repo, "pull_request",
-                                     Path(scratch) / "gh-output-true"),
-                  (0, "site_only=true\n"))
+                                     Path(scratch) / "gh-output-linear",
+                                     head_sha="0" * 40),
+                  (0, "site_only=false\n"))
             check("cidecide/push-false",
                   _ci_decide_outcome(repo, "push", Path(scratch) / "gh-output-push"),
                   (0, "site_only=false\n"))
@@ -563,25 +628,53 @@ def self_test(report_path=None):
                   (0, "site_only=false\n"))
         with tempfile.TemporaryDirectory() as scratch:
             repo, base = _fixture_repo(Path(scratch), env)
-            # the root commit has no first parent, so the diff read is cannot-evaluate,
-            # written as false with exit 0
+            # the root commit has no parent at all, so the second-parent rule reads it as
+            # cannot-evaluate, written as false with exit 0
             check("cidecide/no-first-parent-false-exit-0",
                   _ci_decide_outcome(repo, "pull_request",
-                                     Path(scratch) / "gh-output-root"),
+                                     Path(scratch) / "gh-output-root",
+                                     head_sha="0" * 40),
                   (0, "site_only=false\n"))
             # a true merge commit shaped as the tested merge ref: the first parent is the
             # base-branch tip, the second the train head, so HEAD^1..HEAD is exactly the
-            # train's site-only change
+            # train's site-only change; the decision requires HEAD^2 to equal the head SHA
+            # the environment passes
             _fixture_git(repo, "checkout", "-q", "-b", "merge-train-1", env=env)
             (repo / "site" / "index.html").write_text("b\n")
             _fixture_git(repo, "add", "-A", env=env)
             _fixture_git(repo, "commit", "-q", "-m", "train site change", env=env)
+            train_tip = subprocess.run(
+                ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                capture_output=True, text=True, timeout=GIT_TIMEOUT, env=env).stdout.strip()
             _fixture_git(repo, "checkout", "-q", "main", env=env)
             _fixture_git(repo, "merge", "-q", "--no-ff", "-m", "merge", "merge-train-1",
                          env=env)
             check("cidecide/train-head-true",
                   _ci_decide_outcome(repo, "pull_request",
-                                     Path(scratch) / "gh-output-merge"),
+                                     Path(scratch) / "gh-output-merge", head_sha=train_tip),
+                  (0, "site_only=true\n"))
+            # the boundary of the second-parent rule: the same merge decides false when the
+            # environment names another commit as the head, and when it names none
+            check("cidecide/second-parent-mismatch-false",
+                  _ci_decide_outcome(repo, "pull_request",
+                                     Path(scratch) / "gh-output-mismatch", head_sha=base),
+                  (0, "site_only=false\n"))
+            check("cidecide/missing-head-sha-false",
+                  _ci_decide_outcome(repo, "pull_request",
+                                     Path(scratch) / "gh-output-nosha"),
+                  (0, "site_only=false\n"))
+            # the scope job's real launch shape: the tool extracted ALONE into a directory
+            # outside any repository, run with the working directory set to the repo it
+            # judges; the planted copy above carries its exit-report sibling, so only this
+            # case catches a --ci-decide path that imports one
+            alone = Path(scratch) / "outside-any-repo"
+            os.makedirs(alone)
+            shutil.copy(Path(__file__).resolve(), alone / "ci_site_scope_base.py")
+            check("cidecide/isolated-tool-outside-repo-true",
+                  _ci_decide_outcome(repo, "pull_request",
+                                     Path(scratch) / "gh-output-isolated",
+                                     head_sha=train_tip,
+                                     tool=alone / "ci_site_scope_base.py"),
                   (0, "site_only=true\n"))
         with tempfile.TemporaryDirectory() as scratch:
             repo, base = _fixture_repo(Path(scratch), env)
@@ -634,8 +727,10 @@ def self_test(report_path=None):
           "outside; the train gate admits only a pull_request from a merge-train-* head of this "
           "repository; each rule patched out flips its vector; the CLI decides over synthetic "
           "repos, reads renames with detection off, and exits 2 on a bad revision, an "
-          "option-shaped revision, a missing repo and a usage error; --ci-decide diffs HEAD^1 "
-          "against a root commit, a linear head and a true merge commit); execution set "
+          "option-shaped revision, a missing repo and a usage error; --ci-decide requires a "
+          "two-parent HEAD whose second parent is HEAD_SHA, deciding false on a root commit, a "
+          "linear head, a mismatched or missing head SHA, and true on the matching merge, also "
+          "when the tool is extracted alone outside any repository); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
@@ -658,4 +753,9 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    _selftest_exit_report.exit_with(main(sys.argv[1:]))
+    if sys.argv[1:] == ["--ci-decide"]:
+        # Dispatched before any sibling import: the scope job runs this file alone, extracted
+        # from the base tree into a directory outside the repository, so the decision path must
+        # not depend on a module that was not extracted with it.
+        sys.exit(ci_decide())
+    _exit_report().exit_with(main(sys.argv[1:]))
