@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1c3ccd4604842d1a92c3649a65555a3213f9f52576f9d00e092492c832812651"
+tree-sha256 = "b05e988f61008a184cb1c2b96aaec0276ebecc448e624a6390bdf8b6c2f3f0fe"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3581,8 +3581,8 @@ sha256 = "034c0c5acd6ebf7916e7c72ae184e86d0a70ea1baafc93cb86015461fd18f2d8"
 
 [[sources]]
 path = "tools/check_headers.py"
-bytes = 29585
-sha256 = "b1122b767271d4c1c3786ed10caa7141853f8bf4ddd9865845473b1f519b120b"
+bytes = 32132
+sha256 = "7de00bde82268e3d13fe503a84ccbcbc1042cb96e9d91df6cd0781bee044b841"
 
 [[sources]]
 path = "tools/check_hooks_preview.py"
@@ -3751,8 +3751,8 @@ sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 34825
-sha256 = "5eeb5a2b74fdf321a985bf94c2ef45ba9a7065f2eb60f979d645b1db830d4ed9"
+bytes = 41174
+sha256 = "05b77545161fc113bf3ae9092ce86df7b08d43a55700eb91194256538e9296d4"
 
 [[sources]]
 path = "tools/check_site_versions.py"
@@ -4001,8 +4001,8 @@ sha256 = "f9bfcb410fcf35ffebe60ed237f03c4cd862393a81bb2f3043cccc1a9e183d3e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 204078
-sha256 = "e7283e51d10522e0956007b89ca84caf5ad40321c5fb3d921c4910fc6efd2d65"
+bytes = 205044
+sha256 = "6952be3bebd604f1aa0a301d61d77acbd16780255b611ed8903473a56ebb4483"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

@@ -13,7 +13,8 @@ the live policy with `! Content-Security-Policy`, then sets Content-Security-Pol
 policy and X-Robots-Tag: noindex. Each header appears once per block; the Permissions-Policy and the draft
 policy are byte-identical to the constants below; the live policy keeps every directive of the draft policy
 with every one of its sources and adds no directive and no source except the recorded widenings in
-LIVE_CSP_WIDENINGS. X-Content-Type-Options, Referrer-Policy and Strict-Transport-Security are never set
+LIVE_CSP_WIDENINGS (a quoted keyword source such as 'self' matches in any case, every other source only
+exactly). X-Content-Type-Options, Referrer-Policy and Strict-Transport-Security are never set
 here (Cloudflare sends them). A missing file, a non-regular file, a missing, duplicated, unknown or
 out-of-order block or header, a forbidden header, a wrong value and a live policy that drops a directive or
 a source, or adds one that is not recorded, are findings (exit 1). A file that cannot be stat'ed or read,
@@ -66,6 +67,11 @@ LIVE_CSP = None
 # widening; the live pages carry inline styles, so style-src 'unsafe-inline' is the only one. Any other
 # added source, and any added directive, is a finding.
 LIVE_CSP_WIDENINGS = (("style-src", "'unsafe-inline'"),)
+# The quoted keyword sources, which CSP matches ASCII case-insensitively, so 'SELF' is 'self'. Every other
+# source (a host, scheme, nonce or hash source) is compared exactly, which can only refuse more.
+CSP_KEYWORDS = frozenset(("'self'", "'none'", "'unsafe-inline'", "'unsafe-eval'", "'strict-dynamic'",
+                          "'unsafe-hashes'", "'report-sample'", "'unsafe-allow-redirects'",
+                          "'wasm-unsafe-eval'"))
 # (kind, name, value) per entry, in file order; kind is "set" or "remove".
 EXPECTED_BLOCKS = (
     ("/*", (
@@ -131,12 +137,14 @@ def parse(data, where):
 
 
 def csp_directives(value):
-    """The (lowercased directive name, [sources]) pairs of a policy, in order; empty segments skipped."""
+    """The (lowercased directive name, [sources]) pairs of a policy, in order, each keyword source in
+    CSP_KEYWORDS lowercased and every other source as written; empty segments skipped."""
     pairs = []
     for segment in value.split(";"):
         tokens = segment.split()
         if tokens:
-            pairs.append((tokens[0].lower(), tokens[1:]))
+            pairs.append((tokens[0].lower(), [token.lower() if token.lower() in CSP_KEYWORDS else token
+                                              for token in tokens[1:]]))
     return pairs
 
 
@@ -428,6 +436,23 @@ def _self_test():
         check(name, errors == [] and len(findings) == len(fragments)
               and all(fragment in line for fragment, line in zip(fragments, findings)), (findings, errors))
 
+    # A keyword source matches in any case and a host source only exactly: an upper-case recorded widening
+    # and an upper-case draft keyword pass, an upper-case unrecorded keyword is still a widening, and a host
+    # source in another case is both a narrowing and a widening.
+    for name, old, new, fragments in (
+        ("pass/live-csp-recorded-widening-keyword-case", "style-src 'self' 'unsafe-inline';",
+         "style-src 'self' 'UNSAFE-INLINE';", []),
+        ("pass/live-csp-draft-keyword-case", "script-src 'self'", "script-src 'SELF'", []),
+        ("refuse/live-csp-widens-keyword-case", "static.cloudflareinsights.com;",
+         "static.cloudflareinsights.com 'UNSAFE-EVAL';", ["widens script-src: adds 'unsafe-eval'"]),
+        ("refuse/live-csp-host-source-case-exact", " https://ajax.cloudflare.com", " https://AJAX.cloudflare.com",
+         ["narrows script-src: lacks https://ajax.cloudflare.com",
+          "widens script-src: adds https://AJAX.cloudflare.com"]),
+    ):
+        findings, errors = _scan_case((good.replace(live_line, live_line.replace(old, new)), good))
+        check(name, errors == [] and len(findings) == len(fragments)
+              and all(fragment in line for fragment, line in zip(fragments, findings)), (findings, errors))
+
     live_anchor, draft_anchor = "  Cross-Origin-Opener-Policy: same-origin\n", "  X-Robots-Tag: noindex\n"
     nosniff = "X-Content-Type-Options: nosniff"
     referrer = "Referrer-Policy: strict-origin-when-cross-origin"
@@ -500,8 +525,10 @@ def _self_test():
             got = _quiet(run_gate, _fixture(tmp, bodies))
         check(name, got == want, got)
 
-    got = [_main_exit(argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
-                                         ["--execution-report", "relative/report"])]
+    # Only a list _parse_argv refuses is run through main() for its exit code; an accepted one would start
+    # this self-test again, so its parse is recorded instead and fails the check by name.
+    got = [_main_exit(argv) if _parse_argv(argv) is None else _parse_argv(argv)
+           for argv in (["--bogus"], ["--self-test", "--bogus"], ["--execution-report", "relative/report"])]
     check("refuse/unrecognized-argument", got == [2, 2, 2], got)
 
     # The size bound at its ends: one byte under, exactly at, and one byte over MAX_BYTES.
@@ -557,8 +584,9 @@ def _main_exit(argv):
         sys.argv = saved
 
 
-def main():
-    argv = sys.argv[1:]
+def _parse_argv(argv):
+    """(argv, report_path) for an accepted argument list, argv being [] or ["--self-test"] and report_path
+    None or absolute; None for any other list."""
     # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
     # that trailing two-token form, with an absolute path, alone or after --self-test.
     report_path = None
@@ -566,8 +594,16 @@ def main():
             and argv[:-2] in ([], ["--self-test"]):
         report_path, argv = argv[-1], ["--self-test"]
     if argv not in ([], ["--self-test"]):
-        print("error: unrecognized arguments {!r}; fail closed".format(argv), file=sys.stderr)
+        return None
+    return argv, report_path
+
+
+def main():
+    parsed = _parse_argv(sys.argv[1:])
+    if parsed is None:
+        print("error: unrecognized arguments {!r}; fail closed".format(sys.argv[1:]), file=sys.stderr)
         return 2
+    argv, report_path = parsed
     if argv == ["--self-test"]:
         if report_path is not None:
             # Finalized at interpreter exit by tools/_selftest_exit_report.py; nothing writes it in band.

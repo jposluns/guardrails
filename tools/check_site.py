@@ -25,13 +25,15 @@ Logo consistency: within a root, every page's header logo block must be byte-ide
 block of the pages not named 404.html. A 404 page is served at any missing URL, however deep, so it must
 open its logo with the root-absolute home link href="/" where that block opens with the relative
 href="./" (the relative form is a finding there); every other byte must still match, and no other page
-gets this allowance.
+gets this allowance. For the same reason every relative href or src on a page named 404.html (a
+stylesheet, icon, script, image or link, inside the logo block or not) is a finding; root-absolute,
+external and fragment-only or query-only values pass there.
 
 Apple touch icon: every live page (one not under the top-level draft/ directory of its root, 404 pages
 included) must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root,
 taken as the exact path (no .html or index.html fallback); a missing link, or one naming a missing file, a
-directory, an external URL or a path escaping the root, is a finding, and so is a relative href on a 404
-page. Draft pages are built under the site template's own rules and are not checked here.
+directory, an external or protocol-relative URL or a path escaping the root, is a finding, and so is a
+relative href on a 404 page. Draft pages are built under the site template's own rules and are not checked here.
 """
 import sys
 
@@ -324,7 +326,11 @@ def touch_icon_findings(label, page_rel, icons, page_dir, site_root):
     out = []
     for href, line in icons:
         classified = classify(href)
-        if parts[-1] == NOT_FOUND_PAGE and classified is not None and classified[0] != "" \
+        split = urlsplit(href)
+        if split.netloc and not split.scheme:
+            out.append("{}:{}: {} is a protocol-relative URL (//host/...), not a path to a file under the root; "
+                       "it must be a root-absolute path -> {!r}".format(label, line, TOUCH_ICON_REL, href))
+        elif parts[-1] == NOT_FOUND_PAGE and classified is not None and classified[0] != "" \
                 and not classified[0].startswith("/"):
             out.append("{}:{}: {} on a 404 page is relative; a 404 page is served at any path, so it must "
                        "be root-absolute -> {!r}".format(label, line, TOUCH_ICON_REL, href))
@@ -441,6 +447,7 @@ def _self_test():
             failures.append("coverage: neither root present did not pass clean")
 
     _touch_icon_self_test(quiet)
+    _not_found_links_self_test()
     failures.extend(FAILURES)
 
     if failures:
@@ -524,6 +531,11 @@ def _touch_icon_self_test(quiet):
         got = findings("sub/404.html", [("../assets/logos/t.png", 3)])
         check("touch-icon/nested-404-relative-href-fails", len(got) == 1 and "must be root-absolute" in got[0],
               got)
+        for name, page_rel in (("touch-icon/404-protocol-relative-href-named", "404.html"),
+                               ("touch-icon/nested-404-protocol-relative-href-named", "sub/404.html"),
+                               ("touch-icon/protocol-relative-href-named", "a.html")):
+            got = findings(page_rel, [("//aiqt.ai/assets/logos/t.png", 3)])
+            check(name, len(got) == 1 and "is a protocol-relative URL" in got[0], got)
 
         page = Page()
         page.feed('<link rel="icon" href="/f.svg"><link rel="Apple-Touch-Icon" href=" /t.png ">'
@@ -542,6 +554,83 @@ def _touch_icon_self_test(quiet):
 
     got = quiet(main)
     check("live/real-tree-passes", got == 0, got)
+
+
+def _not_found_links_self_test():
+    """The 404-page link rule: every relative href or src on a page named 404.html, top-level or nested, is
+    a finding even where it resolves from the page's own directory; root-absolute and fragment-only links
+    pass there, and the same relative links pass on any other page."""
+    import contextlib
+    import io
+    import tempfile
+
+    def scan(base):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            return _scan_root(base, "site"), out.getvalue()
+
+    icon = '<link rel="apple-touch-icon" href="/t.png">'
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        root = base / "site"
+        (root / "sub").mkdir(parents=True)
+        for directory in (root, root / "sub"):
+            for asset in ("s.css", "f.svg", "j.js", "i.png", "l.png", "t.png"):
+                (directory / asset).write_bytes(b"x")
+            (directory / "b.html").write_text("<!doctype html><title>t</title>" + icon, encoding="utf-8")
+        (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
+                                         '<a class="logo" href="./"><img src="l.png" alt=""></a>', encoding="utf-8")
+
+        def page(head, body):
+            return "<!doctype html><title>t</title>" + head + "<body>" + body + "</body>"
+
+        stylesheet = '<link rel="stylesheet" href="s.css">'
+        favicon = '<link rel="icon" href="f.svg">'
+        script = '<script src="j.js"></script>'
+        img = '<img src="i.png" alt="">'
+        nav = '<nav><a href="b">B</a></nav>'
+        logo = '<a class="logo" href="/"><img src="l.png" alt=""></a>'
+        for name, page_rel, head, body, value in (
+                ("404-links/relative-stylesheet-fails", "404.html", icon + stylesheet, "", "s.css"),
+                ("404-links/nested-relative-stylesheet-fails", "sub/404.html", icon + stylesheet, "", "s.css"),
+                ("404-links/relative-icon-fails", "404.html", icon + favicon, "", "f.svg"),
+                ("404-links/nested-relative-icon-fails", "sub/404.html", icon + favicon, "", "f.svg"),
+                ("404-links/relative-script-fails", "404.html", icon + script, "", "j.js"),
+                ("404-links/nested-relative-script-fails", "sub/404.html", icon + script, "", "j.js"),
+                ("404-links/relative-img-fails", "404.html", icon, img, "i.png"),
+                ("404-links/nested-relative-img-fails", "sub/404.html", icon, img, "i.png"),
+                ("404-links/relative-nav-link-fails", "404.html", icon, nav, "b"),
+                ("404-links/nested-relative-nav-link-fails", "sub/404.html", icon, nav, "b"),
+                ("404-links/relative-logo-img-fails", "404.html", icon, logo, "l.png"),
+                ("404-links/nested-relative-logo-img-fails", "sub/404.html", icon, logo, "l.png")):
+            (root / page_rel).write_text(page(head, body), encoding="utf-8")
+            got = scan(base)
+            (root / page_rel).unlink()
+            check(name, got[0] == 1 and "FAIL: 1 site/" in got[1] and "relative href or src on a 404 page" in got[1]
+                  and got[1].rstrip().endswith("-> " + value), got)
+
+        absolute = page(icon + '<link rel="stylesheet" href="/s.css"><link rel="icon" href="/f.svg">'
+                        '<script src="/j.js"></script>',
+                        '<p id="top"><img src="https://aiqt.ai/i.png" alt=""></p><nav><a href="/b">B</a>'
+                        '<a href="#top">T</a></nav><a class="logo" href="/"><img src="/l.png" alt=""></a>')
+        (root / "404.html").write_text(absolute, encoding="utf-8")
+        (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
+                                         '<a class="logo" href="./"><img src="/l.png" alt=""></a>', encoding="utf-8")
+        got = scan(base)
+        check("404-links/root-absolute-and-fragment-links-pass", got[0] == 0, got)
+        (root / "404.html").unlink()
+
+        (root / "sub" / "c.html").write_text(page(icon + '<link rel="stylesheet" href="s.css">',
+                                                  '<img src="i.png" alt=""><nav><a href="b">B</a></nav>'),
+                                             encoding="utf-8")
+        got = scan(base)
+        check("404-links/relative-links-on-other-page-pass", got[0] == 0, got)
+
+        (root / "sub" / "404.html").write_text(page('<link rel="apple-touch-icon" href="t.png">', ""),
+                                               encoding="utf-8")
+        got = scan(base)
+        check("404-links/relative-touch-icon-reported-once", got[0] == 1 and "FAIL: 1 site/" in got[1]
+              and "apple-touch-icon on a 404 page is relative" in got[1], got)
 
 
 # Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the served site pages). Matching this gate's
@@ -626,6 +715,12 @@ def _scan_root(root, subdir):
             if classified is None:
                 continue
             pathpart, frag = classified
+            # A 404 page is served at any missing URL, however deep, so a relative href or src there resolves
+            # below the root. A relative touch icon is already reported by touch_icon_findings.
+            if f.name == NOT_FOUND_PAGE and pathpart and not pathpart.startswith("/") \
+                    and (v, line) not in page.touch_icons:
+                findings.append("{}:{}: relative href or src on a 404 page; a 404 page is served at any path, so "
+                                "it must be root-absolute -> {}".format(rel, line, v))
             if pathpart == "":
                 if not frag:
                     continue
