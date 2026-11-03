@@ -23,7 +23,10 @@ opfiles.ai site, served from opf/site as its own root, whose pages link ./disclo
 resolves within opf/site). Neither root allowlists a page, so every page outside the root's draft/ must carry
 its nav link; the pages under site/draft/ and opf/site/draft/ are exempt from the nav rule and are held to
 the draft rule instead (one /draft/disclosure/ link in the About region of draft/index.html, nothing
-required on the other draft pages; the same absolute href on both roots). Each tree is a REQUIRED
+required on the other draft pages; the same absolute href on both roots). A live 404 page (any page named
+404.html outside the root's draft/, in either root) is the one exception to the per-root form: it is served
+at whatever missing URL was requested, so a relative link would resolve against that URL, and it must carry
+the root-absolute /disclosure instead; a relative ./disclosure on a 404 page is a missing link. Each tree is a REQUIRED
 coverage input: if a root is absent, unreadable, or carries no .html pages, the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
 file, opened O_NOFOLLOW and confirmed regular via fstat on the opened fd, so a symlink/FIFO/socket/device
 .html (or site/ itself as a symlink) is fail-closed and never read or followed, and the check-then-read
@@ -79,6 +82,15 @@ COVERAGE_ROOTS = (
     ("site", "/disclosure", frozenset()),
     ("opf/site", "./disclosure", frozenset()),
 )
+# A 404 page is served at any missing URL, however deep, so its links must not depend on the request
+# path: on a page with this file name the root-absolute DISCLOSURE_HREF replaces the root's own form.
+NOT_FOUND_PAGE = "404.html"
+
+
+def required_href(name, href):
+    """The disclosure href a page named `name` (relative to its root) must carry, given its root's form."""
+    return DISCLOSURE_HREF if Path(name).name == NOT_FOUND_PAGE else href
+
 
 # The staged draft under site/draft/ follows the shared site template (baseline 1.6.0), whose top bar has no
 # Disclosure item: the draft landing page links the disclosure page from its "About this project" region
@@ -173,24 +185,26 @@ def disclosure_link_count(text, href=DISCLOSURE_HREF):
 def check_pages(pages, allowlist, href=DISCLOSURE_HREF):
     """pages: {name: html_text}. Return a sorted list of findings. Enforces exactly one `href` disclosure
     link in the nav on every page not in allowlist, and treats a missing or newly-linking allowlisted page
-    as drift. Callers guarantee pages is non-empty; emptiness is a fail-closed input error handled in run()."""
+    as drift. A 404 page is held to the root-absolute DISCLOSURE_HREF instead (required_href). Callers
+    guarantee pages is non-empty; emptiness is a fail-closed input error handled in run()."""
     findings = []
     for name in sorted(allowlist):
         if name not in pages:
             findings.append(
                 "{}: allowlisted for the nav link but no such page exists (allowlist drift)".format(name))
     for name in sorted(pages):
-        count = disclosure_link_count(pages[name], href)
+        want = required_href(name, href)
+        count = disclosure_link_count(pages[name], want)
         if name in allowlist:
             if count:
                 findings.append(
                     "{}: allowlisted as nav-exempt but now carries {} {} link(s); "
-                    "remove it from the allowlist (allowlist drift)".format(name, count, href))
+                    "remove it from the allowlist (allowlist drift)".format(name, count, want))
         elif count == 0:
-            findings.append("{}: missing the {} nav link".format(name, href))
+            findings.append("{}: missing the {} nav link".format(name, want))
         elif count > 1:
             findings.append(
-                "{}: carries {} {} links (expected exactly one)".format(name, count, href))
+                "{}: carries {} {} links (expected exactly one)".format(name, count, want))
     return findings
 
 
@@ -288,8 +302,12 @@ def _run_one(root, subdir, href, allowlist):
         live_scope = " outside {}/{}/".format(subdir, DRAFT_SUBDIR)
         draft_note = "; under {}/{}/ the landing page carries the {} About link".format(
             subdir, DRAFT_SUBDIR, DRAFT_DISCLOSURE_HREF)
-    print("PASS: every {}/ page{} carries the {} nav link (allowlist: {}){}".format(
-        subdir, live_scope, href, allow_str, draft_note))
+    if href == DISCLOSURE_HREF:
+        carried = "the {} nav link".format(href)
+    else:
+        carried = "the {} nav link ({} pages carry {})".format(href, NOT_FOUND_PAGE, DISCLOSURE_HREF)
+    print("PASS: every {}/ page{} carries {} (allowlist: {}){}".format(
+        subdir, live_scope, carried, allow_str, draft_note))
     return 0
 
 
@@ -861,6 +879,29 @@ def _self_test():
         os.remove(str(root4 / "opf" / "site" / "draft" / "index.html"))
         if quiet_run(root4) != 1:
             failures.append("opf/site/draft/ pages without the landing page were not reported (expected 1)")
+    # A 404 page carries the root-absolute /disclosure on either root: it passes there, and the relative
+    # ./disclosure (which a nested missing URL would resolve below the root) is a missing link.
+    with tempfile.TemporaryDirectory() as d4b:
+        root4b = Path(d4b)
+        (root4b / "site").mkdir()
+        (root4b / "site" / "about.html").write_text(nav, encoding="utf-8")
+        (root4b / "opf" / "site").mkdir(parents=True)
+        (root4b / "opf" / "site" / "index.html").write_text(rel_nav, encoding="utf-8")
+        (root4b / "opf" / "site" / "404.html").write_text(nav, encoding="utf-8")
+        if quiet_run(root4b) != 0:
+            failures.append("an opf/site 404 page carrying the root-absolute /disclosure did not pass")
+        (root4b / "opf" / "site" / "404.html").write_text(rel_nav, encoding="utf-8")
+        if quiet_run(root4b) != 1:
+            failures.append("an opf/site 404 page carrying the relative ./disclosure was not reported (expected 1)")
+    for label, pages, expected in (
+            ("404 page with root-absolute link passes on the relative root", {"404.html": nav}, []),
+            ("404 page with relative link fails on the relative root", {"404.html": rel_nav},
+             ["404.html: missing the /disclosure nav link"]),
+            ("non-404 page with root-absolute link fails on the relative root", {"about.html": nav},
+             ["about.html: missing the ./disclosure nav link"])):
+        got = check_pages(pages, frozenset(), "./disclosure")
+        if got != expected:
+            failures.append("{}: expected {} got {}".format(label, expected, got))
     with tempfile.TemporaryDirectory() as d5:
         closed = _close_vectors_guarded(Path(d5))
     if closed is None:
