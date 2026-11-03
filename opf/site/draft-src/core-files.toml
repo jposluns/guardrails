@@ -1,0 +1,282 @@
+# The opfiles.ai draft core files page (template reference/reference.html): the 5 core store files in
+# full, then the record indexes and the files around them, 1 line each. The section and heading ids are
+# the 20 short-link anchors of opf/site/_redirects, so every kept anchor resolves on this page.
+path = "core-files/index.html"
+title = "Core files"
+kind = "document"
+label = "Reference"
+heading = "Core store files"
+meta = "The store's control and ledger files: the manifest that declares the store, the ID counters, the version ledger, the worklog (appended per change, correctable until released, then frozen), and the concurrency lease. The record indexes and the files around them follow, 1 line each."
+
+[[body]]
+component = "section"
+lbl = "manifest.toml"
+id = "manifest"
+heading = "The store manifest"
+rail = "The store manifest"
+
+[[body]]
+component = "lead"
+html = "The store's control document and discovery marker: declarations for its schema, types, views, modules, and enforcement posture. Closed keysets throughout: an unknown key in any base section is a validation finding."
+
+[[body]]
+component = "code"
+id = "manifest-toml"
+file = ".working/toml/manifest.toml"
+text = '''[opf]
+standard = "opf"
+spec_version = "2.0.0"
+homes = 2
+layout = "inline"
+posture = "required"
+import_status = "none"
+
+[modules]
+governance = false'''
+
+[[body]]
+component = "callout"
+label = "Note"
+html = '''<p>The reference tooling does not yet implement spec 2.0.0: its scaffold still writes <code>spec_version = "1.2.0"</code> with no <code>homes</code> key.</p>'''
+
+[[body]]
+component = "subhead"
+heading = "The top-level tables"
+
+[[body]]
+component = "label"
+text = "11 tables"
+
+[[body]]
+component = "table"
+caption = "The top-level tables of the store manifest"
+head = ["Table", "Holds"]
+rows = [
+  ["<code>[opf]</code>", "standard, spec_version, homes (2), layout (inline or per-record), posture (off, warn or required), import_status (none, partial or complete)"],
+  ["<code>[store]</code>", "sync_target (empty under the in-repo default)"],
+  ["<code>[modules]</code>", "governance, delivery_assurance, operational_policy, concurrent_operation"],
+  ["<code>[profiles.*]</code>", "additive requirement bundles; may only add requirements"],
+  ["<code>[types.*]</code>", "1 table per enabled type, carrying its normative namespace"],
+  ["<code>[providers.*]</code>", "handler and roles (create, auth, sync); local-directory and generic-git-remote ship as universal fallbacks"],
+  ["<code>[views.*]</code>", "kind (deterministic, composed or projection), sources, target"],
+  ["<code>[deliverables.*]</code>", "the curated CHANGELOG.md declaration"],
+  ["<code>[archive]</code>", "period (\"year\")"],
+  ["<code>[unmanaged]</code>", "pre-existing files kept in place, enumerated"],
+  ["<code>[vendors]</code>", "registered x-&lt;vendor&gt; extension namespaces"],
+]
+
+[[body]]
+component = "pullquote"
+html = "Declare the store contract so tools need not infer it."
+
+[[body]]
+component = "prose"
+html = "<p>A tool validates the base before operating, enforces only what is declared, and records a profile it does not support as present-but-unevaluated rather than failing over it. Tooling locates the machine store by finding exactly 1 immediate subdirectory of <code>.working/</code> whose manifest declares the token. 0 matches or more than 1 stops the tool, never guesses.</p>"
+
+[[body]]
+component = "label"
+text = "At a glance"
+
+[[body]]
+component = "record"
+
+[[body.items]]
+term = "Declares"
+html = "<code>[opf]</code> <code>[modules]</code> <code>[types.*]</code> <code>[views.*]</code> <code>[providers.*]</code> <code>[profiles.*]</code>"
+
+[[body.items]]
+term = "Read by"
+html = "<code>opf render</code>, <code>opf doctor</code>, <code>opf absorb</code>, <code>opf record</code>"
+
+[[body.items]]
+term = "Written by"
+html = "<code>opf init</code>, a reviewed adopter edit, and <code>opf migrate</code> (planned; not yet implemented in the reference CLI)"
+
+[[body]]
+component = "section"
+lbl = "counters.toml"
+id = "counters"
+heading = "The ID counters"
+rail = "The ID counters"
+
+[[body]]
+component = "prose"
+html = "<p>The ID authority: 1 monotonic high-water value per record namespace.</p>"
+
+[[body]]
+component = "section"
+lbl = "version.toml"
+id = "version"
+heading = "The version ledger"
+rail = "The version ledger"
+
+[[body]]
+component = "prose"
+html = "<p>The version and release ledger: numbers, dates, spans, and digests, never release prose.</p>"
+
+[[body]]
+component = "section"
+lbl = "worklog.toml"
+id = "worklog"
+heading = "The worklog"
+rail = "The worklog"
+
+[[body]]
+component = "prose"
+html = "<p>The detailed operational record: 1 entry per change, appended as the work happens. Entries are correctable until released, then frozen.</p>"
+
+[[body]]
+component = "section"
+lbl = "lease.toml"
+id = "lease"
+heading = "The single-writer lease"
+rail = "The single-writer lease"
+
+[[body]]
+component = "prose"
+html = "<p>Present only while a run holds the store's single-writer lease; its absence is the normal state.</p>"
+
+[[body]]
+component = "section"
+lbl = "Record indexes"
+id = "backlog-item"
+heading = "The backlog"
+rail = "Record indexes"
+
+[[body]]
+component = "prose"
+html = '''<p>11 baseline typed indexes, their declared generated views, and the planned module schemas. One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified.</p>'''
+
+[[body]]
+component = "subhead"
+id = "done"
+heading = "Completion receipts"
+
+[[body]]
+component = "prose"
+html = "<p>A durable completion receipt, created in its single terminal state and immutable from birth.</p>"
+
+[[body]]
+component = "subhead"
+id = "finding"
+heading = "The finding register"
+
+[[body]]
+component = "prose"
+html = "<p>An observation worth acting on, which links its remediation rather than containing it.</p>"
+
+[[body]]
+component = "subhead"
+id = "pending-decision"
+heading = "Pending decisions"
+
+[[body]]
+component = "prose"
+html = "<p>A question that must be answered before dependent work settles.</p>"
+
+[[body]]
+component = "subhead"
+id = "autonomous-decision"
+heading = "Self-made decisions, on the record"
+
+[[body]]
+component = "prose"
+html = "<p>A call an actor was authorized to make itself, with its basis, the action taken, and links to what it affected.</p>"
+
+[[body]]
+component = "subhead"
+id = "maintainer-decision"
+heading = "Rulings the maintainer made"
+
+[[body]]
+component = "prose"
+html = "<p>A created-terminal, immutable ruling carrying its decision, the answer plus its rationale.</p>"
+
+[[body]]
+component = "subhead"
+id = "preference-pattern"
+heading = "Standing preferences, distilled"
+
+[[body]]
+component = "prose"
+html = "<p>The reusable rule beneath a family of individual rulings.</p>"
+
+[[body]]
+component = "subhead"
+id = "block"
+heading = "Blocks"
+
+[[body]]
+component = "prose"
+html = "<p>A record that named work cannot proceed; it scopes an enumerated list of record IDs.</p>"
+
+[[body]]
+component = "subhead"
+id = "handoff"
+heading = "The session handoff"
+
+[[body]]
+component = "prose"
+html = "<p>The durable state snapshot a session resumes from, with at most 1 current handoff at any time.</p>"
+
+[[body]]
+component = "subhead"
+id = "reference"
+heading = "Sources, captured at the claim"
+
+[[body]]
+component = "prose"
+html = "<p>An immutable captured source, recorded at the moment a claim or artefact that rests on it is produced.</p>"
+
+[[body]]
+component = "subhead"
+id = "contribution"
+heading = "Work proposed or sent to a peer project"
+
+[[body]]
+component = "prose"
+html = "<p>It tracks proposal, delivery, and outcome.</p>"
+
+[[body]]
+component = "subhead"
+id = "modules"
+heading = "Optional modules and importer types"
+
+[[body]]
+component = "prose"
+html = "<p>4 optional modules, default-off.</p>"
+
+[[body]]
+component = "section"
+lbl = "Around the records"
+id = "pointer"
+heading = "The store pointer"
+rail = "Pointer, archive and projection"
+
+[[body]]
+component = "prose"
+html = "<p>The committed pointer that names where the store repository lives. A pointer that does not resolve stops the tool and never falls back silently to the default location.</p>"
+
+[[body]]
+component = "subhead"
+id = "archive"
+heading = "The archive"
+
+[[body]]
+component = "prose"
+html = "<p>1 rotation manifest per calendar-year bucket: rotation is relocation, never deletion, and never ID reuse.</p>"
+
+[[body]]
+component = "subhead"
+id = "decisions-projection"
+heading = "The decisions projection"
+
+[[body]]
+component = "prose"
+html = "<p>The machine projection, generated at <code>.working/DECISIONS.toml</code> and rendered from the 4 decision types.</p>"
+
+[[body]]
+component = "next"
+html = "Create the store with <code>opf init</code>, or ask your assistant for a plan."
+text = "Adopt it"
+href = "adopt/"

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Site-integrity gate for site/*.html: en/em dashes, link/anchor resolution, and basic HTML validity.
 
-Link classification uses urlsplit: an absolute URL on the site's own host (aiqt.ai) is internal; every
+Link classification uses urlsplit: an absolute URL on the scanned root's own host (aiqt.ai for site/,
+opfiles.ai for opf/site/; ROOT_HOSTS) is internal, so a link to the other site is external; every
 other scheme (http/https elsewhere, mailto, tel, ftp, javascript, data, ...) and protocol-relative
 //host links are external and skipped. An internal path resolves to an existing file under site/ by
 trying the path as-is, path + ".html", and path + "/index.html"; "/" resolves to index.html; a path
@@ -42,7 +43,9 @@ page is reported by this rule and by the touch-icon rule below, so it is listed 
 
 404 structure: that list of attributes cannot name every way markup loads a resource, so a 404 page is also
 held, fail closed, to the element and attribute names the live 404 pages use: any other name the raw scan
-finds is a finding naming the page, line and name. On the allowed names, any value and any script or style
+finds is a finding naming the page, line and name. The 404 page directly under the root's top-level draft/
+(draft/404.html, served at any missing /draft/ URL, built from the site template) is held the same way to
+the names the two draft 404 pages use instead; a 404.html any deeper under draft/ keeps the live names. On the allowed names, any value and any script or style
 text containing "url(" (any case, as written or decoded) is a finding, a meta element may carry only the
 attributes the live pages use on meta, onclick and the SVG presentation attributes only the values they use,
 a script without src only a body whose sha256 is pinned, and a script with src only an empty body. A
@@ -89,6 +92,9 @@ EN, EM = "–", "—"
 # non-aiqt.ai adopter can vendor the pack unpatched. Unchanged when the variable is unset or empty.
 _SITE_HOST = (os.environ.get("AIQT_SITE_HOST", "aiqt.ai") or "aiqt.ai").lower()
 SITE_HOSTS = {_SITE_HOST, "www." + _SITE_HOST}
+# The own-host set of each coverage root: an absolute URL on the root's own host is internal to that
+# root, and a link to the other site is external. site/ keeps SITE_HOSTS; opf/site/ is opfiles.ai.
+ROOT_HOSTS = {"site": SITE_HOSTS, "opf/site": {"opfiles.ai", "www.opfiles.ai"}}
 
 # Tags that never take an end tag; never pushed on the open-tag stack.
 VOID_ELEMENTS = {
@@ -269,14 +275,16 @@ def resolve_link(base, path, site_root):
     return None
 
 
-def classify(v):
+def classify(v, hosts=None):
+    # `hosts` is the scanned root's own-host set (ROOT_HOSTS); None keeps SITE_HOSTS.
     # urlsplit does not percent-decode. The PATH is unquoted so an encoded link (my%20page.html) resolves
     # against the real file "my page.html". The FRAGMENT is returned RAW: HTML fragment navigation matches
     # an id equal to the raw fragment FIRST, then the percent-decoded form, so the anchor check tries both
     # (see main()). Unquoting the fragment here unconditionally would drop the raw-match case.
+    own = SITE_HOSTS if hosts is None else hosts
     parts = urlsplit(v)
     if parts.scheme:
-        if parts.scheme.lower() in ("http", "https") and parts.netloc.lower() in SITE_HOSTS:
+        if parts.scheme.lower() in ("http", "https") and parts.netloc.lower() in own:
             return unquote(parts.path), parts.fragment
         return None
     if parts.netloc:
@@ -406,6 +414,33 @@ NOT_FOUND_PRESENTATION = {
 NOT_FOUND_INLINE_SCRIPT_SHA256 = frozenset((
     "26b7f1c5bd8e7e7ac8723806089d3d541b9957a89cecd01a7a2bf2d96e622aae",
 ))
+# The draft 404 pages (the 404.html directly under each root's top-level draft/, served at any missing /draft/
+# URL) are
+# built from the site template, not from the live pages, so they are held to their own structural allowlist,
+# fail closed in the same way. Derived by running raw_tags over the two draft 404 pages (site/draft/404.html
+# and opf/site/draft/404.html, rendered by tools/gen_draft_site.py) and taking exactly the names, meta
+# attributes, onclick values, SVG presentation values and no-src script bodies they use (no onclick and no
+# inline script); a name or value is added only when a draft 404 page starts using it.
+NOT_FOUND_DRAFT_ELEMENTS = frozenset((
+    "a", "body", "button", "circle", "div", "footer", "h1", "head", "header", "html", "img", "li", "link",
+    "main", "meta", "nav", "p", "path", "script", "span", "svg", "title", "ul",
+))
+NOT_FOUND_DRAFT_ATTRIBUTES = frozenset((
+    "alt", "aria-current", "aria-hidden", "aria-label", "aria-live", "aria-pressed", "charset", "class",
+    "content", "cx", "cy", "d", "data-cfasync", "data-scheme-toggle", "fill", "focusable", "height", "hidden",
+    "href", "id", "lang", "name", "r", "rel", "role", "src", "stroke", "stroke-linecap", "stroke-linejoin",
+    "stroke-width", "target", "type", "viewbox", "width",
+))
+NOT_FOUND_DRAFT_META_ATTRIBUTES = frozenset(("charset", "content", "name"))
+NOT_FOUND_DRAFT_ONCLICK = frozenset()
+NOT_FOUND_DRAFT_PRESENTATION = {
+    "fill": frozenset(("none",)),
+    "font-family": frozenset(),
+    "font-size": frozenset(),
+    "font-weight": frozenset(),
+    "text-anchor": frozenset(),
+}
+NOT_FOUND_DRAFT_INLINE_SCRIPT_SHA256 = frozenset()
 # A CSS url() loads relative to the page, so it is refused in any value or script or style text on a 404 page.
 _URL_FUNCTION = "url("
 _RAW_TEXT_END = {element: re.compile(r"</" + element + r"[\t\n\f\r />]", re.I | re.A)
@@ -544,8 +579,9 @@ def _raw_text_body(text, element, end):
     return text[end:] if match is None else text[end:match.start()]
 
 
-def not_found_structure_findings(label, text):
-    """Findings for the raw markup `text` of a 404 page named `label` against the structural allowlist: an
+def not_found_structure_findings(label, text, draft=False):
+    """Findings for the raw markup `text` of a 404 page named `label` against the structural allowlist (the
+    NOT_FOUND_DRAFT_* sets in place of the NOT_FOUND_* ones when `draft` is true, for a draft 404 page): an
     element or attribute name raw_tags finds that is not in NOT_FOUND_ELEMENTS or NOT_FOUND_ATTRIBUTES, a meta
     attribute outside NOT_FOUND_META_ATTRIBUTES, an onclick or SVG presentation value the live 404 pages do
     not use, any value or script or style text that contains "url(" (any case, as written or with its
@@ -556,6 +592,16 @@ def not_found_structure_findings(label, text):
     Residual: the rule reads markup only. It cannot analyse what an allowlisted inline script does at run time
     (it trusts the pinned script bodies), nor what the same-origin script, stylesheet or icon a root-absolute
     URL loads contains."""
+    if draft:
+        kind, elements, attribute_names, meta_names = (
+            "draft", NOT_FOUND_DRAFT_ELEMENTS, NOT_FOUND_DRAFT_ATTRIBUTES, NOT_FOUND_DRAFT_META_ATTRIBUTES)
+        onclicks, presentation, inline_scripts = (
+            NOT_FOUND_DRAFT_ONCLICK, NOT_FOUND_DRAFT_PRESENTATION, NOT_FOUND_DRAFT_INLINE_SCRIPT_SHA256)
+    else:
+        kind, elements, attribute_names, meta_names = (
+            "live", NOT_FOUND_ELEMENTS, NOT_FOUND_ATTRIBUTES, NOT_FOUND_META_ATTRIBUTES)
+        onclicks, presentation, inline_scripts = (
+            NOT_FOUND_ONCLICK, NOT_FOUND_PRESENTATION, NOT_FOUND_INLINE_SCRIPT_SHA256)
     out = []
     svg_seen = False
     for element, line, attributes, end in raw_tags(text):
@@ -563,25 +609,26 @@ def not_found_structure_findings(label, text):
             out.append("{}:{}: <script> at or after an <svg> start tag on a 404 page is refused (inside svg, src "
                        "is not a script attribute and the body runs)".format(label, line))
         svg_seen = svg_seen or element == "svg"
-        if element not in NOT_FOUND_ELEMENTS:
-            out.append("{}:{}: element <{}> is not in the 404-page element allowlist".format(label, line, element))
+        if element not in elements:
+            out.append("{}:{}: element <{}> is not in the {}404-page element allowlist".format(
+                label, line, element, "draft " if draft else ""))
         for name, value, attr_line in attributes:
-            if name not in NOT_FOUND_ATTRIBUTES:
-                out.append("{}:{}: attribute {} on <{}> is not in the 404-page attribute allowlist".format(
-                    label, attr_line, name, element))
-            if element == "meta" and name not in NOT_FOUND_META_ATTRIBUTES:
-                out.append("{}:{}: attribute {} on <meta> is not one the live 404 pages use on meta".format(
-                    label, attr_line, name))
+            if name not in attribute_names:
+                out.append("{}:{}: attribute {} on <{}> is not in the {}404-page attribute allowlist".format(
+                    label, attr_line, name, element, "draft " if draft else ""))
+            if element == "meta" and name not in meta_names:
+                out.append("{}:{}: attribute {} on <meta> is not one the {} 404 pages use on meta".format(
+                    label, attr_line, name, kind))
             value = "" if value is None else value
             if _URL_FUNCTION in value.lower() or _URL_FUNCTION in unescape(value).lower():
                 out.append("{}:{}: {} value on a 404 page contains url(, which loads relative to the page "
                            "-> {!r}".format(label, attr_line, name, value))
-            if name == "onclick" and value not in NOT_FOUND_ONCLICK:
-                out.append("{}:{}: onclick value on a 404 page is not one the live 404 pages use -> {!r}".format(
-                    label, attr_line, value))
-            if name in NOT_FOUND_PRESENTATION and value not in NOT_FOUND_PRESENTATION[name]:
-                out.append("{}:{}: {} value on a 404 page is not one the live 404 pages use -> {!r}".format(
-                    label, attr_line, name, value))
+            if name == "onclick" and value not in onclicks:
+                out.append("{}:{}: onclick value on a 404 page is not one the {} 404 pages use -> {!r}".format(
+                    label, attr_line, kind, value))
+            if name in presentation and value not in presentation[name]:
+                out.append("{}:{}: {} value on a 404 page is not one the {} 404 pages use -> {!r}".format(
+                    label, attr_line, name, kind, value))
         if element in _RAW_TEXT_END:
             body = _raw_text_body(text, element, end)
             if _URL_FUNCTION in body.lower() or _URL_FUNCTION in unescape(body).lower():
@@ -593,7 +640,7 @@ def not_found_structure_findings(label, text):
                            "wherever src is not read)".format(label, line))
             if element == "script" and not has_src:
                 digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
-                if digest not in NOT_FOUND_INLINE_SCRIPT_SHA256:
+                if digest not in inline_scripts:
                     out.append("{}:{}: inline <script> on a 404 page is not a pinned script body (sha256 {})".format(
                         label, line, digest))
     return out
@@ -701,6 +748,118 @@ def _self_test():
             '<!doctype html><title>t</title><a href="./nope">x</a>', encoding="utf-8")
         if quiet(_scan_root, r, "opf/site") != 1:
             failures.append("coverage: a dangling relative link under opf/site/draft was not caught")
+
+    # The opfiles.ai draft under opf/site/draft/: nested pages, an asset, a fragment and an absolute
+    # opfiles.ai URL resolve inside opf/site; a missing target, a missing fragment and an aiqt.ai URL
+    # read as internal there are findings, while an aiqt.ai URL is external on opf/site.
+    host_findings = []
+    with tempfile.TemporaryDirectory() as d:
+        r = Path(d)
+        draft = r / "opf" / "site" / "draft"
+        (draft / "model").mkdir(parents=True)
+        (draft / "assets" / "baseline").mkdir(parents=True)
+        (draft / "assets" / "baseline" / "baseline.css").write_text("p{}", encoding="utf-8")
+        (draft / "model" / "index.html").write_text(
+            '<!doctype html><title>t</title><h2 id="box">B</h2>', encoding="utf-8")
+        (draft / "index.html").write_text(
+            '<!doctype html><title>t</title><link rel="stylesheet" href="/draft/assets/baseline/baseline.css">'
+            '<a href="/draft/model/">M</a><a href="/draft/model/#box">B</a>'
+            '<a href="https://opfiles.ai/draft/model/">O</a><a href="https://aiqt.ai/no-such-page">A</a>',
+            encoding="utf-8")
+        draft_cases = (
+            ("draft/nested-assets-fragments-and-own-host-pass", None, 0),
+            ("draft/missing-target", '<a href="/draft/core-files/">C</a>', 1),
+            ("draft/missing-fragment", '<a href="/draft/model/#absent">X</a>', 1),
+            ("draft/missing-asset", '<img src="/draft/assets/baseline/logos/absent.svg" alt="">', 1),
+            ("draft/own-host-missing-target", '<a href="https://www.opfiles.ai/draft/absent/">X</a>', 1),
+        )
+        for label, extra, want in draft_cases:
+            probe_page = draft / "probe.html"
+            if extra is None:
+                if probe_page.exists():
+                    probe_page.unlink()
+            else:
+                probe_page.write_text("<!doctype html><title>t</title>" + extra, encoding="utf-8")
+            got = quiet(_scan_root, r, "opf/site")
+            if got != want:
+                host_findings.append("{}: expected exit {}, got {}".format(label, want, got))
+    for label, value, hosts, want in (
+            ("hosts/opfiles-internal-on-opf-site", "https://opfiles.ai/draft/", ROOT_HOSTS["opf/site"],
+             ("/draft/", "")),
+            ("hosts/aiqt-external-on-opf-site", "https://aiqt.ai/draft/", ROOT_HOSTS["opf/site"], None),
+            ("hosts/opfiles-external-on-site", "https://www.opfiles.ai/draft/", ROOT_HOSTS["site"], None),
+            ("hosts/aiqt-internal-on-site", "https://www.aiqt.ai/x#y", ROOT_HOSTS["site"], ("/x", "y")),
+            ("hosts/default-is-site-hosts", "https://aiqt.ai/x", None, ("/x", ""))):
+        got = classify(value, hosts)
+        if got != want:
+            host_findings.append("{}: expected {!r}, got {!r}".format(label, want, got))
+    if ROOT_HOSTS["site"] is not SITE_HOSTS or set(ROOT_HOSTS) != set(COVERAGE_ROOTS):
+        host_findings.append("hosts/every-root-has-its-host-set: {!r}".format(sorted(ROOT_HOSTS)))
+    failures.extend(host_findings)
+
+    # The draft 404 structural allowlist: a name only the draft 404 pages use passes on a draft 404 page and
+    # stays a finding on a live one, a name neither uses is a finding on both, and a live-only presentation
+    # value is a finding on a draft 404 page. Through _scan_root, only a 404.html directly under the root's
+    # top-level draft/ takes the draft list (a nested draft/ directory, and a 404.html in a subdirectory of
+    # the top-level draft/, keep the live list) under both site/ and opf/site/, and the reference rule still
+    # holds a draft 404 page to root-absolute URLs.
+    draft_404_cases = (
+        ("draft-404/draft-name-passes-on-draft", '<img src="/t.png" alt="">', True, ""),
+        ("draft-404/draft-name-fails-on-live", '<img src="/t.png" alt="">', False,
+         "element <img> is not in the 404-page element allowlist"),
+        ("draft-404/unlisted-element-fails-on-draft", "<style>p{}</style>", True,
+         "element <style> is not in the draft 404-page element allowlist"),
+        ("draft-404/unlisted-attribute-fails-on-draft", '<a href="/" ping="/p">H</a>', True,
+         "attribute ping on <a> is not in the draft 404-page attribute allowlist"),
+        ("draft-404/draft-fill-passes-on-draft", '<svg fill="none"></svg>', True, ""),
+        ("draft-404/live-fill-fails-on-draft", '<svg fill="var(--accent)"></svg>', True,
+         "fill value on a 404 page is not one the draft 404 pages use"),
+        ("draft-404/onclick-fails-on-draft", '<button type="button" onclick="toggleNav()">B</button>', True,
+         "onclick value on a 404 page is not one the draft 404 pages use"),
+        ("draft-404/inline-script-fails-on-draft", "<script>x()</script>", True,
+         "inline <script> on a 404 page is not a pinned script body"),
+    )
+    for label, markup, is_draft, message in draft_404_cases:
+        got = not_found_structure_findings("404.html", markup, draft=is_draft)
+        if (message == "" and got) or (message and not any(message in f for f in got)):
+            failures.append("{}: expected {!r}, got {!r}".format(label, message or "no finding", got))
+    with tempfile.TemporaryDirectory() as d:
+        r = Path(d)
+        (r / "site" / "draft").mkdir(parents=True)
+        (r / "site" / "sub" / "draft").mkdir(parents=True)
+        (r / "site" / "draft" / "x" / "y").mkdir(parents=True)
+        (r / "opf" / "site" / "draft" / "x" / "y").mkdir(parents=True)
+        for subdir in COVERAGE_ROOTS:
+            (r / subdir / "t.png").write_bytes(b"png")
+            (r / subdir / "index.html").write_text(
+                '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png">', encoding="utf-8")
+        draft_page = '<!doctype html><title>t</title><img src="/t.png" alt="">'
+        scan_cases = (
+            ("draft-404/scan-top-level-draft-passes", "site", "draft/404.html", draft_page, 0, ""),
+            ("draft-404/scan-nested-draft-keeps-live-list", "site", "sub/draft/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/scan-draft-subdir-keeps-live-list", "site", "draft/x/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/scan-draft-deep-subdir-keeps-live-list", "site", "draft/x/y/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/scan-draft-relative-src-fails", "site", "draft/404.html",
+             '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
+             "src on a 404 page must be root-absolute"),
+            ("draft-404/opf-scan-top-level-draft-passes", "opf/site", "draft/404.html", draft_page, 0, ""),
+            ("draft-404/opf-scan-draft-subdir-keeps-live-list", "opf/site", "draft/x/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/opf-scan-draft-deep-subdir-keeps-live-list", "opf/site", "draft/x/y/404.html",
+             draft_page, 1, "element <img> is not in the 404-page element allowlist"),
+        )
+        for label, subdir, page_rel, markup, want, message in scan_cases:
+            (r / subdir / page_rel).write_text(markup, encoding="utf-8")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                got = _scan_root(r, subdir)
+            (r / subdir / page_rel).unlink()
+            if got != want or message not in out.getvalue():
+                failures.append("{}: expected exit {} and {!r}, got {} {!r}".format(
+                    label, want, message, got, out.getvalue()))
     with tempfile.TemporaryDirectory() as d2:
         if quiet(run, Path(d2)) != 0:
             failures.append("coverage: neither root present did not pass clean")
@@ -715,8 +874,9 @@ def _self_test():
             print("  - " + x)
         return 1
     print("PASS: check_site self-test ({} logo cases + {} 404-page logo cases + {} SITE_HOSTS env cases + "
-          "coverage-root legs + {} registered checks)".format(len(cases), len(not_found_cases),
-                                                             len(host_cases), len(EXECUTED)))
+          "coverage-root legs + {} opfiles draft cases + 5 per-root host cases + {} draft 404 cases + {} "
+          "registered checks)".format(len(cases), len(not_found_cases), len(host_cases), len(draft_cases),
+                                      len(draft_404_cases) + len(scan_cases), len(EXECUTED)))
     return 0
 
 
@@ -1094,6 +1254,7 @@ def main():
 def _scan_root(root, subdir):
     site = root / subdir
     site_root = site.resolve()
+    hosts = ROOT_HOSTS.get(subdir, SITE_HOSTS)
     docs, ids_by_path, findings = [], {}, []
     try:
         html_files = sorted(walk_files(site, suffixes={".html"}))
@@ -1126,10 +1287,13 @@ def _scan_root(root, subdir):
                 findings.append("{}:{}: en dash".format(rel, number))
             if EM in line:
                 findings.append("{}:{}: em dash".format(rel, number))
-        # Both 404 rules read the raw text, not the parsed page.
+        # Both 404 rules read the raw text, not the parsed page. The draft 404 page (only <root>/draft/404.html,
+        # directly under the root's top-level draft/) is held to the draft structural allowlist; a 404.html any
+        # deeper keeps the live list. The reference rule is the same for every 404 page.
         if f.name == NOT_FOUND_PAGE:
             findings.extend(not_found_reference_findings(rel, text))
-            findings.extend(not_found_structure_findings(rel, text))
+            findings.extend(not_found_structure_findings(
+                rel, text, draft=f.relative_to(site).parts == (DRAFT_DIR, NOT_FOUND_PAGE)))
         if page is None:
             findings.append("{}: could not parse as HTML".format(rel))
             continue
@@ -1148,7 +1312,7 @@ def _scan_root(root, subdir):
             v = value.strip()
             if not v:
                 continue
-            classified = classify(v)
+            classified = classify(v, hosts)
             if classified is None:
                 continue
             pathpart, frag = classified

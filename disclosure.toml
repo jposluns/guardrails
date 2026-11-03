@@ -159,8 +159,18 @@ label = "the generated Claude Code hooks plugin under plugin/ and its source und
 prefix = ".aiqt/core/hooks/"
 label = "the generated Claude Code hooks plugin under plugin/ and its source under .aiqt/core/hooks/"
 
+[[code]]
+prefix = ".baseline/check_palette.py"
+label = ".baseline/check_palette.py, the palette contrast gate vendored from the site template"
+
 [[noncode]]
 prefix = ".aiqt/"
+
+[[noncode]]
+prefix = ".baseline/opfiles-pin.toml"
+
+[[noncode]]
+prefix = ".baseline/pin.toml"
 
 [[noncode]]
 prefix = ".claude/"

@@ -115,6 +115,12 @@ run_gate "newtab-selftest" python3 -I -B tools/check_newtab.py --self-test
 run_gate "newtab" python3 -I -B tools/check_newtab.py
 run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
+run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
+run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
+run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
+run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
+run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
 run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
 run_gate "security-txt" python3 -I -B tools/check_security_txt.py
 run_gate "sitemap-selftest" python3 -I -B tools/check_selftest_execution.py --suite sitemap-selftest

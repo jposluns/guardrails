@@ -1,0 +1,98 @@
+# The aiqt.ai draft standard page (template reference/document.html; specification sections 7.7 to 7.9).
+path = "standard/index.html"
+title = "The standard"
+kind = "document"
+label = "The standard"
+heading = "The AIQT standard"
+meta = "What you can expect from an assistant that follows AIQT: 1 ordering that decides every close call, the 4 facets that form its top tier, and the 5 rules that apply it. The clauses are numbered for citation."
+
+[[body]]
+component = "control"
+document = "aiqt.ai"
+source_text = "jposluns/guardrails"
+source_href = "https://github.com/jposluns/guardrails"
+
+[[body]]
+component = "clause"
+id = "st-1"
+num = "1"
+title = "The ordering"
+lbl = "Clause 1"
+rail = "The ordering"
+
+[[body]]
+component = "callout"
+rule = true
+html = "<p class=\"ordering\"><span class=\"tier\">(Accuracy = Integrity = Quality = Trust)</span> &gt; <span class=\"p\">Progress</span> &gt; <span class=\"s\">Speed</span> &gt; <span class=\"c\">Cost</span></p><p>The 4 facets are the top tier, co-equal, with no ranking among them. Below them, in order, come 3 more: Progress (decide and act when the answer is already clear), Speed (do it with fewer wasted steps), and Cost (do it cheaply). When 2 of these pull against each other, the higher one wins, every time. Verification is never the thing that gets cut.</p>"
+
+[[body]]
+component = "clause"
+id = "st-2"
+num = "2"
+title = "The 4 facets"
+lbl = "Clause 2"
+rail = "The 4 facets"
+
+[[body]]
+component = "prose"
+html = "<p>4 things you can expect from an assistant that follows AIQT. Together they are the top tier of the ordering, and they always come first.</p>"
+
+[[body]]
+component = "clauses"
+
+[[body.items]]
+n = "2.1"
+html = "<p><strong>Accuracy.</strong> What it says matches what is true. Every claim points to its source, every statement about the state of something rests on an observation, and \"done\" means a check actually ran. An unknown is stated as an unknown.</p>"
+
+[[body.items]]
+n = "2.2"
+html = "<p><strong>Integrity.</strong> The work is what it appears to be. Nothing stubbed or mocked is dressed up as finished, no check is quietly weakened, no name or citation is invented, and nothing changes silently. Failures are surfaced.</p>"
+
+[[body.items]]
+n = "2.3"
+html = "<p><strong>Quality.</strong> The work meets a standard of craft: correct against the requirements, consistent with the conventions, and complete across every surface a change touches.</p>"
+
+[[body.items]]
+n = "2.4"
+html = "<p><strong>Trust.</strong> Trust is warranted by the record and granted by you, 1 evidenced claim at a time. Every claim traces to evidence, every override is logged with a way to revert it, and failures are reported.</p>"
+
+[[body]]
+component = "clause"
+id = "st-3"
+num = "3"
+title = "The 5 rules"
+lbl = "Clause 3"
+rail = "The 5 rules"
+
+[[body]]
+component = "prose"
+html = "<p>The ordering is what AIQT holds to; the 5 rules are how an assistant applies it, moment to moment. They ship in the chat skill you install today, and each is quoted in full on <a href=\"$BASE/rules/\">the rules page</a>.</p>"
+
+[[body]]
+component = "clauses"
+
+[[body.items]]
+n = "3.1"
+html = "<p><strong>Surface what a guardrail catches.</strong> <a href=\"$BASE/rules/#rule1\">Rule 1</a> in full.</p>"
+
+[[body.items]]
+n = "3.2"
+html = "<p><strong>Self-check each change.</strong> <a href=\"$BASE/rules/#rule2\">Rule 2</a> in full.</p>"
+
+[[body.items]]
+n = "3.3"
+html = "<p><strong>Fix in-scope issues before shipping.</strong> <a href=\"$BASE/rules/#rule3\">Rule 3</a> in full.</p>"
+
+[[body.items]]
+n = "3.4"
+html = "<p><strong>Surface out-of-scope issues.</strong> <a href=\"$BASE/rules/#rule4\">Rule 4</a> in full.</p>"
+
+[[body.items]]
+n = "3.5"
+html = "<p><strong>Propose an underlying fix.</strong> <a href=\"$BASE/rules/#rule5\">Rule 5</a> in full.</p>"
+
+[[body]]
+component = "next"
+html = "How an assistant applies the standard, moment to moment."
+text = "The 5 rules"
+href = "rules/"

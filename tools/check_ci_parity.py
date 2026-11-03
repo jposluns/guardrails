@@ -588,6 +588,12 @@ REPO_GATES = frozenset({
     ".github/check_newtab_contract.py",
 })
 
+# The pinned build gates copied from the shared site template package, each named; no general .baseline
+# executable allowance. The pin gate (tools/check_baseline_pin.py) holds their bytes.
+PINNED_BUILD_GATES = frozenset({
+    ".baseline/check_palette.py",
+})
+
 # The one status branch protection requires. In a workflow with more than one job,
 # exactly one job carries this name, a job-level if: of always(), and a needs: list
 # naming every other job exactly once (module docstring, REQUIRED STATUS).
@@ -1246,7 +1252,8 @@ def normalize(tokens, masked_ok=False, raws=None):
                 "dynamic-target",
                 "gate target must be a literal tools/*.py path",
             )
-        if (target not in REPO_GATES and not PY_TARGET_RE.fullmatch(target)
+        if (target not in REPO_GATES and target not in PINNED_BUILD_GATES
+                and not PY_TARGET_RE.fullmatch(target)
                 or ".." in target.split("/")):
             return Result(
                 False,
@@ -1254,7 +1261,7 @@ def normalize(tokens, masked_ok=False, raws=None):
                 "gate-target",
                 "unsupported gate target {!r}; expected a literal "
                 "tools/*.py path, {} or gitleaks dir".format(
-                    target, " or ".join(sorted(REPO_GATES))),
+                    target, " or ".join(sorted(REPO_GATES | PINNED_BUILD_GATES))),
             )
         canonical = [target]
 
@@ -5369,6 +5376,16 @@ def self_test():
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
                   ci_fixture(common + (unknown,)), ()), 2)
+    # The pinned palette gate is accepted by its exact path on both runners; a sibling under .baseline/
+    # is still refused, so the allowance is the one named file.
+    palette = "python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css"
+    case("01i pinned build gate matched",
+         evaluate(local_fixture(common + (palette,)), ci_fixture(common + (palette,)), ()), 0)
+    case("01j pinned build gate local-only",
+         evaluate(local_fixture(common + (palette,)), ci_fixture(common), ()), 1, ("local-only",))
+    sibling = "python3 -I -B .baseline/other.py"
+    case("01k unpinned .baseline executable refused",
+         evaluate(local_fixture(common + (sibling,)), ci_fixture(common + (sibling,)), ()), 2)
 
     fail_without_change = evaluate(
         local_fixture(common + (
