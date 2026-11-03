@@ -401,6 +401,26 @@ class = "pack-immutable"
 path = "site/js/install.js"
 class = "pack-immutable"
 
+[[release-class]]
+path = "site/sitemap.xml"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/.well-known/security.txt"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/_headers"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/llms.txt"
+class = "pack-immutable"
+
+[[release-class]]
+path = "site/assets/baseline/logos/aiqt-touch.png"
+class = "pack-immutable"
+
 # --- concern-1: the opfiles.ai site subtree (opf/site) -------------------------------------------------
 # The opfiles.ai website: the served site pages live directly under opf/site (Cloudflare Pages builds
 # opf/site as the site root). Hand-authored shippable site content, same class as the site/ pages above.
@@ -474,9 +494,13 @@ note = "The documented adopter vendoring location; reserved, never a pack-immuta
 # them (a line-ending conversion would refuse every store verb). It is marked binary so git applies no text
 # conversion, filter or attribute to it; its bytes are pinned by SHIPPED_DECLARATION_SHA256 and the release
 # manifest.
+# site/assets/baseline/logos/aiqt-touch.png and opf/site/assets/baseline/logos/opfiles-touch.png are the
+# Apple touch icons copied byte for byte from the shared site template (baseline 1.3.1, CC0 1.0). They are
+# PNG images, so they are marked binary: git applies no text conversion and byte-canon does not read them;
+# their bytes match the template's SHA256SUMS and are pinned by the release manifest.
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml", "site/assets/baseline/logos/aiqt-touch.png", "opf/site/assets/baseline/logos/opfiles-touch.png"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 

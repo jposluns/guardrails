@@ -1,0 +1,20 @@
+# AIQT Guardrails
+
+AIQT Guardrails holds your AI assistant to one standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Open source.
+
+## Key pages
+
+- [Add AIQT to your assistant](/install): add AIQT to your chat assistant on one page: pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, get the file it needs, and follow a short guide.
+- [The standard](/standard): the AIQT standard in plain terms: the four things it holds your assistant to (Accuracy, Integrity, Quality, Trust) and the one priority ordering that decides every close call.
+- [The five rules](/rules): the five working rules of AIQT: surface what a guardrail catches, re-anchor the standard with a self-check, fix in-scope issues before shipping, surface out-of-scope issues, and propose an underlying guardrail.
+- [Examples](/examples): five real tradeoffs shown both ways: what happens without AIQT when speed, cost, or progress wins, and what happens with AIQT when the standard holds the line.
+- [Learn more](/learn): go deeper on AIQT: the standard itself, AIQT in action, how it works, where it is going, and the evidence behind it.
+- [The development assistant](/development): the AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects.
+- [Technical details](/tech-details): the technical detail of the AIQT development assistant, which is in development: the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.
+- [Enforcement register](/enforcement): every rule and the shipped mechanical controls linked to it; a link records that a control exists, not complete coverage.
+- [Evidence](/evidence): the evidence behind AIQT: the release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history.
+- [Disclosure](/disclosure): the AIQT disclosure matrix: for each thing AIQT does, the claim and its limitation side by side, each pointing to the evidence.
+- [Mappings](/mappings): a navigational crosswalk from the pack's mapped rules to security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA); no framework publisher endorses or is affiliated with this pack.
+- [Roadmap](/roadmap): where AIQT is now and where it is going: the chat assistant is available now, the development assistant is in development, and Teams and Enterprise are ideas we are considering.
+- [Teams and Enterprise](/teams): one shared governance standard for AI-assisted work, designed to be portable across the tools a team uses, with claims that trace to evidence and overrides that are logged.
+- [About](/about): where AIQT comes from: it began inside the GRC Library, a public documentation project written under an AI-managed workflow, and became a portable standard in its own right.
