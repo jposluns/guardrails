@@ -23706,15 +23706,22 @@ def _orch_lexed_amp_places(command, amps):
 # one inside single quotes), and removing such a pair can glue a start word on the next line to the word
 # before it, so a start form in EITHER text keeps the scan's verdict: removing the pairs never lifts a deny
 # the first text gives. '<<<', '<(' and '>(' have no lookbehind, so the second text reads them wherever they
-# sit. A form split by a pair bash joins right after a pair bash does not join is read by the second text
-# when that pair's backslash follows a blank (: \\<newline>ev\<newline>al), and a start word is when the
-# pair ends a bare comment line (#\<newline>sou\<newline>rce); after a pair inside single quotes bash glues
-# the word to the quoted word and runs no start word. Neither text reads the start words coproc, eval,
-# setsid, disown and source, or a '.', split by a pair bash joins right after a pair bash does not join
-# that has a word before it (: x\\<newline>ev\<newline>al, or # c\<newline>sou\<newline>rce), nor a '.'
-# split that way after a bare comment line ending in a backslash: the second text glues it to the word
-# before it and the first keeps it split, so the no-'&' allow is taken although bash runs the form (a
-# disclosed residual). A word that matches only after a removal, or one in a body or comment, reads as a
+# sit, whatever is glued in front. The start words and the '.' have one, and it alone decides whether a
+# start word or a '.' split by a pair bash joins, right after a pair bash does not join, is read: the first
+# text keeps it split, and the second glues it to the last character before that pair's backslash (before
+# both backslashes of an escaped one) that is not a quote or a backslash (at the start of the text,
+# nothing, which reads as a blank does). The start words coproc, eval, setsid, disown and source refuse a
+# match when that character is a word character, a '.' or a '-' (: x\\<newline>ev\<newline>al,
+# # c\<newline>sou\<newline>rce, #-\<newline>sou\<newline>rce) and match after any other (a blank in
+# : \\<newline>ev\<newline>al, a '/' in : /\\<newline>ev\<newline>al, the '#' of a bare comment line in
+# #\<newline>sou\<newline>rce). The '.' matches only when that character is a blank, ';', '|', '(', '{' or
+# backquote (: \\<newline>.\<newline> f), so it is missed after any other, a bare comment line's '#'
+# included (#\<newline>.\<newline> f). Where such a split form is missed after a pair whose backslash is
+# escaped or that ends a comment line, the no-'&' allow is taken although bash runs the form (a disclosed
+# residual). A start word right after a pair inside single quotes, before the closing quote or directly
+# after it (echo 'x\<newline>'eval), is part of the quoted word, so bash runs no start word there; one after
+# a blank or ';' that follows the closing quote (echo 'x\<newline>'; ev\<newline>al) runs, and the second
+# text reads it. A word that matches only after a removal, or one in a body or comment, reads as a
 # start form all the same, which only keeps the scan's verdict. A '.' right after a ')' is not read (prose
 # ends a sentence that way far more often than a case pattern runs '.'), nor is a start word built at run
 # time (from a variable or an ANSI-C escape).
@@ -23728,10 +23735,14 @@ def _orch_runtime_start_readings(command):
     the scan's verdict: the command with every quote and backslash removed, which reads a start word written
     whole (one after a pair bash does not join included), and the command with every backslash-newline pair
     removed first, then every quote and backslash, which reads a form split by a pair bash joins. A start word
-    or a '.' split by a pair bash joins right after a pair bash does not join that has a word before it, or a
-    '.' split that way after a bare comment line ending in a backslash, matches in neither (the second text
-    glues it to the word before it), a disclosed residual; '<<<', '<(' and '>(' match in the second text
-    wherever they sit, and after a pair inside single quotes bash runs no start word."""
+    or a '.' split by a pair bash joins right after a pair bash does not join stays split in the first text,
+    and the second glues it to the last character before that pair's backslash (before both backslashes of an
+    escaped one) that is not a quote or a backslash: a start word then matches in neither when that character
+    is a word character, a '.' or a '-', and a '.' when it is anything but a blank, ';', '|', '(', '{' or
+    backquote, a disclosed residual after a pair whose backslash is escaped or that ends a comment line.
+    '<<<', '<(' and '>(' have no lookbehind and match in the second text wherever they sit. A start word right
+    after a pair inside single quotes, before the closing quote or directly after it, is part of the quoted
+    word, so bash runs no start word there."""
     return (command.translate(_ORCH_RUNTIME_START_UNQUOTE),
             command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
 

@@ -3000,13 +3000,31 @@ _TRKASY_RUNTIME_START_UNJOINED_FORMS = (
     ("unjoined-single-quote-closed-after-eval", "echo 'x\\\neval' \"sleep 5 $(printf '\\x26')\""),
 )
 # DISCLOSED RESIDUAL, not a deny: a start word or a '.' split by a pair bash joins, right after a pair bash
-# does not join that has a word before it (or a '.' split that way after a bare comment line ending in a
-# backslash), matches in neither text the search reads (the pairs removed glue it to the word before it;
-# kept, it stays split), so the no-'&' allow is taken although bash runs the form. These rows assert that
-# CURRENT allow, so a change that makes either shape deny fails here and has to update them.
+# does not join (its backslash escaped, or ending a comment line), stays split in the first text the search
+# reads, and the second glues it to the last character before that pair's backslash (before both
+# backslashes of an escaped one) that is not a quote or a backslash. A start word then matches in neither
+# when that character is a word character, a '.' or a '-', and a '.' when it is anything but a blank, ';',
+# '|', '(', '{' or backquote (a bare comment line's '#' included), so the no-'&' allow is taken although
+# bash runs the form. These rows assert that CURRENT allow for every start word after each kind of pair,
+# a '.' and a '-' as the glued character, and both '.' shapes, so a change that makes any of them deny
+# fails here and has to update them.
 _TRKASY_RUNTIME_START_MIXED_RESIDUAL_FORMS = (
     ("mixed-escaped-backslash-split-eval", ": x\\\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
     ("mixed-comment-split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n# c\\\nsou\\\nrce /abs/j.sh"),
+    ("mixed-escaped-backslash-split-coproc", ": x\\\\\nco\\\nproc sleep 5"),
+    ("mixed-escaped-backslash-split-setsid", ": x\\\\\nset\\\nsid -f sleep 5"),
+    ("mixed-escaped-backslash-split-disown", ": x\\\\\ndis\\\nown -a"),
+    ("mixed-escaped-backslash-split-source",
+     "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n: x\\\\\nsou\\\nrce /abs/j.sh"),
+    ("mixed-comment-split-coproc", "# c\\\nco\\\nproc sleep 5"),
+    ("mixed-comment-split-eval", "# c\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("mixed-comment-split-setsid", "# c\\\nset\\\nsid -f sleep 5"),
+    ("mixed-comment-split-disown", "# c\\\ndis\\\nown -a"),
+    ("mixed-escaped-backslash-glued-dot-split-eval", ": x.\\\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("mixed-comment-glued-dash-split-source",
+     "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n#-\\\nsou\\\nrce /abs/j.sh"),
+    ("mixed-escaped-backslash-split-dot", "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n: x\\\\\n.\\\n /abs/j.sh"),
+    ("mixed-bare-comment-split-dot", "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n#\\\n.\\\n /abs/j.sh"),
 )
 # eval spelled with quotes or a backslash, which bash removes before it runs the word.
 _TRKASY_RUNTIME_START_QUOTED_FORMS = (
@@ -3040,9 +3058,9 @@ def _test_trkasy_no_amp(failures, tmp):
     with a start word after a pair bash does not join is red with the search reading only the text with
     every pair removed; the disown-alone rows are red with disown removed from the pattern; and the e'v'al
     and ev\\al rows are red with the search reading the raw command ("eval" and \\eval match there too, so
-    those rows deny either way). Each disclosed-residual row (a start word split by a pair bash joins, right
-    after a pair bash does not join that has a word before it) allows, the current behaviour, so a change that
-    makes that row deny shows here."""
+    those rows deny either way). Each disclosed-residual row (a start word or a '.' split by a pair bash
+    joins, right after a pair bash does not join, glued by the pairs removed to a character its lookbehind
+    refuses) allows, the current behaviour, so a change that makes that row deny shows here."""
     root = tmp / "trkasy-noamp"
     (root / ".aiqt").mkdir(parents=True)
     (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
@@ -3072,8 +3090,10 @@ def _test_trkasy_no_amp(failures, tmp):
     for label, command in _TRKASY_RUNTIME_START_MIXED_RESIDUAL_ROWS:
         got = _decision(handler, command, cwd=str(root))
         if got != "allow":
-            failures.append("({}) disclosed residual (a split start form right after a pair bash does not "
-                            "join) allows today; got {}, so update this row and the residual it pins"
+            failures.append("({}) disclosed residual (a start word or '.' split by a pair bash joins, right "
+                            "after a pair bash does not join, glued to the last character before that "
+                            "pair's backslash that is not a quote or backslash, one its lookbehind refuses) "
+                            "allows today; got {}, so update this row and the residual it pins"
                             .format(label, got))
     readings = aiqt_hooks._orch_runtime_start_readings
     pattern = aiqt_hooks._ORCH_RUNTIME_START_RE
