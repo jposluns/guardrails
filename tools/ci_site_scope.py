@@ -94,8 +94,8 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 # No further import here: the scope job extracts this file ALONE from the base tree and runs
 # --ci-decide outside the repository, so the decision path must need nothing beside the standard
-# library. The self-test's exit-report sibling is imported lazily (_exit_report), never on the
-# --ci-decide path.
+# library. The self-test's exit-report and fixture-environment siblings are imported lazily
+# (_exit_report, _git_env), never on the --ci-decide path.
 
 
 def _exit_report():
@@ -436,14 +436,16 @@ def _patched(**replacements):
 
 
 def _git_env():
-    """A scrubbed environment for fixture git: no inherited GIT_* variable, no user or system
-    config, a fixed identity, and the PATH needed to find git."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
-    env["GIT_CONFIG_GLOBAL"] = os.devnull
-    env["GIT_CONFIG_SYSTEM"] = os.devnull
-    env["GIT_AUTHOR_NAME"] = env["GIT_COMMITTER_NAME"] = "fixture"
-    env["GIT_AUTHOR_EMAIL"] = env["GIT_COMMITTER_EMAIL"] = "fixture@example.invalid"
-    return env
+    """The hermetic environment for fixture git and for the CLI children the self-test launches:
+    the shared fixture scrub (tools/_git_fixture_env.py: no inherited GIT_* variable, HOME and
+    XDG_CONFIG_HOME pointed at a scratch home, the global and system config pinned to os.devnull,
+    the no-auto-maintenance pins) plus a fixed identity, so no git call of the self-test reads the
+    caller's configuration. Imported here, never on the --ci-decide path, which must run alone."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from _git_fixture_env import git_fixture_env
+    return git_fixture_env(GIT_AUTHOR_NAME="fixture", GIT_COMMITTER_NAME="fixture",
+                           GIT_AUTHOR_EMAIL="fixture@example.invalid",
+                           GIT_COMMITTER_EMAIL="fixture@example.invalid")
 
 
 def _fixture_git(path, *args, env):
@@ -659,16 +661,18 @@ def self_test(report_path=None):
         check("revert/train-prefix-dropped-red",
               train_head("pull_request", "feature-x", "o/r", "o/r"), True)
     # ---------- the CLI over synthetic repos, as the workflow runs it ----------
+    # The probe runs under the fixture environment too: git reads the caller's global config even
+    # for --version, so a malformed caller config would otherwise read as git being unavailable.
+    env = _git_env()
     git_probe = 1
     try:
         git_probe = subprocess.run(["git", "--version"], capture_output=True,
-                                   timeout=GIT_TIMEOUT).returncode
+                                   timeout=GIT_TIMEOUT, env=env).returncode
     except OSError:
         git_probe = 1
     if git_probe != 0:
         FAILURES.append("cli/: git is unavailable, the CLI vectors cannot run")
     else:
-        env = _git_env()
         with tempfile.TemporaryDirectory() as scratch:
             repo, base = _fixture_repo(Path(scratch), env)
             (repo / "site" / "index.html").write_text("b\n")

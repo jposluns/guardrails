@@ -714,6 +714,13 @@ CONFIG_EXCLUSIONS = {
             " and as the direct self-test launch CONFIG_DIRECT_SELFTESTS keeps, so each poisoned"
             " lane still enters that self-test's own entry point without any launcher sanitizing"
             " the environment first.",
+        ("tools/ci_site_scope.py",):
+            "A bare launch is a usage error by design, not a self-test: the tool runs only with a"
+            " mode flag, so with none it prints its usage and exits 2 (cannot evaluate) in every"
+            " lane and under any configuration, running no git (its self-test pins that exit as"
+            " launch/no-arguments-exit-2); its self-test stays in this roster as the direct"
+            " --self-test launch, registered in both CI and the standalone runner, and as the"
+            " ci-site-scope-selftest suite step.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
