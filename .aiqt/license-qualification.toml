@@ -25,7 +25,31 @@
 # rights-waiving licence too (rows are validated whether or not class 3 scans); a second
 # occurrence beside an excused one still flags. An absent file means no declaration and no exceptions
 # (adopters own their configuration, like .aiqt/newtab.toml); a present but malformed file is
-# cannot-evaluate (exit 2), never a clean pass. This repository needs no exceptions, so this file
-# declares the licence identity and no [[exception]] rows.
+# cannot-evaluate (exit 2), never a clean pass. This repository declares the licence identity and
+# excuses only the draft licence pages' statements of the vendored site template's own licence.
 
 licence = "Apache-2.0"
+
+[[exception]]
+path = "site/draft/license/index.html"
+phrase = "cc0"
+occurrence = 1
+reason = "names the licence of the vendored site template's runtime files (third-party material under its own terms), not a waiver of this project's rights"
+
+[[exception]]
+path = "site/draft/license/index.html"
+phrase = "cc0"
+occurrence = 2
+reason = "states that the template's fonts and marks are outside the vendored template's own licence, not a waiver of this project's rights"
+
+[[exception]]
+path = "opf/site/draft/license/index.html"
+phrase = "cc0"
+occurrence = 1
+reason = "names the licence of the vendored site template's runtime files (third-party material under its own terms), not a waiver of this project's rights"
+
+[[exception]]
+path = "opf/site/draft/license/index.html"
+phrase = "cc0"
+occurrence = 2
+reason = "states that the template's fonts and marks are outside the vendored template's own licence, not a waiver of this project's rights"

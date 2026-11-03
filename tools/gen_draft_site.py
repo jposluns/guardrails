@@ -1135,8 +1135,10 @@ def _body_html(site, page):
 # The link guard is a structural pass (html.parser) over each rendered page, so it sees every element and
 # attribute whatever its case or quoting. It enforces: no element that loads, embeds, submits or redirects
 # outside the link rules (LINK_REFUSED_TAGS, and a meta carrying http-equiv), except each script element
-# the shell itself writes (exactly src plus defer, with a src the shell chose, and once the head's scheme
-# script: exactly data-cfasync="false" then src, with the scheme src the shell chose); every URL attribute
+# the shell itself writes (exactly src plus defer, with a src the shell chose, and once the scheme script:
+# exactly data-cfasync="false" then src, with the scheme src the shell chose, wherever on the page it
+# appears; the guard does not check that it sits in the head, which render_page's order provides and the
+# shell self-test asserts); every URL attribute
 # (LINK_URL_ATTRS) is an https URL, a #fragment, a path under the site's base or one of its kept live
 # paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no "." or
 # ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries

@@ -42,7 +42,7 @@ d = "How the rules relate to ISO, NIST, OWASP, MITRE and CSA frameworks, and the
 
 [[body]]
 component = "value"
-html = "You cannot tell from the tone whether an assistant knows or is guessing. AIQT gives it 1 written standard: every claim is checked or marked as unchecked, shortcuts are reported, and done means the bar you set was met. You can then ask it to show its evidence and hold it to the answer. It installs in Claude, ChatGPT, Gemini, Copilot, and Copilot Studio, <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>. Results depend on the assistant and the model you use. Its 30 Claude Code hooks ship as an opt-in plugin; a guided install and setup doctor arrive with 1.1.0."
+html = "You cannot tell from the tone whether an assistant knows or is guessing. AIQT gives it 1 written standard: every claim is checked or marked as unchecked, shortcuts are reported, and done means the bar you set was met. You can then ask it to show its evidence and hold it to the answer. It installs in Claude, ChatGPT, Gemini, Copilot, and Copilot Studio, <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. Results depend on the assistant and the model you use. Its 30 Claude Code hooks ship as an opt-in plugin; a guided install and setup doctor arrive with 1.1.0."
 
 [[body]]
 component = "about"

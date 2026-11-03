@@ -19,7 +19,8 @@ symbolic link or other non-regular entry anywhere in a copy root, including the 
 The one exception to the copy-root rule is BUILD_TOOLS: the template's build tools that a site copies outside
 its served tree and pins in the same [files] table (only .baseline/check_palette.py, the palette gate). A
 pin may list such a path at its own repository path, beside its copy-root files; the gate hashes it as 1
-regular file, never following a symbolic link, and reports it missing, a symbolic link, not a regular file
+regular file (only its last component is checked for a symbolic link; a linked parent directory is
+followed), and reports it missing, a symbolic link, not a regular file
 or differing (exit 1), or unreadable (exit 2). Its directory gets no stray scan, since .baseline/ also holds
 the pins. Any other path outside a copy root is still cannot-evaluate, and a pin must list at least 1
 copy-root file. A pin that is missing, unreadable, over MAX_PIN_BYTES, not UTF-8, not TOML or not of the pinned shape, and
@@ -76,7 +77,9 @@ TOP_KEYS = {"version", "files"}
 # <prefix>assets/baseline.
 COPY_DIR = "assets/baseline"
 # The build tools a pin may list outside any copy root, each at exactly this repository path: the template's
-# palette gate, copied from the package's tools/ and run from the build command, never served.
+# palette gate, copied from the package's tools/, never served, and run by tools/run_all_checks.sh and the
+# Quality workflow (template specification section 4 item 3 also requires it in the Pages build command,
+# which is set outside this repository).
 BUILD_TOOLS = (".baseline/check_palette.py",)
 # The in-tree record of the template version every pin must name: the [vendored."site-template"] table of
 # the attribution file tools/gen_notice.py renders the root NOTICE from, read under the scanned root.
@@ -346,8 +349,9 @@ def _scan_pin(root, pin_rel, assigned, findings, errors, versions):
 
 
 def _check_tool(root, rel, digest, findings, errors):
-    """Check 1 pinned build tool: a regular file at its own path, never followed through a symbolic link,
-    whose bytes match the pin."""
+    """Check 1 pinned build tool: a regular file at its own path whose bytes match the pin. Only the last
+    path component is checked for a symbolic link (os.lstat); a symbolic link among its parent directories,
+    such as .baseline/ itself, is followed, and the file is then opened by path."""
     path = Path(root) / rel
     try:
         mode = os.lstat(path).st_mode

@@ -444,8 +444,9 @@ path = ".baseline/opfiles-pin.toml"
 class = "pack-immutable"
 
 # The site template's palette gate, copied byte for byte from the template package's tools/check_palette.py and
-# pinned in both baseline pins; run by tools/run_all_checks.sh, the Quality workflow and the Pages build command,
-# never served.
+# pinned in both baseline pins; run by tools/run_all_checks.sh and the Quality workflow (template specification
+# section 4 item 3 also requires it in the Pages build command, which is set outside this repository), never
+# served.
 [[release-class]]
 path = ".baseline/check_palette.py"
 class = "pack-immutable"

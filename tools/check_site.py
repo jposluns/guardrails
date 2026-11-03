@@ -43,9 +43,9 @@ page is reported by this rule and by the touch-icon rule below, so it is listed 
 
 404 structure: that list of attributes cannot name every way markup loads a resource, so a 404 page is also
 held, fail closed, to the element and attribute names the live 404 pages use: any other name the raw scan
-finds is a finding naming the page, line and name. A 404 page under the root's top-level draft/ (served at
-any missing /draft/ URL, built from the site template) is held the same way to the names the two draft 404
-pages use instead. On the allowed names, any value and any script or style
+finds is a finding naming the page, line and name. The 404 page directly under the root's top-level draft/
+(draft/404.html, served at any missing /draft/ URL, built from the site template) is held the same way to
+the names the two draft 404 pages use instead; a 404.html any deeper under draft/ keeps the live names. On the allowed names, any value and any script or style
 text containing "url(" (any case, as written or decoded) is a finding, a meta element may carry only the
 attributes the live pages use on meta, onclick and the SVG presentation attributes only the values they use,
 a script without src only a body whose sha256 is pinned, and a script with src only an empty body. A
@@ -414,7 +414,8 @@ NOT_FOUND_PRESENTATION = {
 NOT_FOUND_INLINE_SCRIPT_SHA256 = frozenset((
     "26b7f1c5bd8e7e7ac8723806089d3d541b9957a89cecd01a7a2bf2d96e622aae",
 ))
-# The draft 404 pages (a 404.html under the root's top-level draft/, served at any missing /draft/ URL) are
+# The draft 404 pages (the 404.html directly under each root's top-level draft/, served at any missing /draft/
+# URL) are
 # built from the site template, not from the live pages, so they are held to their own structural allowlist,
 # fail closed in the same way. Derived by running raw_tags over the two draft 404 pages (site/draft/404.html
 # and opf/site/draft/404.html, rendered by tools/gen_draft_site.py) and taking exactly the names, meta
@@ -799,8 +800,9 @@ def _self_test():
     # The draft 404 structural allowlist: a name only the draft 404 pages use passes on a draft 404 page and
     # stays a finding on a live one, a name neither uses is a finding on both, and a live-only presentation
     # value is a finding on a draft 404 page. Through _scan_root, only a 404.html directly under the root's
-    # top-level draft/ takes the draft list (a nested draft/ directory keeps the live list), and the
-    # reference rule still holds a draft 404 page to root-absolute URLs.
+    # top-level draft/ takes the draft list (a nested draft/ directory, and a 404.html in a subdirectory of
+    # the top-level draft/, keep the live list), and the reference rule still holds a draft 404 page to
+    # root-absolute URLs.
     draft_404_cases = (
         ("draft-404/draft-name-passes-on-draft", '<img src="/t.png" alt="">', True, ""),
         ("draft-404/draft-name-fails-on-live", '<img src="/t.png" alt="">', False,
@@ -825,6 +827,7 @@ def _self_test():
         r = Path(d)
         (r / "site" / "draft").mkdir(parents=True)
         (r / "site" / "sub" / "draft").mkdir(parents=True)
+        (r / "site" / "draft" / "x" / "y").mkdir(parents=True)
         (r / "site" / "t.png").write_bytes(b"png")
         (r / "site" / "index.html").write_text(
             '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png">', encoding="utf-8")
@@ -832,6 +835,10 @@ def _self_test():
         scan_cases = (
             ("draft-404/scan-top-level-draft-passes", "draft/404.html", draft_page, 0, ""),
             ("draft-404/scan-nested-draft-keeps-live-list", "sub/draft/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/scan-draft-subdir-keeps-live-list", "draft/x/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/scan-draft-deep-subdir-keeps-live-list", "draft/x/y/404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
             ("draft-404/scan-draft-relative-src-fails", "draft/404.html",
              '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
@@ -1273,13 +1280,13 @@ def _scan_root(root, subdir):
                 findings.append("{}:{}: en dash".format(rel, number))
             if EM in line:
                 findings.append("{}:{}: em dash".format(rel, number))
-        # Both 404 rules read the raw text, not the parsed page. A draft 404 page (under the root's top-level
-        # draft/) is held to the draft structural allowlist; the reference rule is the same for every 404 page.
+        # Both 404 rules read the raw text, not the parsed page. The draft 404 page (only <root>/draft/404.html,
+        # directly under the root's top-level draft/) is held to the draft structural allowlist; a 404.html any
+        # deeper keeps the live list. The reference rule is the same for every 404 page.
         if f.name == NOT_FOUND_PAGE:
-            page_parts = f.relative_to(site).parts
             findings.extend(not_found_reference_findings(rel, text))
             findings.extend(not_found_structure_findings(
-                rel, text, draft=len(page_parts) > 1 and page_parts[0] == DRAFT_DIR))
+                rel, text, draft=f.relative_to(site).parts == (DRAFT_DIR, NOT_FOUND_PAGE)))
         if page is None:
             findings.append("{}: could not parse as HTML".format(rel))
             continue
