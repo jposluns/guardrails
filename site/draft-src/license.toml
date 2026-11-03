@@ -1,0 +1,11 @@
+# The aiqt.ai draft licence page. A placeholder until the licence page's copy deck lands
+# (template specification section 7.16).
+path = "license/index.html"
+title = "Licence"
+kind = "document"
+label = "Draft"
+heading = "Licence"
+
+[[body]]
+component = "prose"
+html = "<p>The AIQT.ai licence page arrives here in a later draft.</p>"

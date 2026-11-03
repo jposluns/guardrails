@@ -2,12 +2,12 @@
 # the baseline version, then each copied runtime or licence file's path and SHA-256.
 # tools/check_baseline_pin.py checks the copy against this file offline (no network).
 # Update it only together with the copied files, when the pin moves to a new baseline version.
-version = "1.2.1"
+version = "1.3.1"
 
 [files]
 "site/draft/assets/baseline/LICENSE" = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
 "site/draft/assets/baseline/NOTICE.md" = "08b26141bb2ecf0f4cd76e599c21f888fc71c4b3ab7ba769e954f6eea37ac7f3"
-"site/draft/assets/baseline/baseline.css" = "2eca5c37df53360a3edcf29f2baf78eaa26b7da423dccbfc84e849636cbe1f18"
+"site/draft/assets/baseline/baseline.css" = "9d8e4d5307af49f607e89bcb3ac32a80d25f9e86253572b65559cd35cd4e16e9"
 "site/draft/assets/baseline/copy.js" = "9bf99b50471889b768c795af5a4f84f526cecf7622a1f1265ca3d088b31339a4"
 "site/draft/assets/baseline/fonts.css" = "a309a8ff4026a67fb5d10dea2c02e5b9ea2c1b32d4b18d7892015e038397396a"
 "site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt" = "c02c0002d3bbd41a16933c162888c400469c7029f1362ca9d60d5ed20ea7d157"
@@ -57,5 +57,6 @@ version = "1.2.1"
 "site/draft/assets/baseline/marks/linkedin-in-bug.png" = "3c0149f26168b5fe0f43e68664abe40341a6443b3cd435d18a73e12f64f8b600"
 "site/draft/assets/baseline/marks/orcid-id.svg" = "195be086656233fc1a0089086d9190d28dc6abce39c2290612d1893233e1f166"
 "site/draft/assets/baseline/palettes.css" = "c67ffe38a93d266150a0bd82ce141fb6e8b544ff6a8d210f70b3d84032650bf7"
+"site/draft/assets/baseline/rail.js" = "36535faf2df8637e694ff2a57af982b9c67c9f410f80d4dfceb193c4f2d601ca"
 "site/draft/assets/baseline/search.js" = "4f106660b503af5c770a05472f733ababb3a01f3514cd9d1bfe03b983490d88f"
 "site/draft/assets/baseline/select.js" = "2c4e1f1a2cc00c49dc013fd421b16c14cdc89eb873fc57f7768be90604d4bf90"

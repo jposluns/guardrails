@@ -1269,6 +1269,14 @@ count = 2
 class = "EXEMPT"
 reason = "test-code"
 
+[[site]]
+path = "tools/gen_draft_site.py"
+function = "_self_test.model"
+form = "call"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 # reparses the TOML this generator just rendered
 [[site]]
 path = "tools/gen_first_pin_demo.py"

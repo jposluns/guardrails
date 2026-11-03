@@ -1,0 +1,11 @@
+# The aiqt.ai draft disclosure page. A placeholder until the disclosure's copy deck lands
+# (template specification section 7.20).
+path = "disclosure/index.html"
+title = "Disclosure"
+kind = "document"
+label = "Draft"
+heading = "Disclosure"
+
+[[body]]
+component = "prose"
+html = "<p>The AIQT.ai disclosure arrives here in a later draft.</p>"

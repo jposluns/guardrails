@@ -1,0 +1,14 @@
+# The aiqt.ai draft home page. A placeholder until the landing page's copy deck lands: the About
+# region already sits where it will follow the value paragraph (template specification section 7.24).
+path = "index.html"
+title = "Home"
+kind = "document"
+label = "Draft"
+heading = "Draft in progress"
+
+[[body]]
+component = "prose"
+html = "<p>The new AIQT.ai pages arrive here one at a time.</p>"
+
+[[body]]
+component = "about"

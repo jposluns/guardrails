@@ -191,7 +191,8 @@ details ul ul { margin: 0.2rem 0 0.4rem; }
 .rail ol li a::before { counter-increment: r; content: counter(r); font: 400 0.8rem/1.6 "Newsreader", serif; color: var(--accent); font-variant-numeric: lining-nums; }
 .rail ul li a { grid-template-columns: 1fr; }
 .rail li a:hover { color: var(--text); }
-.rail li a[aria-current="true"] { color: var(--accent); }
+/* rail.js marks the section on screen with aria-current="location"; the "true" form is kept for pages built on 1.2.1 and earlier. */
+.rail li a[aria-current="location"], .rail li a[aria-current="true"] { color: var(--accent); }
 .rail > .lbl, .rail > ol, .rail > ul { margin-left: calc(100% * var(--logo-inset)); }
 
 /* Callouts: no border, label in the label column */

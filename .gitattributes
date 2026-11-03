@@ -659,6 +659,9 @@ site/downloads/aiqt/manifest.json text eol=lf
 site/downloads/aiqt/provenance.md text eol=lf
 site/downloads/mappings.csv text eol=lf
 site/downloads/mappings.json text eol=lf
+site/draft-src/disclosure.toml text eol=lf
+site/draft-src/home.toml text eol=lf
+site/draft-src/license.toml text eol=lf
 site/draft/assets/baseline/LICENSE text eol=lf
 site/draft/assets/baseline/NOTICE.md text eol=lf
 site/draft/assets/baseline/baseline.css text eol=lf
@@ -711,6 +714,7 @@ site/draft/assets/baseline/marks/github-invertocat-white.svg text eol=lf
 site/draft/assets/baseline/marks/linkedin-in-bug.png binary
 site/draft/assets/baseline/marks/orcid-id.svg binary
 site/draft/assets/baseline/palettes.css binary
+site/draft/assets/baseline/rail.js text eol=lf
 site/draft/assets/baseline/search.js text eol=lf
 site/draft/assets/baseline/select.js text eol=lf
 site/draft/disclosure/index.html text eol=lf

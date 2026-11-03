@@ -74,7 +74,7 @@ COVERAGE_ROOTS = (
     ("opf/site", "./disclosure", frozenset()),
 )
 
-# The staged draft under site/draft/ follows the shared site template (baseline 1.2.1), whose top bar has no
+# The staged draft under site/draft/ follows the shared site template (baseline 1.3.1), whose top bar has no
 # Disclosure item: the draft landing page links the disclosure page from its "About this project" region
 # (p.about), and the inner draft pages carry no disclosure link. So the live rule above covers every site/
 # page outside site/draft/, unchanged, and the draft rule covers the pages under it: exactly one

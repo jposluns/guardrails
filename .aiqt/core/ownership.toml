@@ -407,6 +407,11 @@ class = "pack-immutable"
 pattern = "site/draft/**"
 class = "pack-immutable"
 
+# The draft's page data files, 1 TOML file per page, the sources tools/gen_draft_site.py renders from.
+[[release-class]]
+pattern = "site/draft-src/**"
+class = "pack-immutable"
+
 # The baseline pin: version and SHA-256 of every file under each copy root, read by tools/check_baseline_pin.py.
 [[release-class]]
 path = ".baseline/pin.toml"

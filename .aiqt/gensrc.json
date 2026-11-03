@@ -385,7 +385,8 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "tools/gen_draft_site.py"
+        "tools/gen_draft_site.py",
+        "site/draft-src/disclosure.toml"
       ],
       "target": "site/draft/disclosure/index.html"
     },
@@ -393,7 +394,8 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "tools/gen_draft_site.py"
+        "tools/gen_draft_site.py",
+        "site/draft-src/home.toml"
       ],
       "target": "site/draft/index.html"
     },
@@ -401,7 +403,8 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "tools/gen_draft_site.py"
+        "tools/gen_draft_site.py",
+        "site/draft-src/license.toml"
       ],
       "target": "site/draft/license/index.html"
     },
