@@ -23696,35 +23696,39 @@ def _orch_lexed_amp_places(command, amps):
 # an open quote or an uncertain '#' in such a command still denies (_orch_foreground_detach_lexed). coproc
 # runs its command asynchronously; eval reads a string, and an '&' built in it at run time, as code;
 # setsid can return before its command finishes (always under -f); disown leaves a job no one waits for;
-# source and a lone '.' (one at the start, or after a blank, newline, ';', '|', '(', '{' or backquote, with
-# a blank after it) read a file as code, and a here-string (<<<) fed to a shell is code too; a process
-# substitution, <( ) or >( ), runs its command asynchronously. The search reads two texts, each with every
-# quote and backslash removed, so e'v'al, "eval" and \eval match as well: the command as written, which
-# reads a start form written whole, and the command with every backslash-newline pair removed first, which
-# reads a form split by a pair bash joins (ev\<newline>al is eval, <\<newline>( a process substitution)
-# whole. Not every pair is one bash joins (one whose backslash is itself escaped, one ending a comment line,
-# one inside single quotes), and removing such a pair can glue a start word on the next line to the word
-# before it, so a start form in EITHER text keeps the scan's verdict: removing the pairs never lifts a deny
-# the first text gives. '<<<', '<(' and '>(' have no lookbehind, so the second text reads them wherever they
-# sit, whatever is glued in front. The start words and the '.' have one, and it alone decides whether a
-# start word or a '.' split by a pair bash joins, right after a pair bash does not join, is read: the first
-# text keeps it split, and the second glues it to the last character before that pair's backslash (before
-# both backslashes of an escaped one) that is not a quote or a backslash (at the start of the text,
-# nothing, which reads as a blank does). The start words coproc, eval, setsid, disown and source refuse a
-# match when that character is a word character, a '.' or a '-' (: x\\<newline>ev\<newline>al,
-# # c\<newline>sou\<newline>rce, #-\<newline>sou\<newline>rce) and match after any other (a blank in
-# : \\<newline>ev\<newline>al, a '/' in : /\\<newline>ev\<newline>al, the '#' of a bare comment line in
-# #\<newline>sou\<newline>rce). The '.' matches only when that character is a blank, ';', '|', '(', '{' or
-# backquote (: \\<newline>.\<newline> f), so it is missed after any other, a bare comment line's '#'
-# included (#\<newline>.\<newline> f). Where such a split form is missed after a pair whose backslash is
-# escaped or that ends a comment line, the no-'&' allow is taken although bash runs the form (a disclosed
-# residual). A start word right after a pair inside single quotes, before the closing quote or directly
-# after it (echo 'x\<newline>'eval), is part of the quoted word, so bash runs no start word there; one after
-# a blank or ';' that follows the closing quote (echo 'x\<newline>'; ev\<newline>al) runs, and the second
-# text reads it. A word that matches only after a removal, or one in a body or comment, reads as a
-# start form all the same, which only keeps the scan's verdict. A '.' right after a ')' is not read (prose
-# ends a sentence that way far more often than a case pattern runs '.'), nor is a start word built at run
-# time (from a variable or an ANSI-C escape).
+# source and a lone '.' (one at the start, or after whitespace (a blank, a newline or other whitespace),
+# ';', '|', '(', '{' or a backquote, with a blank after it) read a file as code, and a here-string (<<<)
+# fed to a shell is code too; a process substitution, <( ) or >( ), runs its command asynchronously. The
+# search reads two texts, each with every quote and backslash removed, so e'v'al, "eval" and \eval match
+# as well: the command as written, which reads a start form written whole, and the command with every
+# backslash-newline pair removed first, which reads a form split by a pair bash joins (ev\<newline>al is
+# eval, <\<newline>( a process substitution) whole. Not every pair is one bash joins (one whose backslash
+# is itself escaped, one ending a comment line, one inside single quotes), and removing such a pair can
+# glue a start word on the next line to the word before it, so a start form in EITHER text keeps the scan's
+# verdict: removing the pairs never lifts a deny the first text gives. '<<<', '<(' and '>(' have no
+# lookbehind, so the second text reads them wherever they sit, whatever is glued in front. The start words
+# and the '.' have one: the start words coproc, eval, setsid, disown and source refuse a match after a word
+# character, a '.' or a '-', and the '.' matches only after whitespace (a blank, a newline or other
+# whitespace), ';', '|', '(', '{' or a backquote, or at the start of the text. When a start word, or a '.'
+# and the blank after it, is split by a backslash-newline pair and any other backslash-newline pair comes
+# before it in the command, the search may miss it: the first text keeps it split, and the second also
+# removes the earlier pair, so the split word can be glued to whatever stood before that pair, and where
+# its lookbehind refuses what is glued in front it is read in neither text. Where the search misses such a
+# form that bash runs, the no-'&' allow can be taken (a disclosed residual). Known shapes, examples and not
+# the full set, each missed in both contexts the self-test pins while bash runs the form:
+# : x\\<newline>ev\<newline>al, : x.\\<newline>ev\<newline>al, # c\<newline>sou\<newline>rce,
+# #-\<newline>sou\<newline>rce, : x\<newline>\\<newline>ev\<newline>al and
+# : x\\<newline>\\<newline>ev\<newline>al (each earlier pair removed, eval glued to the x),
+# : x\\<newline>.\<newline> f, : x\<newline>\\<newline>.\<newline> f and #\<newline>.\<newline> f. Others
+# are read: a blank in : \\<newline>ev\<newline>al, a '/' in : /\\<newline>ev\<newline>al and the '#' of a
+# bare comment line in #\<newline>sou\<newline>rce are not refused, nor is the blank in
+# : \\<newline>.\<newline> f. A start word right after a pair inside single quotes, before the closing quote
+# or directly after it (echo 'x\<newline>'eval), is part of the quoted word, so bash runs no start word
+# there; a start word later in the command can run, as eval does in echo 'x\<newline>'; ev\<newline>al,
+# which the second text reads. A word that matches only after a removal, or one in a body or comment, reads
+# as a start form all the same, which only keeps the scan's verdict. A '.' right after a ')' is not read
+# (prose ends a sentence that way far more often than a case pattern runs '.'), nor is a start word built
+# at run time (from a variable or an ANSI-C escape).
 _ORCH_RUNTIME_START_RE = re.compile(
     r"(?<![\w.-])(?:coproc|eval|setsid|disown|source)(?![\w.-])|(?<![^\s;|({`])\.(?=[ \t])|<<<|[<>]\(")
 _ORCH_RUNTIME_START_UNQUOTE = str.maketrans("", "", "'\"\\")
@@ -23734,15 +23738,15 @@ def _orch_runtime_start_readings(command):
     """The two texts the runtime start search (_ORCH_RUNTIME_START_RE) reads, a start form in either keeping
     the scan's verdict: the command with every quote and backslash removed, which reads a start word written
     whole (one after a pair bash does not join included), and the command with every backslash-newline pair
-    removed first, then every quote and backslash, which reads a form split by a pair bash joins. A start word
-    or a '.' split by a pair bash joins right after a pair bash does not join stays split in the first text,
-    and the second glues it to the last character before that pair's backslash (before both backslashes of an
-    escaped one) that is not a quote or a backslash: a start word then matches in neither when that character
-    is a word character, a '.' or a '-', and a '.' when it is anything but a blank, ';', '|', '(', '{' or
-    backquote, a disclosed residual after a pair whose backslash is escaped or that ends a comment line.
-    '<<<', '<(' and '>(' have no lookbehind and match in the second text wherever they sit. A start word right
-    after a pair inside single quotes, before the closing quote or directly after it, is part of the quoted
-    word, so bash runs no start word there."""
+    removed first, then every quote and backslash, which reads a form split by a pair bash joins. When a
+    start word, or a '.' and the blank after it, is split by a backslash-newline pair and any other
+    backslash-newline pair comes before it in the command, the search may miss it (a disclosed residual): the
+    first text keeps it split, and the second also removes the earlier pair, so the split word can be glued
+    to whatever stood before that pair, where a start word's lookbehind refuses a word character, a '.' or a
+    '-' and the '.' matches only after whitespace (a blank, a newline or other whitespace), ';', '|', '(',
+    '{' or a backquote, or at the start of the text. '<<<', '<(' and '>(' have no lookbehind and match in
+    the second text wherever they sit. A start word right after a pair inside single quotes, before the
+    closing quote or directly after it, is part of the quoted word, so bash runs no start word there."""
     return (command.translate(_ORCH_RUNTIME_START_UNQUOTE),
             command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
 
