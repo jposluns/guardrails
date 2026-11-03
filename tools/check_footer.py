@@ -20,7 +20,10 @@ draft): its live pages keep the ./disclosure nav rule below.
 
 Coverage spans TWO required roots: site/ (the aiqt.ai site, absolute /disclosure) and opf/site/ (the
 opfiles.ai site, served from opf/site as its own root, whose pages link ./disclosure relative so it
-resolves within opf/site; every opf/site page carries the nav, so nothing is exempt). Each tree is a REQUIRED
+resolves within opf/site). Neither root allowlists a page, so every page outside the root's draft/ must carry
+its nav link; the pages under site/draft/ and opf/site/draft/ are exempt from the nav rule and are held to
+the draft rule instead (one /draft/disclosure/ link in the About region of draft/index.html, nothing
+required on the other draft pages; the same absolute href on both roots). Each tree is a REQUIRED
 coverage input: if a root is absent, unreadable, or carries no .html pages, the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
 file, opened O_NOFOLLOW and confirmed regular via fstat on the opened fd, so a symlink/FIFO/socket/device
 .html (or site/ itself as a symlink) is fail-closed and never read or followed, and the check-then-read
@@ -30,7 +33,7 @@ adversarial input. This gate does NOT defend against a concurrent-write attacker
 component symlink race (full component-wise containment is the OS/CI-isolation layer's job per
 SYSTEM-HARDENING.md), nor cross-check the page set against an expected/tracked index (page presence and
 git-tracking are gen_manifest's concern). Those are out of a trusted-input coverage gate's scope. The allowlist is empty:
-every public page carries the nav, so none is exempt. It stays an EXPLICIT mechanism, not a silent skip:
+no live page is exempt (the draft pages are partitioned out by the draft rule, not allowlisted). It stays an EXPLICIT mechanism, not a silent skip:
 an allowlisted page that is missing, or that starts carrying the link, is allowlist drift and fails.
 
   check_footer.py             scan site/*.html

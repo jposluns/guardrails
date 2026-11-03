@@ -26,6 +26,16 @@ renders, select.js where the install selector renders, and rail.js where the rai
 (section 7.6); no rail link carries a static aria-current. In an inline HTML value the token `$BASE/`
 renders as the base path, so content survives promotion unchanged. The document control strip reads its
 Version from the repository's VERSION file and its Status from changelog.toml.
+
+Escaping: every data value is text, escaped for its context (element text, or a double-quoted attribute
+value with quotes escaped, external hrefs included), except the inline HTML values, which render raw:
+the page heading and meta; hero kicker, statement and intro; entries item title, n and d; plan item
+title, n and small; every `html` key (region, value, clauses item, note, callout, download, scope, next,
+lead, prose, pullquote, record item, srcview item); clause title; section, family and subhead heading;
+family verified, intro, after and steps; entry heading, claim, limitation and evidence; table and register
+head cells and row cells; steps and list items; figure caption; srcview gen and heading; code and srcview
+note. Code text, code file labels, srcview labels and figure node text are escaped as before. Every
+rendered page then passes the link guard (_LinkGuard), which refuses raw markup that breaks the link rules.
 """
 import sys
 
@@ -127,8 +137,9 @@ FAMILY = (
 
 # Kept live paths (template SPECIFICATION 4.1): the root-relative live targets an aiqt.ai draft page may
 # link, each of which exists under site/ today and keeps its path at promotion. A kept link renders as a
-# plain root-relative anchor with no new-tab hint. Every other root-relative or absolute internal target
-# stays refused, so a draft page cannot grow a live link this list has not reviewed.
+# plain root-relative anchor with no new-tab hint. The link guard (_LinkGuard) refuses every other URL
+# attribute value that is not under the site's base, a #fragment or an https URL, in any element, case or
+# quoting html.parser reads; its residual is stated at the guard.
 KEPT_LIVE_PATHS = (
     "/development",
     "/downloads/aiqt-instructions-1_5k.txt",
@@ -197,9 +208,20 @@ def _page_url(site, rel):
     return _url(site, rel)
 
 
+def _t(value):
+    """A data value that is text, not markup, escaped as element text."""
+    return _html.escape(value, quote=False)
+
+
+def _attr(value):
+    """A data value escaped as a double-quoted attribute value."""
+    return _html.escape(value, quote=True)
+
+
 def _external(href, label):
+    """A new-tab anchor: href is a raw URL, escaped here as an attribute value; label is markup."""
     return ('<a href="{}" target="_blank" rel="noopener noreferrer">{}<span class="vh"> (opens in a new tab)'
-            '</span></a>').format(href, label)
+            '</span></a>').format(_attr(href), label)
 
 
 def _brand(site):
@@ -345,7 +367,7 @@ def _any_link(site, href, text, where):
     """An anchor for an internal site-relative href, or a new-tab anchor for an https URL."""
     if isinstance(href, str) and href.startswith("https://"):
         return _external(href, text)
-    return '<a href="{}">{}</a>'.format(_internal_href(site, href, where), text)
+    return '<a href="{}">{}</a>'.format(_attr(_internal_href(site, href, where)), text)
 
 
 def _inline(site, value):
@@ -366,19 +388,19 @@ def _c_hero(site, doc, where):
             '<div class="hero-art"><img src="{}" alt="{}"></div></section>').format(
                 _inline(site, _text(spec, where, "kicker")), classes,
                 _inline(site, _text(spec, where, "statement")), _inline(site, _text(spec, where, "intro")),
-                _internal_href(site, spec["start_href"], where), _text(spec, where, "start_text"),
+                _attr(_internal_href(site, spec["start_href"], where)), _t(_text(spec, where, "start_text")),
                 _asset(site, "logos/{}.svg".format(site["key"])),
                 site["logo-alt"])
 
 
 def _c_entries(site, doc, where):
     spec = _need(doc, where, ("component", "items"), ("label",))
-    label = _text(spec, where, "label", "Start here")
+    label = _t(_text(spec, where, "label", "Start here"))
     tiles = []
     for item in _items(spec, where, "items", ("href", "title", "n", "d")):
         tiles.append('<li><a href="{}"><span class="t">{}</span><span class="n">{}</span>'
                      '<span class="d">{}</span></a></li>'.format(
-                         _internal_href(site, item["href"], where), _inline(site, item["title"]),
+                         _attr(_internal_href(site, item["href"], where)), _inline(site, item["title"]),
                          _inline(site, item["n"]), _inline(site, item["d"])))
     return ('<div class="region"><p class="lbl">{}</p><div><ol class="entries">{}</ol></div></div>').format(
         label, "".join(tiles))
@@ -387,13 +409,13 @@ def _c_entries(site, doc, where):
 def _c_region(site, doc, where):
     spec = _need(doc, where, ("component", "label", "html"))
     return '<div class="region"><p class="lbl">{}</p><div>{}</div></div>'.format(
-        _text(spec, where, "label"), _inline(site, _text(spec, where, "html")))
+        _t(_text(spec, where, "label")), _inline(site, _text(spec, where, "html")))
 
 
 def _c_value(site, doc, where):
     spec = _need(doc, where, ("component", "html"), ("label",))
     return ('<div class="region"><p class="lbl">{}</p><div><p class="value">{}</p></div></div>').format(
-        _text(spec, where, "label", "What it gives you"), _inline(site, _text(spec, where, "html")))
+        _t(_text(spec, where, "label", "What it gives you")), _inline(site, _text(spec, where, "html")))
 
 
 def _c_about(site, doc, where):
@@ -435,25 +457,25 @@ def _c_control(site, doc, where):
         raise RefusedPage("{}: source_href must be an https URL".format(where))
     version, status = _version_and_status()
     licence = '<a href="{}">{}</a>'.format(
-        _internal_href(site, spec.get("licence_href", "license/"), where),
-        _text(spec, where, "licence_text", "Apache 2.0, see NOTICE"))
+        _attr(_internal_href(site, spec.get("licence_href", "license/"), where)),
+        _t(_text(spec, where, "licence_text", "Apache 2.0, see NOTICE")))
     return ('<dl class="control"><div><dt>Document</dt><dd>{}</dd></div>'
             '<div><dt>Version</dt><dd>{}</dd></div><div><dt>Status</dt><dd>{}</dd></div>'
             '<div><dt>Source</dt><dd>{}</dd></div><div><dt>Licence</dt><dd>{}</dd></div></dl>').format(
-                _text(spec, where, "document"), version, status,
-                _external(source_href, _text(spec, where, "source_text")), licence)
+                _t(_text(spec, where, "document")), _t(version), _t(status),
+                _external(source_href, _t(_text(spec, where, "source_text"))), licence)
 
 
 def _c_clause(site, doc, where):
     spec = _need(doc, where, ("component", "id", "num", "title", "lbl"), ("rail",))
     return ('<p class="lbl sec">{}</p>\n<h2 class="clause" id="{}"><span class="num">{}</span>'
-            '<span>{}</span></h2>').format(_text(spec, where, "lbl"), _checked_id(spec, where),
-                                           _text(spec, where, "num"), _inline(site, _text(spec, where, "title")))
+            '<span>{}</span></h2>').format(_t(_text(spec, where, "lbl")), _checked_id(spec, where),
+                                           _t(_text(spec, where, "num")), _inline(site, _text(spec, where, "title")))
 
 
 def _c_clauses(site, doc, where):
     spec = _need(doc, where, ("component", "items"))
-    rows = ['<li><span class="n">{}</span><div>{}</div></li>'.format(item["n"], _inline(site, item["html"]))
+    rows = ['<li><span class="n">{}</span><div>{}</div></li>'.format(_t(item["n"]), _inline(site, item["html"]))
             for item in _items(spec, where, "items", ("n", "html"))]
     return '<ol class="clauses">{}</ol>'.format("".join(rows))
 
@@ -461,7 +483,7 @@ def _c_clauses(site, doc, where):
 def _c_note(site, doc, where):
     spec = _need(doc, where, ("component", "label", "html"))
     return '<div class="note"><span class="label">{}</span><div>{}</div></div>'.format(
-        _text(spec, where, "label"), _inline(site, _text(spec, where, "html")))
+        _t(_text(spec, where, "label")), _inline(site, _text(spec, where, "html")))
 
 
 def _c_callout(site, doc, where):
@@ -469,14 +491,14 @@ def _c_callout(site, doc, where):
     classes = "callout rule" if _flag(spec, where, "rule") else "callout"
     body = '<div class="{}">{}</div>'.format(classes, _inline(site, _text(spec, where, "html")))
     if "label" in spec:
-        return '<p class="lbl accent blk">{}</p>\n{}'.format(_text(spec, where, "label"), body)
+        return '<p class="lbl accent blk">{}</p>\n{}'.format(_t(_text(spec, where, "label")), body)
     return body
 
 
 def _c_figures(site, doc, where):
     spec = _need(doc, where, ("component", "items"))
     figs = ['<div class="fig"><span class="num">{}</span><span class="cap">{}</span></div>'.format(
-        item["num"], item["cap"]) for item in _items(spec, where, "items", ("num", "cap"))]
+        _t(item["num"]), _t(item["cap"])) for item in _items(spec, where, "items", ("num", "cap"))]
     return '<div class="wide"><div class="figures">{}</div></div>'.format("".join(figs))
 
 
@@ -511,7 +533,7 @@ def _table_html(site, spec, where):
         body.append("<tr>{}</tr>".format("".join(cells)))
     table = ('<table class="{}"><caption class="vh">{}</caption>{}<thead><tr>{}</tr></thead>'
              '<tbody>{}</tbody></table>').format(
-                 classes, _text(spec, where, "caption"), cols,
+                 classes, _t(_text(spec, where, "caption")), cols,
                  "".join("<th>{}</th>".format(_inline(site, cell)) for cell in head), "".join(body))
     return '<div class="tablewrap" tabindex="0">{}</div>'.format(table)
 
@@ -525,7 +547,7 @@ def _c_register(site, doc, where):
     spec = _need(doc, where, ("component", "reg", "title", "count", "caption", "head", "rows"),
                  ("sticky", "fixed", "cols"))
     cap = '<p class="reg-cap"><b>{}</b><span>{}</span><span class="count">{}</span></p>'.format(
-        _text(spec, where, "reg"), _text(spec, where, "title"), _text(spec, where, "count"))
+        _t(_text(spec, where, "reg")), _t(_text(spec, where, "title")), _t(_text(spec, where, "count")))
     return '<div class="wide"><div class="register">{}{}</div></div>'.format(
         cap, _table_html(site, spec, where))
 
@@ -561,11 +583,11 @@ def _c_picker(site, doc, where):
         if ID_RE.fullmatch(item["family"]) is None:
             raise RefusedPage("{}: {!r} is not a valid family id".format(where, item["family"]))
         links.append('<li><a href="#{0}" data-family-link="{0}">{1}</a></li>'.format(
-            item["family"], item["label"]))
+            item["family"], _t(item["label"])))
     return ('<ul class="picker" data-picker>{}</ul>'
             '<button class="btn picker-reset" type="button" data-picker-reset hidden>{}</button>'
             '<p class="vh" role="status" aria-live="polite" data-picker-status></p>').format(
-                "".join(links), _text(spec, where, "reset"))
+                "".join(links), _t(_text(spec, where, "reset")))
 
 
 def _c_family(site, doc, where):
@@ -574,7 +596,7 @@ def _c_family(site, doc, where):
     family = _text(spec, where, "family")
     if ID_RE.fullmatch(family) is None:
         raise RefusedPage("{}: {!r} is not a valid family id".format(where, family))
-    parts = ['<p class="lbl sec">{}</p>'.format(_text(spec, where, "lbl")),
+    parts = ['<p class="lbl sec">{}</p>'.format(_t(_text(spec, where, "lbl"))),
              "<h2>{}</h2>".format(_inline(site, _text(spec, where, "heading"))),
              '<p class="verified">{}</p>'.format(_inline(site, _text(spec, where, "verified")))]
     if "intro" in spec:
@@ -592,11 +614,11 @@ def _c_family(site, doc, where):
 
 def _c_download(site, doc, where):
     spec = _need(doc, where, ("component", "href", "filename", "size", "html"), ("label",))
-    link = _any_link(site, _text(spec, where, "href"), _text(spec, where, "filename"), where)
+    link = _any_link(site, _text(spec, where, "href"), _t(_text(spec, where, "filename")), where)
     body = ('<div class="download"><p class="file">{}</p><p class="lbl size">{}</p><p>{}</p></div>').format(
-        link, _text(spec, where, "size"), _inline(site, _text(spec, where, "html")))
+        link, _t(_text(spec, where, "size")), _inline(site, _text(spec, where, "html")))
     if "label" in spec:
-        return '<p class="lbl blk">{}</p>\n{}'.format(_text(spec, where, "label"), body)
+        return '<p class="lbl blk">{}</p>\n{}'.format(_t(_text(spec, where, "label")), body)
     return body
 
 
@@ -608,7 +630,8 @@ def _c_plan(site, doc, where):
     classes = "plan" + ((" " + variant) if variant else "") + (" described" if _flag(spec, where, "described") else "")
     rows = []
     for item in _items(spec, where, "items", ("href", "title"), ("n", "small")):
-        row = '<a href="{}">{}</a>'.format(_internal_href(site, item["href"], where), _inline(site, item["title"]))
+        row = '<a href="{}">{}</a>'.format(_attr(_internal_href(site, item["href"], where)),
+                                           _inline(site, item["title"]))
         if "n" in item:
             row += '<span class="n">{}</span>'.format(_inline(site, item["n"]))
         if "small" in item:
@@ -628,7 +651,7 @@ def _c_next(site, doc, where):
     if "html" in spec:
         line = "<p>{}</p>".format(_inline(site, _text(spec, where, "html")))
     arrow = '<a class="start" href="{}">{} <span class="arrow" aria-hidden="true">&rarr;</span></a>'.format(
-        _internal_href(site, spec["href"], where), _text(spec, where, "text"))
+        _attr(_internal_href(site, spec["href"], where)), _t(_text(spec, where, "text")))
     return '<div class="next"><p class="lbl">Next</p>{}{}</div>'.format(line, arrow)
 
 
@@ -645,7 +668,7 @@ def _c_label(site, doc, where):
     attr = ""
     if "id" in spec:
         attr = ' id="{}"'.format(_checked_id(spec, where))
-    return '<p class="lbl {}"{}>{}</p>'.format(variant, attr, _text(spec, where, "text"))
+    return '<p class="lbl {}"{}>{}</p>'.format(variant, attr, _t(_text(spec, where, "text")))
 
 
 def _c_section(site, doc, where):
@@ -654,7 +677,7 @@ def _c_section(site, doc, where):
     if "id" in spec:
         attr = ' id="{}"'.format(_checked_id(spec, where))
     return '<p class="lbl sec">{}</p>\n<h2{}>{}</h2>'.format(
-        _text(spec, where, "lbl"), attr, _inline(site, _text(spec, where, "heading")))
+        _t(_text(spec, where, "lbl")), attr, _inline(site, _text(spec, where, "heading")))
 
 
 def _c_entry(site, doc, where):
@@ -663,7 +686,7 @@ def _c_entry(site, doc, where):
     return ('<p class="lbl sec">{}</p>\n<h2 id="{}">{}</h2>\n'
             '<p><strong>Claim:</strong> {}</p>\n<p><strong>Limitation:</strong> {}</p>\n'
             '<p><strong>Evidence:</strong> {}</p>').format(
-                _text(spec, where, "lbl"), _checked_id(spec, where), _inline(site, _text(spec, where, "heading")),
+                _t(_text(spec, where, "lbl")), _checked_id(spec, where), _inline(site, _text(spec, where, "heading")),
                 _inline(site, _text(spec, where, "claim")), _inline(site, _text(spec, where, "limitation")),
                 _inline(site, _text(spec, where, "evidence")))
 
@@ -684,7 +707,7 @@ def _c_record(site, doc, where):
     the `cols` variant for a grid of short values."""
     spec = _need(doc, where, ("component", "items"), ("cols",))
     classes = "record cols" if _flag(spec, where, "cols") else "record"
-    groups = "".join("<div><dt>{}</dt><dd>{}</dd></div>".format(item["term"], _inline(site, item["html"]))
+    groups = "".join("<div><dt>{}</dt><dd>{}</dd></div>".format(_t(item["term"]), _inline(site, item["html"]))
                      for item in _items(spec, where, "items", ("term", "html")))
     return '<dl class="{}">{}</dl>'.format(classes, groups)
 
@@ -871,7 +894,7 @@ def _mappings_by_rule(rows):
     for _rid, rrows in gen_mappings._group_ordered(rows, "rule_id").items():
         parts = ["<details><summary>{}</summary><p>{}</p><ul>".format(
             text(rrows[0]["rule_title"]),
-            _external(gen_mappings._attr(rrows[0]["rule_source"]), "View this rule on GitHub"))]
+            _external(rrows[0]["rule_source"], "View this rule on GitHub"))]
         groups = gen_mappings._group_ordered(rrows, "framework")
         for _fw, frows in sorted(groups.items(),
                                  key=lambda item: gen_mappings._framework_sort_key(item[1][0])):
@@ -910,7 +933,7 @@ def _mappings_by_framework(rows, reg):
             parts.append("<li>{}: {}<ul>".format(text(cid), text(idrows[0]["identifier_title"])))
             for row in idrows:
                 parts.append("<li>{} ({})</li>".format(
-                    _external(gen_mappings._attr(row["rule_source"]), text(row["rule_title"])),
+                    _external(row["rule_source"], text(row["rule_title"])),
                     text(row["fit"])))
             parts.append("</ul></li>")
         parts.append("</ul></details>")
@@ -961,6 +984,8 @@ def _page_from_doc(doc, where):
     rel = _text(spec, where, "path")
     if REL_RE.fullmatch(rel) is None:
         raise RefusedPage("{}: {!r} is not a safe page path".format(where, rel))
+    title = _text(spec, where, "title")
+    meta = _text(spec, where, "meta") if "meta" in spec else None
     kind = _text(spec, where, "kind")
     if kind not in KINDS:
         raise RefusedPage("{}: kind must be one of {}".format(where, ", ".join(KINDS)))
@@ -991,8 +1016,8 @@ def _page_from_doc(doc, where):
             rail.append((_checked_id(component, comp_where), _text(component, comp_where, "rail")))
         if name == "about" and kind == "document" and position != len(body):
             raise RefusedPage("{}: the About region closes a document page".format(comp_where))
-    return {"rel": rel, "title": spec["title"], "kind": kind, "label": spec.get("label"),
-            "heading": spec.get("heading"), "meta": spec.get("meta"), "body": body, "rail": rail,
+    return {"rel": rel, "title": title, "kind": kind, "label": spec.get("label"),
+            "heading": spec.get("heading"), "meta": meta, "body": body, "rail": rail,
             "where": where}
 
 
@@ -1060,7 +1085,7 @@ def _rail_html(site, page):
         _asset(site, "logos/{}.svg".format(site["key"])), site["logo-alt"])
     if not page["rail"]:
         return '<div class="rail">{}</div>'.format(logo)
-    links = "".join('<li><a href="#{}">{}</a></li>'.format(anchor, label) for anchor, label in page["rail"])
+    links = "".join('<li><a href="#{}">{}</a></li>'.format(anchor, _t(label)) for anchor, label in page["rail"])
     return ('<nav class="rail" aria-label="On this page">{}<p class="lbl">On this page</p>'
             '<ol>{}</ol></nav>').format(logo, links)
 
@@ -1073,7 +1098,7 @@ def _body_html(site, page):
         rendered.append((component["component"], COMPONENTS[component["component"]](site, component, comp_where)))
     if page["kind"] == "landing":
         return '<div class="wrap">{}</div>'.format("\n".join(html for _name, html in rendered))
-    parts = ['<p class="lbl first">{}</p>'.format(page["label"]),
+    parts = ['<p class="lbl first">{}</p>'.format(_t(page["label"])),
              "<h1>{}</h1>".format(_inline(site, page["heading"])), _rail_html(site, page)]
     if page["meta"]:
         parts.append('<p class="meta">{}</p>'.format(_inline(site, page["meta"])))
@@ -1087,27 +1112,98 @@ def _body_html(site, page):
     return '<div class="wrap">{}</div>'.format("\n".join([doc] + tail))
 
 
-LINK_RE = re.compile(r'(?:href|src)="([^"]*)"')
-ANCHOR_RE = re.compile(r"<a [^>]*>")
+# The link guard is a structural pass (html.parser) over each rendered page, so it sees every element and
+# attribute whatever its case or quoting. It enforces: no element that loads, embeds, submits or redirects
+# outside the link rules (LINK_REFUSED_TAGS, and a meta carrying http-equiv), except each script element
+# the shell itself writes (exactly src plus defer, with a src the shell chose); every URL attribute
+# (LINK_URL_ATTRS) is an https URL, a #fragment, a path under the site's base or one of its kept live
+# paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no ".."
+# segment; and every a or area whose href is https carries target="_blank", rel with noopener and
+# noreferrer, and the "(opens in a new tab)" hint in its text or aria-label. Residual: the guard judges the
+# markup as Python's html.parser tokenizes it, so a malformed construct a browser repairs differently is
+# outside it; it reads no stylesheet (inline styles are refused separately) and treats a URL-shaped value
+# in any attribute not listed here as text; and it does not check that an allowed target exists.
+LINK_REFUSED_TAGS = frozenset((
+    "script", "iframe", "frame", "frameset", "base", "form", "object", "embed", "applet", "portal",
+    "animate", "set", "animatemotion", "animatetransform", "handler", "foreignobject"))
+LINK_URL_ATTRS = frozenset((
+    "href", "src", "action", "formaction", "data", "poster", "cite", "background", "srcset", "imagesrcset",
+    "longdesc", "manifest", "ping", "xlink:href", "codebase", "archive", "usemap", "icon", "profile",
+    "lowsrc", "dynsrc"))
+NEWTAB_HINT = "(opens in a new tab)"
+_URL_BAD_CHAR_RE = re.compile(r"[\x00-\x20\x7f\\]")
 
 
-def _link_findings(site, html):
-    """Every base-path or new-tab finding on a built page: an internal href or src outside the site's base,
-    a non-https external URL, or an external anchor without the new-tab attributes and hint."""
-    found = []
-    base = site["base"]
-    for target in LINK_RE.findall(html):
-        if target.startswith(base) or target.startswith("#") or _kept_live(site, target):
-            continue
-        if not target.startswith("https://"):
-            found.append("{!r} is neither under {} nor an https URL".format(target, base))
-    for anchor in ANCHOR_RE.findall(html):
-        href = LINK_RE.search(anchor)
-        if href is None or not href.group(1).startswith("https://"):
-            continue
-        if 'target="_blank" rel="noopener noreferrer"' not in anchor:
-            found.append("external link {!r} without the new-tab attributes".format(href.group(1)))
-    return found
+class _LinkGuard(HTMLParser):
+    def __init__(self, site, scripts):
+        super().__init__(convert_charrefs=True)
+        self.site = site
+        self.scripts = list(scripts)
+        self.found = []
+        self._anchor = None
+
+    def _url_finding(self, name, tag, value):
+        site, base = self.site, self.site["base"]
+        if value is None:
+            return "{} attribute on <{}> has no value".format(name, tag)
+        if name in ("srcset", "imagesrcset", "ping", "archive"):
+            return "{} attribute on <{}> (a URL list) is not allowed".format(name, tag)
+        if _URL_BAD_CHAR_RE.search(value) or value.startswith("//") \
+                or ".." in value.split("#", 1)[0].split("?", 1)[0].split("/"):
+            return "{} {!r} on <{}> is not a plain URL".format(name, value, tag)
+        if value.startswith("https://") or value.startswith("#") or value.startswith(base) \
+                or _kept_live(site, value):
+            return None
+        return "{} {!r} on <{}> is neither under {} nor an https URL".format(name, value, tag, base)
+
+    def handle_starttag(self, tag, attrs):
+        first = {}
+        for name, value in attrs:
+            first.setdefault(name, value)
+        if tag == "script" and len(attrs) == 2 and attrs[0][0] == "src" and attrs[1] == ("defer", None) \
+                and attrs[0][1] in self.scripts:
+            self.scripts.remove(attrs[0][1])
+        elif tag in LINK_REFUSED_TAGS:
+            self.found.append("<{}> element".format(tag))
+        if tag == "meta" and "http-equiv" in first:
+            self.found.append("<meta http-equiv> element")
+        for name, value in attrs:
+            if name in LINK_URL_ATTRS:
+                problem = self._url_finding(name, tag, value)
+                if problem is not None:
+                    self.found.append(problem)
+        if tag in ("a", "area") and isinstance(first.get("href"), str) and first["href"].startswith("https://"):
+            rel = (first.get("rel") or "").split()
+            if first.get("target") != "_blank" or "noopener" not in rel or "noreferrer" not in rel:
+                self.found.append("external link {!r} without the new-tab attributes".format(first["href"]))
+            # The hint is in the aria-label, or (an a element only) in the text the anchor closes over.
+            if NEWTAB_HINT in (first.get("aria-label") or ""):
+                pass
+            elif tag == "a":
+                self._anchor = [first["href"], []]
+            else:
+                self.found.append("external link {!r} without the new-tab hint".format(first["href"]))
+
+    def handle_data(self, data):
+        if self._anchor is not None:
+            self._anchor[1].append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._anchor is not None:
+            if NEWTAB_HINT not in "".join(self._anchor[1]):
+                self.found.append("external link {!r} without the new-tab hint".format(self._anchor[0]))
+            self._anchor = None
+
+
+def _link_findings(site, html, scripts=()):
+    """Every link-rule finding on a built page (see the link guard comment above). `scripts` is the list of
+    script src values the shell wrote; each allows 1 script element with exactly that src and defer."""
+    guard = _LinkGuard(site, scripts)
+    guard.feed(html)
+    guard.close()
+    if guard._anchor is not None:
+        guard.found.append("external link {!r} is never closed".format(guard._anchor[0]))
+    return guard.found
 
 
 def render_page(site, pages, page):
@@ -1115,15 +1211,16 @@ def render_page(site, pages, page):
     head = ['<meta charset="utf-8">', '<meta name="viewport" content="width=device-width, initial-scale=1">']
     if site["base"] == DRAFT_BASE:
         head.append('<meta name="robots" content="noindex, nofollow">')
-    head.append("<title>{} | {}.ai</title>".format(title, site["name"]))
+    head.append("<title>{} | {}.ai</title>".format(_t(title), site["name"]))
     head.append('<link rel="icon" href="{}" type="image/svg+xml">'.format(
         _asset(site, "logos/{}-favicon.svg".format(site["key"]))))
     head.append('<link rel="apple-touch-icon" href="{}">'.format(
         _asset(site, "logos/{}-touch.png".format(site["key"]))))
     for sheet in ("fonts.css", "palettes.css", "baseline.css"):
         head.append('<link rel="stylesheet" href="{}">'.format(_asset(site, sheet)))
-    for script in _page_scripts(page):
-        head.append('<script src="{}" defer></script>'.format(_asset(site, script)))
+    scripts = [_asset(site, script) for script in _page_scripts(page)]
+    for src in scripts:
+        head.append('<script src="{}" defer></script>'.format(src))
     html = "\n".join([
         "<!doctype html>",
         '<html lang="en" class="site-{}">'.format(site["key"]),
@@ -1140,7 +1237,7 @@ def render_page(site, pages, page):
         "</body>",
         "</html>",
     ]) + "\n"
-    refusals = refusals_for(html) + _link_findings(site, html)
+    refusals = refusals_for(html) + _link_findings(site, html, scripts)
     if refusals:
         raise RefusedPage("{}/{}: {}".format(site["root"], rel, "; ".join(refusals)))
     return html
@@ -1653,7 +1750,9 @@ def _self_test():
     expect("rail/no-static-aria-current", rail_nav is not None and "aria-current" not in rail_nav.group(0))
 
     # Every link on a built page stays under BASE or is an https link with the new-tab attributes.
-    expect("links/clean-page-passes", _link_findings(site, railed_html) == [], _link_findings(site, railed_html))
+    railed_scripts = [_asset(site, "rail.js")]
+    expect("links/clean-page-passes", _link_findings(site, railed_html, railed_scripts) == [],
+           _link_findings(site, railed_html, railed_scripts))
     expect("links/internal-outside-base", _link_findings(site, '<a href="/live/">x</a>') != [])
     expect("links/non-https-external", _link_findings(site, '<a href="http://example.com/">x</a>') != [])
     expect("links/external-without-newtab", _link_findings(site, '<a href="https://example.com/">x</a>') != [])
@@ -1876,6 +1975,152 @@ def _self_test():
     expect("refuse/steps-empty-item", "non-empty strings" in refused(
         "refuse/steps-empty-item", rendered, 'component = "steps"\nitems = ["A", ""]\n'))
 
+    # Text fields are escaped for their context: each carries "<q>&" and must render "&lt;q&gt;&amp;", never
+    # the raw tag; inline HTML fields (the documented raw set) are unchanged above.
+    raw, esc = "<q>&", "&lt;q&gt;&amp;"
+    for name, toml, want, kind in (
+            ("escape/hero-start-text", 'component = "hero"\nkicker = "K"\nstatement = "S"\nintro = "I"\n'
+             'start_text = "X"\nstart_href = ""\n', '/draft/">{} <span'.format(esc), "landing"),
+            ("escape/entries-label", 'component = "entries"\nlabel = "X"\n[[body.items]]\nhref = ""\ntitle = "T"\n'
+             'n = "n"\nd = "d"\n', '<p class="lbl">{}</p>'.format(esc), "landing"),
+            ("escape/region-label", 'component = "region"\nlabel = "X"\nhtml = "H"\n',
+             '<p class="lbl">{}</p>'.format(esc), "landing"),
+            ("escape/value-label", 'component = "value"\nlabel = "X"\nhtml = "H"\n',
+             '<p class="lbl">{}</p>'.format(esc), "landing"),
+            ("escape/control-document", 'component = "control"\ndocument = "X"\nsource_text = "s"\n'
+             'source_href = "https://example.com/"\n', "<dd>{}</dd>".format(esc), "document"),
+            ("escape/control-source-text", 'component = "control"\ndocument = "d"\nsource_text = "X"\n'
+             'source_href = "https://example.com/"\n', 'noreferrer">{}<span'.format(esc), "document"),
+            ("escape/control-licence-text", 'component = "control"\ndocument = "d"\nsource_text = "s"\n'
+             'source_href = "https://example.com/"\nlicence_text = "X"\n', '/license/">{}</a>'.format(esc),
+             "document"),
+            ("escape/control-source-href", 'component = "control"\ndocument = "d"\nsource_text = "s"\n'
+             'source_href = "https://example.com/?a=1&b=\\"x"\n',
+             'href="https://example.com/?a=1&amp;b=&quot;x"', "document"),
+            ("escape/clause-lbl-num", 'component = "clause"\nid = "c"\nnum = "X"\ntitle = "T"\nlbl = "X"\n',
+             '<p class="lbl sec">{0}</p>\n<h2 class="clause" id="c"><span class="num">{0}</span>'.format(esc),
+             "document"),
+            ("escape/clauses-n", 'component = "clauses"\n[[body.items]]\nn = "X"\nhtml = "H"\n',
+             '<span class="n">{}</span>'.format(esc), "document"),
+            ("escape/note-label", 'component = "note"\nlabel = "X"\nhtml = "H"\n',
+             '<span class="label">{}</span>'.format(esc), "document"),
+            ("escape/callout-label", 'component = "callout"\nlabel = "X"\nhtml = "H"\n',
+             '<p class="lbl accent blk">{}</p>'.format(esc), "document"),
+            ("escape/figures-num-cap", 'component = "figures"\n[[body.items]]\nnum = "X"\ncap = "X"\n',
+             '<span class="num">{0}</span><span class="cap">{0}</span>'.format(esc), "document"),
+            ("escape/table-caption", 'component = "table"\ncaption = "X"\nhead = ["A"]\nrows = [["x"]]\n',
+             '<caption class="vh">{}</caption>'.format(esc), "document"),
+            ("escape/register-fields", 'component = "register"\nreg = "X"\ntitle = "X"\ncount = "X"\n'
+             'caption = "C"\nhead = ["A"]\nrows = [["x"]]\n',
+             '<b>{0}</b><span>{0}</span><span class="count">{0}</span>'.format(esc), "document"),
+            ("escape/picker-label-reset", 'component = "picker"\nreset = "X"\n[[body.items]]\nfamily = "f"\n'
+             'label = "X"\n', 'data-family-link="f">{0}</a></li></ul><button class="btn picker-reset" '
+             'type="button" data-picker-reset hidden>{0}</button>'.format(esc), "document"),
+            ("escape/family-lbl", 'component = "family"\nfamily = "f"\nlbl = "X"\nheading = "H"\nverified = "V"\n',
+             '<p class="lbl sec">{}</p>'.format(esc), "document"),
+            ("escape/download-fields", 'component = "download"\nlabel = "X"\nhref = "https://example.com/x"\n'
+             'filename = "X"\nsize = "X"\nhtml = "D"\n', '<p class="lbl blk">{0}</p>\n<div class="download">'
+             '<p class="file"><a href="https://example.com/x" target="_blank" rel="noopener noreferrer">{0}'
+             '<span class="vh"> (opens in a new tab)</span></a></p><p class="lbl size">{0}</p>'.format(esc),
+             "document"),
+            ("escape/next-text", 'component = "next"\ntext = "X"\nhref = ""\n', '/draft/">{} <span'.format(esc),
+             "document"),
+            ("escape/label-text", 'component = "label"\ntext = "X"\n', '<p class="lbl blk">{}</p>'.format(esc),
+             "document"),
+            ("escape/section-lbl", 'component = "section"\nlbl = "X"\nheading = "H"\n',
+             '<p class="lbl sec">{}</p>'.format(esc), "document"),
+            ("escape/entry-lbl", 'component = "entry"\nlbl = "X"\nid = "e"\nheading = "H"\nclaim = "C"\n'
+             'limitation = "L"\nevidence = "E"\n', '<p class="lbl sec">{}</p>'.format(esc), "document"),
+            ("escape/record-term", 'component = "record"\n[[body.items]]\nterm = "X"\nhtml = "H"\n',
+             "<dt>{}</dt>".format(esc), "document")):
+        got = rendered(toml.replace('"X"', '"{}"'.format(raw)), kind=kind)
+        expect(name, want in got and "<q>" not in got, got)
+    escaped_page = model('path = "index.html"\ntitle = "{0}"\nkind = "document"\nlabel = "{0}"\nheading = "H"\n'
+                         '[[body]]\ncomponent = "section"\nlbl = "L"\nid = "s"\nheading = "H"\nrail = "{0}"\n'
+                         .format(raw))
+    escaped_html = render_page(site, [escaped_page], escaped_page)
+    expect("escape/page-title", "<title>{} | AIQT.ai</title>".format(esc) in escaped_html, escaped_html)
+    expect("escape/page-label", '<p class="lbl first">{}</p>'.format(esc) in escaped_html, escaped_html)
+    expect("escape/rail-label", '<li><a href="#s">{}</a></li>'.format(esc) in escaped_html, escaped_html)
+    expect("escape/no-raw-tag", "<q>" not in escaped_html, escaped_html)
+    expect("escape/external-href", _external('https://example.com/?a="1"&b', "L").startswith(
+        '<a href="https://example.com/?a=&quot;1&quot;&amp;b" '), _external('https://example.com/?a="1"&b', "L"))
+
+    # The page keys title and meta go through the checked reader: a wrong type or an empty string is a
+    # named refusal, never a traceback or a rendered page; a present meta renders.
+    page_head = 'path = "index.html"\nkind = "document"\nlabel = "L"\nheading = "H"\n'
+    page_body = '[[body]]\ncomponent = "prose"\nhtml = "<p>P</p>"\n'
+    for name, line, key in (("refuse/title-not-string", "title = 3\n", "title"),
+                            ("refuse/title-empty", 'title = ""\n', "title"),
+                            ("refuse/title-table", "title = {a = 1}\n", "title"),
+                            ("refuse/meta-not-string", 'title = "T"\nmeta = ["m"]\n', "meta"),
+                            ("refuse/meta-empty", 'title = "T"\nmeta = ""\n', "meta"),
+                            ("refuse/meta-boolean", 'title = "T"\nmeta = true\n', "meta")):
+        expect(name, "{} must be a non-empty string".format(key) in refused(
+            name, model, page_head + line + page_body))
+    metad = model(page_head + 'title = "T"\nmeta = "M <code>c</code>"\n' + page_body)
+    expect("page/meta-renders", '<p class="meta">M <code>c</code></p>' in render_page(site, [metad], metad))
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
+        with open(Path(tmp) / "home.toml", "w", encoding="utf-8") as handle:
+            handle.write(page_head + "title = 3\n" + page_body)
+        expect("refuse/title-from-data-dir", "title must be a non-empty string" in refused(
+            "refuse/title-from-data-dir", _load_pages, Path(tmp)))
+
+    # The link guard is structural: every element and attribute is seen whatever its case or quoting.
+    for name, text in (
+            ("guard/single-quoted-href", "<a href='/elsewhere/'>x</a>"),
+            ("guard/unquoted-href", "<a href=/elsewhere/>x</a>"),
+            ("guard/uppercase-href", '<A HREF="/elsewhere/">x</A>'),
+            ("guard/javascript-href", '<a href="javascript:x()">x</a>'),
+            ("guard/protocol-relative", '<a href="//example.com/">x</a>'),
+            ("guard/backslash", '<a href="/draft/\\example.com">x</a>'),
+            ("guard/dot-dot-segment", '<a href="/draft/../x">x</a>'),
+            ("guard/whitespace-in-url", '<a href=" /draft/x">x</a>'),
+            ("guard/img-src", '<img src="http://example.com/x.png" alt="">'),
+            ("guard/srcset", '<img src="/draft/x.png" srcset="/draft/x.png 1x" alt="">'),
+            ("guard/form-action", '<form action="/draft/x"></form>'),
+            ("guard/button-formaction", '<button formaction="http://example.com/">x</button>'),
+            ("guard/meta-refresh", '<meta http-equiv="refresh" content="0; url=https://example.com/">'),
+            ("guard/meta-refresh-uppercase", '<META HTTP-EQUIV=refresh CONTENT="0">'),
+            ("guard/base", '<base href="https://example.com/">'),
+            ("guard/script-not-shell", '<script src="/draft/assets/baseline/rail.js" defer></script>'),
+            ("guard/iframe", '<iframe src="https://example.com/"></iframe>'),
+            ("guard/object", '<object data="/draft/x"></object>'),
+            ("guard/embed", '<embed src="/draft/x">'),
+            ("guard/svg-animate", '<svg><animate attributeName="href" to="javascript:x()"></animate></svg>'),
+            ("guard/svg-xlink-href", '<svg><a xlink:href="javascript:x()">x</a></svg>'),
+            ("guard/external-no-target", '<a href="https://example.com/" rel="noopener noreferrer">x'
+             '<span class="vh"> (opens in a new tab)</span></a>'),
+            ("guard/external-no-rel", '<a href="https://example.com/" target="_blank">x'
+             '<span class="vh"> (opens in a new tab)</span></a>'),
+            ("guard/external-no-hint", '<a href="https://example.com/" target="_blank" '
+             'rel="noopener noreferrer">x</a>'),
+            ("guard/external-single-quoted", "<a href='https://example.com/'>x</a>"),
+            ("guard/area-no-hint", '<area href="https://example.com/" target="_blank" rel="noopener noreferrer">')):
+        expect(name, _link_findings(site, text) != [], text)
+    for name, text in (
+            ("guard/external-uppercase-passes", '<A HREF="https://example.com/" TARGET="_blank" '
+             "REL='noopener noreferrer'>x<span class=\"vh\"> (opens in a new tab)</span></A>"),
+            ("guard/aria-label-hint-passes", '<a href="https://example.com/" target="_blank" '
+             'rel="noopener noreferrer" aria-label="Example (opens in a new tab)">x</a>'),
+            ("guard/fragment-and-base-pass", '<a href="#top">x</a><img src="/draft/x.png" alt="">'),
+            ("guard/meta-name-passes", '<meta name="robots" content="noindex, nofollow">')):
+        expect(name, _link_findings(site, text) == [], (text, _link_findings(site, text)))
+    shell_src = _asset(site, "rail.js")
+    expect("guard/shell-script-passes", _link_findings(
+        site, '<script src="{}" defer></script>'.format(shell_src), [shell_src]) == [])
+    expect("guard/shell-script-once", _link_findings(
+        site, '<script src="{0}" defer></script><script src="{0}" defer></script>'.format(shell_src),
+        [shell_src]) != [])
+    expect("guard/shell-script-extra-attr", _link_findings(
+        site, '<script src="{}" defer async></script>'.format(shell_src), [shell_src]) != [])
+    expect("guard/coded-page-passes", "copy.js" in render_page(site, [coded], coded))
+    for name, html in (("guard/inline-single-quoted-refused", "<a href='/elsewhere/'>x</a>"),
+                       ("guard/inline-iframe-refused", '<iframe src=\\"https://example.com/\\"></iframe>'),
+                       ("guard/inline-form-refused", '<form action=\\"https://example.com/\\"></form>')):
+        hostile_page = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "{}"\n'.format(html))
+        expect(name, refused(name, render_page, site, [hostile_page], hostile_page) != "")
+
     # opfiles.ai keeps its own live paths: rendered root-relative with no new-tab hint on that site only.
     opf_kept = COMPONENTS["next"](opf, {"component": "next", "text": "Guide", "href": "/adopt.md"}, "fixture.body[1]")
     expect("links/opfiles-kept-plain", opf_kept == (
@@ -1917,7 +2162,8 @@ def _self_test():
     print("SELF-TEST PASS: gen_draft_site (shell order, robots meta, footer cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
-          "switch and --check exit codes)")
+          "switch, text-field escaping, the structural link guard, the checked title and meta keys and "
+          "--check exit codes)")
     return 0
 
 

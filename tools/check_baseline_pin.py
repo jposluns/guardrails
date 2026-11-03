@@ -16,8 +16,16 @@ file whose bytes differ, a
 pinned file that is missing, a file under a copy root that the pin does not list (a stray), and a
 symbolic link or other non-regular entry anywhere in a copy root, including the root itself (exit 1). A
 pin that is missing, unreadable, over MAX_PIN_BYTES, not UTF-8, not TOML or not of the pinned shape, and
-a copied file that cannot be read, are cannot-evaluate (exit 2), never a pass. The gate reads only the
-repository; it never touches the network.
+a copied file that cannot be read, are cannot-evaluate (exit 2), never a pass.
+
+Every registered pin must name the same version, and that version must equal the site template version
+recorded in .aiqt/attribution.toml, table [vendored."site-template"], key version: the single in-tree
+source tools/gen_notice.py renders the root NOTICE from (the NOTICE is generated output, so it is not
+read). The file is read under the scanned root. An attribution file that is missing, unreadable, not a
+regular file, over MAX_ATTRIBUTION_BYTES, not UTF-8 or not TOML, a missing [vendored."site-template"]
+table, a version there that is missing or not an X.Y.Z string, a pin whose version differs from it, and
+2 pins that name different versions are cannot-evaluate (exit 2). The gate reads only the repository; it
+never touches the network.
 """
 import sys
 
@@ -60,10 +68,17 @@ TOP_KEYS = {"version", "files"}
 # The copy root's own last components: a pinned path is <prefix>assets/baseline/<file>, and its copy root is
 # <prefix>assets/baseline.
 COPY_DIR = "assets/baseline"
+# The in-tree record of the template version every pin must name: the [vendored."site-template"] table of
+# the attribution file tools/gen_notice.py renders the root NOTICE from, read under the scanned root.
+ATTRIBUTION_REL = ".aiqt/attribution.toml"
+ATTRIBUTION_BLOCK = "site-template"
+ATTRIBUTION_WHERE = '{} [vendored."{}"]'.format(ATTRIBUTION_REL, ATTRIBUTION_BLOCK)
+MAX_ATTRIBUTION_BYTES = 1 << 20
 
 
 class CannotEvaluate(Exception):
-    """An input that cannot be judged: a missing, unreadable, oversized or malformed pin, or an unreadable file."""
+    """An input that cannot be judged: a missing, unreadable, oversized or malformed pin or attribution file,
+    or an unreadable file."""
 
 
 def _safe_rel(value):
@@ -116,6 +131,75 @@ def parse_pin(data, where):
             raise CannotEvaluate("{}: {}: the SHA-256 must be 64 lowercase hex digits".format(where, path))
         pinned[rel] = digest
     return version, [(root, pinned)]
+
+
+def _read_attribution_bytes(path):
+    """The attribution file's bytes, at most MAX_ATTRIBUTION_BYTES + 1 of them."""
+    with open(path, "rb") as handle:
+        return handle.read(MAX_ATTRIBUTION_BYTES + 1)
+
+
+def parse_attribution(data, where=ATTRIBUTION_REL):
+    """The site template version the attribution file records; CannotEvaluate on any malformed input."""
+    if len(data) > MAX_ATTRIBUTION_BYTES:
+        raise CannotEvaluate("{}: larger than {} bytes".format(where, MAX_ATTRIBUTION_BYTES))
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CannotEvaluate("{}: not UTF-8 ({})".format(where, exc)) from None
+    doc, problem = None, None
+    try:
+        doc = tomllib.loads(text)
+    except (RecursionError, MemoryError, ValueError) as exc:
+        problem = "{}: not valid TOML ({}: {})".format(where, type(exc).__name__, exc)
+    if problem is not None:
+        raise CannotEvaluate(problem)
+    vendored = doc.get("vendored")
+    block = vendored.get(ATTRIBUTION_BLOCK) if isinstance(vendored, dict) else None
+    if not isinstance(block, dict):
+        raise CannotEvaluate('{}: no [vendored."{}"] table, so the version every pin must name is '
+                             'unknown'.format(where, ATTRIBUTION_BLOCK))
+    version = block.get("version")
+    if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+        raise CannotEvaluate('{}: [vendored."{}"] version must be an X.Y.Z string'.format(
+            where, ATTRIBUTION_BLOCK))
+    return version
+
+
+def _attribution_version(root):
+    """(version, None) read from the attribution file under root, or (None, the cannot-evaluate line)."""
+    path = Path(root) / ATTRIBUTION_REL
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise CannotEvaluate("{}: not a regular file".format(ATTRIBUTION_REL))
+        return parse_attribution(_read_attribution_bytes(path)), None
+    except FileNotFoundError:
+        return None, "{}: missing".format(ATTRIBUTION_REL)
+    except OSError as exc:
+        return None, "{}: unreadable ({})".format(ATTRIBUTION_REL, exc)
+    except CannotEvaluate as exc:
+        return None, str(exc)
+
+
+def _version_errors(root, versions):
+    """Cannot-evaluate lines for pins that name different versions, or a version other than the one the
+    attribution file records; versions is [(pin_rel, version)] for every pin that parsed."""
+    expected, problem = _attribution_version(root)
+    if problem is not None:
+        return [problem]
+    errors = []
+    if versions:
+        first_rel, first_version = versions[0]
+        for pin_rel, version in versions[1:]:
+            if version != first_version:
+                errors.append("the pins disagree: {} names version {} but {} names version {}; every "
+                              "registered pin must name the same version".format(
+                                  first_rel, first_version, pin_rel, version))
+    for pin_rel, version in versions:
+        if version != expected:
+            errors.append("{}: version {} differs from the site template version {} recorded in {}".format(
+                pin_rel, version, expected, ATTRIBUTION_WHERE))
+    return errors
 
 
 def _sha256(path):
@@ -178,20 +262,24 @@ def scan(root, pins=PINS):
     problems = _registry_errors(pins)
     if problems:
         return findings, problems
+    versions = []
     for pin_rel, assigned in pins:
-        _scan_pin(root, pin_rel, assigned, findings, errors)
+        _scan_pin(root, pin_rel, assigned, findings, errors, versions)
+    errors.extend(_version_errors(root, versions))
     return findings, errors
 
 
-def _scan_pin(root, pin_rel, assigned, findings, errors):
-    """Check 1 pin against its assigned copy root, appending to findings and errors."""
+def _scan_pin(root, pin_rel, assigned, findings, errors, versions):
+    """Check 1 pin against its assigned copy root, appending to findings and errors, and (pin_rel, version)
+    to versions once the pin parses."""
     pin_path = Path(root) / pin_rel
     try:
         mode = os.lstat(pin_path).st_mode
         if not stat.S_ISREG(mode):
             raise CannotEvaluate("{}: not a regular file".format(pin_rel))
         data = _read_pin_bytes(pin_path)
-        _version, roots = parse_pin(data, pin_rel)
+        version, roots = parse_pin(data, pin_rel)
+        versions.append((pin_rel, version))
     except FileNotFoundError:
         errors.append("{}: missing".format(pin_rel))
         return
@@ -248,7 +336,8 @@ def run_gate(root, pins=PINS):
     if findings:
         return 1
     print("PASS: every file pinned in {} matches its SHA-256 under its registered copy root, with no stray "
-          "or linked entry".format(", ".join(pin_rel for pin_rel, _root in pins)))
+          "or linked entry, and every pin names the site template version recorded in {}".format(
+              ", ".join(pin_rel for pin_rel, _root in pins), ATTRIBUTION_WHERE))
     return 0
 
 
@@ -278,16 +367,35 @@ SECOND_ROOT = PINS[1][1]
 TWO_PINS = ((PIN_REL, FIXTURE_ROOT), (SECOND_PIN, SECOND_ROOT))
 
 
-def _pin_text(files, root=FIXTURE_ROOT, version="1.2.1", extra=""):
+# The fixture's template version, named by every fixture pin and by the fixture attribution file; it
+# differs from the live one, so a pass shows the version is read under the scanned root.
+FIXTURE_VERSION = "1.2.1"
+
+
+def _pin_text(files, root=FIXTURE_ROOT, version=FIXTURE_VERSION, extra=""):
     lines = ['version = "{}"'.format(version), extra, "", "[files]"]
     for rel in sorted(files):
         lines.append('"{}/{}" = "{}"'.format(root, rel, hashlib.sha256(files[rel]).hexdigest()))
     return "\n".join(lines) + "\n"
 
 
-def _fixture(tmp, files=None, pin=None, root=FIXTURE_ROOT, pin_rel=PIN_REL):
-    """A fixture tree under tmp: the copied files under root and the pin at pin_rel (text, bytes, None for
-    the exact pin of FIXTURE_FILES under root, or False for absent)."""
+def _attribution_text(version=FIXTURE_VERSION, block=ATTRIBUTION_BLOCK):
+    """A fixture attribution file: another vendored block first, so the version is taken from the named one."""
+    return ('[vendored."marko"]\nname = "Marko"\nversion = "9.9.9"\n\n'
+            '[vendored."{}"]\nname = "Shared site template (baseline package)"\nversion = "{}"\n'
+            'verified = true\n').format(block, version)
+
+
+def _fixture(tmp, files=None, pin=None, root=FIXTURE_ROOT, pin_rel=PIN_REL, attribution=None):
+    """A fixture tree under tmp: the copied files under root, the pin at pin_rel (text, bytes, None for
+    the exact pin of FIXTURE_FILES under root, or False for absent) and the attribution file (text, bytes,
+    None for one recording FIXTURE_VERSION, or False to write none)."""
+    if attribution is None:
+        attribution = _attribution_text()
+    if attribution is not False:
+        os.makedirs((Path(tmp) / ATTRIBUTION_REL).parent, exist_ok=True)
+        with open(Path(tmp) / ATTRIBUTION_REL, "wb") as handle:
+            handle.write(attribution.encode("utf-8") if isinstance(attribution, str) else attribution)
     files = FIXTURE_FILES if files is None else files
     for rel, data in files.items():
         target = Path(tmp) / root / rel
@@ -303,12 +411,12 @@ def _fixture(tmp, files=None, pin=None, root=FIXTURE_ROOT, pin_rel=PIN_REL):
     return tmp
 
 
-def _scan_case(files=None, pin=None, mutate=None, pins=FIXTURE_PINS, second=None):
+def _scan_case(files=None, pin=None, mutate=None, pins=FIXTURE_PINS, second=None, attribution=None):
     """scan() over a fixture; second, when given, is (files, pin) for the second registered pair."""
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
-        _fixture(tmp, files, pin)
+        _fixture(tmp, files, pin, attribution=attribution)
         if second is not None:
-            _fixture(tmp, second[0], second[1], root=SECOND_ROOT, pin_rel=SECOND_PIN)
+            _fixture(tmp, second[0], second[1], root=SECOND_ROOT, pin_rel=SECOND_PIN, attribution=False)
         if mutate is not None:
             mutate(Path(tmp))
         return scan(tmp, pins)
@@ -433,11 +541,19 @@ def _self_test():
         findings, errors = _scan_case(pin=pin)
         check(name, findings == [] and len(errors) == 1, (findings, errors))
 
-    # The parser's resource errors are handled at the parse site, never propagated.
-    for name, exc_type in (("malformed/recursion-error", RecursionError), ("malformed/memory-error", MemoryError)):
+    # The parser's resource errors are handled at each parse site, never propagated. The injection raises
+    # only for the document that carries the marker (a pin's [files] table or the attribution file's
+    # [vendored. tables) and parses the other one, so each case reaches 1 parse site.
+    for name, exc_type, marker, where in (
+            ("malformed/recursion-error", RecursionError, "[files]", PIN_REL),
+            ("malformed/memory-error", MemoryError, "[files]", PIN_REL),
+            ("version/attribution-recursion-error", RecursionError, "[vendored.", ATTRIBUTION_REL),
+            ("version/attribution-memory-error", MemoryError, "[vendored.", ATTRIBUTION_REL)):
         original_loads = tomllib.loads
 
-        def _raise(_text, _exc_type=exc_type):
+        def _raise(text, _exc_type=exc_type, _marker=marker, _loads=original_loads):
+            if _marker not in text:
+                return _loads(text)
             raise _exc_type("raised by the self-test")
 
         tomllib.loads = _raise
@@ -445,7 +561,8 @@ def _self_test():
             findings, errors = _scan_case()
         finally:
             tomllib.loads = original_loads
-        check(name, findings == [] and len(errors) == 1 and exc_type.__name__ in errors[0], (findings, errors))
+        check(name, findings == [] and len(errors) == 1 and errors[0].startswith(where + ":")
+              and exc_type.__name__ in errors[0], (findings, errors))
 
     # The pin size bound at its ends: one byte under, exactly at, and one byte over MAX_PIN_BYTES.
     pad = MAX_PIN_BYTES - len(good.encode("utf-8"))
@@ -502,6 +619,73 @@ def _self_test():
         findings, errors = _scan_case(pins=pins, second=(None, None))
         check(name, findings == [] and len(errors) == 1 and "registry" in errors[0], (findings, errors))
 
+    # The version rule: every pin names the version the attribution file records, and the pins agree. Each
+    # case's digests all match, so only the version can refuse it.
+    findings, errors = _scan_case(attribution=_attribution_text(version="1.2.2"))
+    check("version/pin-differs-from-attribution", findings == [] and errors == [
+        "{}: version {} differs from the site template version 1.2.2 recorded in {}".format(
+            PIN_REL, FIXTURE_VERSION, ATTRIBUTION_WHERE)], (findings, errors))
+
+    findings, errors = _scan_case(pins=TWO_PINS, second=(None, None), attribution=_attribution_text(version="1.2.2"))
+    check("version/both-pins-differ-from-attribution", findings == [] and len(errors) == 2
+          and errors[0].startswith(PIN_REL + ": version " + FIXTURE_VERSION + " differs")
+          and errors[1].startswith(SECOND_PIN + ": version " + FIXTURE_VERSION + " differs"), (findings, errors))
+
+    findings, errors = _scan_case(pins=TWO_PINS, second=(None, _pin_text(FIXTURE_FILES, root=SECOND_ROOT,
+                                                                         version="1.2.2")))
+    check("version/pins-disagree", findings == [] and len(errors) == 2 and errors[0] == (
+        "the pins disagree: {} names version {} but {} names version 1.2.2; every registered pin must name "
+        "the same version".format(PIN_REL, FIXTURE_VERSION, SECOND_PIN))
+          and errors[1].startswith(SECOND_PIN + ": version 1.2.2 differs"), (findings, errors))
+
+    findings, errors = _scan_case(attribution=False)
+    check("version/attribution-missing", findings == [] and errors == [ATTRIBUTION_REL + ": missing"],
+          (findings, errors))
+
+    original_attribution = _read_attribution_bytes
+    globals()["_read_attribution_bytes"] = _deny
+    try:
+        findings, errors = _scan_case()
+    finally:
+        globals()["_read_attribution_bytes"] = original_attribution
+    check("version/attribution-unreadable", findings == [] and len(errors) == 1
+          and errors[0].startswith(ATTRIBUTION_REL + ": unreadable"), (findings, errors))
+
+    def _link_attribution(tmp):
+        real = tmp / "real-attribution.toml"
+        os.rename(tmp / ATTRIBUTION_REL, real)
+        os.symlink(real, tmp / ATTRIBUTION_REL)
+
+    findings, errors = _scan_case(mutate=_link_attribution)
+    check("version/attribution-not-regular", findings == []
+          and errors == [ATTRIBUTION_REL + ": not a regular file"], (findings, errors))
+
+    good_attribution = _attribution_text()
+    for name, attribution in (
+            ("version/attribution-not-utf8", good_attribution.encode("utf-8") + b"# \xff\n"),
+            ("version/attribution-not-toml", good_attribution + "[vendored\n"),
+            ("version/attribution-block-missing", _attribution_text(block="other-template")),
+            ("version/attribution-vendored-not-table", 'vendored = "site-template"\n'),
+            ("version/attribution-block-not-table", '[vendored]\n"site-template" = "{}"\n'.format(FIXTURE_VERSION)),
+            ("version/attribution-version-missing",
+             good_attribution.replace('version = "{}"\n'.format(FIXTURE_VERSION), "")),
+            ("version/attribution-version-not-string",
+             good_attribution.replace('version = "{}"'.format(FIXTURE_VERSION), "version = 1")),
+            ("version/attribution-version-shape", _attribution_text(version="1.2"))):
+        findings, errors = _scan_case(attribution=attribution)
+        check(name, findings == [] and len(errors) == 1 and errors[0].startswith(ATTRIBUTION_REL + ":"),
+              (findings, errors))
+
+    # The attribution size bound at its ends: exactly at MAX_ATTRIBUTION_BYTES passes, one byte over refuses.
+    pad = MAX_ATTRIBUTION_BYTES - len(good_attribution.encode("utf-8"))
+    for name, extra, refused in (("bound/attribution-size-at", pad, False),
+                                 ("bound/attribution-size-over", pad + 1, True)):
+        body = good_attribution + "#" + "x" * (extra - 2) + "\n"
+        findings, errors = _scan_case(attribution=body)
+        check(name, findings == [] and len(body.encode("utf-8")) == MAX_ATTRIBUTION_BYTES + extra - pad
+              and errors == ([ATTRIBUTION_REL + ": larger than {} bytes".format(MAX_ATTRIBUTION_BYTES)]
+                             if refused else []), (len(body), findings, errors))
+
     # The gate's own report lines go to a buffer: a self-test run writes nothing to its error stream.
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp, \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stream:
@@ -529,7 +713,11 @@ def _self_test():
           "unreadable copied file are cannot-evaluate; the pin size bound holds one byte under, at and "
           "over; 2 registered pairs pass together, a second copy's defect is reported against its own root "
           "and pin, and a pin naming another root or a registry repeating a pin or a root is "
-          "cannot-evaluate; the exit codes are 0, 1 and 2; the live tree passes)".format(len(EXECUTED)))
+          "cannot-evaluate; a pin whose version differs from the attribution file's site template version, "
+          "2 pins naming different versions, and an attribution file that is missing, unreadable, not a "
+          "regular file, non-UTF-8, non-TOML, over its size bound, without the site template table or with "
+          "a missing or misshapen version there are cannot-evaluate; the exit codes are 0, 1 and 2; the "
+          "live tree passes)".format(len(EXECUTED)))
     return 0
 
 
