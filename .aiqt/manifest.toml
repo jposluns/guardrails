@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a94bae6358792d2e1d8f824b831d1a6a1617b904746927fed5a6c577c5eac8f5"
+tree-sha256 = "696d434db9412b47d29a0054c79cf96d49b79d1e6ae067bb88c20ebd741e3f7e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -16,8 +16,8 @@ sha256 = "9bf86b7a1a51656b13907f3422bf3bf974d3d41fa6cf2c9bc4b04686ee8f8190"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
-bytes = 12085
-sha256 = "8bf1a37772eff8caa121181076436a4e5d9717f4cf0797dface73f2b8ae4b66c"
+bytes = 12100
+sha256 = "fe89cd743fa9948b4aa26a42f2339804c4fa1901ed970c295faf4e44fd444bb5"
 
 [[sources]]
 path = ".aiqt/core/adapter-blocks.toml"
@@ -2406,8 +2406,8 @@ sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 [[sources]]
 path = "NOTICE"
-bytes = 11862
-sha256 = "5e4f7745bc4da4e03d64f5ca7851b09fb8ca9bfae8e35b5b3f5b2c7e3c799f5c"
+bytes = 11877
+sha256 = "ced1ec72e210171e95eea1c83816d3f0f5464a6fa24adada23089a74ff928bc5"
 
 [[sources]]
 path = "README.md"
@@ -4236,8 +4236,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 91373
-sha256 = "72900f640afea8713411ed333e557cbf8a557842711c1cc936b116dd47372c2d"
+bytes = 91378
+sha256 = "0938a2d7a37d33152c10efd7385f6e4155068d6b84f77164c5e3b92b1b656f02"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"

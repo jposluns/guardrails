@@ -9,8 +9,8 @@ allowlist drifts. A /disclosure link elsewhere in the page body or footer does N
 requirement: only anchors nested inside a <nav> element count, so the link cannot drift out of the nav
 and still pass. <nav> nesting is tracked, so an anchor is attributed to the nav only while one is open.
 
-(Historically this gate required the link in the <footer>; B-10 moved the canonical disclosure link
-into the site nav and repurposed this gate accordingly. The filename is retained as its gate identity.)
+(Historically this gate required the link in the <footer>; the canonical disclosure link later moved
+into the site nav and this gate was repurposed accordingly. The filename is retained as its gate identity.)
 
 The staged draft under site/draft/ follows the shared site template, whose top bar has no Disclosure item,
 so a draft rule covers it instead (stated beside DRAFT_SUBDIR): exactly one /draft/disclosure/ link in the
