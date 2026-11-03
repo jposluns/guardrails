@@ -189,8 +189,8 @@ Legs, in order:
                  statement runs and is scanned, as are a def's decorators and a def's or lambda's
                  default values; a function or lambda body (a method's included) runs only when
                  called and is not scanned.
-  tomllib        always ON: every tomllib.load and tomllib.loads call in every .py file of the tree (.github
-                 and the vendored tree included; a directory in SKIPPED_DIR_NAMES is not walked), under
+  tomllib        always ON: every tomllib.load and tomllib.loads call in every .py file of the tree (.github,
+                 the vendored tree and .baseline included; a directory in SKIPPED_DIR_NAMES is not walked), under
                  every spelling the scan resolves (import tomllib, import tomllib as X, from tomllib import
                  load or loads [as Y], the tomllib._parser submodule, and a module re-export such as
                  _opf_store.tomllib or from M import tomllib), is HANDLED or is classified by one row of
@@ -449,8 +449,10 @@ FLOW_ENTRY_RE = re.compile(
 PLAIN_INDICATORS = "-?:,[]{}#&*!|>'\"%@`"
 # The action file names of a local action, in the order the runner looks for them.
 ACTION_FILES = ("action.yml", "action.yaml")
-# Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest.
-EXCLUDED_TREES = (".github/", "opf/tools/_vendor/")
+# Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest; .baseline/
+# is the shared site template's vendored tooling, pinned by SHA-256 and kept byte-identical to the template
+# package, so it cannot carry this repository's guard (the tree holds only its two pins and that tool).
+EXCLUDED_TREES = (".github/", "opf/tools/_vendor/", ".baseline/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 # The git index mode of a gitlink (a submodule's commit), as git ls-files -s prints it.
 GITLINK_MODE = b"160000"
@@ -3640,6 +3642,16 @@ def _self_test_cases(base):
             "opf/tools/_vendor/lib/__main__.py": _entry("import sys\n"),
             ".venv/lib/tool.py": _entry("import sys\n"),
             "tools/helper.py": "VALUE = 1\n"}, track=True))[0], 0)
+    # .baseline/ is excluded by its exact name only: a near-miss tree is still counted.
+    baseline = {".baseline/check_tool.py": _entry("import sys\n")}
+    near = dict(baseline, **{"baseline/check_tool.py": _entry("import sys\n"),
+                             ".baselines/check_tool.py": _entry("import sys\n")})
+    code, lines = evaluate(_fixture(base, source=_source_text(completeness=True), files=near, track=True))
+    check("completeness/baseline-tree-ignored-near-miss-counted",
+          (evaluate(_fixture(base, source=_source_text(completeness=True), files=baseline, track=True))[0],
+           code, _has(lines, "FAIL: .baseline/check_tool.py: a shipped entrypoint"),
+           _has(lines, "FAIL: baseline/check_tool.py: a shipped entrypoint"),
+           _has(lines, "FAIL: .baselines/check_tool.py: a shipped entrypoint")), (0, 1, False, True, True))
     _tracked_cases(base, demo, unguarded)
 
     # The fallback leg: a module-level import fallback is the canonical write-flush-exit refusal or a

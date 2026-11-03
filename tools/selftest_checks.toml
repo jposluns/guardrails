@@ -2805,6 +2805,7 @@ expected-check-ids = [
   "completeness/on-unguarded-finding",
   "completeness/on-all-listed-passes",
   "completeness/excluded-trees-ignored",
+  "completeness/baseline-tree-ignored-near-miss-counted",
   "completeness/ignored-beside-tracked-passes",
   "completeness/untracked-not-counted",
   "completeness/tracked-unguarded-finding",
