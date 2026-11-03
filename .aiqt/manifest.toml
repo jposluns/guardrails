@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2402ad0b801b75be2d14af2db2f1f12a38515ff2765e3577c9c3a9d8acbc2e12"
+tree-sha256 = "838a413398dcc01181baf3491ad37ac2edddd250537c6821a4cd3291d11499ee"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3496,8 +3496,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 212462
-sha256 = "96456854e7249e27d5535cf9811e518f1ccefc0bc6b4405a65d41dfd088586b0"
+bytes = 212785
+sha256 = "0e78ce0234a10efb11bfd2ab6c95249b96c350a749a3674498f667dcf4d3021c"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
