@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Nav-coverage gate: every site/*.html carries exactly one /disclosure link INSIDE its <nav>.
+"""Nav-coverage gate: every live site/ and opf/site/ page carries exactly one disclosure link INSIDE its <nav>.
 
-The disclosure matrix is the site's standing "what we claim, and what we do not" page; every public
-page must point to it from its primary navigation so a reader is never more than one click from the
-limitations. This gate asserts that link is present, and IN THE NAV, on every page EXCEPT an explicit
-allowlist, and fails closed if a non-exempt page lacks it or the allowlist drifts. A /disclosure link
-elsewhere in the page body or footer does NOT satisfy the requirement: only anchors nested inside a
-<nav> element count, so the link cannot drift out of the nav and still pass. <nav> nesting is tracked,
-so an anchor is attributed to the nav only while one is open.
+The disclosure matrix is the site's standing "what we claim, and what we do not" page; every live public
+page (every page outside a draft/ subtree) must point to it from its primary navigation so a reader is
+never more than one click from the limitations. This gate asserts that link is present, and IN THE NAV, on
+every live page EXCEPT an explicit allowlist, and fails closed if a non-exempt live page lacks it or the
+allowlist drifts. A /disclosure link elsewhere in the page body or footer does NOT satisfy the
+requirement: only anchors nested inside a <nav> element count, so the link cannot drift out of the nav
+and still pass. <nav> nesting is tracked, so an anchor is attributed to the nav only while one is open.
 
 (Historically this gate required the link in the <footer>; B-10 moved the canonical disclosure link
 into the site nav and repurposed this gate accordingly. The filename is retained as its gate identity.)
@@ -36,7 +36,7 @@ git-tracking are gen_manifest's concern). Those are out of a trusted-input cover
 no live page is exempt (the draft pages are partitioned out by the draft rule, not allowlisted). It stays an EXPLICIT mechanism, not a silent skip:
 an allowlisted page that is missing, or that starts carrying the link, is allowlist drift and fails.
 
-  check_footer.py             scan site/*.html
+  check_footer.py             scan every .html page under site/ and opf/site/
   check_footer.py --self-test  assert the present/missing/drift and fail-closed paths each resolve
 
 Exit 0 clean, 1 on any coverage finding, 2 on a missing/unreadable/empty required input (fail-closed).
@@ -64,7 +64,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 
 DISCLOSURE_HREF = "/disclosure"
-# Pages exempt from the nav-link requirement, relative to site/. Empty: every page carries the nav.
+# Pages exempt from the nav-link requirement, relative to site/. Empty: every live site/ page (every page
+# outside site/draft/, which the draft rule below covers instead) carries the nav.
 ALLOWLIST = frozenset()
 
 # Coverage roots, each (subdir, disclosure_href, allowlist). Both are REQUIRED inputs (an absent,
@@ -72,13 +73,14 @@ ALLOWLIST = frozenset()
 # aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure. opf/site is the
 # opfiles.ai site, served from opf/site as its own root (Cloudflare Pages builds opf/site), so its pages
 # link the disclosure page RELATIVE (./disclosure): a relative link resolves within opf/site whatever the
-# mount point. Every opf/site page carries the nav, so the allowlist is empty (like site/).
+# mount point. Every live opf/site page (every page outside opf/site/draft/, which the draft rule below
+# covers instead) carries the nav, so the allowlist is empty (like site/).
 COVERAGE_ROOTS = (
     ("site", "/disclosure", frozenset()),
     ("opf/site", "./disclosure", frozenset()),
 )
 
-# The staged draft under site/draft/ follows the shared site template (baseline 1.3.1), whose top bar has no
+# The staged draft under site/draft/ follows the shared site template (baseline 1.4.1), whose top bar has no
 # Disclosure item: the draft landing page links the disclosure page from its "About this project" region
 # (p.about), and the inner draft pages carry no disclosure link. So the live rule above covers every site/
 # page outside site/draft/, unchanged, and the draft rule covers the pages under it: exactly one
@@ -281,12 +283,13 @@ def _run_one(root, subdir, href, allowlist):
             print("  {}/{}".format(subdir, finding))
         return 1
     allow_str = ", ".join(sorted(allowlist)) or "none"
-    draft_note = ""
+    live_scope, draft_note = "", ""
     if any(Path(name).parts[0] == DRAFT_SUBDIR for name in pages):
+        live_scope = " outside {}/{}/".format(subdir, DRAFT_SUBDIR)
         draft_note = "; under {}/{}/ the landing page carries the {} About link".format(
             subdir, DRAFT_SUBDIR, DRAFT_DISCLOSURE_HREF)
-    print("PASS: every {}/ page carries the {} nav link (allowlist: {}){}".format(
-        subdir, href, allow_str, draft_note))
+    print("PASS: every {}/ page{} carries the {} nav link (allowlist: {}){}".format(
+        subdir, live_scope, href, allow_str, draft_note))
     return 0
 
 
@@ -826,7 +829,7 @@ def _self_test():
         if quiet_one(root3) != 2:
             failures.append("a symlinked site/ root did not fail closed (expected exit 2)")
     # opf/site coverage: the relative ./disclosure nav link is tree-appropriate (opf/site is served as its
-    # own root), every page carries the nav (empty allowlist), a page missing the link is a finding, and an
+    # own root), every live page carries the nav (empty allowlist), a page missing the link is a finding, and an
     # absent opf/site root fails closed. run() requires BOTH roots, so it is exercised over a two-root tree.
     rel_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
     with tempfile.TemporaryDirectory() as d4:

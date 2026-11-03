@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1624c9e5984e57fcbe7374116a60fe2c21f0c07aaeecc6d8a9caad2035a70a35"
+tree-sha256 = "a94bae6358792d2e1d8f824b831d1a6a1617b904746927fed5a6c577c5eac8f5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -17,7 +17,7 @@ sha256 = "9bf86b7a1a51656b13907f3422bf3bf974d3d41fa6cf2c9bc4b04686ee8f8190"
 [[sources]]
 path = ".aiqt/attribution.toml"
 bytes = 12085
-sha256 = "9be190941dba6164f559dc4845c948d4675cec77300a35fa947e366e0e47ec8e"
+sha256 = "8bf1a37772eff8caa121181076436a4e5d9717f4cf0797dface73f2b8ae4b66c"
 
 [[sources]]
 path = ".aiqt/core/adapter-blocks.toml"
@@ -947,12 +947,12 @@ sha256 = "6776098bcc3e8a873b832556493dbf8f34c5b3ef6967705bfb44a9958888fd2a"
 [[sources]]
 path = ".baseline/opfiles-pin.toml"
 bytes = 7527
-sha256 = "28854dd703fecabd14fcde92a42e17cfe6735a35eba2f820f37f605c54582dca"
+sha256 = "61b9f68e006b7f663dd7e81c65bf5d8c705703a4d49954d1c69492f0814323b0"
 
 [[sources]]
 path = ".baseline/pin.toml"
 bytes = 7175
-sha256 = "2e2ec4031dd129db171ceee7f6e4d0d4f27a2e9b7db050ae54dfdee8df75f790"
+sha256 = "6221eb07899cb68dcc181db6b626d4817aedc26f199ee0c42af85e9c40ce9338"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
@@ -2407,7 +2407,7 @@ sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 [[sources]]
 path = "NOTICE"
 bytes = 11862
-sha256 = "8e31d65885508b41d848ecc7a6206f97c2e40d8bf7a07dd8384f21cf7672116f"
+sha256 = "5e4f7745bc4da4e03d64f5ca7851b09fb8ca9bfae8e35b5b3f5b2c7e3c799f5c"
 
 [[sources]]
 path = "README.md"
@@ -2702,7 +2702,7 @@ sha256 = "576651ee836932deb4ce9944c36a07bba8ad533d5d8969233ef1db70c41a6255"
 [[sources]]
 path = "opf/site/draft-src/license.toml"
 bytes = 5565
-sha256 = "188684c6b1e0ff59c5ff0da0b7426ec02f93bd98158b9e356a113310ab2d21f4"
+sha256 = "6d9d9cbac4860a5aada2f8a9486f7b5639eac0b2ab88fa97fd14bbb61ff042b9"
 
 [[sources]]
 path = "opf/site/draft-src/model.toml"
@@ -2736,8 +2736,8 @@ sha256 = "08b26141bb2ecf0f4cd76e599c21f888fc71c4b3ab7ba769e954f6eea37ac7f3"
 
 [[sources]]
 path = "opf/site/draft/assets/baseline/baseline.css"
-bytes = 46843
-sha256 = "9d8e4d5307af49f607e89bcb3ac32a80d25f9e86253572b65559cd35cd4e16e9"
+bytes = 48918
+sha256 = "8af38c8d65033c376475a3c65bcd90496010dd5a396c24aaa08d222d31619490"
 
 [[sources]]
 path = "opf/site/draft/assets/baseline/copy.js"
@@ -3017,7 +3017,7 @@ sha256 = "7d498516e49ca9a45355b52f5a2774f4b0a855ac398738866d51ad89a9ea31f4"
 [[sources]]
 path = "opf/site/draft/license/index.html"
 bytes = 9959
-sha256 = "de44327e0c1d00159956651e0245c022fe4a00533b6c3d746900ac23e2bd7535"
+sha256 = "116f0ff3ba92dbb5d5f8f854f9fb7f3428efb085826962f590e5d75b483c8907"
 
 [[sources]]
 path = "opf/site/draft/model/index.html"
@@ -3667,7 +3667,7 @@ sha256 = "9167976a1ad50884890dcadb88f8e77e4905f6367a0760d3fad00c2a18b71ec0"
 [[sources]]
 path = "site/draft-src/license.toml"
 bytes = 6150
-sha256 = "41d1b98b86b060d7ec6ec582e0b09b6caf87ab95904f0211fbaa517ed98fb321"
+sha256 = "f74ef3b5ebd66d284214994bf6d01d403d3cec3ddd252785ea9c21180d8c42f7"
 
 [[sources]]
 path = "site/draft-src/mappings.toml"
@@ -3701,8 +3701,8 @@ sha256 = "08b26141bb2ecf0f4cd76e599c21f888fc71c4b3ab7ba769e954f6eea37ac7f3"
 
 [[sources]]
 path = "site/draft/assets/baseline/baseline.css"
-bytes = 46843
-sha256 = "9d8e4d5307af49f607e89bcb3ac32a80d25f9e86253572b65559cd35cd4e16e9"
+bytes = 48918
+sha256 = "8af38c8d65033c376475a3c65bcd90496010dd5a396c24aaa08d222d31619490"
 
 [[sources]]
 path = "site/draft/assets/baseline/copy.js"
@@ -3982,7 +3982,7 @@ sha256 = "07949f0f6bf6eac4be8f96467b342e7244e7b641c9890d6f7eb6512ec25779bf"
 [[sources]]
 path = "site/draft/license/index.html"
 bytes = 10505
-sha256 = "8e3554b6a65bb3e0dea1f9d393efabfad9f468998c41d428457ce8b8d017fef4"
+sha256 = "80ea425ff7436f120e037d14c727d0fe5147bcf4d8c8ceccda2c09b58a6dd89d"
 
 [[sources]]
 path = "site/draft/mappings/index.html"
@@ -4236,8 +4236,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 90993
-sha256 = "15cf6e1ea9ddabc8eab1bb9e8c0119f7295fe9a26351a2f81a44d0ebe1be0edb"
+bytes = 91373
+sha256 = "72900f640afea8713411ed333e557cbf8a557842711c1cc936b116dd47372c2d"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -4512,7 +4512,7 @@ sha256 = "ee37d7b4db8fb441ddb3fb07e4003c94a5b36124e9714bca2f84ad4e7bb1b199"
 [[sources]]
 path = "tools/gen_draft_site.py"
 bytes = 129483
-sha256 = "4d233b132109db83dec8bf4bc7306c1803d68c3bf55ddc78b22fe5b0724c530d"
+sha256 = "8bd8a36f8c60d0798f40aac07af964661ed10980f14b855b9a02ed0fc6b950e8"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
@@ -4716,8 +4716,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 29043
-sha256 = "d6298e407691b96484d97c8e091506bbd6751f94bbed95650b1ce6c2cd8abedf"
+bytes = 29138
+sha256 = "2dd3628dba6d271efda8749a2cebf9dd481b2832d692ddf8bb41b1f41ef8448d"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
