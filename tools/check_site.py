@@ -36,6 +36,15 @@ decoded, and is never percent-decoded, so "%2F..." is refused. Anything else (a 
 "../", an empty value, "//host", any other scheme) is a finding naming the attribute and value. A relative
 touch icon on a 404 page is reported by this rule and by the touch-icon rule below, so it is listed twice.
 
+404 structure: that list of attributes cannot name every way markup loads a resource, so a 404 page is also
+held, fail closed, to the element and attribute names the live 404 pages use: any other name the raw scan
+finds is a finding naming the page, line and name. On the allowed names, any value and any script or style
+text containing "url(" (any case, as written or decoded) is a finding, a meta element may carry only the
+attributes the live pages use on meta, onclick and the SVG presentation attributes only the values they use,
+and a script without src only a body whose sha256 is pinned. The rule reads markup only: it cannot analyse
+what an allowlisted inline script does at run time (it trusts the pinned bodies), nor what a script or
+stylesheet loaded from a root-absolute URL contains.
+
 Apple touch icon: every live page (one not under the top-level draft/ directory of its root, 404 pages
 included) must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root,
 taken as the exact path (no .html or index.html fallback); a missing link, or one naming a missing file, a
@@ -56,6 +65,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import hashlib
 import os
 import re
 from html import unescape
@@ -357,18 +367,54 @@ _RAW_TAG_RE = re.compile(r"<[A-Za-z]")
 # these there can make a protocol-relative //host URL.
 _SECOND_SLASH = ("/", "\\", "\t", "\n", "\r")
 
+# The 404-page structural allowlist, fail closed: every element and attribute name raw_tags finds on a 404 page
+# must be listed here. Derived by running raw_tags over the two live 404 pages (site/404.html and
+# opf/site/404.html) and taking exactly the names, meta attributes, onclick values, SVG presentation values
+# and no-src script bodies (sha256 of the UTF-8 text between the start tag and its end tag) they use; a name
+# or value is added only when a live 404 page starts using it.
+NOT_FOUND_ELEMENTS = frozenset((
+    "a", "body", "button", "div", "footer", "h1", "h4", "head", "header", "html", "link", "main", "meta",
+    "nav", "p", "script", "section", "span", "svg", "text", "title",
+))
+NOT_FOUND_ATTRIBUTES = frozenset((
+    "aria-controls", "aria-expanded", "aria-hidden", "aria-label", "charset", "class", "content", "fill",
+    "font-family", "font-size", "font-weight", "height", "href", "id", "lang", "name", "onclick", "rel", "src",
+    "target", "text-anchor", "type", "viewbox", "width", "x", "y",
+))
+NOT_FOUND_META_ATTRIBUTES = frozenset(("charset", "content", "name"))
+NOT_FOUND_ONCLICK = frozenset(("toggleNav()", "toggleTheme()"))
+NOT_FOUND_PRESENTATION = {
+    "fill": frozenset(("var(--accent)", "var(--accent-2)")),
+    "font-family": frozenset(("system-ui,-apple-system,Segoe UI,sans-serif",)),
+    "font-size": frozenset(("40", "42")),
+    "font-weight": frozenset(("800",)),
+    "text-anchor": frozenset(("middle",)),
+}
+NOT_FOUND_INLINE_SCRIPT_SHA256 = frozenset((
+    "26b7f1c5bd8e7e7ac8723806089d3d541b9957a89cecd01a7a2bf2d96e622aae",
+))
+# A CSS url() loads relative to the page, so it is refused in any value or script or style text on a 404 page.
+_URL_FUNCTION = "url("
+_RAW_TEXT_END = {element: re.compile(r"</" + element + r"[\t\n\f\r />]", re.I | re.A)
+                 for element in ("script", "style")}
 
-def raw_url_attributes(text):
-    """Every (name, value, line) of a URL-bearing attribute in the raw markup, the value as written (character
-    references and percent-escapes left alone), duplicates included. A tag scan starts at every "<" followed
-    by a letter, inside a comment, script, svg, math or attribute value too, so nothing a browser loads is
-    missed; markup a browser does not read as a tag can only add a finding. An unclosed quote runs to the end."""
+
+def raw_tags(text):
+    """Every start tag in the raw markup as (element, line, attributes, end): element and attribute names
+    lowercased, each attribute a (name, value, line) with the value as written (character references and
+    percent-escapes left alone; None for a name written without "="), duplicates included, and `end` the
+    offset just past the tag's ">". A tag scan starts at every "<" followed by a letter, inside a comment,
+    script, svg, math or attribute value too; markup a browser does not read as a tag can only add a finding.
+    Markup a browser builds from text that holds no literal "<" (an entity-escaped srcdoc, a script that
+    writes markup at run time) is not seen here. An unclosed quote runs to the end."""
     out = []
     n = len(text)
     for match in _RAW_TAG_RE.finditer(text):
         i = match.end()
         while i < n and text[i] not in _HTML_SPACE + "/>":
             i += 1
+        element = text[match.start() + 1:i].lower()
+        attributes = []
         while i < n and text[i] != ">":
             if text[i] in _HTML_SPACE + "/":
                 i += 1
@@ -378,10 +424,12 @@ def raw_url_attributes(text):
             while i < n and text[i] not in _HTML_SPACE + "/>=":
                 i += 1
             name = text[start:i].lower()
+            line = text.count("\n", 0, start) + 1
             j = i
             while j < n and text[j] in _HTML_SPACE:
                 j += 1
             if j >= n or text[j] != "=":
+                attributes.append((name, None, line))
                 continue
             j += 1
             while j < n and text[j] in _HTML_SPACE:
@@ -395,9 +443,17 @@ def raw_url_attributes(text):
                 while end < n and text[end] not in _HTML_SPACE + ">":
                     end += 1
                 value, i = text[j:end], end
-            if name in NOT_FOUND_URL_ATTRS:
-                out.append((name, value, text.count("\n", 0, start) + 1))
+            attributes.append((name, value, line))
+        out.append((element, text.count("\n", 0, match.start()) + 1, attributes, min(i + 1, n)))
     return out
+
+
+def raw_url_attributes(text):
+    """Every (name, value, line) of a URL-bearing attribute that raw_tags finds, the value as written,
+    duplicates included. It reads only the names in NOT_FOUND_URL_ATTRS; not_found_structure_findings holds
+    every other name on a 404 page to an allowlist."""
+    return [(name, value, line) for _element, _line, attributes, _end in raw_tags(text)
+            for name, value, line in attributes if name in NOT_FOUND_URL_ATTRS and value is not None]
 
 
 def srcset_urls(value):
@@ -452,6 +508,56 @@ def not_found_reference_findings(label, text):
         for value in bad:
             out.append("{}:{}: {} on a 404 page must be root-absolute (one leading /), fragment-only, query-only "
                        "or https://; a 404 page is served at any path -> {!r}".format(label, line, name, value))
+    return out
+
+
+def _raw_text_body(text, element, end):
+    """The raw text of a script or style element whose start tag ends at `end`, up to its end tag (to the end
+    of the text when there is none)."""
+    match = _RAW_TEXT_END[element].search(text, end)
+    return text[end:] if match is None else text[end:match.start()]
+
+
+def not_found_structure_findings(label, text):
+    """Findings for the raw markup `text` of a 404 page named `label` against the structural allowlist: an
+    element or attribute name raw_tags finds that is not in NOT_FOUND_ELEMENTS or NOT_FOUND_ATTRIBUTES, a meta
+    attribute outside NOT_FOUND_META_ATTRIBUTES, an onclick or SVG presentation value the live 404 pages do
+    not use, any value or script or style text that contains "url(" (any case, as written or with its
+    character references decoded), and a script without src whose body's sha256 is not pinned in
+    NOT_FOUND_INLINE_SCRIPT_SHA256. Residual: the rule reads markup only. It cannot analyse what an allowlisted
+    inline script does at run time (it trusts the pinned script bodies), nor what a script or stylesheet
+    loaded from a root-absolute URL contains."""
+    out = []
+    for element, line, attributes, end in raw_tags(text):
+        if element not in NOT_FOUND_ELEMENTS:
+            out.append("{}:{}: element <{}> is not in the 404-page element allowlist".format(label, line, element))
+        for name, value, attr_line in attributes:
+            if name not in NOT_FOUND_ATTRIBUTES:
+                out.append("{}:{}: attribute {} on <{}> is not in the 404-page attribute allowlist".format(
+                    label, attr_line, name, element))
+            if element == "meta" and name not in NOT_FOUND_META_ATTRIBUTES:
+                out.append("{}:{}: attribute {} on <meta> is not one the live 404 pages use on meta".format(
+                    label, attr_line, name))
+            value = "" if value is None else value
+            if _URL_FUNCTION in value.lower() or _URL_FUNCTION in unescape(value).lower():
+                out.append("{}:{}: {} value on a 404 page contains url(, which loads relative to the page "
+                           "-> {!r}".format(label, attr_line, name, value))
+            if name == "onclick" and value not in NOT_FOUND_ONCLICK:
+                out.append("{}:{}: onclick value on a 404 page is not one the live 404 pages use -> {!r}".format(
+                    label, attr_line, value))
+            if name in NOT_FOUND_PRESENTATION and value not in NOT_FOUND_PRESENTATION[name]:
+                out.append("{}:{}: {} value on a 404 page is not one the live 404 pages use -> {!r}".format(
+                    label, attr_line, name, value))
+        if element in _RAW_TEXT_END:
+            body = _raw_text_body(text, element, end)
+            if _URL_FUNCTION in body.lower() or _URL_FUNCTION in unescape(body).lower():
+                out.append("{}:{}: <{}> text on a 404 page contains url(, which loads relative to the page".format(
+                    label, line, element))
+            if element == "script" and not any(name == "src" for name, _value, _line in attributes):
+                digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+                if digest not in NOT_FOUND_INLINE_SCRIPT_SHA256:
+                    out.append("{}:{}: inline <script> on a 404 page is not a pinned script body (sha256 {})".format(
+                        label, line, digest))
     return out
 
 
@@ -684,7 +790,15 @@ def _not_found_links_self_test():
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
             return _scan_root(base, "site"), out.getvalue()
 
-    icon = '<link rel="apple-touch-icon" href="/t.png">'
+    # The structural allowlist also reports the img, video, object, form, math and svg markup these reference
+    # cases use, so they count the reference findings, and a passing case allows only allowlist findings.
+    def ref_findings(output):
+        return [line for line in output.splitlines() if "on a 404 page must be root-absolute" in line]
+
+    def other_findings(output):
+        return [line for line in output.splitlines()[1:] if not line.endswith(" allowlist")]
+
+    icon ='<link rel="apple-touch-icon" href="/t.png">'
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "site"
@@ -721,8 +835,8 @@ def _not_found_links_self_test():
             (root / page_rel).write_text(page(head, body), encoding="utf-8")
             got = scan(base)
             (root / page_rel).unlink()
-            check(name, got[0] == 1 and "FAIL: 1 site/" in got[1] and "on a 404 page must be root-absolute" in got[1]
-                  and got[1].rstrip().endswith("-> " + repr(value)), got)
+            refs = ref_findings(got[1])
+            check(name, got[0] == 1 and len(refs) == 1 and refs[0].endswith("-> " + repr(value)), got)
 
         absolute = page(icon + '<link rel="stylesheet" href="/s.css"><link rel="icon" href="/f.svg">'
                         '<script src="/j.js"></script>',
@@ -732,7 +846,8 @@ def _not_found_links_self_test():
         (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
                                          '<a class="logo" href="./"><img src="/l.png" alt=""></a>', encoding="utf-8")
         got = scan(base)
-        check("404-links/root-absolute-and-fragment-links-pass", got[0] == 0, got)
+        check("404-links/root-absolute-and-fragment-links-pass", got[0] in (0, 1) and not other_findings(got[1]),
+              got)
         (root / "404.html").unlink()
 
         (root / "sub" / "c.html").write_text(page(icon + '<link rel="stylesheet" href="s.css">',
@@ -779,14 +894,14 @@ def _not_found_links_self_test():
                 ("404-links/entity-encoded-second-slash-fails", "404.html", icon,
                  '<img src="/&#47;aiqt.ai/i.png" alt="">', "src", "/&#47;aiqt.ai/i.png", 1),
                 ("404-links/backslash-after-slash-fails", "404.html", icon, '<img src="/\\aiqt.ai/i.png" alt="">',
-                 "src", "/\\aiqt.ai/i.png", 2),
+                 "src", "/\\aiqt.ai/i.png", 1),
                 ("404-links/empty-href-fails", "404.html", icon, '<a href="">E</a>', "href", "", 1),
                 ("404-links/other-scheme-fails", "404.html", icon, '<a href="http://aiqt.ai/b">B</a>',
                  "href", "http://aiqt.ai/b", 1)):
             (root / page_rel).write_text(page(head, body), encoding="utf-8")
             got = scan(base)
             (root / page_rel).unlink()
-            check(name, got[0] == 1 and "FAIL: {} site/".format(count) in got[1]
+            check(name, got[0] == 1 and len(ref_findings(got[1])) == count
                   and "{} on a 404 page must be root-absolute".format(attr) in got[1]
                   and "-> {}\n".format(repr(value)) in got[1], got)
         for name, body in (
@@ -800,7 +915,77 @@ def _not_found_links_self_test():
             (root / "404.html").write_text(page(icon, body), encoding="utf-8")
             got = scan(base)
             (root / "404.html").unlink()
-            check(name, got[0] == 0, got)
+            check(name, got[0] in (0, 1) and not other_findings(got[1]), got)
+
+        # A tab or newline after the leading "/" can make a protocol-relative //host URL.
+        for name, value in (("404-links/tab-after-slash-fails", "/\taiqt.ai/b"),
+                            ("404-links/newline-after-slash-fails", "/\naiqt.ai/b")):
+            (root / "404.html").write_text(page(icon, '<a href="{}">B</a>'.format(value)), encoding="utf-8")
+            got = scan(base)
+            (root / "404.html").unlink()
+            refs = ref_findings(got[1])
+            check(name, got[0] == 1 and len(refs) == 1 and refs[0].endswith("-> " + repr(value)), got)
+
+        # The structural allowlist: each case is refused by the guard its message names, whatever else fires.
+        for name, raw, message in (
+                ("404-structure/formaction-fails", page(icon, '<button type="button" formaction="b">B</button>'),
+                 "attribute formaction on <button> is not in the 404-page attribute allowlist"),
+                ("404-structure/imagesrcset-fails", page(icon + '<link rel="preload" imagesrcset="i.png 1x">', ""),
+                 "attribute imagesrcset on <link> is not in the 404-page attribute allowlist"),
+                ("404-structure/background-fails",
+                 "<!doctype html><title>t</title>" + icon + '<body background="i.png"></body>',
+                 "attribute background on <body> is not in the 404-page attribute allowlist"),
+                ("404-structure/ping-fails", page(icon, '<a href="/" ping="b">H</a>'),
+                 "attribute ping on <a> is not in the 404-page attribute allowlist"),
+                ("404-structure/meta-refresh-fails", page(icon + '<meta http-equiv="refresh" content="0;url=b">', ""),
+                 "attribute http-equiv on <meta> is not one the live 404 pages use on meta"),
+                ("404-structure/style-attribute-url-fails", page(icon, '<div style="background:url(i.png)"></div>'),
+                 "style value on a 404 page contains url("),
+                ("404-structure/entity-escaped-url-fails", page(icon, '<div class="u&#114;l&#40;i.png)"></div>'),
+                 "class value on a 404 page contains url("),
+                ("404-structure/style-element-import-fails", page(icon + '<style>@import "s.css";</style>', ""),
+                 "element <style> is not in the 404-page element allowlist"),
+                ("404-structure/style-element-url-fails", page(icon + "<style>p{background:URL(i.png)}</style>", ""),
+                 "<style> text on a 404 page contains url("),
+                ("404-structure/fill-url-fails", page(icon, '<svg><text fill="url(#g)">A</text></svg>'),
+                 "fill value on a 404 page contains url("),
+                ("404-structure/fill-unpinned-value-fails", page(icon, '<svg><text fill="red">A</text></svg>'),
+                 "fill value on a 404 page is not one the live 404 pages use"),
+                ("404-structure/svg-set-fails", page(icon, '<svg><set attributeName="href" to="b"/></svg>'),
+                 "element <set> is not in the 404-page element allowlist"),
+                ("404-structure/import-map-fails",
+                 page(icon + '<script type="importmap">{"imports":{"a":"./j.js"}}</script>', ""),
+                 "inline <script> on a 404 page is not a pinned script body"),
+                ("404-structure/inline-module-fails",
+                 page(icon + '<script type="module">import "./j.js";</script>', ""),
+                 "inline <script> on a 404 page is not a pinned script body"),
+                ("404-structure/unpinned-onclick-fails", page(icon, '<button type="button" onclick="go()">B</button>'),
+                 "onclick value on a 404 page is not one the live 404 pages use"),
+                ("404-structure/iframe-srcdoc-fails", page(icon, '<iframe srcdoc="&lt;img src=i.png&gt;"></iframe>'),
+                 "attribute srcdoc on <iframe> is not in the 404-page attribute allowlist"),
+                ("404-structure/base-href-fails", page('<base href="/sub/">' + icon, ""),
+                 "element <base> is not in the 404-page element allowlist")):
+            (root / "404.html").write_text(raw, encoding="utf-8")
+            got = scan(base)
+            (root / "404.html").unlink()
+            check(name, got[0] == 1 and message in got[1], got)
+
+        # A 404 page the parser rejects still gets both raw-markup rules (the parse failure is simulated: no
+        # input tried makes this parser raise).
+        (root / "404.html").write_text(page(icon, '<a href="b">B</a><b ping="b">P</b>'), encoding="utf-8")
+        real_feed = Page.feed
+
+        def failing_feed(self, data):
+            raise ValueError("simulated parse failure")
+        Page.feed = failing_feed
+        try:
+            got = scan(base)
+        finally:
+            Page.feed = real_feed
+        (root / "404.html").unlink()
+        check("404-structure/unparsed-page-still-checked", got[0] == 1 and "could not parse as HTML" in got[1]
+              and "href on a 404 page must be root-absolute" in got[1]
+              and "attribute ping on <b> is not in the 404-page attribute allowlist" in got[1], got)
 
 
 # Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the served site pages). Matching this gate's
@@ -863,9 +1048,10 @@ def _scan_root(root, subdir):
                 findings.append("{}:{}: en dash".format(rel, number))
             if EM in line:
                 findings.append("{}:{}: em dash".format(rel, number))
-        # Read from the raw text, before the parse, so a 404 page that does not parse is still checked.
+        # Both 404 rules read the raw text, not the parsed page.
         if f.name == NOT_FOUND_PAGE:
             findings.extend(not_found_reference_findings(rel, text))
+            findings.extend(not_found_structure_findings(rel, text))
         if page is None:
             findings.append("{}: could not parse as HTML".format(rel))
             continue
@@ -906,7 +1092,7 @@ def _scan_root(root, subdir):
                 if ids is not None and frag not in ids and unquote(frag) not in ids:
                     findings.append("{}:{}: broken anchor -> {} (#{} not found)".format(rel, line, v, frag))
         findings.extend(touch_icon_findings(rel, f.relative_to(site), page.touch_icons, f.parent, site_root))
-    # Logo consistency (M-04): the header logo block is duplicated per page (no page generator yet), so it
+    # Logo consistency: the header logo block is duplicated per page (no page generator yet), so it
     # must stay byte-identical on every page that carries it; an outlier is drift.
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
     if findings:
