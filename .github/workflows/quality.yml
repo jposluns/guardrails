@@ -276,6 +276,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_sitemap.py
 
+      - name: Site headers self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite headers-selftest
+
+      - name: Site headers
+        shell: bash
+        run: python3 -I -B tools/check_headers.py
+
       - name: Render driver behaviour self-test
         shell: bash
         run: python3 -I -B tools/selftest_opf_render.py

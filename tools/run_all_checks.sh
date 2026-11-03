@@ -119,6 +119,8 @@ run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py
 run_gate "security-txt" python3 -I -B tools/check_security_txt.py
 run_gate "sitemap-selftest" python3 -I -B tools/check_selftest_execution.py --suite sitemap-selftest
 run_gate "sitemap" python3 -I -B tools/check_sitemap.py
+run_gate "headers-selftest" python3 -I -B tools/check_selftest_execution.py --suite headers-selftest
+run_gate "headers" python3 -I -B tools/check_headers.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py

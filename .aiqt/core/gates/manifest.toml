@@ -398,6 +398,15 @@ class = "c"
 residue = "It checks that site/sitemap.xml and opf/site/sitemap.xml each list every indexable page of their root exactly once (every *.html file except a 404.html and anything under the root's draft/ or downloads/ directory, mapped to its served URL) and no other URL, every entry on the root's own https origin with a valid YYYY-MM-DD lastmod and no /draft/ URL, and that each root's robots.txt carries its Sitemap line exactly once; a missing, unreadable, oversized, non-UTF-8, DOCTYPE-bearing or non-urlset input fails closed. It covers a recognizable SUBSET (class c, partial): it does not check that a lastmod matches the page's last commit, that Cloudflare serves each URL with status 200, or that a page carries no noindex meta. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "headers"
+script = "tools/check_headers.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It checks that site/_headers and opf/site/_headers each exist as a regular file holding exactly the /* and /draft/* rule blocks, in that order, each header once per block: on /* the live Content-Security-Policy, X-Frame-Options DENY, the Permissions-Policy value and Cross-Origin-Opener-Policy same-origin; on /draft/* the removal of the live policy, the shared draft policy and X-Robots-Tag noindex; the Permissions-Policy and draft policy byte-identical to baseline 1.2.1 section 9, a live policy that keeps every draft directive and source, and no X-Content-Type-Options, Referrer-Policy or Strict-Transport-Security line; a missing rule, a wrong value or an unreadable, oversized, non-UTF-8 or not _headers-shaped file fails closed. It covers a recognizable SUBSET (class c, partial): it reads the repository only, so it does not show that Cloudflare serves each header exactly once, that a /draft/ page carries only the draft policy, that the live policy is as narrow as the live pages allow, or that the browser reports no CSP violation. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "install-page"
 script = "tools/check_install_page.py"
 rules = []
