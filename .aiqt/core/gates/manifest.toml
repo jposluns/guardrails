@@ -332,7 +332,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "c"
-residue = "It checks the published site surface for integrity (dashes, link and anchor resolution, basic HTML validity and tag structure). It covers a recognizable SUBSET: per its own docstring (tools/check_site.py) the subtrees of svg/math and of textarea are not structurally validated and links and ids inside them are not resolved (a self-described deferred coverage gap), so a defect inside such a subtree passes (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "It checks the published site surface for integrity (dashes, link and anchor resolution, basic HTML validity and tag structure), and that every live page outside a draft/ directory carries an apple-touch-icon link naming an existing file under its root. It covers a recognizable SUBSET: per its own docstring (tools/check_site.py) the subtrees of svg/math and of textarea are not structurally validated and links and ids inside them are not resolved (a self-described deferred coverage gap), so a defect inside such a subtree passes (class c, partial). Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "overclaim"

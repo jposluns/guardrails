@@ -101,7 +101,7 @@ run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
 run_gate "dashes-selftest" python3 -I -B tools/check_no_dashes.py --self-test
 run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --default-parity
 run_gate "links"     python3 -I -B tools/check_links.py
-run_gate "site-selftest" python3 -I -B tools/check_site.py --self-test
+run_gate "site-selftest" python3 -I -B tools/check_selftest_execution.py --suite site-selftest
 run_gate "site"      python3 -I -B tools/check_site.py
 run_gate "overclaim-selftest" python3 -I -B tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 -I -B tools/check_overclaim.py

@@ -536,6 +536,7 @@ opf/site/about.html text eol=lf
 opf/site/adopt.html text eol=lf
 opf/site/adopt.md text eol=lf
 opf/site/aiqt.html text eol=lf
+opf/site/assets/baseline/logos/opfiles-touch.png binary
 opf/site/core-files.html text eol=lf
 opf/site/disclosure.html text eol=lf
 opf/site/favicon.svg text eol=lf
@@ -651,6 +652,7 @@ site/404.html text eol=lf
 site/_headers text eol=lf
 site/_redirects text eol=lf
 site/about.html text eol=lf
+site/assets/baseline/logos/aiqt-touch.png binary
 site/development.html text eol=lf
 site/disclosure.html text eol=lf
 site/downloads/aiqt-instructions-1_5k.txt text eol=lf

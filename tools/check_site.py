@@ -25,6 +25,12 @@ Logo consistency: within a root, every page's header logo block must be byte-ide
 block of the pages not named 404.html. A 404 page is served at any missing URL, however deep, so it may
 open its logo with the root-absolute home link href="/" where that block opens with the relative
 href="./"; every other byte must still match, and no other page gets this allowance.
+
+Apple touch icon: every live page (one not under a draft/ directory of its root, 404 pages included)
+must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root, taken as
+the exact path (no .html or index.html fallback); a missing link, or one naming a missing file, a
+directory, an external URL or a path escaping the root, is a finding. Draft pages are built under the
+site template's own rules and are not checked here.
 """
 import sys
 
@@ -94,6 +100,10 @@ AUTOCLOSERS = {
 # an interactive element (<a>/<button>) may not contain another interactive element. These nest silently
 # in the parser (well-balanced) but break rendering/behaviour, so open/close balance never catches them.
 INTERACTIVE = {"a", "button"}
+# The Apple touch icon link every live page carries, and the directory name whose subtree holds draft pages
+# (built under the site template's own rules, so not held to the live pages' head).
+TOUCH_ICON_REL = "apple-touch-icon"
+DRAFT_DIR = "draft"
 
 
 class Page(HTMLParser):
@@ -109,6 +119,7 @@ class Page(HTMLParser):
         self.tag_findings = []    # (line, msg) structural findings
         self.suspend_tag = None   # SUSPEND_ROOT we are inside (subtree not checked), or None
         self.suspend_count = 0    # nesting of that same root, so the matching close ends suspension
+        self.touch_icons = []     # (href, line) of each <link rel="apple-touch-icon">
 
     def handle_starttag(self, tag, attrs):
         if self.suspend_tag is not None:
@@ -119,6 +130,8 @@ class Page(HTMLParser):
         for key in ("href", "src"):
             if d.get(key):
                 self.links.append((d[key], self.getpos()[0]))
+        if tag == "link" and TOUCH_ICON_REL in (d.get("rel") or "").lower().split():
+            self.touch_icons.append(((d.get("href") or "").strip(), self.getpos()[0]))
         if d.get("id"):
             self.ids.add(d["id"])
             self.id_list.append((d["id"], self.getpos()[0]))
@@ -281,6 +294,34 @@ def logo_findings(pages):
     return out
 
 
+def _touch_icon_file(href, page_dir, site_root):
+    """The existing regular file under site_root that href names as an exact path, or None. An external
+    or empty-path href, a directory, a path escaping the root and a missing file all give None."""
+    classified = classify(href)
+    if classified is None or classified[0] == "":
+        return None
+    path = classified[0]
+    base = site_root if path.startswith("/") else page_dir
+    resolved = (base / path.lstrip("/")).resolve()
+    if _under(site_root, resolved) and resolved != site_root and resolved.is_file():
+        return resolved
+    return None
+
+
+def touch_icon_findings(label, page_rel, icons, page_dir, site_root):
+    """Findings for one page's Apple touch icon links. `label` names the page in a finding, `page_rel` is
+    its path relative to its root, `icons` its (href, line) list. A page under a draft/ directory is not
+    checked; any other page needs at least one link, and every link must name an existing file."""
+    if DRAFT_DIR in Path(page_rel).parts[:-1]:
+        return []
+    if not icons:
+        return ['{}: missing <link rel="{}"> (every live page links the touch icon)'.format(
+            label, TOUCH_ICON_REL)]
+    return ["{}:{}: {} names a file that does not exist under the root -> {!r}".format(
+        label, line, TOUCH_ICON_REL, href)
+        for href, line in icons if _touch_icon_file(href, page_dir, site_root) is None]
+
+
 def _self_test():
     good = '<a class="logo" href="/">L</a>'
     bad = '<a class="logo" href="/">L&trade;</a>'
@@ -365,8 +406,10 @@ def _self_test():
         r = Path(d)
         draft = r / "opf" / "site" / "draft"
         draft.mkdir(parents=True)
+        (r / "opf" / "site" / "touch.png").write_bytes(b"png")
         (r / "opf" / "site" / "index.html").write_text(
-            "<!doctype html><title>t</title><nav></nav>", encoding="utf-8")
+            '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/touch.png"><nav></nav>',
+            encoding="utf-8")
         (draft / "disclosure.html").write_text("<!doctype html><title>t</title><p>d</p>", encoding="utf-8")
         (draft / "manifest.html").write_text(
             '<!doctype html><title>t</title><nav><a href="./disclosure">D</a></nav>', encoding="utf-8")
@@ -380,14 +423,101 @@ def _self_test():
         if quiet(run, Path(d2)) != 0:
             failures.append("coverage: neither root present did not pass clean")
 
+    _touch_icon_self_test(quiet)
+    failures.extend(FAILURES)
+
     if failures:
         print("SELF-TEST FAIL:")
         for x in failures:
             print("  - " + x)
         return 1
     print("PASS: check_site self-test ({} logo cases + {} 404-page logo cases + {} SITE_HOSTS env cases + "
-          "coverage-root legs)".format(len(cases), len(not_found_cases), len(host_cases)))
+          "coverage-root legs + {} registered checks)".format(len(cases), len(not_found_cases),
+                                                             len(host_cases), len(EXECUTED)))
     return 0
+
+
+# The registered execution-suite identity (tools/selftest_checks.toml) and the executed-check-id record
+# the instrumented check() helper appends to; the execution gate reconciles the report against the
+# registry.
+SUITE_ID = "site-selftest"
+EXECUTED = []
+FAILURES = []
+
+
+def check(name, ok, detail=""):
+    if name in EXECUTED:
+        print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
+        sys.exit(2)
+    EXECUTED.append(name)
+    if not ok:
+        FAILURES.append("{}: {!r}".format(name, detail))
+
+
+def _touch_icon_self_test(quiet):
+    """The touch-icon check: a live page passes only with a link naming an existing file under its root;
+    a draft page is exempt, a page merely named draft is not, and the scan and the live tree agree."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        root = base / "site"
+        (root / "assets" / "logos").mkdir(parents=True)
+        (root / "sub").mkdir()
+        (root / "assets" / "logos" / "t.png").write_bytes(b"png")
+        (base / "outside.png").write_bytes(b"png")
+        site_root = root.resolve()
+
+        def findings(page_rel, icons):
+            return touch_icon_findings(page_rel, page_rel, icons, root / Path(page_rel).parent, site_root)
+
+        got = findings("a.html", [("/assets/logos/t.png", 3)])
+        check("touch-icon/root-absolute-href-passes", got == [], got)
+        got = findings("sub/a.html", [("../assets/logos/t.png", 3)])
+        check("touch-icon/relative-href-passes", got == [], got)
+        got = findings("404.html", [("/assets/logos/t.png?v=1#x", 3)])
+        check("touch-icon/query-and-fragment-ignored", got == [], got)
+        got = findings("a.html", [])
+        check("touch-icon/missing-link-fails", len(got) == 1 and "missing <link" in got[0], got)
+        got = findings("404.html", [])
+        check("touch-icon/404-page-checked", len(got) == 1 and "missing <link" in got[0], got)
+        got = findings("a.html", [("/assets/logos/gone.png", 3)])
+        check("touch-icon/missing-file-fails", len(got) == 1 and "does not exist" in got[0], got)
+        got = findings("a.html", [("/assets/logos/t.png", 3), ("/assets/logos/gone.png", 4)])
+        check("touch-icon/second-link-missing-file-fails", len(got) == 1 and "a.html:4:" in got[0], got)
+        for name, href in (("touch-icon/directory-href-fails", "/assets/logos/"),
+                           ("touch-icon/root-href-fails", "/"),
+                           ("touch-icon/empty-href-fails", ""),
+                           ("touch-icon/html-fallback-not-taken", "/assets/logos/t"),
+                           ("touch-icon/escaping-href-fails", "/../outside.png"),
+                           ("touch-icon/external-href-fails", "https://example.test/t.png")):
+            got = findings("a.html", [(href, 3)])
+            check(name, len(got) == 1 and "does not exist" in got[0], got)
+        got = findings("draft/a.html", [])
+        check("touch-icon/draft-page-exempt", got == [], got)
+        got = findings("draft/sub/a.html", [("/nope.png", 3)])
+        check("touch-icon/nested-draft-page-exempt", got == [], got)
+        got = findings("draft.html", [])
+        check("touch-icon/page-named-draft-checked", len(got) == 1, got)
+        got = findings("drafts/a.html", [])
+        check("touch-icon/drafts-directory-checked", len(got) == 1, got)
+
+        page = Page()
+        page.feed('<link rel="icon" href="/f.svg"><link rel="Apple-Touch-Icon" href=" /t.png ">'
+                  '<link rel="stylesheet" href="/s.css">')
+        check("touch-icon/parser-reads-link", page.touch_icons == [("/t.png", 1)], page.touch_icons)
+
+        (root / "index.html").write_text(
+            '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/assets/logos/t.png">',
+            encoding="utf-8")
+        (root / "sub" / "a.html").write_text("<!doctype html><title>t</title><p>x</p>", encoding="utf-8")
+        check("touch-icon/scan-reports-missing-link", quiet(_scan_root, base, "site") == 1, None)
+        (root / "sub" / "a.html").write_text(
+            '<!doctype html><title>t</title><link rel="apple-touch-icon" href="../assets/logos/t.png">',
+            encoding="utf-8")
+        check("touch-icon/scan-passes-when-linked", quiet(_scan_root, base, "site") == 0, None)
+
+    got = quiet(main)
+    check("live/real-tree-passes", got == 0, got)
 
 
 # Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the served site pages). Matching this gate's
@@ -489,6 +619,7 @@ def _scan_root(root, subdir):
                 # HTML fragment navigation (raw match, else decoded match).
                 if ids is not None and frag not in ids and unquote(frag) not in ids:
                     findings.append("{}:{}: broken anchor -> {} (#{} not found)".format(rel, line, v, frag))
+        findings.extend(touch_icon_findings(rel, f.relative_to(site), page.touch_icons, f.parent, site_root))
     # Logo consistency (M-04): the header logo block is duplicated per page (no page generator yet), so it
     # must stay byte-identical on every page that carries it; an outlier is drift.
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
@@ -497,12 +628,26 @@ def _scan_root(root, subdir):
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: {}/ dashes, links, anchors, titles, unique ids, and tag structure all check out"
+    print("PASS: {}/ dashes, links, anchors, titles, unique ids, tag structure and touch icons all check out"
           .format(subdir))
     return 0
 
 
+def _entry(argv):
+    # The execution gate appends `--execution-report ABS_PATH` to the self-test launch; accepted only in
+    # that trailing two-token form, with an absolute path, alone or after --self-test.
+    if len(argv) >= 2 and argv[-2] == "--execution-report" and os.path.isabs(argv[-1]) \
+            and argv[:-2] in ([], ["--self-test"]):
+        # Finalized at interpreter exit by tools/_selftest_exit_report.py; nothing writes it in band.
+        import _selftest_exit_report
+        _selftest_exit_report.arm(argv[-1], SUITE_ID, EXECUTED)
+        return _self_test()
+    if "--self-test" in argv:
+        return _self_test()
+    return main()
+
+
 if __name__ == "__main__":
-    if "--self-test" in sys.argv[1:]:
-        sys.exit(_self_test())
-    sys.exit(main())
+    _code = _entry(sys.argv[1:])
+    _finalizer = sys.modules.get("_selftest_exit_report")
+    (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)

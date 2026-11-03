@@ -4835,6 +4835,33 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "site-selftest"
+runner = "tools/check_site.py"
+expected-check-ids = [
+  "touch-icon/root-absolute-href-passes",
+  "touch-icon/relative-href-passes",
+  "touch-icon/query-and-fragment-ignored",
+  "touch-icon/missing-link-fails",
+  "touch-icon/404-page-checked",
+  "touch-icon/missing-file-fails",
+  "touch-icon/second-link-missing-file-fails",
+  "touch-icon/directory-href-fails",
+  "touch-icon/root-href-fails",
+  "touch-icon/empty-href-fails",
+  "touch-icon/html-fallback-not-taken",
+  "touch-icon/escaping-href-fails",
+  "touch-icon/external-href-fails",
+  "touch-icon/draft-page-exempt",
+  "touch-icon/nested-draft-page-exempt",
+  "touch-icon/page-named-draft-checked",
+  "touch-icon/drafts-directory-checked",
+  "touch-icon/parser-reads-link",
+  "touch-icon/scan-reports-missing-link",
+  "touch-icon/scan-passes-when-linked",
+  "live/real-tree-passes",
+]
+
+[[suite]]
 id = "headers-selftest"
 runner = "tools/check_headers.py"
 expected-check-ids = [
