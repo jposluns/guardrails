@@ -385,7 +385,7 @@ def _table_html(spec, where):
     if "cols" in spec:
         value = spec["cols"]
         if not isinstance(value, list) or not value or not all(
-                isinstance(col, str) and re.fullmatch(r"w\d{1,2}", col) for col in value):
+                isinstance(col, str) and re.fullmatch(r"w[0-9]{1,2}", col) for col in value):
             raise RefusedPage("{}: cols must be an array of wN column classes".format(where))
         cols = "<colgroup>{}</colgroup>".format("".join('<col class="{}">'.format(col) for col in value))
     head = spec.get("head")
@@ -1129,6 +1129,17 @@ def _self_test():
         "refuse/bad-code-variant", rendered, 'component = "code"\nid = "x"\ntext = "t"\nvariant = "inline"\n'))
     expect("refuse/bad-id", "not a valid id" in refused(
         "refuse/bad-id", rendered, 'component = "clause"\nid = "1 bad"\nnum = "1"\ntitle = "T"\nlbl = "L"\n'))
+    # Column classes are ASCII w0 to w99 only: a non-ASCII digit (TOML escapes, so the source stays ASCII),
+    # a third digit or a trailing newline is refused, and both ends of the range render.
+    for name, col in (("refuse/cols-arabic-indic-digit", "w\\u0661"), ("refuse/cols-fullwidth-digit", "w\\uff11"),
+                      ("refuse/cols-three-digits", "w100"), ("refuse/cols-trailing-newline", "w1\\n")):
+        expect(name, "wN column classes" in refused(
+            name, rendered, 'component = "table"\ncaption = "C"\ncols = ["{}"]\nhead = ["A"]\nrows = [["x"]]\n'
+            .format(col)))
+    for name, col in (("component/table-cols-w0", "w0"), ("component/table-cols-w99", "w99")):
+        cols_table = rendered('component = "table"\ncaption = "C"\ncols = ["{}"]\nhead = ["A"]\nrows = [["x"]]\n'
+                              .format(col))
+        expect(name, '<col class="{}">'.format(col) in cols_table, cols_table)
 
     # Scripts are derived from the content: rail.js only where the rail lists sections (section 7.6).
     plain = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<p>P</p>"\n')
