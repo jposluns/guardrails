@@ -25,9 +25,16 @@ Logo consistency: within a root, every page's header logo block must be byte-ide
 block of the pages not named 404.html. A 404 page is served at any missing URL, however deep, so it must
 open its logo with the root-absolute home link href="/" where that block opens with the relative
 href="./" (the relative form is a finding there); every other byte must still match, and no other page
-gets this allowance. For the same reason every relative href or src on a page named 404.html (a
-stylesheet, icon, script, image or link, inside the logo block or not) is a finding; root-absolute,
-external and fragment-only or query-only values pass there.
+gets this allowance.
+
+404 references: for the same reason a page named 404.html (top-level or nested) is held to an allowlist read
+from its raw markup, not from the parsed page: every occurrence of href, src, srcset (each candidate URL),
+poster, data, action and xlink:href, duplicates and those inside svg and math included, must start with
+exactly one "/" (followed by a character other than "/", a backslash, a tab or a newline, or nothing), or
+with "#", "?" or "https://". The value is tested as written and again with its character references
+decoded, and is never percent-decoded, so "%2F..." is refused. Anything else (a relative path, "./",
+"../", an empty value, "//host", any other scheme) is a finding naming the attribute and value. A relative
+touch icon on a 404 page is reported by this rule and by the touch-icon rule below, so it is listed twice.
 
 Apple touch icon: every live page (one not under the top-level draft/ directory of its root, 404 pages
 included) must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root,
@@ -51,6 +58,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import os
 import re
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -340,6 +348,113 @@ def touch_icon_findings(label, page_rel, icons, page_dir, site_root):
     return out
 
 
+# The URL-bearing attributes a 404 page is held to (srcset is split into its candidate URLs), and the ASCII
+# whitespace that separates attributes and srcset candidates in HTML.
+NOT_FOUND_URL_ATTRS = {"href", "src", "srcset", "poster", "data", "action", "xlink:href"}
+_HTML_SPACE = "\t\n\f\r "
+_RAW_TAG_RE = re.compile(r"<[A-Za-z]")
+# After a leading "/", a browser reads a backslash as a second slash and drops tabs and newlines, so any of
+# these there can make a protocol-relative //host URL.
+_SECOND_SLASH = ("/", "\\", "\t", "\n", "\r")
+
+
+def raw_url_attributes(text):
+    """Every (name, value, line) of a URL-bearing attribute in the raw markup, the value as written (character
+    references and percent-escapes left alone), duplicates included. A tag scan starts at every "<" followed
+    by a letter, inside a comment, script, svg, math or attribute value too, so nothing a browser loads is
+    missed; markup a browser does not read as a tag can only add a finding. An unclosed quote runs to the end."""
+    out = []
+    n = len(text)
+    for match in _RAW_TAG_RE.finditer(text):
+        i = match.end()
+        while i < n and text[i] not in _HTML_SPACE + "/>":
+            i += 1
+        while i < n and text[i] != ">":
+            if text[i] in _HTML_SPACE + "/":
+                i += 1
+                continue
+            start = i
+            i += 1  # a leading "=" belongs to the name
+            while i < n and text[i] not in _HTML_SPACE + "/>=":
+                i += 1
+            name = text[start:i].lower()
+            j = i
+            while j < n and text[j] in _HTML_SPACE:
+                j += 1
+            if j >= n or text[j] != "=":
+                continue
+            j += 1
+            while j < n and text[j] in _HTML_SPACE:
+                j += 1
+            if j < n and text[j] in "\"'":
+                end = text.find(text[j], j + 1)
+                end = n if end == -1 else end
+                value, i = text[j + 1:end], end + 1
+            else:
+                end = j
+                while end < n and text[end] not in _HTML_SPACE + ">":
+                    end += 1
+                value, i = text[j:end], end
+            if name in NOT_FOUND_URL_ATTRS:
+                out.append((name, value, text.count("\n", 0, start) + 1))
+    return out
+
+
+def srcset_urls(value):
+    """The candidate URLs of a srcset value, split as HTML does: skip spaces and commas, take the run of
+    non-space characters (trailing commas dropped, which also ends the candidate), then skip its descriptors
+    up to the next comma outside parentheses."""
+    urls = []
+    i, n = 0, len(value)
+    while i < n:
+        while i < n and (value[i] in _HTML_SPACE or value[i] == ","):
+            i += 1
+        start = i
+        while i < n and value[i] not in _HTML_SPACE:
+            i += 1
+        if start == i:
+            break
+        url = value[start:i]
+        urls.append(url.rstrip(","))
+        if url.endswith(","):
+            continue
+        in_parens = False
+        while i < n and (in_parens or value[i] != ","):
+            if value[i] == "(":
+                in_parens = True
+            elif value[i] == ")":
+                in_parens = False
+            i += 1
+    return urls
+
+
+def not_found_reference_ok(value):
+    """Whether a URL value, taken as written, is safe on a 404 page (served at any path): fragment-only,
+    query-only, https://, or exactly one leading "/" followed by a safe character or nothing. Nothing is
+    percent-decoded, so "%2F..." is not a slash."""
+    if value.startswith(("#", "?", "https://")):
+        return True
+    return value.startswith("/") and value[1:2] not in _SECOND_SLASH
+
+
+def not_found_reference_findings(label, text):
+    """Findings for the raw markup `text` of a 404 page named `label`: each URL-bearing attribute occurrence
+    (each srcset candidate) that fails not_found_reference_ok as written or with its character references
+    decoded, as a browser decodes them before reading the URL."""
+    out = []
+    for name, raw, line in raw_url_attributes(text):
+        decoded = unescape(raw)
+        if name == "srcset":
+            candidates = dict.fromkeys(srcset_urls(raw) + srcset_urls(decoded))
+            bad = [url for url in candidates if not not_found_reference_ok(url)]
+        else:
+            bad = [] if not_found_reference_ok(raw) and not_found_reference_ok(decoded) else [raw]
+        for value in bad:
+            out.append("{}:{}: {} on a 404 page must be root-absolute (one leading /), fragment-only, query-only "
+                       "or https://; a 404 page is served at any path -> {!r}".format(label, line, name, value))
+    return out
+
+
 def _self_test():
     good = '<a class="logo" href="/">L</a>'
     bad = '<a class="logo" href="/">L&trade;</a>'
@@ -557,9 +672,9 @@ def _touch_icon_self_test(quiet):
 
 
 def _not_found_links_self_test():
-    """The 404-page link rule: every relative href or src on a page named 404.html, top-level or nested, is
-    a finding even where it resolves from the page's own directory; root-absolute and fragment-only links
-    pass there, and the same relative links pass on any other page."""
+    """The 404-page reference allowlist: every URL-bearing attribute value on a page named 404.html, top-level
+    or nested, that is not root-absolute, fragment-only, query-only or https:// is a finding even where it
+    resolves from the page's own directory, and the same relative links pass on any other page."""
     import contextlib
     import io
     import tempfile
@@ -606,8 +721,8 @@ def _not_found_links_self_test():
             (root / page_rel).write_text(page(head, body), encoding="utf-8")
             got = scan(base)
             (root / page_rel).unlink()
-            check(name, got[0] == 1 and "FAIL: 1 site/" in got[1] and "relative href or src on a 404 page" in got[1]
-                  and got[1].rstrip().endswith("-> " + value), got)
+            check(name, got[0] == 1 and "FAIL: 1 site/" in got[1] and "on a 404 page must be root-absolute" in got[1]
+                  and got[1].rstrip().endswith("-> " + repr(value)), got)
 
         absolute = page(icon + '<link rel="stylesheet" href="/s.css"><link rel="icon" href="/f.svg">'
                         '<script src="/j.js"></script>',
@@ -629,8 +744,63 @@ def _not_found_links_self_test():
         (root / "sub" / "404.html").write_text(page('<link rel="apple-touch-icon" href="t.png">', ""),
                                                encoding="utf-8")
         got = scan(base)
-        check("404-links/relative-touch-icon-reported-once", got[0] == 1 and "FAIL: 1 site/" in got[1]
-              and "apple-touch-icon on a 404 page is relative" in got[1], got)
+        check("404-links/relative-touch-icon-reported-by-both-rules", got[0] == 1 and "FAIL: 2 site/" in got[1]
+              and "apple-touch-icon on a 404 page is relative" in got[1]
+              and "href on a 404 page must be root-absolute" in got[1], got)
+        (root / "sub" / "404.html").unlink()
+
+        # The allowlist reads the raw markup: each refused value is named with its attribute, and the number
+        # of findings is exact. Each accepted form is shown passing on a page of its own.
+        for name, page_rel, head, body, attr, value, count in (
+                ("404-links/percent-encoded-slash-src-fails", "404.html", icon, '<img src="%2Fi.png" alt="">',
+                 "src", "%2Fi.png", 1),
+                ("404-links/nested-percent-encoded-slash-src-fails", "sub/404.html", icon,
+                 '<img src="%2Fi.png" alt="">', "src", "%2Fi.png", 1),
+                ("404-links/percent-encoded-slash-touch-icon-fails", "404.html",
+                 '<link rel="apple-touch-icon" href="%2Ft.png">', "", "href", "%2Ft.png", 1),
+                ("404-links/dot-slash-src-fails", "404.html", icon, '<img src="./i.png" alt="">', "src", "./i.png", 1),
+                ("404-links/dot-dot-slash-href-fails", "sub/404.html", icon, '<a href="../b">B</a>', "href", "../b", 1),
+                ("404-links/svg-use-href-fails", "404.html", icon, '<svg><use href="f.svg#a"></use></svg>',
+                 "href", "f.svg#a", 1),
+                ("404-links/svg-image-href-fails", "404.html", icon, '<svg><image href="i.png"/></svg>',
+                 "href", "i.png", 1),
+                ("404-links/svg-xlink-href-fails", "404.html", icon, '<svg><use xlink:href="f.svg#a"/></svg>',
+                 "xlink:href", "f.svg#a", 1),
+                ("404-links/math-href-fails", "404.html", icon, '<math><mi href="b">x</mi></math>', "href", "b", 1),
+                ("404-links/srcset-relative-candidate-fails", "404.html", icon,
+                 '<img src="/i.png" srcset="/i.png 1x, i.png 2x" alt="">', "srcset", "i.png", 1),
+                ("404-links/poster-fails", "404.html", icon, '<video poster="i.png"></video>', "poster", "i.png", 1),
+                ("404-links/object-data-fails", "404.html", icon, '<object data="f.svg"></object>', "data", "f.svg", 1),
+                ("404-links/form-action-fails", "404.html", icon, '<form action="b"></form>', "action", "b", 1),
+                ("404-links/duplicate-src-first-relative-fails", "404.html", icon,
+                 '<img src="i.png" src="/i.png" alt="">', "src", "i.png", 1),
+                ("404-links/protocol-relative-src-fails", "404.html", icon, '<img src="//aiqt.ai/i.png" alt="">',
+                 "src", "//aiqt.ai/i.png", 1),
+                ("404-links/entity-encoded-second-slash-fails", "404.html", icon,
+                 '<img src="/&#47;aiqt.ai/i.png" alt="">', "src", "/&#47;aiqt.ai/i.png", 1),
+                ("404-links/backslash-after-slash-fails", "404.html", icon, '<img src="/\\aiqt.ai/i.png" alt="">',
+                 "src", "/\\aiqt.ai/i.png", 2),
+                ("404-links/empty-href-fails", "404.html", icon, '<a href="">E</a>', "href", "", 1),
+                ("404-links/other-scheme-fails", "404.html", icon, '<a href="http://aiqt.ai/b">B</a>',
+                 "href", "http://aiqt.ai/b", 1)):
+            (root / page_rel).write_text(page(head, body), encoding="utf-8")
+            got = scan(base)
+            (root / page_rel).unlink()
+            check(name, got[0] == 1 and "FAIL: {} site/".format(count) in got[1]
+                  and "{} on a 404 page must be root-absolute".format(attr) in got[1]
+                  and "-> {}\n".format(repr(value)) in got[1], got)
+        for name, body in (
+                ("404-links/query-only-passes", '<a href="?q=1">Q</a><form action="?q=1"></form>'),
+                ("404-links/fragment-only-passes", '<p id="top"></p><a href="#top">T</a>'
+                 '<svg><use href="#top"></use></svg>'),
+                ("404-links/root-absolute-passes", '<a href="/">H</a><img src="/i.png" srcset="/i.png 1x, /i.png 2x" '
+                 'alt=""><video poster="/i.png"></video><object data="/f.svg"></object><form action="/b"></form>'),
+                ("404-links/https-passes", '<a href="https://aiqt.ai/b">B</a><img src="https://example.test/i.png" '
+                 'srcset="https://example.test/i.png 2x" alt="">')):
+            (root / "404.html").write_text(page(icon, body), encoding="utf-8")
+            got = scan(base)
+            (root / "404.html").unlink()
+            check(name, got[0] == 0, got)
 
 
 # Coverage roots: site/ (aiqt.ai) and opf/site/ (opfiles.ai: the served site pages). Matching this gate's
@@ -693,6 +863,9 @@ def _scan_root(root, subdir):
                 findings.append("{}:{}: en dash".format(rel, number))
             if EM in line:
                 findings.append("{}:{}: em dash".format(rel, number))
+        # Read from the raw text, before the parse, so a 404 page that does not parse is still checked.
+        if f.name == NOT_FOUND_PAGE:
+            findings.extend(not_found_reference_findings(rel, text))
         if page is None:
             findings.append("{}: could not parse as HTML".format(rel))
             continue
@@ -715,12 +888,6 @@ def _scan_root(root, subdir):
             if classified is None:
                 continue
             pathpart, frag = classified
-            # A 404 page is served at any missing URL, however deep, so a relative href or src there resolves
-            # below the root. A relative touch icon is already reported by touch_icon_findings.
-            if f.name == NOT_FOUND_PAGE and pathpart and not pathpart.startswith("/") \
-                    and (v, line) not in page.touch_icons:
-                findings.append("{}:{}: relative href or src on a 404 page; a 404 page is served at any path, so "
-                                "it must be root-absolute -> {}".format(rel, line, v))
             if pathpart == "":
                 if not frag:
                     continue
