@@ -2025,6 +2025,9 @@ expected-check-ids = [
   "cidecide/second-parent-mismatch-false",
   "cidecide/missing-head-sha-false",
   "cidecide/isolated-tool-outside-repo-true",
+  "cidecide/two-parent-merge-tools-change-false",
+  "cidecide/three-parent-merge-false",
+  "cidecide/parent-read-causes-false-and-named",
   "cidecide/no-output-exit-1",
   "cidecide/unwritable-output-exit-1",
   # ---------- launch shapes ----------

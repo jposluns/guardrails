@@ -24,7 +24,7 @@ because the diff is read with rename detection off (--no-renames): both sides of
 as a delete and an add, and the non-site side decides false.
 
 The CLI reads the changed paths from git against the merge base it is given with:
-git diff --name-only --no-renames -z <merge-base> HEAD.
+git --no-replace-objects diff --name-only --no-renames -z <merge-base> HEAD.
 It prints exactly one line, site_only=true or site_only=false, and exits 0 only on a clean
 decision; it exits 2 on cannot-evaluate (a bad revision, a git failure, undecodable path bytes, a
 missing git), which the workflow treats as site_only=false.
@@ -33,13 +33,17 @@ The scope job runs --ci-decide: it reads EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_R
 and GITHUB_OUTPUT from the environment, appends site_only=true or site_only=false to
 GITHUB_OUTPUT, and exits 0. Any event but pull_request, a head ref that is not a merge-train-*
 branch, a head repository that is empty or not the base repository, a checked-out HEAD whose
-second parent is missing or is not HEAD_SHA (the pull request's head commit), and any
-cannot-evaluate from the diff read, each writes false, so the full suite runs. The diff is read
-against HEAD^1, the first parent of the checked-out commit: GitHub documents the pull_request
-checkout as a test merge commit (refs/pull/N/merge) whose parents are the base-branch tip the
-merge was built on and the pull request's head (documented behaviour, not verified here), and
-requiring HEAD^2 to equal HEAD_SHA checks that shape instead of assuming it, so HEAD^1..HEAD is
-read as the tested tree's change over its base only when the checkout really is such a merge.
+raw commit object does not record exactly two parents or whose second parent is not HEAD_SHA (the
+pull request's head commit), and any cannot-evaluate from the parent read or the diff read, each
+writes false, so the full suite runs. The parents are read from HEAD's raw commit object (git
+--no-replace-objects cat-file commit HEAD, parsing the header's parent lines), and the diff is
+read against the first of them, HEAD^1 as that object records it, with replacement objects
+disabled on both reads, so no replace ref can redirect a read the decision rests on: GitHub
+documents the pull_request checkout as a test merge commit (refs/pull/N/merge) whose parents are
+the base-branch tip the merge was built on and the pull request's head (documented behaviour, not
+verified here), and requiring exactly two parents, the second equal to HEAD_SHA, checks that shape
+instead of assuming it, so HEAD^1..HEAD is read as the tested tree's change over its base only
+when the checkout really is such a merge.
 The repository read is the process working directory, because the scope job runs this file from
 outside the tree; this entry imports nothing beside the standard library, so the one extracted
 file runs alone. It exits nonzero only when it cannot write the decision at all, which fails the
@@ -125,9 +129,12 @@ SITE_REGENERATED = frozenset({
 # and opf/site/adopt.html; its live gate runs in the always-run registry job in every run and in
 # two of the three config lanes (the malformed lane excludes the bare launch, which stays in the
 # combined and system lanes), so those pages need no exclusion either. What the fast lane
-# deliberately gives up for a site-only train is the skipped jobs' host, configuration and
-# platform repetitions: the host-patch jobs' exact host Python
-# (git-fixture-env-core-host-patch is the core suite repeated on that Python), the config
+# deliberately gives up for a site-only train is every suite that runs only in the skipped jobs:
+# the host-patch jobs are the only CI run of the OPF tooling self-test and of the combined,
+# malformed and system git-fixture-env suites, so on a site-only train those suites run nowhere
+# in CI, and neither does the git-fixture-env core suite, whose other run, the
+# git-fixture-env-core canary, is a heavy job too. It also gives up the skipped jobs' host,
+# configuration and platform repetitions: the host-patch jobs' exact host Python, the config
 # lanes' hostile git configurations, and byte-canon-matrix's platforms.
 SITE_HEAVY_READ = frozenset({
     "opf/site/adopt.html",
@@ -143,14 +150,17 @@ REQUIRE_NONEMPTY = True
 # passing skip. The bare prefix itself ("merge-train-") counts as a train head, matching the
 # heavy jobs' startsWith(github.head_ref, 'merge-train-') condition.
 TRAIN_PREFIX = "merge-train-"
-# The revision --ci-decide diffs against: the first parent of the checked-out commit. On a
-# pull_request event the checkout is the tested merge commit, whose first parent is the
-# base-branch tip it was built on (module docstring).
-MERGE_FIRST_PARENT = "HEAD^1"
-# The second parent --ci-decide requires: it must exist and be exactly the pull request's head
-# commit (HEAD_SHA), or the decision is cannot-evaluate, false. A HEAD with no second parent is
-# not the documented two-parent test merge, so the fast lane never engages on it.
-MERGE_SECOND_PARENT = "HEAD^2"
+# The parent count --ci-decide requires of the checked-out commit's raw object: on a
+# pull_request event the checkout is the tested two-parent merge commit, whose first parent is
+# the base-branch tip it was built on and whose second must be exactly the pull request's head
+# commit (HEAD_SHA). Any other count, zero, one, or three and more, is not that merge, so the
+# decision is cannot-evaluate, false (module docstring). --ci-decide diffs against the first
+# parent that object records.
+MERGE_PARENT_COUNT = 2
+# Every git read the decision rests on (head_parents, changed_paths) runs with
+# --no-replace-objects, so a replace ref can neither swap HEAD's parent list nor the trees the
+# diff compares.
+HEX_DIGITS = frozenset(b"0123456789abcdef")
 
 
 def _plain_relative(path):
@@ -210,11 +220,12 @@ def site_only(paths):
 
 def changed_paths(root, merge_base):
     """(paths, None) read from git against merge_base, or (None, reason) on any error. Rename
-    detection is off, so both sides of a rename appear; -z gives exact NUL-separated paths."""
+    detection is off, so both sides of a rename appear; -z gives exact NUL-separated paths;
+    replacement objects are disabled, so a replace ref cannot redirect either side."""
     if not isinstance(merge_base, str) or not merge_base or merge_base.startswith("-"):
         return None, "merge base must be a non-empty revision, not an option"
-    argv = ["git", "-C", str(root), "diff", "--name-only", "--no-renames", "-z",
-            merge_base, "HEAD", "--"]
+    argv = ["git", "--no-replace-objects", "-C", str(root), "diff", "--name-only",
+            "--no-renames", "-z", merge_base, "HEAD", "--"]
     try:
         proc = subprocess.run(argv, capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -229,23 +240,64 @@ def changed_paths(root, merge_base):
     return [item for item in text.split("\0") if item], None
 
 
-def second_parent(root):
-    """(the revision MERGE_SECOND_PARENT resolves to, None), or (None, reason) when HEAD has no
-    second parent or git cannot answer: the checked-out commit is then not the documented
-    two-parent test merge, so the caller treats it as cannot-evaluate."""
-    argv = ["git", "-C", str(root), "rev-parse", "--verify", MERGE_SECOND_PARENT]
+def _object_id(value):
+    """True only for a full lowercase hexadecimal object id (SHA-1 or SHA-256 length)."""
+    return len(value) in (40, 64) and all(byte in HEX_DIGITS for byte in value)
+
+
+def head_parents(root):
+    """(HEAD's parent ids, in order, as its raw commit object records them, None), or (None,
+    reason) when git cannot answer or the object's header cannot be parsed. The object is read
+    with replacement objects disabled, and its parents are the parent lines that directly follow
+    the tree line, exactly where git writes them; a parent line anywhere else in the header, a
+    malformed id, or a header with no end is unparseable, never read as a smaller list."""
+    argv = ["git", "--no-replace-objects", "-C", str(root), "cat-file", "commit", "HEAD"]
     try:
         proc = subprocess.run(argv, capture_output=True, timeout=GIT_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, "cannot run git: {}".format(exc)
     if proc.returncode != 0:
-        return None, ("HEAD has no second parent, so the checkout is not the tested two-parent "
-                      "merge commit")
-    try:
-        text = proc.stdout.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        return None, "undecodable revision bytes: {}".format(exc)
-    return text.strip(), None
+        tail = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+        return None, "git cat-file commit HEAD exited {}: {}".format(
+            proc.returncode, tail[-1] if tail else "")
+    header, separator, _ = proc.stdout.partition(b"\n\n")
+    if not separator:
+        return None, "HEAD's commit object has no header end, so its parents cannot be read"
+    lines = header.split(b"\n")
+    if not lines[0].startswith(b"tree "):
+        return None, "HEAD's commit object does not begin with a tree line, so it is unparseable"
+    parents = []
+    index = 1
+    while index < len(lines) and lines[index].startswith(b"parent "):
+        value = lines[index][len(b"parent "):]
+        if not _object_id(value):
+            return None, "HEAD's commit object has a malformed parent line"
+        parents.append(value.decode("ascii"))
+        index += 1
+    for line in lines[index:]:
+        if line.startswith(b"parent "):
+            return None, ("HEAD's commit object has a parent line outside the parent block, so "
+                          "its parents cannot be read unambiguously")
+    return parents, None
+
+
+def merge_parents(root):
+    """((first parent, second parent), None) only when HEAD's raw commit object records exactly
+    MERGE_PARENT_COUNT parents; otherwise (None, reason): git could not answer, the header is
+    unparseable, or the count is not two, and each says which. The caller treats every reason
+    as cannot-evaluate."""
+    parents, problem = head_parents(root)
+    if problem is not None:
+        return None, problem
+    if len(parents) != MERGE_PARENT_COUNT:
+        if not parents:
+            shape = "HEAD has no parent (a root commit)"
+        elif len(parents) == 1:
+            shape = "HEAD has one parent (a linear commit)"
+        else:
+            shape = "HEAD has {} parents, not exactly two".format(len(parents))
+        return None, shape + ", so the checkout is not the tested two-parent merge commit"
+    return (parents[0], parents[1]), None
 
 
 def decide(root, merge_base):
@@ -263,8 +315,9 @@ def ci_decide():
     """The scope job entry: read EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO, HEAD_SHA and
     GITHUB_OUTPUT from the environment, append site_only=true or site_only=false to
     GITHUB_OUTPUT, print the decision, exit 0. Any event but pull_request, a non-train or fork
-    head (train_head), a HEAD whose second parent is missing or is not HEAD_SHA, and any
-    cannot-evaluate, each decides false (the full suite). The diff is read against HEAD^1 in the
+    head (train_head), a HEAD that does not record exactly two parents or whose second parent is
+    not HEAD_SHA (merge_parents), and any cannot-evaluate, each decides false (the full suite).
+    The diff is read against the first parent HEAD records, in the
     process working directory, because the scope job runs the base tree's copy of this file from
     outside the tree (module docstring); this function must stay import-free beyond the standard
     library, because that copy is extracted alone. Exits 1 only when the decision cannot be
@@ -284,15 +337,15 @@ def ci_decide():
                 "merge-train-* pull request of this repository, so it never takes the fast "
                 "lane".format(event, head_ref, head_repo, base_repo))
     else:
-        merged_head, problem = second_parent(os.getcwd())
+        parents, problem = merge_parents(os.getcwd())
         if problem is not None:
             note = "cannot evaluate, treated as false: {}".format(problem)
-        elif not head_sha or merged_head != head_sha:
+        elif not head_sha or parents[1] != head_sha:
             note = ("cannot evaluate, treated as false: the checked-out merge commit's second "
                     "parent {!r} is not the pull request's head commit {!r}".format(
-                        merged_head, head_sha))
+                        parents[1], head_sha))
         else:
-            paths, problem = changed_paths(os.getcwd(), MERGE_FIRST_PARENT)
+            paths, problem = changed_paths(os.getcwd(), parents[0])
             if problem is not None:
                 note = "cannot evaluate, treated as false: {}".format(problem)
             else:
@@ -423,6 +476,33 @@ def _fixture_repo(base, env):
     return repo, out.stdout.strip()
 
 
+def _fixture_rev(repo, rev, env):
+    """The full object id rev resolves to in the fixture repo."""
+    out = subprocess.run(["git", "-C", str(repo), "rev-parse", rev], check=True,
+                         capture_output=True, text=True, timeout=GIT_TIMEOUT, env=env)
+    return out.stdout.strip()
+
+
+def _fixture_parent_count(repo, env):
+    """How many parents the fixture's HEAD has, read by git rather than by the tool, so a case
+    pins the shape it builds."""
+    out = subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "rev-list", "--parents",
+                          "-n", "1", "HEAD"], check=True, capture_output=True, text=True,
+                         timeout=GIT_TIMEOUT, env=env)
+    return len(out.stdout.split()) - 1
+
+
+def _fixture_literal_head(repo, body, env):
+    """Write body as a commit object without git's own format checks and detach HEAD onto it, so
+    a case can present a header shape git itself never writes."""
+    proc = subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false",
+                           "-c", "maintenance.auto=false", "hash-object", "-t", "commit",
+                           "--literally", "-w", "--stdin"], input=body, check=True,
+                          capture_output=True, timeout=GIT_TIMEOUT, env=env)
+    with open(repo / ".git" / "HEAD", "w", encoding="ascii") as handle:
+        handle.write(proc.stdout.decode("ascii").strip() + "\n")
+
+
 def _cli(repo, merge_base):
     """Run the planted CLI copy as a child exactly as the workflow does; (exit code, stdout)."""
     proc = subprocess.run(
@@ -444,6 +524,15 @@ def _ci_decide_outcome(repo, event, output, head_ref="merge-train-1",
     with a controlled environment (a merge-train head of this repository unless a case overrides
     it; None leaves a variable unset); (exit code, what the output file holds afterwards, or None
     when it does not exist)."""
+    return _ci_decide_run(repo, event, output, head_ref, head_repo, base_repo, head_sha,
+                          tool)[:2]
+
+
+def _ci_decide_run(repo, event, output, head_ref="merge-train-1", head_repo="example/repo",
+                   base_repo="example/repo", head_sha=None, tool=None):
+    """_ci_decide_outcome's run, also returning the decision line --ci-decide printed, whose
+    parenthesised note says why the decision is what it is; (exit code, output file contents
+    or None, printed stdout)."""
     env = _git_env()
     for name in ("GITHUB_OUTPUT", "EVENT_NAME", "HEAD_REF", "HEAD_REPO", "BASE_REPO",
                  "HEAD_SHA"):
@@ -468,7 +557,7 @@ def _ci_decide_outcome(repo, event, output, head_ref="merge-train-1",
     if output is not None and os.path.isfile(str(output)):
         with open(str(output), encoding="utf-8") as handle:
             recorded = handle.read()
-    return proc.returncode, recorded
+    return proc.returncode, recorded, proc.stdout
 
 
 def self_test(report_path=None):
@@ -637,8 +726,8 @@ def self_test(report_path=None):
                   (0, "site_only=false\n"))
             # a true merge commit shaped as the tested merge ref: the first parent is the
             # base-branch tip, the second the train head, so HEAD^1..HEAD is exactly the
-            # train's site-only change; the decision requires HEAD^2 to equal the head SHA
-            # the environment passes
+            # train's site-only change; the decision requires exactly two parents, the second
+            # equal to the head SHA the environment passes
             _fixture_git(repo, "checkout", "-q", "-b", "merge-train-1", env=env)
             (repo / "site" / "index.html").write_text("b\n")
             _fixture_git(repo, "add", "-A", env=env)
@@ -676,6 +765,101 @@ def self_test(report_path=None):
                                      head_sha=train_tip,
                                      tool=alone / "ci_site_scope_base.py"),
                   (0, "site_only=true\n"))
+        with tempfile.TemporaryDirectory() as scratch:
+            # a valid two-parent merge shaped as the tested merge ref, HEAD_SHA its second
+            # parent, whose train side changes a tools/ file: the parent rule passes, so only
+            # the path decision over HEAD^1..HEAD can make it false
+            repo, base = _fixture_repo(Path(scratch), env)
+            _fixture_git(repo, "checkout", "-q", "-b", "merge-train-2", env=env)
+            (repo / "site" / "index.html").write_text("b\n")
+            (repo / "tools" / "t.py").write_text("b\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "train tool change", env=env)
+            train_tip = _fixture_rev(repo, "HEAD", env)
+            _fixture_git(repo, "checkout", "-q", "main", env=env)
+            _fixture_git(repo, "merge", "-q", "--no-ff", "-m", "merge", "merge-train-2",
+                         env=env)
+            check("cidecide/two-parent-merge-tools-change-false",
+                  (_fixture_parent_count(repo, env),
+                   _ci_decide_outcome(repo, "pull_request",
+                                      Path(scratch) / "gh-output-tools-merge",
+                                      head_sha=train_tip)),
+                  (2, (0, "site_only=false\n")))
+        with tempfile.TemporaryDirectory() as scratch:
+            # a three-parent (octopus) merge whose second parent is HEAD_SHA and whose every
+            # change is site-only: reading HEAD^2 alone would accept it, the exact-two rule
+            # does not. The base branch moves first, so the merge records all three parents.
+            repo, base = _fixture_repo(Path(scratch), env)
+            _fixture_git(repo, "checkout", "-q", "-b", "merge-train-3", env=env)
+            (repo / "site" / "index.html").write_text("b\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "train site change", env=env)
+            train_tip = _fixture_rev(repo, "HEAD", env)
+            _fixture_git(repo, "checkout", "-q", "-b", "side", "main", env=env)
+            (repo / "opf" / "site" / "a.css").write_text("b\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "side site change", env=env)
+            _fixture_git(repo, "checkout", "-q", "main", env=env)
+            (repo / ".aiqt" / "manifest.toml").write_text("b\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "base moves", env=env)
+            _fixture_git(repo, "merge", "-q", "--no-ff", "-m", "octopus", "merge-train-3",
+                         "side", env=env)
+            rc, recorded, three_parent_note = _ci_decide_run(
+                repo, "pull_request", Path(scratch) / "gh-output-octopus", head_sha=train_tip)
+            check("cidecide/three-parent-merge-false",
+                  (_fixture_parent_count(repo, env), _fixture_rev(repo, "HEAD^2", env) == train_tip,
+                   rc, recorded),
+                  (3, True, 0, "site_only=false\n"))
+        with tempfile.TemporaryDirectory() as scratch:
+            # every cannot-evaluate cause of the parent read decides false with a note naming
+            # that cause: a git failure (no repository) is not reported as a missing parent,
+            # and a header git never writes is unparseable, never read as a shorter list
+            notes = []
+            notrepo = Path(scratch) / "notrepo"
+            os.makedirs(notrepo)
+            notes.append((_ci_decide_run(notrepo, "pull_request",
+                                         Path(scratch) / "gh-output-notrepo",
+                                         head_sha="0" * 40,
+                                         tool=Path(__file__).resolve()),
+                          "git cat-file commit HEAD exited"))
+            repo, base = _fixture_repo(Path(scratch), env)
+            notes.append((_ci_decide_run(repo, "pull_request",
+                                         Path(scratch) / "gh-output-root-note",
+                                         head_sha="0" * 40),
+                          "HEAD has no parent (a root commit)"))
+            (repo / "site" / "index.html").write_text("b\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "linear site change", env=env)
+            notes.append((_ci_decide_run(repo, "pull_request",
+                                         Path(scratch) / "gh-output-linear-note",
+                                         head_sha="0" * 40),
+                          "HEAD has one parent (a linear commit)"))
+            notes.append(((rc, recorded, three_parent_note), "HEAD has 3 parents, not exactly two"))
+            tree = _fixture_rev(repo, "HEAD^{tree}", env).encode("ascii")
+            author = b"author fixture <fixture@example.invalid> 0 +0000\n"
+            literal = (
+                (b"tree " + tree + b"\nparent " + base.encode("ascii") + b"\nparent zz\n" +
+                 author + b"\nmalformed\n", "malformed parent line"),
+                (b"tree " + tree + b"\nparent " + base.encode("ascii") + b"\n" + author +
+                 b"parent " + base.encode("ascii") + b"\n\nstray\n",
+                 "parent line outside the parent block"),
+                (b"tree " + tree + b"\nparent " + base.encode("ascii") + b"\nparent " +
+                 base.encode("ascii") + b"\n" + author.rstrip(b"\n"), "no header end"),
+                (b"parent " + base.encode("ascii") + b"\nparent " + base.encode("ascii") +
+                 b"\ntree " + tree + b"\n" + author + b"\nno tree first\n",
+                 "does not begin with a tree line"),
+            )
+            for index, (body, phrase) in enumerate(literal):
+                _fixture_literal_head(repo, body, env)
+                notes.append((_ci_decide_run(repo, "pull_request",
+                                             Path(scratch) / "gh-output-literal-{}".format(index),
+                                             head_sha=base),
+                              phrase))
+            check("cidecide/parent-read-causes-false-and-named",
+                  [(rc, recorded, "cannot evaluate" in out and phrase in out)
+                   for (rc, recorded, out), phrase in notes],
+                  [(0, "site_only=false\n", True)] * 8)
         with tempfile.TemporaryDirectory() as scratch:
             repo, base = _fixture_repo(Path(scratch), env)
             _fixture_git(repo, "mv", "site/index.html", "tools/index.html", env=env)
@@ -727,10 +911,13 @@ def self_test(report_path=None):
           "outside; the train gate admits only a pull_request from a merge-train-* head of this "
           "repository; each rule patched out flips its vector; the CLI decides over synthetic "
           "repos, reads renames with detection off, and exits 2 on a bad revision, an "
-          "option-shaped revision, a missing repo and a usage error; --ci-decide requires a "
-          "two-parent HEAD whose second parent is HEAD_SHA, deciding false on a root commit, a "
-          "linear head, a mismatched or missing head SHA, and true on the matching merge, also "
-          "when the tool is extracted alone outside any repository); execution set "
+          "option-shaped revision, a missing repo and a usage error; --ci-decide requires a HEAD "
+          "whose raw commit object records exactly two parents, the second HEAD_SHA, deciding "
+          "false on a root commit, a linear head, a three-parent merge, a mismatched or missing "
+          "head SHA, a directory that is not a repository and an unparseable commit header, each "
+          "with a note naming its cause, false on a valid two-parent merge that changes a tools/ "
+          "file, and true on the matching site-only merge, also when the tool is extracted alone "
+          "outside any repository); execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
