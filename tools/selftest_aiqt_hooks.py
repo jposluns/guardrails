@@ -2999,10 +2999,11 @@ _TRKASY_RUNTIME_START_UNJOINED_FORMS = (
     ("unjoined-single-quote-closed-before-eval", "echo 'x\\\n'eval \"sleep 5 $(printf '\\x26')\""),
     ("unjoined-single-quote-closed-after-eval", "echo 'x\\\neval' \"sleep 5 $(printf '\\x26')\""),
 )
-# DISCLOSED RESIDUAL, not a deny: a form split by a pair bash joins, right after a pair bash does not join,
-# matches in neither text the search reads (the pairs removed glue it to the word before it; kept, it stays
-# split), so the no-'&' allow is taken although bash runs the form. These rows assert that CURRENT allow,
-# so a change that closes or widens the residual fails here and has to update them.
+# DISCLOSED RESIDUAL, not a deny: a start word or a '.' split by a pair bash joins, right after a pair bash
+# does not join that has a word before it (or a '.' split that way after a bare comment line ending in a
+# backslash), matches in neither text the search reads (the pairs removed glue it to the word before it;
+# kept, it stays split), so the no-'&' allow is taken although bash runs the form. These rows assert that
+# CURRENT allow, so a change that makes either shape deny fails here and has to update them.
 _TRKASY_RUNTIME_START_MIXED_RESIDUAL_FORMS = (
     ("mixed-escaped-backslash-split-eval", ": x\\\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
     ("mixed-comment-split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n# c\\\nsou\\\nrce /abs/j.sh"),
@@ -3039,8 +3040,9 @@ def _test_trkasy_no_amp(failures, tmp):
     with a start word after a pair bash does not join is red with the search reading only the text with
     every pair removed; the disown-alone rows are red with disown removed from the pattern; and the e'v'al
     and ev\\al rows are red with the search reading the raw command ("eval" and \\eval match there too, so
-    those rows deny either way). Each disclosed-residual row (a form split by a pair bash joins, right after
-    a pair bash does not join) allows, the current behaviour, so a change to that residual shows here."""
+    those rows deny either way). Each disclosed-residual row (a start word split by a pair bash joins, right
+    after a pair bash does not join that has a word before it) allows, the current behaviour, so a change that
+    makes that row deny shows here."""
     root = tmp / "trkasy-noamp"
     (root / ".aiqt").mkdir(parents=True)
     (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
@@ -3056,9 +3058,15 @@ def _test_trkasy_no_amp(failures, tmp):
             failures.append("({}) a real bare '&' must deny in registry scope; got {}".format(label, got))
     start_rows = (_TRKASY_RUNTIME_START_DENY_ROWS + _TRKASY_RUNTIME_START_SPLIT_ROWS
                   + _TRKASY_RUNTIME_START_UNJOINED_ROWS + _TRKASY_RUNTIME_START_QUOTED_ROWS)
+    single_quote_labels = frozenset(label for label, _command in _TRKASY_RUNTIME_START_UNJOINED_ROWS
+                                    if "-unjoined-single-quote-" in label)
     for label, command in start_rows:
         got = _decision(handler, command, cwd=str(root))
-        if got != "deny":
+        if got != "deny" and label in single_quote_labels:
+            failures.append("({}) bash runs no start form here (the start word is part of the quoted word), so "
+                            "this row pins an over-deny the scan's verdict keeps in registry scope; got {}"
+                            .format(label, got))
+        elif got != "deny":
             failures.append("({}) a runtime start form beside an open quote or uncertain '#' must deny in "
                             "registry scope; got {}".format(label, got))
     for label, command in _TRKASY_RUNTIME_START_MIXED_RESIDUAL_ROWS:
