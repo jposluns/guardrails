@@ -15,7 +15,8 @@ into the site nav and repurposed this gate accordingly. The filename is retained
 The staged draft under site/draft/ follows the shared site template, whose top bar has no Disclosure item,
 so a draft rule covers it instead (stated beside DRAFT_SUBDIR): exactly one /draft/disclosure/ link in the
 draft landing page's "About this project" region, none required on the other draft pages. The draft rule
-replaces the live rule for site/ at promotion.
+replaces the live rule for site/ at promotion. The same partition applies to opf/site/draft/ (the opfiles.ai
+draft): its live pages keep the ./disclosure nav rule below.
 
 Coverage spans TWO required roots: site/ (the aiqt.ai site, absolute /disclosure) and opf/site/ (the
 opfiles.ai site, served from opf/site as its own root, whose pages link ./disclosure relative so it
@@ -79,7 +80,9 @@ COVERAGE_ROOTS = (
 # (p.about), and the inner draft pages carry no disclosure link. So the live rule above covers every site/
 # page outside site/draft/, unchanged, and the draft rule covers the pages under it: exactly one
 # DRAFT_DISCLOSURE_HREF link inside the About region of DRAFT_LANDING, and none required elsewhere. At
-# promotion the draft moves to the root and the draft rule replaces the live rule for site/.
+# promotion the draft moves to the root and the draft rule replaces the live rule for site/. The opfiles.ai
+# draft under opf/site/draft/ is built from the same template, so the same partition applies there: its
+# live pages keep the relative ./disclosure nav rule and its draft landing page carries the About link.
 DRAFT_SUBDIR = "draft"
 DRAFT_LANDING = "draft/index.html"
 DRAFT_DISCLOSURE_HREF = "/draft/disclosure/"
@@ -128,7 +131,7 @@ class _AboutAnchors(HTMLParser):
 
 
 def check_draft_pages(pages):
-    """pages: {name under site/: html_text} for the pages under site/draft/. Return a sorted list of
+    """pages: {name under the root: html_text} for the pages under its draft/. Return a sorted list of
     findings for the draft rule: DRAFT_LANDING must exist once any draft page does and carry exactly one
     DRAFT_DISCLOSURE_HREF link inside its About region; the other draft pages need none."""
     if not pages:
@@ -147,8 +150,8 @@ def check_draft_pages(pages):
 
 
 def check_site_pages(pages, allowlist, href=DISCLOSURE_HREF):
-    """The site/ root: the live rule (check_pages) over every page outside site/draft/ and the draft rule
-    (check_draft_pages) over the pages under it."""
+    """One coverage root (site/ or opf/site/): the live rule (check_pages, with the root's own href) over
+    every page outside its draft/ and the draft rule (check_draft_pages) over the pages under it."""
     draft = {name: text for name, text in pages.items() if Path(name).parts[0] == DRAFT_SUBDIR}
     live = {name: text for name, text in pages.items() if name not in draft}
     return sorted(check_pages(live, allowlist, href) + check_draft_pages(draft))
@@ -266,10 +269,9 @@ def _run_one(root, subdir, href, allowlist):
             print("error: cannot load {} ({}); a symlink, non-regular, unreadable, or undecodable page is "
                   "fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
-    if subdir == "site":
-        findings = check_site_pages(pages, allowlist, href)
-    else:
-        findings = check_pages(pages, allowlist, href)
+    # The live/draft partition applies to every coverage root: site/draft/ (aiqt.ai) and opf/site/draft/
+    # (opfiles.ai) both follow the shared site template, and each root's live pages keep their own href.
+    findings = check_site_pages(pages, allowlist, href)
     if findings:
         print("FAIL: {} nav-coverage issue(s) under {}/".format(len(findings), subdir))
         for finding in sorted(set(findings)):
@@ -277,7 +279,7 @@ def _run_one(root, subdir, href, allowlist):
         return 1
     allow_str = ", ".join(sorted(allowlist)) or "none"
     draft_note = ""
-    if subdir == "site" and any(Path(name).parts[0] == DRAFT_SUBDIR for name in pages):
+    if any(Path(name).parts[0] == DRAFT_SUBDIR for name in pages):
         draft_note = "; under {}/{}/ the landing page carries the {} About link".format(
             subdir, DRAFT_SUBDIR, DRAFT_DISCLOSURE_HREF)
     print("PASS: every {}/ page carries the {} nav link (allowlist: {}){}".format(
@@ -731,6 +733,34 @@ def _self_test():
         got = check_site_pages(pages, frozenset())
         if got != sorted(expected):
             failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    # The same partition on the opf/site root: live opfiles.ai pages keep the relative ./disclosure nav
+    # rule, and opf/site/draft/ follows the draft rule (the landing page's About link, none elsewhere).
+    opf_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
+    opf_draft_nav = '<nav><a href="/draft/model/">The model</a></nav>'
+    opf_cases = [
+        ("opfiles: good live pages and a good draft pass",
+         {"index.html": opf_nav, "draft/index.html": opf_draft_nav + about,
+          "draft/model/index.html": opf_draft_nav}, []),
+        ("opfiles: draft pages without the draft landing page fail",
+         {"index.html": opf_nav, "draft/model/index.html": opf_draft_nav},
+         ["draft/index.html: missing; the draft rule needs the draft landing page"]),
+        ("opfiles: draft landing without the About link fails",
+         {"index.html": opf_nav, "draft/index.html": opf_draft_nav},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("opfiles: draft landing with 2 About links fails",
+         {"index.html": opf_nav, "draft/index.html": about + about},
+         ["draft/index.html: carries 2 /draft/disclosure/ links in its About region (expected exactly one)"]),
+        ("opfiles: live page without the ./disclosure nav link still fails beside a good draft",
+         {"index.html": opf_nav, "manifest.html": "<nav></nav>", "draft/index.html": opf_draft_nav + about},
+         ["manifest.html: missing the ./disclosure nav link"]),
+        ("opfiles: live page carrying only the absolute /disclosure link still fails",
+         {"index.html": nav, "draft/index.html": opf_draft_nav + about},
+         ["index.html: missing the ./disclosure nav link"]),
+    ]
+    for label, pages, expected in opf_cases:
+        got = check_site_pages(pages, frozenset(), "./disclosure")
+        if got != sorted(expected):
+            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
     # run() fail-closed on a missing/empty/unreadable required input; clean on a good tree (exit codes).
     # run()'s own stdout/stderr is captured so its diagnostic lines do not leak into the self-test output.
     import contextlib
@@ -811,6 +841,20 @@ def _self_test():
         (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
+        os.remove(str(root4 / "opf" / "site" / "stale.html"))
+        # the opfiles.ai draft through the real two-root run(): a good draft passes, a draft landing page
+        # without its About link is a finding, and draft pages without a landing page are a finding.
+        (root4 / "opf" / "site" / "draft" / "model").mkdir(parents=True)
+        (root4 / "opf" / "site" / "draft" / "index.html").write_text(opf_draft_nav + about, encoding="utf-8")
+        (root4 / "opf" / "site" / "draft" / "model" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
+        if quiet_run(root4) != 0:
+            failures.append("a two-root tree with a good opf/site/draft/ did not pass (expected exit 0)")
+        (root4 / "opf" / "site" / "draft" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
+        if quiet_run(root4) != 1:
+            failures.append("an opf/site/draft/ landing page without its About link was not reported (expected 1)")
+        os.remove(str(root4 / "opf" / "site" / "draft" / "index.html"))
+        if quiet_run(root4) != 1:
+            failures.append("opf/site/draft/ pages without the landing page were not reported (expected 1)")
     with tempfile.TemporaryDirectory() as d5:
         closed = _close_vectors_guarded(Path(d5))
     if closed is None:
@@ -828,9 +872,9 @@ def _self_test():
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + run() exit-code legs + {} "
-          "#378 close-vector runs + {} close-vector guard cases)".format(len(cases), len(site_cases), close_runs,
-                                                                         guard_cases))
+    print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + {} opfiles draft-rule "
+          "cases + run() exit-code legs + {} #378 close-vector runs + {} close-vector guard cases)".format(
+              len(cases), len(site_cases), len(opf_cases), close_runs, guard_cases))
     return 0
 
 

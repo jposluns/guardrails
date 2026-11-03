@@ -1,0 +1,16 @@
+# The opfiles.ai draft 404 page: the label, the fixed heading, a lead naming what the top bar links to, the
+# logo-only rail and a Next block to the home page (template specification section 7.17).
+path = "404.html"
+title = "Page not found"
+kind = "document"
+label = "404"
+heading = "That page is not here."
+
+[[body]]
+component = "lead"
+html = "The top bar links to the model, the standard, the core store files and adoption."
+
+[[body]]
+component = "next"
+text = "Home"
+href = ""

@@ -190,6 +190,7 @@
 .aiqt/standards/owasp-proactive.toml text eol=lf
 .aiqt/standards/owasp-web.toml text eol=lf
 .aiqt/tracker-label-baseline.toml text eol=lf
+.baseline/opfiles-pin.toml text eol=lf
 .baseline/pin.toml text eol=lf
 .claude/RULES-INDEX.md text eol=lf
 .claude/rules/README.md text eol=lf
@@ -536,6 +537,77 @@ opf/site/adopt.md text eol=lf
 opf/site/aiqt.html text eol=lf
 opf/site/core-files.html text eol=lf
 opf/site/disclosure.html text eol=lf
+opf/site/draft-src/404.toml text eol=lf
+opf/site/draft-src/adopt.toml text eol=lf
+opf/site/draft-src/core-files.toml text eol=lf
+opf/site/draft-src/disclosure.toml text eol=lf
+opf/site/draft-src/home.toml text eol=lf
+opf/site/draft-src/license.toml text eol=lf
+opf/site/draft-src/model.toml text eol=lf
+opf/site/draft-src/standard.toml text eol=lf
+opf/site/draft/404.html text eol=lf
+opf/site/draft/adopt/index.html text eol=lf
+opf/site/draft/assets/baseline/LICENSE text eol=lf
+opf/site/draft/assets/baseline/NOTICE.md text eol=lf
+opf/site/draft/assets/baseline/baseline.css text eol=lf
+opf/site/draft/assets/baseline/copy.js text eol=lf
+opf/site/draft/assets/baseline/fonts.css text eol=lf
+opf/site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt text eol=lf
+opf/site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2 binary
+opf/site/draft/assets/baseline/fonts/jetbrains-mono-LICENSE.txt text eol=lf
+opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2 binary
+opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2 binary
+opf/site/draft/assets/baseline/fonts/newsreader-LICENSE.txt text eol=lf
+opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2 binary
+opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2 binary
+opf/site/draft/assets/baseline/fonts/public-sans-LICENSE.txt text eol=lf
+opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2 binary
+opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2 binary
+opf/site/draft/assets/baseline/logos/aiqt-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/aiqt-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/aiqt-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/aiqt-touch.png binary
+opf/site/draft/assets/baseline/logos/aiqt.svg text eol=lf
+opf/site/draft/assets/baseline/logos/auditthis-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/auditthis-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/auditthis-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/auditthis-touch.png binary
+opf/site/draft/assets/baseline/logos/auditthis.svg text eol=lf
+opf/site/draft/assets/baseline/logos/cleanlanguage-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/cleanlanguage-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/cleanlanguage-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/cleanlanguage-touch.png binary
+opf/site/draft/assets/baseline/logos/cleanlanguage.svg text eol=lf
+opf/site/draft/assets/baseline/logos/grclibrary-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/grclibrary-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/grclibrary-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/grclibrary-touch.png binary
+opf/site/draft/assets/baseline/logos/grclibrary.svg text eol=lf
+opf/site/draft/assets/baseline/logos/opfiles-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/opfiles-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/opfiles-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/opfiles-touch.png binary
+opf/site/draft/assets/baseline/logos/opfiles.svg text eol=lf
+opf/site/draft/assets/baseline/logos/secureconfig-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/secureconfig-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/secureconfig-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/secureconfig-touch.png binary
+opf/site/draft/assets/baseline/logos/secureconfig.svg text eol=lf
+opf/site/draft/assets/baseline/marks/NOTICE.md text eol=lf
+opf/site/draft/assets/baseline/marks/github-invertocat-black.svg text eol=lf
+opf/site/draft/assets/baseline/marks/github-invertocat-white.svg text eol=lf
+opf/site/draft/assets/baseline/marks/linkedin-in-bug.png binary
+opf/site/draft/assets/baseline/marks/orcid-id.svg binary
+opf/site/draft/assets/baseline/palettes.css binary
+opf/site/draft/assets/baseline/rail.js text eol=lf
+opf/site/draft/assets/baseline/search.js text eol=lf
+opf/site/draft/assets/baseline/select.js text eol=lf
+opf/site/draft/core-files/index.html text eol=lf
+opf/site/draft/disclosure/index.html text eol=lf
+opf/site/draft/index.html text eol=lf
+opf/site/draft/license/index.html text eol=lf
+opf/site/draft/model/index.html text eol=lf
+opf/site/draft/standard/index.html text eol=lf
 opf/site/favicon.svg text eol=lf
 opf/site/index.html text eol=lf
 opf/site/llms.txt text eol=lf

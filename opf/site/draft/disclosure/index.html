@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en" class="site-opfiles">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Disclosure | OPFiles.ai</title>
+<link rel="icon" href="/draft/assets/baseline/logos/opfiles-favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/opfiles-touch.png">
+<link rel="stylesheet" href="/draft/assets/baseline/fonts.css">
+<link rel="stylesheet" href="/draft/assets/baseline/palettes.css">
+<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">
+<script src="/draft/assets/baseline/rail.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main-content">Skip to content</a>
+<header class="mast"><a class="brand" href="/draft/"><span class="name">OPFiles<span class="tld">.ai</span></span><span class="rule" aria-hidden="true"></span></a><nav class="nav" aria-label="Site"><a href="/draft/model/">The model</a><a href="/draft/standard/">The standard</a><a href="/draft/core-files/">Core files</a><a href="/draft/adopt/">Adopt</a><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a></nav></header>
+<main id="main-content">
+<div class="wrap"><div class="doc"><p class="lbl first">Disclosure</p>
+<h1>Disclosure</h1>
+<nav class="rail" aria-label="On this page"><img class="rail-logo" src="/draft/assets/baseline/logos/opfiles.svg" alt="A machine-written source record and its generated view, joined by a drift gate"><p class="lbl">On this page</p><ol><li><a href="#d-1">Draft status</a></li><li><a href="#d-2">Implementations</a></li><li><a href="#d-3">Changelog and worklog checks</a></li><li><a href="#d-4">Store resolution</a></li><li><a href="#d-5">The single-writer lease</a></li><li><a href="#d-6">Doctor and the renderer</a></li><li><a href="#d-7">Adoption and the prompt pack</a></li><li><a href="#d-8">What the release is made of</a></li><li><a href="#d-9">Network reach</a></li></ol></nav>
+<p class="meta">This page sets out what OPFiles claims, the limit of each claim, and the evidence for both.</p>
+<p class="lbl sec">Entry 1</p>
+<h2 id="d-1">Draft status</h2>
+<p><strong>Claim:</strong> The specification is a working draft and the reference tooling lands verb by verb. A conformance claim names its scope and which profiles were evaluated.</p>
+<p><strong>Limitation:</strong> Until the validation tooling covers a given claim, conformance to that claim is self-asserted, and any report says so. An unqualified "conformant" claim is never emitted, by tooling or by prose.</p>
+<p><strong>Evidence:</strong> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a> <a href="/draft/standard/">The standard</a></p>
+<p class="lbl sec">Entry 2</p>
+<h2 id="d-2">Implementations</h2>
+<p><strong>Claim:</strong> The specification defines 1 implementation model, with no conformance classes. Base 2.0.0, with homes = 2, is the only base version it defines.</p>
+<p><strong>Limitation:</strong> The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification. Its doctor grades a 2.0.0 manifest under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification.</p>
+<p><strong>Evidence:</strong> <a href="/draft/core-files/#manifest">The store manifest</a></p>
+<p class="lbl sec">Entry 3</p>
+<h2 id="d-3">Changelog and worklog checks</h2>
+<p><strong>Claim:</strong> Changelog freeze compares a published entry's LF-normalized UTF-8 digest with its recorded digest. Range coverage checks that changelog entries tile every released version with no gap or overlap.</p>
+<p><strong>Limitation:</strong> Line-ending-only changes do not alter the freeze digest. The freeze check does not judge whether the prose is accurate or complete, and range coverage does not judge the quality of what the entries say. The unreleased worklog tail is reviewed, not machine-frozen: before a release cut, entries are correctable in place. Review and version-control history, not a digest, control the unreleased tail.</p>
+<p><strong>Evidence:</strong> <a href="/draft/core-files/#worklog">The worklog</a> <a href="/draft/core-files/#version">The version ledger</a></p>
+<p class="lbl sec">Entry 4</p>
+<h2 id="d-4">Store resolution</h2>
+<p><strong>Claim:</strong> Store resolution confirms that 1 declared store resolves. The tracked-store check confirms that the store is a tracked git repository whose pointer, recorded sync target, and actual remote agree.</p>
+<p><strong>Limitation:</strong> Resolution cannot detect a second, unnamed store a project might also keep. The tracked-store check does not verify that the repository is backed up, accessible, or hosted anywhere in particular.</p>
+<p><strong>Evidence:</strong> <a href="/draft/core-files/#pointer">The store pointer</a></p>
+<p class="lbl sec">Entry 5</p>
+<h2 id="d-5">The single-writer lease</h2>
+<p><strong>Claim:</strong> The standard's cross-system contract requires a divergence check to detect a collision between 2 systems afterward.</p>
+<p><strong>Limitation:</strong> The lease has a propagation window: a second system may begin before observing the held lease. The divergence check and the lease are specified controls, not complete CLI coverage, and opf sync is planned. The operation lock that opf init takes excludes other OPF runs on the same store only. It does not exclude runs on another store in the same repository or writers on another system.</p>
+<p><strong>Evidence:</strong> <a href="/draft/core-files/#lease">The single-writer lease</a></p>
+<p class="lbl sec">Entry 6</p>
+<h2 id="d-6">Doctor and the renderer</h2>
+<p><strong>Claim:</strong> opf doctor runs the integrity checks as 1 command you can configure as a required CI step.</p>
+<p><strong>Limitation:</strong> Doctor reports per-record view drift and the content schemas of module-tier and importer records as cannot-evaluate. The reference renderer does not render or drift-check per-record views. For a store with module-tier or importer records, or a per-record store that declares views, doctor's overall verdict is cannot-evaluate (exit 2). Doctor does not check behind, ahead, or divergence against a sync target.</p>
+<p><strong>Evidence:</strong> <a href="/draft/adopt/">The 10 command verbs</a></p>
+<p class="lbl sec">Entry 7</p>
+<h2 id="d-7">Adoption and the prompt pack</h2>
+<p><strong>Claim:</strong> The reference CLI runs adoption investigation; opf adopt plan, approve, reconcile and status run, and plan and approve write nothing.</p>
+<p><strong>Limitation:</strong> apply refuses every plan in this build and complete refuses with exit 2, so adoption cannot finish yet and no receipt, completion check or retirement is recorded. The prompt pack's procedures are instructions an assistant is asked to follow; they do not control what the assistant does.</p>
+<p><strong>Evidence:</strong> <a href="/draft/adopt/">Adopt</a> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-QUICKSTART.md" target="_blank" rel="noopener noreferrer">The quickstart<span class="vh"> (opens in a new tab)</span></a></p>
+<p class="lbl sec">Entry 8</p>
+<h2 id="d-8">What the release is made of</h2>
+<p><strong>Claim:</strong> The AIQT Guardrails 1.0.5 release manifest ships OPFiles code: the Python and shell tooling under opf/tools/; the opf enforcement hooks (the pre-commit hook and the Claude Code deny hook), the pre-commit installer, and the CI template and script under opf/enforcement/; and the HTML pages (inline scripts included) and JavaScript under opf/site/.</p>
+<p><strong>Limitation:</strong> On your machine none of it runs on its own: each piece runs only when you run a tool or check, install an enforcement hook, or open the site in a browser.</p>
+<p><strong>Evidence:</strong> <a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">The repository<span class="vh"> (opens in a new tab)</span></a></p>
+<p class="lbl sec">Entry 9</p>
+<h2 id="d-9">Network reach</h2>
+<p><strong>Claim:</strong> A host provider's conveniences call the external API of the host the target names; the egress bound is that named host and nothing else.</p>
+<p><strong>Limitation:</strong> The standard cannot vouch for the host's own behaviour beyond that bound. Public deliverables reach the product repository under that repository's own review flow, which the standard requires to exist but does not gate.</p>
+<p><strong>Evidence:</strong> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a></p>
+<p class="lbl blk">Security</p>
+<p>To report a security vulnerability, see <a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">the vulnerability disclosure policy<span class="vh"> (opens in a new tab)</span></a>. For what these sites send to Cloudflare and the owner, see <a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">the privacy policy<span class="vh"> (opens in a new tab)</span></a>.</p>
+<div class="next"><p class="lbl">Next</p><a class="start" href="/draft/">Home <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
+</div></div>
+</main>
+<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project sites"><li class="slice slice-2"><a class="card" href="/draft/" aria-current="page"><img src="/draft/assets/baseline/logos/opfiles.svg" alt=""><span class="cname">OPFiles<span class="tld">.ai</span></span><span class="vh"> (this site)</span></a></li><li class="slice slice-3"><a class="card" href="https://auditthis.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/auditthis.svg" alt=""><span class="cname">AuditThis<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-4"><a class="card" href="https://cleanlanguage.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/cleanlanguage.svg" alt=""><span class="cname">CleanLanguage<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-5"><a class="card" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/aiqt.svg" alt=""><span class="cname">AIQT<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-6"><a class="card" href="https://grclibrary.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/grclibrary.svg" alt=""><span class="cname">GRCLibrary<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-1"><a class="card" href="https://secureconfig.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/secureconfig.svg" alt=""><span class="cname">SecureConfig<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li></ul><ul class="tail" aria-label="Jeff Posluns elsewhere"><li class="tile tile-1"><a class="card" href="https://github.com/jposluns" target="_blank" rel="noopener noreferrer"><img class="only-light" src="/draft/assets/baseline/marks/github-invertocat-black.svg" alt=""><img class="only-dark" src="/draft/assets/baseline/marks/github-invertocat-white.svg" alt=""><span class="cname vh">GitHub</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-2"><a class="card" href="https://www.linkedin.com/in/jposluns/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/linkedin-in-bug.png" alt=""><span class="cname vh">LinkedIn</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-3"><a class="card" href="https://orcid.org/0009-0000-7775-2233" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/orcid-id.svg" alt=""><span class="cname vh">ORCID</span><span class="vh"> (opens in a new tab)</span></a></li></ul><div class="tile sigtile"><a class="sig" href="https://posluns.ca/" target="_blank" rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span><span class="post"> Project</span></a></div></div></footer>
+<p class="vh" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

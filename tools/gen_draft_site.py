@@ -6,18 +6,19 @@
   gen_draft_site.py --self-test  assert the shell, the components, the refusals and the base-path rules
 
 Every page is built from 1 shell (template specification section 5): `<html lang="en" class="site-<name>">`,
-the head (charset, viewport, the robots noindex meta while BASE is the draft path, the title
+the head (charset, viewport, the robots noindex meta while the site's base is the draft path, the title
 `<Page> | <Name>.ai`, the favicon, the touch icon, fonts.css, palettes.css, baseline.css, then the page's
 scripts with defer), the skip link, the top bar (the site's page links, then GitHub last; section 7.1),
 `main#main-content`, the family footer (section 7.19) and the `#copy-status` live region. The home page
 carries the "About this project" region (section 7.24), the one place that links the Disclosure and Licence
-pages. BASE is the one base path for every internal href and src; it becomes "/" at
-promotion, and the robots meta goes with it. A page is refused (exit 2, nothing written) if it carries an
+pages. Each site's base (SITES) is the one base path for every internal href and src of that site; it
+becomes "/" at that site's promotion, and the robots meta goes with it. A page is refused (exit 2, nothing written) if it carries an
 en or em dash, an inline style or script, an `on*` attribute, or "what this is" framing. The baseline
 files under assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
 
-Content model: each page is 1 TOML data file under site/draft-src/, discovered by listing that directory,
-so a page lands or changes as data. A data file names the page's output path, title and kind (landing or
+Content model: each page is 1 TOML data file under its site's data directory (site/draft-src/ for aiqt.ai,
+opf/site/draft-src/ for opfiles.ai), discovered by listing that directory, so a page lands or changes as
+data; each site renders only its own pages, with its own chrome, into its own draft root. A data file names the page's output path, title and kind (landing or
 document) and a body of components (specification section 7); the generator refuses an unknown component,
 an unknown or missing key, a wrong type, a duplicate output path, and a data directory it cannot list
 (exit 2, nothing written). The page's scripts are derived from its content: copy.js where a copy block
@@ -57,12 +58,9 @@ import gen_mappings  # noqa: E402  (the one mappings rendering source: rows, reg
 import gen_rules  # noqa: E402  (the one frontmatter parser and corpus loader)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
 
-# The one base path for every internal href and src: "/draft/" while staging, "/" at promotion.
-BASE = "/draft/"
+# The staging base path; each site's own base (SITES) is this while staging and "/" at its promotion.
 DRAFT_BASE = "/draft/"
 ASSETS = "assets/baseline/"
-# The page data files, 1 per page, discovered by listing this directory.
-SRC_REL = "site/draft-src"
 MAX_PAGE_BYTES = 1 << 20
 
 GENSRC_OUTPUTS = (
@@ -91,6 +89,30 @@ GENSRC_OUTPUTS = (
     {"target": "site/draft/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/draft/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/draft/404.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/404.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/draft/adopt/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/adopt.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/draft/core-files/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/draft/disclosure/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/disclosure.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/draft/license/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/license.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/draft/model/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/model.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/draft/standard/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
 )
 
 # The 6 project sites in rainbow order (specification section 1): key, name word, domain, footer slice.
@@ -103,23 +125,10 @@ FAMILY = (
     ("grclibrary", "GRCLibrary", "grclibrary.ai", 6),
 )
 
-# Per-site chrome; aiqt.ai first. The pages themselves are data files under SRC_REL. Nav items are the
-# site's own pages, then GitHub last; Disclosure and Licence are not in the bar (the home page's About
-# region links them). An internal nav item is emitted only once its page's data file is registered, so
-# every internal link resolves while the pages land one at a time.
-SITES = (
-    {"key": "aiqt", "name": "AIQT", "root": "site/draft",
-     "logo-alt": "A shield bearing a check mark, set on a guardrail",
-     "github": "https://github.com/jposluns/guardrails",
-     "nav": (("install/", "Install"), ("standard/", "The standard"), ("rules/", "The 5 rules"),
-             ("mappings/", "Mappings"))},
-)
-
-
-# Kept live paths (template SPECIFICATION 4.1): the root-relative live targets a draft page may link,
-# each of which exists under site/ today and keeps its path at promotion. A kept link renders as a plain
-# root-relative anchor with no new-tab hint. Every other root-relative or absolute internal target stays
-# refused, so a draft page cannot grow a live link this list has not reviewed.
+# Kept live paths (template SPECIFICATION 4.1): the root-relative live targets an aiqt.ai draft page may
+# link, each of which exists under site/ today and keeps its path at promotion. A kept link renders as a
+# plain root-relative anchor with no new-tab hint. Every other root-relative or absolute internal target
+# stays refused, so a draft page cannot grow a live link this list has not reviewed.
 KEPT_LIVE_PATHS = (
     "/development",
     "/downloads/aiqt-instructions-1_5k.txt",
@@ -134,26 +143,58 @@ KEPT_LIVE_PATHS = (
     "/tech-details",
 )
 
+# The opfiles.ai kept live paths: its machine-readable entry point and its adoption guide, each of which
+# exists under opf/site/ today and keeps its path at promotion.
+OPF_KEPT_LIVE_PATHS = (
+    "/adopt.md",
+    "/llms.txt",
+)
+
+# The per-site context; aiqt.ai first. Each site has its own page data directory ("src", 1 TOML file per
+# page, discovered by listing it), its output root, its live root (where its kept live paths must exist),
+# its base path ("/draft/" while staging, "/" at its own promotion), its key and name, its logo alt text,
+# its kept live paths and its nav. Nav items are the site's own pages, then GitHub last; Disclosure and
+# Licence are not in the bar (the home page's About region links them). An internal nav item is emitted
+# only once its page's data file is registered, so every nav link resolves while the pages land one at a
+# time. Only a site with "control" set renders the document control strip (template specification 7.7:
+# aiqt.ai only), so no other site's page can carry the AIQT VERSION as its own release.
+SITES = (
+    {"key": "aiqt", "name": "AIQT", "src": "site/draft-src", "root": "site/draft", "live": "site",
+     "base": DRAFT_BASE, "control": True,
+     "logo-alt": "A shield bearing a check mark, set on a guardrail",
+     "github": "https://github.com/jposluns/guardrails",
+     "kept": KEPT_LIVE_PATHS,
+     "nav": (("install/", "Install"), ("standard/", "The standard"), ("rules/", "The 5 rules"),
+             ("mappings/", "Mappings"))},
+    {"key": "opfiles", "name": "OPFiles", "src": "opf/site/draft-src", "root": "opf/site/draft",
+     "live": "opf/site", "base": DRAFT_BASE, "control": False,
+     "logo-alt": "A machine-written source record and its generated view, joined by a drift gate",
+     "github": "https://github.com/jposluns/guardrails",
+     "kept": OPF_KEPT_LIVE_PATHS,
+     "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Core files"),
+             ("adopt/", "Adopt"))},
+)
+
 
 class RefusedPage(Exception):
     """A built page or a page data file breaks a rule; nothing is written."""
 
 
-def _url(path=""):
-    return BASE + path
+def _url(site, path=""):
+    return site["base"] + path
 
 
-def _asset(path):
-    return BASE + ASSETS + path
+def _asset(site, path):
+    return site["base"] + ASSETS + path
 
 
-def _page_url(rel):
-    """The served URL of a page path under the draft root: index.html is its folder."""
+def _page_url(site, rel):
+    """The served URL of a page path under the site's draft root: index.html is its folder."""
     if rel == "index.html":
-        return _url()
+        return _url(site)
     if rel.endswith("/index.html"):
-        return _url(rel[:-len("index.html")])
-    return _url(rel)
+        return _url(site, rel[:-len("index.html")])
+    return _url(site, rel)
 
 
 def _external(href, label):
@@ -163,14 +204,14 @@ def _external(href, label):
 
 def _brand(site):
     return ('<a class="brand" href="{}"><span class="name">{}<span class="tld">.ai</span></span>'
-            '<span class="rule" aria-hidden="true"></span></a>').format(_url(), site["name"])
+            '<span class="rule" aria-hidden="true"></span></a>').format(_url(site), site["name"])
 
 
 def _nav(site, pages, current):
-    registered = {_page_url(page["rel"]) for page in pages}
+    registered = {_page_url(site, page["rel"]) for page in pages}
     items = []
     for path, label in site["nav"]:
-        href = _url(path)
+        href = _url(site, path)
         if href not in registered:
             continue
         mark = ' aria-current="page"' if href == current else ""
@@ -184,11 +225,11 @@ def _footer(site):
     start = [entry[0] for entry in order].index(site["key"])
     cards = []
     for key, word, domain, number in order[start:] + order[:start]:
-        image = '<img src="{}" alt="">'.format(_asset("logos/{}.svg".format(key)))
+        image = '<img src="{}" alt="">'.format(_asset(site, "logos/{}.svg".format(key)))
         name = '<span class="cname">{}<span class="tld">.ai</span></span>'.format(word)
         if key == site["key"]:
             link = '<a class="card" href="{}" aria-current="page">{}{}<span class="vh"> (this site)</span></a>'.format(
-                _url(), image, name)
+                _url(site), image, name)
         else:
             link = ('<a class="card" href="https://{}/" target="_blank" rel="noopener noreferrer">{}{}'
                     '<span class="vh"> (opens in a new tab)</span></a>').format(domain, image, name)
@@ -202,8 +243,8 @@ def _footer(site):
         'rel="noopener noreferrer"><img src="{}" alt=""><span class="cname vh">LinkedIn</span>{}</a></li>'
         '<li class="tile tile-3"><a class="card" href="https://orcid.org/0009-0000-7775-2233" target="_blank" '
         'rel="noopener noreferrer"><img src="{}" alt=""><span class="cname vh">ORCID</span>{}</a></li>'
-    ).format(_asset("marks/github-invertocat-black.svg"), _asset("marks/github-invertocat-white.svg"), newtab,
-             _asset("marks/linkedin-in-bug.png"), newtab, _asset("marks/orcid-id.svg"), newtab)
+    ).format(_asset(site, "marks/github-invertocat-black.svg"), _asset(site, "marks/github-invertocat-white.svg"),
+             newtab, _asset(site, "marks/linkedin-in-bug.png"), newtab, _asset(site, "marks/orcid-id.svg"), newtab)
     sig = ('<div class="tile sigtile"><a class="sig" href="https://posluns.ca/" target="_blank" '
            'rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new '
            'tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span>'
@@ -213,12 +254,12 @@ def _footer(site):
                 "".join(cards), tail, sig)
 
 
-def _about():
+def _about(site):
     """The "About this project" region (specification section 7.24, reference/landing.html)."""
     dot = '<span class="dot" aria-hidden="true">&middot;</span>'
     return ('<div class="region"><p class="lbl">About this project</p><div><p class="about">'
             '<a href="{}">Disclosure</a>{}<a href="{}">Licence</a>{}{}{}{}</p></div></div>').format(
-                _url("disclosure/"), dot, _url("license/"), dot,
+                _url(site, "disclosure/"), dot, _url(site, "license/"), dot,
                 _external("https://posluns.ca/privacy/", "Privacy"), dot,
                 _external("https://posluns.ca/security/", "Security"))
 
@@ -275,40 +316,41 @@ def _items(doc, where, key, required, optional=()):
     return out
 
 
-def _kept_live(target):
-    """True only for a root-relative target whose path (before an optional #fragment) is a kept live
-    path; both ends of the shape are checked, so "/evidence2" and a malformed fragment stay refused."""
+def _kept_live(site, target):
+    """True only for a root-relative target whose path (before an optional #fragment) is one of the
+    site's kept live paths; both ends of the shape are checked, so "/evidence2" and a malformed fragment
+    stay refused."""
     if not isinstance(target, str) or not target.startswith("/"):
         return False
     path, sep, frag = target.partition("#")
-    if path not in KEPT_LIVE_PATHS:
+    if path not in site["kept"]:
         return False
     return not sep or ID_RE.fullmatch(frag) is not None
 
 
-def _internal_href(href, where):
-    """BASE + href for a site-relative target ("" is the home page), or a kept live path unchanged;
-    refused outside those shapes."""
+def _internal_href(site, href, where):
+    """The site's base + href for a site-relative target ("" is the home page), or one of the site's kept
+    live paths unchanged; refused outside those shapes."""
     if isinstance(href, str) and href.startswith("/"):
-        if _kept_live(href):
+        if _kept_live(site, href):
             return href
         raise RefusedPage("{}: {!r} is not a site-relative href or a kept live path".format(where, href))
     if not isinstance(href, str) or href.lower().startswith("http") \
             or ".." in href or INTERNAL_HREF_RE.fullmatch(href) is None:
         raise RefusedPage("{}: {!r} is not a site-relative href".format(where, href))
-    return _url(href)
+    return _url(site, href)
 
 
-def _any_link(href, text, where):
+def _any_link(site, href, text, where):
     """An anchor for an internal site-relative href, or a new-tab anchor for an https URL."""
     if isinstance(href, str) and href.startswith("https://"):
         return _external(href, text)
-    return '<a href="{}">{}</a>'.format(_internal_href(href, where), text)
+    return '<a href="{}">{}</a>'.format(_internal_href(site, href, where), text)
 
 
-def _inline(value):
-    """An inline HTML value with the $BASE/ token rendered as the base path."""
-    return value.replace("$BASE/", BASE)
+def _inline(site, value):
+    """An inline HTML value with the $BASE/ token rendered as the site's base path."""
+    return value.replace("$BASE/", site["base"])
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -322,9 +364,10 @@ def _c_hero(site, doc, where):
             '<p class="lbl gold">{}</p><h1 class="{}">{}</h1><p class="intro">{}</p>'
             '<a class="start" href="{}">{} <span class="arrow" aria-hidden="true">&rarr;</span></a></div>'
             '<div class="hero-art"><img src="{}" alt="{}"></div></section>').format(
-                _inline(_text(spec, where, "kicker")), classes, _inline(_text(spec, where, "statement")),
-                _inline(_text(spec, where, "intro")), _internal_href(spec["start_href"], where),
-                _text(spec, where, "start_text"), _asset("logos/{}.svg".format(site["key"])),
+                _inline(site, _text(spec, where, "kicker")), classes,
+                _inline(site, _text(spec, where, "statement")), _inline(site, _text(spec, where, "intro")),
+                _internal_href(site, spec["start_href"], where), _text(spec, where, "start_text"),
+                _asset(site, "logos/{}.svg".format(site["key"])),
                 site["logo-alt"])
 
 
@@ -335,8 +378,8 @@ def _c_entries(site, doc, where):
     for item in _items(spec, where, "items", ("href", "title", "n", "d")):
         tiles.append('<li><a href="{}"><span class="t">{}</span><span class="n">{}</span>'
                      '<span class="d">{}</span></a></li>'.format(
-                         _internal_href(item["href"], where), _inline(item["title"]),
-                         _inline(item["n"]), _inline(item["d"])))
+                         _internal_href(site, item["href"], where), _inline(site, item["title"]),
+                         _inline(site, item["n"]), _inline(site, item["d"])))
     return ('<div class="region"><p class="lbl">{}</p><div><ol class="entries">{}</ol></div></div>').format(
         label, "".join(tiles))
 
@@ -344,18 +387,18 @@ def _c_entries(site, doc, where):
 def _c_region(site, doc, where):
     spec = _need(doc, where, ("component", "label", "html"))
     return '<div class="region"><p class="lbl">{}</p><div>{}</div></div>'.format(
-        _text(spec, where, "label"), _inline(_text(spec, where, "html")))
+        _text(spec, where, "label"), _inline(site, _text(spec, where, "html")))
 
 
 def _c_value(site, doc, where):
     spec = _need(doc, where, ("component", "html"), ("label",))
     return ('<div class="region"><p class="lbl">{}</p><div><p class="value">{}</p></div></div>').format(
-        _text(spec, where, "label", "What it gives you"), _inline(_text(spec, where, "html")))
+        _text(spec, where, "label", "What it gives you"), _inline(site, _text(spec, where, "html")))
 
 
 def _c_about(site, doc, where):
     _need(doc, where, ("component",))
-    return _about()
+    return _about(site)
 
 
 def _version_and_status():
@@ -383,6 +426,8 @@ def _version_and_status():
 
 
 def _c_control(site, doc, where):
+    if not site.get("control"):
+        raise RefusedPage("{}: the document control strip belongs to aiqt.ai only".format(where))
     spec = _need(doc, where, ("component", "document", "source_text", "source_href"),
                  ("licence_text", "licence_href"))
     source_href = _text(spec, where, "source_href")
@@ -390,7 +435,7 @@ def _c_control(site, doc, where):
         raise RefusedPage("{}: source_href must be an https URL".format(where))
     version, status = _version_and_status()
     licence = '<a href="{}">{}</a>'.format(
-        _internal_href(spec.get("licence_href", "license/"), where),
+        _internal_href(site, spec.get("licence_href", "license/"), where),
         _text(spec, where, "licence_text", "Apache 2.0, see NOTICE"))
     return ('<dl class="control"><div><dt>Document</dt><dd>{}</dd></div>'
             '<div><dt>Version</dt><dd>{}</dd></div><div><dt>Status</dt><dd>{}</dd></div>'
@@ -403,12 +448,12 @@ def _c_clause(site, doc, where):
     spec = _need(doc, where, ("component", "id", "num", "title", "lbl"), ("rail",))
     return ('<p class="lbl sec">{}</p>\n<h2 class="clause" id="{}"><span class="num">{}</span>'
             '<span>{}</span></h2>').format(_text(spec, where, "lbl"), _checked_id(spec, where),
-                                           _text(spec, where, "num"), _inline(_text(spec, where, "title")))
+                                           _text(spec, where, "num"), _inline(site, _text(spec, where, "title")))
 
 
 def _c_clauses(site, doc, where):
     spec = _need(doc, where, ("component", "items"))
-    rows = ['<li><span class="n">{}</span><div>{}</div></li>'.format(item["n"], _inline(item["html"]))
+    rows = ['<li><span class="n">{}</span><div>{}</div></li>'.format(item["n"], _inline(site, item["html"]))
             for item in _items(spec, where, "items", ("n", "html"))]
     return '<ol class="clauses">{}</ol>'.format("".join(rows))
 
@@ -416,13 +461,13 @@ def _c_clauses(site, doc, where):
 def _c_note(site, doc, where):
     spec = _need(doc, where, ("component", "label", "html"))
     return '<div class="note"><span class="label">{}</span><div>{}</div></div>'.format(
-        _text(spec, where, "label"), _inline(_text(spec, where, "html")))
+        _text(spec, where, "label"), _inline(site, _text(spec, where, "html")))
 
 
 def _c_callout(site, doc, where):
     spec = _need(doc, where, ("component", "html"), ("label", "rule"))
     classes = "callout rule" if _flag(spec, where, "rule") else "callout"
-    body = '<div class="{}">{}</div>'.format(classes, _inline(_text(spec, where, "html")))
+    body = '<div class="{}">{}</div>'.format(classes, _inline(site, _text(spec, where, "html")))
     if "label" in spec:
         return '<p class="lbl accent blk">{}</p>\n{}'.format(_text(spec, where, "label"), body)
     return body
@@ -435,7 +480,7 @@ def _c_figures(site, doc, where):
     return '<div class="wide"><div class="figures">{}</div></div>'.format("".join(figs))
 
 
-def _table_html(spec, where):
+def _table_html(site, spec, where):
     classes = " ".join(name for name, on in (("sticky", _flag(spec, where, "sticky")),
                                              ("fixed", _flag(spec, where, "fixed"))) if on)
     cols = ""
@@ -460,20 +505,20 @@ def _table_html(spec, where):
             if cell.startswith("<td"):
                 if not cell.endswith("</td>"):
                     raise RefusedPage("{}: row {}: a raw cell must be a whole td element".format(where, number))
-                cells.append(_inline(cell))
+                cells.append(_inline(site, cell))
             else:
-                cells.append("<td>{}</td>".format(_inline(cell)))
+                cells.append("<td>{}</td>".format(_inline(site, cell)))
         body.append("<tr>{}</tr>".format("".join(cells)))
     table = ('<table class="{}"><caption class="vh">{}</caption>{}<thead><tr>{}</tr></thead>'
              '<tbody>{}</tbody></table>').format(
                  classes, _text(spec, where, "caption"), cols,
-                 "".join("<th>{}</th>".format(_inline(cell)) for cell in head), "".join(body))
+                 "".join("<th>{}</th>".format(_inline(site, cell)) for cell in head), "".join(body))
     return '<div class="tablewrap" tabindex="0">{}</div>'.format(table)
 
 
 def _c_table(site, doc, where):
     spec = _need(doc, where, ("component", "caption", "head", "rows"), ("sticky", "fixed", "cols"))
-    return '<div class="wide">{}</div>'.format(_table_html(spec, where))
+    return '<div class="wide">{}</div>'.format(_table_html(site, spec, where))
 
 
 def _c_register(site, doc, where):
@@ -481,11 +526,12 @@ def _c_register(site, doc, where):
                  ("sticky", "fixed", "cols"))
     cap = '<p class="reg-cap"><b>{}</b><span>{}</span><span class="count">{}</span></p>'.format(
         _text(spec, where, "reg"), _text(spec, where, "title"), _text(spec, where, "count"))
-    return '<div class="wide"><div class="register">{}{}</div></div>'.format(cap, _table_html(spec, where))
+    return '<div class="wide"><div class="register">{}{}</div></div>'.format(
+        cap, _table_html(site, spec, where))
 
 
 def _c_code(site, doc, where):
-    spec = _need(doc, where, ("component", "id", "text"), ("variant", "wide", "note"))
+    spec = _need(doc, where, ("component", "id", "text"), ("variant", "wide", "note", "file"))
     variant = _text(spec, where, "variant", "plain")
     if variant not in CODE_VARIANTS:
         raise RefusedPage("{}: variant must be one of {}".format(where, ", ".join(CODE_VARIANTS)))
@@ -500,8 +546,11 @@ def _c_code(site, doc, where):
                               _html.escape(_text(spec, where, "text"), quote=False))
     if _flag(spec, where, "wide"):
         pre = '<div class="wide">{}</div>'.format(pre)
+    if "file" in spec:
+        # The file label bar names the block's file path above it (`.lbl.file`).
+        pre = '<p class="lbl file">{}</p>\n{}'.format(_html.escape(_text(spec, where, "file"), quote=False), pre)
     if "note" in spec:
-        pre += '\n<p class="code-note">{}</p>'.format(_inline(_text(spec, where, "note")))
+        pre += '\n<p class="code-note">{}</p>'.format(_inline(site, _text(spec, where, "note")))
     return pre
 
 
@@ -526,26 +575,26 @@ def _c_family(site, doc, where):
     if ID_RE.fullmatch(family) is None:
         raise RefusedPage("{}: {!r} is not a valid family id".format(where, family))
     parts = ['<p class="lbl sec">{}</p>'.format(_text(spec, where, "lbl")),
-             "<h2>{}</h2>".format(_inline(_text(spec, where, "heading"))),
-             '<p class="verified">{}</p>'.format(_inline(_text(spec, where, "verified")))]
+             "<h2>{}</h2>".format(_inline(site, _text(spec, where, "heading"))),
+             '<p class="verified">{}</p>'.format(_inline(site, _text(spec, where, "verified")))]
     if "intro" in spec:
-        parts.append(_inline(_text(spec, where, "intro")))
+        parts.append(_inline(site, _text(spec, where, "intro")))
     if "steps" in spec:
         steps = spec["steps"]
         if not isinstance(steps, list) or not steps or not all(isinstance(step, str) for step in steps):
             raise RefusedPage("{}: steps must be a non-empty array of strings".format(where))
         parts.append('<ol class="steps">{}</ol>'.format(
-            "".join("<li><span>{}</span></li>".format(_inline(step)) for step in steps)))
+            "".join("<li><span>{}</span></li>".format(_inline(site, step)) for step in steps)))
     if "after" in spec:
-        parts.append(_inline(_text(spec, where, "after")))
+        parts.append(_inline(site, _text(spec, where, "after")))
     return '<section id="{0}" data-family-section="{0}">\n{1}\n</section>'.format(family, "\n".join(parts))
 
 
 def _c_download(site, doc, where):
     spec = _need(doc, where, ("component", "href", "filename", "size", "html"), ("label",))
-    link = _any_link(_text(spec, where, "href"), _text(spec, where, "filename"), where)
+    link = _any_link(site, _text(spec, where, "href"), _text(spec, where, "filename"), where)
     body = ('<div class="download"><p class="file">{}</p><p class="lbl size">{}</p><p>{}</p></div>').format(
-        link, _text(spec, where, "size"), _inline(_text(spec, where, "html")))
+        link, _text(spec, where, "size"), _inline(site, _text(spec, where, "html")))
     if "label" in spec:
         return '<p class="lbl blk">{}</p>\n{}'.format(_text(spec, where, "label"), body)
     return body
@@ -559,33 +608,33 @@ def _c_plan(site, doc, where):
     classes = "plan" + ((" " + variant) if variant else "") + (" described" if _flag(spec, where, "described") else "")
     rows = []
     for item in _items(spec, where, "items", ("href", "title"), ("n", "small")):
-        row = '<a href="{}">{}</a>'.format(_internal_href(item["href"], where), _inline(item["title"]))
+        row = '<a href="{}">{}</a>'.format(_internal_href(site, item["href"], where), _inline(site, item["title"]))
         if "n" in item:
-            row += '<span class="n">{}</span>'.format(_inline(item["n"]))
+            row += '<span class="n">{}</span>'.format(_inline(site, item["n"]))
         if "small" in item:
-            row += "<small>{}</small>".format(_inline(item["small"]))
+            row += "<small>{}</small>".format(_inline(site, item["small"]))
         rows.append("<li>{}</li>".format(row))
     return '<ul class="{}">{}</ul>'.format(classes, "".join(rows))
 
 
 def _c_scope(site, doc, where):
     spec = _need(doc, where, ("component", "html"))
-    return '<p class="lbl blk">Scope</p>\n<p>{}</p>'.format(_inline(_text(spec, where, "html")))
+    return '<p class="lbl blk">Scope</p>\n<p>{}</p>'.format(_inline(site, _text(spec, where, "html")))
 
 
 def _c_next(site, doc, where):
     spec = _need(doc, where, ("component", "text", "href"), ("html",))
     line = ""
     if "html" in spec:
-        line = "<p>{}</p>".format(_inline(_text(spec, where, "html")))
+        line = "<p>{}</p>".format(_inline(site, _text(spec, where, "html")))
     arrow = '<a class="start" href="{}">{} <span class="arrow" aria-hidden="true">&rarr;</span></a>'.format(
-        _internal_href(spec["href"], where), _text(spec, where, "text"))
+        _internal_href(site, spec["href"], where), _text(spec, where, "text"))
     return '<div class="next"><p class="lbl">Next</p>{}{}</div>'.format(line, arrow)
 
 
 def _c_lead(site, doc, where):
     spec = _need(doc, where, ("component", "html"))
-    return '<p class="lead">{}</p>'.format(_inline(_text(spec, where, "html")))
+    return '<p class="lead">{}</p>'.format(_inline(site, _text(spec, where, "html")))
 
 
 def _c_label(site, doc, where):
@@ -605,7 +654,7 @@ def _c_section(site, doc, where):
     if "id" in spec:
         attr = ' id="{}"'.format(_checked_id(spec, where))
     return '<p class="lbl sec">{}</p>\n<h2{}>{}</h2>'.format(
-        _text(spec, where, "lbl"), attr, _inline(_text(spec, where, "heading")))
+        _text(spec, where, "lbl"), attr, _inline(site, _text(spec, where, "heading")))
 
 
 def _c_entry(site, doc, where):
@@ -614,14 +663,166 @@ def _c_entry(site, doc, where):
     return ('<p class="lbl sec">{}</p>\n<h2 id="{}">{}</h2>\n'
             '<p><strong>Claim:</strong> {}</p>\n<p><strong>Limitation:</strong> {}</p>\n'
             '<p><strong>Evidence:</strong> {}</p>').format(
-                _text(spec, where, "lbl"), _checked_id(spec, where), _inline(_text(spec, where, "heading")),
-                _inline(_text(spec, where, "claim")), _inline(_text(spec, where, "limitation")),
-                _inline(_text(spec, where, "evidence")))
+                _text(spec, where, "lbl"), _checked_id(spec, where), _inline(site, _text(spec, where, "heading")),
+                _inline(site, _text(spec, where, "claim")), _inline(site, _text(spec, where, "limitation")),
+                _inline(site, _text(spec, where, "evidence")))
 
 
 def _c_prose(site, doc, where):
     spec = _need(doc, where, ("component", "html"))
-    return _inline(_text(spec, where, "html"))
+    return _inline(site, _text(spec, where, "html"))
+
+
+def _c_pullquote(site, doc, where):
+    """A pull quote: the section's one-line thesis set apart in the document's blockquote voice."""
+    spec = _need(doc, where, ("component", "html"))
+    return "<blockquote><p>{}</p></blockquote>".format(_inline(site, _text(spec, where, "html")))
+
+
+def _c_record(site, doc, where):
+    """A record list (specification section 7.18, `dl.record`): each term and its value in 1 group, with
+    the `cols` variant for a grid of short values."""
+    spec = _need(doc, where, ("component", "items"), ("cols",))
+    classes = "record cols" if _flag(spec, where, "cols") else "record"
+    groups = "".join("<div><dt>{}</dt><dd>{}</dd></div>".format(item["term"], _inline(site, item["html"]))
+                     for item in _items(spec, where, "items", ("term", "html")))
+    return '<dl class="{}">{}</dl>'.format(classes, groups)
+
+
+def _c_subhead(site, doc, where):
+    """An h3 inside a section; its optional id is checked for shape here and for duplicates per page."""
+    spec = _need(doc, where, ("component", "heading"), ("id",))
+    attr = ""
+    if "id" in spec:
+        attr = ' id="{}"'.format(_checked_id(spec, where))
+    return "<h3{}>{}</h3>".format(attr, _inline(site, _text(spec, where, "heading")))
+
+
+def _c_steps(site, doc, where):
+    """Plain numbered steps outside the install selector (`.steps`, the selector's own step markup)."""
+    spec = _need(doc, where, ("component", "items"))
+    items = spec.get("items")
+    if not isinstance(items, list) or not items or not all(isinstance(item, str) and item for item in items):
+        raise RefusedPage("{}: items must be a non-empty array of non-empty strings".format(where))
+    return '<ol class="steps">{}</ol>'.format(
+        "".join("<li><span>{}</span></li>".format(_inline(site, item)) for item in items))
+
+
+def _c_list(site, doc, where):
+    """A plain index list (specification section 7.13, `.plan` with its column variant) whose items are
+    text, not links."""
+    spec = _need(doc, where, ("component", "items"), ("variant",))
+    variant = _text(spec, where, "variant", "")
+    if variant not in PLAN_VARIANTS:
+        raise RefusedPage("{}: variant must be one of one, three".format(where))
+    items = spec.get("items")
+    if not isinstance(items, list) or not items or not all(isinstance(item, str) and item for item in items):
+        raise RefusedPage("{}: items must be a non-empty array of non-empty strings".format(where))
+    return '<ul class="{}">{}</ul>'.format("plan" + ((" " + variant) if variant else ""),
+                                          "".join("<li>{}</li>".format(_inline(site, item)) for item in items))
+
+
+# The figure's diagram geometry (specification section 7.18: an inline SVG `.wide`, a `.stack` variant shown
+# at 600 px and below, and a figcaption). Every node is a box with a tracked label (`t`), a monospace name
+# (`m`) and a serif line (`s`); an edge label sits on each arrow, and the `under` line runs beneath.
+FIG_NODE_W, FIG_NODE_H, FIG_GAP = 210, 88, 100
+FIG_STACK_W, FIG_STACK_GAP, FIG_STACK_CHARS = 320, 52, 38
+
+
+def _fig_node(x, y, width, node):
+    esc = _html.escape
+    return ('<rect class="node" x="{x}" y="{y}" width="{w}" height="{h}" rx="6"></rect>'
+            '<text class="t" x="{tx}" y="{y1}">{t}</text><text class="m" x="{tx}" y="{y2}">{m}</text>'
+            '<text class="s" x="{tx}" y="{y3}">{s}</text>').format(
+                x=x, y=y, w=width, h=FIG_NODE_H, tx=x + 14, y1=y + 26, y2=y + 50, y3=y + 70,
+                t=esc(node["t"]), m=esc(node["m"]), s=esc(node["s"]))
+
+
+def _fig_lines(text, limit):
+    """The words of `text` greedily packed into lines of at most `limit` characters."""
+    lines = []
+    for word in text.split():
+        if lines and len(lines[-1]) + 1 + len(word) <= limit:
+            lines[-1] += " " + word
+        else:
+            lines.append(word)
+    return lines
+
+
+def _c_figure(site, doc, where):
+    spec = _need(doc, where, ("component", "id", "caption", "under", "items"))
+    fig_id = _checked_id(spec, where)
+    nodes = _items(spec, where, "items", ("t", "m", "s"), ("edge",))
+    if not 2 <= len(nodes) <= 4:
+        raise RefusedPage("{}: a figure has 2 to 4 nodes".format(where))
+    for position, node in enumerate(nodes, 1):
+        if ("edge" in node) != (position < len(nodes)):
+            raise RefusedPage("{}: every node but the last carries an edge label, the last none".format(where))
+    esc = _html.escape
+    under = _text(spec, where, "under")
+    words = []
+    for node in nodes:
+        words.append("{}, {}, {}".format(node["t"], node["m"], node["s"]))
+        if "edge" in node:
+            words.append(node["edge"])
+    label = esc("; ".join(words) + ". " + under[:1].upper() + under[1:] + ".")
+    width = len(nodes) * FIG_NODE_W + (len(nodes) - 1) * FIG_GAP + 20
+    mid = 20 + FIG_NODE_H // 2
+    wide = []
+    for position, node in enumerate(nodes):
+        x = 10 + position * (FIG_NODE_W + FIG_GAP)
+        wide.append(_fig_node(x, 20, FIG_NODE_W, node))
+        if "edge" in node:
+            start, end = x + FIG_NODE_W, x + FIG_NODE_W + FIG_GAP
+            wide.append('<line class="arrow" x1="{}" y1="{}" x2="{}" y2="{}"></line>'
+                        '<polygon class="head" points="{},{} {},{} {},{}"></polygon>'
+                        '<text class="t accent" x="{}" y="{}" text-anchor="middle">{}</text>'.format(
+                            start + 4, mid, end - 10, mid, end - 10, mid - 6, end, mid, end - 10, mid + 6,
+                            start + FIG_GAP // 2, mid - 10, esc(node["edge"])))
+    wide.append('<text class="s" x="{}" y="140" text-anchor="middle">{}</text>'.format(width // 2, esc(under)))
+    stack = []
+    centre = FIG_STACK_W // 2
+    y = 10
+    for node in nodes:
+        stack.append(_fig_node(20, y, FIG_STACK_W - 40, node))
+        y += FIG_NODE_H
+        if "edge" in node:
+            stack.append('<line class="arrow" x1="{0}" y1="{1}" x2="{0}" y2="{2}"></line>'
+                         '<polygon class="head" points="{3},{2} {0},{4} {5},{2}"></polygon>'
+                         '<text class="t accent" x="{6}" y="{7}">{8}</text>'.format(
+                             centre, y + 4, y + FIG_STACK_GAP - 10, centre - 6, y + FIG_STACK_GAP, centre + 6,
+                             centre + 16, y + FIG_STACK_GAP // 2 + 4, esc(node["edge"])))
+            y += FIG_STACK_GAP
+    for line in _fig_lines(under, FIG_STACK_CHARS):
+        y += 22
+        stack.append('<text class="s" x="{}" y="{}" text-anchor="middle">{}</text>'.format(centre, y, esc(line)))
+    return ('<figure class="figure" id="{id}">'
+            '<svg class="wide" viewBox="0 0 {ww} 160" role="img" aria-label="{label}">{wide}</svg>'
+            '<svg class="stack" viewBox="0 0 {sw} {sh}" role="img" aria-label="{label}">{stack}</svg>'
+            '<figcaption>{cap}</figcaption></figure>').format(
+                id=fig_id, ww=width, label=label, wide="".join(wide), sw=FIG_STACK_W, sh=y + 16,
+                stack="".join(stack), cap=_inline(site, _text(spec, where, "caption")))
+
+
+def _c_srcview(site, doc, where):
+    """The source beside its generated view (specification section 7.18, `.srcview`): the source in a copy
+    block under its file label, the view under its own, with the generated-by line, its heading and its
+    rows; an optional code note follows."""
+    spec = _need(doc, where, ("component", "id", "source_label", "text", "view_label", "gen", "heading",
+                              "items"), ("note",))
+    block_id = _checked_id(spec, where)
+    rows = "".join("<li>{}</li>".format(_inline(site, item["html"]))
+                   for item in _items(spec, where, "items", ("html",)))
+    out = ('<div class="srcview"><div><p class="lbl">{}</p><pre id="{}" class="hascopy"><button class="copy" '
+           'type="button" data-copy="{}" hidden>Copy</button>{}</pre></div><div><p class="lbl">{}</p>'
+           '<div class="view"><p class="gen">{}</p><h4>{}</h4><ul>{}</ul></div></div></div>').format(
+               _html.escape(_text(spec, where, "source_label"), quote=False), block_id, block_id,
+               _html.escape(_text(spec, where, "text"), quote=False),
+               _html.escape(_text(spec, where, "view_label"), quote=False), _inline(site, _text(spec, where, "gen")),
+               _inline(site, _text(spec, where, "heading")), rows)
+    if "note" in spec:
+        out += '\n<p class="code-note">{}</p>'.format(_inline(site, _text(spec, where, "note")))
+    return out
 
 
 _MAPPINGS_VIEWS = ("by-rule", "by-framework")
@@ -723,7 +924,9 @@ COMPONENTS = {
     "callout": _c_callout, "figures": _c_figures, "table": _c_table, "register": _c_register,
     "code": _c_code, "picker": _c_picker, "family": _c_family, "download": _c_download, "plan": _c_plan,
     "scope": _c_scope, "next": _c_next, "lead": _c_lead, "label": _c_label, "section": _c_section,
-    "entry": _c_entry, "prose": _c_prose, "mappings": _c_mappings,
+    "entry": _c_entry, "prose": _c_prose, "mappings": _c_mappings, "list": _c_list, "figure": _c_figure,
+    "srcview": _c_srcview, "pullquote": _c_pullquote, "record": _c_record, "subhead": _c_subhead,
+    "steps": _c_steps,
 }
 # Components whose rail key lists the section on the page's rail (specification section 7.6).
 RAIL_BEARING = ("clause", "section", "entry")
@@ -752,11 +955,18 @@ def _page_from_doc(doc, where):
     if not isinstance(body, list) or not body or not all(isinstance(item, dict) for item in body):
         raise RefusedPage("{}: body must be a non-empty array of component tables".format(where))
     rail = []
+    ids = {}
     for position, component in enumerate(body, 1):
         comp_where = "{}.body[{}]".format(where, position)
         name = component.get("component")
         if name not in COMPONENTS:
             raise RefusedPage("{}: unknown component {!r}".format(comp_where, name))
+        # An id a component carries is a fragment target, so 2 components on 1 page may not share it.
+        if isinstance(component.get("id"), str):
+            if component["id"] in ids:
+                raise RefusedPage("{}: duplicate id {!r} (also in {})".format(
+                    comp_where, component["id"], ids[component["id"]]))
+            ids[component["id"]] = comp_where
         if "rail" in component:
             if name not in RAIL_BEARING:
                 raise RefusedPage("{}: only a clause, section or entry joins the rail".format(comp_where))
@@ -768,9 +978,11 @@ def _page_from_doc(doc, where):
             "where": where}
 
 
-def _load_pages(src):
+def _load_pages(src, label=None):
     """Every page model from the data directory, sorted by file name; RefusedPage on anything that is
-    not a plain readable TOML page file, on a directory that cannot be listed, and on an empty set."""
+    not a plain readable TOML page file, on a directory that cannot be listed, and on an empty set.
+    `label` names the directory in diagnostics (the site's repository-relative source directory)."""
+    label = str(src) if label is None else label
     names = []
     try:
         with os.scandir(src) as entries:
@@ -788,7 +1000,7 @@ def _load_pages(src):
         raise RefusedPage("{}: no page data files".format(src))
     pages, seen = [], {}
     for name in names:
-        where = "{}/{}".format(SRC_REL, name)
+        where = "{}/{}".format(label, name)
         try:
             with open(Path(src) / name, "rb") as handle:
                 data = handle.read(MAX_PAGE_BYTES + 1)
@@ -816,7 +1028,7 @@ def _page_scripts(page):
     selector, rail.js only where the rail lists in-page sections (specification sections 7.6 and 8)."""
     names = {component["component"] for component in page["body"]}
     scripts = []
-    if "code" in names:
+    if "code" in names or "srcview" in names:
         scripts.append("copy.js")
     if "picker" in names:
         scripts.append("select.js")
@@ -827,7 +1039,7 @@ def _page_scripts(page):
 
 def _rail_html(site, page):
     logo = '<img class="rail-logo" src="{}" alt="{}">'.format(
-        _asset("logos/{}.svg".format(site["key"])), site["logo-alt"])
+        _asset(site, "logos/{}.svg".format(site["key"])), site["logo-alt"])
     if not page["rail"]:
         return '<div class="rail">{}</div>'.format(logo)
     links = "".join('<li><a href="#{}">{}</a></li>'.format(anchor, label) for anchor, label in page["rail"])
@@ -843,10 +1055,10 @@ def _body_html(site, page):
         rendered.append((component["component"], COMPONENTS[component["component"]](site, component, comp_where)))
     if page["kind"] == "landing":
         return '<div class="wrap">{}</div>'.format("\n".join(html for _name, html in rendered))
-    parts = ['<p class="lbl first">{}</p>'.format(page["label"]), "<h1>{}</h1>".format(_inline(page["heading"])),
-             _rail_html(site, page)]
+    parts = ['<p class="lbl first">{}</p>'.format(page["label"]),
+             "<h1>{}</h1>".format(_inline(site, page["heading"])), _rail_html(site, page)]
     if page["meta"]:
-        parts.append('<p class="meta">{}</p>'.format(_inline(page["meta"])))
+        parts.append('<p class="meta">{}</p>'.format(_inline(site, page["meta"])))
     tail = []
     for name, html in rendered:
         if name == "about":
@@ -861,15 +1073,16 @@ LINK_RE = re.compile(r'(?:href|src)="([^"]*)"')
 ANCHOR_RE = re.compile(r"<a [^>]*>")
 
 
-def _link_findings(html):
-    """Every base-path or new-tab finding on a built page: an internal href or src outside BASE, a non-https
-    external URL, or an external anchor without the new-tab attributes and hint."""
+def _link_findings(site, html):
+    """Every base-path or new-tab finding on a built page: an internal href or src outside the site's base,
+    a non-https external URL, or an external anchor without the new-tab attributes and hint."""
     found = []
+    base = site["base"]
     for target in LINK_RE.findall(html):
-        if target.startswith(BASE) or target.startswith("#") or _kept_live(target):
+        if target.startswith(base) or target.startswith("#") or _kept_live(site, target):
             continue
         if not target.startswith("https://"):
-            found.append("{!r} is neither under {} nor an https URL".format(target, BASE))
+            found.append("{!r} is neither under {} nor an https URL".format(target, base))
     for anchor in ANCHOR_RE.findall(html):
         href = LINK_RE.search(anchor)
         if href is None or not href.group(1).startswith("https://"):
@@ -882,16 +1095,17 @@ def _link_findings(html):
 def render_page(site, pages, page):
     rel, title = page["rel"], page["title"]
     head = ['<meta charset="utf-8">', '<meta name="viewport" content="width=device-width, initial-scale=1">']
-    if BASE == DRAFT_BASE:
+    if site["base"] == DRAFT_BASE:
         head.append('<meta name="robots" content="noindex, nofollow">')
     head.append("<title>{} | {}.ai</title>".format(title, site["name"]))
     head.append('<link rel="icon" href="{}" type="image/svg+xml">'.format(
-        _asset("logos/{}-favicon.svg".format(site["key"]))))
-    head.append('<link rel="apple-touch-icon" href="{}">'.format(_asset("logos/{}-touch.png".format(site["key"]))))
+        _asset(site, "logos/{}-favicon.svg".format(site["key"]))))
+    head.append('<link rel="apple-touch-icon" href="{}">'.format(
+        _asset(site, "logos/{}-touch.png".format(site["key"]))))
     for sheet in ("fonts.css", "palettes.css", "baseline.css"):
-        head.append('<link rel="stylesheet" href="{}">'.format(_asset(sheet)))
+        head.append('<link rel="stylesheet" href="{}">'.format(_asset(site, sheet)))
     for script in _page_scripts(page):
-        head.append('<script src="{}" defer></script>'.format(_asset(script)))
+        head.append('<script src="{}" defer></script>'.format(_asset(site, script)))
     html = "\n".join([
         "<!doctype html>",
         '<html lang="en" class="site-{}">'.format(site["key"]),
@@ -899,7 +1113,7 @@ def render_page(site, pages, page):
         "</head>",
         "<body>",
         '<a class="skip" href="#main-content">Skip to content</a>',
-        '<header class="mast">{}{}</header>'.format(_brand(site), _nav(site, pages, _page_url(rel))),
+        '<header class="mast">{}{}</header>'.format(_brand(site), _nav(site, pages, _page_url(site, rel))),
         '<main id="main-content">',
         _body_html(site, page),
         "</main>",
@@ -908,7 +1122,7 @@ def render_page(site, pages, page):
         "</body>",
         "</html>",
     ]) + "\n"
-    refusals = refusals_for(html) + _link_findings(html)
+    refusals = refusals_for(html) + _link_findings(site, html)
     if refusals:
         raise RefusedPage("{}/{}: {}".format(site["root"], rel, "; ".join(refusals)))
     return html
@@ -963,34 +1177,39 @@ def refusals_for(html):
     return found
 
 
-def _kept_live_missing():
-    """Every kept live path with no target under site/: the path as-is for a file target, or the path
-    plus ".html" for an extensionless page, matching how the live site serves it."""
+def _kept_live_missing(site):
+    """Every kept live path of the site with no target under its live root: the path as-is for a file
+    target, or the path plus ".html" for an extensionless page, matching how the live site serves it."""
     missing = []
-    for path in KEPT_LIVE_PATHS:
+    for path in site["kept"]:
         rel = path.lstrip("/")
-        candidates = [ROOT / "site" / rel]
+        candidates = [ROOT / site["live"] / rel]
         if "." not in rel.rsplit("/", 1)[-1]:
-            candidates.append(ROOT / "site" / (rel + ".html"))
+            candidates.append(ROOT / site["live"] / (rel + ".html"))
         if not any(candidate.is_file() for candidate in candidates):
             missing.append(path)
     return missing
 
 
-def build(pages=None):
-    """{target path: text} for every registered output. With the default page set (the data files under
-    SRC_REL), the built set must match the GENSRC_OUTPUTS declaration, so a page cannot land or vanish
-    without its registry entry. Every kept live path must exist under site/ before anything renders."""
-    missing = _kept_live_missing()
-    if missing:
-        raise RefusedPage("kept live path(s) with no target under site/: {}".format(", ".join(missing)))
+def build(pages=None, sites=SITES):
+    """{target path: text} for every registered output. Each site is loaded from its own data directory
+    and rendered with its own context; with the default page sets, the built set must match the
+    GENSRC_OUTPUTS declaration, so a page cannot land or vanish without its registry entry. A given
+    `pages` list (a fixture) is rendered for every site in `sites`. Every kept live path of a site must
+    exist under its live root before anything renders, and no 2 sites may build the same output path."""
     declared = pages is None
-    if pages is None:
-        pages = _load_pages(ROOT / SRC_REL)
     outputs = {}
-    for site in SITES:
-        for page in pages:
-            outputs["{}/{}".format(site["root"], page["rel"])] = render_page(site, pages, page)
+    for site in sites:
+        missing = _kept_live_missing(site)
+        if missing:
+            raise RefusedPage("kept live path(s) with no target under {}/: {}".format(
+                site["live"], ", ".join(missing)))
+        site_pages = _load_pages(ROOT / site["src"], site["src"]) if declared else pages
+        for page in site_pages:
+            target = "{}/{}".format(site["root"], page["rel"])
+            if target in outputs:
+                raise RefusedPage("{}: built by more than 1 site".format(target))
+            outputs[target] = render_page(site, site_pages, page)
     if declared:
         targets = {entry["target"] for entry in GENSRC_OUTPUTS}
         if set(outputs) != targets:
@@ -1061,14 +1280,13 @@ def _self_test():
         failures.append("{}: expected a refusal".format(name))
         return ""
 
-    global BASE
     site = SITES[0]
     outputs = build()
     page = outputs["site/draft/index.html"]
     expect("shell/html-class", '<html lang="en" class="site-aiqt">' in page)
     expect("shell/title", "<title>Home | AIQT.ai</title>" in page)
     expect("shell/robots-meta", page.count('<meta name="robots" content="noindex, nofollow">') == 1)
-    order = [page.find(_asset(sheet)) for sheet in ("fonts.css", "palettes.css", "baseline.css")]
+    order = [page.find(_asset(site, sheet)) for sheet in ("fonts.css", "palettes.css", "baseline.css")]
     expect("shell/stylesheet-order", -1 not in order and order == sorted(order), order)
     expect("shell/no-site-css", "site.css" not in page)
     expect("shell/favicon", '<link rel="icon" href="/draft/assets/baseline/logos/aiqt-favicon.svg"' in page)
@@ -1086,8 +1304,8 @@ def _self_test():
             for rel in ("index.html", "disclosure/index.html", "license/index.html")]
     # The unregistered set is derived from the site nav against the loaded pages, so the check follows
     # the pages as they land instead of hard-coding one path as absent.
-    registered_urls = {_page_url(page["rel"]) for page in _load_pages(ROOT / SRC_REL)}
-    nav_urls = [_url(path) for path, _label in site["nav"]]
+    registered_urls = {_page_url(site, page["rel"]) for page in _load_pages(ROOT / site["src"])}
+    nav_urls = [_url(site, path) for path, _label in site["nav"]]
     unregistered = [href for href in nav_urls if href not in registered_urls]
     expect("nav/unregistered-items-absent",
            all('href="{}"'.format(href) not in nav for nav in navs for href in unregistered),
@@ -1121,7 +1339,7 @@ def _self_test():
                and "<title>{} | AIQT.ai</title>".format(title) in inner)
     hrefs = re.findall(r'(?:href|src)="([^"]*)"', page)
     internal = [h for h in hrefs if not h.startswith("https://") and not h.startswith("#")]
-    expect("base/every-internal-path", internal and all(h.startswith(BASE) for h in internal), internal)
+    expect("base/every-internal-path", internal and all(h.startswith(DRAFT_BASE) for h in internal), internal)
     externals = re.findall(r'<a [^>]*href="https://[^"]*"[^>]*>', page)
     expect("base/external-newtab", externals and all('target="_blank" rel="noopener noreferrer"' in a for a in externals))
     expect("refuse/clean-page-passes", refusals_for(page) == [], refusals_for(page))
@@ -1175,7 +1393,7 @@ def _self_test():
     expect("component/value", value == (
         '<div class="region"><p class="lbl">What it gives you</p><div><p class="value">V '
         '<a href="/draft/license/">free</a>.</p></div></div>'), value)
-    expect("component/about", rendered('component = "about"\n', kind="landing") == _about())
+    expect("component/about", rendered('component = "about"\n', kind="landing") == _about(site))
     with open(ROOT / "VERSION", encoding="utf-8") as handle:
         released = handle.read().strip()
     control = rendered('component = "control"\ndocument = "aiqt.ai"\nsource_text = "jposluns/guardrails"\n'
@@ -1326,7 +1544,8 @@ def _self_test():
         "refuse/kept-path-prefix", rendered, 'component = "next"\ntext = "T"\nhref = "/evidence2"\n'))
     expect("refuse/kept-bad-fragment", "kept live path" in refused(
         "refuse/kept-bad-fragment", rendered, 'component = "next"\ntext = "T"\nhref = "/evidence#a b"\n'))
-    expect("links/kept-fragment-passes", _link_findings('<a href="/evidence#limits">x</a>') == [])
+    expect("links/kept-fragment-passes", _link_findings(site, '<a href="/evidence#limits">x</a>') == [])
+    expect("links/kept-is-per-site", _link_findings(SITES[1], '<a href="/evidence#limits">x</a>') != [])
 
     # The data model refuses what it does not know, with every key named.
     expect("refuse/unknown-component", "unknown component" in refused(
@@ -1398,10 +1617,10 @@ def _self_test():
     expect("rail/no-static-aria-current", rail_nav is not None and "aria-current" not in rail_nav.group(0))
 
     # Every link on a built page stays under BASE or is an https link with the new-tab attributes.
-    expect("links/clean-page-passes", _link_findings(railed_html) == [], _link_findings(railed_html))
-    expect("links/internal-outside-base", _link_findings('<a href="/live/">x</a>') != [])
-    expect("links/non-https-external", _link_findings('<a href="http://example.com/">x</a>') != [])
-    expect("links/external-without-newtab", _link_findings('<a href="https://example.com/">x</a>') != [])
+    expect("links/clean-page-passes", _link_findings(site, railed_html) == [], _link_findings(site, railed_html))
+    expect("links/internal-outside-base", _link_findings(site, '<a href="/live/">x</a>') != [])
+    expect("links/non-https-external", _link_findings(site, '<a href="http://example.com/">x</a>') != [])
+    expect("links/external-without-newtab", _link_findings(site, '<a href="https://example.com/">x</a>') != [])
     bad = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<a href=\\"/elsewhere/\\">x</a>"\n')
     try:
         render_page(site, [bad], bad)
@@ -1410,7 +1629,7 @@ def _self_test():
         pass
     hostile = fixture_page('[[body]]\ncomponent = "prose"\nhtml = "<p onclick=\\"x()\\">x</p>"\n')
     try:
-        build([hostile])
+        build([hostile], sites=(site,))
         expect("refuse/build-raises", False)
     except RefusedPage:
         pass
@@ -1462,29 +1681,183 @@ def _self_test():
 
     # Every kept live path has its target under site/ today; a kept entry with no target refuses the
     # build before anything renders.
-    expect("kept/all-targets-exist", _kept_live_missing() == [], _kept_live_missing())
-    global KEPT_LIVE_PATHS
-    saved_kept = KEPT_LIVE_PATHS
-    KEPT_LIVE_PATHS = KEPT_LIVE_PATHS + ("/absent-page",)
+    expect("kept/all-targets-exist", all(_kept_live_missing(each) == [] for each in SITES),
+           [_kept_live_missing(each) for each in SITES])
+    absent = dict(site, kept=site["kept"] + ("/absent-page",))
+    expect("kept/missing-detected", _kept_live_missing(absent) == ["/absent-page"], _kept_live_missing(absent))
     try:
-        expect("kept/missing-detected", _kept_live_missing() == ["/absent-page"], _kept_live_missing())
-        try:
-            build([plain])
-            expect("refuse/kept-missing-build", False)
-        except RefusedPage as exc:
-            expect("refuse/kept-missing-build", "kept live path" in str(exc), str(exc))
-    finally:
-        KEPT_LIVE_PATHS = saved_kept
+        build([plain], sites=(absent,))
+        expect("refuse/kept-missing-build", False)
+    except RefusedPage as exc:
+        expect("refuse/kept-missing-build", "kept live path" in str(exc), str(exc))
+    try:
+        build([plain], sites=(site, dict(SITES[1], root=site["root"])))
+        expect("refuse/shared-output-path", False)
+    except RefusedPage as exc:
+        expect("refuse/shared-output-path", "more than 1 site" in str(exc), str(exc))
 
-    BASE = "/"
-    try:
-        pages = _load_pages(ROOT / SRC_REL)
-        promoted = render_page(site, pages, [page for page in pages if page["rel"] == "index.html"][0])
-    finally:
-        BASE = DRAFT_BASE
+    # Promotion is per site: 1 site rebuilt at "/" while the other stays under /draft/.
+    promoted_set = build(sites=(dict(site, base="/"), SITES[1]))
+    promoted = promoted_set["site/draft/index.html"]
     expect("base/promotion-drops-robots", "noindex" not in promoted)
     expect("base/promotion-root-paths", 'href="/assets/baseline/fonts.css"' in promoted
            and "/draft/" not in promoted)
+    still = promoted_set["opf/site/draft/index.html"]
+    expect("base/other-site-stays-draft", still == outputs["opf/site/draft/index.html"]
+           and 'href="/draft/assets/baseline/fonts.css"' in still and "noindex" in still)
+
+    # opfiles.ai: its own page set, chrome, footer cycle and nav, with no control strip.
+    opf = SITES[1]
+    home = outputs["opf/site/draft/index.html"]
+    expect("opfiles/outputs", sorted(rel for rel in outputs if rel.startswith("opf/site/draft/")) == [
+        "opf/site/draft/404.html", "opf/site/draft/adopt/index.html", "opf/site/draft/core-files/index.html",
+        "opf/site/draft/disclosure/index.html", "opf/site/draft/index.html", "opf/site/draft/license/index.html",
+        "opf/site/draft/model/index.html", "opf/site/draft/standard/index.html"], sorted(outputs))
+    expect("opfiles/html-class", '<html lang="en" class="site-opfiles">' in home)
+    expect("opfiles/title", "<title>Home | OPFiles.ai</title>" in home)
+    expect("opfiles/favicon", '<link rel="icon" href="/draft/assets/baseline/logos/opfiles-favicon.svg"' in home)
+    expect("opfiles/touch-icon",
+           '<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/opfiles-touch.png">' in home)
+    opf_slices = re.findall(r'<li class="slice slice-(\d)">', home)
+    expect("opfiles/footer-cycle", opf_slices == ["2", "3", "4", "5", "6", "1"], opf_slices)
+    expect("opfiles/footer-current-card",
+           home.count('aria-current="page"><img src="/draft/assets/baseline/logos/opfiles.svg"') == 1)
+    opf_nav = re.search(r'<nav class="nav" aria-label="Site">(.*?)</nav>',
+                        outputs["opf/site/draft/model/index.html"]).group(1)
+    expect("opfiles/nav", opf_nav.startswith(
+        '<a href="/draft/model/" aria-current="page">The model</a><a href="/draft/standard/">The standard</a>'
+        '<a href="/draft/core-files/">Core files</a><a href="/draft/adopt/">Adopt</a>'
+        '<a href="https://github.com/jposluns/guardrails" target="_blank"'), opf_nav)
+    expect("opfiles/nav-order", [label for _path, label in opf["nav"]] == [
+        "The model", "The standard", "Core files", "Adopt"], opf["nav"])
+    expect("opfiles/about", home.count(_about(opf)) == 1)
+    expect("opfiles/no-control-strip", all('class="control"' not in outputs[rel] for rel in outputs
+                                           if rel.startswith("opf/")))
+    model_page = outputs["opf/site/draft/model/index.html"]
+    expect("opfiles/model-figure", model_page.count('<figure class="figure" id="fig-1">') == 1
+           and '<p class="lbl blk">Model</p>' in model_page and "<figcaption>Figure 1. " in model_page)
+    expect("opfiles/model-srcview", model_page.count('<div class="srcview">') == 1
+           and '<script src="/draft/assets/baseline/copy.js" defer></script>' in model_page)
+    expect("opfiles/standard-list", '<ul class="plan three"><li>Store layout and naming</li>'
+           in outputs["opf/site/draft/standard/index.html"])
+    expect("refuse/control-off-aiqt", "aiqt.ai only" in refused(
+        "refuse/control-off-aiqt", _c_control, opf,
+        {"component": "control", "document": "d", "source_text": "s", "source_href": "https://example.com/"},
+        "fixture.body[1]"))
+
+    # The 3 section 7.18 and 7.13 components added for opfiles.ai, each pinned exactly.
+    plain_list = rendered('component = "list"\nvariant = "three"\nitems = ["A", "B <code>c</code>"]\n')
+    expect("component/list-three", plain_list == '<ul class="plan three"><li>A</li><li>B <code>c</code></li></ul>',
+           plain_list)
+    expect("component/list-default", rendered('component = "list"\nitems = ["A"]\n') == '<ul class="plan"><li>A</li></ul>')
+    expect("refuse/list-empty-item", "non-empty strings" in refused(
+        "refuse/list-empty-item", rendered, 'component = "list"\nitems = ["A", ""]\n'))
+    expect("refuse/list-bad-variant", "variant" in refused(
+        "refuse/list-bad-variant", rendered, 'component = "list"\nvariant = "four"\nitems = ["A"]\n'))
+    srcview = rendered('component = "srcview"\nid = "src"\nsource_label = "a.toml"\ntext = "x = \\"<1>\\""\n'
+                       'view_label = "A.md"\ngen = "Generated."\nheading = "A"\nnote = "N."\n'
+                       '[[body.items]]\nhtml = "<code>BI-1</code>"\n')
+    expect("component/srcview", srcview == (
+        '<div class="srcview"><div><p class="lbl">a.toml</p><pre id="src" class="hascopy"><button class="copy" '
+        'type="button" data-copy="src" hidden>Copy</button>x = "&lt;1&gt;"</pre></div><div><p class="lbl">A.md'
+        '</p><div class="view"><p class="gen">Generated.</p><h4>A</h4><ul><li><code>BI-1</code></li></ul></div>'
+        '</div></div>\n<p class="code-note">N.</p>'), srcview)
+    figure = rendered('component = "figure"\nid = "f"\ncaption = "Figure 1. C."\nunder = "u &"\n'
+                      '[[body.items]]\nt = "A"\nm = "a.toml"\ns = "s1"\nedge = "go"\n'
+                      '[[body.items]]\nt = "B"\nm = "B.md"\ns = "s2"\n')
+    expect("component/figure", figure == (
+        '<figure class="figure" id="f"><svg class="wide" viewBox="0 0 540 160" role="img" '
+        'aria-label="A, a.toml, s1; go; B, B.md, s2. U &amp;.">'
+        '<rect class="node" x="10" y="20" width="210" height="88" rx="6"></rect>'
+        '<text class="t" x="24" y="46">A</text><text class="m" x="24" y="70">a.toml</text>'
+        '<text class="s" x="24" y="90">s1</text>'
+        '<line class="arrow" x1="224" y1="64" x2="310" y2="64"></line>'
+        '<polygon class="head" points="310,58 320,64 310,70"></polygon>'
+        '<text class="t accent" x="270" y="54" text-anchor="middle">go</text>'
+        '<rect class="node" x="320" y="20" width="210" height="88" rx="6"></rect>'
+        '<text class="t" x="334" y="46">B</text><text class="m" x="334" y="70">B.md</text>'
+        '<text class="s" x="334" y="90">s2</text>'
+        '<text class="s" x="270" y="140" text-anchor="middle">u &amp;</text></svg>'
+        '<svg class="stack" viewBox="0 0 320 276" role="img" aria-label="A, a.toml, s1; go; B, B.md, s2. U &amp;.">'
+        '<rect class="node" x="20" y="10" width="280" height="88" rx="6"></rect>'
+        '<text class="t" x="34" y="36">A</text><text class="m" x="34" y="60">a.toml</text>'
+        '<text class="s" x="34" y="80">s1</text>'
+        '<line class="arrow" x1="160" y1="102" x2="160" y2="140"></line>'
+        '<polygon class="head" points="154,140 160,150 166,140"></polygon>'
+        '<text class="t accent" x="176" y="128">go</text>'
+        '<rect class="node" x="20" y="150" width="280" height="88" rx="6"></rect>'
+        '<text class="t" x="34" y="176">B</text><text class="m" x="34" y="200">B.md</text>'
+        '<text class="s" x="34" y="220">s2</text>'
+        '<text class="s" x="160" y="260" text-anchor="middle">u &amp;</text></svg>'
+        '<figcaption>Figure 1. C.</figcaption></figure>'), figure)
+    expect("refuse/figure-one-node", "2 to 4 nodes" in refused(
+        "refuse/figure-one-node", rendered, 'component = "figure"\nid = "f"\ncaption = "C"\nunder = "u"\n'
+        '[[body.items]]\nt = "A"\nm = "a"\ns = "s"\n'))
+    # The node count at its upper end: 4 nodes render, 5 are refused (2, the lower end, renders above).
+    four = ('component = "figure"\nid = "f"\ncaption = "C"\nunder = "u"\n'
+            + '[[body.items]]\nt = "A"\nm = "a"\ns = "s"\nedge = "e"\n' * 3 + '[[body.items]]\nt = "B"\nm = "b"\ns = "s"\n')
+    expect("component/figure-four-nodes", rendered(four).count('<rect class="node"') == 8)
+    expect("refuse/figure-five-nodes", "2 to 4 nodes" in refused(
+        "refuse/figure-five-nodes", rendered, four.replace('[[body.items]]\nt = "B"',
+                                                           '[[body.items]]\nt = "A"\nm = "a"\ns = "s"\nedge = "e"\n'
+                                                           '[[body.items]]\nt = "B"', 1)))
+    expect("refuse/figure-last-edge", "edge label" in refused(
+        "refuse/figure-last-edge", rendered, 'component = "figure"\nid = "f"\ncaption = "C"\nunder = "u"\n'
+        '[[body.items]]\nt = "A"\nm = "a"\ns = "s"\nedge = "e"\n[[body.items]]\nt = "B"\nm = "b"\ns = "s"\n'
+        'edge = "e"\n'))
+    expect("figure/lines-at-limit", _fig_lines("aa bb", 5) == ["aa bb"] and _fig_lines("aa bbb", 5) == ["aa", "bbb"]
+           and _fig_lines("aa b", 5) == ["aa b"], (_fig_lines("aa bb", 5), _fig_lines("aa bbb", 5)))
+
+    # The 5 components the opfiles.ai core files, adopt, disclosure and licence pages use, each pinned exactly.
+    pull = rendered('component = "pullquote"\nhtml = "Declare it <em>once</em>."\n')
+    expect("component/pullquote", pull == '<blockquote><p>Declare it <em>once</em>.</p></blockquote>', pull)
+    record = rendered('component = "record"\n[[body.items]]\nterm = "Declares"\nhtml = "<code>[opf]</code>"\n'
+                      '[[body.items]]\nterm = "Read by"\nhtml = "R"\n')
+    expect("component/record", record == (
+        '<dl class="record"><div><dt>Declares</dt><dd><code>[opf]</code></dd></div>'
+        '<div><dt>Read by</dt><dd>R</dd></div></dl>'), record)
+    record_cols = rendered('component = "record"\ncols = true\n[[body.items]]\nterm = "T"\nhtml = "V"\n')
+    expect("component/record-cols", record_cols == '<dl class="record cols"><div><dt>T</dt><dd>V</dd></div></dl>',
+           record_cols)
+    expect("refuse/record-missing-term", "missing key" in refused(
+        "refuse/record-missing-term", rendered, 'component = "record"\n[[body.items]]\nhtml = "V"\n'))
+    filed = rendered('component = "code"\nid = "m"\nfile = ".working/<toml>/m.toml"\ntext = "t"\n')
+    expect("component/code-file-label", filed == (
+        '<p class="lbl file">.working/&lt;toml&gt;/m.toml</p>\n<pre id="m" class="hascopy"><button class="copy" '
+        'type="button" data-copy="m" hidden>Copy</button>t</pre>'), filed)
+    subhead = rendered('component = "subhead"\nid = "done"\nheading = "Completion <code>receipts</code>"\n')
+    expect("component/subhead", subhead == '<h3 id="done">Completion <code>receipts</code></h3>', subhead)
+    expect("component/subhead-no-id", rendered('component = "subhead"\nheading = "H"\n') == "<h3>H</h3>")
+    expect("refuse/subhead-bad-id", "not a valid id" in refused(
+        "refuse/subhead-bad-id", rendered, 'component = "subhead"\nid = "9 bad"\nheading = "H"\n'))
+    expect("refuse/duplicate-id", "duplicate id" in refused(
+        "refuse/duplicate-id", fixture_page, '[[body]]\ncomponent = "subhead"\nid = "done"\nheading = "A"\n'
+        '[[body]]\ncomponent = "section"\nlbl = "L"\nid = "done"\nheading = "B"\n'))
+    steps = rendered('component = "steps"\nitems = ["Give it <code>/llms.txt</code>.", "Review."]\n')
+    expect("component/steps", steps == (
+        '<ol class="steps"><li><span>Give it <code>/llms.txt</code>.</span></li><li><span>Review.</span></li></ol>'),
+        steps)
+    expect("refuse/steps-empty-item", "non-empty strings" in refused(
+        "refuse/steps-empty-item", rendered, 'component = "steps"\nitems = ["A", ""]\n'))
+
+    # opfiles.ai keeps its own live paths: rendered root-relative with no new-tab hint on that site only.
+    opf_kept = COMPONENTS["next"](opf, {"component": "next", "text": "Guide", "href": "/adopt.md"}, "fixture.body[1]")
+    expect("links/opfiles-kept-plain", opf_kept == (
+        '<div class="next"><p class="lbl">Next</p><a class="start" href="/adopt.md">Guide '
+        '<span class="arrow" aria-hidden="true">&rarr;</span></a></div>'), opf_kept)
+    expect("links/opfiles-kept-not-aiqt", _link_findings(site, '<a href="/llms.txt">x</a>') != []
+           and _link_findings(opf, '<a href="/llms.txt">x</a>') == [])
+    expect("refuse/opfiles-kept-prefix", "kept live path" in refused(
+        "refuse/opfiles-kept-prefix", COMPONENTS["next"], opf,
+        {"component": "next", "text": "T", "href": "/llms.txt2"}, "fixture.body[1]"))
+    adopt_page = outputs["opf/site/draft/adopt/index.html"]
+    expect("opfiles/adopt-kept-links", '<a href="/llms.txt"><code>/llms.txt</code></a>' in adopt_page
+           and '<a href="/adopt.md"><code>/adopt.md</code></a>' in adopt_page
+           and "https://opfiles.ai/" not in adopt_page and '<ol class="steps">' in adopt_page)
+    core_page = outputs["opf/site/draft/core-files/index.html"]
+    expect("opfiles/core-files-components", '<dl class="record">' in core_page and "<blockquote>" in core_page
+           and '<p class="lbl file">.working/toml/manifest.toml</p>' in core_page
+           and '<h3 id="done">' in core_page)
 
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
         first = run(tmp, check=True)

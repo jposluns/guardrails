@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5002ff6b8e7d666ae9f94c79c0d2e368e2b0e842655d69a6f446c9d8bb4106f3"
+tree-sha256 = "316d250657265ef8bda1f2c14b85327ab3c2656889251af7fd65ecac253bd3da"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 22947
-sha256 = "b3d338ee271257d5706d6e0d2e8e94c6f1d13647838fec7373627dd15ffc1696"
+bytes = 24451
+sha256 = "a8b842be42f76bee1a1ee95b82985df8cebee966a42cb0f82eff87384e4ae424"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -836,8 +836,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 13586
-sha256 = "3562fae41dcff76022acbbe3b09b87e0f9f3b8873377e2e6785d449b3f51bcd8"
+bytes = 15543
+sha256 = "2b045cce22b8c16bd46e91eeff382f1f1723174a50c9b8ddb7c932b0daf4daeb"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -943,6 +943,11 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 path = ".aiqt/tracker-label-baseline.toml"
 bytes = 5110
 sha256 = "6776098bcc3e8a873b832556493dbf8f34c5b3ef6967705bfb44a9958888fd2a"
+
+[[sources]]
+path = ".baseline/opfiles-pin.toml"
+bytes = 7527
+sha256 = "28854dd703fecabd14fcde92a42e17cfe6735a35eba2f820f37f605c54582dca"
 
 [[sources]]
 path = ".baseline/pin.toml"
@@ -2296,8 +2301,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 49191
-sha256 = "4002202894cdedd315ed9be5eab96342e765bc5f1127d9818f03816e9ec0a25e"
+bytes = 53610
+sha256 = "544ff54cf6b316fdfeb30eda112957b324cd31e00187625dd68e710d535a05a3"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2668,6 +2673,361 @@ sha256 = "9dc0946a4618004bff8930f1454aa2400366b06d798f85479d78b680a92092d4"
 path = "opf/site/disclosure.html"
 bytes = 12522
 sha256 = "a348bc33dd66939a2080e1e4645a4414350f78e214e95d5627ca5cc3b6c41ac1"
+
+[[sources]]
+path = "opf/site/draft-src/404.toml"
+bytes = 480
+sha256 = "7b46a4d2f5c19bbc7e0fa29f8173d9672b277e4070166379cc231a3363abf227"
+
+[[sources]]
+path = "opf/site/draft-src/adopt.toml"
+bytes = 2852
+sha256 = "57940d250f010152b258c88e8f359e58bd800bcab966bd75a9ee20686f8d6806"
+
+[[sources]]
+path = "opf/site/draft-src/core-files.toml"
+bytes = 8748
+sha256 = "2c06352da38b4bb30cb9315b62a8b5571dcd2272013a80c21e5d2b685af32872"
+
+[[sources]]
+path = "opf/site/draft-src/disclosure.toml"
+bytes = 7834
+sha256 = "ff52bb7b4acee8e255359d561781e2b4c3ce9744cf4e67ce01405b932423dd95"
+
+[[sources]]
+path = "opf/site/draft-src/home.toml"
+bytes = 1992
+sha256 = "576651ee836932deb4ce9944c36a07bba8ad533d5d8969233ef1db70c41a6255"
+
+[[sources]]
+path = "opf/site/draft-src/license.toml"
+bytes = 5565
+sha256 = "188684c6b1e0ff59c5ff0da0b7426ec02f93bd98158b9e356a113310ab2d21f4"
+
+[[sources]]
+path = "opf/site/draft-src/model.toml"
+bytes = 3497
+sha256 = "869143d917ef63085c0a7ca1aa950396a30da31016fe4990c1d1bfb23ae87e33"
+
+[[sources]]
+path = "opf/site/draft-src/standard.toml"
+bytes = 3339
+sha256 = "9a6ebed3e6e204a1edcd60f24aeaba9a05cb6529c15801bb7b56d9bb8ca8f849"
+
+[[sources]]
+path = "opf/site/draft/404.html"
+bytes = 5037
+sha256 = "7aa7ea127611afa23c170ac2c386530d83438077725a12702101494d6cfd6964"
+
+[[sources]]
+path = "opf/site/draft/adopt/index.html"
+bytes = 7643
+sha256 = "e78902a258a77e58a329a2d7032e38476ffa58c3cad07fbe95d7dfdc98bdd5b3"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/LICENSE"
+bytes = 7048
+sha256 = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/NOTICE.md"
+bytes = 1218
+sha256 = "08b26141bb2ecf0f4cd76e599c21f888fc71c4b3ab7ba769e954f6eea37ac7f3"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/baseline.css"
+bytes = 46843
+sha256 = "9d8e4d5307af49f607e89bcb3ac32a80d25f9e86253572b65559cd35cd4e16e9"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/copy.js"
+bytes = 1337
+sha256 = "9bf99b50471889b768c795af5a4f84f526cecf7622a1f1265ca3d088b31339a4"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts.css"
+bytes = 1611
+sha256 = "a309a8ff4026a67fb5d10dea2c02e5b9ea2c1b32d4b18d7892015e038397396a"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt"
+bytes = 4442
+sha256 = "c02c0002d3bbd41a16933c162888c400469c7029f1362ca9d60d5ed20ea7d157"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2"
+bytes = 42708
+sha256 = "51acdc0e009e1d84cca6b654c4218275d8ee33dd243f3df25f7412a824a78d99"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/jetbrains-mono-LICENSE.txt"
+bytes = 4524
+sha256 = "403581b69dac5cff4079205e01c6b467e56af449ecbd7247693ddb1baafa005b"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2"
+bytes = 42964
+sha256 = "a8afa085e9ca5e53434e2ee918ba6b65c7dd4dda56509976b36591478c99d62e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2"
+bytes = 40404
+sha256 = "18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/newsreader-LICENSE.txt"
+bytes = 4520
+sha256 = "26028ec4e13b650065fa525a09532176f8a668b76ff849ea01c564a7480f91e7"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2"
+bytes = 64520
+sha256 = "48bc8861b9b2ca9300747cad4fd6a3b4ac3028d364df00bd1b72097baa75e509"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2"
+bytes = 58084
+sha256 = "62981321d9a3cc7a61a73792729043703fd6112da86e8ec848bb57f088578757"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/public-sans-LICENSE.txt"
+bytes = 4503
+sha256 = "705a497c781f6463ff819abb513bb495f3fb05256f1d20321e3275813c0bafa5"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2"
+bytes = 28292
+sha256 = "16dc93252adb78785ae56a6465494f73b604b39817760ea92bd4046521bb5a35"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2"
+bytes = 26832
+sha256 = "5ed4d31c988e73b258894244f209069ebe77dc7e564861954b21198b6de90d68"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt-card.svg"
+bytes = 1181
+sha256 = "9192924345aeb6c086bc096c5e59f3bc1dbe74df06f44406be7a90520b9565aa"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt-favicon.svg"
+bytes = 540
+sha256 = "8a082befc210b86f795cecce1141ff813940652a5ecabb900214f27976352965"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt-mono.svg"
+bytes = 1152
+sha256 = "dc2718f4cf579ffe9b3e02bd4edce71c51e1c4954e915d59660964cceadc4118"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt-touch.png"
+bytes = 5625
+sha256 = "600f0ca0d03b23eccb36670313a573644a5642277a684df5bfb5c3a684f44ec5"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt.svg"
+bytes = 1171
+sha256 = "66ab34a8a0c03ef260e73cec128f53a714183cd8ba3c675969e9a04feb222781"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis-card.svg"
+bytes = 2158
+sha256 = "187d433274a30812c978b492895245ac728f6b9e3d73e17ca07504e1a9f57fb6"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis-favicon.svg"
+bytes = 774
+sha256 = "41ea619415ab55ff13aea87ddd9d1ed5cdeae6300e54501d30a70ae55560f504"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis-mono.svg"
+bytes = 1973
+sha256 = "198aa04cb150ddcee4c2130218c81e61bd52f23983903e2e16f7ec03dd7797d4"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis-touch.png"
+bytes = 6539
+sha256 = "2730c58989818670116a40a199741cb17e9635020cc6e2cca43ffec0da47d0e2"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis.svg"
+bytes = 2148
+sha256 = "0f2fb19cd2917e8d39e57c08172987bbc72ca0597a096d892aaed44ff5374572"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage-card.svg"
+bytes = 1702
+sha256 = "ace7ce40a3bd16f66e136739853dd81fe0f8058412580cacf8af5948da773751"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage-favicon.svg"
+bytes = 618
+sha256 = "3ebe565b9e5d7ec0eef1ae7092f92cafa56985fcca31a3499abc6fda23b1fa1d"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage-mono.svg"
+bytes = 2096
+sha256 = "3d9c927bbe57ed53c724da4c24eae84682878d06b693188059c4a6a8d70bad1d"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage-touch.png"
+bytes = 6138
+sha256 = "b75fdf0780b168595b01dda57185bce0778e09d1093739be4b8c8239c722957e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage.svg"
+bytes = 1692
+sha256 = "285c37c1d77bc24206e31c3eb99837a79ba79f6c16b4ccbd7470f1fbfc58f985"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary-card.svg"
+bytes = 1961
+sha256 = "6c8add330f2a99263df464055fdd6635c0163ba850f2c2572152d1aa41a5884b"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary-favicon.svg"
+bytes = 675
+sha256 = "f1fe54a61a9c75d5e588bea38c7378cd397eaf7466d32642bf2f283df1d39588"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary-mono.svg"
+bytes = 1704
+sha256 = "3a5495b7d810fc95ddffef3dcc9a03c1e7751bf370c93940b9118e79a2c0db90"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary-touch.png"
+bytes = 5288
+sha256 = "4b191cd0f40bd836d8e0e6c254ccfd7460fa5c1f33853853e4f61de50ce0d9ca"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary.svg"
+bytes = 1951
+sha256 = "8ad4d338a68ce7afc781c02be91ee7e87ce464d44d0ed56eb10d5cddf80b45f8"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles-card.svg"
+bytes = 2741
+sha256 = "1b605de22dc5b2f8a86fe82c58a0e22092ea3c5fc2c566e9b88f2f2617ab61ef"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles-favicon.svg"
+bytes = 691
+sha256 = "e48c0de54ea7f31ffe5af118a803791fc5e4b469143bdcf80261944b77e3c17a"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles-mono.svg"
+bytes = 3091
+sha256 = "3886f2eec2739e0dcaf4e6e9c02b67be142d63ab7ccd3f5626e1d15d7ea995eb"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles-touch.png"
+bytes = 5292
+sha256 = "f55098b6da69f606b347f53553f59fdc8d3275ade45793a562a6bff767b1b2f3"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles.svg"
+bytes = 2731
+sha256 = "f294e493b3ad949b72e8f25500a507fa8f47e41f58247904f44b0434637d4f0c"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig-card.svg"
+bytes = 1911
+sha256 = "21f74d06b216d72d1e8d483a444d3e439847ede8e523427c147ba2ba59cd553e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig-favicon.svg"
+bytes = 555
+sha256 = "526ca1f3606625306c4876bf8fe6ba5af86e87f622729cf003ef60949e26ccbd"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig-mono.svg"
+bytes = 1924
+sha256 = "5fd490079642b41ab12863bc1692e5481a737cc4f8f764319dd31f13a2037b86"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig-touch.png"
+bytes = 5758
+sha256 = "5897da9f6f9a556358584faee1d33b210a96de56b7ef6177d32a5bd940f0c0c7"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig.svg"
+bytes = 1901
+sha256 = "a74c1604acb4032e763afe0cf0a9ed9b4e5f4bdb76790d24a3de16a48eda5c1b"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/NOTICE.md"
+bytes = 2892
+sha256 = "b39a747fb9f73ec9373bd2329060af372e14185fcdc7f91fa67ea2cda3b6dd20"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/github-invertocat-black.svg"
+bytes = 1559
+sha256 = "693d7abe6f899646cc2e96856723b45e95f71885a54910b2749f6decdf7e1ee1"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/github-invertocat-white.svg"
+bytes = 1559
+sha256 = "ccd84c89b1056345608fc3489357f8acc7397e49a3cdc2d418b6c8016911d47b"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/linkedin-in-bug.png"
+bytes = 8375
+sha256 = "3c0149f26168b5fe0f43e68664abe40341a6443b3cd435d18a73e12f64f8b600"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/orcid-id.svg"
+bytes = 2016
+sha256 = "195be086656233fc1a0089086d9190d28dc6abce39c2290612d1893233e1f166"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/palettes.css"
+bytes = 17493
+sha256 = "c67ffe38a93d266150a0bd82ce141fb6e8b544ff6a8d210f70b3d84032650bf7"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/rail.js"
+bytes = 2809
+sha256 = "36535faf2df8637e694ff2a57af982b9c67c9f410f80d4dfceb193c4f2d601ca"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/search.js"
+bytes = 1575
+sha256 = "4f106660b503af5c770a05472f733ababb3a01f3514cd9d1bfe03b983490d88f"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/select.js"
+bytes = 2954
+sha256 = "2c4e1f1a2cc00c49dc013fd421b16c14cdc89eb873fc57f7768be90604d4bf90"
+
+[[sources]]
+path = "opf/site/draft/core-files/index.html"
+bytes = 12391
+sha256 = "565a4c0c8549d323cce27bc4c7a3181f946a3ccb0e2b2973401fe44960bd32f4"
+
+[[sources]]
+path = "opf/site/draft/disclosure/index.html"
+bytes = 12835
+sha256 = "ef118e3f124f36846c34eabebfc4c8bbf7635206e96754987466fa91e88dce07"
+
+[[sources]]
+path = "opf/site/draft/index.html"
+bytes = 7502
+sha256 = "7d498516e49ca9a45355b52f5a2774f4b0a855ac398738866d51ad89a9ea31f4"
+
+[[sources]]
+path = "opf/site/draft/license/index.html"
+bytes = 9959
+sha256 = "de44327e0c1d00159956651e0245c022fe4a00533b6c3d746900ac23e2bd7535"
+
+[[sources]]
+path = "opf/site/draft/model/index.html"
+bytes = 11046
+sha256 = "fc0b01fc8e9bc868dbd1d51837f06191d832afec368d0049489afeec82d7452e"
+
+[[sources]]
+path = "opf/site/draft/standard/index.html"
+bytes = 7793
+sha256 = "dd8dc1bd001d281e7c1ae2fdeb8e1a3fbba461ef29ce644a406efd8c86512bb4"
 
 [[sources]]
 path = "opf/site/favicon.svg"
@@ -3816,8 +4176,8 @@ sha256 = "670497debf8f21b516b24f4d4647f9ac0f2b165a7cd930f7a5d67e3c8f7b5ed0"
 
 [[sources]]
 path = "tools/check_baseline_pin.py"
-bytes = 20981
-sha256 = "e87821889cbd42d871b89f2b67cde8e7552f03a7b1da302693095515851409f6"
+bytes = 26454
+sha256 = "90af0e9d8e25f4ed50e810c7becf1453f71c37338e6a147a8362672f4cf826c6"
 
 [[sources]]
 path = "tools/check_branch_root.py"
@@ -3876,8 +4236,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 87011
-sha256 = "15d713ade8eb529fa45e97d25c8dbd2eab1f3d51e5fc86b7d9ea6ccc17046598"
+bytes = 90644
+sha256 = "f3242c9169ce5d057acd3ea840b6b3ff599e9c7012e1a1750e83cfb0766d6141"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -4056,8 +4416,8 @@ sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 22339
-sha256 = "e8b76e12aea5b311603589c8da51cd343988e61d847e13a0215c866cd497dd56"
+bytes = 26030
+sha256 = "d2b2d66e400aa40e2f9d34480bd4d0927cdc677a824cbd2ce66a2734141827ff"
 
 [[sources]]
 path = "tools/check_site_versions.py"
@@ -4151,8 +4511,8 @@ sha256 = "ee37d7b4db8fb441ddb3fb07e4003c94a5b36124e9714bca2f84ad4e7bb1b199"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 82866
-sha256 = "8ac7eb7eaf21c8472560e0500e7428829ebc57f61aaf39072eca92a53a4dc5e5"
+bytes = 109387
+sha256 = "8fd8defd4efa457bb5a50a5d5b08ee80a8b027135c1ed7229099470231e82de8"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
@@ -4306,8 +4666,8 @@ sha256 = "f9bfcb410fcf35ffebe60ed237f03c4cd862393a81bb2f3043cccc1a9e183d3e"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 200421
-sha256 = "d21bfad478c8d7570d8b02fdbc83054a571fc74c4abb779815350c2127d9a5e2"
+bytes = 200730
+sha256 = "ed86ec9c7458ce699808d685882e6314389d91f58be0fd7ad3a653cfa0e34384"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Site-integrity gate for site/*.html: en/em dashes, link/anchor resolution, and basic HTML validity.
 
-Link classification uses urlsplit: an absolute URL on the site's own host (aiqt.ai) is internal; every
+Link classification uses urlsplit: an absolute URL on the scanned root's own host (aiqt.ai for site/,
+opfiles.ai for opf/site/; ROOT_HOSTS) is internal, so a link to the other site is external; every
 other scheme (http/https elsewhere, mailto, tel, ftp, javascript, data, ...) and protocol-relative
 //host links are external and skipped. An internal path resolves to an existing file under site/ by
 trying the path as-is, path + ".html", and path + "/index.html"; "/" resolves to index.html; a path
@@ -49,6 +50,9 @@ EN, EM = "–", "—"
 # non-aiqt.ai adopter can vendor the pack unpatched. Unchanged when the variable is unset or empty.
 _SITE_HOST = (os.environ.get("AIQT_SITE_HOST", "aiqt.ai") or "aiqt.ai").lower()
 SITE_HOSTS = {_SITE_HOST, "www." + _SITE_HOST}
+# The own-host set of each coverage root: an absolute URL on the root's own host is internal to that
+# root, and a link to the other site is external. site/ keeps SITE_HOSTS; opf/site/ is opfiles.ai.
+ROOT_HOSTS = {"site": SITE_HOSTS, "opf/site": {"opfiles.ai", "www.opfiles.ai"}}
 
 # Tags that never take an end tag; never pushed on the open-tag stack.
 VOID_ELEMENTS = {
@@ -222,14 +226,16 @@ def resolve_link(base, path, site_root):
     return None
 
 
-def classify(v):
+def classify(v, hosts=None):
+    # `hosts` is the scanned root's own-host set (ROOT_HOSTS); None keeps SITE_HOSTS.
     # urlsplit does not percent-decode. The PATH is unquoted so an encoded link (my%20page.html) resolves
     # against the real file "my page.html". The FRAGMENT is returned RAW: HTML fragment navigation matches
     # an id equal to the raw fragment FIRST, then the percent-decoded form, so the anchor check tries both
     # (see main()). Unquoting the fragment here unconditionally would drop the raw-match case.
+    own = SITE_HOSTS if hosts is None else hosts
     parts = urlsplit(v)
     if parts.scheme:
-        if parts.scheme.lower() in ("http", "https") and parts.netloc.lower() in SITE_HOSTS:
+        if parts.scheme.lower() in ("http", "https") and parts.netloc.lower() in own:
             return unquote(parts.path), parts.fragment
         return None
     if parts.netloc:
@@ -335,6 +341,54 @@ def _self_test():
             '<!doctype html><title>t</title><a href="./nope">x</a>', encoding="utf-8")
         if quiet(_scan_root, r, "opf/site") != 1:
             failures.append("coverage: a dangling relative link under opf/site/draft was not caught")
+
+    # The opfiles.ai draft under opf/site/draft/: nested pages, an asset, a fragment and an absolute
+    # opfiles.ai URL resolve inside opf/site; a missing target, a missing fragment and an aiqt.ai URL
+    # read as internal there are findings, while an aiqt.ai URL is external on opf/site.
+    host_findings = []
+    with tempfile.TemporaryDirectory() as d:
+        r = Path(d)
+        draft = r / "opf" / "site" / "draft"
+        (draft / "model").mkdir(parents=True)
+        (draft / "assets" / "baseline").mkdir(parents=True)
+        (draft / "assets" / "baseline" / "baseline.css").write_text("p{}", encoding="utf-8")
+        (draft / "model" / "index.html").write_text(
+            '<!doctype html><title>t</title><h2 id="box">B</h2>', encoding="utf-8")
+        (draft / "index.html").write_text(
+            '<!doctype html><title>t</title><link rel="stylesheet" href="/draft/assets/baseline/baseline.css">'
+            '<a href="/draft/model/">M</a><a href="/draft/model/#box">B</a>'
+            '<a href="https://opfiles.ai/draft/model/">O</a><a href="https://aiqt.ai/no-such-page">A</a>',
+            encoding="utf-8")
+        draft_cases = (
+            ("draft/nested-assets-fragments-and-own-host-pass", None, 0),
+            ("draft/missing-target", '<a href="/draft/core-files/">C</a>', 1),
+            ("draft/missing-fragment", '<a href="/draft/model/#absent">X</a>', 1),
+            ("draft/missing-asset", '<img src="/draft/assets/baseline/logos/absent.svg" alt="">', 1),
+            ("draft/own-host-missing-target", '<a href="https://www.opfiles.ai/draft/absent/">X</a>', 1),
+        )
+        for label, extra, want in draft_cases:
+            probe_page = draft / "probe.html"
+            if extra is None:
+                if probe_page.exists():
+                    probe_page.unlink()
+            else:
+                probe_page.write_text("<!doctype html><title>t</title>" + extra, encoding="utf-8")
+            got = quiet(_scan_root, r, "opf/site")
+            if got != want:
+                host_findings.append("{}: expected exit {}, got {}".format(label, want, got))
+    for label, value, hosts, want in (
+            ("hosts/opfiles-internal-on-opf-site", "https://opfiles.ai/draft/", ROOT_HOSTS["opf/site"],
+             ("/draft/", "")),
+            ("hosts/aiqt-external-on-opf-site", "https://aiqt.ai/draft/", ROOT_HOSTS["opf/site"], None),
+            ("hosts/opfiles-external-on-site", "https://www.opfiles.ai/draft/", ROOT_HOSTS["site"], None),
+            ("hosts/aiqt-internal-on-site", "https://www.aiqt.ai/x#y", ROOT_HOSTS["site"], ("/x", "y")),
+            ("hosts/default-is-site-hosts", "https://aiqt.ai/x", None, ("/x", ""))):
+        got = classify(value, hosts)
+        if got != want:
+            host_findings.append("{}: expected {!r}, got {!r}".format(label, want, got))
+    if ROOT_HOSTS["site"] is not SITE_HOSTS or set(ROOT_HOSTS) != set(COVERAGE_ROOTS):
+        host_findings.append("hosts/every-root-has-its-host-set: {!r}".format(sorted(ROOT_HOSTS)))
+    failures.extend(host_findings)
     with tempfile.TemporaryDirectory() as d2:
         if quiet(run, Path(d2)) != 0:
             failures.append("coverage: neither root present did not pass clean")
@@ -344,8 +398,8 @@ def _self_test():
         for x in failures:
             print("  - " + x)
         return 1
-    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + coverage-root legs)".format(
-        len(cases), len(host_cases)))
+    print("PASS: check_site self-test ({} logo cases + {} SITE_HOSTS env cases + coverage-root legs + {} "
+          "opfiles draft cases + 5 per-root host cases)".format(len(cases), len(host_cases), len(draft_cases)))
     return 0
 
 
@@ -377,6 +431,7 @@ def main():
 def _scan_root(root, subdir):
     site = root / subdir
     site_root = site.resolve()
+    hosts = ROOT_HOSTS.get(subdir, SITE_HOSTS)
     docs, ids_by_path, findings = [], {}, []
     try:
         html_files = sorted(walk_files(site, suffixes={".html"}))
@@ -427,7 +482,7 @@ def _scan_root(root, subdir):
             v = value.strip()
             if not v:
                 continue
-            classified = classify(v)
+            classified = classify(v, hosts)
             if classified is None:
                 continue
             pathpart, frag = classified

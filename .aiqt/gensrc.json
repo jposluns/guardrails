@@ -269,6 +269,78 @@
       "target": "VERSION"
     },
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/404.toml"
+      ],
+      "target": "opf/site/draft/404.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/adopt.toml"
+      ],
+      "target": "opf/site/draft/adopt/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/core-files.toml"
+      ],
+      "target": "opf/site/draft/core-files/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/disclosure.toml"
+      ],
+      "target": "opf/site/draft/disclosure/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/home.toml"
+      ],
+      "target": "opf/site/draft/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/license.toml"
+      ],
+      "target": "opf/site/draft/license/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/model.toml"
+      ],
+      "target": "opf/site/draft/model/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/standard.toml"
+      ],
+      "target": "opf/site/draft/standard/index.html"
+    },
+    {
       "kind": "block",
       "regenerate": "python3 tools/gen_secret_patterns.py",
       "sources": [

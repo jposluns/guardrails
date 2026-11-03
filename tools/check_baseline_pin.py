@@ -5,10 +5,14 @@
   check_baseline_pin.py --self-test  assert every refusal and a pass over tempdir fixtures
   check_baseline_pin.py [--self-test] --execution-report ABS_PATH
 
-.baseline/pin.toml records, in the package README's format, the baseline version (`version = "X.Y.Z"`) and
-a [files] table from each copied file's repository path to its SHA-256. Every path lies under one copy
-root, a directory whose last 2 components are assets/baseline (site/draft/assets/baseline while staging).
-The gate hashes every pinned file under the copy root and reports a file whose bytes differ, a
+Each pin records, in the package README's format, the baseline version (`version = "X.Y.Z"`) and a [files]
+table from each copied file's repository path to its SHA-256. Every path in a pin lies under one copy root, a
+directory whose last 2 components are assets/baseline. PINS registers every pin with the 1 copy root it is
+bound to (.baseline/pin.toml for site/draft/assets/baseline, .baseline/opfiles-pin.toml for
+opf/site/draft/assets/baseline while staging); a pin that names any other root, and a registry that repeats
+a pin or a root, are cannot-evaluate, so 2 pins can never validate the same copy and leave the other one
+unchecked. For each registered pair the gate hashes every pinned file under the copy root and reports a
+file whose bytes differ, a
 pinned file that is missing, a file under a copy root that the pin does not list (a stray), and a
 symbolic link or other non-regular entry anywhere in a copy root, including the root itself (exit 1). A
 pin that is missing, unreadable, over MAX_PIN_BYTES, not UTF-8, not TOML or not of the pinned shape, and
@@ -40,7 +44,12 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PIN_REL = ".baseline/pin.toml"
+# Every pin and the 1 copy root it is bound to, in check order; both columns are unique.
+PINS = (
+    (".baseline/pin.toml", "site/draft/assets/baseline"),
+    (".baseline/opfiles-pin.toml", "opf/site/draft/assets/baseline"),
+)
+PIN_REL = PINS[0][0]
 MAX_PIN_BYTES = 1 << 20
 CHUNK = 1 << 16
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -151,22 +160,52 @@ def _inventory(base, findings, errors, where):
     return sorted(found)
 
 
-def scan(root):
-    """(findings, errors) for the pin under root; errors make the run cannot-evaluate."""
+def _registry_errors(pins):
+    """Cannot-evaluate lines for a registry that is empty or repeats a pin or a copy root."""
+    if not pins:
+        return ["the pin registry is empty"]
+    errors = []
+    for column, what in ((0, "pin"), (1, "copy root")):
+        values = [pair[column] for pair in pins]
+        for value in sorted({value for value in values if values.count(value) > 1}):
+            errors.append("the pin registry lists the {} {} more than once".format(what, value))
+    return errors
+
+
+def scan(root, pins=PINS):
+    """(findings, errors) for every registered pin under root; errors make the run cannot-evaluate."""
     findings, errors = [], []
-    pin_path = Path(root) / PIN_REL
+    problems = _registry_errors(pins)
+    if problems:
+        return findings, problems
+    for pin_rel, assigned in pins:
+        _scan_pin(root, pin_rel, assigned, findings, errors)
+    return findings, errors
+
+
+def _scan_pin(root, pin_rel, assigned, findings, errors):
+    """Check 1 pin against its assigned copy root, appending to findings and errors."""
+    pin_path = Path(root) / pin_rel
     try:
         mode = os.lstat(pin_path).st_mode
         if not stat.S_ISREG(mode):
-            raise CannotEvaluate("{}: not a regular file".format(PIN_REL))
+            raise CannotEvaluate("{}: not a regular file".format(pin_rel))
         data = _read_pin_bytes(pin_path)
-        _version, roots = parse_pin(data, PIN_REL)
+        _version, roots = parse_pin(data, pin_rel)
     except FileNotFoundError:
-        return findings, ["{}: missing".format(PIN_REL)]
+        errors.append("{}: missing".format(pin_rel))
+        return
     except OSError as exc:
-        return findings, ["{}: unreadable ({})".format(PIN_REL, exc)]
+        errors.append("{}: unreadable ({})".format(pin_rel, exc))
+        return
     except CannotEvaluate as exc:
-        return findings, [str(exc)]
+        errors.append(str(exc))
+        return
+    for copy_root, _pinned in roots:
+        if copy_root != assigned:
+            errors.append("{}: names the copy root {}, but its registered root is {}".format(
+                pin_rel, copy_root, assigned))
+            return
     for copy_root, pinned in roots:
         base = Path(root) / copy_root
         try:
@@ -182,7 +221,7 @@ def scan(root):
             continue
         present = _inventory(base, findings, errors, copy_root)
         for rel in sorted(set(present) - set(pinned)):
-            findings.append("{}/{}: stray file, not listed in {}".format(copy_root, rel, PIN_REL))
+            findings.append("{}/{}: stray file, not listed in {}".format(copy_root, rel, pin_rel))
         for rel in sorted(pinned):
             if rel not in present:
                 if not any(line.startswith("{}/{}:".format(copy_root, rel)) for line in findings):
@@ -196,11 +235,10 @@ def scan(root):
             if got != pinned[rel]:
                 findings.append("{}/{}: SHA-256 {} differs from the pinned {}".format(
                     copy_root, rel, got, pinned[rel]))
-    return findings, errors
 
 
-def run_gate(root):
-    findings, errors = scan(root)
+def run_gate(root, pins=PINS):
+    findings, errors = scan(root, pins)
     for line in errors:
         print("CANNOT EVALUATE: " + line, file=sys.stderr)
     for line in findings:
@@ -209,7 +247,8 @@ def run_gate(root):
         return 2
     if findings:
         return 1
-    print("PASS: every file pinned in {} matches its SHA-256, with no stray or linked entry".format(PIN_REL))
+    print("PASS: every file pinned in {} matches its SHA-256 under its registered copy root, with no stray "
+          "or linked entry".format(", ".join(pin_rel for pin_rel, _root in pins)))
     return 0
 
 
@@ -232,6 +271,11 @@ def check(name, ok, detail=""):
 
 FIXTURE_ROOT = "site/draft/assets/baseline"
 FIXTURE_FILES = {"baseline.css": b"body{}\n", "fonts/a.woff2": b"wOF2\x00\x01", "marks/NOTICE.md": b"# n\n"}
+# The single-pair registry most cases use, and the 2-pair registry the live tree uses.
+FIXTURE_PINS = ((PIN_REL, FIXTURE_ROOT),)
+SECOND_PIN = PINS[1][0]
+SECOND_ROOT = PINS[1][1]
+TWO_PINS = ((PIN_REL, FIXTURE_ROOT), (SECOND_PIN, SECOND_ROOT))
 
 
 def _pin_text(files, root=FIXTURE_ROOT, version="1.2.1", extra=""):
@@ -241,29 +285,33 @@ def _pin_text(files, root=FIXTURE_ROOT, version="1.2.1", extra=""):
     return "\n".join(lines) + "\n"
 
 
-def _fixture(tmp, files=None, pin=None):
-    """A fixture tree under tmp: the copied files and the pin (text, bytes, or None for absent)."""
+def _fixture(tmp, files=None, pin=None, root=FIXTURE_ROOT, pin_rel=PIN_REL):
+    """A fixture tree under tmp: the copied files under root and the pin at pin_rel (text, bytes, None for
+    the exact pin of FIXTURE_FILES under root, or False for absent)."""
     files = FIXTURE_FILES if files is None else files
     for rel, data in files.items():
-        target = Path(tmp) / FIXTURE_ROOT / rel
+        target = Path(tmp) / root / rel
         os.makedirs(target.parent, exist_ok=True)
         with open(target, "wb") as handle:
             handle.write(data)
     if pin is None:
-        pin = _pin_text(FIXTURE_FILES)
+        pin = _pin_text(FIXTURE_FILES, root=root)
     if pin is not False:
         os.makedirs(Path(tmp) / ".baseline", exist_ok=True)
-        with open(Path(tmp) / PIN_REL, "wb") as handle:
+        with open(Path(tmp) / pin_rel, "wb") as handle:
             handle.write(pin.encode("utf-8") if isinstance(pin, str) else pin)
     return tmp
 
 
-def _scan_case(files=None, pin=None, mutate=None):
+def _scan_case(files=None, pin=None, mutate=None, pins=FIXTURE_PINS, second=None):
+    """scan() over a fixture; second, when given, is (files, pin) for the second registered pair."""
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp:
         _fixture(tmp, files, pin)
+        if second is not None:
+            _fixture(tmp, second[0], second[1], root=SECOND_ROOT, pin_rel=SECOND_PIN)
         if mutate is not None:
             mutate(Path(tmp))
-        return scan(tmp)
+        return scan(tmp, pins)
 
 
 def _self_test():
@@ -413,16 +461,57 @@ def _self_test():
         check(name, got == refused and len(body.encode("utf-8")) == len(good.encode("utf-8")) + extra,
               (len(body), got))
 
+    # The registry: every pin is bound to its own copy root. Both pairs pass together; a defect in the
+    # second copy is reported against the second root and pin; a pin naming another root (so 2 pins would
+    # validate 1 copy) and a registry repeating a pin or a root are cannot-evaluate.
+    check("registry/live-pairs", PINS == ((".baseline/pin.toml", "site/draft/assets/baseline"),
+                                          (".baseline/opfiles-pin.toml", "opf/site/draft/assets/baseline")),
+          PINS)
+    findings, errors = _scan_case(pins=TWO_PINS, second=(None, None))
+    check("registry/two-pairs-pass", findings == [] and errors == [], (findings, errors))
+
+    changed = dict(FIXTURE_FILES, **{"baseline.css": b"body{ }\n"})
+    findings, errors = _scan_case(pins=TWO_PINS, second=(changed, None))
+    check("registry/second-copy-differing", errors == [] and len(findings) == 1
+          and findings[0].startswith(SECOND_ROOT + "/baseline.css: SHA-256"), (findings, errors))
+
+    stray = dict(FIXTURE_FILES, **{"search.js": b"x\n"})
+    findings, errors = _scan_case(pins=TWO_PINS, second=(stray, None))
+    check("registry/second-copy-stray", errors == [] and findings == [
+        "{}/search.js: stray file, not listed in {}".format(SECOND_ROOT, SECOND_PIN)], (findings, errors))
+
+    findings, errors = _scan_case(pins=TWO_PINS, second=(None, False))
+    check("registry/second-pin-missing", findings == [] and errors == [SECOND_PIN + ": missing"],
+          (findings, errors))
+
+    # The second pin names the first copy root: it would re-validate the first copy and leave the second
+    # unchecked, so it is refused even though every digest it lists matches.
+    findings, errors = _scan_case(pins=TWO_PINS, second=(None, _pin_text(FIXTURE_FILES)))
+    check("registry/pin-names-other-root", findings == [] and len(errors) == 1
+          and errors[0].startswith(SECOND_PIN + ": names the copy root " + FIXTURE_ROOT), (findings, errors))
+
+    # The first pin names a root that is not its own, with the files present there.
+    findings, errors = _scan_case(pins=TWO_PINS, second=(None, None),
+                                  pin=_pin_text(FIXTURE_FILES, root=SECOND_ROOT))
+    check("registry/first-pin-names-second-root", findings == [] and len(errors) == 1
+          and "registered root is " + FIXTURE_ROOT in errors[0], (findings, errors))
+
+    for name, pins in (("registry/duplicate-root", ((PIN_REL, FIXTURE_ROOT), (SECOND_PIN, FIXTURE_ROOT))),
+                       ("registry/duplicate-pin", ((PIN_REL, FIXTURE_ROOT), (PIN_REL, SECOND_ROOT))),
+                       ("registry/empty", ())):
+        findings, errors = _scan_case(pins=pins, second=(None, None))
+        check(name, findings == [] and len(errors) == 1 and "registry" in errors[0], (findings, errors))
+
     # The gate's own report lines go to a buffer: a self-test run writes nothing to its error stream.
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp, \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stream:
         _fixture(tmp)
-        codes = [run_gate(tmp)]
+        codes = [run_gate(tmp, FIXTURE_PINS)]
         with open(Path(tmp) / FIXTURE_ROOT / "baseline.css", "ab") as handle:
             handle.write(b"x")
-        codes.append(run_gate(tmp))
+        codes.append(run_gate(tmp, FIXTURE_PINS))
         os.unlink(Path(tmp) / PIN_REL)
-        codes.append(run_gate(tmp))
+        codes.append(run_gate(tmp, FIXTURE_PINS))
         codes.append("CANNOT EVALUATE" in stream.getvalue())
     check("exit/codes-0-1-2", codes == [0, 1, 2, True], codes)
 
@@ -438,7 +527,9 @@ def _self_test():
           "missing file, a stray file, a symbolic link at a file, a directory or the root, a FIFO and a "
           "missing root each fail; a missing, unreadable, non-UTF-8, non-TOML or misshapen pin and an "
           "unreadable copied file are cannot-evaluate; the pin size bound holds one byte under, at and "
-          "over; the exit codes are 0, 1 and 2; the live tree passes)".format(len(EXECUTED)))
+          "over; 2 registered pairs pass together, a second copy's defect is reported against its own root "
+          "and pin, and a pin naming another root or a registry repeating a pin or a root is "
+          "cannot-evaluate; the exit codes are 0, 1 and 2; the live tree passes)".format(len(EXECUTED)))
     return 0
 
 
