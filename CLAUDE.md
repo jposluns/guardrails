@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.21** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.22** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -100,26 +100,41 @@ the five host jobs and `byte-canon-matrix`) carry one pinned job-level `if:` and
 request whose head is a `merge-train-*` branch of this repository; every other job runs in every run. A
 label added to any other pull request into main starts a run whose heavy jobs are skipped, so its
 `Quality gates` fails by design, and a change merges only by riding a train: a squash merge of an
-up-to-date, labelled `merge-train-*` pull request, whose run is the full suite, and the push to `main`
-runs it again. A newer run of the same pull request cancels its superseded run; a push run has a
+up-to-date, labelled `merge-train-*` pull request, whose run is the full suite (or the site fast
+lane below for a site-only train, the one skip `Quality gates` accepts), and the push to `main`
+runs the full suite again. A newer run of the same pull request cancels its superseded run; a push run has a
 concurrency group of its own and is never cancelled. `tools/check_ci_parity.py` and
 `tools/check_python_host_pin.py` accept exactly the pinned `concurrency` block and `if:` line.
 
-The site fast lane (maintainer's recorded decision, 2026-11-03): a `scope` job runs first in every
-Quality run and decides, with `tools/ci_site_scope.py`, whether every path the pull request changes is
-in the site allowlist: under `site/` or `opf/site/`, or exactly one of the three files a site-only
-change regenerates (`.aiqt/manifest.toml`, `.aiqt/release/root.txt`,
-`.aiqt/release/announce-snippet.txt`), except the six site-tree pages a heavy suite reads as a verdict
-input (the five OPF homes contract pages and `opf/site/tooling.html`), which always take the full
-suite. When, and only when, that decision is true (`site_only=true`),
-the heavy jobs skip (their pinned `if:` reads the scope output) and the `Quality gates` job passes
-those jobs as skipped; site-only pull requests therefore ride site-only trains, whose Quality run is
-the site fast lane rather than the full suite. Everything else is fail-closed: an empty changed-path
-list, any path outside the allowlist, a rename out of those trees, or any error reading the diff
-decides false and the full suite runs; a heavy job that is skipped, fails, is cancelled, or reports no
-result outside a true decision still fails `Quality gates`. A push to `main` NEVER takes the fast
-lane: on a push the scope job writes `site_only=false` without reading any diff, so the post-merge
-push run is always the full suite, also after a site-only train merges.
+The site fast lane (maintainer's recorded decision, 2026-11-03): the heavy jobs wait for a `scope`
+job (every other job runs in parallel with it), which decides with the BASE commit's copy of
+`tools/ci_site_scope.py` (`git show` into the runner's temporary directory, never the copy under
+test; a base with no readable copy decides false) whether the run is a pull request whose head is a
+`merge-train-*` branch of this repository AND every path it changes, read against `HEAD^1` (the
+tested merge commit's first parent), is in the site allowlist: under `site/` or `opf/site/`, or
+exactly one of the three files a site-only change regenerates (`.aiqt/manifest.toml`,
+`.aiqt/release/root.txt`, `.aiqt/release/announce-snippet.txt`), except the six site-tree pages a
+skippable heavy suite reads as a verdict input with no always-run sibling (the five OPF homes
+contract pages and `opf/site/tooling.html`), which always take the full suite. The other site-tree
+reads of heavy suites are covered in every run: `tools/check_opf_declaration.py` decodes every
+`.md` and `.html` file in the tree, so its live gate and self-test also run in the always-run
+`site` job, and `tools/check_python_floor.py` (which reads `site/development.html`,
+`site/install.html`, `opf/site/adopt.md` and `opf/site/adopt.html`) also runs live in the
+always-run registry job. When, and only when, that decision is true (`site_only=true`), the heavy
+jobs skip (their pinned `if:` reads the scope output) and the `Quality gates` job passes those jobs
+as skipped, and only while the run is such a merge-train pull request (the gates step re-checks the
+event, head ref and head repository before accepting a skip); site-only pull requests therefore
+ride site-only trains, and that routing is enforced, not just convention. Everything else is
+fail-closed: an empty changed-path list, any path outside the allowlist, a rename out of those
+trees, a non-train or fork head, or any error reading the diff decides false and the full suite
+runs; a heavy job that is skipped, fails, is cancelled, or reports no result outside a true
+decision still fails `Quality gates`. Adding a NEW site file regenerates `.gitattributes`, which is
+outside the allowlist, so such a change takes the full lane. A push to `main` NEVER takes the fast
+lane: on a push the scope job writes `site_only=false` without reading any diff, so a push runs
+everything, also after a site-only train merges; that holds only while the scope job itself
+succeeds, and a failed scope job turns the run red through `Quality gates` (never into a pass).
+`tools/check_ci_parity.py` pins the scope job's whole body (`SCOPE_JOB`), the heavy jobs' `if:`
+line and the gates step, so none of this wiring can drift unreviewed.
 Every `actions/checkout` step in `.github/workflows` sets `persist-credentials: false`, so the job token
 stays out of the checkout's git config (no job pushes or fetches after its checkout);
 `tools/check_ci_parity.py` reads each workflow file there as parsed YAML and refuses a checkout step

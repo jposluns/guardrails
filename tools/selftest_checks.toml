@@ -1989,6 +1989,13 @@ expected-check-ids = [
   "decide/drive-colon-false",
   "decide/empty-string-false",
   "decide/non-string-false",
+  # ---------- the train gate every --ci-decide verdict must pass ----------
+  "train/train-head-true",
+  "train/non-pull-request-false",
+  "train/non-train-head-false",
+  "train/fork-head-false",
+  "train/empty-repo-false",
+  "train/prefix-boundary",
   # ---------- revert cases: each rule patched out flips its vector ----------
   "revert/allowlist-dropped-red",
   "revert/nonempty-rule-dropped-red",
@@ -1996,6 +2003,7 @@ expected-check-ids = [
   "revert/tree-widened-red",
   "revert/regenerated-widened-red",
   "revert/heavy-read-exclusion-dropped-red",
+  "revert/train-prefix-dropped-red",
   # ---------- the CLI over synthetic repos ----------
   "cli/site-only-true-exit-0",
   "cli/empty-diff-false-exit-0",
@@ -2009,8 +2017,11 @@ expected-check-ids = [
   "cidecide/pull-request-site-only-true",
   "cidecide/pull-request-mixed-false",
   "cidecide/push-false",
-  "cidecide/bad-base-false-exit-0",
-  "cidecide/missing-base-false-exit-0",
+  "cidecide/non-train-head-false",
+  "cidecide/fork-head-false",
+  "cidecide/missing-head-env-false",
+  "cidecide/no-first-parent-false-exit-0",
+  "cidecide/train-head-true",
   "cidecide/no-output-exit-1",
   "cidecide/unwritable-output-exit-1",
   # ---------- launch shapes ----------

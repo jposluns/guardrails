@@ -84,15 +84,20 @@ jobs:
   # on those jobs.
 
   # Site fast lane. The maintainer's recorded decision (2026-11-03) authorizes skipping the heavy jobs
-  # when, and only when, every path a pull request changes is in the site allowlist: under site/ or
+  # when, and only when, the run is a pull request whose head is a merge-train-* branch of this
+  # repository AND every path it changes is in the site allowlist: under site/ or
   # opf/site/, or one of the three files a site-only change regenerates (.aiqt/manifest.toml,
   # .aiqt/release/root.txt, .aiqt/release/announce-snippet.txt), EXCEPT the six site-tree pages a
-  # heavy suite reads as a verdict input (the five OPF homes contract pages
-  # opf/tools/check_opf_homes.py reads and the opf/site/tooling.html page
-  # tools/check_opf_declaration.py reads), which always take the full suite. tools/ci_site_scope.py
-  # decides from the changed-path list read against the merge base this job gives it; an empty list,
+  # SKIPPABLE heavy suite reads as a verdict input (the five OPF homes contract pages
+  # opf/tools/check_opf_homes.py reads and the opf/site/tooling.html declaration surface
+  # tools/check_opf_declaration.py reads), which always take the full suite. The scope job decides
+  # with the BASE commit's copy of tools/ci_site_scope.py (git show BASE_SHA:... into the runner's
+  # temporary directory), never the copy under test, so a pull request cannot widen its own lane by
+  # editing the tool; the base having no readable copy decides false. The tool reads the
+  # changed-path list against HEAD^1, the tested merge commit's first parent; an empty list,
   # any path outside the allowlist, a rename out of those trees (read with rename detection off, so
-  # both sides appear), or any error reading the diff reads as site_only=false, the full suite. A
+  # both sides appear), a non-train or fork head, or any error reading the diff reads as
+  # site_only=false, the full suite. A
   # push to main never takes the fast lane: on a push this job emits site_only=false without reading
   # any diff. Adding a NEW site file also runs the full suite by construction: gen_manifest.py pins
   # every file in .gitattributes, which is outside the allowlist, so such a change is never
@@ -100,17 +105,27 @@ jobs:
   # Coverage account (gate discipline), from each heavy job's own steps and the files its suites read:
   # opf-tooling-a, opf-tooling-b, opf-tooling-c, opf-host-patch and selftest-execution run the
   # self-tests of tools under tools/ and opf/tools/ over synthetic fixtures those modules build
-  # themselves; their only site-tree verdict inputs are the six excluded pages above.
-  # git-fixture-env-core and the four git-fixture-env host jobs run the git-fixture-env
-  # suites, whose inputs are tools/ modules and generated fixtures; none of those suites reads
-  # site/ or opf/site/ as an input that can change its verdict. The three regenerated records are
+  # themselves, with these site-tree verdict inputs: opf/tools/check_opf_homes.py (live gate AND
+  # self-test, opf-tooling-a) reads the five excluded homes pages; tools/check_opf_declaration.py
+  # (live gate AND self-test, selftest-execution) reads opf/site/tooling.html and walks the whole
+  # tree decoding every .md and .html file, site pages included, so that gate and its self-test
+  # also run in the always-run site job below and a site-only change that turns them red fails
+  # every lane (the execution-reconciled registration stays in selftest-execution).
+  # git-fixture-env-core runs the core suite, whose inputs are tools/ modules and generated
+  # fixtures, never site/ or opf/site/; the three git-fixture-env config host jobs rerun the
+  # registered roster against the real checkout, so they inherit the opf-declaration and
+  # opf-homes reads above plus tools/check_python_floor.py, whose live gate reads
+  # site/development.html, site/install.html, opf/site/adopt.md and opf/site/adopt.html; the
+  # python-floor live gate also runs in the always-run registry job in every run, so a site-only
+  # change that turns it red fails every lane. The three regenerated records are
   # validated by the always-run registry and release jobs (gen_manifest.py --check,
   # check_manifest.py, check_release_delta.py, check_release_build.py). byte-canon-matrix scans
   # tree bytes under a hostile core.autocrlf checkout; a site-only change CAN add bytes there, and
   # that overlap is covered by the surviving siblings: the registry job's unconditioned
   # check_byte_canon run scans the same bytes in every run, and the platform leg's subject,
   # .gitattributes eol=lf pinning, is outside the allowlist, so a site-only change cannot alter it.
-  # The Quality gates job passes a SKIPPED heavy job only when site_only is true; any other skip,
+  # The Quality gates job passes a SKIPPED heavy job only when site_only is true AND the run is a
+  # pull request from a merge-train-* head of this repository; any other skip,
   # failure, cancellation or missing result still fails the run.
   scope:
     name: Site fast-lane scope
@@ -136,18 +151,38 @@ jobs:
         shell: bash
         run: python3 -I -B tools/ci_site_scope.py --self-test
 
-      # --ci-decide reads EVENT_NAME, BASE_SHA and GITHUB_OUTPUT itself and appends site_only=true
-      # or site_only=false to GITHUB_OUTPUT: on any event but pull_request, and on any error reading
-      # the diff (the CLI's exit 2, cannot-evaluate), it writes false, so the full suite runs; it
-      # exits nonzero only when it cannot write the output at all, which fails this job and so fails
-      # Quality gates.
+      # The decision runs the BASE commit's copy of the tool (git show BASE_SHA:...), never the
+      # copy under test, so a pull request cannot widen its own lane by editing the tool; when the
+      # base has no readable copy, the decision is false, the full suite. --ci-decide reads
+      # EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO and GITHUB_OUTPUT itself and appends
+      # site_only=true or site_only=false to GITHUB_OUTPUT: on any event but pull_request, any
+      # head that is not a merge-train-* branch of this repository, and on any error reading the
+      # diff against HEAD^1 (the tested merge commit's first parent), it writes false, so the full
+      # suite runs; it exits nonzero only when it cannot write the output at all, which fails this
+      # job and so fails Quality gates. tools/check_ci_parity.py pins this job's whole body
+      # (SCOPE_JOB), so none of these lines can drift unreviewed.
       - name: Site fast-lane scope decision
         id: decide
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: python3 -I -B tools/ci_site_scope.py --ci-decide
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          decided="no"
+          if [ -n "${BASE_SHA:-}" ]; then
+            if git show "${BASE_SHA}:tools/ci_site_scope.py" > "${RUNNER_TEMP}/ci_site_scope_base.py"; then
+              python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide
+              decided="yes"
+            fi
+          fi
+          if [ "${decided}" = "no" ]; then
+            echo "site_only=false" >> "${GITHUB_OUTPUT}"
+            echo "site_only=false (the base commit has no readable scope tool)"
+          fi
 
   secrets:
     name: Secrets and leaks
@@ -284,6 +319,18 @@ jobs:
       - name: Site integrity
         shell: bash
         run: python3 -I -B tools/check_site.py
+
+      # The OPF declaration gate walks the whole tree and decodes every .md and .html file
+      # (restating_documents), so site pages are among its verdict inputs; it runs here, in an
+      # always-run job, so a site-only change that turns it red fails every lane. Its
+      # execution-reconciled registration stays in the selftest-execution job.
+      - name: OPF declaration self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
+
+      - name: OPF declaration gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_declaration.py
 
       - name: Overclaim lint self-test
         shell: bash
@@ -1600,7 +1647,8 @@ jobs:
   # if: always() is skipped and the required status would read green. if: always() makes this job
   # run whatever the needed jobs concluded, also when the run is cancelled, and its step passes
   # only when every needed job concluded success, with one authorized exception: a HEAVY job that
-  # concluded skipped passes only when the scope job's site_only output is true (the site fast
+  # concluded skipped passes only when the scope job's site_only output is true AND the run is a
+  # pull request whose head is a merge-train-* branch of this repository (the site fast
   # lane); any other skip, failure, cancellation, or missing result fails it. needs: must list
   # every other job in this workflow;
   # tools/check_ci_parity.py holds that coverage and the if: always() guard.
@@ -1638,6 +1686,10 @@ jobs:
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
           SITE_ONLY: ${{ needs.scope.outputs.site_only }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
           OTHER_RESULTS: ${{ needs.scope.result || 'missing' }} ${{ needs.secrets.result || 'missing' }} ${{ needs.site.result || 'missing' }} ${{ needs.opf-closure-a.result || 'missing' }} ${{ needs.opf-closure-b.result || 'missing' }} ${{ needs.opf-closure-c.result || 'missing' }} ${{ needs.opf-closure-d.result || 'missing' }} ${{ needs.opf-closure-e.result || 'missing' }} ${{ needs.opf-closure-f.result || 'missing' }} ${{ needs.release.result || 'missing' }} ${{ needs.generated.result || 'missing' }} ${{ needs.registry.result || 'missing' }}
           HEAVY_RESULTS: ${{ needs.opf-tooling-a.result || 'missing' }} ${{ needs.opf-tooling-b.result || 'missing' }} ${{ needs.opf-tooling-c.result || 'missing' }} ${{ needs.selftest-execution.result || 'missing' }} ${{ needs.git-fixture-env-core.result || 'missing' }} ${{ needs.opf-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-host-patch.result || 'missing' }} ${{ needs.byte-canon-matrix.result || 'missing' }}
         run: |
@@ -1653,12 +1705,29 @@ jobs:
           fi
           heavy="${HEAVY_RESULTS:-missing}"
           heavy="${heavy//success/}"
+          accept="no"
           if [ "${SITE_ONLY:-false}" = "true" ]; then
+            accept="yes"
+          fi
+          if [ "${EVENT_NAME:-}" != "pull_request" ]; then
+            accept="no"
+          fi
+          head_ref="${HEAD_REF:-}"
+          if [ "${head_ref}" = "${head_ref#merge-train-}" ]; then
+            accept="no"
+          fi
+          if [ -z "${HEAD_REPO:-}" ]; then
+            accept="no"
+          fi
+          if [ "${HEAD_REPO:-}" != "${BASE_REPO:-}" ]; then
+            accept="no"
+          fi
+          if [ "${accept}" = "yes" ]; then
             heavy="${heavy//skipped/}"
           fi
           heavy="${heavy// /}"
           if [ -n "$heavy" ]; then
-            echo "Quality gates: FAILED, a heavy job must conclude success, or be skipped only when site_only is true"
+            echo "Quality gates: FAILED, a heavy job must conclude success, or be skipped only in a site-only merge-train pull request of this repository"
             exit 1
           fi
           echo "Quality gates: PASS, every needed job concluded as required"
