@@ -2028,6 +2028,10 @@ expected-check-ids = [
   "cidecide/two-parent-merge-tools-change-false",
   "cidecide/three-parent-merge-false",
   "cidecide/parent-read-causes-false-and-named",
+  "cidecide/gpgsig-merge-true",
+  "cidecide/mergetag-merge-true",
+  "cidecide/grafted-parents-raw-object-true",
+  "cidecide/replaced-base-raw-object-true",
   "cidecide/no-output-exit-1",
   "cidecide/unwritable-output-exit-1",
   # ---------- launch shapes ----------

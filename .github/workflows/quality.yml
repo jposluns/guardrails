@@ -99,8 +99,10 @@ jobs:
   # workflow itself, which no pull_request workflow covers, so that ordering is merge-lane
   # discipline, not isolation from a hostile train. The base having no readable copy decides
   # false. The tool requires the checked-out HEAD to be the documented two-parent test merge
-  # (HEAD^2 must equal the event's head SHA; GitHub-documented behaviour, not verified here) and
-  # reads the changed-path list against HEAD^1, that merge's first parent; an empty list,
+  # (GitHub-documented behaviour, not verified here): HEAD's raw commit object, read with
+  # git --no-replace-objects cat-file commit HEAD, must record exactly two parents, the second
+  # equal to the event's head SHA; it reads the changed-path list against the first parent that
+  # object records, with replace refs disabled; an empty list,
   # any path outside the allowlist, a rename out of those trees (read with rename detection off, so
   # both sides appear), a non-train or fork head, a HEAD that is not such a merge, or any error
   # reading the diff reads as site_only=false, the full suite. A
@@ -131,8 +133,18 @@ jobs:
   # the combined and system lanes); the
   # python-floor live gate also runs in the always-run registry job in every run, so a site-only
   # change that turns it red fails every lane. What the fast lane deliberately gives up for a
-  # site-only train is the skipped jobs' host, configuration and platform repetitions of those
-  # checks: the host-patch jobs' exact host Python, the config lanes' hostile git configurations
+  # site-only train is every check in the eleven jobs that carry the site_only condition
+  # (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, git-fixture-env-core,
+  # opf-host-patch, the four git-fixture-env host-patch jobs and byte-canon-matrix): every
+  # step of those jobs is skipped, and of their commands only the child-status probe, the
+  # opf-declaration live gate and its selftest-execution suite, and check_byte_canon.py (live
+  # gate and self-test) also run, as the same command, in an always-run job, so every other
+  # command in them runs nowhere else in CI on such a train (among them the OPF tooling live
+  # gates and self-tests, the opf.py self-test, check_selftest_execution.py --self-test and its
+  # other suites there, check_entry_guard.py, check_child_status_coverage.py, every
+  # git-fixture-env suite, and check_python_host_pin.py beyond the registry job's --jobs-only
+  # run). It also gives up the host, configuration and platform repetitions of the checks above:
+  # the host-patch jobs' exact host Python, the config lanes' hostile git configurations
   # and byte-canon-matrix's platforms. The three regenerated records are
   # validated by the always-run registry and release jobs (gen_manifest.py --check,
   # check_manifest.py, check_release_delta.py, check_release_build.py). byte-canon-matrix scans
@@ -162,13 +174,17 @@ jobs:
       # The decision runs FIRST, before any step that runs the pull request's own code (the
       # child-status probe and the scope self-test run files from the checkout, so they follow
       # it), and extracts the base tree's copy of the tool with git --no-replace-objects show
-      # from HEAD^1, the same revision the diff is read against, so an ordinary train cannot
-      # repoint the decision from inside this job; when HEAD^1 has no readable copy, the decision
-      # is false, the full suite. --ci-decide reads EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO,
-      # HEAD_SHA and GITHUB_OUTPUT itself and appends site_only=true or site_only=false to
-      # GITHUB_OUTPUT: on any event but pull_request, any head that is not a merge-train-* branch
-      # of this repository, a checked-out HEAD whose second parent is missing or is not HEAD_SHA,
-      # and on any error reading the diff against HEAD^1 (that merge's first parent), it writes
+      # from HEAD^1, so an ordinary train cannot repoint the decision from inside this job; when
+      # HEAD^1 has no readable copy, the decision is false, the full suite. That extraction
+      # disables replace refs only: git resolves HEAD^1 through an info/grafts file, while the
+      # decision reads HEAD's raw parent and ignores both grafts and replace refs, so under a
+      # grafts file the two can differ; a fresh CI checkout has no grafts file. --ci-decide reads
+      # EVENT_NAME, HEAD_REF, HEAD_REPO, BASE_REPO, HEAD_SHA and GITHUB_OUTPUT itself and appends
+      # site_only=true or site_only=false to GITHUB_OUTPUT: on any event but pull_request, any
+      # head that is not a merge-train-* branch of this repository, a checked-out HEAD whose raw
+      # commit object does not record exactly two parents or whose second parent is not
+      # HEAD_SHA, a git failure or an unparseable commit header, and on any error reading the
+      # diff against the first parent that object records, it writes
       # false, so the full suite runs; it exits nonzero only when it cannot write the output at
       # all, which fails this job and so fails Quality gates. tools/check_ci_parity.py pins this
       # job's whole body (SCOPE_JOB), the step order included; that pin is a consistency check

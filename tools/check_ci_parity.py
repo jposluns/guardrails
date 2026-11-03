@@ -771,7 +771,11 @@ HEAVY_JOBS = frozenset({
 # temporary directory), so an ordinary train cannot repoint the decision from inside
 # this job (a train that edits the workflow itself is outside what any pull_request
 # workflow covers); when the base has no readable copy the step writes
-# site_only=false, the full suite. Any departure in the job body (outputs:, env:, a
+# site_only=false, the full suite. The extracted tool then requires HEAD's raw commit
+# object to record exactly two parents, the second equal to HEAD_SHA, and reads the
+# diff against the first; the job's comments state that rule, and this pin compares
+# the job's non-comment lines only, so it holds the lines that run the rule, not the
+# comments that describe it. Any departure in the job body (outputs:, env:, a
 # step, a run line, the step ORDER) is a lane finding, because those lines choose
 # which copy of the tool decides, which inputs it reads and what runs before it. This
 # pin is a consistency check within the reviewed repository, not an authorization.

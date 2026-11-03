@@ -38,7 +38,11 @@ pull request's head commit), and any cannot-evaluate from the parent read or the
 writes false, so the full suite runs. The parents are read from HEAD's raw commit object (git
 --no-replace-objects cat-file commit HEAD, parsing the header's parent lines), and the diff is
 read against the first of them, HEAD^1 as that object records it, with replacement objects
-disabled on both reads, so no replace ref can redirect a read the decision rests on: GitHub
+disabled on both reads, so no replace ref can redirect a read the decision rests on, and an
+info/grafts file cannot either (the raw object read ignores grafts, and the diff names the
+first parent by its full id); the scope job's extraction of this file (HEAD^1:...) disables
+replace refs only, so under a grafts file that revision can differ from the one the diff is read
+against, and a fresh CI checkout has no grafts file. GitHub
 documents the pull_request checkout as a test merge commit (refs/pull/N/merge) whose parents are
 the base-branch tip the merge was built on and the pull request's head (documented behaviour, not
 verified here), and requiring exactly two parents, the second equal to HEAD_SHA, checks that shape
@@ -129,11 +133,17 @@ SITE_REGENERATED = frozenset({
 # and opf/site/adopt.html; its live gate runs in the always-run registry job in every run and in
 # two of the three config lanes (the malformed lane excludes the bare launch, which stays in the
 # combined and system lanes), so those pages need no exclusion either. What the fast lane
-# deliberately gives up for a site-only train is every suite that runs only in the skipped jobs:
-# the host-patch jobs are the only CI run of the OPF tooling self-test and of the combined,
-# malformed and system git-fixture-env suites, so on a site-only train those suites run nowhere
-# in CI, and neither does the git-fixture-env core suite, whose other run, the
-# git-fixture-env-core canary, is a heavy job too. It also gives up the skipped jobs' host,
+# deliberately gives up for a site-only train is every check in the eleven skipped jobs
+# (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, git-fixture-env-core,
+# opf-host-patch, the four git-fixture-env host-patch jobs and byte-canon-matrix): every step of
+# those jobs is skipped, and of their commands only the child-status probe, the opf-declaration
+# live gate and its selftest-execution suite, and check_byte_canon.py (live gate and self-test)
+# also run, as the same command, in an always-run job. Every other command in them runs nowhere
+# else in CI on such a train: the OPF tooling live gates and self-tests of the three
+# opf-tooling jobs, the opf.py self-test, check_selftest_execution.py --self-test and every
+# other selftest-execution suite those jobs run, check_entry_guard.py,
+# check_child_status_coverage.py, every git-fixture-env suite, and check_python_host_pin.py
+# beyond the registry job's --jobs-only run. It also gives up the skipped jobs' host,
 # configuration and platform repetitions: the host-patch jobs' exact host Python, the config
 # lanes' hostile git configurations, and byte-canon-matrix's platforms.
 SITE_HEAVY_READ = frozenset({
@@ -861,6 +871,74 @@ def self_test(report_path=None):
                    for (rc, recorded, out), phrase in notes],
                   [(0, "site_only=false\n", True)] * 8)
         with tempfile.TemporaryDirectory() as scratch:
+            # the decision reads HEAD's raw commit object and nothing that rewrites it: a valid
+            # site-only two-parent merge, HEAD_SHA its second parent, still decides true when its
+            # header also carries a gpgsig or a mergetag header (multi-line values whose
+            # continuation lines start with a space; each carries one that reads "parent <id>"
+            # after that space, which is header value text, never a parent line), when an
+            # info/grafts file gives HEAD other parents, and when a replace ref swaps the base
+            repo, base = _fixture_repo(Path(scratch), env)
+            _fixture_git(repo, "checkout", "-q", "-b", "merge-train-4", env=env)
+            (repo / "site" / "index.html").write_text("b\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "train site change", env=env)
+            train_tip = _fixture_rev(repo, "HEAD", env)
+            _fixture_git(repo, "checkout", "-q", "main", env=env)
+            _fixture_git(repo, "merge", "-q", "--no-ff", "-m", "merge", "merge-train-4",
+                         env=env)
+            merge = _fixture_rev(repo, "HEAD", env)
+            tree = _fixture_rev(repo, "HEAD^{tree}", env).encode("ascii")
+            signature = b"fixture <fixture@example.invalid> 0 +0000\n"
+            header = (b"tree " + tree + b"\nparent " + base.encode("ascii") + b"\nparent " +
+                      train_tip.encode("ascii") + b"\nauthor " + signature + b"committer " +
+                      signature)
+            signed = (header + b"gpgsig -----BEGIN PGP SIGNATURE-----\n \n parent " +
+                      base.encode("ascii") + b"\n -----END PGP SIGNATURE-----\n\nmerge\n")
+            tagged = (header + b"mergetag object " + train_tip.encode("ascii") +
+                      b"\n type commit\n tag v1\n tagger " + signature + b" \n parent " +
+                      base.encode("ascii") + b" is the base this tag was cut against\n\nmerge\n")
+            for check_id, body in (("cidecide/gpgsig-merge-true", signed),
+                                   ("cidecide/mergetag-merge-true", tagged)):
+                _fixture_literal_head(repo, body, env)
+                check(check_id,
+                      (_fixture_parent_count(repo, env),
+                       _ci_decide_outcome(repo, "pull_request",
+                                          Path(scratch) / ("gh-output-" + check_id[9:]),
+                                          head_sha=train_tip)),
+                      (2, (0, "site_only=true\n")))
+            # info/grafts gives HEAD one parent, and git's own parent read follows it (the
+            # fixture's count is 1); --no-replace-objects does not disable grafts, so only the
+            # raw object read keeps the decision on the two recorded parents
+            _fixture_git(repo, "checkout", "-q", "--detach", merge, env=env)
+            os.makedirs(repo / ".git" / "info", exist_ok=True)
+            with open(repo / ".git" / "info" / "grafts", "w", encoding="ascii") as handle:
+                handle.write("{} {}\n".format(merge, base))
+            check("cidecide/grafted-parents-raw-object-true",
+                  (_fixture_parent_count(repo, env),
+                   _ci_decide_outcome(repo, "pull_request", Path(scratch) / "gh-output-grafts",
+                                      head_sha=train_tip)),
+                  (1, (0, "site_only=true\n")))
+            os.remove(repo / ".git" / "info" / "grafts")
+            # a replace ref swaps the base for a commit whose tools/ file differs, so a diff
+            # that honoured it would see a tools/ change (git's own diff does); the decision
+            # reads the base as recorded
+            _fixture_git(repo, "checkout", "-q", "-b", "replacement", base, env=env)
+            (repo / "tools" / "t.py").write_text("b\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "replacement base", env=env)
+            replacement = _fixture_rev(repo, "HEAD", env)
+            _fixture_git(repo, "checkout", "-q", "--detach", merge, env=env)
+            _fixture_git(repo, "replace", base, replacement, env=env)
+            honoured = subprocess.run(
+                ["git", "-C", str(repo), "diff", "--name-only", "--no-renames", base, "HEAD"],
+                check=True, capture_output=True, text=True, timeout=GIT_TIMEOUT,
+                env=env).stdout.split()
+            check("cidecide/replaced-base-raw-object-true",
+                  ("tools/t.py" in honoured,
+                   _ci_decide_outcome(repo, "pull_request", Path(scratch) / "gh-output-replace",
+                                      head_sha=train_tip)),
+                  (True, (0, "site_only=true\n")))
+        with tempfile.TemporaryDirectory() as scratch:
             repo, base = _fixture_repo(Path(scratch), env)
             _fixture_git(repo, "mv", "site/index.html", "tools/index.html", env=env)
             _fixture_git(repo, "commit", "-q", "-m", "rename out", env=env)
@@ -917,7 +995,9 @@ def self_test(report_path=None):
           "head SHA, a directory that is not a repository and an unparseable commit header, each "
           "with a note naming its cause, false on a valid two-parent merge that changes a tools/ "
           "file, and true on the matching site-only merge, also when the tool is extracted alone "
-          "outside any repository); execution set "
+          "outside any repository, when the merge carries a gpgsig or a mergetag header, when an "
+          "info/grafts file rewrites HEAD's parents and when a replace ref swaps the base); "
+          "execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
