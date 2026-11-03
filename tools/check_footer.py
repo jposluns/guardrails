@@ -2,7 +2,7 @@
 """Nav-coverage gate: every live site/ and opf/site/ page carries exactly one disclosure link INSIDE its <nav>.
 
 The disclosure matrix is the site's standing "what we claim, and what we do not" page; every live public
-page (every page outside a draft/ subtree) must point to it from its primary navigation so a reader is
+page (every page outside the root's top-level draft/) must point to it from its primary navigation so a reader is
 never more than one click from the limitations. This gate asserts that link is present, and IN THE NAV, on
 every live page EXCEPT an explicit allowlist, and fails closed if a non-exempt live page lacks it or the
 allowlist drifts. A /disclosure link elsewhere in the page body or footer does NOT satisfy the
@@ -80,7 +80,7 @@ COVERAGE_ROOTS = (
     ("opf/site", "./disclosure", frozenset()),
 )
 
-# The staged draft under site/draft/ follows the shared site template (baseline 1.4.1), whose top bar has no
+# The staged draft under site/draft/ follows the shared site template (baseline 1.5.1), whose top bar has no
 # Disclosure item: the draft landing page links the disclosure page from its "About this project" region
 # (p.about), and the inner draft pages carry no disclosure link. So the live rule above covers every site/
 # page outside site/draft/, unchanged, and the draft rule covers the pages under it: exactly one

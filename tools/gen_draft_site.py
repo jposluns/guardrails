@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the staged draft sites (shared site template, baseline 1.4.1) under each site's draft/ root.
+"""Generate the staged draft sites (shared site template, baseline 1.5.1) under each site's draft/ root.
 
   gen_draft_site.py              write every registered page
   gen_draft_site.py --check      exit 1 if any target differs from a fresh build, 2 if one cannot be read
@@ -59,6 +59,7 @@ import tempfile
 import tomllib
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -503,7 +504,8 @@ def _c_figures(site, doc, where):
 
 
 def _table_html(site, spec, where):
-    classes = " ".join(name for name, on in (("sticky", _flag(spec, where, "sticky")),
+    sticky = _flag(spec, where, "sticky")
+    classes = " ".join(name for name, on in (("sticky", sticky),
                                              ("fixed", _flag(spec, where, "fixed"))) if on)
     cols = ""
     if "cols" in spec:
@@ -535,7 +537,10 @@ def _table_html(site, spec, where):
              '<tbody>{}</tbody></table>').format(
                  classes, _t(_text(spec, where, "caption")), cols,
                  "".join("<th>{}</th>".format(_inline(site, cell)) for cell in head), "".join(body))
-    return '<div class="tablewrap" tabindex="0">{}</div>'.format(table)
+    # A sticky table sits in the bounded scroll box only when its wrapper carries .bounded (template
+    # specification section 7.31); an unmarked wrapper is bounded only where the browser supports :has().
+    wrap = "tablewrap bounded" if sticky else "tablewrap"
+    return '<div class="{}" tabindex="0">{}</div>'.format(wrap, table)
 
 
 def _c_table(site, doc, where):
@@ -1117,12 +1122,13 @@ def _body_html(site, page):
 # outside the link rules (LINK_REFUSED_TAGS, and a meta carrying http-equiv), except each script element
 # the shell itself writes (exactly src plus defer, with a src the shell chose); every URL attribute
 # (LINK_URL_ATTRS) is an https URL, a #fragment, a path under the site's base or one of its kept live
-# paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no ".."
-# segment; and every a or area whose href is https carries target="_blank", rel with noopener and
-# noreferrer, and the "(opens in a new tab)" hint in its text or aria-label. Residual: the guard judges the
-# markup as Python's html.parser tokenizes it, so a malformed construct a browser repairs differently is
-# outside it; it reads no stylesheet (inline styles are refused separately) and treats a URL-shaped value
-# in any attribute not listed here as text; and it does not check that an allowed target exists.
+# paths, with no backslash, whitespace or control character, no protocol-relative "//" start and no "." or
+# ".." segment, raw or percent-encoded (%2e, either case); and every a or area whose href is https carries
+# target="_blank", rel with noopener and noreferrer, and the "(opens in a new tab)" hint in its text or
+# aria-label. Residual: the guard judges the markup as Python's html.parser tokenizes it, so a malformed
+# construct a browser repairs differently is outside it; it reads no stylesheet (inline styles are refused
+# separately) and treats a URL-shaped value in any attribute not listed here as text; and it does not
+# check that an allowed target exists.
 LINK_REFUSED_TAGS = frozenset((
     "script", "iframe", "frame", "frameset", "base", "form", "object", "embed", "applet", "portal",
     "animate", "set", "animatemotion", "animatetransform", "handler", "foreignobject"))
@@ -1148,8 +1154,10 @@ class _LinkGuard(HTMLParser):
             return "{} attribute on <{}> has no value".format(name, tag)
         if name in ("srcset", "imagesrcset", "ping", "archive"):
             return "{} attribute on <{}> (a URL list) is not allowed".format(name, tag)
+        # A browser reads %2e as "." in a path segment, so each segment is tested after one decoding.
+        segments = value.split("#", 1)[0].split("?", 1)[0].split("/")
         if _URL_BAD_CHAR_RE.search(value) or value.startswith("//") \
-                or ".." in value.split("#", 1)[0].split("?", 1)[0].split("/"):
+                or any(unquote(segment) in (".", "..") for segment in segments):
             return "{} {!r} on <{}> is not a plain URL".format(name, value, tag)
         if value.startswith("https://") or value.startswith("#") or value.startswith(base) \
                 or _kept_live(site, value):
@@ -1540,7 +1548,7 @@ def _self_test():
     table = rendered('component = "table"\ncaption = "C"\nsticky = true\nfixed = true\ncols = ["w26", "w17"]\n'
                      'head = ["A", "B"]\nrows = [["x", "<td class=\\"id\\"><code>y</code></td>"]]\n')
     expect("component/table", table == (
-        '<div class="wide"><div class="tablewrap" tabindex="0"><table class="sticky fixed">'
+        '<div class="wide"><div class="tablewrap bounded" tabindex="0"><table class="sticky fixed">'
         '<caption class="vh">C</caption><colgroup><col class="w26"><col class="w17"></colgroup>'
         '<thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>x</td><td class="id"><code>y</code>'
         '</td></tr></tbody></table></div></div>'), table)
@@ -2075,6 +2083,18 @@ def _self_test():
             ("guard/protocol-relative", '<a href="//example.com/">x</a>'),
             ("guard/backslash", '<a href="/draft/\\example.com">x</a>'),
             ("guard/dot-dot-segment", '<a href="/draft/../x">x</a>'),
+            ("guard/encoded-dot-dot-lower", '<a href="/draft/%2e%2e/x">x</a>'),
+            ("guard/encoded-dot-dot-upper", '<a href="/draft/%2E%2E/x">x</a>'),
+            ("guard/encoded-dot-dot-second", '<a href="/draft/.%2e/x">x</a>'),
+            ("guard/encoded-dot-dot-first", '<a href="/draft/%2e./x">x</a>'),
+            ("guard/encoded-dot-dot-lower-query", '<a href="/draft/%2e%2e?q=1">x</a>'),
+            ("guard/encoded-dot-dot-upper-query", '<a href="/draft/%2E%2E?q=1">x</a>'),
+            ("guard/encoded-dot-dot-second-query", '<a href="/draft/.%2e?q=1">x</a>'),
+            ("guard/encoded-dot-dot-first-query", '<a href="/draft/%2e.?q=1">x</a>'),
+            ("guard/encoded-dot-dot-lower-fragment", '<a href="/draft/%2e%2e#top">x</a>'),
+            ("guard/encoded-dot-dot-upper-fragment", '<a href="/draft/%2E%2E#top">x</a>'),
+            ("guard/encoded-dot-dot-second-fragment", '<a href="/draft/.%2e#top">x</a>'),
+            ("guard/encoded-dot-dot-first-fragment", '<a href="/draft/%2e.#top">x</a>'),
             ("guard/whitespace-in-url", '<a href=" /draft/x">x</a>'),
             ("guard/img-src", '<img src="http://example.com/x.png" alt="">'),
             ("guard/srcset", '<img src="/draft/x.png" srcset="/draft/x.png 1x" alt="">'),
@@ -2104,7 +2124,9 @@ def _self_test():
             ("guard/aria-label-hint-passes", '<a href="https://example.com/" target="_blank" '
              'rel="noopener noreferrer" aria-label="Example (opens in a new tab)">x</a>'),
             ("guard/fragment-and-base-pass", '<a href="#top">x</a><img src="/draft/x.png" alt="">'),
-            ("guard/meta-name-passes", '<meta name="robots" content="noindex, nofollow">')):
+            ("guard/meta-name-passes", '<meta name="robots" content="noindex, nofollow">'),
+            ("guard/plain-path-passes", '<a href="/draft/install/">x</a>'),
+            ("guard/encoded-non-dot-segment-passes", '<a href="/draft/a%2eb/">x</a>')):
         expect(name, _link_findings(site, text) == [], (text, _link_findings(site, text)))
     shell_src = _asset(site, "rail.js")
     expect("guard/shell-script-passes", _link_findings(
