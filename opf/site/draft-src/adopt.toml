@@ -94,34 +94,8 @@ component = "prose"
 html = '''<p>The reference tooling's <code>opf init</code> does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above. Its <code>opf doctor</code> grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; <code>opf upgrade</code> and <code>opf record</code> refuse such a store. The reference tooling defines no store upgrade: <code>opf upgrade</code> refuses every invocation with exit 2, reading and writing nothing.</p>'''
 
 [[body]]
-component = "section"
-lbl = "The verbs"
-heading = "The 10 command verbs and their status"
-
-[[body]]
 component = "prose"
-html = "<p>The <code>opf</code> reference CLI is 1 implementation of the standard's command vocabulary. A base adopter can use their own tooling instead, or adopt by hand.</p>"
-
-[[body]]
-component = "table"
-caption = "The 10 command verbs and their status"
-head = ["Verb", "Does", "Status"]
-rows = [
-  ["<code>init</code>", "scaffolds the store", "implemented"],
-  ["<code>render</code>", "regenerates and checks the views", "implemented"],
-  ["<code>doctor</code>", "verifies the store", "implemented"],
-  ["<code>absorb</code>", "drafts changelog entries for human curation", "implemented"],
-  ["<code>record</code>", "authors 1 record change at a time", "implemented"],
-  ["<code>adopt</code>", "plan, approve, reconcile and status run; apply refuses every plan in this build and complete refuses every invocation, each with exit 2, so adoption cannot finish yet", "partly implemented"],
-  ["<code>upgrade</code>", "refuses with exit 2; the reference tooling defines no store upgrade", "refuses"],
-  ["<code>import</code>", "ordinary modes retired; refuse with exit 2", "retired"],
-  ["<code>migrate</code>", "specified, not yet implemented", "planned"],
-  ["<code>sync</code>", "specified, not yet implemented", "planned"],
-]
-
-[[body]]
-component = "prose"
-html = "<p><code>doctor</code> exits 0 when clean, 1 on a finding, and 2 when it cannot evaluate. <code>render --check</code> exits 1 for drift.</p>"
+html = "<p>The <code>opf</code> reference CLI, its 10 command verbs and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>.</p>"
 
 [[body]]
 component = "next"

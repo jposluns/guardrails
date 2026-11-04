@@ -506,6 +506,15 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
+        "site/draft-src/install-details.toml"
+      ],
+      "target": "site/install/details/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
         "site/draft-src/install.toml"
       ],
       "target": "site/install/index.html"
