@@ -114,7 +114,7 @@ text = "Your browser"
 
 [[body]]
 component = "prose"
-html = '''<p>If you use the light and dark switch, your choice is kept in your browser's local storage under the name scheme, so the site opens in that scheme next time. It is not sent to this site, and the site itself stores nothing until you press the switch. Cloudflare, which serves this site, adds 2 scripts of its own to each page: a visitor analytics script, and a check for automated visitors that sets 2 cookies (__cf_ob and cf_clearance) and 1 session storage entry (_cfPre_tabId) when a page loads. Both come from Cloudflare, not from this site.</p>'''
+html = '''<p>If you use the light and dark switch, your choice is kept in your browser's local storage under the name scheme, so the site opens in that scheme next time. It is not sent to this site, and the site itself stores nothing until you press the switch. Cloudflare, which serves this site, adds scripts to its pages: an analytics script, and a check for automated visitors. On 4 November 2026 that check set 2 cookies (__cf_ob and cf_clearance) and 1 session storage entry (_cfPre_tabId) as a page loaded. These scripts come from Cloudflare, not from this site.</p>'''
 
 [[body]]
 component = "label"
