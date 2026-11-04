@@ -70,7 +70,8 @@ doctor's decision-chain check reads archived records beside the active ones, so 
 chain is rendered here from its active decisions alone (join_resolution states what that leaves unseen).
 Only the decision renderers' one-current-resolution refusal reads the archive, through the doctor's own
 archive walk and chain derivation, so it never refuses a chain the doctor and the record verb count once,
-and such a chain is listed with the doctor's effective and superseded sets over its active decisions.
+and the members of the active chain it re-judged are listed with the doctor's sets; an active decision
+that only the archive joins to that chain keeps its active-only listing (join_resolution).
 
 The write path (spec 5.7/5.8/11): a mutating render gates on the `_opf_check.validate_store`
 store-integrity layer (cross-record uniqueness, coverage, reconciliation, view drift, changelog/version
@@ -875,11 +876,13 @@ def join_resolution(decisions, archived=None):
     that count is exactly one; a refusal that stands then names the doctor's chain and its current
     resolutions, archived members included. A decided decision rotated to the archive can thus remove an
     active head's authority, as it does for the doctor and the record verb, so a chain all three count
-    once is not refused here, and its returned sets are the doctor's restricted to the active decisions:
-    an active member whose authority an archived decided decision removed is superseded, not current (a
-    chain whose one current resolution is archived lists none of its active members as current). Only
-    such a re-judged chain reads the archive; every other chain's sets stay the active ones. When the
-    archive walk raises a problem, the active-only refusal stands."""
+    once is not refused here. Within the active chain it re-judged, an active member whose authority an
+    archived decided decision removed is listed as superseded, not current (an active chain whose one
+    current resolution is archived lists none of its members as current). An active decision that only
+    the archive joins to that chain is not moved and keeps its active-only listing, so such a layout can
+    still list more than one effective resolution for one doctor chain. Only a re-judged chain reads the
+    archive; every other chain's sets stay the active ones. When the archive walk raises a problem, the
+    active-only refusal stands."""
     every = decisions
     chains = _linked_chains(decisions)
     decisions = t_filter(t_filter(decisions, "not_importer_authored"), "not_proposed")
@@ -951,8 +954,8 @@ def join_resolution(decisions, archived=None):
         # record verb's chain rule count its current resolutions alike; it stands unless that count is
         # exactly one, naming the doctor's chain and current resolutions. A chain it lets through is
         # listed as the doctor derives it: an active member whose authority a link over that record set
-        # removes moves from `current` to `superseded`, so the chain never renders two effective
-        # resolutions. Every other chain keeps its active-only sets.
+        # removes moves from `current` to `superseded`; an active decision only the archive joins is not
+        # moved (see the docstring). Every other chain keeps its active-only sets.
         full = _chains_with_archive(every, archived)
         if full is not None:
             full_chains, removed = full
