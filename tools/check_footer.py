@@ -92,7 +92,7 @@ def required_href(name, href):
     return DISCLOSURE_HREF if Path(name).name == NOT_FOUND_PAGE else href
 
 
-# The staged draft under site/draft/ follows the shared site template (baseline 1.6.1), whose top bar has no
+# The staged draft under site/draft/ follows the shared site template (baseline 1.7.0), whose top bar has no
 # Disclosure item: the draft landing page links the disclosure page from its "About this project" region
 # (p.about), and the inner draft pages carry no disclosure link. So the live rule above covers every site/
 # page outside site/draft/, unchanged, and the draft rule covers the pages under it: exactly one
