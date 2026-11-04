@@ -78,8 +78,8 @@
         <h3>Assistant-driven (recommended)</h3>
         <p>Your AI development assistant follows the adoption procedure in the prompt pack: it
           investigates your project, proposes one plan, and asks for one approval of that plan. The
-          reference CLI runs investigation and planning today; approval, apply and completion are
-          not executable yet, so the assistant stops there and reports. The standard requires no
+          reference CLI runs investigation, planning and approval today; apply and completion are
+          not executable yet, so the assistant stops after approval and reports. The standard requires no
           particular assistant or tool.</p>
       </div>
       <div class="card">
@@ -131,10 +131,10 @@
         </ul>
       </div>
       <div class="card">
-        <h3>What it does not run yet</h3>
+        <h3>What it does not complete yet</h3>
         <p><code>opf adopt apply</code> and <code>complete</code> refuse with exit 2, so nothing is
           applied and nothing is retired. <code>approve</code> checks a plan and prints its approval
-          but writes nothing, so no approval is recorded; <code>reconcile</code> only recovers an
+          but writes nothing, so no approval is recorded; <code>reconcile</code> recovers an
           interrupted adoption transaction, or reports that there is nothing to reconcile. Installing the enforcement pack through adoption, and
           post-adoption import, are not available either. An assistant following the pack stops at
           the approval step and reports, rather than doing the missing stages by hand.</p>
