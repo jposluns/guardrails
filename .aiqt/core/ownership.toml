@@ -354,6 +354,10 @@ path = "site/install/index.html"
 class = "pack-immutable"
 
 [[release-class]]
+path = "site/install/details/index.html"
+class = "pack-immutable"
+
+[[release-class]]
 path = "site/license/index.html"
 class = "pack-immutable"
 
