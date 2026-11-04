@@ -132,9 +132,10 @@
       </div>
       <div class="card">
         <h3>What it does not run yet</h3>
-        <p><code>opf adopt approve</code>, <code>apply</code>, <code>complete</code> and
-          <code>reconcile</code> refuse with exit 2, so no approval is recorded, nothing is applied,
-          and nothing is retired. Installing the enforcement pack through adoption, and
+        <p><code>opf adopt apply</code> and <code>complete</code> refuse with exit 2, so nothing is
+          applied and nothing is retired. <code>approve</code> checks a plan and prints its approval
+          but writes nothing, so no approval is recorded; <code>reconcile</code> only recovers an
+          interrupted adoption transaction, or reports that there is nothing to reconcile. Installing the enforcement pack through adoption, and
           post-adoption import, are not available either. An assistant following the pack stops at
           the approval step and reports, rather than doing the missing stages by hand.</p>
         <p>Recovery after a refused or reversed run: when an adoption transaction is refused after
@@ -193,8 +194,10 @@
 
     <h3 id="cmd-adopt"><code>opf adopt</code></h3>
     <p><b style="color:var(--ink)">Status.</b> Partly implemented. The read-only <code>plan</code> and
-      <code>status</code> subcommands run; <code>approve</code>, <code>apply</code>,
-      <code>complete</code>, and <code>reconcile</code> refuse with exit 2 before reading anything.</p>
+      <code>status</code> subcommands run; <code>approve</code> runs and prints an approval without
+      recording it; <code>reconcile</code> runs, recovering an interrupted adoption transaction or
+      reporting that there is nothing to reconcile; <code>apply</code> and <code>complete</code> refuse
+      with exit 2.</p>
     <p><b style="color:var(--ink)">Purpose.</b> Guide setup and wiring of an existing project:
       investigate, plan, one approval, apply, and completion (specification section 14).</p>
     <p><b style="color:var(--ink)">How it works.</b> <code>plan --inputs FILE</code> reads a
