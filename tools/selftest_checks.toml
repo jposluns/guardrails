@@ -3968,6 +3968,7 @@ expected-check-ids = [
   "revert/p5-confirm-pin-reach-red",
   "revert/p5-brace-ref-red",
   "revert/p5-submodule-remote-red",
+  "preflight/p6-fixture-verbatim",
   "preflight/p6-present-quiet",
   "preflight/p6-markdown-present-quiet",
   "preflight/p6-trailing-boundary",

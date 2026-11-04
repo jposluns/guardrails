@@ -4664,6 +4664,26 @@ def _nesting_sample(seed, count):
     return texts
 
 
+def _verbatim_tempdir(prefix, make=tempfile.mkdtemp, attempts=64):
+    """A fresh directory from `make` (tempfile.mkdtemp) whose path is pure ASCII with no character of
+    _input_declarations.RENDERING_MARK_RE, so a fixture brief that names it on an INPUT line renders it
+    exactly as written. mkdtemp draws its name from an alphabet that holds `_`, and a name such as
+    `-_k9b51z_` renders as emphasis, which drops both marks and names a path that does not exist; such a
+    draw is removed and drawn again. A temporary root that itself holds a mark, or `attempts` marked draws,
+    is CannotEvaluate: the P6 fixtures cannot be written there."""
+    root = tempfile.gettempdir()
+    if not root.isascii() or _input_declarations.RENDERING_MARK_RE.search(root) is not None:
+        raise CannotEvaluate("self-test: the temporary root {} holds a character the CommonMark reading "
+                             "renders, so the INPUT fixtures cannot name it verbatim".format(root))
+    for _ in range(attempts):
+        directory = make(prefix=prefix)
+        if directory.isascii() and _input_declarations.RENDERING_MARK_RE.search(directory) is None:
+            return Path(directory)
+        os.rmdir(directory)
+    raise CannotEvaluate("self-test: {} temporary directory names in a row held a rendering mark".format(
+        attempts))
+
+
 def self_test(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -6448,7 +6468,7 @@ def self_test(report_path=None):
     finally:
         shutil.rmtree(base, ignore_errors=True)
     # ---------- P6: a declared input (an INPUT line) must exist on the lint's host; {T} is a fresh directory ----------
-    inputs = Path(tempfile.mkdtemp(prefix="aiqt-brief-input-"))
+    inputs = _verbatim_tempdir("aiqt-brief-input-")
     locked = inputs / "locked"
     try:
         os.makedirs(inputs / "dir with space")
@@ -6473,6 +6493,20 @@ def self_test(report_path=None):
             with _patched(input_readable=lambda path: False):
                 return p6_code("INPUT: {T}/unreadable.md\n")
 
+        # {T} renders verbatim: a mkdtemp draw the reading renders as emphasis (it names a path without
+        # the marks) is removed and drawn again, never handed to the fixtures below
+        marked = inputs / "draw-_k9b51z_"
+        draws = iter((marked, inputs / "draw-clean"))
+
+        def marked_first(prefix):
+            directory = next(draws)
+            os.mkdir(directory)
+            return str(directory)
+
+        check("preflight/p6-fixture-verbatim", (
+            _input_declarations.read("INPUT: {}/in.md\n".format(marked)) == ([(1, "{}/in.md".format(marked))], []),
+            _verbatim_tempdir("draw-", make=marked_first), os.path.lexists(marked)),
+            (False, inputs / "draw-clean", False))
         p6_missing = (1, [("P6", "HARD")])
         check("preflight/p6-present-quiet", [p6(text) for text in (
             "INPUT: {T}/in.md\n", "INPUT: \"{T}/dir with space/in.md\"\n", "INPUT: `{T}/dir with space/in.md`\n",
