@@ -429,10 +429,11 @@ NOT_FOUND_DRAFT_ELEMENTS = frozenset((
 NOT_FOUND_DRAFT_ATTRIBUTES = frozenset((
     "alt", "aria-current", "aria-hidden", "aria-label", "aria-live", "aria-pressed", "charset", "class",
     "content", "cx", "cy", "d", "data-cfasync", "data-scheme-toggle", "fill", "focusable", "height", "hidden",
-    "href", "id", "lang", "name", "r", "rel", "role", "src", "stroke", "stroke-linecap", "stroke-linejoin",
-    "stroke-width", "target", "type", "viewbox", "width",
+    "href", "id", "lang", "name", "property", "r", "rel", "role", "src", "stroke", "stroke-linecap",
+    "stroke-linejoin", "stroke-width", "target", "type", "viewbox", "width",
 ))
-NOT_FOUND_DRAFT_META_ATTRIBUTES = frozenset(("charset", "content", "name"))
+# "property" is the og:description meta the generator writes from each page's description.
+NOT_FOUND_DRAFT_META_ATTRIBUTES = frozenset(("charset", "content", "name", "property"))
 NOT_FOUND_DRAFT_ONCLICK = frozenset()
 NOT_FOUND_DRAFT_PRESENTATION = {
     "fill": frozenset(("none",)),
@@ -648,6 +649,7 @@ def not_found_structure_findings(label, text, draft=False):
 
 
 def _self_test():
+    _use_staged_declaration(True)
     good = '<a class="logo" href="/">L</a>'
     bad = '<a class="logo" href="/">L&trade;</a>'
     failures = []
@@ -899,6 +901,17 @@ def _self_test():
     _touch_icon_self_test(quiet)
     _not_found_links_self_test()
     _declaration_self_test()
+    _use_staged_declaration(False)
+    # The real declaration is the promoted one: the root's 404.html is a template page, a nested draft/ page
+    # is not, and turning the staged default back on flips both (fails on purpose).
+    real = _template_pages.template_targets()
+    check("declaration/real-is-promoted", "site/404.html" in real and "opf/site/404.html" in real
+          and "site/draft/404.html" not in real and "site/draft/index.html" in real, sorted(real))
+    _use_staged_declaration(True)
+    flipped = _template_pages.template_targets()
+    _use_staged_declaration(False)
+    check("declaration/staged-flip-differs", "site/404.html" not in flipped and "site/draft/404.html" in flipped,
+          sorted(flipped))
     failures.extend(FAILURES)
 
     if failures:
@@ -980,6 +993,30 @@ def _declaration_self_test():
             check(scan_name, code == 2 and "cannot read the template page targets" in err, (code, err))
 
 
+_REAL_TEMPLATE_TARGETS = _template_pages.template_targets
+
+
+def _staged_targets():
+    """The page targets tools/gen_draft_site.py builds in the staged form (each site's pages under its root's
+    draft/ folder, base "/draft/"), the form before promotion."""
+    import gen_draft_site
+    return frozenset(gen_draft_site.build(sites=gen_draft_site.staged_sites(), registered=False))
+
+
+def _use_staged_declaration(on):
+    """While `on`, the declaration read with no fixture root is the staged one, so the self-test cases written
+    for the staged state (a live 404.html beside a draft/ folder of template pages) keep their meaning now
+    that the real declaration is promoted; the real-tree case runs with it off."""
+    if on:
+        staged = _staged_targets()
+        real_root = _template_pages.ROOT
+        _template_pages.template_targets = (
+            lambda root=None: staged if root is None and _template_pages.ROOT == real_root
+            else _REAL_TEMPLATE_TARGETS(root))
+    else:
+        _template_pages.template_targets = _REAL_TEMPLATE_TARGETS
+
+
 def _promoted_targets():
     """The page targets tools/gen_draft_site.py builds at base "/" (each site's pages at its own root): the
     promoted state the self-tests hold each template-page rule to, beside today's staged declaration."""
@@ -1056,8 +1093,12 @@ def _touch_icon_self_test(quiet):
         check("touch-icon/promoted-template-page-exempt", got == [], got)
         got = findings("install/index.html", [("/nope.png", 3)], promoted)
         check("touch-icon/promoted-nested-template-page-exempt", got == [], got)
+        # The /draft/ placeholder is itself a generated template page once promoted (the generator writes its
+        # touch icon); any other page under draft/ is a live page and is checked.
         got = findings("draft/index.html", [], promoted)
-        check("touch-icon/promoted-draft-placeholder-checked", len(got) == 1 and "missing <link" in got[0], got)
+        check("touch-icon/promoted-draft-placeholder-template-exempt", got == [], got)
+        got = findings("draft/a.html", [], promoted)
+        check("touch-icon/promoted-unlisted-draft-page-checked", len(got) == 1 and "missing <link" in got[0], got)
         got = findings("index.html", [])
         check("touch-icon/staged-root-page-checked", len(got) == 1 and "missing <link" in got[0], got)
         got = findings("draft/model/index.html", [], staged, "opf/site")
@@ -1098,7 +1139,9 @@ def _touch_icon_self_test(quiet):
             encoding="utf-8")
         check("touch-icon/scan-passes-when-linked", quiet(_scan_root, base, "site") == 0, None)
 
+    _use_staged_declaration(False)
     got = quiet(main)
+    _use_staged_declaration(True)
     check("live/real-tree-passes", got == 0, got)
 
 

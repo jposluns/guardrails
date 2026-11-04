@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en" class="site-opfiles">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="This page sets out what OPFiles claims, the limit of each claim, and the evidence for both.">
+<meta property="og:description" content="This page sets out what OPFiles claims, the limit of each claim, and the evidence for both.">
+<title>Disclosure | OPFiles.ai</title>
+<link rel="icon" href="/draft/assets/baseline/logos/opfiles-favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/opfiles-touch.png">
+<script data-cfasync="false" src="/draft/assets/baseline/scheme.js"></script>
+<link rel="stylesheet" href="/draft/assets/baseline/fonts.css">
+<link rel="stylesheet" href="/draft/assets/baseline/palettes.css">
+<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">
+<script src="/draft/assets/baseline/rail.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main-content">Skip to content</a>
+<header class="mast"><a class="brand" href="/"><span class="name">OPFiles<span class="tld">.ai</span></span><span class="rule" aria-hidden="true"></span></a><nav class="nav" aria-label="Site"><a href="/model/">The model</a><a href="/standard/">The standard</a><a href="/core-files/">Core files</a><a href="/adopt/">Adopt</a><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a></nav><button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden><svg class="moon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg><svg class="sun" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><span class="vh">Dark mode</span></button></header>
+<main id="main-content">
+<div class="wrap"><div class="doc"><p class="lbl first">Disclosure</p>
+<h1>Disclosure</h1>
+<nav class="rail" aria-label="On this page"><img class="rail-logo" src="/draft/assets/baseline/logos/opfiles.svg" alt="A machine-written source record and its generated view, joined by a drift gate"><p class="lbl">On this page</p><ol><li><a href="#d-1">Draft status</a></li><li><a href="#d-2">Implementations</a></li><li><a href="#d-3">Changelog and worklog checks</a></li><li><a href="#d-4">Store resolution</a></li><li><a href="#d-5">The single-writer lease</a></li><li><a href="#d-6">Doctor and the renderer</a></li><li><a href="#d-7">Adoption and the prompt pack</a></li><li><a href="#d-8">What the release is made of</a></li><li><a href="#d-9">Network reach</a></li><li><a href="#d-10">The discovery token</a></li></ol></nav>
+<p class="meta">This page sets out what OPFiles claims, the limit of each claim, and the evidence for both.</p>
+<p class="lbl sec">Entry 1</p>
+<h2 id="d-1">Draft status</h2>
+<p><strong>Claim:</strong> The specification is a working draft and the reference tooling lands verb by verb. A conformance claim names its scope and which profiles were evaluated.</p>
+<p><strong>Limitation:</strong> Until the validation tooling covers a given claim, conformance to that claim is self-asserted, and any report says so. An unqualified "conformant" claim is never emitted, by tooling or by prose.</p>
+<p><strong>Evidence:</strong> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a> <a href="/standard/">The standard</a></p>
+<p class="lbl sec">Entry 2</p>
+<h2 id="d-2">Implementations</h2>
+<p><strong>Claim:</strong> Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.</p>
+<p><strong>Limitation:</strong> The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification. The reference tooling's opf doctor grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store. The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.</p>
+<p><strong>Evidence:</strong> <a href="/core-files/#manifest">The store manifest</a></p>
+<p class="lbl sec">Entry 3</p>
+<h2 id="d-3">Changelog and worklog checks</h2>
+<p><strong>Claim:</strong> Changelog freeze compares a published entry's LF-normalized UTF-8 digest with its recorded digest. Range coverage checks that changelog entries tile every released version with no gap or overlap.</p>
+<p><strong>Limitation:</strong> Line-ending-only changes do not alter the freeze digest. The freeze check does not judge whether the prose is accurate or complete, and range coverage does not judge the quality of what the entries say. The unreleased worklog tail is reviewed, not machine-frozen: before a release cut, entries are correctable in place. Review and version-control history, not a digest, control the unreleased tail.</p>
+<p><strong>Evidence:</strong> <a href="/core-files/#worklog">The worklog</a> <a href="/core-files/#version">The version ledger</a></p>
+<p class="lbl sec">Entry 4</p>
+<h2 id="d-4">Store resolution</h2>
+<p><strong>Claim:</strong> Store resolution confirms that 1 declared store resolves. The tracked-store check confirms that the store is a tracked git repository whose pointer, recorded sync target, and actual remote agree.</p>
+<p><strong>Limitation:</strong> Resolution cannot detect a second, unnamed store a project might also keep. The tracked-store check does not verify that the repository is backed up, accessible, or hosted anywhere in particular.</p>
+<p><strong>Evidence:</strong> <a href="/core-files/#pointer">The store pointer</a></p>
+<p class="lbl sec">Entry 5</p>
+<h2 id="d-5">The single-writer lease</h2>
+<p><strong>Claim:</strong> The standard's cross-system contract requires a divergence check to detect a collision between 2 systems afterward.</p>
+<p><strong>Limitation:</strong> The lease has a propagation window: a second system may begin before observing the held lease. The divergence check and the lease are specified controls, not complete CLI coverage, and opf sync is planned. The operation lock that opf init takes excludes other OPF runs on the same store only. It does not exclude runs on another store in the same repository or writers on another system.</p>
+<p><strong>Evidence:</strong> <a href="/core-files/#lease">The single-writer lease</a></p>
+<p class="lbl sec">Entry 6</p>
+<h2 id="d-6">Doctor and the renderer</h2>
+<p><strong>Claim:</strong> opf doctor runs the integrity checks as 1 command you can configure as a required CI step.</p>
+<p><strong>Limitation:</strong> Doctor reports per-record view drift and the content schemas of module-tier and importer records as cannot-evaluate. The reference renderer does not render or drift-check per-record views. For a store with module-tier or importer records, or a per-record store that declares views, doctor's overall verdict is cannot-evaluate (exit 2). Doctor does not check behind, ahead, or divergence against a sync target.</p>
+<p><strong>Evidence:</strong> <a href="/adopt/">The 10 command verbs</a></p>
+<p class="lbl sec">Entry 7</p>
+<h2 id="d-7">Adoption and the prompt pack</h2>
+<p><strong>Claim:</strong> The reference CLI runs adoption investigation; opf adopt plan, approve, reconcile and status run, and plan, approve and status write nothing.</p>
+<p><strong>Limitation:</strong> apply refuses every plan in this build and complete refuses every invocation, each with exit 2, so adoption cannot finish yet and no receipt, completion check or retirement is recorded. Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path. The prompt pack's procedures are instructions an assistant is asked to follow; they do not control what the assistant does. The interim clean-start route initializes a store with <code>opf init</code>; it is not an adoption, and a later <code>opf adopt</code> run reads that store as re-adoption. That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.</p>
+<p><strong>Evidence:</strong> <a href="/adopt/">Adopt</a> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-QUICKSTART.md" target="_blank" rel="noopener noreferrer">The quickstart<span class="vh"> (opens in a new tab)</span></a></p>
+<p class="lbl sec">Entry 8</p>
+<h2 id="d-8">What the release is made of</h2>
+<p><strong>Claim:</strong> The AIQT Guardrails 1.0.5 release manifest ships OPFiles code: the Python and shell tooling under opf/tools/; the opf enforcement hooks (the pre-commit hook and the Claude Code deny hook), the pre-commit installer, and the CI template and script under opf/enforcement/; and the HTML pages (inline scripts included) and JavaScript under opf/site/.</p>
+<p><strong>Limitation:</strong> On your machine none of it runs on its own: each piece runs only when you run a tool or check, install an enforcement hook, or open the site in a browser.</p>
+<p><strong>Evidence:</strong> <a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">The repository<span class="vh"> (opens in a new tab)</span></a></p>
+<p class="lbl sec">Entry 9</p>
+<h2 id="d-9">Network reach</h2>
+<p><strong>Claim:</strong> A host provider's conveniences call the external API of the host the target names; the egress bound is that named host and nothing else.</p>
+<p><strong>Limitation:</strong> The standard cannot vouch for the host's own behaviour beyond that bound. Public deliverables reach the product repository under that repository's own review flow, which the standard requires to exist but does not gate.</p>
+<p><strong>Evidence:</strong> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a></p>
+<p class="lbl sec">Entry 10</p>
+<h2 id="d-10">The discovery token</h2>
+<p><strong>Claim:</strong> A store declares itself with the exact discovery token <code>standard = "opf"</code> in its <code>[opf]</code> table.</p>
+<p><strong>Limitation:</strong> A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).</p>
+<p><strong>Evidence:</strong> <a href="/core-files/#manifest">The store manifest</a></p>
+<p class="lbl blk">Your browser</p>
+<p>If you use the light and dark switch, your choice is kept in your browser's local storage under the name scheme, so the site opens in that scheme next time. It is not sent to this site, and the site itself stores nothing until you press the switch. Cloudflare, which serves this site, adds an analytics script to its pages; it comes from Cloudflare, not from this site. On 4 November 2026 it stored nothing in the browser.</p>
+<p class="lbl blk">Security</p>
+<p>To report a security vulnerability, see <a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">the vulnerability disclosure policy<span class="vh"> (opens in a new tab)</span></a>. For what reaches Cloudflare and the owner when you visit this site, see <a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">the privacy policy<span class="vh"> (opens in a new tab)</span></a>.</p>
+<div class="next"><p class="lbl">Next</p><a class="start" href="/">Home <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
+</div></div>
+</main>
+<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project sites"><li class="slice slice-2"><a class="card" href="/" aria-current="page"><img src="/draft/assets/baseline/logos/opfiles.svg" alt=""><span class="cname">OPFiles<span class="tld">.ai</span></span><span class="vh"> (this site)</span></a></li><li class="slice slice-3"><a class="card" href="https://auditthis.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/auditthis.svg" alt=""><span class="cname">AuditThis<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-4"><a class="card" href="https://cleanlanguage.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/cleanlanguage.svg" alt=""><span class="cname">CleanLanguage<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-5"><a class="card" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/aiqt.svg" alt=""><span class="cname">AIQT<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-6"><a class="card" href="https://grclibrary.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/grclibrary.svg" alt=""><span class="cname">GRCLibrary<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-1"><a class="card" href="https://secureconfig.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/secureconfig.svg" alt=""><span class="cname">SecureConfig<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li></ul><ul class="tail" aria-label="Jeff Posluns elsewhere"><li class="tile tile-1"><a class="card" href="https://github.com/jposluns" target="_blank" rel="noopener noreferrer"><img class="only-light" src="/draft/assets/baseline/marks/github-invertocat-black.svg" alt=""><img class="only-dark" src="/draft/assets/baseline/marks/github-invertocat-white.svg" alt=""><span class="cname vh">GitHub</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-2"><a class="card" href="https://www.linkedin.com/in/jposluns/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/linkedin-in-bug.png" alt=""><span class="cname vh">LinkedIn</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-3"><a class="card" href="https://orcid.org/0009-0000-7775-2233" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/orcid-id.svg" alt=""><span class="cname vh">ORCID</span><span class="vh"> (opens in a new tab)</span></a></li></ul><div class="tile sigtile"><a class="sig" href="https://posluns.ca/" target="_blank" rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span><span class="post"> Project</span></a></div></div></footer>
+<p class="vh" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

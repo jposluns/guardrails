@@ -130,29 +130,11 @@ from _gen_common import repo_root, reconcile  # noqa: E402
 # source is present as a regular non-symlink file (so a deleted or renamed docs/*.md fails closed
 # rather than silently reading as an absent source that trips no check).
 GENSRC_OUTPUTS = (
-    {"target": "site/rules.html", "kind": "file",
-     "sources": ("docs/_shell.html", "docs/rules.md"),
-     "regenerate": "python3 tools/gen_site.py"},
-    {"target": "site/about.html", "kind": "file",
-     "sources": ("docs/_shell.html", "docs/about.md"),
-     "regenerate": "python3 tools/gen_site.py"},
     {"target": "site/development.html", "kind": "file",
      "sources": ("docs/_shell.html", "docs/development.md"),
      "regenerate": "python3 tools/gen_site.py"},
     {"target": "site/evidence.html", "kind": "file",
      "sources": ("docs/_shell.html", "docs/evidence.md"),
-     "regenerate": "python3 tools/gen_site.py"},
-    {"target": "site/learn.html", "kind": "file",
-     "sources": ("docs/_shell.html", "docs/learn.md"),
-     "regenerate": "python3 tools/gen_site.py"},
-    {"target": "site/standard.html", "kind": "file",
-     "sources": ("docs/_shell.html", "docs/standard.md"),
-     "regenerate": "python3 tools/gen_site.py"},
-    {"target": "site/examples.html", "kind": "file",
-     "sources": ("docs/_shell.html", "docs/examples.md"),
-     "regenerate": "python3 tools/gen_site.py"},
-    {"target": "site/teams.html", "kind": "file",
-     "sources": ("docs/_shell.html", "docs/teams.md"),
      "regenerate": "python3 tools/gen_site.py"},
 )
 
@@ -190,25 +172,20 @@ FIELD_TO_TOKEN = {
 # matching entry here; the shell-load-time reconciliation surfaces the drift both ways.
 SIDEBAR_SLUG_TO_HREF = {
     "home": "/",
-    "install": "/install",
-    "install-claude": "/install#claude",
-    "install-chatgpt": "/install#chatgpt",
-    "install-gemini": "/install#gemini",
-    "install-copilot": "/install#copilot",
-    "install-copilotstudio": "/install#copilotstudio",
-    "install-other": "/install#other",
+    "install": "/install/",
+    "install-claude": "/install/#claude",
+    "install-chatgpt": "/install/#chatgpt",
+    "install-gemini": "/install/#gemini",
+    "install-copilot": "/install/#copilot",
+    "install-copilotstudio": "/install/#copilotstudio",
+    "install-other": "/install/#other",
     "development": "/development",
     "tech-details": "/tech-details",
-    "teams": "/teams",
-    "learn": "/learn",
-    "standard": "/standard",
-    "mappings": "/mappings",
-    "examples": "/examples",
-    "roadmap": "/roadmap",
+    "standard": "/standard/",
+    "mappings": "/mappings/",
     "evidence": "/evidence",
-    "rules": "/rules",
-    "about": "/about",
-    "disclosure": "/disclosure",
+    "rules": "/rules/",
+    "disclosure": "/disclosure/",
 }
 
 
@@ -1007,12 +984,12 @@ def _self_test():
     # 13. sidebar_active slug marks the shell's link active.
     slug_shell = tiny_shell.replace(
         '<body>{{content}}</body>',
-        '<body><a class="navlink" href="/rules">Rules</a>{{content}}</body>')
+        '<body><a class="navlink" href="/rules/">Rules</a>{{content}}</body>')
     fm_slug = frontmatter.replace('sidebar-active = ""', 'sidebar-active = "rules"')
     case_count += 1
     try:
         rendered = render_page(slug_shell, fm_slug + '<p>ok</p>\n', "test.md")
-        needle = '<a class="navlink active" href="/rules" aria-current="page">Rules</a>'
+        needle = '<a class="navlink active" href="/rules/" aria-current="page">Rules</a>'
         if needle not in rendered:
             failures.append("sidebar active: expected {!r} in rendered".format(needle))
     except SchemaError as exc:
@@ -1021,7 +998,7 @@ def _self_test():
     _expect_error(
         "sidebar link absent",
         frontmatter.replace('sidebar-active = ""', 'sidebar-active = "rules"'),
-        "no `<a class=\"navlink\" href=\"/rules\">` link")
+        "no `<a class=\"navlink\" href=\"/rules/\">` link")
 
     # ---- Frontmatter escaping (BLOCKER-1) --------------------------------------------------------
     # 15. Title containing `&<>` is text-escaped in <title>, not injected as markup.
@@ -1128,12 +1105,12 @@ def _self_test():
     _expect_render("tab-only blank splits para", tab_blank_src, "<p>Two</p>")
 
     # ---- Sidebar reconciliation (MAJOR-8) ------------------------------------------------------
-    # 30. A shell with duplicated internal navlink (two `/rules`) fails closed at load time.
+    # 30. A shell with duplicated internal navlink (two `/rules/`) fails closed at load time.
     dup_nav_shell = tiny_shell.replace(
         '<body>{{content}}</body>',
         '<body>'
-        '<a class="navlink" href="/rules">A</a>'
-        '<a class="navlink" href="/rules">B</a>'
+        '<a class="navlink" href="/rules/">A</a>'
+        '<a class="navlink" href="/rules/">B</a>'
         + ''.join('<a class="navlink" href="{}">L</a>'.format(h)
                   for slug, h in SIDEBAR_SLUG_TO_HREF.items() if slug != "rules")
         + '{{content}}</body>')
@@ -1142,16 +1119,16 @@ def _self_test():
         lambda: _validate_shell_sidebar(dup_nav_shell, "shell.html"),
         SchemaError, "2 navlinks for slug 'rules'")
     # 31. A shell missing a mapped navlink fails closed at load time.
-    missing_about = tiny_shell.replace(
+    missing_evidence = tiny_shell.replace(
         '<body>{{content}}</body>',
         '<body>'
         + ''.join('<a class="navlink" href="{}">L</a>'.format(h)
-                  for slug, h in SIDEBAR_SLUG_TO_HREF.items() if slug != "about")
+                  for slug, h in SIDEBAR_SLUG_TO_HREF.items() if slug != "evidence")
         + '{{content}}</body>')
     _expect_raises(
         "shell missing mapped navlink",
-        lambda: _validate_shell_sidebar(missing_about, "shell.html"),
-        SchemaError, "no navlink for mapped slug 'about'")
+        lambda: _validate_shell_sidebar(missing_evidence, "shell.html"),
+        SchemaError, "no navlink for mapped slug 'evidence'")
     # 32. A shell with an unknown INTERNAL navlink fails closed at load time.
     extra_internal = tiny_shell.replace(
         '<body>{{content}}</body>',
@@ -1265,15 +1242,15 @@ def _self_test():
         "navlink alt-layout duplicate",
         lambda: _validate_shell_sidebar(
             nav_base.replace('{{content}}',
-                             '<a href="/rules" class="navlink">Dup</a>{{content}}'), "shell.html"),
+                             '<a href="/rules/" class="navlink">Dup</a>{{content}}'), "shell.html"),
         SchemaError, "2 navlinks for slug 'rules'")
     # A duplicate navlink using single-quoted attributes is caught.
     _expect_raises(
         "navlink single-quote duplicate",
         lambda: _validate_shell_sidebar(
             nav_base.replace('{{content}}',
-                             "<a class='navlink' href='/about'>Dup</a>{{content}}"), "shell.html"),
-        SchemaError, "2 navlinks for slug 'about'")
+                             "<a class='navlink' href='/evidence'>Dup</a>{{content}}"), "shell.html"),
+        SchemaError, "2 navlinks for slug 'evidence'")
     # A navlink with no href is caught (not silently ignored).
     _expect_raises(
         "navlink missing href",

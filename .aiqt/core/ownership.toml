@@ -309,9 +309,9 @@ class = "pack-immutable"
 path = "roadmap.toml"
 class = "pack-immutable"
 
-# --- concern-1: pack-immutable non-download site paths (each literal; the block-generated pages
-# --- site/disclosure.html, site/mappings.html, site/roadmap.html, site/install.html are whole-file
-# --- pack-immutable here, their block FRESHNESS checked separately by each block generator's own --check, 4.2)
+# --- concern-1: pack-immutable non-download site paths (each literal; the template pages tools/gen_draft_site.py
+# --- writes at the site root, site/index.html, site/404.html and site/<page>/index.html, are whole-file
+# --- pack-immutable here, their FRESHNESS checked by its own --check)
 
 [[release-class]]
 path = "site/404.html"
@@ -322,15 +322,11 @@ path = "site/_redirects"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/about.html"
-class = "pack-immutable"
-
-[[release-class]]
 path = "site/development.html"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/disclosure.html"
+path = "site/disclosure/index.html"
 class = "pack-immutable"
 
 [[release-class]]
@@ -342,10 +338,6 @@ path = "site/evidence.html"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/examples.html"
-class = "pack-immutable"
-
-[[release-class]]
 path = "site/favicon.svg"
 class = "pack-immutable"
 
@@ -354,19 +346,15 @@ path = "site/index.html"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/install.html"
+path = "site/install/index.html"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/learn.html"
+path = "site/license/index.html"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/mappings.html"
-class = "pack-immutable"
-
-[[release-class]]
-path = "site/roadmap.html"
+path = "site/mappings/index.html"
 class = "pack-immutable"
 
 [[release-class]]
@@ -374,19 +362,15 @@ path = "site/robots.txt"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/rules.html"
+path = "site/rules/index.html"
 class = "pack-immutable"
 
 [[release-class]]
-path = "site/standard.html"
+path = "site/standard/index.html"
 class = "pack-immutable"
 
 [[release-class]]
 path = "site/styles.css"
-class = "pack-immutable"
-
-[[release-class]]
-path = "site/teams.html"
 class = "pack-immutable"
 
 [[release-class]]
@@ -395,10 +379,6 @@ class = "pack-immutable"
 
 [[release-class]]
 path = "site/theme.js"
-class = "pack-immutable"
-
-[[release-class]]
-path = "site/js/install.js"
 class = "pack-immutable"
 
 [[release-class]]
@@ -421,8 +401,8 @@ class = "pack-immutable"
 path = "site/assets/baseline/logos/aiqt-touch.png"
 class = "pack-immutable"
 
-# The staged aiqt.ai draft (tools/gen_draft_site.py pages plus the pinned baseline copy under
-# site/draft/assets/baseline/), one directory prefix like opf/site: it moves to the site root at promotion.
+# The aiqt.ai draft folder: the /draft/ placeholder page tools/gen_draft_site.py writes and the pinned
+# baseline copy under site/draft/assets/baseline/, still served there; one directory prefix like opf/site.
 [[release-class]]
 pattern = "site/draft/**"
 class = "pack-immutable"

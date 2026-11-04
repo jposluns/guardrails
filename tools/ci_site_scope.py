@@ -120,19 +120,18 @@ SITE_REGENERATED = frozenset({
 })
 # Site-tree files a suite that can be SKIPPED reads as a verdict input, enumerated by the
 # gate-discipline coverage account recorded with this change: opf/tools/check_opf_homes.py (live
-# gate and self-test, the opf-tooling-a job and the git-fixture-env config lanes) reads the five
-# OPF homes contract pages and has no always-run sibling, so those five exclusions are
-# load-bearing; it also reads the generated draft disclosure, adopt and core-files pages that replace
-# three of them, so those three pages and the opf/site/draft-src/ sources they are generated from
-# are excluded too. tools/check_opf_declaration.py (live gate and self-test) reads
-# opf/site/tooling.html as a declaration surface AND walks the whole tree decoding every .md and
-# .html file (restating_documents), site pages included; because of that whole-tree walk, the
+# gate and self-test, the opf-tooling-a job and the git-fixture-env config lanes) reads the four
+# OPF homes contract files under opf/site/ (the generated adopt, core-files and disclosure pages
+# and the adoption guide opf/site/adopt.md) and has no always-run sibling, so those four
+# exclusions are load-bearing; the opf/site/draft-src/ sources the three pages are generated from
+# are excluded too. tools/check_opf_declaration.py (live gate and self-test) reads no site-tree
+# declaration surface, but walks the whole tree decoding every .md and .html file
+# (restating_documents), site pages included; because of that whole-tree walk, the
 # opf-declaration live gate and its self-test also run in the always-run site job, so a
 # site-only change that turns them red fails every lane (the execution-reconciled registration
-# stays in the selftest-execution job), and the tooling.html exclusion is retained as a
-# deliberate conservative margin, not because an always-run read is missing.
-# tools/check_python_floor.py reads site/development.html, site/install.html, opf/site/adopt.md,
-# opf/site/adopt.html and the generated draft install and adopt pages; its live gate runs in the always-run registry job in every run and in
+# stays in the selftest-execution job).
+# tools/check_python_floor.py reads site/development.html, site/install/index.html,
+# opf/site/adopt.md and opf/site/adopt/index.html; its live gate runs in the always-run registry job in every run and in
 # two of the three config lanes (the malformed lane excludes the bare launch, which stays in the
 # combined and system lanes), so those pages need no exclusion either. What the fast lane
 # deliberately gives up for a site-only train is every check in the eleven skipped jobs
@@ -149,18 +148,13 @@ SITE_REGENERATED = frozenset({
 # configuration and platform repetitions: the host-patch jobs' exact host Python, the config
 # lanes' hostile git configurations, and byte-canon-matrix's platforms.
 SITE_HEAVY_READ = frozenset({
-    "opf/site/adopt.html",
     "opf/site/adopt.md",
-    "opf/site/core-files.html",
-    "opf/site/disclosure.html",
+    "opf/site/adopt/index.html",
+    "opf/site/core-files/index.html",
+    "opf/site/disclosure/index.html",
     "opf/site/draft-src/adopt.toml",
     "opf/site/draft-src/core-files.toml",
     "opf/site/draft-src/disclosure.toml",
-    "opf/site/draft/adopt/index.html",
-    "opf/site/draft/core-files/index.html",
-    "opf/site/draft/disclosure/index.html",
-    "opf/site/record-indexes.html",
-    "opf/site/tooling.html",
 })
 REQUIRE_NONEMPTY = True
 # The merge lane's train branches: the fast lane engages only for a pull request whose head is
@@ -611,11 +605,11 @@ def self_test(report_path=None):
           [site_only(["opf/site/x"]), site_only(["opf/site/"]), site_only(["opf/site"]),
            site_only(["opf/sitex/a"])],
           [True, False, False, False])
-    # the twelve site-tree files a heavy suite reads as a verdict input are excluded
+    # the seven site-tree files a heavy suite reads as a verdict input are excluded
     check("decide/heavy-read-page-false",
-          [site_only([path]) for path in sorted(SITE_HEAVY_READ)], [False] * 12)
+          [site_only([path]) for path in sorted(SITE_HEAVY_READ)], [False] * 7)
     check("decide/heavy-read-poisons-false",
-          site_only(["site/index.html", "opf/site/tooling.html"]), False)
+          site_only(["site/index.html", "opf/site/core-files/index.html"]), False)
     # the regenerated records match exactly, never as a prefix or a sibling
     check("decide/regen-exact-only",
           [site_only([".aiqt/manifest.toml.bak"]), site_only([".aiqt/release/root.txt2"]),
@@ -664,7 +658,7 @@ def self_test(report_path=None):
         check("revert/regenerated-widened-red", site_only(["VERSION"]), True)
     with _patched(SITE_HEAVY_READ=frozenset()):
         check("revert/heavy-read-exclusion-dropped-red",
-              site_only(["opf/site/tooling.html"]), True)
+              site_only(["opf/site/core-files/index.html"]), True)
     with _patched(TRAIN_PREFIX=""):
         check("revert/train-prefix-dropped-red",
               train_head("pull_request", "feature-x", "o/r", "o/r"), True)

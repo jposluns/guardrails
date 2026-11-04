@@ -75,13 +75,14 @@ ALLOWLIST = frozenset()
 
 # Coverage roots, each (subdir, disclosure_href, allowlist). Both are REQUIRED inputs (an absent,
 # unreadable, or page-less root is fail-closed exit 2, never a clean pass over nothing). site/ is the
-# aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure. opf/site is the
+# aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure/ (the disclosure page
+# is the folder page site/disclosure/index.html). A live 404 page still carries DISCLOSURE_HREF. opf/site is the
 # opfiles.ai site, served from opf/site as its own root (Cloudflare Pages builds opf/site), so its pages
 # link the disclosure page RELATIVE (./disclosure): a relative link resolves within opf/site whatever the
 # mount point. Every live opf/site page (every page that is not a template page, which the draft rule below
 # covers instead) carries the nav, so the allowlist is empty (like site/).
 COVERAGE_ROOTS = (
-    ("site", "/disclosure", frozenset()),
+    ("site", "/disclosure/", frozenset()),
     ("opf/site", "./disclosure", frozenset()),
 )
 # A 404 page is served at any missing URL, however deep, so its links must not depend on the request
@@ -804,8 +805,8 @@ def _self_test():
     # pages at base "/" in each site's live root): the draft rule follows the template base, and a page
     # under draft/ that the generator does not list is a live page in either state.
     import gen_draft_site
-    staged_out = gen_draft_site.build()
-    promoted_out = gen_draft_site.build(sites=gen_draft_site.promoted_sites(), registered=False)
+    staged_out = gen_draft_site.build(sites=gen_draft_site.staged_sites(), registered=False)
+    promoted_out = gen_draft_site.build()
     promoted = frozenset(promoted_out)
     s_home, s_inner = staged_out["site/draft/index.html"], staged_out["site/draft/install/index.html"]
     p_home, p_inner = promoted_out["site/index.html"], promoted_out["site/install/index.html"]
@@ -906,10 +907,12 @@ def _self_test():
     # own root), every live page carries the nav (empty allowlist), a page missing the link is a finding, and an
     # absent opf/site root fails closed. run() requires BOTH roots, so it is exercised over a two-root tree.
     rel_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
+    # run() holds each site/ page to the site/ root's own href in COVERAGE_ROOTS.
+    site_nav = '<nav><a href="{}">Disclosure</a></nav>'.format(dict((s, h) for s, h, _a in COVERAGE_ROOTS)["site"])
     with tempfile.TemporaryDirectory() as d4:
         root4 = Path(d4)
         (root4 / "site").mkdir()
-        (root4 / "site" / "about.html").write_text(nav, encoding="utf-8")
+        (root4 / "site" / "about.html").write_text(site_nav, encoding="utf-8")
         if quiet_run(root4) != 2:
             failures.append("run() with site/ present but opf/site absent did not fail closed (expected 2)")
         (root4 / "opf" / "site").mkdir(parents=True)
@@ -940,7 +943,7 @@ def _self_test():
     with tempfile.TemporaryDirectory() as d4b:
         root4b = Path(d4b)
         (root4b / "site").mkdir()
-        (root4b / "site" / "about.html").write_text(nav, encoding="utf-8")
+        (root4b / "site" / "about.html").write_text(site_nav, encoding="utf-8")
         (root4b / "opf" / "site").mkdir(parents=True)
         (root4b / "opf" / "site" / "index.html").write_text(rel_nav, encoding="utf-8")
         (root4b / "opf" / "site" / "404.html").write_text(nav, encoding="utf-8")
