@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a729a7734f1663fec508d2ed3ddcdbf5e6acdd5452a88248144b9684266a4ddc"
+tree-sha256 = "35aae82e5357dd67e1d469df1e499b88a1ad5950f9f5dab20adb0d66474f70fe"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2751,8 +2751,8 @@ sha256 = "6594419bc15c14e7e4844e2a34bc5ef24618b7fccf79e9a0787f4e88d0f976ab"
 
 [[sources]]
 path = "opf/tools/_fail_closed_child.py"
-bytes = 45296
-sha256 = "655bed7faaf0a72e747e97fdaaebfa2becb67c00b6130be383ee799dee546524"
+bytes = 45342
+sha256 = "3536fdca8ea2b0d4a096368c59839f7c2baa0a94d2fdb9595a6ad2ec1d612c5b"
 
 [[sources]]
 path = "opf/tools/_journal.py"

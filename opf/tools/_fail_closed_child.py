@@ -42,10 +42,11 @@ NO record) writes no record (an os._exit during interpreter teardown, after the 
 instead leaves the record in place and sets the real status the parent compares against it), and the
 finalizer's refusing paths end with os._exit(2), which drops unflushed buffers on file objects other
 than sys.stdout, sys.stderr, sys.__stdout__ and sys.__stderr__ (those four the finalizer flushes
-after its own-process check, so the forked-process refusal exits before any flush, and a flush that
-itself raises ends the attempt unflushed); a refusing path writes no record and exits 2, so an
-os._exit there can only lose refusal diagnostics, never turn into a pass, while the reporting path
-defers to the interpreter, whose own teardown flushes what remains.
+after its own-process check; every refusing path, the forked-process refusal and a raising flush
+included, flushes sys.stderr with its refusal note, while unflushed sys.stdout text may be lost); a
+refusing path writes no record and exits 2, so an os._exit there can only lose refusal diagnostics,
+never turn into a pass, while the reporting path defers to the interpreter, whose own teardown
+flushes what remains.
 
 THE PARENT (minimal, this slice): run_child first calls the canonical child-status guard, carried
 below as the inline copy tools/check_child_status_coverage.py pins by AST to opf/tools/_child_status.py,
@@ -691,7 +692,7 @@ import os
 import _fail_closed_child as fcc
 with open(fcc._STATE["record_path"], "x", encoding="utf-8") as handle:
     json.dump({"nonce": fcc._STATE["nonce"], "decided_code": 0, "check_ids": [], "faults": []}, handle)
-    handle.write(" " * fcc._RECORD_CAP)
+    handle.write(" " * (1 << 20))
 os._exit(0)
 """
 
