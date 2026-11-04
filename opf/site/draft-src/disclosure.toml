@@ -104,7 +104,7 @@ text = "Your browser"
 
 [[body]]
 component = "prose"
-html = '''<p>If you use the light and dark switch, your choice is kept in your browser's local storage under the name scheme, so the site opens in that scheme next time. It is not sent to this site, and nothing is stored until you press the switch.</p>'''
+html = '''<p>If you use the light and dark switch, your choice is kept in your browser's local storage under the name scheme, so the site opens in that scheme next time. It is not sent to this site, and the site itself stores nothing until you press the switch. Cloudflare, which serves this site, adds an analytics script to its pages; it comes from Cloudflare, not from this site. On 4 November 2026 it stored nothing in the browser.</p>'''
 
 [[body]]
 component = "label"
@@ -112,7 +112,7 @@ text = "Security"
 
 [[body]]
 component = "prose"
-html = '''<p>To report a security vulnerability, see <a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">the vulnerability disclosure policy<span class="vh"> (opens in a new tab)</span></a>. For what these sites send to Cloudflare and the owner, see <a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">the privacy policy<span class="vh"> (opens in a new tab)</span></a>.</p>'''
+html = '''<p>To report a security vulnerability, see <a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">the vulnerability disclosure policy<span class="vh"> (opens in a new tab)</span></a>. For what reaches Cloudflare and the owner when you visit this site, see <a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">the privacy policy<span class="vh"> (opens in a new tab)</span></a>.</p>'''
 
 [[body]]
 component = "next"
