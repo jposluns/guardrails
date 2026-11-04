@@ -41,7 +41,7 @@ d = "Ask your assistant for a plan, review it, then authorize; the 10 command ve
 
 [[body]]
 component = "value"
-html = "OPFiles keeps each record in a fixed, machine-written form and generates the readable version from it; a check, set as a required step, fails the moment the 2 disagree. The standard forbids reusing a record's number or deleting a record. It is <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. The specification is a working draft; 2 of its 10 commands are not yet implemented, and adoption cannot finish yet."
+html = "OPFiles keeps each record in a fixed, machine-written form and generates the readable version from it; a check, set as a required step, fails the moment the 2 disagree. The standard forbids reusing a record's number or deleting a record. OPFiles is part of <a href=\"https://aiqt.ai\" target=\"_blank\" rel=\"noopener noreferrer\">AIQT Guardrails<span class=\"vh\"> (opens in a new tab)</span></a>, and both live in 1 repository: an AIQT adoption sets OPFiles up by default, and you can adopt OPFiles on its own. It is <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. The specification is a working draft; 2 of its 10 commands are not yet implemented, and adoption cannot finish yet."
 
 [[body]]
 component = "about"

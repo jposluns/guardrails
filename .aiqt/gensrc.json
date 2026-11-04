@@ -476,6 +476,15 @@
       "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
         "tools/gen_draft_site.py",
+        "site/draft-src/future.toml"
+      ],
+      "target": "site/draft/future/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
         "site/draft-src/home.toml"
       ],
       "target": "site/draft/index.html"

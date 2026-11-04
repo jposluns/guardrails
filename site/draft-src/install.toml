@@ -39,6 +39,10 @@ component = "prose"
 html = '''<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions and handoffs in one machine-written source, generates the readable versions from it, and fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open, and it significantly cuts errors.</p><p>An AIQT adoption sets up OPF by default. It is optional: say so in your plan review and the adoption skips it, and you can add it later.</p>'''
 
 [[body]]
+component = "prose"
+html = '''<p>Planning for a team? See <a href="$BASE/future/">what is coming for teams and enterprises</a>.</p>'''
+
+[[body]]
 component = "next"
 html = "What AIQT holds your assistant to."
 text = "The standard"
