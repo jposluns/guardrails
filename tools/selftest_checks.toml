@@ -4050,6 +4050,7 @@ expected-check-ids = [
   "c1/unverifiable-undeclared-path-passes",
   "c1/unverifiable-declared-input-blockers-unchanged",
   "c1/declared-input-forms-no-vote",
+  "c1/declared-input-fixture-verbatim",
   "c1/markdown-declared-forms-no-vote",
   "c1/ascii-rendered-forms-no-vote",
   "c1/markdown-fence-briefs-declare",
