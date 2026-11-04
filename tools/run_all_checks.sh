@@ -336,6 +336,8 @@ run_gate "cwe-importer-selftest" python3 -I -B tools/import_cwe.py --self-test
 
 run_gate "ci-parity-selftest" python3 -I -B tools/check_ci_parity.py --self-test
 run_gate "ci-parity"          python3 -I -B tools/check_ci_parity.py
+# The self-test ends with the live declaration gate over this tree (mirrors the registry job's one step).
+run_gate "ci-selection-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-selection-selftest
 
 # Git option-table drift: the self-test exercises the parser/comparator over fixtures (no git invoked);
 # the live leg compares installed git branch/tag help spellings against the hook's static option literal

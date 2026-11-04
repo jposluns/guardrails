@@ -1094,6 +1094,16 @@ count = 2
 class = "EXEMPT"
 reason = "test-code"
 
+# The self-test saves tomllib.loads before it swaps in a raiser for the RecursionError and MemoryError
+# cannot-evaluate vectors, and restores it after; the registry parse itself is handled in load_registry.
+[[site]]
+path = "tools/check_ci_selection.py"
+function = "_self_test"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 [[site]]
 path = "tools/check_crosswalk.py"
 function = "self_test"

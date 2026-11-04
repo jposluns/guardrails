@@ -1653,6 +1653,12 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_ci_parity.py
 
+      # The self-test ends with the live gate over this tree (check id live/real-tree-passes), so this one
+      # step also runs the declaration gate on tools/ci_checks.toml.
+      - name: CI selection declarations self-test and live gate (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite ci-selection-selftest
+
       - name: Git option table self-test
         shell: bash
         run: python3 -I -B tools/check_git_option_table.py --self-test

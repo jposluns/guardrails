@@ -110,6 +110,7 @@ guarded-surfaces = [
     "tools/check_byte_canon.py",
     "tools/check_child_status_coverage.py",
     "tools/check_ci_parity.py",
+    "tools/check_ci_selection.py",
     "tools/check_cited_standards.py",
     "tools/check_clauses.py",
     "tools/check_crosswalk.py",
