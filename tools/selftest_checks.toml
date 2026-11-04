@@ -4941,6 +4941,7 @@ expected-check-ids = [
   "homepage/missing-refused",
   "homepage/other-file-name-refused",
   "homepage/name-prefix-refused",
+  "homepage/trailing-suffix-refused",
   "homepage/not-string-refused",
   "exit/codes-0-1-2",
   "live/real-tree-passes",

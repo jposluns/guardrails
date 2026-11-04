@@ -33,9 +33,9 @@ read). The same table's homepage, the source archive URL, must end in /baseline-
 recorded version, so the archive cannot name another version. The file is read under the scanned root. An
 attribution file that is missing, unreadable, not a regular file, over MAX_ATTRIBUTION_BYTES, not UTF-8 or
 not TOML, a missing [vendored."site-template"] table, a version there that is missing or not an X.Y.Z
-string, a homepage there that is missing, not a string or not ending that way, a pin whose version differs
-from it, and 2 pins that name different versions are cannot-evaluate (exit 2). The gate reads only the repository; it
-never touches the network.
+string, a homepage there that is missing, not a string or not ending that way, a pin whose version
+differs from the recorded version, and 2 pins that name different versions are cannot-evaluate (exit 2).
+The gate reads only the repository; it never touches the network.
 """
 import sys
 
@@ -395,7 +395,7 @@ def run_gate(root, pins=PINS):
     if findings:
         return 1
     print("PASS: every file pinned in {} matches its SHA-256 under its registered copy root, with no stray "
-          "or linked entry, every pinned build tool is a regular file with its pinned SHA-256, and every pin names the site template version recorded in {}, whose homepage is that version's archive".format(
+          "or linked entry, every pinned build tool is a regular file with its pinned SHA-256, and every pin names the site template version recorded in {}, whose homepage ends in that version's archive name".format(
               ", ".join(pin_rel for pin_rel, _root in pins), ATTRIBUTION_WHERE))
     return 0
 
@@ -833,7 +833,8 @@ def _self_test():
             ("homepage/other-version-refused", archive.replace(FIXTURE_VERSION, "1.2.2"), None),
             ("homepage/missing-refused", False, "missing"),
             ("homepage/other-file-name-refused", archive.replace(".tar.gz", ".zip"), None),
-            ("homepage/name-prefix-refused", archive.replace(ending, "/x" + ending[1:]), None)):
+            ("homepage/name-prefix-refused", archive.replace(ending, "/x" + ending[1:]), None),
+            ("homepage/trailing-suffix-refused", archive + ".sig", None)):
         findings, errors = _scan_case(attribution=_attribution_text(homepage=homepage))
         check(name, findings == [] and errors == [
             '{}: [vendored."{}"] homepage must end in {} for version {}, but it is {}'.format(
