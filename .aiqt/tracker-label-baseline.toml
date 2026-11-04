@@ -199,7 +199,6 @@ reviewer-source = 46
 [[path]]
 path = "opf/tools/check_opf_record.py"
 review-round = 10
-qa-round = 9
 
 [[path]]
 path = "opf/tools/opf.py"

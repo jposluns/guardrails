@@ -1375,9 +1375,11 @@ def _superseders(rows, target):
     a target only such rows link is still its chain's current resolution and a head a new decision may
     supersede (spec 8.8); whether the whole planned chain then keeps exactly one current resolution is the
     planned-chain rule (_require_one_current_resolution). Only the exact actor kind `importer` is exempt:
-    a row whose actor kind is absent, unreadable or a lookalike counts when decided, fail-closed. A row
-    whose status cannot be read as unqualified `decided` removes nothing, exactly as the doctor's
-    derivation reads it (it seats such a row as not decided), so the two never disagree on a head."""
+    a row whose actor kind is absent, unreadable or a lookalike counts when decided, fail-closed. The
+    status is read from its raw string, its state the part before any `/` and only a `/proposed` suffix a
+    qualifier, so a status the doctor cannot parse whose state part is `decided` (`decided/bogus`) counts
+    here as removing authority, while the doctor seats that row with no state (it removes nothing there)
+    and grades its chain CANNOT-EVALUATE; that difference only refuses more."""
     return [r.get("id") for r in rows if isinstance(r, dict)
             and _opf_views.removes_authority(
                 str(r.get("status", "")).split("/", 1)[0],

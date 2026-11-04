@@ -2474,6 +2474,21 @@ def _check_handoff(recs, rep, unread=frozenset()):
                  "the at-most-one-current count is not evaluated over a partial set (spec 8.5)")
 
 
+def authority_removed(recs, firewall=True):
+    """The IDs among the clean seated pending_decision records in `recs` (as decision_chains seats them)
+    whose current authority a `supersedes` link removes (_opf_views.removes_authority, the shared
+    predicate): each target, itself among them, of a link from a decided, unqualified decision not
+    authored by an importer (`firewall` False: whoever authored it). decision_chains counts a chain's
+    current resolutions against this set, and the views' resolution join reads it to list a chain it
+    judges over the archive (_opf_views._chains_with_archive)."""
+    pds = [r for r in recs if r.rtype == "pending_decision" and isinstance(r.id, str)
+           and r.location != "imported"]
+    ids = {r.id for r in pds}
+    return {tid for r in pds for rel, tid in r.links
+            if rel == "supersedes" and isinstance(tid, str) and tid in ids
+            and _opf_views.removes_authority(r.state, r.qual is not None, firewall and r.actor_kind == "importer")}
+
+
 def decision_chains(recs, by_id, firewall=True):
     """The pending_decision supersession chains THAT HAVE A RESOLUTION (OPF-SPEC 8.5), as (members, current)
     pairs in record order. A chain is the connected component section 8.8 defines: every clean
@@ -2484,7 +2499,10 @@ def decision_chains(recs, by_id, firewall=True):
     ruling), true only for a decided, unqualified decision not authored by an importer, so a `supersedes`
     link from an open, withdrawn or `/proposed` decision joins the chain but removes no current authority,
     and such a decision is never itself a resolution. The views' resolution join and the record verb's
-    pre-write chain checks derive from the same predicate, so the three agree by construction. A chain
+    pre-write chain checks derive from the same predicate, so the three agree on a chain's count of current
+    resolutions. The record verb also refuses two things this derivation does not grade: a decide whose
+    record a decided successor already supersedes (its arrival rule), and a `supersedes` link whose
+    target's chain leads back to the record (the spec 8.8 cycle check, which follows every link). A chain
     with no decided member has no
     resolution yet and is not listed. The section 8.6 firewall applies here as in every current-state
     join, keyed on provenance alone (the maintainer ruling: OPF has never been released, so no store
@@ -2521,14 +2539,11 @@ def decision_chains(recs, by_id, firewall=True):
         if ra != rb:
             parent[ra] = rb
 
-    superseded = set()
     for r in pds:
         for rel, tid in r.links:
             if rel == "supersedes" and isinstance(tid, str) and tid in parent:
                 union(r.id, tid)
-                if _opf_views.removes_authority(r.state, r.qual is not None,
-                                                firewall and r.actor_kind == "importer"):
-                    superseded.add(tid)
+    superseded = authority_removed(pds, firewall)
     components = {}
     for pid in parent:
         components.setdefault(find(pid), []).append(pid)
@@ -2563,7 +2578,7 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
     chain THAT HAS A RESOLUTION (OPF-SPEC 8.5), over the chains decision_chains derives. For a chain
     carrying at least one decided member, the count of current resolutions must be exactly one, in BOTH
     directions: zero (every decided member's authority removed, a supersedes cycle among decided
-    resolutions) is a fail-open the count-only-over-one form missed (F14), and more than one (a chain
+    resolutions) is a fail-open a count of more than one alone would miss, and more than one (a chain
     joined only through an open, withdrawn, proposed or importer-authored decision, whose link removes no
     authority) is the two-heads finding, the chain and its resolutions named. A wholly-undecided chain
     legitimately has zero and is not
@@ -11025,7 +11040,7 @@ def self_test():
         check("r3-two-current-resolutions-invalid", run(f).status == INVALID)
         f = clean_machine()
         # every decided member's authority removed (a supersedes cycle between two decided resolutions)
-        # -> zero current (F14)
+        # -> zero current, a finding as well as more than one
         f["pending_decision.index.toml"] = idx([pd(1, supersedes="PD-2"), pd(2, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=2)
         check("r3-zero-current-resolution-invalid", run(f).status == INVALID)

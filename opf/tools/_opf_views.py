@@ -69,7 +69,8 @@ module-type mirror can be rendered regardless). Every record source is read from
 doctor's decision-chain check reads archived records beside the active ones, so a decision supersession
 chain is rendered here from its active decisions alone (join_resolution states what that leaves unseen).
 Only the decision renderers' one-current-resolution refusal reads the archive, through the doctor's own
-archive walk and chain derivation, so it never refuses a chain the doctor and the record verb count once.
+archive walk and chain derivation, so it never refuses a chain the doctor and the record verb count once,
+and such a chain is listed with the doctor's effective and superseded sets over its active decisions.
 
 The write path (spec 5.7/5.8/11): a mutating render gates on the `_opf_check.validate_store`
 store-integrity layer (cross-record uniqueness, coverage, reconciliation, view drift, changelog/version
@@ -516,7 +517,10 @@ def removes_authority(state, qualified, importer_authored):
     such a decision is never itself a current effective resolution. This is the ONE rule the resolution
     join (join_resolution), the doctor's chain derivation (_opf_check.decision_chains) and the record
     verb's pre-write chain checks (_opf_record._superseders and its planned-chain rule) all derive from,
-    so the three agree by construction. Takes the three facts as plain values so every caller's record
+    so the three agree on a chain's count of current resolutions. The record verb also refuses two things
+    the doctor and the views do not grade: a decide whose record a decided successor already supersedes
+    (its arrival rule), and a `supersedes` link whose target's chain leads back to the record (the spec
+    8.8 cycle check, which follows every link). Takes the three facts as plain values so every caller's record
     shape (a raw record table, or the doctor's seated view) adapts at its own site."""
     return state == "decided" and not qualified and not importer_authored
 
@@ -776,8 +780,9 @@ def _chains_with_archive(every, archived):
     """The doctor's supersession chains (_opf_check.decision_chains, derived from removes_authority) over
     the active `every`, seated as the doctor seats them, then the archived records `archived()` returns
     (the doctor's own archive walk, _opf_check.archived_records), keeping the first record seated per ID
-    as the doctor's map does. None when `archived()` returns None (the walk raised a problem), so the
-    caller's active-only refusal stands."""
+    as the doctor's map does, with the IDs whose authority a link over that same record set removes
+    (_opf_check.authority_removed, the set decision_chains counts against): (chains, removed). None when
+    `archived()` returns None (the walk raised a problem), so the caller's active-only refusal stands."""
     import _opf_check   # call-time: _opf_check imports this module at its top
     rest = archived()
     if rest is None:
@@ -788,7 +793,7 @@ def _chains_with_archive(every, archived):
     for rec in recs:
         if isinstance(rec.id, str):
             by_id.setdefault(rec.id, rec)
-    return _opf_check.decision_chains(recs, by_id)
+    return _opf_check.decision_chains(recs, by_id), _opf_check.authority_removed(recs)
 
 
 def _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors):
@@ -820,7 +825,8 @@ def join_resolution(decisions, archived=None):
     chain heads), superseded is the complementary set, and supersedes_map maps each authority-removing
     one's ID to the sorted IDs among them that it directly supersedes. EVERYTHING here derives from the
     ONE shared predicate, removes_authority (the doctor's decision_chains and the record verb's pre-write
-    chain checks derive from the same one, so the three agree by construction): a `supersedes` link
+    chain checks derive from the same one, so the three agree on a chain's count of current resolutions;
+    removes_authority names the two record-verb refusals neither grades): a `supersedes` link
     removes its target's current authority, and a decision stands as a current effective resolution, only
     when that decision is decided, unqualified and not importer-authored (spec 8.5/8.6). An
     importer-authored decision is imported history outside
@@ -866,10 +872,14 @@ def join_resolution(decisions, archived=None):
     `archived`, when given, is a zero-argument reader of the archived records the doctor seats
     (_archived_decisions), and a chain the active decisions alone would refuse is judged again by the
     doctor's own derivation over the active and archived records (_chains_with_archive), standing unless
-    that count is exactly one. A decided decision rotated to the archive can thus remove an active head's
-    authority, as it does for the doctor and the record verb, so a chain all three count once is not
-    refused here; the returned sets stay the active ones. When the archive walk raises a problem, the
-    active-only refusal stands."""
+    that count is exactly one; a refusal that stands then names the doctor's chain and its current
+    resolutions, archived members included. A decided decision rotated to the archive can thus remove an
+    active head's authority, as it does for the doctor and the record verb, so a chain all three count
+    once is not refused here, and its returned sets are the doctor's restricted to the active decisions:
+    an active member whose authority an archived decided decision removed is superseded, not current (a
+    chain whose one current resolution is archived lists none of its active members as current). Only
+    such a re-judged chain reads the archive; every other chain's sets stay the active ones. When the
+    archive walk raises a problem, the active-only refusal stands."""
     every = decisions
     chains = _linked_chains(decisions)
     decisions = t_filter(t_filter(decisions, "not_importer_authored"), "not_proposed")
@@ -938,11 +948,24 @@ def join_resolution(decisions, archived=None):
         # An active head may have lost its authority to a decided decision rotated to the archive, which
         # the active index alone cannot show. Such a chain is judged by the doctor's own derivation over
         # the doctor's own record set (active, then archived), so this refusal, C-DECISION-CHAINS and the
-        # record verb's chain rule count one chain alike; it stands unless that count is exactly one.
+        # record verb's chain rule count its current resolutions alike; it stands unless that count is
+        # exactly one, naming the doctor's chain and current resolutions. A chain it lets through is
+        # listed as the doctor derives it: an active member whose authority a link over that record set
+        # removes moves from `current` to `superseded`, so the chain never renders two effective
+        # resolutions. Every other chain keeps its active-only sets.
         full = _chains_with_archive(every, archived)
         if full is not None:
-            split = [(m, h, j) for m, h, j in split
-                     if len(next((c for ms, c in full if set(m) <= set(ms)), h)) != 1]
+            full_chains, removed = full
+            kept = []
+            for m, h, j in split:
+                ms, c = next(((ms, c) for ms, c in full_chains if set(m) <= set(ms)), (m, h))
+                if len(c) != 1:
+                    kept.append((_sorted_ids(ms), _sorted_ids(c), j))
+                    continue
+                lost = set(m) & ids & removed
+                current -= lost
+                superseded |= lost
+            split = kept
     if split:
         named = "; ".join("[{}] (current: {}; joined by: {})".format(
             ", ".join(m), ", ".join(h), ", ".join(j) or "links between its members")
@@ -3576,13 +3599,17 @@ def _self_test():
             [_pd(1, "decided", "maintainer"), _pd(2, "withdrawn", "maintainer", 1),
              _pd(3, "decided", "maintainer", 2)],
             ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3"), "withdrawn"))
-        # A decided decision rotated to the archive removes an active head's authority for the views' count
-        # as it does for the doctor and the record verb: the open PD-3 joins the decided PD-1 and PD-2, the
+        # A decided decision rotated to the archive removes an active head's authority for the views as it
+        # does for the doctor and the record verb: the open PD-3 joins the decided PD-1 and PD-2, the
         # archived decided PD-4 supersedes PD-2, and PD-1 supersedes PD-4, so the chain has one current
-        # resolution (PD-1) and renders, while the active index alone shows two. Red when the refusal counts
-        # the active index alone (both renderers then refuse naming PD-1 and PD-2). The controls: the same
-        # chain with the archived PD-4 not superseding PD-2 keeps two and refuses, and an archive the
-        # doctor's walk does not pass (the reader returns None) keeps the active-only refusal.
+        # resolution (PD-1) and renders, while the active index alone shows two. Both renderers list the
+        # doctor's sets, PD-1 effective and PD-2 superseded. Red when the refusal counts the active index
+        # alone (both renderers then refuse naming PD-1 and PD-2), and red when the re-judge lifts the
+        # refusal but keeps the active-only sets (PD-2 then renders as a second effective resolution). The
+        # controls: the same chain with the archived PD-4 not superseding PD-2 keeps two and refuses naming
+        # the doctor's chain, PD-4 included; an archived decided PD-4 superseding PD-1 instead leaves the
+        # doctor's current PD-2 and PD-4, which the refusal names in place of the active heads; and an
+        # archive the doctor's walk does not pass (the reader returns None) keeps the active-only refusal.
         import _opf_check as _ar_check
         _ar_active = [_pd(1, "decided", "maintainer", 4), _pd(2, "decided", "maintainer"),
                       _pd(3, "open", "maintainer", 1, 2)]
@@ -3594,15 +3621,24 @@ def _self_test():
         _ar_two = _ar_reader(_pd(4, "decided", "maintainer"))
         check("resolution-archived-decided-link-removes-active-head-one-current",
               _outcome(lambda a: join_resolution(a, _ar_one), _ar_active)
-              == ("ok", ({"PD-1", "PD-2", "PD-3"}, set(), {"PD-1": [], "PD-2": []}))
-              and _outcome(render_decisions_toml, {"pending_decision": _ar_active, ARCHIVED_DECISIONS: _ar_one})[0]
-              == "ok"
-              and _outcome(render_decisions, {"pending_decision": _ar_active, "autonomous_decision": [],
-                                              ARCHIVED_DECISIONS: _ar_one})[0] == "ok"
+              == ("ok", ({"PD-1", "PD-3"}, {"PD-2"}, {"PD-1": [], "PD-2": []}))
               and _both_refuse(_ar_active, ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-2"), "undecided"))
+        check("decisions-archived-decided-link-renders-doctor-sets",
+              _outcome(render_decisions, {"pending_decision": _ar_active, "autonomous_decision": [],
+                                          ARCHIVED_DECISIONS: _ar_one})
+              == ("ok", "# DECISIONS\n\n## Pending decisions\n- PD-3 t\n\n## Effective resolutions\n- PD-1 t\n\n"
+                  "## Superseded resolutions\n- PD-2 t\n\n## Autonomous decisions\n_No records._\n\n"
+                  "## Maintainer decisions\n_No records._\n\n## Preference patterns\n_No records._\n")
+              and '\n[derived]\neffective = ["PD-1", "PD-3"]\nsuperseded = ["PD-2"]\n' in _outcome(
+                  render_decisions_toml, {"pending_decision": _ar_active, ARCHIVED_DECISIONS: _ar_one})[1])
         check("resolution-archived-chain-two-current-still-cannot-evaluate", _refused_naming(
             _outcome(lambda a: join_resolution(a, _ar_two), _ar_active),
-            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-2"), "undecided"))
+            ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-1", "PD-2"), "undecided"))
+        check("resolution-archived-chain-refusal-names-doctor-current", _refused_naming(
+            _outcome(lambda a: join_resolution(a, _ar_reader(_pd(4, "decided", "maintainer", 1))),
+                     [_pd(1, "decided", "maintainer"), _pd(2, "decided", "maintainer"),
+                      _pd(3, "open", "maintainer", 1, 2)]),
+            ("PD-1", "PD-2", "PD-3", "PD-4"), ("PD-2", "PD-4"), "undecided"))
         check("resolution-archive-walk-problem-keeps-active-refusal", _refused_naming(
             _outcome(lambda a: join_resolution(a, lambda: None), _ar_active),
             ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-2"), "undecided"))

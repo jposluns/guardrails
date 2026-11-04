@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "fdf7dcadfc1af960e07d6d8adb4e5a3b6373101e284dad1a3fa37d2013eeb049"
+tree-sha256 = "fdfeb9d97889d39f08b313574351210eefc969fab25ddfb09c014d7af13c35d0"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -936,8 +936,8 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 
 [[sources]]
 path = ".aiqt/tracker-label-baseline.toml"
-bytes = 5110
-sha256 = "768317cd267fb8dc48206d87b2b8f74bbf69fccd2d34eab287dbabe2c117765b"
+bytes = 5097
+sha256 = "32f319c2ea9ace02f08dc86d834a3fc9570096a86534101647a3c047f085cb7e"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
@@ -2806,8 +2806,8 @@ sha256 = "46fc281172a82ade8fe5915f6b3a4db47e3929f05efef1ea4964bb97553b0e7d"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 862663
-sha256 = "d871f741fd9936e575eb5e7a966804c891992d564ccc9e5fedc8a67e5e2c7ac0"
+bytes = 863846
+sha256 = "1e961d2631ee902b46c78f9fa3063b134d725fbd2ffa04c6ebee04d59315539c"
 
 [[sources]]
 path = "opf/tools/_opf_declaration.py"
@@ -2891,8 +2891,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
-bytes = 370202
-sha256 = "f845fb51fb3b522ef31142d928073fe20b0ab229597cbb1ddc737339fcba4b3c"
+bytes = 370397
+sha256 = "c0062df333b7d77558ec1f4ef27e44c7b309820c3051a8df444d27c3c5000aac"
 
 [[sources]]
 path = "opf/tools/_opf_release.py"
@@ -2916,8 +2916,8 @@ sha256 = "f107eb0ce949cb2eeb740b19efd1a3c31379495774745663264c06d0f30d1592"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
-bytes = 431219
-sha256 = "ccdeee915e6de4db7e58ac6433adf301c67004d35ffcac3511c502c3cdb1f224"
+bytes = 434362
+sha256 = "0d0369f8155b3048f8771fd66f226ba16b136d353ab03c49707144f90eb11ce3"
 
 [[sources]]
 path = "opf/tools/_opf_worklog.py"
@@ -3136,8 +3136,8 @@ sha256 = "ece985a127931180d2096ff17e1293d11be46f68bd8a2266b160a4f47c279181"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
-bytes = 636140
-sha256 = "d06e5c1c00ddb30a95f3b19f50f8d5e91f6617263707c0e9195160c4357fe453"
+bytes = 636543
+sha256 = "8e0249dfb1f6ed0ac843b123f1865bf212888fc3a50af232de63798a4438e48c"
 
 [[sources]]
 path = "opf/tools/opf-declaration.toml"

@@ -333,21 +333,22 @@ Each case runs on its own copy of that template; the root is removed in a finall
       flips the chain rule still refuses with every byte untouched (two current resolutions for the fork,
       none for the cycle). Every landing at unqualified decided must leave its chain with exactly one
       current resolution (the doctor's own rule, recomputed over the planned index), each case its own
-      test, every byte untouched: QA1 Case A, a --supersedes naming a chain head whose joined chain would
+      test, every byte untouched: a --supersedes naming a chain head whose joined chain would
       then hold two current resolutions, since an open decision's links join the chain but remove no
       authority (the same decide superseding the joined chain's other head instead lands doctor VALID);
-      QA1 Case B, a record a decided successor already supersedes, decided with --supersedes (its
+      a record a decided successor already supersedes, decided with --supersedes (its
       authority would be removed on arrival); and that record decided without
       the link (flip, applied to each of the three: drop the chain rule, under which the decide publishes
       and the source gate refuses on the C-DECISION-CHAINS finding). The chain rule
       reads what the doctor reads, the archive included, each case its own test after a release whose
-      worklog rotates to archive/2026 with one decision: QA3 reproduction A, a decide superseding an
+      worklog rotates to archive/2026 with one decision: a decide superseding an
       archived head, legal only because the archive shows the chain's other decided member already
-      superseded, lands doctor VALID; QA3 reproduction B, the decide of a record an
+      superseded, lands doctor VALID; the decide of a record an
       archived decided decision supersedes, refuses with every byte untouched; and an archived index
       that does not parse refuses a decide with every byte untouched, never skipped (flip, applied to
-      each of the three: restore the active-only read, under which A refuses on two current resolutions,
-      B publishes with the refusal lost (the superseder is the archive's alone), and the third publishes
+      each of the three: restore the active-only read, under which the first refuses on two current
+      resolutions, the second publishes with the refusal lost (the superseder is the archive's alone), and
+      the third publishes
       and the final doctor cannot evaluate the archive). The supersedes target checks read the same record
       set, each case its own test: superseding a decided chain head rotated to the archive lands doctor
       VALID, and a second successor for a resolution an archived decision already supersedes refuses at
@@ -357,7 +358,8 @@ Each case runs on its own copy of that template; the root is removed in a finall
       is no record, the fork reaches the chain rule, and the withdrawn target refuses as no record); and
       a supersede that would close a cycle through an archived chain member refuses with the cycle
       check's own message, every byte untouched, in its own test (flip: restore the active-only read for
-      the cycle check alone, under which the chain rule refuses instead with its own message). The
+      the cycle check alone, under which the chain rule accepts the link, the decide publishes and the
+      untouched assertion turns red). The
       decisions register's other two types are driven end to end:
       a maintainer files a maintainer_decision linking exemplifies PP-1, doctor VALID and listed with its link, and an
       assistant distils a preference_pattern to active/proposed that the maintainer ratifies and then
@@ -2753,7 +2755,7 @@ def flip_t72_cycle():
 
 
 def t72_chain_join(fx):
-    """QA1 Case A. PD-1 is decided, PD-3 (open) links supersedes PD-2 and PD-1 (joining the three into one
+    """A --supersedes whose link joins two chains into one with two current resolutions. PD-1 is decided, PD-3 (open) links supersedes PD-2 and PD-1 (joining the three into one
     chain without removing authority, PD-1 its one current resolution), and PD-4 is decided in its own
     chain: doctor VALID. PD-2 decided with --supersedes PD-4 passes every
     target check (PD-4 is decided, schema-valid, and the head of its chain, and its own chain never reaches
@@ -2789,7 +2791,8 @@ def _shadowed(fx, root):
 
 
 def t72_superseded_record(fx):
-    """QA1 Case B. PD-2 is already superseded by the decided PD-3, so PD-2 decided with --supersedes PD-1
+    """A decide of a record a decided successor already supersedes, with --supersedes. PD-2 is already
+    superseded by the decided PD-3, so PD-2 decided with --supersedes PD-1
     would land a resolution whose authority is already removed: it
     refuses with every byte untouched."""
     root = fx.case("t72-superseded-record")
@@ -2799,7 +2802,7 @@ def t72_superseded_record(fx):
 
 
 def t72_superseded_record_plain(fx):
-    """QA1 Case B without the link: PD-2's own decide would land a resolution the decided PD-3 already
+    """The same superseded record decided without the link: PD-2's own decide would land a resolution the decided PD-3 already
     supersedes, so it refuses with every byte untouched too."""
     root = fx.case("t72-superseded-record-plain")
     with ticking():
@@ -2864,7 +2867,8 @@ def _withdrawn_successor(fx, root):
 
 
 def t72_archived_resolution(fx):
-    """QA3 reproduction A. PD-2 is decided, the open PD-3 links supersedes PD-1 and PD-2 (joining the three
+    """A decide superseding an archived head, legal only because the chain rule reads the archive. PD-2 is
+    decided, the open PD-3 links supersedes PD-1 and PD-2 (joining the three
     into one chain without removing authority), and PD-4, decided superseding PD-2, is rotated to the
     archive: doctor VALID, the archived PD-4 the chain's one current resolution. PD-1 decided with
     --supersedes PD-4 supersedes that archived head and leaves itself the one current resolution, legal
@@ -2886,7 +2890,7 @@ def t72_archived_resolution(fx):
 
 
 def t72_archived_successor(fx):
-    """QA3 reproduction B. PD-2, created linking supersedes PD-1 and then decided, is rotated to the
+    """A decide of a record an archived decided decision supersedes. PD-2, created linking supersedes PD-1 and then decided, is rotated to the
     archive: doctor VALID, PD-2 the chain's one current resolution. Deciding PD-1 would land a resolution
     the archived decided PD-2 already supersedes, so it refuses with every byte untouched."""
     root = fx.case("t72-archived-successor")
@@ -2987,7 +2991,8 @@ def t72_archived_cycle(fx):
 
 def flip_t72_archived_cycle():
     """Restore the active-only read for the cycle check alone: it walks the active index, so the chain
-    through the archived PD-2 is missed and the chain rule refuses instead, with its own message."""
+    through the archived PD-2 is missed, and the chain rule accepts the link (PD-1 the chain's one current
+    resolution, since the archived withdrawn PD-2's link removes no authority), so the decide publishes."""
     link, acyclic = record._supersession_link, record._require_acyclic
 
     def active_only(req, ctx, operand, rid):
