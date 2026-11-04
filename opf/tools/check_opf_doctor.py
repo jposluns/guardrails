@@ -158,8 +158,9 @@ resolution (both the HEAD-prior and the per-parent finding named) or carried by 
 clean merge whose result keeps both sides' added records concludes as a two-parent merge, a merged
 branch's own committed non-terminal status change (reaching a terminal state kept in the result)
 concludes ungraded, and an octopus git merge -s ours of two branches (MERGE_HEAD naming two commits) is
-refused the same way; the clean merge and the -s ours drop, run again without the stubs, commit, so it
-is the stubs that stop them. The merge observation fails closed: a
+refused the same way; the first merge the pre-merge-commit stub stops (two branches each adding one file
+outside the store) and the -s ours drop, run again without the stubs, commit, so it is the stubs that
+stop them. The merge observation fails closed: a
 MERGE_HEAD the hook cannot validate (not hex, an unknown id, empty, a tree id) exits 2 at the hook by
 its own message, and one the hook passes but the observer cannot read back to usable snapshots (an
 oversized MERGE_HEAD of valid ids past the observer's bounded read, a parent commit holding no
@@ -168,7 +169,8 @@ but is not the full-length id git writes) is doctor's named CANNOT-EVALUATE, eac
 never an unchecked merge; the observer's remaining malformed branches sit behind the hook's validation,
 so doctor runs over the planted merge state directly and an empty MERGE_HEAD, an unreadable one (a
 directory at its path), a full-length id resolving to no commit, and a store path git cannot report
-(rev-parse --show-prefix failing) are each the same named CANNOT-EVALUATE. Run as
+(rev-parse --show-prefix failing) are each the same named CANNOT-EVALUATE; each of these observer cases
+(the abbreviated id included) also holds the note its own branch prints through doctor. Run as
 pre-merge-commit, the hook runs no step and exits 2. The shipped files disclose that git merge --no-verify
 skips the stubs, that a merge commit's non-terminal status changes are not graded while a terminal state
 any parent holds must be kept by a record active in the result (one the result archives is not
@@ -2616,12 +2618,18 @@ def _self_test_isolated():
             expect("merge-storeless-parent-cannot-evaluate", (refused, still, cant in text),
                    (True, True, True))
             # The observer's own malformed-merge branches, each ending in the engine's named
-            # CANNOT-EVALUATE. An ABBREVIATED commit id passes the hook (its per-line test is hex, and
-            # git rev-parse --verify resolves an abbreviation), so the observer's full-length id test is
-            # reached end to end through git commit.
+            # CANNOT-EVALUATE and each pinned by the note its own branch adds, which doctor prints as
+            # "opf doctor: note: ...": the engine's shared message alone stays green when a branch's own
+            # handling is removed and a later branch or the engine still holds the merge closed. An
+            # ABBREVIATED commit id passes the hook (its per-line test is hex, and git rev-parse --verify
+            # resolves an abbreviation), so the observer's full-length id test is reached end to end
+            # through git commit.
+            note = "opf doctor: note: merge: "
             refused, still, text = _planted_commit(planted_head[:-1] + "\n")
-            expect("merge-head-abbreviated-id-cannot-evaluate", (refused, still, cant in text),
-                   (True, True, True))
+            expect("merge-head-abbreviated-id-cannot-evaluate",
+                   (refused, still, cant in text,
+                    note + "MERGE_HEAD holds {!r}, which is not a commit id".format(planted_head[:-1]) in text),
+                   (True, True, True, True))
 
             # The remaining malformed branches sit behind the hook's validation (an empty, unreadable or
             # unresolvable MERGE_HEAD exits 2 at the hook before any check runs), so the observer is
@@ -2644,19 +2652,25 @@ def _self_test_isolated():
             # An empty MERGE_HEAD (the hook refuses one itself, so it is planted for doctor directly).
             Path(planted_mh).write_text("", encoding="utf-8")
             rc, text = _doctor_merge_text()
-            expect("merge-head-observer-empty-cannot-evaluate", (rc, cant in text), (EXIT_ERROR, True))
+            expect("merge-head-observer-empty-cannot-evaluate",
+                   (rc, cant in text, note + "MERGE_HEAD exists but names no commit" in text),
+                   (EXIT_ERROR, True, True))
             # A full-length id that resolves to no commit of the repository (the hook verifies each id
             # itself, so an unresolvable one is planted for doctor directly).
             Path(planted_mh).write_text("1" * 40 + "\n", encoding="utf-8")
             rc, text = _doctor_merge_text()
-            expect("merge-head-observer-unresolvable-cannot-evaluate", (rc, cant in text),
-                   (EXIT_ERROR, True))
+            expect("merge-head-observer-unresolvable-cannot-evaluate",
+                   (rc, cant in text,
+                    note + "MERGE_HEAD names {}, which does not resolve to a commit of this "
+                    "repository".format("1" * 40) in text),
+                   (EXIT_ERROR, True, True))
             # A MERGE_HEAD that exists but cannot be read back (a directory at its path).
             Path(planted_mh).unlink()
             Path(planted_mh).mkdir()
             rc, text = _doctor_merge_text()
-            expect("merge-head-observer-unreadable-cannot-evaluate", (rc, cant in text),
-                   (EXIT_ERROR, True))
+            expect("merge-head-observer-unreadable-cannot-evaluate",
+                   (rc, cant in text, note + "MERGE_HEAD exists but cannot be read (" in text),
+                   (EXIT_ERROR, True, True))
             Path(planted_mh).rmdir()
             # A store path git cannot report: a git whose rev-parse --show-prefix fails while every other
             # call runs as usual (the observer's scrubbed environment carries only PATH and HOME, so the
@@ -2672,7 +2686,10 @@ def _self_test_isolated():
             os.chmod(str(noprefix_bin / "git"), 0o755)
             Path(planted_mh).write_text(planted_head + "\n", encoding="utf-8")
             rc, text = _doctor_merge_text(extra_path=noprefix_bin)
-            expect("merge-head-observer-prefix-cannot-evaluate", (rc, cant in text), (EXIT_ERROR, True))
+            expect("merge-head-observer-prefix-cannot-evaluate",
+                   (rc, cant in text,
+                    note + "could not determine the store's path within the repository" in text),
+                   (EXIT_ERROR, True, True))
             # Tolerant cleanup: a regression that ACCEPTS one of these commits makes git consume
             # MERGE_HEAD, and the red vectors above must still be reported, not a harness error.
             Path(planted_mh).unlink(missing_ok=True)
@@ -2693,6 +2710,7 @@ def _self_test_isolated():
                 and "terminal-status resurrection" in inst_text
                 and "tied counters do not expose it" in hook_text
                 and "tied counters do not expose it" in inst_text
+                and "caught only as a lowered counter: tied counters do not expose it" in inst_text
                 and "different unqualified terminal states" in hook_text
                 and "different unqualified terminal states" in inst_text
                 and "is not status-compared" in hook_text
@@ -2871,7 +2889,8 @@ def _self_test_isolated():
               "unqualified-terminal record refused as terminal resurrection whether staged in the merge "
               "resolution or carried by the merged branch, a clean merge keeping both sides' records "
               "(and a merged branch's own non-terminal status change reaching a kept terminal state) "
-              "concluded, the clean merge and the -s ours drop run again without the stubs committing; "
+              "concluded, the first merge the stub stops (two branches each adding one file outside "
+              "the store) and the -s ours drop run again without the stubs committing; "
               "merge observation fails closed "
               "(a MERGE_HEAD the hook cannot validate, not hex, an unknown id, empty or a tree id, exits "
               "2 at the hook, while an oversized MERGE_HEAD of valid ids, a parent commit holding no "
@@ -2879,7 +2898,8 @@ def _self_test_isolated():
               "and the observer branches behind the hook's validation, an empty MERGE_HEAD, an "
               "unreadable one, a full-length id resolving to no commit and a store path git cannot "
               "report, are each the same named CANNOT-EVALUATE with doctor run over the planted merge "
-              "state directly), never an unchecked merge; "
+              "state directly, each observer case also holding its own branch's note), never an "
+              "unchecked merge; "
               "git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
               "passes an unborn branch and a remote sync target; over an opf init store passes render "

@@ -90,13 +90,12 @@
 # records, lowered counters and terminal-status resurrection, but the survival comparison covers each
 # parent's typed record indexes (a worklog entry is not an indexed record, so a dropped worklog entry is
 # caught only as a lowered counter, and tied counters do not expose it), a record a parent holds at an
-# unqualified terminal state keeps that state only while it stays active in the result (one the result
-# archives is not status-compared against a parent; two parents holding one record at different
+# unqualified terminal state is held to that state only while it stays active in the result (one the
+# result archives is not status-compared against a parent; two parents holding one record at different
 # unqualified terminal states refuse every result that keeps it active; a merged parent record with an
-# unparseable status or an unsupported type is a named cannot-evaluate), and a merge commit's
-# non-terminal status
-# changes are not graded; the pre-merge-commit
-# stop makes a scripted git merge or git pull (merge mode) exit 1 and leaves MERGE_HEAD and the staged
+# unparseable status or an unsupported type is a named cannot-evaluate while the result keeps it
+# active), and a merge commit's non-terminal status changes are not graded; the pre-merge-commit stop
+# makes a scripted git merge or git pull (merge mode) exit 1 and leaves MERGE_HEAD and the staged
 # merge result behind, so a later git pull exits 128 until the merge is concluded with git commit or
 # abandoned with git merge --abort; a core.hooksPath set later, in any scope, stops the stubs silently; the
 # core.hooksPath check reads the configuration this run sees, so one a later commit reads instead

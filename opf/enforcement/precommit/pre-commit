@@ -60,10 +60,12 @@
 # record, so a dropped entry is caught only as a lowered counter, and tied counters do not expose it),
 # no counter may fall below its value in any parent, and a record any parent holds at an unqualified
 # terminal state must keep that state while it stays an active record in the result (see Residuals),
-# refusing on any dropped record, lowered counter or
-# terminal-status resurrection, while a merge commit's non-terminal status changes are not graded (see
-# Residuals). A MERGE_HEAD that cannot be read, or holds anything but commit ids of this
-# repository, exits 2 before any check, never an unchecked merge.
+# refusing on any dropped record, lowered counter or terminal-status resurrection, while a merge
+# commit's non-terminal status changes are not graded (see Residuals). A MERGE_HEAD that cannot be read,
+# is empty, or holds anything but lowercase-hex ids that git resolves to commits of this
+# repository exits 2 before any check. One that passes those tests but that the doctor cannot read back
+# to the merged commits' snapshots (an abbreviated id, which git resolves, is one) is the doctor's named
+# cannot-evaluate, also exit 2: never an unchecked merge.
 #
 # Residuals this hook does not close (spec 14.1):
 #   - Per-clone installation: the stub is local to the clone. It is not cloned or pushed, so a clone that
@@ -92,8 +94,8 @@
 #     only while it is active in the result: one the result archives is not status-compared against a
 #     parent (its survival and the archive's own checks still apply). Two parents that hold one record
 #     at different unqualified terminal states refuse every merge result that keeps it active, whichever
-#     of the two states the result keeps. A merged parent's record with an unparseable status or an
-#     unsupported type is a named cannot-evaluate, never an ungraded record.
+#     of the two states the result keeps. While the result keeps it active, a merged parent's record with
+#     an unparseable status or an unsupported type is a named cannot-evaluate, never an ungraded record.
 #   - The hook runs checked-out code: the stub runs the working-tree copy of this file, and this file
 #     runs the working-tree opf.py (OPF_TOOL), not the staged ones. Checking out a branch, merge or pull
 #     request that changes them runs the changed code, with the user's privileges, at the next git
@@ -187,7 +189,10 @@ remotes=$(git remote) || fail "git remote could not list the remotes"
 # octopus merge). Its ids are validated and carried into the snapshot as its MERGE_HEAD, so the doctor
 # compares the staged result with every parent (see Merge commits above). Reading MERGE_HEAD as a file
 # (git rev-parse MERGE_HEAD resolves only its first line) keeps every merged commit; one that cannot be
-# read or does not hold commit ids of this repository exits 2 before any check.
+# read, is empty, or holds anything but lowercase-hex ids git resolves to commits of this
+# repository exits 2 before any check. git rev-parse --verify also resolves an abbreviated id, so one
+# passes here and the doctor refuses it later as a named cannot-evaluate (the doctor's merge observation
+# holds the full-length id test; this hook does not).
 mh_lines=
 mh_path=$(git rev-parse --path-format=absolute --git-path MERGE_HEAD) || fail "could not locate MERGE_HEAD"
 if [ -e "$mh_path" ] || [ -L "$mh_path" ]; then
