@@ -4936,6 +4936,12 @@ expected-check-ids = [
   "version/attribution-version-shape",
   "bound/attribution-size-at",
   "bound/attribution-size-over",
+  "homepage/matching-passes",
+  "homepage/other-version-refused",
+  "homepage/missing-refused",
+  "homepage/other-file-name-refused",
+  "homepage/name-prefix-refused",
+  "homepage/not-string-refused",
   "exit/codes-0-1-2",
   "live/real-tree-passes",
 ]
