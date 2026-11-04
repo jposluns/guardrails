@@ -43,9 +43,10 @@ page is reported by this rule and by the touch-icon rule below, so it is listed 
 
 404 structure: that list of attributes cannot name every way markup loads a resource, so a 404 page is also
 held, fail closed, to the element and attribute names the live 404 pages use: any other name the raw scan
-finds is a finding naming the page, line and name. The 404 page directly under the root's top-level draft/
-(draft/404.html, served at any missing /draft/ URL, built from the site template) is held the same way to
-the names the two draft 404 pages use instead; a 404.html any deeper under draft/ keeps the live names. On the allowed names, any value and any script or style
+finds is a finding naming the page, line and name. A 404 page the site template builds (a 404.html target
+of tools/gen_draft_site.py GENSRC_OUTPUTS, read through tools/_template_pages.py: draft/404.html while
+staged, the root's 404.html once promoted) is held the same way to the names the two template 404 pages
+use instead; any other 404.html, under draft/ or not, keeps the live names. On the allowed names, any value and any script or style
 text containing "url(" (any case, as written or decoded) is a finding, a meta element may carry only the
 attributes the live pages use on meta, onclick and the SVG presentation attributes only the values they use,
 a script without src only a body whose sha256 is pinned, and a script with src only an empty body. A
@@ -56,11 +57,11 @@ The rule reads markup only: it cannot analyse what an allowlisted inline script 
 trusts the pinned bodies), nor what the same-origin script, stylesheet or icon a root-absolute URL loads
 contains, nor where an https:// a href leads once followed (a navigation, not a load).
 
-Apple touch icon: every live page (one not under the top-level draft/ directory of its root, 404 pages
-included) must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root,
+Apple touch icon: every live page (one that is not a generated template page, 404 pages included) must carry a <link rel="apple-touch-icon"> whose href names an existing file under that root,
 taken as the exact path (no .html or index.html fallback); a missing link, or one naming a missing file, a
 directory, an external or protocol-relative URL or a path escaping the root, is a finding, and so is a
-relative href on a 404 page. Draft pages are built under the site template's own rules and are not checked here.
+relative href on a 404 page. Template pages are built under the site template's own rules and are not checked
+here; a page under draft/ that the generator does not list is a live page.
 """
 import sys
 
@@ -86,6 +87,7 @@ from urllib.parse import unquote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+import _template_pages  # noqa: E402  which pages the site template generates (GENSRC_OUTPUTS, not a folder name)
 
 EN, EM = "–", "—"
 # Site host from AIQT_SITE_HOST (default, and empty-value fallback, aiqt.ai; lowercased), so a
@@ -135,10 +137,9 @@ AUTOCLOSERS = {
 # an interactive element (<a>/<button>) may not contain another interactive element. These nest silently
 # in the parser (well-balanced) but break rendering/behaviour, so open/close balance never catches them.
 INTERACTIVE = {"a", "button"}
-# The Apple touch icon link every live page carries, and the directory name whose subtree holds draft pages
-# (built under the site template's own rules, so not held to the live pages' head).
+# The Apple touch icon link every live page carries. A generated template page (built under the site
+# template's own rules) is not held to the live pages' head; _template_pages says which pages those are.
 TOUCH_ICON_REL = "apple-touch-icon"
-DRAFT_DIR = "draft"
 
 
 class Page(HTMLParser):
@@ -345,14 +346,14 @@ def _touch_icon_file(href, page_dir, site_root):
     return None
 
 
-def touch_icon_findings(label, page_rel, icons, page_dir, site_root):
+def touch_icon_findings(label, page_rel, icons, page_dir, site_root, template=False):
     """Findings for one page's Apple touch icon links. `label` names the page in a finding, `page_rel` is
-    its path relative to its root, `icons` its (href, line) list. A page under the root's top-level draft/
-    directory (the /draft/* of _headers) is not checked; any other page needs at least one link, and every
+    its path relative to its root, `icons` its (href, line) list. A generated template page (`template`
+    true, from _template_pages) is not checked; any other page needs at least one link, and every
     link must name an existing file. A 404 page is served at any missing URL, however deep, so its links
     must be root-absolute: a relative one resolves below the root there."""
     parts = Path(page_rel).parts
-    if len(parts) > 1 and parts[0] == DRAFT_DIR:
+    if template:
         return []
     if not icons:
         return ['{}: missing <link rel="{}"> (every live page links the touch icon)'.format(
@@ -739,9 +740,12 @@ def _self_test():
         (r / "opf" / "site" / "index.html").write_text(
             '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/touch.png"><nav></nav>',
             encoding="utf-8")
-        (draft / "disclosure.html").write_text("<!doctype html><title>t</title><p>d</p>", encoding="utf-8")
+        # These pages are not generator targets, so they are live pages and carry the touch icon.
+        icon = '<link rel="apple-touch-icon" href="/touch.png">'
+        (draft / "disclosure.html").write_text("<!doctype html><title>t</title>" + icon + "<p>d</p>",
+                                               encoding="utf-8")
         (draft / "manifest.html").write_text(
-            '<!doctype html><title>t</title><nav><a href="./disclosure">D</a></nav>', encoding="utf-8")
+            '<!doctype html><title>t</title>' + icon + '<nav><a href="./disclosure">D</a></nav>', encoding="utf-8")
         if quiet(_scan_root, r, "opf/site") != 0:
             failures.append("coverage: a clean opf/site tree with relative links did not pass")
         (draft / "broken.html").write_text(
@@ -799,10 +803,10 @@ def _self_test():
 
     # The draft 404 structural allowlist: a name only the draft 404 pages use passes on a draft 404 page and
     # stays a finding on a live one, a name neither uses is a finding on both, and a live-only presentation
-    # value is a finding on a draft 404 page. Through _scan_root, only a 404.html directly under the root's
-    # top-level draft/ takes the draft list (a nested draft/ directory, and a 404.html in a subdirectory of
-    # the top-level draft/, keep the live list) under both site/ and opf/site/, and the reference rule still
-    # holds a draft 404 page to root-absolute URLs.
+    # value is a finding on a draft 404 page. Through _scan_root, only a 404.html the generator lists takes
+    # the draft list (a nested draft/ directory, and a 404.html in a subdirectory of the top-level draft/,
+    # keep the live list) under both site/ and opf/site/, and the reference rule still holds a draft 404
+    # page to root-absolute URLs.
     draft_404_cases = (
         ("draft-404/draft-name-passes-on-draft", '<img src="/t.png" alt="">', True, ""),
         ("draft-404/draft-name-fails-on-live", '<img src="/t.png" alt="">', False,
@@ -857,11 +861,33 @@ def _self_test():
              '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
              "src on a 404 page must be root-absolute"),
         )
-        for label, subdir, page_rel, markup, want, message in scan_cases:
+        # The same rule once the pages are promoted (the generator's own build at base "/"): the root's 404.html
+        # takes the draft list and a 404.html left under draft/ keeps the live list, on both roots.
+        promoted = _promoted_targets()
+        promoted_scan_cases = (
+            ("draft-404/promoted-root-404-passes", "site", "404.html", draft_page, 0, ""),
+            ("draft-404/promoted-draft-404-keeps-live-list", "site", "draft/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/opf-promoted-root-404-passes", "opf/site", "404.html", draft_page, 0, ""),
+            ("draft-404/opf-promoted-draft-404-keeps-live-list", "opf/site", "draft/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/promoted-root-relative-src-fails", "site", "404.html",
+             '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
+             "src on a 404 page must be root-absolute"),
+        )
+        staged_scan_cases = (
+            ("draft-404/staged-root-404-keeps-live-list", "site", "404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/opf-staged-root-404-keeps-live-list", "opf/site", "404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
+        )
+        scan_cases = scan_cases + staged_scan_cases
+        for label, subdir, page_rel, markup, want, message, targets in (
+                [case + (None,) for case in scan_cases] + [case + (promoted,) for case in promoted_scan_cases]):
             (r / subdir / page_rel).write_text(markup, encoding="utf-8")
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                got = _scan_root(r, subdir)
+                got = _scan_root(r, subdir, targets)
             (r / subdir / page_rel).unlink()
             if got != want or message not in out.getvalue():
                 failures.append("{}: expected exit {} and {!r}, got {} {!r}".format(
@@ -872,6 +898,7 @@ def _self_test():
 
     _touch_icon_self_test(quiet)
     _not_found_links_self_test()
+    _declaration_self_test()
     failures.extend(FAILURES)
 
     if failures:
@@ -882,8 +909,82 @@ def _self_test():
     print("PASS: check_site self-test ({} logo cases + {} 404-page logo cases + {} SITE_HOSTS env cases + "
           "coverage-root legs + {} opfiles draft cases + 5 per-root host cases + {} draft 404 cases + {} "
           "registered checks)".format(len(cases), len(not_found_cases), len(host_cases), len(draft_cases),
-                                      len(draft_404_cases) + len(scan_cases), len(EXECUTED)))
+                                      len(draft_404_cases) + len(scan_cases) + len(promoted_scan_cases),
+                                      len(EXECUTED)))
     return 0
+
+
+def _declaration_self_test():
+    """The template page declaration: a well-formed one is read, each malformed entry raises ValueError, and
+    the scan of a root exits 2 on one (fail-closed) rather than crashing with exit 1."""
+    import contextlib
+    import io
+    import tempfile
+    entry = '{"target": "site/draft/index.html", "kind": "file", "sources": ("src.toml",), "regenerate": "x"}'
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+
+        def declare(literal):
+            fixture = base / "case{}".format(len(list(base.iterdir())))
+            (fixture / "tools").mkdir(parents=True)
+            (fixture / "site").mkdir()
+            (fixture / "src.toml").write_text("x", encoding="utf-8")
+            (fixture / "site" / "a.html").write_text("<!doctype html><title>t</title>", encoding="utf-8")
+            (fixture / _template_pages.GENERATOR).write_text("GENSRC_OUTPUTS = {}\n".format(literal),
+                                                             encoding="utf-8")
+            return fixture
+
+        def scan(fixture):
+            saved = _template_pages.ROOT
+            _template_pages.ROOT = fixture
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    code = _scan_root(fixture, "site")
+            except Exception as exc:  # a crash is the failure this case pins, so it is recorded, not raised
+                code = "{}: {}".format(type(exc).__name__, exc)
+            finally:
+                _template_pages.ROOT = saved
+            return code, err.getvalue()
+
+        good = declare("({},)".format(entry))
+        try:
+            got = _template_pages.template_targets(good)
+        except (OSError, ValueError) as exc:
+            got = exc
+        check("declaration/well-formed-read", got == frozenset({"site/draft/index.html"}), got)
+        got = scan(good)
+        check("declaration/well-formed-scan-not-refused", got[0] != 2, got)
+        # Each malformed entry (a literal the declaration reader accepts as a tuple of entries) must raise
+        # ValueError, never a KeyError, TypeError or a non-string target.
+        for name, scan_name, literal in (
+                ("declaration/entry-without-target-refused", "declaration/entry-without-target-scan-exits-2",
+                 '({"tool": "x"},)'),
+                ("declaration/bare-string-entry-refused", "declaration/bare-string-entry-scan-exits-2",
+                 '("site/draft/index.html",)'),
+                ("declaration/list-target-refused", "declaration/list-target-scan-exits-2", '({"target": ["a"]},)'),
+                ("declaration/int-target-refused", "declaration/int-target-scan-exits-2", '({"target": 5},)'),
+                ("declaration/full-entry-list-target-refused", "declaration/full-entry-list-target-scan-exits-2",
+                 "({},)".format(entry.replace('"site/draft/index.html"', '["a"]'))),
+                ("declaration/full-entry-int-target-refused", "declaration/full-entry-int-target-scan-exits-2",
+                 "({},)".format(entry.replace('"site/draft/index.html"', "5")))):
+            fixture = declare(literal)
+            try:
+                got = _template_pages.template_targets(fixture)
+            except ValueError as exc:
+                got = exc
+            except Exception as exc:  # a crash is the failure this case pins, so it is recorded, not raised
+                got = "{}: {}".format(type(exc).__name__, exc)
+            check(name, isinstance(got, ValueError), got)
+            code, err = scan(fixture)
+            check(scan_name, code == 2 and "cannot read the template page targets" in err, (code, err))
+
+
+def _promoted_targets():
+    """The page targets tools/gen_draft_site.py builds at base "/" (each site's pages at its own root): the
+    promoted state the self-tests hold each template-page rule to, beside today's staged declaration."""
+    import gen_draft_site
+    return frozenset(gen_draft_site.build(sites=gen_draft_site.promoted_sites(), registered=False))
 
 
 # The registered execution-suite identity (tools/selftest_checks.toml) and the executed-check-id record
@@ -905,8 +1006,11 @@ def check(name, ok, detail=""):
 
 def _touch_icon_self_test(quiet):
     """The touch-icon check: a live page passes only with a link naming an existing file under its root;
-    a draft page is exempt, a page merely named draft is not, and the scan and the live tree agree."""
+    a generated template page is exempt (staged under draft/ or promoted to the root), any other page under
+    draft/ or merely named draft is not, and the scan and the live tree agree."""
     import tempfile
+    staged = _template_pages.template_targets()
+    promoted = _promoted_targets()
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "site"
@@ -916,8 +1020,9 @@ def _touch_icon_self_test(quiet):
         (base / "outside.png").write_bytes(b"png")
         site_root = root.resolve()
 
-        def findings(page_rel, icons):
-            return touch_icon_findings(page_rel, page_rel, icons, root / Path(page_rel).parent, site_root)
+        def findings(page_rel, icons, targets=staged, subdir="site"):
+            return touch_icon_findings(page_rel, page_rel, icons, root / Path(page_rel).parent, site_root,
+                                       _template_pages.is_template_page(subdir, page_rel, targets))
 
         got = findings("a.html", [("/assets/logos/t.png", 3)])
         check("touch-icon/root-absolute-href-passes", got == [], got)
@@ -941,10 +1046,26 @@ def _touch_icon_self_test(quiet):
                            ("touch-icon/external-href-fails", "https://example.test/t.png")):
             got = findings("a.html", [(href, 3)])
             check(name, len(got) == 1 and "does not exist" in got[0], got)
-        got = findings("draft/a.html", [])
+        got = findings("draft/index.html", [])
         check("touch-icon/draft-page-exempt", got == [], got)
-        got = findings("draft/sub/a.html", [("/nope.png", 3)])
+        got = findings("draft/install/index.html", [("/nope.png", 3)])
         check("touch-icon/nested-draft-page-exempt", got == [], got)
+        got = findings("draft/a.html", [])
+        check("touch-icon/unlisted-draft-page-checked", len(got) == 1 and "missing <link" in got[0], got)
+        got = findings("index.html", [], promoted)
+        check("touch-icon/promoted-template-page-exempt", got == [], got)
+        got = findings("install/index.html", [("/nope.png", 3)], promoted)
+        check("touch-icon/promoted-nested-template-page-exempt", got == [], got)
+        got = findings("draft/index.html", [], promoted)
+        check("touch-icon/promoted-draft-placeholder-checked", len(got) == 1 and "missing <link" in got[0], got)
+        got = findings("index.html", [])
+        check("touch-icon/staged-root-page-checked", len(got) == 1 and "missing <link" in got[0], got)
+        got = findings("draft/model/index.html", [], staged, "opf/site")
+        check("touch-icon/opf-template-page-exempt", got == [], got)
+        got = findings("model/index.html", [], promoted, "opf/site")
+        check("touch-icon/opf-promoted-template-page-exempt", got == [], got)
+        got = findings("draft/model/index.html", [], staged, "site")
+        check("touch-icon/other-site-template-page-checked", len(got) == 1, got)
         got = findings("draft.html", [])
         check("touch-icon/page-named-draft-checked", len(got) == 1, got)
         got = findings("drafts/a.html", [])
@@ -1257,10 +1378,18 @@ def main():
     return run(Path(__file__).resolve().parents[1])
 
 
-def _scan_root(root, subdir):
+def _scan_root(root, subdir, targets=None):
+    """Scan one coverage root. `targets` (a fixture's GENSRC_OUTPUTS targets) defaults to the generator's
+    declaration; a declaration that cannot be read fails closed."""
     site = root / subdir
     site_root = site.resolve()
     hosts = ROOT_HOSTS.get(subdir, SITE_HOSTS)
+    if targets is None:
+        try:
+            targets = _template_pages.template_targets()
+        except (OSError, ValueError) as exc:
+            print("error: cannot read the template page targets ({}); fail-closed".format(exc), file=sys.stderr)
+            return 2
     docs, ids_by_path, findings = [], {}, []
     try:
         html_files = sorted(walk_files(site, suffixes={".html"}))
@@ -1293,13 +1422,13 @@ def _scan_root(root, subdir):
                 findings.append("{}:{}: en dash".format(rel, number))
             if EM in line:
                 findings.append("{}:{}: em dash".format(rel, number))
-        # Both 404 rules read the raw text, not the parsed page. The draft 404 page (only <root>/draft/404.html,
-        # directly under the root's top-level draft/) is held to the draft structural allowlist; a 404.html any
-        # deeper keeps the live list. The reference rule is the same for every 404 page.
+        # Both 404 rules read the raw text, not the parsed page. A 404.html the site template generates is held
+        # to the draft structural allowlist; every other 404.html keeps the live list. The reference rule is the
+        # same for every 404 page.
+        template = _template_pages.is_template_page(subdir, f.relative_to(site), targets)
         if f.name == NOT_FOUND_PAGE:
             findings.extend(not_found_reference_findings(rel, text))
-            findings.extend(not_found_structure_findings(
-                rel, text, draft=f.relative_to(site).parts == (DRAFT_DIR, NOT_FOUND_PAGE)))
+            findings.extend(not_found_structure_findings(rel, text, draft=template))
         if page is None:
             findings.append("{}: could not parse as HTML".format(rel))
             continue
@@ -1339,7 +1468,8 @@ def _scan_root(root, subdir):
                 # HTML fragment navigation (raw match, else decoded match).
                 if ids is not None and frag not in ids and unquote(frag) not in ids:
                     findings.append("{}:{}: broken anchor -> {} (#{} not found)".format(rel, line, v, frag))
-        findings.extend(touch_icon_findings(rel, f.relative_to(site), page.touch_icons, f.parent, site_root))
+        findings.extend(touch_icon_findings(rel, f.relative_to(site), page.touch_icons, f.parent, site_root,
+                                            template))
     # Logo consistency: the header logo block is duplicated per page (no page generator yet), so it
     # must stay byte-identical on every page that carries it; an outlier is drift.
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
