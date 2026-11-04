@@ -17,7 +17,7 @@ rail = "The store manifest"
 
 [[body]]
 component = "lead"
-html = "The store's control document and discovery marker: declarations for its schema, types, views, modules, and enforcement posture. Closed keysets throughout: an unknown key in any base section is a validation finding."
+html = '''The store's control document and discovery marker: declarations for its schema, types, views, modules, and enforcement posture. Closed keysets throughout: an unknown key in any base section is a validation finding. The base <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code>, the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:'''
 
 [[body]]
 component = "code"
@@ -52,7 +52,7 @@ component = "table"
 caption = "The top-level tables of the store manifest"
 head = ["Table", "Holds"]
 rows = [
-  ["<code>[opf]</code>", "standard, spec_version, homes (2), layout (inline or per-record), posture (off, warn or required), import_status (none, partial or complete)"],
+  ["<code>[opf]</code> ", "standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)"],
   ["<code>[store]</code>", "sync_target (empty under the in-repo default)"],
   ["<code>[modules]</code>", "governance, delivery_assurance, operational_policy, concurrent_operation"],
   ["<code>[profiles.*]</code>", "additive requirement bundles; may only add requirements"],

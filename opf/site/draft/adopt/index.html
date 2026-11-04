@@ -11,6 +11,7 @@
 <link rel="stylesheet" href="/draft/assets/baseline/fonts.css">
 <link rel="stylesheet" href="/draft/assets/baseline/palettes.css">
 <link rel="stylesheet" href="/draft/assets/baseline/baseline.css">
+<script src="/draft/assets/baseline/copy.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main-content">Skip to content</a>
@@ -23,6 +24,20 @@
 <p class="lbl blk">How</p>
 <ol class="steps"><li><span>Give your assistant this site's machine-readable entry point, <a href="/llms.txt"><code>/llms.txt</code></a>, and the adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>, as the starting material.</span></li><li><span>Review the plan it proposes: what it would create, import, or retire.</span></li><li><span>Authorize, then inspect the scaffolded store and the validation results.</span></li></ol>
 <p>Adopting by hand is the fallback for when you cannot use an assistant; both paths target the same store format.</p>
+<p class="lbl sec">By hand</p>
+<h2 id="byhand">The manual path</h2>
+<p>The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with <code>opf render --write</code> for a supported store or your own renderer, and then work records-first. The standard requires no particular tool. The reference tooling requires Python 3.14 or newer. It validates spec 1.2.0 stores in either layout, with limits: it does not render or drift-check per-record views, and the baseline validator reports module-tier and importer record content schemas as cannot-evaluate.</p>
+<p>The reference tooling's <code>opf init</code> does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2).</p>
+<dl class="record"><div><dt>manifest.toml</dt><dd>The control document. It declares <code>standard = "opf"</code> (the exact discovery token) in its <code>[opf]</code> table, along with the base <code>spec_version</code> you conform to (<code>"2.0.0"</code>), the homes generation <code>homes = 2</code>, the storage layout, the enforcement posture, and <code>import_status</code>.</dd></div><div><dt>counters.toml</dt><dd>The ID high-water marks. It holds the clean row and the imported counter row (the quoted key <code>"imported:&lt;NS&gt;"</code>, at zero to start) of every enabled type.</dd></div><div><dt>Typed indexes</dt><dd>The eleven baseline typed indexes, each a <code>.index.toml</code> file, empty to start.</dd></div></dl>
+<p>The imported leaves: one <code>&lt;type&gt;.imported.index.toml</code> beside each of those eleven indexes, plus <code>worklog.imported.toml</code> for the worklog, each empty to start. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).</p>
+<p class="lbl file">.working/toml/manifest.toml</p>
+<pre id="manifest-opf" class="hascopy"><button class="copy" type="button" data-copy="manifest-opf" hidden>Copy</button>[opf]
+standard = "opf"         # the exact discovery token
+spec_version = "2.0.0"   # the base spec version this store conforms to
+homes = 2                # the homes generation; required, and 2 is the only value</pre>
+<p class="lbl sec">Reference tooling</p>
+<h2 id="tooling">Where the reference tooling stands</h2>
+<p>The reference tooling's <code>opf init</code> does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above. Its <code>opf doctor</code> grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; <code>opf upgrade</code> and <code>opf record</code> refuse such a store. The reference tooling defines no store upgrade: <code>opf upgrade</code> refuses every invocation with exit 2, reading and writing nothing.</p>
 <p class="lbl sec">The verbs</p>
 <h2>The 10 command verbs and their status</h2>
 <p>The <code>opf</code> reference CLI is 1 implementation of the standard's command vocabulary. A base adopter can use their own tooling instead, or adopt by hand.</p>

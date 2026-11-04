@@ -456,9 +456,11 @@ EXCLUDED_TREES = (".github/", "opf/tools/_vendor/", ".baseline/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 # The git index mode of a gitlink (a submodule's commit), as git ls-files -s prints it.
 GITLINK_MODE = b"160000"
+# The generated draft install and adopt pages (tools/gen_draft_site.py) sit beside the hand-written
+# pages they replace, so the floor statement stays checked when those pages go.
 DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
-                     "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
-                     ".preview/README.md")
+                     "site/draft/install/index.html", "opf/site/adopt.md", "opf/site/adopt.html",
+                     "opf/site/draft/adopt/index.html", "opf/spec/OPF-QUICKSTART.md", ".preview/README.md")
 # How many times a declaration file states the floor phrase, where that is more than once: each copy is
 # counted, so changing or removing one of them is a finding.
 # .preview/README.md states it once and quotes it once in the hooks' refusal line.

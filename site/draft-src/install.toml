@@ -194,6 +194,16 @@ html = '''<p>In a new chat, ask <em>"Which standard are you applying, and what d
 <p>Then a behaviour check: ask it for <em>"the exact default timeout of a library you have not shown it."</em> Applying AIQT, it should say it cannot know rather than inventing a number.</p>'''
 
 [[body]]
+component = "section"
+lbl = "Writing code"
+heading = "Writing code?"
+id = "code"
+
+[[body]]
+component = "prose"
+html = '''<p>The <a href="/development">development assistant</a> brings the same standard into your repository. The pack's tools and hooks require Python 3.14 or newer. The chat setup on this page needs no Python.</p>'''
+
+[[body]]
 component = "next"
 html = "How your assistant applies the standard, change by change."
 text = "The 5 rules"
