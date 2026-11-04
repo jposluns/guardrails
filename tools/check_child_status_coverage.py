@@ -484,7 +484,6 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/gen_enforcement_register.py",
     "tools/gen_first_pin_demo.py",
     "tools/gen_hooks.py",
-    "tools/gen_install.py",
     "tools/gen_manifest.py",
     "tools/gen_mappings.py",
     "tools/gen_reference_facts.py",

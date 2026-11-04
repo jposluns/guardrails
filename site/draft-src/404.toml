@@ -5,6 +5,7 @@ title = "Page not found"
 kind = "document"
 label = "404"
 heading = "That page is not here."
+description = "That page could not be found."
 
 [[body]]
 component = "lead"

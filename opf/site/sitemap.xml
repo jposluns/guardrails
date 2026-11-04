@@ -2,46 +2,30 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://opfiles.ai/</loc>
-    <lastmod>2026-10-27</lastmod>
+    <lastmod>2026-11-04</lastmod>
   </url>
   <url>
-    <loc>https://opfiles.ai/about</loc>
-    <lastmod>2026-09-27</lastmod>
+    <loc>https://opfiles.ai/adopt/</loc>
+    <lastmod>2026-11-04</lastmod>
   </url>
   <url>
-    <loc>https://opfiles.ai/adopt</loc>
-    <lastmod>2026-11-02</lastmod>
+    <loc>https://opfiles.ai/core-files/</loc>
+    <lastmod>2026-11-04</lastmod>
   </url>
   <url>
-    <loc>https://opfiles.ai/aiqt</loc>
-    <lastmod>2026-10-01</lastmod>
+    <loc>https://opfiles.ai/disclosure/</loc>
+    <lastmod>2026-11-04</lastmod>
   </url>
   <url>
-    <loc>https://opfiles.ai/core-files</loc>
-    <lastmod>2026-10-27</lastmod>
+    <loc>https://opfiles.ai/license/</loc>
+    <lastmod>2026-11-04</lastmod>
   </url>
   <url>
-    <loc>https://opfiles.ai/disclosure</loc>
-    <lastmod>2026-10-27</lastmod>
+    <loc>https://opfiles.ai/model/</loc>
+    <lastmod>2026-11-04</lastmod>
   </url>
   <url>
-    <loc>https://opfiles.ai/record-indexes</loc>
-    <lastmod>2026-10-27</lastmod>
-  </url>
-  <url>
-    <loc>https://opfiles.ai/roadmap</loc>
-    <lastmod>2026-10-27</lastmod>
-  </url>
-  <url>
-    <loc>https://opfiles.ai/standard</loc>
-    <lastmod>2026-09-20</lastmod>
-  </url>
-  <url>
-    <loc>https://opfiles.ai/store-meta</loc>
-    <lastmod>2026-09-27</lastmod>
-  </url>
-  <url>
-    <loc>https://opfiles.ai/tooling</loc>
-    <lastmod>2026-10-31</lastmod>
+    <loc>https://opfiles.ai/standard/</loc>
+    <lastmod>2026-11-04</lastmod>
   </url>
 </urlset>
