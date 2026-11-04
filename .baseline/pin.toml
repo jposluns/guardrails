@@ -3,7 +3,7 @@
 # palette gate, copied to .baseline/check_palette.py outside the served tree.
 # tools/check_baseline_pin.py checks the copy against this file offline (no network).
 # Update it only together with the copied files, when the pin moves to a new baseline version.
-version = "1.6.0"
+version = "1.6.1"
 
 [files]
 ".baseline/check_palette.py" = "d7a9994997ef721e8e7ba3809b18df3f0e9e3c803bd6fcddb3c8125171e21bfc"
