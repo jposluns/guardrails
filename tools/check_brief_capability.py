@@ -4664,6 +4664,14 @@ def _nesting_sample(seed, count):
     return texts
 
 
+def _p6_input_root(make=tempfile.mkdtemp):
+    """The P6 fixture directory {T}, drawn through `make` (tempfile.mkdtemp) by
+    _input_declarations.verbatim_tempdir so the INPUT lines that name it render it exactly as written; a
+    root or draw the reading would render differently is CannotEvaluate. The self-test draws {T} here
+    through a stand-in `make` whose first draw holds marks, and checks the draws that call made."""
+    return Path(_input_declarations.verbatim_tempdir("aiqt-brief-input-", CannotEvaluate, make=make))
+
+
 def self_test(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -6448,7 +6456,18 @@ def self_test(report_path=None):
     finally:
         shutil.rmtree(base, ignore_errors=True)
     # ---------- P6: a declared input (an INPUT line) must exist on the lint's host; {T} is a fresh directory ----------
-    inputs = Path(tempfile.mkdtemp(prefix="aiqt-brief-input-"))
+    # {T} is drawn through a stand-in for mkdtemp whose first draw always holds marks (as a real draw can),
+    # so preflight/p6-fixture-verbatim sees every draw the call site made, and a call site that draws
+    # with plain mkdtemp fails it on every run, not only on an unlucky draw
+    draws = []
+
+    def marked_first(prefix):
+        directory = tempfile.mkdtemp(prefix=prefix + "_", suffix="_") if not draws else tempfile.mkdtemp(
+            prefix=prefix)
+        draws.append((prefix, directory))
+        return directory
+
+    inputs = _p6_input_root(make=marked_first)
     locked = inputs / "locked"
     try:
         os.makedirs(inputs / "dir with space")
@@ -6473,6 +6492,17 @@ def self_test(report_path=None):
             with _patched(input_readable=lambda path: False):
                 return p6_code("INPUT: {T}/unreadable.md\n")
 
+        # {T} renders verbatim: a mkdtemp draw the reading renders as emphasis names a path without the
+        # marks; the call site above drew {T} through the marked-first stand-in, its marked draws were
+        # removed and drawn again, never handed to the fixtures below, and {T} reads back as written
+        marked = inputs / "draw-_k9b51z_"
+        check("preflight/p6-fixture-verbatim", (
+            _input_declarations.read("INPUT: {}/in.md\n".format(marked)) == ([(1, "{}/in.md".format(marked))], []),
+            len(draws) > 1, set(prefix for prefix, _ in draws),
+            [os.path.lexists(directory) for _, directory in draws[:-1]] == [False] * (len(draws) - 1),
+            Path(draws[-1][1]) == inputs if draws else None,
+            _input_declarations.read("INPUT: {}/in.md\n".format(inputs))),
+            (False, True, {"aiqt-brief-input-"}, True, True, ([(1, "{}/in.md".format(inputs))], [])))
         p6_missing = (1, [("P6", "HARD")])
         check("preflight/p6-present-quiet", [p6(text) for text in (
             "INPUT: {T}/in.md\n", "INPUT: \"{T}/dir with space/in.md\"\n", "INPUT: `{T}/dir with space/in.md`\n",
