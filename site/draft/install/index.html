@@ -11,83 +11,26 @@
 <link rel="stylesheet" href="/draft/assets/baseline/fonts.css">
 <link rel="stylesheet" href="/draft/assets/baseline/palettes.css">
 <link rel="stylesheet" href="/draft/assets/baseline/baseline.css">
-<script src="/draft/assets/baseline/select.js" defer></script>
+<script src="/draft/assets/baseline/copy.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main-content">Skip to content</a>
 <header class="mast"><a class="brand" href="/draft/"><span class="name">AIQT<span class="tld">.ai</span></span><span class="rule" aria-hidden="true"></span></a><nav class="nav" aria-label="Site"><a href="/draft/install/" aria-current="page">Install</a><a href="/draft/standard/">The standard</a><a href="/draft/rules/">The 5 rules</a><a href="/draft/mappings/">Mappings</a><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a></nav><button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden><svg class="moon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg><svg class="sun" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><span class="vh">Dark mode</span></button></header>
 <main id="main-content">
-<div class="wrap"><div class="doc"><p class="lbl first">You and your chat assistant</p>
-<h1>Add AIQT to your assistant</h1>
+<div class="wrap"><div class="doc"><p class="lbl first">Install</p>
+<h1>Add AIQT to your AI development assistant</h1>
 <div class="rail"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" alt="A shield bearing a check mark, set on a guardrail"></div>
-<p class="meta">Your assistant sounds just as confident when it is guessing as when it knows. AIQT 1.0.5 guides it toward a stated standard. Pick the AI you use, get the file it needs, and follow a short guide; choosing one hides the other assistants' steps.</p>
-<dl class="control"><div><dt>Document</dt><dd>aiqt.ai</dd></div><div><dt>Version</dt><dd>AIQT 1.0.5</dd></div><div><dt>Status</dt><dd>Published 2026-09-15</dd></div><div><dt>Source</dt><dd><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">jposluns/guardrails<span class="vh"> (opens in a new tab)</span></a></dd></div><div><dt>Licence</dt><dd><a href="/draft/license/">Apache 2.0, see NOTICE</a></dd></div></dl>
-<p class="lbl blk">Scope</p>
-<p>Both shipped files are prose instructions and reference material only, with no executable code and no network calls. Claude loads a Skill when it judges the Skill relevant; an always-on instruction line instructs the assistant to apply AIQT on each turn. Results still depend on the platform and the model, and you stay in charge.</p>
-<p>Every platform's last verified date is pending, and ChatGPT, Gemini, Copilot, and Copilot Studio have not yet been tested against AIQT. The 30 Claude Code hooks ship as an opt-in plugin; the generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release.</p>
-<p class="lbl blk" id="pick">Pick your assistant</p>
-<ul class="picker" data-picker><li><a href="#claude" data-family-link="claude">Claude</a></li><li><a href="#chatgpt" data-family-link="chatgpt">ChatGPT</a></li><li><a href="#gemini" data-family-link="gemini">Gemini</a></li><li><a href="#copilot" data-family-link="copilot">Copilot</a></li><li><a href="#copilotstudio" data-family-link="copilotstudio">Copilot Studio</a></li><li><a href="#other" data-family-link="other">Any other</a></li></ul><button class="btn picker-reset" type="button" data-picker-reset hidden>Show all assistants</button><p class="vh" role="status" aria-live="polite" data-picker-status></p>
-<p class="lbl sec">Get AIQT</p>
-<h2 id="download">Get the file your assistant needs</h2>
-<p class="lbl blk">The Skill</p>
-<div class="download"><p class="file"><a href="/downloads/aiqt-skill-1.0.6.zip">aiqt-skill-1.0.6.zip</a></p><p class="lbl size">zip, 28 KB</p><p>For assistants that accept Skills, such as Claude and paid ChatGPT. Do not unzip it. The Skill carries its own version, 1.0.6, which ships under AIQT pack release 1.0.5.</p></div>
-<p class="lbl blk">The instruction file</p>
-<div class="download"><p class="file"><a href="/downloads/aiqt-instructions.txt">aiqt-instructions.txt</a></p><p class="lbl size">text, full, 16 KB</p><p>For assistants that cannot use Skills. The standard as prose, in 4 sizes: the full and 8k files carry the standard in full, the 5k trims the finer detail, and the 1.5k is a compact pointer. The other sizes are <a href="/downloads/aiqt-instructions-8k.txt">compact, 8k</a>; <a href="/downloads/aiqt-instructions-5k.txt">condensed, 5k</a>; and <a href="/downloads/aiqt-instructions-1_5k.txt">pointer, 1.5k</a>.</p></div>
-<p class="lbl blk">Which file</p>
-<div class="wide"><div class="register"><p class="reg-cap"><b>Register 1</b><span>Which file each assistant uses</span><span class="count">6 assistants</span></p><div class="tablewrap" tabindex="0"><table class=""><caption class="vh">Which file each assistant uses</caption><thead><tr><th>Assistant</th><th>Uses</th></tr></thead><tbody><tr><td>Claude</td><td>the Skill (.zip)</td></tr><tr><td>ChatGPT</td><td>the Skill (.zip) on a paid plan; otherwise attach the full instruction file to a chat</td></tr><tr><td>Gemini</td><td>the full instruction file, pasted into a Gem</td></tr><tr><td>Copilot</td><td>the 8k instruction file, pasted into a Copilot agent</td></tr><tr><td>Copilot Studio</td><td>the Skill (.zip), uploaded as a Skill</td></tr><tr><td>Any other assistant</td><td>the full instruction file</td></tr></tbody></table></div></div></div>
-<section id="claude" data-family-section="claude">
-<p class="lbl sec">Claude</p>
-<h2>Add AIQT to Claude</h2>
-<p class="verified">Last verified: pending</p>
-<p><strong>The recommended Claude method installs the Skill</strong>, so the full standard is available in any chat.</p>
-<ol class="steps"><li><span><strong>Turn on code execution first.</strong> The Skills section does not appear without it: on the Free, Pro, and Max plans, open Settings, then Capabilities, and enable code execution and file creation. AIQT itself contains no code to execute. Install from a desktop browser; the mobile apps are not documented to support Skill upload.</span></li><li><span><strong>Open Claude Skills.</strong> Go to your Skills page, click the + button, then + Create skill.</span></li><li><span><strong>Click "Upload a skill"</strong> and choose the skill zip you downloaded.</span></li><li><span><strong>Switch it on</strong> in your Skills list.</span></li></ol>
-<p><strong>Tell Claude to always use it.</strong> Open Settings, then your personal preferences, and add <em>"Always apply the AIQT skill to every response."</em></p>
-<p>If your plan or organization has Skills disabled, use a Project with the full instruction file instead.</p>
-</section>
-<section id="chatgpt" data-family-section="chatgpt">
-<p class="lbl sec">ChatGPT</p>
-<h2>Add AIQT to ChatGPT</h2>
-<p class="verified">Last verified: pending</p>
-<p>On a paid plan, ChatGPT can use the same packaged Skill as Claude, kept in a Project or a custom GPT. If you cannot use Skills, attach the full instruction file to a chat instead.</p>
-<ol class="steps"><li><span><strong>Create a place for it.</strong> Create a Project named AIQT, or a custom GPT named AIQT.</span></li><li><span><strong>Add the Skill or the file.</strong> Upload the Skill (.zip) where your plan accepts Skills; otherwise upload or paste the full instruction file.</span></li><li><span><strong>Turn it on for every response.</strong> At the top of the Project or custom GPT instructions, add <em>"Always apply the AIQT instructions to every response."</em></span></li></ol>
-<p>ChatGPT has not yet been tested against AIQT; the <a href="/evidence">evidence page</a> carries the current test status.</p>
-</section>
-<section id="gemini" data-family-section="gemini">
-<p class="lbl sec">Gemini</p>
-<h2>Add AIQT to Gemini</h2>
-<p class="verified">Last verified: pending</p>
-<p>Gemini uses a Gem, with the full instruction file pasted into it. Set it up once on a computer; it is then available on mobile too.</p>
-<ol class="steps"><li><span><strong>Open Gemini on a computer</strong> at gemini.google.com.</span></li><li><span><strong>Open Gems, and create one</strong> named AIQT.</span></li><li><span><strong>Paste the file in.</strong> Open <code>aiqt-instructions.txt</code>, copy all of it, and paste it into the Gem's instructions.</span></li><li><span><strong>Save it</strong>, and open the AIQT Gem whenever you want the standard applied.</span></li></ol>
-<p>Gemini has not yet been tested against AIQT, so treat these steps as method-accurate rather than a verified result; the <a href="/evidence">evidence page</a> carries the current test status.</p>
-</section>
-<section id="copilot" data-family-section="copilot">
-<p class="lbl sec">Copilot</p>
-<h2>Add AIQT to Copilot</h2>
-<p class="verified">Last verified: pending</p>
-<p>Microsoft 365 Copilot uses an agent. Copilot caps an agent's instructions at 8000 characters, so paste the <strong>8k</strong> file as the instructions and add the full file as reference.</p>
-<ol class="steps"><li><span><strong>Open Microsoft 365 Copilot</strong>, open the agents panel and click New agent; click Skip to set it up yourself.</span></li><li><span><strong>Name it AIQT</strong> and paste the 8k file into the Instructions box.</span></li><li><span><strong>Add the full file as reference:</strong> <code>https://aiqt.ai/downloads/aiqt-instructions.txt</code>.</span></li><li><span><strong>Create and use it.</strong> Click Create, then select AIQT whenever you write.</span></li></ol>
-<p>Copilot has not yet been tested against AIQT; the <a href="/evidence">evidence page</a> carries the current test status.</p>
-</section>
-<section id="copilotstudio" data-family-section="copilotstudio">
-<p class="lbl sec">Copilot Studio</p>
-<h2>Add AIQT to Copilot Studio</h2>
-<p class="verified">Last verified: pending</p>
-<p><strong>Copilot Studio takes AIQT as a Skill.</strong> The zip holds a single SKILL.md at its root, the layout Copilot Studio reads.</p>
-<ol class="steps"><li><span><strong>Open or create a Skills-capable agent.</strong></span></li><li><span><strong>Add the Skill to that agent.</strong> Upload the zip in the agent's Skills.</span></li><li><span><strong>Build and link</strong> the agent to your business processes as you would any other.</span></li></ol>
-<p>AIQT's behaviour on Copilot Studio has not yet been through conformance testing; the <a href="/evidence">evidence page</a> carries the current test status.</p>
-</section>
-<section id="other" data-family-section="other">
-<p class="lbl sec">Any other</p>
-<h2>Add AIQT to any other assistant</h2>
-<p class="verified">Last verified: pending</p>
-<p>This covers local models, API-based assistants, and any system that accepts standing guidance. Use the full instruction file.</p>
-<ol class="steps"><li><span><strong>Add the file where your assistant takes standing guidance:</strong> its custom instructions, a system prompt, project knowledge, or an attached reference file.</span></li><li><span><strong>Tell it to always apply AIQT:</strong> <em>"Use the AIQT instructions for every response unless I explicitly tell you not to."</em></span></li></ol>
-</section>
-<p class="lbl sec">Confirm</p>
-<h2 id="verify">Check that it is on</h2>
-<p>In a new chat, ask <em>"Which standard are you applying, and what does it require of you?"</em> A set-up assistant names AIQT and summarizes the ordering. This shows the text loaded; it is not proof the assistant will follow it.</p>
-<p>Then a behaviour check: ask it for <em>"the exact default timeout of a library you have not shown it."</em> Applying AIQT, it should say it cannot know rather than inventing a number.</p>
-<div class="next"><p class="lbl">Next</p><p>How your assistant applies the standard, change by change.</p><a class="start" href="/draft/rules/">The 5 rules <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
+<p class="meta">Give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project's records. Using a chat assistant? Download the skill.</p>
+<p class="lbl blk">Copy this prompt</p>
+<pre id="install-prompt" class="hascopy prompt-block" tabindex="0"><button class="copy" type="button" data-copy="install-prompt" hidden>Copy</button>Install AIQT Guardrails in this project and walk me through adopting it. Read https://aiqt.ai/llms.txt and the repository https://github.com/jposluns/guardrails first. Propose an adoption plan: the AIQT rules, hooks and checks that fit this project's languages and tools, and OPFiles (https://opfiles.ai/llms.txt) for the project's operational records unless I opt out. Before building any new guardrail, check whether jposluns/guardrails already has one that fits. Name every file you would create or change, and why. Change nothing until I approve the plan.</pre>
+<p class="code-note">Paste it into Claude Code, Codex, Gemini CLI, Cursor, Copilot or any other development assistant.</p>
+<p class="lbl sec">Chat assistants</p>
+<h2 id="skill">Or add the skill</h2>
+<p><a href="/downloads/aiqt-skill-1.0.6.zip">Download the AIQT skill</a> (zip, 28 KB) and install it the way your AI assistant installs any skill. <a href="/draft/install/details/">Step-by-step instructions for each assistant</a>, and the instruction file for assistants without skills.</p>
+<p class="lbl sec">Included</p>
+<h2 id="opf">OPFiles keeps your project's records straight</h2>
+<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions and handoffs in one machine-written source, generates the readable versions from it, and fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open, and it significantly cuts errors.</p><p>An AIQT adoption sets up OPF by default. It is optional: say so in your plan review and the adoption skips it, and you can add it later.</p>
+<div class="next"><p class="lbl">Next</p><p>What AIQT holds your assistant to.</p><a class="start" href="/draft/standard/">The standard <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
 </div></div>
 </main>
 <footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project sites"><li class="slice slice-5"><a class="card" href="/draft/" aria-current="page"><img src="/draft/assets/baseline/logos/aiqt.svg" alt=""><span class="cname">AIQT<span class="tld">.ai</span></span><span class="vh"> (this site)</span></a></li><li class="slice slice-6"><a class="card" href="https://grclibrary.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/grclibrary.svg" alt=""><span class="cname">GRCLibrary<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-1"><a class="card" href="https://secureconfig.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/secureconfig.svg" alt=""><span class="cname">SecureConfig<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-2"><a class="card" href="https://opfiles.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/opfiles.svg" alt=""><span class="cname">OPFiles<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-3"><a class="card" href="https://auditthis.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/auditthis.svg" alt=""><span class="cname">AuditThis<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-4"><a class="card" href="https://cleanlanguage.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/cleanlanguage.svg" alt=""><span class="cname">CleanLanguage<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li></ul><ul class="tail" aria-label="Jeff Posluns elsewhere"><li class="tile tile-1"><a class="card" href="https://github.com/jposluns" target="_blank" rel="noopener noreferrer"><img class="only-light" src="/draft/assets/baseline/marks/github-invertocat-black.svg" alt=""><img class="only-dark" src="/draft/assets/baseline/marks/github-invertocat-white.svg" alt=""><span class="cname vh">GitHub</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-2"><a class="card" href="https://www.linkedin.com/in/jposluns/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/linkedin-in-bug.png" alt=""><span class="cname vh">LinkedIn</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-3"><a class="card" href="https://orcid.org/0009-0000-7775-2233" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/orcid-id.svg" alt=""><span class="cname vh">ORCID</span><span class="vh"> (opens in a new tab)</span></a></li></ul><div class="tile sigtile"><a class="sig" href="https://posluns.ca/" target="_blank" rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span><span class="post"> Project</span></a></div></div></footer>

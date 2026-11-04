@@ -24,34 +24,8 @@ component = "prose"
 html = "<p>Adopting by hand is the fallback for when you cannot use an assistant; both paths target the same store format.</p>"
 
 [[body]]
-component = "section"
-lbl = "The verbs"
-heading = "The 10 command verbs and their status"
-
-[[body]]
 component = "prose"
-html = "<p>The <code>opf</code> reference CLI is 1 implementation of the standard's command vocabulary. A base adopter can use their own tooling instead, or adopt by hand.</p>"
-
-[[body]]
-component = "table"
-caption = "The 10 command verbs and their status"
-head = ["Verb", "Does", "Status"]
-rows = [
-  ["<code>init</code>", "scaffolds the store", "implemented"],
-  ["<code>render</code>", "regenerates and checks the views", "implemented"],
-  ["<code>doctor</code>", "verifies the store", "implemented"],
-  ["<code>absorb</code>", "drafts changelog entries for human curation", "implemented"],
-  ["<code>record</code>", "authors 1 record change at a time", "implemented"],
-  ["<code>adopt</code>", "plan, approve, reconcile and status run; apply refuses every plan in this build and complete refuses with exit 2, so adoption cannot finish yet", "partly implemented"],
-  ["<code>upgrade</code>", "refuses with exit 2; the reference tooling defines no store upgrade", "refuses"],
-  ["<code>import</code>", "ordinary modes retired; refuse with exit 2", "retired"],
-  ["<code>migrate</code>", "specified, not yet implemented", "planned"],
-  ["<code>sync</code>", "specified, not yet implemented", "planned"],
-]
-
-[[body]]
-component = "prose"
-html = "<p><code>doctor</code> exits 0 when clean, 1 on a finding, and 2 when it cannot evaluate. <code>render --check</code> exits 1 for drift.</p>"
+html = "<p>The <code>opf</code> reference CLI, its 10 command verbs and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>.</p>"
 
 [[body]]
 component = "next"

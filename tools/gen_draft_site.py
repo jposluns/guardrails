@@ -102,6 +102,9 @@ GENSRC_OUTPUTS = (
     {"target": "site/draft/install/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/install.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/draft/install/details/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/draft/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
@@ -198,7 +201,7 @@ SITES = (
      "logo-alt": "A machine-written source record and its generated view, joined by a drift gate",
      "github": "https://github.com/jposluns/guardrails",
      "kept": OPF_KEPT_LIVE_PATHS,
-     "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Core files"),
+     "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Technical details"),
              ("adopt/", "Adopt"))},
 )
 
@@ -1919,10 +1922,10 @@ def _self_test():
                         outputs["opf/site/draft/model/index.html"]).group(1)
     expect("opfiles/nav", opf_nav.startswith(
         '<a href="/draft/model/" aria-current="page">The model</a><a href="/draft/standard/">The standard</a>'
-        '<a href="/draft/core-files/">Core files</a><a href="/draft/adopt/">Adopt</a>'
+        '<a href="/draft/core-files/">Technical details</a><a href="/draft/adopt/">Adopt</a>'
         '<a href="https://github.com/jposluns/guardrails" target="_blank"'), opf_nav)
     expect("opfiles/nav-order", [label for _path, label in opf["nav"]] == [
-        "The model", "The standard", "Core files", "Adopt"], opf["nav"])
+        "The model", "The standard", "Technical details", "Adopt"], opf["nav"])
     expect("opfiles/about", home.count(_about(opf)) == 1)
     expect("opfiles/no-control-strip", all('class="control"' not in outputs[rel] for rel in outputs
                                            if rel.startswith("opf/")))
