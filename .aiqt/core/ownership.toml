@@ -21,6 +21,10 @@ format-version = 1
 # --- concern-1 concrete-literal exclusion set (the ONLY hand-maintained list; visible, reviewable) -----
 
 [[exclusion]]
+path = "opf/README.md"
+reason = "Repository documentation for the opf/ folder, the page the opfiles.ai GitHub link opens; tracked, not shipped. Exact literal, not a glob."
+
+[[exclusion]]
 path = ".gitignore"
 reason = "Repository-local development metadata; tracked but not shipped."
 
