@@ -53,7 +53,8 @@ by sentence (_PINNED), so deleting or rewording a pinned sentence there turns th
 rest of Appendix E, and additions to it, stay unprotected here. The quickstart's, the opfiles.ai
 disclosure page's, the adopt page's, the adoption guide's, the record-indexes page's and the
 core-files page's changed
-sentences are pinned the same way over tag-stripped text (_SURFACE), outside the keyword lint,
+sentences (the disclosure, adopt and core-files pins held by both the hand-written page and the
+generated draft page that replaces it) are pinned the same way over tag-stripped text (_SURFACE), outside the keyword lint,
 and the self-test pins the registry's shape, so dropping a _SURFACE entry turns the self-test
 red; each sentence of the disclosure page's retired fresh-only item, the quickstart's retired
 conformance-class sentence, the record-indexes page's deleted importer-only legacy_fragment
@@ -273,6 +274,12 @@ ADOPT_PAGE = SPEC.parents[1] / "site" / "adopt.html"
 ADOPT_GUIDE = SPEC.parents[1] / "site" / "adopt.md"
 RECORD_INDEXES = SPEC.parents[1] / "site" / "record-indexes.html"
 CORE_FILES = SPEC.parents[1] / "site" / "core-files.html"
+# The generated draft pages (tools/gen_draft_site.py, from opf/site/draft-src/) that replace the
+# disclosure, adopt and core-files pages above. While both exist, each must hold every sentence its
+# old page is pinned to, so the pins survive the old page's removal.
+DRAFT_DISCLOSURE = SPEC.parents[1] / "site" / "draft" / "disclosure" / "index.html"
+DRAFT_ADOPT_PAGE = SPEC.parents[1] / "site" / "draft" / "adopt" / "index.html"
+DRAFT_CORE_FILES = SPEC.parents[1] / "site" / "draft" / "core-files" / "index.html"
 
 
 class _Descriptive(str):
@@ -1491,6 +1498,9 @@ _SURFACE = {
         '[opf] standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)',
     ),
 }
+# Each draft page carries its old page's pins, the same tuple, so the two copies cannot drift apart.
+_DRAFT_PAGES = {DRAFT_DISCLOSURE: DISCLOSURE, DRAFT_ADOPT_PAGE: ADOPT_PAGE, DRAFT_CORE_FILES: CORE_FILES}
+_SURFACE.update((draft, _SURFACE[old]) for draft, old in _DRAFT_PAGES.items())
 # Retired surface wording: the disclosure page's fresh-only item, the quickstart's
 # conformance-class sentence, retired with the implementation classes (spec 16.1), the
 # record-indexes page's deleted importer-only legacy_fragment rows and counts, retired with the reserved
@@ -1526,6 +1536,13 @@ _SURFACE_RETIRED = {
         'If an upgrade from 1.0.0 or 1.1.0 passes preflight, it applies the schema delta before failing at render, leaving the changes in place for recovery.',
     ),
 }
+_SURFACE_RETIRED.update((draft, _SURFACE_RETIRED[old]) for draft, old in _DRAFT_PAGES.items()
+                        if old in _SURFACE_RETIRED)
+
+
+def _surface_name(path):
+    # A draft page is an index.html under its page directory, so it is named by its draft path.
+    return "/".join(path.parts[-3:]) if path in _DRAFT_PAGES else path.name
 
 
 def _surface_text(text):
@@ -1539,10 +1556,10 @@ def surface_findings(texts=None):
         body = _surface_text(texts[path])
         for fragment in fragments:
             if fragment not in body:
-                findings.append("surface {} missing contract: {}".format(path.name, fragment))
+                findings.append("surface {} missing contract: {}".format(_surface_name(path), fragment))
         for fragment in _SURFACE_RETIRED.get(path, ()):
             if fragment in body:
-                findings.append("surface {} restores retired text: {}".format(path.name, fragment))
+                findings.append("surface {} restores retired text: {}".format(_surface_name(path), fragment))
     return findings
 
 
@@ -5558,26 +5575,32 @@ def _self_test_vectors():
         for fragment in fragments:
             mutated = dict(surfaces)
             mutated[path] = normalized.replace(fragment, "", 1)
-            finding = "surface {} missing contract: {}".format(path.name, fragment)
-            check("surface-pin-flip-" + path.name + "-" + fragment,
+            finding = "surface {} missing contract: {}".format(_surface_name(path), fragment)
+            check("surface-pin-flip-" + _surface_name(path) + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   nb.count(frag) == 1 and f in surface_findings(m))
     # Emptying or narrowing the surface registry would retire its pins silently: its shape is
     # pinned, so dropping a file or any of its pins turns the self-test red.
     check("surface-registry", lambda: tuple(_SURFACE) == (
-        QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES) and
-          tuple(map(len, _SURFACE.values())) == (10, 7, 10, 6, 7, 4))
+        QUICKSTART, DISCLOSURE, ADOPT_PAGE, ADOPT_GUIDE, RECORD_INDEXES, CORE_FILES,
+        DRAFT_DISCLOSURE, DRAFT_ADOPT_PAGE, DRAFT_CORE_FILES) and
+          tuple(map(len, _SURFACE.values())) == (10, 7, 10, 6, 7, 4, 7, 10, 4))
+    # Each draft page is held to exactly its old page's pins, retired sentences included, so a pin
+    # narrowed on one copy alone turns the self-test red.
+    check("surface-draft-pages", lambda: tuple(_DRAFT_PAGES.values()) == (DISCLOSURE, ADOPT_PAGE, CORE_FILES)
+          and all(_SURFACE[draft] == _SURFACE[old] and _SURFACE_RETIRED.get(draft) == _SURFACE_RETIRED.get(old)
+                  for draft, old in _DRAFT_PAGES.items()))
     # Each retired surface sentence is absent from its live file, and planting it back turns the
     # gate red with its own finding.
-    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 10, 6) and
+    check("surface-retired-registry", lambda: tuple(map(len, _SURFACE_RETIRED.values())) == (3, 10, 6, 10) and
           set(_SURFACE_RETIRED) <= set(_SURFACE))
     for path, fragments in _SURFACE_RETIRED.items():
         normalized = _surface_text(surfaces[path])
         for fragment in fragments:
             mutated = dict(surfaces)
             mutated[path] = normalized + " " + fragment
-            finding = "surface {} restores retired text: {}".format(path.name, fragment)
-            check("surface-retired-flip-" + path.name + "-" + fragment,
+            finding = "surface {} restores retired text: {}".format(_surface_name(path), fragment)
+            check("surface-retired-flip-" + _surface_name(path) + "-" + fragment,
                   lambda f=finding, m=mutated, frag=fragment, nb=normalized:
                   frag not in nb and f in surface_findings(m))
     # Delete the wrapped sentence in place: normalization must not hide a lost requirement.

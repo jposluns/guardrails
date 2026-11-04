@@ -5,7 +5,7 @@ title = "Adopt"
 kind = "document"
 label = "Adopt"
 heading = "Ask your assistant for a plan. Review it, then authorize."
-meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes, then inspect the scaffolded store and validation results."
+meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes, then inspect the scaffolded store and validation results. In this build the reference tooling stops after approval."
 
 [[body]]
 component = "label"
@@ -16,12 +16,71 @@ component = "steps"
 items = [
   '''Give your assistant this site's machine-readable entry point, <a href="/llms.txt"><code>/llms.txt</code></a>, and the adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>, as the starting material.''',
   "Review the plan it proposes: what it would create, import, or retire.",
-  "Authorize, then inspect the scaffolded store and the validation results.",
+  "Authorize, then inspect the scaffolded store and the validation results (the reference tooling cannot apply a plan yet).",
 ]
 
 [[body]]
 component = "prose"
 html = "<p>Adopting by hand is the fallback for when you cannot use an assistant; both paths target the same store format.</p>"
+
+[[body]]
+component = "section"
+lbl = "By hand"
+id = "byhand"
+heading = "The manual path"
+
+[[body]]
+component = "prose"
+html = '''<p>The shape of the manual path is short: create the store (write the files from the specification and schemas), commit it, generate the views with <code>opf render --write</code> for a supported store or your own renderer, and then work records-first. The standard requires no particular tool. The reference tooling requires Python 3.14 or newer. It validates spec 1.2.0 stores in either layout, with limits: it does not render or drift-check per-record views, and the baseline validator reports module-tier and importer record content schemas as cannot-evaluate. For a store with module-tier or importer records, or a per-record store that declares views, doctor's overall verdict is cannot-evaluate (exit 2).</p>
+<p>The reference tooling's <code>opf init</code> does not scaffold this store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). Conformance you assert by hand is self-asserted, and you should say so wherever you claim it, because no validator has checked it for you yet.</p>'''
+
+[[body]]
+component = "record"
+
+[[body.items]]
+term = "manifest.toml"
+html = '''The control document. It declares <code>standard = "opf"</code> (the exact discovery token) in its <code>[opf]</code> table, along with the base <code>spec_version</code> you conform to (<code>"2.0.0"</code>), the homes generation <code>homes = 2</code>, the storage layout, the enforcement posture, and <code>import_status</code>.'''
+
+[[body.items]]
+term = "counters.toml"
+html = '''The ID high-water marks. It holds the clean row and the imported counter row (the quoted key <code>"imported:&lt;NS&gt;"</code>, at zero to start) of every enabled type.'''
+
+[[body.items]]
+term = "version.toml"
+html = '''The version and release ledger: numbers, dates, spans, and digests, never release prose.'''
+
+[[body.items]]
+term = "worklog.toml"
+html = '''The durable operational record: one entry per change, correctable in place until a release freezes its span, never deleted. It is a ledger kept as a single file in either layout, not a typed index.'''
+
+[[body.items]]
+term = "Typed indexes"
+html = '''The eleven baseline typed indexes, each a <code>.index.toml</code> file, empty to start.'''
+
+[[body]]
+component = "prose"
+html = '''<p>The imported leaves: one <code>&lt;type&gt;.imported.index.toml</code> beside each of those eleven indexes, plus <code>worklog.imported.toml</code> for the worklog, each empty to start. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).</p>
+<p>Then write the committed pointer <code>.opf.toml</code> at your product repository root, so the store resolves from a stable location (specification section 4.3). In the manifest, a <code>[profiles.aiqt]</code> table is optional and is ignored by base-only tooling; a base adopter need not add it.</p>
+<p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest: also set <code>layout</code>, <code>posture</code> and <code>import_status</code>, register each enabled type in <code>[types]</code>, and declare views and the other settings (see <a href="$BASE/standard/">the standard</a> for the normative shape, and <a href="$BASE/core-files/">the core store files</a> for every table it can carry):</p>'''
+
+[[body]]
+component = "code"
+id = "manifest-opf"
+file = ".working/toml/manifest.toml"
+text = '''[opf]
+standard = "opf"         # the exact discovery token
+spec_version = "2.0.0"   # the base spec version this store conforms to
+homes = 2                # the homes generation; required, and 2 is the only value'''
+
+[[body]]
+component = "section"
+lbl = "Reference tooling"
+id = "tooling"
+heading = "Where the reference tooling stands"
+
+[[body]]
+component = "prose"
+html = '''<p>The reference tooling's <code>opf init</code> does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above. Its <code>opf doctor</code> grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; <code>opf upgrade</code> and <code>opf record</code> refuse such a store. The reference tooling defines no store upgrade: <code>opf upgrade</code> refuses every invocation with exit 2, reading and writing nothing.</p>'''
 
 [[body]]
 component = "section"
@@ -42,7 +101,7 @@ rows = [
   ["<code>doctor</code>", "verifies the store", "implemented"],
   ["<code>absorb</code>", "drafts changelog entries for human curation", "implemented"],
   ["<code>record</code>", "authors 1 record change at a time", "implemented"],
-  ["<code>adopt</code>", "plan, approve, reconcile and status run; apply refuses every plan in this build and complete refuses with exit 2, so adoption cannot finish yet", "partly implemented"],
+  ["<code>adopt</code>", "plan, approve, reconcile and status run; apply refuses every plan in this build and complete refuses every invocation, each with exit 2, so adoption cannot finish yet", "partly implemented"],
   ["<code>upgrade</code>", "refuses with exit 2; the reference tooling defines no store upgrade", "refuses"],
   ["<code>import</code>", "ordinary modes retired; refuse with exit 2", "retired"],
   ["<code>migrate</code>", "specified, not yet implemented", "planned"],

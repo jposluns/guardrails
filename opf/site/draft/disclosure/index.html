@@ -19,7 +19,7 @@
 <main id="main-content">
 <div class="wrap"><div class="doc"><p class="lbl first">Disclosure</p>
 <h1>Disclosure</h1>
-<nav class="rail" aria-label="On this page"><img class="rail-logo" src="/draft/assets/baseline/logos/opfiles.svg" alt="A machine-written source record and its generated view, joined by a drift gate"><p class="lbl">On this page</p><ol><li><a href="#d-1">Draft status</a></li><li><a href="#d-2">Implementations</a></li><li><a href="#d-3">Changelog and worklog checks</a></li><li><a href="#d-4">Store resolution</a></li><li><a href="#d-5">The single-writer lease</a></li><li><a href="#d-6">Doctor and the renderer</a></li><li><a href="#d-7">Adoption and the prompt pack</a></li><li><a href="#d-8">What the release is made of</a></li><li><a href="#d-9">Network reach</a></li></ol></nav>
+<nav class="rail" aria-label="On this page"><img class="rail-logo" src="/draft/assets/baseline/logos/opfiles.svg" alt="A machine-written source record and its generated view, joined by a drift gate"><p class="lbl">On this page</p><ol><li><a href="#d-1">Draft status</a></li><li><a href="#d-2">Implementations</a></li><li><a href="#d-3">Changelog and worklog checks</a></li><li><a href="#d-4">Store resolution</a></li><li><a href="#d-5">The single-writer lease</a></li><li><a href="#d-6">Doctor and the renderer</a></li><li><a href="#d-7">Adoption and the prompt pack</a></li><li><a href="#d-8">What the release is made of</a></li><li><a href="#d-9">Network reach</a></li><li><a href="#d-10">The discovery token</a></li></ol></nav>
 <p class="meta">This page sets out what OPFiles claims, the limit of each claim, and the evidence for both.</p>
 <p class="lbl sec">Entry 1</p>
 <h2 id="d-1">Draft status</h2>
@@ -28,8 +28,8 @@
 <p><strong>Evidence:</strong> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a> <a href="/draft/standard/">The standard</a></p>
 <p class="lbl sec">Entry 2</p>
 <h2 id="d-2">Implementations</h2>
-<p><strong>Claim:</strong> The specification defines 1 implementation model, with no conformance classes. Base 2.0.0, with homes = 2, is the only base version it defines.</p>
-<p><strong>Limitation:</strong> The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification. Its doctor grades a 2.0.0 manifest under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification.</p>
+<p><strong>Claim:</strong> Implementations (specification section 16.1): the specification defines one implementation model, with no conformance classes, and base 2.0.0, with homes = 2, is the only base version it defines.</p>
+<p><strong>Limitation:</strong> The reference tooling does not yet implement base 2.0.0: it still initializes and validates stores at base 1.2.0, and it makes no claim of conformance to the specification. The reference tooling's opf doctor grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the specification; opf upgrade and opf record refuse such a store. The reference tooling defines no store upgrade: opf upgrade refuses every invocation with exit 2, reading and writing nothing.</p>
 <p><strong>Evidence:</strong> <a href="/draft/core-files/#manifest">The store manifest</a></p>
 <p class="lbl sec">Entry 3</p>
 <h2 id="d-3">Changelog and worklog checks</h2>
@@ -53,8 +53,8 @@
 <p><strong>Evidence:</strong> <a href="/draft/adopt/">The 10 command verbs</a></p>
 <p class="lbl sec">Entry 7</p>
 <h2 id="d-7">Adoption and the prompt pack</h2>
-<p><strong>Claim:</strong> The reference CLI runs adoption investigation; opf adopt plan, approve, reconcile and status run, and plan and approve write nothing.</p>
-<p><strong>Limitation:</strong> apply refuses every plan in this build and complete refuses with exit 2, so adoption cannot finish yet and no receipt, completion check or retirement is recorded. The prompt pack's procedures are instructions an assistant is asked to follow; they do not control what the assistant does.</p>
+<p><strong>Claim:</strong> The reference CLI runs adoption investigation; opf adopt plan, approve, reconcile and status run, and plan, approve and status write nothing.</p>
+<p><strong>Limitation:</strong> apply refuses every plan in this build and complete refuses every invocation, each with exit 2, so adoption cannot finish yet and no receipt, completion check or retirement is recorded. Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path. The prompt pack's procedures are instructions an assistant is asked to follow; they do not control what the assistant does. The interim clean-start route initializes a store with <code>opf init</code>; it is not an adoption, and a later <code>opf adopt</code> run reads that store as re-adoption. That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.</p>
 <p><strong>Evidence:</strong> <a href="/draft/adopt/">Adopt</a> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-QUICKSTART.md" target="_blank" rel="noopener noreferrer">The quickstart<span class="vh"> (opens in a new tab)</span></a></p>
 <p class="lbl sec">Entry 8</p>
 <h2 id="d-8">What the release is made of</h2>
@@ -66,6 +66,11 @@
 <p><strong>Claim:</strong> A host provider's conveniences call the external API of the host the target names; the egress bound is that named host and nothing else.</p>
 <p><strong>Limitation:</strong> The standard cannot vouch for the host's own behaviour beyond that bound. Public deliverables reach the product repository under that repository's own review flow, which the standard requires to exist but does not gate.</p>
 <p><strong>Evidence:</strong> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a></p>
+<p class="lbl sec">Entry 10</p>
+<h2 id="d-10">The discovery token</h2>
+<p><strong>Claim:</strong> A store declares itself with the exact discovery token <code>standard = "opf"</code> in its <code>[opf]</code> table.</p>
+<p><strong>Limitation:</strong> A rename would be a store-breaking change the specification gives no path: every base-schema version bump stays additive and keeps the exact token, so no bump the specification permits renames it (specification sections 4.5 and 9.2).</p>
+<p><strong>Evidence:</strong> <a href="/draft/core-files/#manifest">The store manifest</a></p>
 <p class="lbl blk">Your browser</p>
 <p>If you use the light and dark switch, your choice is kept in your browser's local storage under the name scheme, so the site opens in that scheme next time. It is not sent to this site, and the site itself stores nothing until you press the switch. Cloudflare, which serves this site, adds an analytics script to its pages; it comes from Cloudflare, not from this site. On 4 November 2026 it stored nothing in the browser.</p>
 <p class="lbl blk">Security</p>
