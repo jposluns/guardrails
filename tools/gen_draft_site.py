@@ -552,8 +552,9 @@ def _table_html(site, spec, where):
              '<tbody>{}</tbody></table>').format(
                  classes, _t(_text(spec, where, "caption")), cols,
                  "".join("<th>{}</th>".format(_inline(site, cell)) for cell in head), "".join(body))
-    # A sticky table sits in the bounded scroll box only when its wrapper carries .bounded (template
-    # specification section 7.31); an unmarked wrapper is bounded only where the browser supports :has().
+    # A sticky table's wrapper gets the bounded class (template specification section 7.31); any other
+    # table's wrapper does not, and the template bounds an unmarked wrapper only in browsers that
+    # support :has().
     wrap = "tablewrap bounded" if sticky else "tablewrap"
     return '<div class="{}" tabindex="0">{}</div>'.format(wrap, table)
 
@@ -1594,6 +1595,11 @@ def _self_test():
         '<caption class="vh">C</caption><colgroup><col class="w26"><col class="w17"></colgroup>'
         '<thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>x</td><td class="id"><code>y</code>'
         '</td></tr></tbody></table></div></div>'), table)
+    fixed = rendered('component = "table"\ncaption = "C"\nfixed = true\nhead = ["A"]\nrows = [["x"]]\n')
+    expect("component/table-fixed-not-sticky-unbounded", fixed == (
+        '<div class="wide"><div class="tablewrap" tabindex="0"><table class="fixed">'
+        '<caption class="vh">C</caption><thead><tr><th>A</th></tr></thead><tbody><tr><td>x</td></tr>'
+        '</tbody></table></div></div>'), fixed)
     register = rendered('component = "register"\nreg = "Register 1"\ntitle = "T"\ncount = "1 row"\n'
                         'caption = "C"\nhead = ["A"]\nrows = [["x"]]\n')
     expect("component/register", register == (
