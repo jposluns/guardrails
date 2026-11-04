@@ -65,9 +65,11 @@ mis-reported as a downstream malformed-record error, and never silently rendered
 `<TYPE>-INDEX.md` mirrors cover the baseline record types only; module-type mirrors are DEFERRED until
 module-type record schemas ship (`_opf_schema.validate_record` knows only the baseline specs, so no
 module-type mirror can be rendered regardless). Every record source is read from its ACTIVE
-`<type>.index.toml` only (_source_relpath); no view reads a record rotated to the archive, whereas the
+`<type>.index.toml` only (_source_relpath); no view renders a record rotated to the archive, whereas the
 doctor's decision-chain check reads archived records beside the active ones, so a decision supersession
-chain is evaluated here over its active decisions alone (join_resolution states what that leaves unseen).
+chain is rendered here from its active decisions alone (join_resolution states what that leaves unseen).
+Only the decision renderers' one-current-resolution refusal reads the archive, through the doctor's own
+archive walk and chain derivation, so it never refuses a chain the doctor and the record verb count once.
 
 The write path (spec 5.7/5.8/11): a mutating render gates on the `_opf_check.validate_store`
 store-integrity layer (cross-record uniqueness, coverage, reconciliation, view drift, changelog/version
@@ -765,7 +767,51 @@ def _linked_chains(decisions):
                   key=lambda m: _id_key({"id": m[0]}))
 
 
-def join_resolution(decisions):
+# The `src` key under which plan_views hands the decision renderers the archived-records reader
+# (_archived_decisions); it names no declared source and enters no header digest.
+ARCHIVED_DECISIONS = "archived pending_decision reader"
+
+
+def _chains_with_archive(every, archived):
+    """The doctor's supersession chains (_opf_check.decision_chains, derived from removes_authority) over
+    the active `every`, seated as the doctor seats them, then the archived records `archived()` returns
+    (the doctor's own archive walk, _opf_check.archived_records), keeping the first record seated per ID
+    as the doctor's map does. None when `archived()` returns None (the walk raised a problem), so the
+    caller's active-only refusal stands."""
+    import _opf_check   # call-time: _opf_check imports this module at its top
+    rest = archived()
+    if rest is None:
+        return None
+    recs = [_opf_check._make_rec(d, "pending_decision", "active") for d in every if isinstance(d, dict)]
+    recs += list(rest)
+    by_id = {}
+    for rec in recs:
+        if isinstance(rec.id, str):
+            by_id.setdefault(rec.id, rec)
+    return _opf_check.decision_chains(recs, by_id)
+
+
+def _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors):
+    """A zero-argument reader of the archived records through the doctor's own archive walk
+    (_opf_check.archived_records), read at most once and only when called: None when the walk raises any
+    problem, so the caller keeps its active-only judgment (the doctor reports the problem itself)."""
+    memo = []
+
+    def read():
+        if not memo:
+            import _opf_check   # call-time: _opf_check imports this module at its top
+            base = manifest.get("opf")
+            types = _opf_check._authoritative_types(_opf_check._enabled_modules(manifest), manifest.get("types"))
+            recs, problems = _opf_check.archived_records(
+                store_root_fd, machine_rel, types, registered_vendors,
+                base.get("import_status") if isinstance(base, dict) else None,
+                homes=_opf_store.homes_generation(manifest))
+            memo.append(None if problems else recs)
+        return memo[0]
+    return read
+
+
+def join_resolution(decisions, archived=None):
     """The decision-resolution supersession-chain join (spec 8.5): a decided decision may be superseded by
     a newer one linking `supersedes`, and exactly one current effective resolution exists per chain.
     `decisions` is every pending decision a view reads, proposals and importer-authored ones included.
@@ -816,7 +862,14 @@ def join_resolution(decisions):
     decision therefore links nothing here, and an archived decision's link to an active one is not seen: a
     chain the doctor joins through an archived decision is evaluated over its active decisions alone, so
     two non-importer current resolutions that only an archived decision joins into one chain are NOT
-    refused, and each renders as an effective resolution."""
+    refused, and each renders as an effective resolution. The refusal alone also reads the archive:
+    `archived`, when given, is a zero-argument reader of the archived records the doctor seats
+    (_archived_decisions), and a chain the active decisions alone would refuse is judged again by the
+    doctor's own derivation over the active and archived records (_chains_with_archive), standing unless
+    that count is exactly one. A decided decision rotated to the archive can thus remove an active head's
+    authority, as it does for the doctor and the record verb, so a chain all three count once is not
+    refused here; the returned sets stay the active ones. When the archive walk raises a problem, the
+    active-only refusal stands."""
     every = decisions
     chains = _linked_chains(decisions)
     decisions = t_filter(t_filter(decisions, "not_importer_authored"), "not_proposed")
@@ -881,6 +934,15 @@ def join_resolution(decisions):
 
     split = [(m, [i for i in m if i in authority and i not in superseded]) for m in chains]
     split = [(m, h, _joiners(m)) for m, h in split if len(h) > 1]
+    if split and archived is not None:
+        # An active head may have lost its authority to a decided decision rotated to the archive, which
+        # the active index alone cannot show. Such a chain is judged by the doctor's own derivation over
+        # the doctor's own record set (active, then archived), so this refusal, C-DECISION-CHAINS and the
+        # record verb's chain rule count one chain alike; it stands unless that count is exactly one.
+        full = _chains_with_archive(every, archived)
+        if full is not None:
+            split = [(m, h, j) for m, h, j in split
+                     if len(next((c for ms, c in full if set(m) <= set(ms)), h)) != 1]
     if split:
         named = "; ".join("[{}] (current: {}; joined by: {})".format(
             ", ".join(m), ", ".join(h), ", ".join(j) or "links between its members")
@@ -1265,7 +1327,7 @@ def render_decisions(src):
     # supersession graph is over the SETTLED non-importer decisions only: a proposal does not yet supersede
     # anything, and an importer-authored decision confers nothing, so neither becomes an effective head
     # nor removes another decision from `current`.
-    current, superseded, supersedes_map = join_resolution(src["pending_decision"])
+    current, superseded, supersedes_map = join_resolution(src["pending_decision"], src.get(ARCHIVED_DECISIONS))
     decided = t_filter(settled, "state_in", states=("decided",))
     open_pd = t_sort(t_filter(settled, "state_in", states=("open",)))
     effective = t_sort(t_filter(decided, "id_in", ids=current))
@@ -1432,7 +1494,8 @@ def render_decisions_toml(src):
     doc = {"projection": "decisions", "schema": PROJECTION_SCHEMA}
     for t in sources:
         doc[t] = [_projection_row(r, _PROJECTION_EXTRA[t]) for r in sorted(src.get(t, []), key=_id_key)]
-    current, superseded, _supersedes_map = join_resolution(src.get("pending_decision", []))
+    current, superseded, _supersedes_map = join_resolution(src.get("pending_decision", []),
+                                                           src.get(ARCHIVED_DECISIONS))
     doc["derived"] = {"effective": _sorted_ids(current), "superseded": _sorted_ids(superseded)}
     return _opf_emit.emit_checked(doc)
 
@@ -2123,6 +2186,7 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
     # bound to its OWN spec destination; a manifest `target` that does not match is rejected, never silently
     # redirected.
     planned = []   # (view_name, scope, dest_relpath, text)
+    archived_decisions = _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors)
     check_byte_canon = _byte_canon_authority()  # authoritative byte-canon leg; pure function over bytes, lazy
     for name in sorted(views):
         tbl = views[name]
@@ -2143,6 +2207,8 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
                              "cannot rebind a view off its spec destination (fail-closed, spec 5.8/9)"
                              .format(name, declared_target, dest_rel))
         src = {s: rows_by_source[s] for s in required}
+        if "pending_decision" in required:
+            src[ARCHIVED_DECISIONS] = archived_decisions
         body = renderer(src)
         if name == "VERSION":
             text = body                                   # header-exempt exact-bytes deliverable (spec 6.1)
@@ -3510,6 +3576,36 @@ def _self_test():
             [_pd(1, "decided", "maintainer"), _pd(2, "withdrawn", "maintainer", 1),
              _pd(3, "decided", "maintainer", 2)],
             ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-3"), "withdrawn"))
+        # A decided decision rotated to the archive removes an active head's authority for the views' count
+        # as it does for the doctor and the record verb: the open PD-3 joins the decided PD-1 and PD-2, the
+        # archived decided PD-4 supersedes PD-2, and PD-1 supersedes PD-4, so the chain has one current
+        # resolution (PD-1) and renders, while the active index alone shows two. Red when the refusal counts
+        # the active index alone (both renderers then refuse naming PD-1 and PD-2). The controls: the same
+        # chain with the archived PD-4 not superseding PD-2 keeps two and refuses, and an archive the
+        # doctor's walk does not pass (the reader returns None) keeps the active-only refusal.
+        import _opf_check as _ar_check
+        _ar_active = [_pd(1, "decided", "maintainer", 4), _pd(2, "decided", "maintainer"),
+                      _pd(3, "open", "maintainer", 1, 2)]
+
+        def _ar_reader(*records):
+            return lambda: [_ar_check._make_rec(r, "pending_decision", "archived") for r in records]
+
+        _ar_one = _ar_reader(_pd(4, "decided", "maintainer", 2))
+        _ar_two = _ar_reader(_pd(4, "decided", "maintainer"))
+        check("resolution-archived-decided-link-removes-active-head-one-current",
+              _outcome(lambda a: join_resolution(a, _ar_one), _ar_active)
+              == ("ok", ({"PD-1", "PD-2", "PD-3"}, set(), {"PD-1": [], "PD-2": []}))
+              and _outcome(render_decisions_toml, {"pending_decision": _ar_active, ARCHIVED_DECISIONS: _ar_one})[0]
+              == "ok"
+              and _outcome(render_decisions, {"pending_decision": _ar_active, "autonomous_decision": [],
+                                              ARCHIVED_DECISIONS: _ar_one})[0] == "ok"
+              and _both_refuse(_ar_active, ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-2"), "undecided"))
+        check("resolution-archived-chain-two-current-still-cannot-evaluate", _refused_naming(
+            _outcome(lambda a: join_resolution(a, _ar_two), _ar_active),
+            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-2"), "undecided"))
+        check("resolution-archive-walk-problem-keeps-active-refusal", _refused_naming(
+            _outcome(lambda a: join_resolution(a, lambda: None), _ar_active),
+            ("PD-1", "PD-2", "PD-3"), ("PD-1", "PD-2"), "undecided"))
         check("resolution-withdrawn-successor-keeps-resolution-current", _outcome(join_resolution, [
             _pd(1, "decided", "maintainer"), _pd(2, "withdrawn", "maintainer", 1)])
             == ("ok", ({"PD-1", "PD-2"}, set(), {"PD-1": []})))
