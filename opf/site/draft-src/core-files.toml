@@ -52,7 +52,9 @@ component = "table"
 caption = "The top-level tables of the store manifest"
 head = ["Table", "Holds"]
 rows = [
-  ["<code>[opf]</code> ", "standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)"],
+  # The trailing space in this first cell is deliberate: with the tags stripped, it keeps "[opf]" and
+  # "standard" apart, so the row reads as the pinned text check_opf_homes.py holds this page to.
+  ["<code>[opf]</code> ","standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)"],
   ["<code>[store]</code>", "sync_target (empty under the in-repo default)"],
   ["<code>[modules]</code>", "governance, delivery_assurance, operational_policy, concurrent_operation"],
   ["<code>[profiles.*]</code>", "additive requirement bundles; may only add requirements"],
