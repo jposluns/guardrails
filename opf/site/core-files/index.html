@@ -62,7 +62,7 @@ governance = false</pre>
 <h2 id="backlog-item">The backlog</h2>
 <p>11 baseline typed indexes, their declared generated views, and the planned module schemas. One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified.</p>
 <h3 id="done">Completion receipts</h3>
-<p>A durable completion receipt, created in its single terminal state and immutable from birth.</p>
+<p>A durable completion receipt, created in its single terminal state and immutable from birth.</p><p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>
 <h3 id="finding">The finding register</h3>
 <p>An observation worth acting on, which links its remediation rather than containing it.</p>
 <h3 id="pending-decision">Pending decisions</h3>
@@ -83,6 +83,8 @@ governance = false</pre>
 <p>It tracks proposal, delivery, and outcome.</p>
 <h3 id="modules">Optional modules and importer types</h3>
 <p>4 optional modules, default-off.</p>
+<p><strong>Reserved namespace</strong> No module toggle: the standard reserves <code>LF</code> unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.</p><p><strong>(none)</strong> <code>LF</code> reserved unassigned; the reference tooling still recognizes <code>legacy_fragment</code> (<code>quarantined &#8594; resolved | ignored</code>) in stores holding such records from its retired import path.</p>
+<p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.</p><p>Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.</p><p>Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.</p><p>A new store's counters file has no <code>LF</code> namespace; a store scaffolded by earlier reference tooling may carry <code>LF</code> (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.</p>
 <p class="lbl sec">Around the records</p>
 <h2 id="pointer">The store pointer</h2>
 <p>The committed pointer that names where the store repository lives. A pointer that does not resolve stops the tool and never falls back silently to the default location.</p>

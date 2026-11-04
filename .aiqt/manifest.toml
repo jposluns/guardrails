@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "147fa4433a44c7be5fe6982305ceefdc4f51e179890f29d8896bdfd5d3815da3"
+tree-sha256 = "81837c2e99fbe0c1856ba3ff05b12fc865cd677c880bbcf42fbd864d1a003ac4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2417,7 +2417,7 @@ sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "8c302713f20518fb160c08fbd01e014ceae6a30e410356e339c00c117def4244"
+sha256 = "efb030611d8e3faf4b51f80293bc3677f1e37672a2d3638ede3deaa9e0c85c65"
 
 [[sources]]
 path = "RELEASING.md"
@@ -2466,18 +2466,18 @@ sha256 = "023a1aa4048dfc10639560b8077d30be17bac123cf78b4ec929d56184b1d231a"
 
 [[sources]]
 path = "docs/_shell.html"
-bytes = 3871
-sha256 = "7aec4b4f1c05d875d39eaf1ffc34c761b71dd4e29ae45eb84c8468f5f049c8aa"
+bytes = 3919
+sha256 = "a6fd9e203ef15013dbf5bba5dae4553eaea4e8319a8c4bb1945b7b7b9459b626"
 
 [[sources]]
 path = "docs/development.md"
-bytes = 10828
-sha256 = "09ec29e47aaa5bfcdba4f95d4cae2e9db7e3af21ad33087660f2f67e62483e11"
+bytes = 10631
+sha256 = "5518db6074be2ca03014125e1c7382f4c4c3c330a44b2976c95ff297a182c6bd"
 
 [[sources]]
 path = "docs/evidence.md"
-bytes = 5387
-sha256 = "29be9e1733805d6540b53dff4f53da825e962168a988320d0a7926d6af00a114"
+bytes = 5348
+sha256 = "01f4029a280cd4cb55f8002b0573ce347d28f40bd9734b7761c57ddfa65bea35"
 
 [[sources]]
 path = "opf/enforcement/ci/github-actions.yml"
@@ -2651,8 +2651,8 @@ sha256 = "f55098b6da69f606b347f53553f59fdc8d3275ade45793a562a6bff767b1b2f3"
 
 [[sources]]
 path = "opf/site/core-files/index.html"
-bytes = 17840
-sha256 = "2a039a77de6caa2f7ddaca52e22112e643ed9edcbb9d79ca18b8ad1407f85a51"
+bytes = 20135
+sha256 = "21a088b4ff17c8b5344e38fa6b9d0c0853373329fd6b49d10fc907324f13c364"
 
 [[sources]]
 path = "opf/site/disclosure/index.html"
@@ -2671,8 +2671,8 @@ sha256 = "590eac66cb028938aaa49156c553df6ac73116636db26b828a04b516120952c8"
 
 [[sources]]
 path = "opf/site/draft-src/core-files.toml"
-bytes = 12655
-sha256 = "b775980b6da4037f614168aa5c4268a8821318953d028a92670e4936d3f58a97"
+bytes = 15036
+sha256 = "237971f22c2596d5aa22be838098568d5a5410159a2ef0e93711fa128cfa024e"
 
 [[sources]]
 path = "opf/site/draft-src/disclosure.toml"
@@ -3531,8 +3531,8 @@ sha256 = "600f0ca0d03b23eccb36670313a573644a5642277a684df5bfb5c3a684f44ec5"
 
 [[sources]]
 path = "site/development.html"
-bytes = 14508
-sha256 = "2e7857dcf5a7875095b0da94d20d77c68cea1ae599bc1e1f6d59af40c861bf5b"
+bytes = 14359
+sha256 = "d854908193c51cd9bbaa1bcc21791b951ed077b20f387c8f82c5d0e973d614bb"
 
 [[sources]]
 path = "site/disclosure/index.html"
@@ -3931,13 +3931,13 @@ sha256 = "942dd72789dd8f14f350365172b4ae4b252d8e23615791eb68222c319707cb64"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 701250
-sha256 = "8f846ade4972a538396c6074b539aefc67286f800c2cdd6a82f47f7ccad6b0d4"
+bytes = 701298
+sha256 = "817243b44c2724e1ff3e7c937af87e690279098e2dd22ec6b97d8f0ef91195d3"
 
 [[sources]]
 path = "site/evidence.html"
-bytes = 9070
-sha256 = "e321443ba2b41140fdfaefa3141cbc99c0b2ee80f77cbc0a00ec7a80cbb57910"
+bytes = 9079
+sha256 = "b0631cb97af5b065f80b3aa317758bbe752000a6b1ff5d9a54f17777e102d22a"
 
 [[sources]]
 path = "site/favicon.svg"
@@ -3986,8 +3986,8 @@ sha256 = "2aa09db3bbac430b2b9fdb53cbcca9f5e2cf784651c3d5f0c8dfbae890be7ef6"
 
 [[sources]]
 path = "site/sitemap.xml"
-bytes = 1116
-sha256 = "5ee0ad6fd88430e269a103f3dc8641d3a219a86c85658d42222a56ccf780cd50"
+bytes = 1215
+sha256 = "00a6165efe6b5ca483dedb127942203adf22d4a466b218ea23e9112b5c083b70"
 
 [[sources]]
 path = "site/standard/index.html"
@@ -4001,8 +4001,8 @@ sha256 = "3a7c8983ab9fca0e04dc69f88afef82b0ff9e533dc150c86f250aae2c3a4d3d3"
 
 [[sources]]
 path = "site/tech-details.html"
-bytes = 22805
-sha256 = "61e983503e845a453dae220fddb5cfdbe291d70f2e93600f38d8f216dd70d4ee"
+bytes = 22774
+sha256 = "6a6bc010c6eaf387fca8e509c2c7f471060402c9670531121fa2e9176488e9ca"
 
 [[sources]]
 path = "site/theme.js"
@@ -4526,8 +4526,8 @@ sha256 = "5765bfa41902a4d9455c44b1ad0ddba692333fed3ff2c6704230cd1dc360d46b"
 
 [[sources]]
 path = "tools/gen_site.py"
-bytes = 78152
-sha256 = "44c721480389704318739c895c6746ed21f566f5c22d7ed5e9288899bd6cc2f4"
+bytes = 78200
+sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
