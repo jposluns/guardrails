@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the staged draft sites (shared site template, baseline 1.6.0) under each site's draft/ root.
+"""Generate the staged draft sites (shared site template, baseline 1.7.0) under each site's draft/ root.
 
   gen_draft_site.py              write every registered page
   gen_draft_site.py --check      exit 1 if any target differs from a fresh build, 2 if one cannot be read
@@ -293,8 +293,9 @@ def _footer(site):
 
 
 def _about(site):
-    """The "About this project" region (specification section 7.24, reference/landing.html)."""
-    dot = '<span class="dot" aria-hidden="true">&middot;</span>'
+    """The "About this project" region (specification section 7.24, reference/landing.html). One ordinary
+    space follows each dot and none precedes it, so the line breaks only after a dot."""
+    dot = '<span class="dot" aria-hidden="true">&middot;</span> '
     return ('<div class="region"><p class="lbl">About this project</p><div><p class="about">'
             '<a href="{}">Disclosure</a>{}<a href="{}">Licence</a>{}{}{}{}</p></div></div>').format(
                 _url(site, "disclosure/"), dot, _url(site, "license/"), dot,
@@ -1483,10 +1484,10 @@ def _self_test():
     expect("nav/github-last", all(nav.endswith('GitHub<span class="vh"> (opens in a new tab)</span></a>')
                                   for nav in navs), navs)
     about = ('<div class="region"><p class="lbl">About this project</p><div><p class="about">'
-             '<a href="/draft/disclosure/">Disclosure</a><span class="dot" aria-hidden="true">&middot;</span>'
-             '<a href="/draft/license/">Licence</a><span class="dot" aria-hidden="true">&middot;</span>'
+             '<a href="/draft/disclosure/">Disclosure</a><span class="dot" aria-hidden="true">&middot;</span> '
+             '<a href="/draft/license/">Licence</a><span class="dot" aria-hidden="true">&middot;</span> '
              '<a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">Privacy'
-             '<span class="vh"> (opens in a new tab)</span></a><span class="dot" aria-hidden="true">&middot;</span>'
+             '<span class="vh"> (opens in a new tab)</span></a><span class="dot" aria-hidden="true">&middot;</span> '
              '<a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">Security'
              '<span class="vh"> (opens in a new tab)</span></a></p></div></div>')
     expect("about/landing-exact-markup", page.count(about) == 1)
