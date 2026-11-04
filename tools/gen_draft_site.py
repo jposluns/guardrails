@@ -212,7 +212,7 @@ SITES = (
     {"key": "opfiles", "name": "OPFiles", "src": "opf/site/draft-src", "root": "opf/site",
      "live": "opf/site", "base": "/", "assets": DRAFT_BASE, "control": False,
      "logo-alt": "A machine-written source record and its generated view, joined by a drift gate",
-     "github": "https://github.com/jposluns/guardrails",
+     "github": "https://github.com/jposluns/guardrails/tree/main/opf",
      "kept": OPF_KEPT_LIVE_PATHS,
      "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Core files"),
              ("adopt/", "Adopt"))},
@@ -2168,7 +2168,7 @@ def _self_test():
     expect("opfiles/nav", opf_nav.startswith(
         '<a href="/draft/model/" aria-current="page">The model</a><a href="/draft/standard/">The standard</a>'
         '<a href="/draft/core-files/">Core files</a><a href="/draft/adopt/">Adopt</a>'
-        '<a href="https://github.com/jposluns/guardrails" target="_blank"'), opf_nav)
+        '<a href="https://github.com/jposluns/guardrails/tree/main/opf" target="_blank"'), opf_nav)
     expect("opfiles/nav-order", [label for _path, label in opf["nav"]] == [
         "The model", "The standard", "Core files", "Adopt"], opf["nav"])
     expect("opfiles/about", home.count(_about(opf)) == 1)
@@ -2489,7 +2489,8 @@ def _self_test():
     adopt_page = outputs["opf/site/draft/adopt/index.html"]
     expect("opfiles/adopt-kept-links", '<a href="/llms.txt"><code>/llms.txt</code></a>' in adopt_page
            and '<a href="/adopt.md"><code>/adopt.md</code></a>' in adopt_page
-           and "https://opfiles.ai/" not in adopt_page and '<ol class="steps">' in adopt_page)
+           and 'href="https://opfiles.ai/' not in adopt_page and '<ol class="steps">' in adopt_page
+           and '<pre id="adopt-prompt" class="hascopy prompt-block" tabindex="0">' in adopt_page)
     core_page = outputs["opf/site/draft/core-files/index.html"]
     expect("opfiles/core-files-components", '<dl class="record">' in core_page and "<blockquote>" in core_page
            and '<p class="lbl file">.working/toml/manifest.toml</p>' in core_page

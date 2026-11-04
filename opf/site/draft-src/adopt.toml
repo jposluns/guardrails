@@ -9,6 +9,17 @@ meta = "Ask your AI development assistant to read the standard, inspect your pro
 
 [[body]]
 component = "label"
+text = "Copy this prompt"
+
+[[body]]
+component = "code"
+id = "adopt-prompt"
+variant = "prompt-block"
+text = "Read https://opfiles.ai/llms.txt and https://opfiles.ai/adopt.md, then inspect this project and propose a plan to adopt OPFiles (OPF). The plan should name every file you would create, import, or retire, and why. Do not change any files until I have reviewed and approved the plan."
+note = "Paste it into your AI development assistant. It proposes a plan and waits for your approval before changing anything."
+
+[[body]]
+component = "label"
 text = "How"
 
 [[body]]
