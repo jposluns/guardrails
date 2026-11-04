@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d70da389f1e453f81ef8267fc66c45359dec3e2ffcaea02ad5add4948d5b450d"
+tree-sha256 = "773a9a28237ce7bdaaa39628ca6feeb816288459b406c2584b540f32c9327814"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -951,13 +951,13 @@ sha256 = "cae71e9a43e87c5687bc50dc75784e83b3a5b643a4e9a07298294b9d270971a4"
 
 [[sources]]
 path = ".baseline/opfiles-pin.toml"
-bytes = 7826
-sha256 = "fa25ef01e87002c10d4687659a621a7edfee8b867677e523f78e8a2fc1b8a440"
+bytes = 7974
+sha256 = "ca2004fe16d4adf88d28892b1aec7ec1026533a1beebf92d07245557fb4e4f21"
 
 [[sources]]
 path = ".baseline/pin.toml"
-bytes = 7478
-sha256 = "0deba08c83544e86384bebbb83d4598006e62608a76f9aef71f90df629f77bd1"
+bytes = 7626
+sha256 = "d58fe4c372546838672266f6cd25e04ed5a58ef730228f913e9196a7222acb90"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
