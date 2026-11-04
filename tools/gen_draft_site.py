@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the staged draft sites (shared site template, baseline 1.6.0) under each site's draft/ root.
+"""Generate the staged draft sites (shared site template, baseline 1.7.0) under each site's draft/ root.
 
   gen_draft_site.py              write every registered page
   gen_draft_site.py --check      exit 1 if any target differs from a fresh build, 2 if one cannot be read
@@ -293,8 +293,9 @@ def _footer(site):
 
 
 def _about(site):
-    """The "About this project" region (specification section 7.24, reference/landing.html)."""
-    dot = '<span class="dot" aria-hidden="true">&middot;</span>'
+    """The "About this project" region (specification section 7.24, reference/landing.html). One ordinary
+    space follows each dot and none precedes it, so the line breaks only after a dot."""
+    dot = '<span class="dot" aria-hidden="true">&middot;</span> '
     return ('<div class="region"><p class="lbl">About this project</p><div><p class="about">'
             '<a href="{}">Disclosure</a>{}<a href="{}">Licence</a>{}{}{}{}</p></div></div>').format(
                 _url(site, "disclosure/"), dot, _url(site, "license/"), dot,
@@ -552,8 +553,9 @@ def _table_html(site, spec, where):
              '<tbody>{}</tbody></table>').format(
                  classes, _t(_text(spec, where, "caption")), cols,
                  "".join("<th>{}</th>".format(_inline(site, cell)) for cell in head), "".join(body))
-    # A sticky table sits in the bounded scroll box only when its wrapper carries .bounded (template
-    # specification section 7.31); an unmarked wrapper is bounded only where the browser supports :has().
+    # A sticky table's wrapper gets the bounded class (template specification section 7.31); any other
+    # table's wrapper does not. The template's :has() fallback bounds an unmarked wrapper only when it
+    # directly holds a sticky table, and only in browsers that support :has().
     wrap = "tablewrap bounded" if sticky else "tablewrap"
     return '<div class="{}" tabindex="0">{}</div>'.format(wrap, table)
 
@@ -1483,10 +1485,10 @@ def _self_test():
     expect("nav/github-last", all(nav.endswith('GitHub<span class="vh"> (opens in a new tab)</span></a>')
                                   for nav in navs), navs)
     about = ('<div class="region"><p class="lbl">About this project</p><div><p class="about">'
-             '<a href="/draft/disclosure/">Disclosure</a><span class="dot" aria-hidden="true">&middot;</span>'
-             '<a href="/draft/license/">Licence</a><span class="dot" aria-hidden="true">&middot;</span>'
+             '<a href="/draft/disclosure/">Disclosure</a><span class="dot" aria-hidden="true">&middot;</span> '
+             '<a href="/draft/license/">Licence</a><span class="dot" aria-hidden="true">&middot;</span> '
              '<a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">Privacy'
-             '<span class="vh"> (opens in a new tab)</span></a><span class="dot" aria-hidden="true">&middot;</span>'
+             '<span class="vh"> (opens in a new tab)</span></a><span class="dot" aria-hidden="true">&middot;</span> '
              '<a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">Security'
              '<span class="vh"> (opens in a new tab)</span></a></p></div></div>')
     expect("about/landing-exact-markup", page.count(about) == 1)
@@ -1594,6 +1596,11 @@ def _self_test():
         '<caption class="vh">C</caption><colgroup><col class="w26"><col class="w17"></colgroup>'
         '<thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>x</td><td class="id"><code>y</code>'
         '</td></tr></tbody></table></div></div>'), table)
+    fixed = rendered('component = "table"\ncaption = "C"\nfixed = true\nhead = ["A"]\nrows = [["x"]]\n')
+    expect("component/table-fixed-not-sticky-unbounded", fixed == (
+        '<div class="wide"><div class="tablewrap" tabindex="0"><table class="fixed">'
+        '<caption class="vh">C</caption><thead><tr><th>A</th></tr></thead><tbody><tr><td>x</td></tr>'
+        '</tbody></table></div></div>'), fixed)
     register = rendered('component = "register"\nreg = "Register 1"\ntitle = "T"\ncount = "1 row"\n'
                         'caption = "C"\nhead = ["A"]\nrows = [["x"]]\n')
     expect("component/register", register == (
