@@ -20,7 +20,7 @@
 <main id="main-content">
 <div class="wrap"><div class="doc"><p class="lbl first">The 5 rules</p>
 <h1>The 5 rules of AIQT</h1>
-<nav class="rail" aria-label="On this page"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" alt="A shield bearing a check mark, set on a guardrail"><p class="lbl">On this page</p><ol><li><a href="#rule1">Surface what a guardrail catches</a></li><li><a href="#rule2">Self-check each change</a></li><li><a href="#rule3">Fix in-scope issues before shipping</a></li><li><a href="#rule4">Surface out-of-scope issues</a></li><li><a href="#rule5">Propose an underlying fix</a></li></ol></nav>
+<nav class="rail" aria-label="On this page"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" alt="A shield bearing a check mark, set on a guardrail"><p class="lbl">On this page</p><ol><li><a href="#rule1">Surface what a guardrail catches</a></li><li><a href="#rule2">Self-check each change</a></li><li><a href="#rule3">Fix in-scope issues before shipping</a></li><li><a href="#rule4">Surface out-of-scope issues</a></li><li><a href="#rule5">Propose an underlying fix</a></li><li><a href="#enforced">Enforced</a></li></ol></nav>
 <p class="meta">The ordering is what AIQT holds to; the 5 rules are how an assistant applies it, moment to moment. They ship in the chat skill you install today. Each rule is quoted from the standard.</p>
 <dl class="control"><div><dt>Document</dt><dd>aiqt.ai</dd></div><div><dt>Version</dt><dd>AIQT 1.0.5</dd></div><div><dt>Status</dt><dd>Published 2026-09-15</dd></div><div><dt>Source</dt><dd><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">jposluns/guardrails<span class="vh"> (opens in a new tab)</span></a></dd></div><div><dt>Licence</dt><dd><a href="/license/">Apache 2.0, see NOTICE</a></dd></div></dl>
 <p class="lbl sec">Rule 1</p>
@@ -39,6 +39,9 @@
 <h2 class="clause" id="rule5"><span class="num">5</span><span>Propose an underlying fix.</span></h2>
 <div class="note"><span class="label">Rule 5</span><div><p>When your own gap let the issue through, propose (and, if asked, draft) a guardrail so it should not recur.</p></div></div>
 <div class="note"><span class="label">Note</span><div><p>Rule 5 improves your own project first: the guardrail lands in your workspace and protects your work. The Guardrail-Seed contribution is a separate, optional step that lets you send the lesson back to AIQT. What travels is a lesson: a general requirement expressed in the pack's own terms. It is not your code, your prompts, your conversations, or your data.</p></div></div>
+<p class="lbl sec">Enforcement</p>
+<h2 id="enforced">Rules your assistant cannot skip</h2>
+<p>An assistant can overlook a written rule. It cannot overlook a hook or a gate. So AIQT favours guardrails that can be enforced, and keeps building hooks, gates and checks for guardrails as they are identified.</p><p>One example: the stop guard will not let your assistant end its turn while your to-do list still holds an item it can work on. It counts the open items itself from the list, rather than taking the assistant's word that it is finished. <a href="https://github.com/jposluns/guardrails/blob/main/.aiqt/core/hooks/ORCHESTRATION.md" target="_blank" rel="noopener noreferrer">See how the stop guard works<span class="vh"> (opens in a new tab)</span></a>.</p>
 <div class="next"><p class="lbl">Next</p><a class="start" href="/install/">Set up in chat <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
 </div></div>
 </main>

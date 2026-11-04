@@ -40,13 +40,17 @@ html = '''<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a h
 
 [[body]]
 component = "section"
-lbl = "Writing code"
-heading = "Writing code?"
+lbl = "Requirements"
+heading = "What it needs"
 id = "code"
 
 [[body]]
 component = "prose"
-html = '''<p>The <a href="/development">development assistant</a> brings the same standard into your repository. The pack's tools and hooks require Python 3.14 or newer. The chat setup on this page needs no Python.</p>'''
+html = '''<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat skill needs no Python.</p>'''
+
+[[body]]
+component = "prose"
+html = '''<p>Planning for a team? See <a href="$BASE/future/">what is coming for teams and enterprises</a>.</p>'''
 
 [[body]]
 component = "next"
