@@ -3,6 +3,8 @@
 # palette gate, copied to .baseline/check_palette.py outside the served tree.
 # tools/check_baseline_pin.py checks the copy against this file offline (no network).
 # Update it only together with the copied files, when the pin moves to a new baseline version.
+# Not copied: matrix.js, the template's matrix-table script, because no page of this site uses it;
+# copy and pin it here before any page loads it.
 version = "1.7.0"
 
 [files]

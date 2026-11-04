@@ -29,11 +29,13 @@ a copied file that cannot be read, are cannot-evaluate (exit 2), never a pass.
 Every registered pin must name the same version, and that version must equal the site template version
 recorded in .aiqt/attribution.toml, table [vendored."site-template"], key version: the single in-tree
 source tools/gen_notice.py renders the root NOTICE from (the NOTICE is generated output, so it is not
-read). The file is read under the scanned root. An attribution file that is missing, unreadable, not a
-regular file, over MAX_ATTRIBUTION_BYTES, not UTF-8 or not TOML, a missing [vendored."site-template"]
-table, a version there that is missing or not an X.Y.Z string, a pin whose version differs from it, and
-2 pins that name different versions are cannot-evaluate (exit 2). The gate reads only the repository; it
-never touches the network.
+read). The same table's homepage, the source archive URL, must end in /baseline-<version>.tar.gz for that
+recorded version, so the archive cannot name another version. The file is read under the scanned root. An
+attribution file that is missing, unreadable, not a regular file, over MAX_ATTRIBUTION_BYTES, not UTF-8 or
+not TOML, a missing [vendored."site-template"] table, a version there that is missing or not an X.Y.Z
+string, a homepage there that is missing, not a string or not ending that way, a pin whose version
+differs from the recorded version, and 2 pins that name different versions are cannot-evaluate (exit 2).
+The gate reads only the repository; it never touches the network.
 """
 import sys
 
@@ -184,6 +186,12 @@ def parse_attribution(data, where=ATTRIBUTION_REL):
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise CannotEvaluate('{}: [vendored."{}"] version must be an X.Y.Z string'.format(
             where, ATTRIBUTION_BLOCK))
+    # The source archive must be the recorded version's own, so the version and the archive cannot drift apart.
+    homepage = block.get("homepage")
+    ending = "/baseline-{}.tar.gz".format(version)
+    if not isinstance(homepage, str) or not homepage.endswith(ending):
+        raise CannotEvaluate('{}: [vendored."{}"] homepage must end in {} for version {}, but it is {}'.format(
+            where, ATTRIBUTION_BLOCK, ending, version, "missing" if homepage is None else repr(homepage)))
     return version
 
 
@@ -387,7 +395,7 @@ def run_gate(root, pins=PINS):
     if findings:
         return 1
     print("PASS: every file pinned in {} matches its SHA-256 under its registered copy root, with no stray "
-          "or linked entry, every pinned build tool is a regular file with its pinned SHA-256, and every pin names the site template version recorded in {}".format(
+          "or linked entry, every pinned build tool is a regular file with its pinned SHA-256, and every pin names the site template version recorded in {}, whose homepage ends in that version's archive name".format(
               ", ".join(pin_rel for pin_rel, _root in pins), ATTRIBUTION_WHERE))
     return 0
 
@@ -435,11 +443,15 @@ def _pin_text(files, root=FIXTURE_ROOT, version=FIXTURE_VERSION, extra="", tools
     return "\n".join(lines) + "\n"
 
 
-def _attribution_text(version=FIXTURE_VERSION, block=ATTRIBUTION_BLOCK):
-    """A fixture attribution file: another vendored block first, so the version is taken from the named one."""
+def _attribution_text(version=FIXTURE_VERSION, block=ATTRIBUTION_BLOCK, homepage=None):
+    """A fixture attribution file: another vendored block first, so the version is taken from the named one.
+    homepage is the archive URL (None for the version's own archive, False to write none)."""
+    if homepage is None:
+        homepage = "https://example.org/baseline/baseline-{}.tar.gz".format(version)
     return ('[vendored."marko"]\nname = "Marko"\nversion = "9.9.9"\n\n'
-            '[vendored."{}"]\nname = "Shared site template (baseline package)"\nversion = "{}"\n'
-            'verified = true\n').format(block, version)
+            '[vendored."{}"]\nname = "Shared site template (baseline package)"\nversion = "{}"\n{}'
+            'verified = true\n').format(block, version,
+                                        "" if homepage is False else 'homepage = "{}"\n'.format(homepage))
 
 
 def _fixture(tmp, files=None, pin=None, root=FIXTURE_ROOT, pin_rel=PIN_REL, attribution=None, tools=None):
@@ -810,6 +822,30 @@ def _self_test():
               and errors == ([ATTRIBUTION_REL + ": larger than {} bytes".format(MAX_ATTRIBUTION_BYTES)]
                              if refused else []), (len(body), findings, errors))
 
+    # The homepage rule: the attribution table's archive URL ends in the recorded version's own archive name.
+    # Every pin matches, so only the homepage can refuse a case.
+    archive = "https://example.org/baseline/baseline-{}.tar.gz".format(FIXTURE_VERSION)
+    findings, errors = _scan_case(attribution=_attribution_text(homepage=archive))
+    check("homepage/matching-passes", findings == [] and errors == [], (findings, errors))
+
+    ending = "/baseline-{}.tar.gz".format(FIXTURE_VERSION)
+    for name, homepage, found in (
+            ("homepage/other-version-refused", archive.replace(FIXTURE_VERSION, "1.2.2"), None),
+            ("homepage/missing-refused", False, "missing"),
+            ("homepage/other-file-name-refused", archive.replace(".tar.gz", ".zip"), None),
+            ("homepage/name-prefix-refused", archive.replace(ending, "/x" + ending[1:]), None),
+            ("homepage/trailing-suffix-refused", archive + ".sig", None)):
+        findings, errors = _scan_case(attribution=_attribution_text(homepage=homepage))
+        check(name, findings == [] and errors == [
+            '{}: [vendored."{}"] homepage must end in {} for version {}, but it is {}'.format(
+                ATTRIBUTION_REL, ATTRIBUTION_BLOCK, ending, FIXTURE_VERSION, found or repr(homepage))],
+              (findings, errors))
+
+    findings, errors = _scan_case(attribution=_attribution_text().replace('homepage = "{}"'.format(archive),
+                                                                         "homepage = 1"))
+    check("homepage/not-string-refused", findings == [] and len(errors) == 1
+          and errors[0].startswith(ATTRIBUTION_REL + ":") and errors[0].endswith("but it is 1"), (findings, errors))
+
     # The gate's own report lines go to a buffer: a self-test run writes nothing to its error stream.
     with tempfile.TemporaryDirectory(prefix="baseline-pin-selftest-") as tmp, \
             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stream:
@@ -842,7 +878,9 @@ def _self_test():
           "outside a copy root, a tool-only pin or a misshapen tool digest is cannot-evaluate; a pin whose version differs from the attribution file's site template version, "
           "2 pins naming different versions, and an attribution file that is missing, unreadable, not a "
           "regular file, non-UTF-8, non-TOML, over its size bound, without the site template table or with "
-          "a missing or misshapen version there are cannot-evaluate; the exit codes are 0, 1 and 2; the "
+          "a missing or misshapen version there are cannot-evaluate; a homepage ending in the recorded "
+          "version's archive name passes, and one naming another version, another file name or a prefixed "
+          "name, missing or not a string is cannot-evaluate; the exit codes are 0, 1 and 2; the "
           "live tree passes)".format(len(EXECUTED)))
     return 0
 

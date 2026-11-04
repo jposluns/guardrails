@@ -4,6 +4,8 @@
 # only the opf/site/draft/assets/baseline copy, and .baseline/pin.toml names only the site/ copy; both
 # pin the 1 shared palette gate, .baseline/check_palette.py, which is never served.
 # Update it only together with the copied files, when the pin moves to a new baseline version.
+# Not copied: matrix.js, the template's matrix-table script, because no page of this site uses it;
+# copy and pin it here before any page loads it.
 version = "1.7.0"
 
 [files]
