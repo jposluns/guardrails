@@ -126,7 +126,7 @@ verified-date = "2026-09-20"
 
 [vendored."site-template"]
 name = "Shared site template (baseline package)"
-component = "Pinned copy of the site template's runtime and licence files, under site/draft/assets/baseline/"
+component = "Pinned copy of the site template's runtime and licence files, under site/draft/assets/baseline/ and opf/site/draft/assets/baseline/, with its palette gate at .baseline/check_palette.py"
 version = "1.7.0"
 licence = "CC0 1.0 Universal, except the fonts and marks named below"
 licence-url = "https://creativecommons.org/publicdomain/zero/1.0/"

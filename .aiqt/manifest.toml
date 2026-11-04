@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "bc71ea8e7862431b38627d738a0013e5b9bebdf2e22c386803a0228e92b6a9c4"
+tree-sha256 = "56aea65a2356f8538ea57cf45f51ab1ae5d065dccf45e714534d53357ffdec22"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -16,8 +16,8 @@ sha256 = "9bf86b7a1a51656b13907f3422bf3bf974d3d41fa6cf2c9bc4b04686ee8f8190"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
-bytes = 12100
-sha256 = "dc3cd37cc09629715f56600c5a72578643cc6da2b2bce321aa2520798a379a6b"
+bytes = 12189
+sha256 = "e1bc4fd9a974aa49ec48fdaebe0a59ef157f8ef85f2b18ace01e9cd568884b9a"
 
 [[sources]]
 path = ".aiqt/core/adapter-blocks.toml"
@@ -2411,8 +2411,8 @@ sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 [[sources]]
 path = "NOTICE"
-bytes = 11877
-sha256 = "021f26072c496642853428d88ff05a8e71bd1c56132ba188e5b9558e88f47138"
+bytes = 11968
+sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 
 [[sources]]
 path = "README.md"

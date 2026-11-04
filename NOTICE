@@ -205,6 +205,7 @@ opf/tools/_vendor/marko-2.2.4.provenance.toml.
 
 Shared site template (baseline package) (version 1.7.0)
   Pinned copy of the site template's runtime and licence files, under site/draft/assets/baseline/
+  and opf/site/draft/assets/baseline/, with its palette gate at .baseline/check_palette.py
 Licence: CC0 1.0 Universal, except the fonts and marks named below
 (https://creativecommons.org/publicdomain/zero/1.0/)
 Jeff Posluns, dedicated to the public domain under CC0 1.0
