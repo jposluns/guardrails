@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "773a9a28237ce7bdaaa39628ca6feeb816288459b406c2584b540f32c9327814"
+tree-sha256 = "592da50b602d13bf51ba63e38f48d3c0b3afaf646ef2a8b8b5e14108c8fff0c9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4241,8 +4241,8 @@ sha256 = "670497debf8f21b516b24f4d4647f9ac0f2b165a7cd930f7a5d67e3c8f7b5ed0"
 
 [[sources]]
 path = "tools/check_baseline_pin.py"
-bytes = 44788
-sha256 = "37d6d333be7052df46cc179c51dd9f84701d57abac0e707da1148a343fa5a0f8"
+bytes = 47829
+sha256 = "e79aff5679466a9ea6b5e8022e93158cf8e3979b8cc1e7b00a6942e0bca86703"
 
 [[sources]]
 path = "tools/check_branch_root.py"
@@ -4751,8 +4751,8 @@ sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 213670
-sha256 = "6e5aa1f9575e0cc1fdc8e9623be0d2f52abc36e4537bbd5429ed43410f3443c3"
+bytes = 213909
+sha256 = "214dd987e31083e1da825850eff3c5bdb34fb82d0955719da85cfcaa0eb1b759"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
