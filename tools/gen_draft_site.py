@@ -2,7 +2,9 @@
 """Generate the staged draft sites (shared site template, baseline 1.7.0) under each site's draft/ root.
 
   gen_draft_site.py              write every registered page
-  gen_draft_site.py --check      exit 1 if any target differs from a fresh build, 2 if one cannot be read
+  gen_draft_site.py --check      exit 1 if any target differs from a fresh build or a page folder holds an
+                                 unlisted page, 2 if one cannot be read or a root-relative link resolves
+                                 to nothing the site serves (both checks also run on a normal run)
   gen_draft_site.py --self-test  assert the shell, the components, the refusals and the base-path rules
 
 Every page is built from 1 shell (template specification section 5): `<html lang="en" class="site-<name>">`,
@@ -56,6 +58,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import html as _html
 import os
 import re
+import shutil
 import stat
 import tempfile
 import tomllib
@@ -1343,12 +1346,19 @@ def _kept_live_missing(site):
     return missing
 
 
-def build(pages=None, sites=SITES):
+def promoted_sites(sites=SITES):
+    """Each site as it stands at its promotion: base "/" and its pages written to its live root."""
+    return tuple(dict(site, base="/", root=site["live"]) for site in sites)
+
+
+def build(pages=None, sites=SITES, registered=True):
     """{target path: text} for every registered output. Each site is loaded from its own data directory
     and rendered with its own context; with the default page sets, the built set must match the
     GENSRC_OUTPUTS declaration, so a page cannot land or vanish without its registry entry. A given
     `pages` list (a fixture) is rendered for every site in `sites`. Every kept live path of a site must
-    exist under its live root before anything renders, and no 2 sites may build the same output path."""
+    exist under its live root before anything renders, and no 2 sites may build the same output path.
+    `registered` false skips the declaration match, for a fixture build of the declared pages at another
+    base (promoted_sites)."""
     declared = pages is None
     outputs = {}
     for site in sites:
@@ -1362,12 +1372,96 @@ def build(pages=None, sites=SITES):
             if target in outputs:
                 raise RefusedPage("{}: built by more than 1 site".format(target))
             outputs[target] = render_page(site, site_pages, page)
-    if declared:
+    if declared and registered:
         targets = {entry["target"] for entry in GENSRC_OUTPUTS}
         if set(outputs) != targets:
             raise RefusedPage("built outputs {} differ from GENSRC_OUTPUTS {}".format(
                 sorted(outputs), sorted(targets)))
     return outputs
+
+
+class _RootLinks(HTMLParser):
+    """Every root-relative href and src value a page writes (one leading "/", not a "//host" URL)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.found = []
+
+    def handle_starttag(self, tag, attrs):
+        for name, value in attrs:
+            if name in ("href", "src") and isinstance(value, str) and value.startswith("/") \
+                    and not value.startswith("//"):
+                self.found.append(value)
+
+
+def _redirect_sources(path):
+    """The source path (the first field) of every rule line of a _redirects file; none when it is absent.
+    OSError or UnicodeDecodeError when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        return frozenset()
+    return frozenset(line.split()[0] for line in text.splitlines()
+                     if line.strip() and not line.lstrip().startswith("#"))
+
+
+def unresolved_links(outputs, sites=SITES, tree=ROOT):
+    """Every root-relative href or src on a built page that resolves to none of: a page the same site
+    generates, a file under the site's template asset folder (in `tree`), one of its kept live paths, or the
+    source of a rule in its live root's _redirects file. The path is compared without its #fragment or
+    ?query, so it holds at any base: the generated page URLs, the asset folder and the redirects all follow
+    the site's own base and root."""
+    found = []
+    for site in sites:
+        prefix = site["root"] + "/"
+        rels = sorted(target[len(prefix):] for target in outputs if target.startswith(prefix))
+        pages = {_page_url(site, rel) for rel in rels}
+        asset_url = site["base"] + ASSETS
+        asset_dir = Path(tree) / site["root"] / ASSETS
+        redirects = _redirect_sources(Path(tree) / site["live"] / "_redirects")
+        for rel in rels:
+            parser = _RootLinks()
+            parser.feed(outputs[prefix + rel])
+            parser.close()
+            for value in parser.found:
+                path = value.split("#", 1)[0].split("?", 1)[0]
+                if path in pages or path in redirects or _kept_live(site, value):
+                    continue
+                if path.startswith(asset_url) and path != asset_url \
+                        and (asset_dir / path[len(asset_url):]).is_file():
+                    continue
+                found.append("{}{}: {} resolves to no generated page, template asset, kept live path or "
+                             "redirect".format(prefix, rel, value))
+    return found
+
+
+def stray_outputs(tree, sites=SITES, targets=None):
+    """Every .html file in a folder that holds a generated page of a site (the folder of a target) that the
+    targets (GENSRC_OUTPUTS by default) do not list, apart from a kept live path's own file. Only those
+    folders are listed, not their subfolders, so the asset folder and a promoted root's other folders (its
+    downloads, its draft placeholder) are not read; a page in a folder holding no generated page is not
+    found here."""
+    if targets is None:
+        targets = {entry["target"] for entry in GENSRC_OUTPUTS}
+    found = []
+    for site in sites:
+        prefix = site["root"] + "/"
+        kept = set()
+        for path in site["kept"]:
+            live = "{}/{}".format(site["live"], path.lstrip("/"))
+            kept.update((live, live + ".html"))
+        for folder in sorted({target.rsplit("/", 1)[0] for target in targets if target.startswith(prefix)}):
+            try:
+                with os.scandir(Path(tree) / folder) as entries:
+                    names = sorted(entry.name for entry in entries if not entry.is_dir(follow_symlinks=False))
+            except FileNotFoundError:
+                continue
+            for name in names:
+                rel = "{}/{}".format(folder, name)
+                if name.endswith(".html") and rel not in targets and rel not in kept:
+                    found.append(rel)
+    return found
 
 
 def _existing(path):
@@ -1387,6 +1481,15 @@ def run(root, check):
         outputs = build()
     except RefusedPage as exc:
         print("error: refused: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        unresolved = unresolved_links(outputs)
+    except (OSError, ValueError) as exc:
+        print("error: cannot read a redirects file ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    if unresolved:
+        for finding in unresolved:
+            print("error: refused: {}".format(finding), file=sys.stderr)
         return 2
     drift = False
     for rel, text in sorted(outputs.items()):
@@ -1411,10 +1514,16 @@ def run(root, check):
         with open(path, "wb") as handle:
             handle.write(data)
         print("wrote {}".format(rel))
+    try:
+        stray = stray_outputs(root)
+    except OSError as exc:
+        print("error: cannot list a page folder ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    for rel in stray:
+        print("stray: {} is in a generated page folder but not in GENSRC_OUTPUTS".format(rel))
     if drift:
         print("run tools/gen_draft_site.py to regenerate")
-        return 1
-    return 0
+    return 1 if drift or stray else 0
 
 
 def _self_test():
@@ -2231,6 +2340,73 @@ def _self_test():
            and '<p class="lbl file">.working/toml/manifest.toml</p>' in core_page
            and '<h3 id="done">' in core_page)
 
+    # Link resolution and stray outputs, staged (base /draft/, the declared build) and promoted (the same
+    # pages built at base "/" into each site's live root, in a fixture tree holding the asset folder and the
+    # redirects files at their promoted places).
+    expect("links/resolve-staged-clean", unresolved_links(outputs) == [], unresolved_links(outputs))
+    promoted_sites_ = promoted_sites()
+    promoted = build(sites=promoted_sites_, registered=False)
+    expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(
+        entry["target"].replace("/draft/", "/", 1) for entry in GENSRC_OUTPUTS), sorted(promoted))
+    staged_home, opf_home = "site/draft/index.html", "opf/site/draft/index.html"
+
+    def with_link(built, target, markup):
+        changed = dict(built)
+        changed[target] = changed[target].replace("</main>", markup + "</main>", 1)
+        return changed
+
+    for name, target, markup, want in (
+            ("links/staged-missing-page-flagged", staged_home, '<a href="/draft/absent/">x</a>', 1),
+            ("links/staged-missing-asset-flagged", staged_home, '<img src="/draft/assets/baseline/absent.svg">', 1),
+            ("links/staged-asset-folder-itself-flagged", staged_home, '<a href="/draft/assets/baseline/">x</a>', 1),
+            ("links/staged-live-only-path-flagged", staged_home, '<a href="/install">x</a>', 1),
+            ("links/staged-other-site-page-flagged", opf_home, '<a href="/draft/install/">x</a>', 1),
+            ("links/staged-promoted-url-flagged", staged_home, '<a href="/install/">x</a>', 1),
+            ("links/staged-page-with-fragment-passes", staged_home, '<a href="/draft/install/#x">x</a>', 0),
+            ("links/staged-redirect-source-passes", staged_home, '<a href="/rule1">x</a>', 0),
+            ("links/staged-kept-live-passes", staged_home, '<a href="/development">x</a>', 0),
+            ("links/staged-protocol-relative-not-root-relative", staged_home, '<a href="//example.com/">x</a>', 0)):
+        got = unresolved_links(with_link(outputs, target, markup))
+        expect(name, len(got) == want, got)
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-promoted-") as tmp:
+        for site_ in SITES:
+            shutil.copytree(ROOT / site_["root"] / ASSETS, Path(tmp) / site_["live"] / ASSETS)
+            shutil.copyfile(ROOT / site_["live"] / "_redirects", Path(tmp) / site_["live"] / "_redirects")
+        found = unresolved_links(promoted, promoted_sites_, tmp)
+        expect("links/resolve-promoted-clean", found == [], found)
+        expect("links/promoted-without-assets-flagged", unresolved_links(promoted, promoted_sites_, ROOT) != [])
+        promoted_home = "site/index.html"
+        for name, markup, want in (
+                ("links/promoted-missing-page-flagged", '<a href="/absent/">x</a>', 1),
+                ("links/promoted-staged-url-flagged", '<a href="/draft/install/">x</a>', 1),
+                ("links/promoted-missing-asset-flagged", '<img src="/assets/baseline/absent.svg">', 1),
+                ("links/promoted-page-passes", '<a href="/install/">x</a>', 0),
+                ("links/promoted-redirect-source-passes", '<a href="/rule1">x</a>', 0),
+                ("links/promoted-kept-live-passes", '<a href="/development">x</a>', 0)):
+            got = unresolved_links(with_link(promoted, promoted_home, markup), promoted_sites_, tmp)
+            expect(name, len(got) == want, got)
+        for rel, text in promoted.items():
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        promoted_targets = set(promoted)
+        expect("stray/promoted-clean", stray_outputs(tmp, promoted_sites_, promoted_targets) == [])
+        for rel in ("site/development.html", "site/draft/index.html", "site/assets/baseline/x.html",
+                    "site/robots.txt"):
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("x")
+        got = stray_outputs(tmp, promoted_sites_, promoted_targets)
+        expect("stray/promoted-kept-placeholder-assets-and-other-files-pass", got == [], got)
+        for rel in ("site/old.html", "site/install/extra.html", "opf/site/model/old.html"):
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("x")
+        got = stray_outputs(tmp, promoted_sites_, promoted_targets)
+        expect("stray/promoted-unlisted-pages-flagged", sorted(got) == [
+            "opf/site/model/old.html", "site/install/extra.html", "site/old.html"], got)
+        expect("stray/promoted-staged-targets-see-none", stray_outputs(tmp) == [], stray_outputs(tmp))
+    expect("stray/staged-tree-clean", stray_outputs(ROOT) == [], stray_outputs(ROOT))
+
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
         first = run(tmp, check=True)
         second = run(tmp, check=False)
@@ -2242,8 +2418,14 @@ def _self_test():
         os.unlink(target)
         os.symlink(Path(tmp) / "site/draft/license/index.html", target)
         fifth = run(tmp, check=True)
-    expect("check/codes", [first, second, third, fourth, fifth] == [1, 0, 0, 1, 2],
-           [first, second, third, fourth, fifth])
+        os.unlink(target)
+        sixth = run(tmp, check=False)
+        with open(Path(tmp) / "site/draft/install/old.html", "w", encoding="utf-8") as handle:
+            handle.write("x")
+        seventh = run(tmp, check=True)
+        eighth = run(tmp, check=False)
+    codes = [first, second, third, fourth, fifth, sixth, seventh, eighth]
+    expect("check/codes", codes == [1, 0, 0, 1, 2, 0, 1, 1], codes)
 
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))

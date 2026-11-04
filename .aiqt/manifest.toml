@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d70da389f1e453f81ef8267fc66c45359dec3e2ffcaea02ad5add4948d5b450d"
+tree-sha256 = "ca8fe8c6a49a42aff0f2d127c6451ab8c527705c7b1383887b6133c1ec42acd2"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2306,8 +2306,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 54263
-sha256 = "56636f6bb95c81d5a18afe8321169b0700431e4c70e750f85452f08967b132f2"
+bytes = 54300
+sha256 = "8d2ae5644072bd9947d97d0ad8b33133db6f1d2283dada0e333d56281e805ac8"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -4210,6 +4210,11 @@ bytes = 55753
 sha256 = "621f5ab2c54599d742cbe291204672bc9935ec5127b8d77f7a825996e7bc0b47"
 
 [[sources]]
+path = "tools/_template_pages.py"
+bytes = 2361
+sha256 = "53b92ac54a43513961bb0d19c5322ce2ec5421ffd125873cb8339cfbe61043ec"
+
+[[sources]]
 path = "tools/_walk.py"
 bytes = 2223
 sha256 = "aee0148730f5f32b7cc0c85c82f7eff7c0b5e0d652673bc4047b4c8eb3474f62"
@@ -4301,8 +4306,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 94104
-sha256 = "6f48c02a15d47d6f52a8d9e997df6181c6e882e73a00ca8cf735fe9ea69c7a06"
+bytes = 98799
+sha256 = "8696489aa0c8959eb57f851741d9419a1e86355a7489156029a661b4d52acc8c"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -4491,8 +4496,8 @@ sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 81696
-sha256 = "7856d6fe7bc836829e6a3fa98dd968e4a54a356a9bcfda2a1b76bfcd3fcd4edc"
+bytes = 86131
+sha256 = "4d12405359ac531bbab34956b038519c5fae5fc2401b0ee562e526902d650b52"
 
 [[sources]]
 path = "tools/check_site_versions.py"
@@ -4596,8 +4601,8 @@ sha256 = "ee37d7b4db8fb441ddb3fb07e4003c94a5b36124e9714bca2f84ad4e7bb1b199"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 136772
-sha256 = "27ff29a48e47744a37073d444a802d7f10974a95f1f9db009829277b281373cb"
+bytes = 147219
+sha256 = "d7a6832dcb05e6bea9cbbb61c881eef06acb1346f8e985d92569b30a4eda10b6"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
@@ -4751,8 +4756,8 @@ sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 213670
-sha256 = "6e5aa1f9575e0cc1fdc8e9623be0d2f52abc36e4537bbd5429ed43410f3443c3"
+bytes = 214045
+sha256 = "fc4d30495876b574ddffa880af524f13960d73a3d9b5a3cfa835661f43307062"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
