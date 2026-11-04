@@ -108,8 +108,10 @@
         Doctor does not check behind, ahead, or divergence against a sync target.</li>
       <li><b style="color:var(--ink)">Adoption and the prompt pack</b>: the reference CLI runs
         adoption investigation and <code>opf adopt plan</code> read-only. <code>opf adopt
-        approve</code>, <code>apply</code>, <code>complete</code>, and <code>reconcile</code> refuse
-        with exit 2, so no approval, receipt, completion check, or retirement is recorded, and
+        approve</code> prints an approval but records none, <code>reconcile</code> recovers an
+        interrupted adoption transaction or reports that there is nothing to reconcile, and
+        <code>apply</code> and <code>complete</code> refuse with exit 2, so no approval, receipt,
+        completion check, or retirement is recorded, and
         adoption cannot install the enforcement pack. A frozen plan is an inert proposal, not
         permission to apply. Investigation covers only its detection roots, the declared
         deliverable and view destinations, and the paths the adopter names, detects by path rather
