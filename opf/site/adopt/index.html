@@ -44,7 +44,7 @@ homes = 2                # the homes generation; required, and 2 is the only val
 <p class="lbl sec">Reference tooling</p>
 <h2 id="tooling">Where the reference tooling stands</h2>
 <p>The reference tooling's <code>opf init</code> does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). The reference tooling does not yet implement spec 2.0.0, the only base version the standard defines; it validates spec 1.2.0 stores, as described above. Its <code>opf doctor</code> grades a manifest declaring <code>spec_version = "2.0.0"</code> with <code>homes = 2</code> under its 1.2.0 rules, so its VALID verdict on such a store says nothing about conformance to the standard; <code>opf upgrade</code> and <code>opf record</code> refuse such a store. The reference tooling defines no store upgrade: <code>opf upgrade</code> refuses every invocation with exit 2, reading and writing nothing.</p>
-<p>The <code>opf</code> reference CLI, its 10 command verbs and what each does today are on <a href="/core-files/#tooling">the technical details page</a>.</p>
+<p>The <code>opf</code> reference CLI, its 10 command verbs, and what each does today are on <a href="/core-files/#tooling">the technical details page</a>.</p>
 <div class="next"><p class="lbl">Next</p><p>Back to the source, the view, and the gate.</p><a class="start" href="/model/">See the model <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
 </div></div>
 </main>

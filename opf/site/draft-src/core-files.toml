@@ -294,7 +294,7 @@ rail = "Tooling"
 
 [[body]]
 component = "prose"
-html = '''<p>The <code>opf</code> reference CLI is 1 implementation of the standard's 10 command verbs. It implements 5 in full (init, render, doctor, absorb, record) and adopt in part; upgrade and the ordinary import modes refuse with exit 2, and migrate and sync are planned. A base adopter can use their own tooling instead, or adopt by hand.</p>'''
+html = '''<p>The <code>opf</code> reference CLI is 1 implementation of the standard's 10 command verbs. It implements 5 in full (init, render, doctor, absorb, and record) and adopt in part; upgrade and the ordinary import modes refuse with exit 2, and migrate and sync are planned. A base adopter can use their own tooling instead, or adopt by hand.</p>'''
 
 [[body]]
 component = "table"
@@ -306,7 +306,7 @@ rows = [
   ["<code>doctor</code>", "Runs the whole-store integrity layer read-only: exit 0 valid, 1 on a finding, 2 when it cannot evaluate."],
   ["<code>absorb</code>", "Drafts changelog entries for human curation, or computes a curated entry's freeze digest; writes no files."],
   ["<code>record</code>", "Authors 1 record change at a time and leaves it uncommitted for your review."],
-  ["<code>adopt</code>", "Plan, approve, reconcile and status run; apply and complete refuse, so adoption cannot finish yet."],
+  ["<code>adopt</code>", "Plan, approve, reconcile, and status run; apply and complete refuse, so adoption cannot finish yet."],
   ["<code>upgrade</code>", "Refuses with exit 2 and writes nothing: the reference tooling defines no store upgrade."],
   ["<code>import</code>", "The ordinary modes are retired and refuse with exit 2; clean-start adoption is the intake."],
   ["<code>migrate</code>", "Planned: relocate the whole store, keeping git history and the worklog."],
@@ -321,7 +321,7 @@ id = "doctor-checks"
 
 [[body]]
 component = "prose"
-html = '''<p>Schema validity; ID uniqueness and counter monotonicity; bidirectional index reconciliation; transition legality where observations suffice; byte drift for the declared baseline views; the root release-version file; worklog span tiling and frozen digests; changelog coverage and freeze; archive integrity; the tracked-store requirement; pointer and sync-target agreement; and path containment. At the strictest posture, an unreadable, unparseable or unresolvable declared input is a failure, never an empty or clean result.</p>'''
+html = '''<p>Schema validity; ID uniqueness and counter monotonicity; bidirectional index reconciliation; transition legality where observations suffice; byte drift for the declared baseline views; the root release-version file; worklog span tiling and frozen digests; changelog coverage and freeze; archive integrity; the tracked-store requirement; pointer and sync-target agreement; and path containment. At the strictest posture, an unreadable, unparseable, or unresolvable declared input is a failure, never an empty or clean result.</p>'''
 
 [[body]]
 component = "section"

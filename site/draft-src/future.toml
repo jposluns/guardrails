@@ -23,7 +23,7 @@ html = "<p><strong>Performance metrics.</strong> How often each guardrail fires 
 
 [[body.items]]
 n = "3"
-html = "<p><strong>Guardrail bundles.</strong> Pre-built sets of guardrails per project type or purpose, curated, versioned and rolled out by the team or enterprise, so every project starts from the same agreed baseline.</p>"
+html = "<p><strong>Guardrail bundles.</strong> Pre-built sets of guardrails per project type or purpose, curated, versioned, and rolled out by the team or enterprise, so every project starts from the same agreed baseline.</p>"
 
 [[body]]
 component = "next"

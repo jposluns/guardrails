@@ -92,7 +92,7 @@ rail = "Enforced"
 
 [[body]]
 component = "prose"
-html = '''<p>An assistant can overlook a written rule. It cannot overlook a hook or a gate. So AIQT favours guardrails that can be enforced, and keeps building hooks, gates and checks for guardrails as they are identified.</p><p>One example: the stop guard will not let your assistant end its turn while your to-do list still holds an item it can work on. It counts the open items itself from the list, rather than taking the assistant's word that it is finished. <a href="https://github.com/jposluns/guardrails/blob/main/.aiqt/core/hooks/ORCHESTRATION.md" target="_blank" rel="noopener noreferrer">See how the stop guard works<span class="vh"> (opens in a new tab)</span></a>.</p>'''
+html = '''<p>An assistant can overlook a written rule. It cannot overlook a hook or a gate. So AIQT favours guardrails that can be enforced, and keeps building hooks, gates, and checks for guardrails as they are identified.</p><p>One example: the stop guard will not let your assistant end its turn while your to-do list still holds an item it can work on. It counts the open items itself from the list, rather than taking the assistant's word that it is finished. <a href="https://github.com/jposluns/guardrails/blob/main/.aiqt/core/hooks/ORCHESTRATION.md" target="_blank" rel="noopener noreferrer">See how the stop guard works<span class="vh"> (opens in a new tab)</span></a>.</p>'''
 
 [[body]]
 component = "next"
