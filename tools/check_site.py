@@ -828,6 +828,7 @@ def _self_test():
         (r / "site" / "draft").mkdir(parents=True)
         (r / "site" / "sub" / "draft").mkdir(parents=True)
         (r / "site" / "draft" / "x" / "y").mkdir(parents=True)
+        (r / "opf" / "site" / "sub" / "draft").mkdir(parents=True)
         (r / "opf" / "site" / "draft" / "x" / "y").mkdir(parents=True)
         for subdir in COVERAGE_ROOTS:
             (r / subdir / "t.png").write_bytes(b"png")
@@ -846,10 +847,15 @@ def _self_test():
              '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
              "src on a 404 page must be root-absolute"),
             ("draft-404/opf-scan-top-level-draft-passes", "opf/site", "draft/404.html", draft_page, 0, ""),
+            ("draft-404/opf-scan-nested-draft-keeps-live-list", "opf/site", "sub/draft/404.html", draft_page, 1,
+             "element <img> is not in the 404-page element allowlist"),
             ("draft-404/opf-scan-draft-subdir-keeps-live-list", "opf/site", "draft/x/404.html", draft_page, 1,
              "element <img> is not in the 404-page element allowlist"),
             ("draft-404/opf-scan-draft-deep-subdir-keeps-live-list", "opf/site", "draft/x/y/404.html",
              draft_page, 1, "element <img> is not in the 404-page element allowlist"),
+            ("draft-404/opf-scan-draft-relative-src-fails", "opf/site", "draft/404.html",
+             '<!doctype html><title>t</title><img src="t.png" alt="">', 1,
+             "src on a 404 page must be root-absolute"),
         )
         for label, subdir, page_rel, markup, want, message in scan_cases:
             (r / subdir / page_rel).write_text(markup, encoding="utf-8")
