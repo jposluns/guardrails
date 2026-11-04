@@ -898,6 +898,7 @@ def _self_test():
 
     _touch_icon_self_test(quiet)
     _not_found_links_self_test()
+    _declaration_self_test()
     failures.extend(FAILURES)
 
     if failures:
@@ -911,6 +912,72 @@ def _self_test():
                                       len(draft_404_cases) + len(scan_cases) + len(promoted_scan_cases),
                                       len(EXECUTED)))
     return 0
+
+
+def _declaration_self_test():
+    """The template page declaration: a well-formed one is read, each malformed entry raises ValueError, and
+    the scan of a root exits 2 on one (fail-closed) rather than crashing with exit 1."""
+    import contextlib
+    import io
+    import tempfile
+    entry = '{"target": "site/draft/index.html", "kind": "file", "sources": ("src.toml",), "regenerate": "x"}'
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+
+        def declare(literal):
+            fixture = base / "case{}".format(len(list(base.iterdir())))
+            (fixture / "tools").mkdir(parents=True)
+            (fixture / "site").mkdir()
+            (fixture / "src.toml").write_text("x", encoding="utf-8")
+            (fixture / "site" / "a.html").write_text("<!doctype html><title>t</title>", encoding="utf-8")
+            (fixture / _template_pages.GENERATOR).write_text("GENSRC_OUTPUTS = {}\n".format(literal),
+                                                             encoding="utf-8")
+            return fixture
+
+        def scan(fixture):
+            saved = _template_pages.ROOT
+            _template_pages.ROOT = fixture
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    code = _scan_root(fixture, "site")
+            except Exception as exc:  # a crash is the failure this case pins, so it is recorded, not raised
+                code = "{}: {}".format(type(exc).__name__, exc)
+            finally:
+                _template_pages.ROOT = saved
+            return code, err.getvalue()
+
+        good = declare("({},)".format(entry))
+        try:
+            got = _template_pages.template_targets(good)
+        except (OSError, ValueError) as exc:
+            got = exc
+        check("declaration/well-formed-read", got == frozenset({"site/draft/index.html"}), got)
+        got = scan(good)
+        check("declaration/well-formed-scan-not-refused", got[0] != 2, got)
+        # Each malformed entry (a literal the declaration reader accepts as a tuple of entries) must raise
+        # ValueError, never a KeyError, TypeError or a non-string target.
+        for name, scan_name, literal in (
+                ("declaration/entry-without-target-refused", "declaration/entry-without-target-scan-exits-2",
+                 '({"tool": "x"},)'),
+                ("declaration/bare-string-entry-refused", "declaration/bare-string-entry-scan-exits-2",
+                 '("site/draft/index.html",)'),
+                ("declaration/list-target-refused", "declaration/list-target-scan-exits-2", '({"target": ["a"]},)'),
+                ("declaration/int-target-refused", "declaration/int-target-scan-exits-2", '({"target": 5},)'),
+                ("declaration/full-entry-list-target-refused", "declaration/full-entry-list-target-scan-exits-2",
+                 "({},)".format(entry.replace('"site/draft/index.html"', '["a"]'))),
+                ("declaration/full-entry-int-target-refused", "declaration/full-entry-int-target-scan-exits-2",
+                 "({},)".format(entry.replace('"site/draft/index.html"', "5")))):
+            fixture = declare(literal)
+            try:
+                got = _template_pages.template_targets(fixture)
+            except ValueError as exc:
+                got = exc
+            except Exception as exc:  # a crash is the failure this case pins, so it is recorded, not raised
+                got = "{}: {}".format(type(exc).__name__, exc)
+            check(name, isinstance(got, ValueError), got)
+            code, err = scan(fixture)
+            check(scan_name, code == 2 and "cannot read the template page targets" in err, (code, err))
 
 
 def _promoted_targets():

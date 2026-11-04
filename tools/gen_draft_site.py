@@ -1380,8 +1380,13 @@ def build(pages=None, sites=SITES, registered=True):
     return outputs
 
 
+# The ASCII whitespace a browser strips from both ends of a URL attribute value.
+_URL_SPACE = "\t\n\f\r "
+
+
 class _RootLinks(HTMLParser):
-    """Every root-relative href and src value a page writes (one leading "/", not a "//host" URL)."""
+    """Every root-relative href and src value a page writes (one leading "/", not a "//host" URL, once the
+    whitespace a browser strips is set aside), as written."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -1389,9 +1394,20 @@ class _RootLinks(HTMLParser):
 
     def handle_starttag(self, tag, attrs):
         for name, value in attrs:
-            if name in ("href", "src") and isinstance(value, str) and value.startswith("/") \
-                    and not value.startswith("//"):
+            if name in ("href", "src") and isinstance(value, str) and value.strip(_URL_SPACE).startswith("/") \
+                    and not value.strip(_URL_SPACE).startswith("//"):
                 self.found.append(value)
+
+
+def _asset_file(asset_dir, rest):
+    """True only when `rest` (the URL path after the asset folder's URL) names a file inside asset_dir: it
+    must be relative, with no empty, "." or ".." segment (also after one percent-decoding, as a browser reads
+    %2e), and must resolve inside the folder."""
+    if any(unquote(segment) in ("", ".", "..") for segment in rest.split("/")):
+        return False
+    folder = Path(asset_dir).resolve()
+    candidate = (folder / rest).resolve()
+    return candidate.is_relative_to(folder) and candidate != folder and candidate.is_file()
 
 
 def _redirect_sources(path):
@@ -1411,7 +1427,8 @@ def unresolved_links(outputs, sites=SITES, tree=ROOT):
     generates, a file under the site's template asset folder (in `tree`), one of its kept live paths, or the
     source of a rule in its live root's _redirects file. The path is compared without its #fragment or
     ?query, so it holds at any base: the generated page URLs, the asset folder and the redirects all follow
-    the site's own base and root."""
+    the site's own base and root. A value with leading or trailing whitespace is refused, as is an asset path
+    that is absolute, has an empty or dot segment, or resolves outside the asset folder (_asset_file)."""
     found = []
     for site in sites:
         prefix = site["root"] + "/"
@@ -1425,11 +1442,14 @@ def unresolved_links(outputs, sites=SITES, tree=ROOT):
             parser.feed(outputs[prefix + rel])
             parser.close()
             for value in parser.found:
-                path = value.split("#", 1)[0].split("?", 1)[0]
-                if path in pages or path in redirects or _kept_live(site, value):
+                if value != value.strip(_URL_SPACE):
+                    found.append("{}{}: {!r} has leading or trailing whitespace".format(prefix, rel, value))
                     continue
-                if path.startswith(asset_url) and path != asset_url \
-                        and (asset_dir / path[len(asset_url):]).is_file():
+                path, sep, frag = value.partition("#")
+                path = path.split("?", 1)[0]
+                if path in pages or path in redirects or _kept_live(site, path + sep + frag):
+                    continue
+                if path.startswith(asset_url) and _asset_file(asset_dir, path[len(asset_url):]):
                     continue
                 found.append("{}{}: {} resolves to no generated page, template asset, kept live path or "
                              "redirect".format(prefix, rel, value))
@@ -1437,8 +1457,9 @@ def unresolved_links(outputs, sites=SITES, tree=ROOT):
 
 
 def stray_outputs(tree, sites=SITES, targets=None):
-    """Every .html file in a folder that holds a generated page of a site (the folder of a target) that the
-    targets (GENSRC_OUTPUTS by default) do not list, apart from a kept live path's own file. Only those
+    """Every .html file (the extension in any case) in a folder that holds a generated page of a site (the
+    folder of a target) that the targets (GENSRC_OUTPUTS by default) do not list, apart from a kept live
+    path's own file. Only those
     folders are listed, not their subfolders, so the asset folder and a promoted root's other folders (its
     downloads, its draft placeholder) are not read; a page in a folder holding no generated page is not
     found here."""
@@ -1459,7 +1480,7 @@ def stray_outputs(tree, sites=SITES, targets=None):
                 continue
             for name in names:
                 rel = "{}/{}".format(folder, name)
-                if name.endswith(".html") and rel not in targets and rel not in kept:
+                if name.lower().endswith(".html") and rel not in targets and rel not in kept:
                     found.append(rel)
     return found
 
@@ -1476,9 +1497,12 @@ def _existing(path):
         return handle.read()
 
 
-def run(root, check):
+def run(root, check, outputs=None):
+    """Write (or with `check`, compare) the built pages under root. `outputs` (a self-test's prebuilt pages)
+    defaults to build()."""
     try:
-        outputs = build()
+        if outputs is None:
+            outputs = build()
     except RefusedPage as exc:
         print("error: refused: {}".format(exc), file=sys.stderr)
         return 2
@@ -2365,9 +2389,35 @@ def _self_test():
             ("links/staged-page-with-fragment-passes", staged_home, '<a href="/draft/install/#x">x</a>', 0),
             ("links/staged-redirect-source-passes", staged_home, '<a href="/rule1">x</a>', 0),
             ("links/staged-kept-live-passes", staged_home, '<a href="/development">x</a>', 0),
-            ("links/staged-protocol-relative-not-root-relative", staged_home, '<a href="//example.com/">x</a>', 0)):
+            ("links/staged-protocol-relative-not-root-relative", staged_home, '<a href="//example.com/">x</a>', 0),
+            ("links/staged-asset-file-passes", staged_home, '<img src="/draft/assets/baseline/baseline.css">', 0),
+            ("links/staged-asset-absolute-remainder-flagged", staged_home,
+             '<img src="/draft/assets/baseline//etc/passwd">', 1),
+            ("links/staged-asset-dot-segments-to-tool-flagged", staged_home,
+             '<img src="/draft/assets/baseline/../../../../tools/gen_draft_site.py">', 1),
+            ("links/staged-asset-dot-segments-to-readme-flagged", staged_home,
+             '<img src="/draft/assets/baseline/../../../../README.md">', 1),
+            ("links/staged-asset-dot-segment-back-inside-flagged", staged_home,
+             '<img src="/draft/assets/baseline/../baseline/baseline.css">', 1),
+            ("links/staged-asset-single-dot-segment-flagged", staged_home,
+             '<img src="/draft/assets/baseline/./baseline.css">', 1),
+            ("links/staged-asset-encoded-dot-segment-flagged", staged_home,
+             '<img src="/draft/assets/baseline/%2e/baseline.css">', 1),
+            ("links/staged-asset-empty-segment-flagged", staged_home,
+             '<img src="/draft/assets/baseline/fonts//baseline.css">', 1),
+            ("links/staged-asset-trailing-slash-flagged", staged_home,
+             '<img src="/draft/assets/baseline/fonts/">', 1),
+            ("links/staged-kept-live-with-query-passes", staged_home, '<a href="/development?x">x</a>', 0),
+            ("links/staged-kept-live-with-query-and-fragment-passes", staged_home,
+             '<a href="/development?x#top">x</a>', 0),
+            ("links/staged-missing-page-with-query-flagged", staged_home, '<a href="/draft/absent/?x=1">x</a>', 1),
+            ("links/staged-leading-space-flagged", staged_home, '<a href=" /draft/install/">x</a>', 1),
+            ("links/staged-trailing-space-flagged", staged_home, '<a href="/draft/install/ ">x</a>', 1),
+            ("links/staged-leading-tab-kept-live-flagged", staged_home, '<a href="\t/development">x</a>', 1)):
         got = unresolved_links(with_link(outputs, target, markup))
         expect(name, len(got) == want, got)
+    got = unresolved_links(with_link(outputs, staged_home, '<a href=" /development">x</a>'))
+    expect("links/staged-whitespace-named", len(got) == 1 and "leading or trailing whitespace" in got[0], got)
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-promoted-") as tmp:
         for site_ in SITES:
             shutil.copytree(ROOT / site_["root"] / ASSETS, Path(tmp) / site_["live"] / ASSETS)
@@ -2404,6 +2454,10 @@ def _self_test():
         got = stray_outputs(tmp, promoted_sites_, promoted_targets)
         expect("stray/promoted-unlisted-pages-flagged", sorted(got) == [
             "opf/site/model/old.html", "site/install/extra.html", "site/old.html"], got)
+        with open(Path(tmp) / "site/install/UPPER.HTML", "w", encoding="utf-8") as handle:
+            handle.write("x")
+        got = stray_outputs(tmp, promoted_sites_, promoted_targets)
+        expect("stray/promoted-upper-case-extension-flagged", "site/install/UPPER.HTML" in got, got)
         expect("stray/promoted-staged-targets-see-none", stray_outputs(tmp) == [], stray_outputs(tmp))
     expect("stray/staged-tree-clean", stray_outputs(ROOT) == [], stray_outputs(ROOT))
 
@@ -2426,6 +2480,14 @@ def _self_test():
         eighth = run(tmp, check=False)
     codes = [first, second, third, fourth, fifth, sixth, seventh, eighth]
     expect("check/codes", codes == [1, 0, 0, 1, 2, 0, 1, 1], codes)
+    # An unresolved link refuses both the check and the normal run (exit 2) before anything is written; the
+    # same prebuilt pages without it only drift against the empty tree.
+    broken = with_link(outputs, staged_home, '<a href="/draft/absent/">x</a>')
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-unresolved-") as tmp:
+        codes = [run(tmp, check=True, outputs=broken), run(tmp, check=False, outputs=broken)]
+        written = sorted(os.listdir(tmp))
+        codes.append(run(tmp, check=True, outputs=outputs))
+    expect("check/unresolved-link-refused", codes == [2, 2, 1] and written == [], (codes, written))
 
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))

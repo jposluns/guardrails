@@ -949,6 +949,37 @@ def _self_test():
         (root4b / "opf" / "site" / "404.html").write_text(rel_nav, encoding="utf-8")
         if quiet_run(root4b) != 1:
             failures.append("an opf/site 404 page carrying the relative ./disclosure was not reported (expected 1)")
+    # A malformed GENSRC_OUTPUTS entry fails closed with exit 2 (a named reason), never a crash with exit 1;
+    # a well-formed declaration over the same tree passes.
+    entry = '{"target": "site/draft/index.html", "kind": "file", "sources": ("src.toml",), "regenerate": "x"}'
+    for label, literal, expected in (
+            ("a well-formed declaration", "(" + entry + ",)", 0),
+            ("an entry without a target", '({"tool": "x"},)', 2),
+            ("a bare string entry", '("site/draft/index.html",)', 2),
+            ("a list target", '({"target": ["a"]},)', 2),
+            ("an int target", '({"target": 5},)', 2),
+            ("a full entry with a list target", "(" + entry.replace('"site/draft/index.html"', '["a"]') + ",)", 2),
+            ("a full entry with an int target", "(" + entry.replace('"site/draft/index.html"', "5") + ",)", 2)):
+        with tempfile.TemporaryDirectory() as d7:
+            root7 = Path(d7)
+            (root7 / "tools").mkdir()
+            (root7 / "site").mkdir()
+            (root7 / "src.toml").write_text("x", encoding="utf-8")
+            (root7 / "site" / "about.html").write_text(nav, encoding="utf-8")
+            (root7 / _template_pages.GENERATOR).write_text("GENSRC_OUTPUTS = {}\n".format(literal), encoding="utf-8")
+            saved = _template_pages.ROOT
+            _template_pages.ROOT = root7
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    got = _run_one(root7, "site", DISCLOSURE_HREF, frozenset())
+            except Exception as exc:  # a crash is the failure this case pins, so it is recorded, not raised
+                got = "{}: {}".format(type(exc).__name__, exc)
+            finally:
+                _template_pages.ROOT = saved
+            if got != expected or (expected == 2 and "cannot read the template page targets" not in err.getvalue()):
+                failures.append("declaration, {}: expected exit {}, got {} {!r}".format(
+                    label, expected, got, err.getvalue()))
     for label, pages, expected in (
             ("404 page with root-absolute link passes on the relative root", {"404.html": nav}, []),
             ("404 page with relative link fails on the relative root", {"404.html": rel_nav},
@@ -976,7 +1007,8 @@ def _self_test():
             print("  " + f)
         return 1
     print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + {} opfiles draft-rule "
-          "cases + {} staged and promoted template cases + run() exit-code legs + {} #378 close-vector runs + "
+          "cases + {} staged and promoted template cases + run() exit-code legs + 7 declaration cases + {} #378 "
+          "close-vector runs + "
           "{} close-vector guard cases)".format(
               len(cases), len(site_cases), len(opf_cases), len(state_cases), close_runs, guard_cases))
     return 0

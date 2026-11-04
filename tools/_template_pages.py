@@ -4,7 +4,9 @@ The gates that hold a template page to the template's own rules (check_site.py, 
 module, never the name of the folder the pages sit in, so the same rule holds while the pages are staged
 under a root's draft/ folder and once they are promoted to the root itself. The declaration is read
 statically (gen_gensrc's reader: the GENSRC_OUTPUTS literal only, the generator is never imported or run).
-A declaration that cannot be read or evaluated raises OSError or ValueError; each caller fails closed.
+A declaration that cannot be read or evaluated, or holds an entry gen_gensrc's own entry validation refuses
+(not a dict, a missing or non-string target, a missing source), raises OSError or ValueError; each caller
+fails closed.
 
 A page path is named by its coverage root ("site" or "opf/site") and its path under that root. The
 template base of a root is the folder, relative to the root, that holds every generated page of that root
@@ -21,12 +23,17 @@ GENERATOR = "tools/gen_draft_site.py"
 
 @cache
 def _declared(root):
-    return frozenset(entry["target"] for entry in gen_gensrc._read_declaration(root / GENERATOR, GENERATOR))
+    # Each entry goes through gen_gensrc's validation before its target is read, so a malformed entry raises
+    # ValueError (exit 2 in each gate) rather than a KeyError or TypeError, or a non-string target.
+    seen = set()
+    return frozenset(gen_gensrc._validate_entry(raw, GENERATOR, root, seen)["target"]
+                     for raw in gen_gensrc._read_declaration(root / GENERATOR, GENERATOR))
 
 
-def template_targets(root=ROOT):
-    """The repo-relative target of every generated template page (a frozenset of POSIX paths)."""
-    return _declared(Path(root))
+def template_targets(root=None):
+    """The repo-relative target of every generated template page (a frozenset of POSIX paths), under `root`
+    (ROOT, read at call time, by default)."""
+    return _declared(Path(ROOT if root is None else root))
 
 
 def is_template_page(subdir, page_rel, targets=None):

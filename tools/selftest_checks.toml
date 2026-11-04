@@ -5131,6 +5131,20 @@ expected-check-ids = [
   "404-structure/script-before-svg-passes",
   "404-structure/script-with-src-and-space-body-fails",
   "404-structure/unparsed-page-still-checked",
+  "declaration/well-formed-read",
+  "declaration/well-formed-scan-not-refused",
+  "declaration/entry-without-target-refused",
+  "declaration/entry-without-target-scan-exits-2",
+  "declaration/bare-string-entry-refused",
+  "declaration/bare-string-entry-scan-exits-2",
+  "declaration/list-target-refused",
+  "declaration/list-target-scan-exits-2",
+  "declaration/int-target-refused",
+  "declaration/int-target-scan-exits-2",
+  "declaration/full-entry-list-target-refused",
+  "declaration/full-entry-list-target-scan-exits-2",
+  "declaration/full-entry-int-target-refused",
+  "declaration/full-entry-int-target-scan-exits-2",
 ]
 
 [[suite]]
