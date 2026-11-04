@@ -244,7 +244,10 @@ def _read(path):
     error (exit 2 via OSError), never a silent skip."""
     if not path.is_file():
         raise OSError("required surface missing: {}".format(path))
-    return path.read_text(encoding="utf-8")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError("{}: not UTF-8 ({})".format(path, exc)) from exc
 
 
 def expected_families(manifests):
@@ -270,14 +273,20 @@ def check_parenthetical(text, where, fams, findings):
                 where, ", ".join(sorted(got)), ", ".join(sorted(fams))))
 
 
+# The rendered Mappings pages: the hand-written live page and the generated draft page that replaces it.
+# While both exist each is held to the same rules, and each is required (a missing one is exit 2).
+MAPPINGS_PAGES = ("site/mappings.html", "site/draft/mappings/index.html")
+
+
 def check_meta(root, fams, findings):
-    text = _read(root / "site" / "mappings.html")
-    metas = [ln for ln in text.splitlines()
-             if 'name="description"' in ln or 'property="og:description"' in ln]
-    if len(metas) != 2:
-        findings.append("site/mappings.html: expected 2 description metas, found {}".format(len(metas)))
-    for ln in metas:
-        check_parenthetical(ln, "site/mappings.html meta", fams, findings)
+    for rel in MAPPINGS_PAGES:
+        text = _read(root / rel)
+        metas = [ln for ln in text.splitlines()
+                 if 'name="description"' in ln or 'property="og:description"' in ln]
+        if len(metas) != 2:
+            findings.append("{}: expected 2 description metas, found {}".format(rel, len(metas)))
+        for ln in metas:
+            check_parenthetical(ln, "{} meta".format(rel), fams, findings)
 
 
 def check_disclosure(root, fams, findings):
@@ -583,29 +592,30 @@ def check_subset_denominator(root, manifests, findings):
     and the coverage in a later <p> of the same <details>, so a same-line scan would miss a subset "N of
     M" there. The check splits the page into <tr> blocks and <details> blocks and associates a subset name
     with a denominator across the block, never by line proximity."""
-    text = _read(root / "site" / "mappings.html")
     subset_names = {man.name for man in manifests.values() if man.catalogue == "subset"}
-    # Registry rows: the name cell and the coverage cell live in one <tr>. A subset row must read
-    # "N referenced (curated subset)", never "N of M".
-    for row in re.findall(r"<tr\b.*?</tr>", text, re.S | re.I):
-        if not N_OF_M.search(row):
-            continue
-        for name in subset_names:
-            if name in row:
-                findings.append("site/mappings.html: subset manifest {!r} rendered with an edition "
-                                "denominator in a registry row".format(name))
-    # Reverse view: the framework name is in the <summary>; its coverage is in a later <p> of the same
-    # <details>. Match on the summary so a forward-view block (a rule-title summary) is not caught, then
-    # scan the whole block so the name and the denominator are associated across the line break.
-    for block in re.findall(r"<details\b.*?</details>", text, re.S | re.I):
-        summ = re.search(r"<summary>(.*?)</summary>", block, re.S | re.I)
-        if not summ:
-            continue
-        head = summ.group(1)
-        for name in subset_names:
-            if name in head and N_OF_M.search(block):
-                findings.append("site/mappings.html: subset manifest {!r} rendered with an edition "
-                                "denominator in the reverse view".format(name))
+    for rel in MAPPINGS_PAGES:
+        text = _read(root / rel)
+        # Registry rows: the name cell and the coverage cell live in one <tr>. A subset row must read
+        # "N referenced (curated subset)", never "N of M".
+        for row in re.findall(r"<tr\b.*?</tr>", text, re.S | re.I):
+            if not N_OF_M.search(row):
+                continue
+            for name in subset_names:
+                if name in row:
+                    findings.append("{}: subset manifest {!r} rendered with an edition "
+                                    "denominator in a registry row".format(rel, name))
+        # Reverse view: the framework name is in the <summary>; its coverage is in a later <p> of the same
+        # <details>. Match on the summary so a forward-view block (a rule-title summary) is not caught,
+        # then scan the whole block so the name and the denominator are associated across the line break.
+        for block in re.findall(r"<details\b.*?</details>", text, re.S | re.I):
+            summ = re.search(r"<summary>(.*?)</summary>", block, re.S | re.I)
+            if not summ:
+                continue
+            head = summ.group(1)
+            for name in subset_names:
+                if name in head and N_OF_M.search(block):
+                    findings.append("{}: subset manifest {!r} rendered with an edition "
+                                    "denominator in the reverse view".format(rel, name))
 
 
 def check_json_subset_denominator(root, manifests, findings):
@@ -1222,7 +1232,8 @@ def main():
 #      plants a vendored name in that section, so the expected result is the finding (exit 1), which
 #      an over-refusal (exit 2) and an unread section (exit 0) would each miss,
 #   7. a subset manifest rendered "3 of 3" in the fixture registry row -> finding (the CWE regression),
-#   8. a missing site/mappings.html -> exit 2 (fail-closed, not a skip),
+#   8. a missing site/mappings.html -> exit 2 (fail-closed, not a skip), and 8b. a missing draft Mappings
+#      page likewise (2b and 12b hold the draft page to the meta and denominator rules),
 #   9. an unreadable standards dir (chmod 0, or an injected permission failure where chmod cannot
 #      bite) -> exit 2; the case runs on every runner; 9b. a dangling-symlink manifest fails INSIDE
 #      the REAL load_manifests (its open() raises on every runner, no seam and no chmod) -> exit 2,
@@ -1363,6 +1374,25 @@ _PAGE = (
     '      </details>\n'
 )
 
+# The generated draft page, mirroring its render: the 2 description metas on their own head lines, each
+# registry row on 1 line, and each reverse-view block (the name in the <summary>, the coverage in the <p>)
+# on 1 line.
+_DRAFT_PAGE = (
+    '<!doctype html>\n'
+    '<html lang="en" class="site-aiqt">\n'
+    '<head>\n'
+    '<meta name="description" content="A crosswalk to frameworks (ISO/IEC, OWASP): titles only.">\n'
+    '<meta property="og:description" content="A crosswalk to frameworks (ISO/IEC, OWASP): titles only.">\n'
+    '</head>\n'
+    '<tr><td>Fixture Full Framework</td><td>OWASP Foundation</td><td>1.0</td><td>3 of 3</td></tr>\n'
+    '<tr><td>Fixture Subset Framework</td><td>ISO/IEC</td><td>2023</td>'
+    '<td>2 referenced (curated subset)</td></tr>\n'
+    '<details><summary>Fixture Full Framework (1.0)</summary>'
+    '<p>supports control. 3 of 3 identifiers referenced.</p></details>\n'
+    '<details><summary>Fixture Subset Framework (2023)</summary>'
+    '<p>aligns with guidance. 2 identifiers referenced from a curated subset of the edition.</p></details>\n'
+)
+
 # The JSON export: a full framework carries ids_total, the subset omits it (the catalogue invariant in
 # machine-readable form). Keys are the framework stems (map-key without the "map-" prefix).
 _JSON = (
@@ -1477,12 +1507,12 @@ _RELEASE_MANIFEST = (
 
 
 def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None, json_export=None,
-                   landing=None, release_manifest=None, budget_toml=None, budget_md=None):
+                   landing=None, release_manifest=None, budget_toml=None, budget_md=None, draft_page=None):
     """Write a complete clean fixture tree, overridable per component for a case's single mutation.
     `manifests` is a list of (stem, name, publisher, edition, kind, catalogue); `landing` overrides the
     README.md the counts leg reads; `release_manifest` overrides the .aiqt/manifest.toml the
     shipped-path declaration leg reads; `budget_toml` and `budget_md` override the instruction-budget
-    source and page the budget-note leg reads."""
+    source and page the budget-note leg reads; `draft_page` overrides the generated draft Mappings page."""
     if manifests is None:
         manifests = [("full", "Fixture Full Framework", "OWASP Foundation", "1.0", "control", "full"),
                      ("subset", "Fixture Subset Framework", "ISO/IEC", "2023", "guidance", "subset")]
@@ -1495,6 +1525,9 @@ def _write_fixture(base, manifests=None, readme=None, page=None, disclosure=None
     site = base / "site"
     site.mkdir(parents=True)
     (site / "mappings.html").write_text(page if page is not None else _PAGE, encoding="utf-8")
+    (site / "draft" / "mappings").mkdir(parents=True)
+    (site / "draft" / "mappings" / "index.html").write_text(
+        draft_page if draft_page is not None else _DRAFT_PAGE, encoding="utf-8")
     downloads = site / "downloads"
     downloads.mkdir()
     (downloads / "mappings.json").write_text(
@@ -1587,6 +1620,21 @@ def self_test_main():
         _write_fixture(meta, page=_PAGE.replace("frameworks (ISO/IEC, OWASP)", "frameworks (OWASP)", 1))
         if run_quiet(meta) != 1:
             failures.append("meta parenthetical missing a family expected exit 1")
+
+        # 2b. the draft page held to the same meta rule: a parenthetical missing one family in one meta,
+        #     and a page left with 1 description meta -> a finding naming the draft page.
+        draft_rel = "site/draft/mappings/index.html"
+        for label, draft_text, message in (
+                ("draft-meta", _DRAFT_PAGE.replace("frameworks (ISO/IEC, OWASP)", "frameworks (OWASP)", 1),
+                 draft_rel + " meta: parenthetical"),
+                ("draft-meta-count", "".join(ln for ln in _DRAFT_PAGE.splitlines(keepends=True)
+                                             if "og:description" not in ln),
+                 draft_rel + ": expected 2 description metas, found 1")):
+            case = tmp / label
+            _write_fixture(case, draft_page=draft_text)
+            rc, out = run_out(case)
+            if rc != 1 or message not in out:
+                failures.append("{}: expected exit 1 with {!r} (got {}: {!r})".format(label, message, rc, out))
 
         # 3. a disclosure claim naming a family with no manifest -> finding.
         disc = tmp / "disc"
@@ -2002,6 +2050,14 @@ def self_test_main():
         if run_quiet(nopage) != 2:
             failures.append("a missing site/mappings.html expected exit 2 (fail-closed)")
 
+        # 8b. a missing draft Mappings page -> exit 2 naming it (fail-closed, not a skip).
+        nodraft = tmp / "nodraft"
+        _write_fixture(nodraft)
+        (nodraft / "site" / "draft" / "mappings" / "index.html").unlink()
+        rc, out = run_capture(nodraft)
+        if rc != 2 or draft_rel not in out:
+            failures.append("a missing {} expected exit 2 naming it (got {}: {!r})".format(draft_rel, rc, out))
+
         # 9. an unreadable standards dir (chmod 0) -> exit 2. Where the runner bypasses DAC (root), the
         #    permission failure is injected through the module's load_manifests binding instead, so the
         #    guarded exit-2 observation is made on every runner, never skipped.
@@ -2067,6 +2123,22 @@ def self_test_main():
             "2 identifiers referenced from a curated subset of the edition", "2 of 61"))
         if run_quiet(revsub) != 1:
             failures.append("a subset reverse-view coverage of 'N of M' expected exit 1")
+
+        # 12b. the draft page held to the same denominator rule: a subset registry row and a subset
+        #      reverse-view coverage rendered "N of M" -> a finding naming the draft page.
+        for label, draft_text, message in (
+                ("draft-denom", _DRAFT_PAGE.replace("<td>2 referenced (curated subset)</td>", "<td>3 of 3</td>"),
+                 draft_rel + ": subset manifest 'Fixture Subset Framework' rendered with an edition "
+                 "denominator in a registry row"),
+                ("draft-revsub", _DRAFT_PAGE.replace(
+                    "2 identifiers referenced from a curated subset of the edition", "2 of 61"),
+                 draft_rel + ": subset manifest 'Fixture Subset Framework' rendered with an edition "
+                 "denominator in the reverse view")):
+            case = tmp / label
+            _write_fixture(case, draft_page=draft_text)
+            rc, out = run_out(case)
+            if rc != 1 or message not in out:
+                failures.append("{}: expected exit 1 with {!r} (got {}: {!r})".format(label, message, rc, out))
 
         # 13. a subset framework carrying a NON-NULL ids_total in the JSON export -> finding.
         jsondenom = tmp / "jsondenom"

@@ -1005,12 +1005,16 @@ def _page_from_doc(doc, where):
     """A validated page model from one parsed data file."""
     if not isinstance(doc, dict):
         raise RefusedPage("{}: the page must be a TOML table".format(where))
-    spec = _need(doc, where, ("path", "title", "kind", "body"), ("label", "heading", "meta"))
+    spec = _need(doc, where, ("path", "title", "kind", "body"), ("label", "heading", "meta", "description"))
     rel = _text(spec, where, "path")
     if REL_RE.fullmatch(rel) is None:
         raise RefusedPage("{}: {!r} is not a safe page path".format(where, rel))
     title = _text(spec, where, "title")
     meta = _text(spec, where, "meta") if "meta" in spec else None
+    # A head-only description, for a page that shows no meta line (the home and 404 pages).
+    description = _text(spec, where, "description") if "description" in spec else None
+    if meta is not None and description is not None:
+        raise RefusedPage("{}: set meta or description, not both".format(where))
     kind = _text(spec, where, "kind")
     if kind not in KINDS:
         raise RefusedPage("{}: kind must be one of {}".format(where, ", ".join(KINDS)))
@@ -1042,7 +1046,7 @@ def _page_from_doc(doc, where):
         if name == "about" and kind == "document" and position != len(body):
             raise RefusedPage("{}: the About region closes a document page".format(comp_where))
     return {"rel": rel, "title": title, "kind": kind, "label": spec.get("label"),
-            "heading": spec.get("heading"), "meta": meta, "body": body, "rail": rail,
+            "heading": spec.get("heading"), "meta": meta, "description": description, "body": body, "rail": rail,
             "where": where}
 
 
@@ -1243,11 +1247,39 @@ def _link_findings(site, html, scripts=(), scheme_src=None):
     return guard.found
 
 
+class _PlainText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def _description(site, page):
+    """The page's description, or else its meta, as plain text (its inline markup reduced to the text,
+    character references decoded, whitespace runs folded to 1 space), or "" for a page with neither."""
+    source = page.get("description") or page["meta"]
+    if not source:
+        return ""
+    reader = _PlainText()
+    reader.feed(_inline(site, source))
+    reader.close()
+    return " ".join("".join(reader.parts).split())
+
+
 def render_page(site, pages, page):
     rel, title = page["rel"], page["title"]
     head = ['<meta charset="utf-8">', '<meta name="viewport" content="width=device-width, initial-scale=1">']
     if site["base"] == DRAFT_BASE:
         head.append('<meta name="robots" content="noindex, nofollow">')
+    # The page's meta text, as plain text, is also its search and link-preview description. Specification
+    # section 5 does not place these metas; they join the other metas before the title, where every
+    # reference page keeps its robots meta, so the elements section 5 lists keep their order.
+    description = _description(site, page)
+    if description:
+        head.append('<meta name="description" content="{}">'.format(_attr(description)))
+        head.append('<meta property="og:description" content="{}">'.format(_attr(description)))
     head.append("<title>{} | {}.ai</title>".format(_t(title), site["name"]))
     head.append('<link rel="icon" href="{}" type="image/svg+xml">'.format(
         _asset(site, "logos/{}-favicon.svg".format(site["key"]))))
@@ -1585,6 +1617,35 @@ def _self_test():
                -1 < head.find(tag) < head.find('<link rel="stylesheet"'))
         expect("shell/scheme-button-last-in-mast " + target, built.count(SCHEME_BUTTON) == 1
                and re.search(r'<header class="mast">.*?</nav>' + re.escape(SCHEME_BUTTON) + "</header>", built))
+    # Every page of both sites: each head line in render_page's order (the description metas after the
+    # robots meta and before the title), and the 2 description metas, each on its own line, exactly on the
+    # pages whose data carries a meta, with that meta's plain text.
+    head_order = ('<meta charset="utf-8">', '<meta name="viewport" ', '<meta name="robots" ',
+                  '<meta name="description" ', '<meta property="og:description" ', "<title>",
+                  '<link rel="icon" ', '<link rel="apple-touch-icon" ', '<script data-cfasync="false" ',
+                  '<link rel="stylesheet" ', '<script src="')
+    described = {}
+    for built_site in SITES:
+        for model_page in _load_pages(ROOT / built_site["src"]):
+            described[built_site["root"] + "/" + model_page["rel"]] = _description(built_site, model_page)
+    expect("meta/description-every-page", sorted(described) == sorted(outputs), sorted(described))
+    expect("meta/description-every-page-has-one", all(described.values()), described)
+    for target, built in sorted(outputs.items()):
+        lines = built.split("<head>\n", 1)[1].split("\n</head>", 1)[0].split("\n")
+        ranks = [next((rank for rank, start in enumerate(head_order) if line.startswith(start)), None)
+                 for line in lines]
+        expect("shell/head-order " + target, None not in ranks and ranks == sorted(ranks), lines)
+        text = described.get(target, "")
+        metas = ['<meta name="description" content="{}">'.format(_attr(text)),
+                 '<meta property="og:description" content="{}">'.format(_attr(text))]
+        if text:
+            expect("meta/description-present " + target,
+                   all(lines.count(meta) == 1 and built.count(meta) == 1 for meta in metas), lines)
+        else:
+            expect("meta/description-absent " + target, "description" not in built.split("</head>", 1)[0])
+    mappings_head = outputs["site/draft/mappings/index.html"].split("</head>", 1)[0]
+    expect("meta/mappings-parenthetical", mappings_head.count(
+        "frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA)") == 2, mappings_head)
     expect("shell/scheme-button-hidden", SCHEME_BUTTON.startswith(
         '<button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden>')
            and SCHEME_BUTTON.endswith('<span class="vh">Dark mode</span></button>'))
@@ -2251,6 +2312,22 @@ def _self_test():
             name, model, page_head + line + page_body))
     metad = model(page_head + 'title = "T"\nmeta = "M <code>c</code>"\n' + page_body)
     expect("page/meta-renders", '<p class="meta">M <code>c</code></p>' in render_page(site, [metad], metad))
+    # The description metas carry the meta escaped for a double-quoted attribute: the markup reduced to its
+    # text, character references decoded and escaped again, no raw quote, the base token rendered, and
+    # whitespace runs folded; each sits on its own head line, after the robots meta and before the title.
+    quoted = model(page_head + 'title = "T"\nmeta = """Say "a" &amp; &lt;b&gt; it\'s\n<code>c</code> $BASE/x"""\n'
+                   + page_body)
+    quoted_lines = render_page(site, [quoted], quoted).split("</head>", 1)[0].split("\n")
+    content = "Say &quot;a&quot; &amp; &lt;b&gt; it&#x27;s c /draft/x"
+    escaped_metas = ['<meta name="description" content="{}">'.format(content),
+                     '<meta property="og:description" content="{}">'.format(content)]
+    expect("meta/description-escaped", all(quoted_lines.count(meta) == 1 for meta in escaped_metas), quoted_lines)
+    positions = [quoted_lines.index(line) if line in quoted_lines else -1 for line in
+                 ['<meta name="robots" content="noindex, nofollow">'] + escaped_metas + ["<title>T | AIQT.ai</title>"]]
+    expect("meta/description-order", -1 not in positions and positions == list(range(positions[0], positions[0] + 4)),
+           positions)
+    plain = model(page_head + 'title = "T"\n' + page_body)
+    expect("meta/description-none-without-meta", "description" not in render_page(site, [plain], plain))
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
         with open(Path(tmp) / "home.toml", "w", encoding="utf-8") as handle:
             handle.write(page_head + "title = 3\n" + page_body)
@@ -2494,7 +2571,8 @@ def _self_test():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: gen_draft_site (shell order, the scheme script and switch, robots meta, footer "
+    print("SELF-TEST PASS: gen_draft_site (shell and head order, the scheme script and switch, robots meta, "
+          "the description metas (presence, escaping and order), footer "
           "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "

@@ -5,6 +5,7 @@ title = "Page not found"
 kind = "document"
 label = "404"
 heading = "That page is not here."
+description = "This page does not exist on opfiles.ai."
 
 [[body]]
 component = "lead"

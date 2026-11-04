@@ -6,7 +6,7 @@ title = "Mappings"
 kind = "document"
 label = "Reference"
 heading = "Framework mappings"
-meta = "A navigational crosswalk from the pack's mapped rules to security and AI-governance frameworks: a registry of the frameworks and editions referenced, then a forward view by rule and a reverse view by framework."
+meta = "A navigational crosswalk from the pack's mapped rules to security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA): a registry of the frameworks and editions referenced, then a forward view by rule and a reverse view by framework."
 
 [[body]]
 component = "control"
