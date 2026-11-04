@@ -553,8 +553,8 @@ def _table_html(site, spec, where):
                  classes, _t(_text(spec, where, "caption")), cols,
                  "".join("<th>{}</th>".format(_inline(site, cell)) for cell in head), "".join(body))
     # A sticky table's wrapper gets the bounded class (template specification section 7.31); any other
-    # table's wrapper does not, and the template bounds an unmarked wrapper only in browsers that
-    # support :has().
+    # table's wrapper does not. The template's :has() fallback bounds an unmarked wrapper only when it
+    # directly holds a sticky table, and only in browsers that support :has().
     wrap = "tablewrap bounded" if sticky else "tablewrap"
     return '<div class="{}" tabindex="0">{}</div>'.format(wrap, table)
 
