@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""Nav-coverage gate: every site/*.html carries exactly one /disclosure link INSIDE its <nav>.
+"""Nav-coverage gate: every live site/ and opf/site/ page carries exactly one disclosure link INSIDE its <nav>.
 
-The disclosure matrix is the site's standing "what we claim, and what we do not" page; every public
-page must point to it from its primary navigation so a reader is never more than one click from the
-limitations. This gate asserts that link is present, and IN THE NAV, on every page EXCEPT an explicit
-allowlist, and fails closed if a non-exempt page lacks it or the allowlist drifts. A /disclosure link
-elsewhere in the page body or footer does NOT satisfy the requirement: only anchors nested inside a
-<nav> element count, so the link cannot drift out of the nav and still pass. <nav> nesting is tracked,
-so an anchor is attributed to the nav only while one is open.
+The disclosure matrix is the site's standing "what we claim, and what we do not" page; every live public
+page (every page outside the root's top-level draft/) must point to it from its primary navigation so a reader is
+never more than one click from the limitations. This gate asserts that link is present, and IN THE NAV, on
+every live page EXCEPT an explicit allowlist, and fails closed if a non-exempt live page lacks it or the
+allowlist drifts. A /disclosure link elsewhere in the page body or footer does NOT satisfy the
+requirement: only anchors nested inside a <nav> element count, so the link cannot drift out of the nav
+and still pass. <nav> nesting is tracked, so an anchor is attributed to the nav only while one is open.
 
-(Historically this gate required the link in the <footer>; B-10 moved the canonical disclosure link
-into the site nav and repurposed this gate accordingly. The filename is retained as its gate identity.)
+(Historically this gate required the link in the <footer>; the canonical disclosure link later moved
+into the site nav and this gate was repurposed accordingly. The filename is retained as its gate identity.)
+
+The staged draft under site/draft/ follows the shared site template, whose top bar has no Disclosure item,
+so a draft rule covers it instead (stated beside DRAFT_SUBDIR): exactly one /draft/disclosure/ link in the
+draft landing page's "About this project" region, none required on the other draft pages. The draft rule
+replaces the live rule for site/ at promotion. The same partition applies to opf/site/draft/ (the opfiles.ai
+draft): its live pages keep the ./disclosure nav rule below.
 
 Coverage spans TWO required roots: site/ (the aiqt.ai site, absolute /disclosure) and opf/site/ (the
 opfiles.ai site, served from opf/site as its own root, whose pages link ./disclosure relative so it
-resolves within opf/site; every opf/site page carries the nav, so nothing is exempt). A 404 page (any page
-named 404.html, in either root) is the one exception to the per-root form: it is served at whatever
-missing URL was requested, so a relative link would resolve against that URL, and it must carry the
-root-absolute /disclosure instead; a relative ./disclosure on a 404 page is a missing link. Each tree is a REQUIRED
+resolves within opf/site). Neither root allowlists a page, so every page outside the root's draft/ must carry
+its nav link; the pages under site/draft/ and opf/site/draft/ are exempt from the nav rule and are held to
+the draft rule instead (one /draft/disclosure/ link in the About region of draft/index.html, nothing
+required on the other draft pages; the same absolute href on both roots). A live 404 page (any page named
+404.html outside the root's draft/, in either root) is the one exception to the per-root form: it is served
+at whatever missing URL was requested, so a relative link would resolve against that URL, and it must carry
+the root-absolute /disclosure instead; a relative ./disclosure on a 404 page is a missing link. Each tree is a REQUIRED
 coverage input: if a root is absent, unreadable, or carries no .html pages, the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
 file, opened O_NOFOLLOW and confirmed regular via fstat on the opened fd, so a symlink/FIFO/socket/device
 .html (or site/ itself as a symlink) is fail-closed and never read or followed, and the check-then-read
@@ -27,10 +36,10 @@ adversarial input. This gate does NOT defend against a concurrent-write attacker
 component symlink race (full component-wise containment is the OS/CI-isolation layer's job per
 SYSTEM-HARDENING.md), nor cross-check the page set against an expected/tracked index (page presence and
 git-tracking are gen_manifest's concern). Those are out of a trusted-input coverage gate's scope. The allowlist is empty:
-every public page carries the nav, so none is exempt. It stays an EXPLICIT mechanism, not a silent skip:
+no live page is exempt (the draft pages are partitioned out by the draft rule, not allowlisted). It stays an EXPLICIT mechanism, not a silent skip:
 an allowlisted page that is missing, or that starts carrying the link, is allowlist drift and fails.
 
-  check_footer.py             scan site/*.html
+  check_footer.py             scan every .html page under site/ and opf/site/
   check_footer.py --self-test  assert the present/missing/drift and fail-closed paths each resolve
 
 Exit 0 clean, 1 on any coverage finding, 2 on a missing/unreadable/empty required input (fail-closed).
@@ -58,7 +67,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
 
 DISCLOSURE_HREF = "/disclosure"
-# Pages exempt from the nav-link requirement, relative to site/. Empty: every page carries the nav.
+# Pages exempt from the nav-link requirement, relative to site/. Empty: every live site/ page (every page
+# outside site/draft/, which the draft rule below covers instead) carries the nav.
 ALLOWLIST = frozenset()
 
 # Coverage roots, each (subdir, disclosure_href, allowlist). Both are REQUIRED inputs (an absent,
@@ -66,7 +76,8 @@ ALLOWLIST = frozenset()
 # aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure. opf/site is the
 # opfiles.ai site, served from opf/site as its own root (Cloudflare Pages builds opf/site), so its pages
 # link the disclosure page RELATIVE (./disclosure): a relative link resolves within opf/site whatever the
-# mount point. Every opf/site page carries the nav, so the allowlist is empty (like site/).
+# mount point. Every live opf/site page (every page outside opf/site/draft/, which the draft rule below
+# covers instead) carries the nav, so the allowlist is empty (like site/).
 COVERAGE_ROOTS = (
     ("site", "/disclosure", frozenset()),
     ("opf/site", "./disclosure", frozenset()),
@@ -79,6 +90,19 @@ NOT_FOUND_PAGE = "404.html"
 def required_href(name, href):
     """The disclosure href a page named `name` (relative to its root) must carry, given its root's form."""
     return DISCLOSURE_HREF if Path(name).name == NOT_FOUND_PAGE else href
+
+
+# The staged draft under site/draft/ follows the shared site template (baseline 1.6.0), whose top bar has no
+# Disclosure item: the draft landing page links the disclosure page from its "About this project" region
+# (p.about), and the inner draft pages carry no disclosure link. So the live rule above covers every site/
+# page outside site/draft/, unchanged, and the draft rule covers the pages under it: exactly one
+# DRAFT_DISCLOSURE_HREF link inside the About region of DRAFT_LANDING, and none required elsewhere. At
+# promotion the draft moves to the root and the draft rule replaces the live rule for site/. The opfiles.ai
+# draft under opf/site/draft/ is built from the same template, so the same partition applies there: its
+# live pages keep the relative ./disclosure nav rule and its draft landing page carries the About link.
+DRAFT_SUBDIR = "draft"
+DRAFT_LANDING = "draft/index.html"
+DRAFT_DISCLOSURE_HREF = "/draft/disclosure/"
 
 
 class _Anchors(HTMLParser):
@@ -101,6 +125,53 @@ class _Anchors(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "nav" and self._nav_depth:
             self._nav_depth -= 1
+
+
+class _AboutAnchors(HTMLParser):
+    """Collect the href of every <a> inside a <p class="about">, the landing page's "About this project"
+    line (template specification section 7.24). A <p> cannot nest, so the region closes at its </p>."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hrefs = []
+        self._open = False
+
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        if tag == "p":
+            self._open = "about" in (d.get("class") or "").split()
+        elif tag == "a" and self._open and d.get("href") is not None:
+            self.hrefs.append(d["href"].strip())
+
+    def handle_endtag(self, tag):
+        if tag == "p":
+            self._open = False
+
+
+def check_draft_pages(pages):
+    """pages: {name under the root: html_text} for the pages under its draft/. Return a sorted list of
+    findings for the draft rule: DRAFT_LANDING must exist once any draft page does and carry exactly one
+    DRAFT_DISCLOSURE_HREF link inside its About region; the other draft pages need none."""
+    if not pages:
+        return []
+    if DRAFT_LANDING not in pages:
+        return ["{}: missing; the draft rule needs the draft landing page".format(DRAFT_LANDING)]
+    parser = _AboutAnchors()
+    parser.feed(pages[DRAFT_LANDING])
+    count = sum(1 for h in parser.hrefs if h == DRAFT_DISCLOSURE_HREF)
+    if count == 0:
+        return ["{}: missing the {} link in its About region".format(DRAFT_LANDING, DRAFT_DISCLOSURE_HREF)]
+    if count > 1:
+        return ["{}: carries {} {} links in its About region (expected exactly one)".format(
+            DRAFT_LANDING, count, DRAFT_DISCLOSURE_HREF)]
+    return []
+
+
+def check_site_pages(pages, allowlist, href=DISCLOSURE_HREF):
+    """One coverage root (site/ or opf/site/): the live rule (check_pages, with the root's own href) over
+    every page outside its draft/ and the draft rule (check_draft_pages) over the pages under it."""
+    draft = {name: text for name, text in pages.items() if Path(name).parts[0] == DRAFT_SUBDIR}
+    live = {name: text for name, text in pages.items() if name not in draft}
+    return sorted(check_pages(live, allowlist, href) + check_draft_pages(draft))
 
 
 def disclosure_link_count(text, href=DISCLOSURE_HREF):
@@ -217,18 +288,26 @@ def _run_one(root, subdir, href, allowlist):
             print("error: cannot load {} ({}); a symlink, non-regular, unreadable, or undecodable page is "
                   "fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
-    findings = check_pages(pages, allowlist, href)
+    # The live/draft partition applies to every coverage root: site/draft/ (aiqt.ai) and opf/site/draft/
+    # (opfiles.ai) both follow the shared site template, and each root's live pages keep their own href.
+    findings = check_site_pages(pages, allowlist, href)
     if findings:
         print("FAIL: {} nav-coverage issue(s) under {}/".format(len(findings), subdir))
         for finding in sorted(set(findings)):
             print("  {}/{}".format(subdir, finding))
         return 1
     allow_str = ", ".join(sorted(allowlist)) or "none"
+    live_scope, draft_note = "", ""
+    if any(Path(name).parts[0] == DRAFT_SUBDIR for name in pages):
+        live_scope = " outside {}/{}/".format(subdir, DRAFT_SUBDIR)
+        draft_note = "; under {}/{}/ the landing page carries the {} About link".format(
+            subdir, DRAFT_SUBDIR, DRAFT_DISCLOSURE_HREF)
     if href == DISCLOSURE_HREF:
         carried = "the {} nav link".format(href)
     else:
         carried = "the {} nav link ({} pages carry {})".format(href, NOT_FOUND_PAGE, DISCLOSURE_HREF)
-    print("PASS: every {}/ page carries {} (allowlist: {})".format(subdir, carried, allow_str))
+    print("PASS: every {}/ page{} carries {} (allowlist: {}){}".format(
+        subdir, live_scope, carried, allow_str, draft_note))
     return 0
 
 
@@ -638,9 +717,72 @@ def _self_test():
         ("stale allowlist entry is drift", {"about.html": nav}, frozenset({"gone.html"}),
          ["gone.html: allowlisted for the nav link but no such page exists (allowlist drift)"]),
     ]
+    # The draft rule beside the live rule (check_site_pages, the site/ root): the live rule still binds every
+    # page outside draft/, and under draft/ only the landing page's About region link is required.
+    about = ('<div class="region"><p class="lbl">About this project</p><div><p class="about">'
+             '<a href="/draft/disclosure/">Disclosure</a><span class="dot" aria-hidden="true">&middot;</span>'
+             '<a href="/draft/license/">Licence</a></p></div></div>')
+    draft_nav = '<nav><a href="/draft/install/">Install</a></nav>'
+    site_cases = [
+        ("live page without the nav link fails beside a good draft",
+         {"about.html": "<nav></nav>", "draft/index.html": draft_nav + about},
+         ["about.html: missing the /disclosure nav link"]),
+        ("live page with only an About link still fails",
+         {"about.html": about.replace("/draft/disclosure/", "/disclosure")},
+         ["about.html: missing the /disclosure nav link"]),
+        ("draft landing without the About link fails",
+         {"about.html": nav, "draft/index.html": draft_nav},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("draft landing with the link only in its nav fails",
+         {"about.html": nav, "draft/index.html": '<nav><a href="/draft/disclosure/">Disclosure</a></nav>'},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("draft landing with 2 About links fails",
+         {"about.html": nav, "draft/index.html": about + about},
+         ["draft/index.html: carries 2 /draft/disclosure/ links in its About region (expected exactly one)"]),
+        ("draft inner page passes with no disclosure link",
+         {"about.html": nav, "draft/index.html": draft_nav + about, "draft/license/index.html": draft_nav}, []),
+        ("draft pages without the draft landing page fail",
+         {"about.html": nav, "draft/license/index.html": draft_nav},
+         ["draft/index.html: missing; the draft rule needs the draft landing page"]),
+        ("a live page named draft.html stays under the live rule",
+         {"about.html": nav, "draft.html": "<nav></nav>"},
+         ["draft.html: missing the /disclosure nav link"]),
+    ]
     failures = []
     for label, pages, allow, expected in cases:
         got = sorted(check_pages(pages, allow))
+        if got != sorted(expected):
+            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    for label, pages, expected in site_cases:
+        got = check_site_pages(pages, frozenset())
+        if got != sorted(expected):
+            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    # The same partition on the opf/site root: live opfiles.ai pages keep the relative ./disclosure nav
+    # rule, and opf/site/draft/ follows the draft rule (the landing page's About link, none elsewhere).
+    opf_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
+    opf_draft_nav = '<nav><a href="/draft/model/">The model</a></nav>'
+    opf_cases = [
+        ("opfiles: good live pages and a good draft pass",
+         {"index.html": opf_nav, "draft/index.html": opf_draft_nav + about,
+          "draft/model/index.html": opf_draft_nav}, []),
+        ("opfiles: draft pages without the draft landing page fail",
+         {"index.html": opf_nav, "draft/model/index.html": opf_draft_nav},
+         ["draft/index.html: missing; the draft rule needs the draft landing page"]),
+        ("opfiles: draft landing without the About link fails",
+         {"index.html": opf_nav, "draft/index.html": opf_draft_nav},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("opfiles: draft landing with 2 About links fails",
+         {"index.html": opf_nav, "draft/index.html": about + about},
+         ["draft/index.html: carries 2 /draft/disclosure/ links in its About region (expected exactly one)"]),
+        ("opfiles: live page without the ./disclosure nav link still fails beside a good draft",
+         {"index.html": opf_nav, "manifest.html": "<nav></nav>", "draft/index.html": opf_draft_nav + about},
+         ["manifest.html: missing the ./disclosure nav link"]),
+        ("opfiles: live page carrying only the absolute /disclosure link still fails",
+         {"index.html": nav, "draft/index.html": opf_draft_nav + about},
+         ["index.html: missing the ./disclosure nav link"]),
+    ]
+    for label, pages, expected in opf_cases:
+        got = check_site_pages(pages, frozenset(), "./disclosure")
         if got != sorted(expected):
             failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
     # run() fail-closed on a missing/empty/unreadable required input; clean on a good tree (exit codes).
@@ -674,6 +816,17 @@ def _self_test():
         (root / "site" / "zz-undecodable.html").write_bytes(b"\xff\xfe<nav></nav>")
         if quiet_one(root) != 2:
             failures.append("an undecodable page did not fail closed (expected exit 2, not a traceback)")
+    with tempfile.TemporaryDirectory() as d1:
+        root1 = Path(d1)
+        (root1 / "site" / "draft" / "license").mkdir(parents=True)
+        (root1 / "site" / "about.html").write_text(nav, encoding="utf-8")
+        (root1 / "site" / "draft" / "index.html").write_text(draft_nav + about, encoding="utf-8")
+        (root1 / "site" / "draft" / "license" / "index.html").write_text(draft_nav, encoding="utf-8")
+        if quiet_one(root1) != 0:
+            failures.append("a site/ tree with a good draft did not pass (expected exit 0)")
+        (root1 / "site" / "draft" / "index.html").write_text(draft_nav, encoding="utf-8")
+        if quiet_one(root1) != 1:
+            failures.append("a draft landing page without its About link did not report a finding (expected 1)")
     with tempfile.TemporaryDirectory() as d2:
         root2 = Path(d2)
         (root2 / "site").mkdir()
@@ -694,7 +847,7 @@ def _self_test():
         if quiet_one(root3) != 2:
             failures.append("a symlinked site/ root did not fail closed (expected exit 2)")
     # opf/site coverage: the relative ./disclosure nav link is tree-appropriate (opf/site is served as its
-    # own root), every page carries the nav (empty allowlist), a page missing the link is a finding, and an
+    # own root), every live page carries the nav (empty allowlist), a page missing the link is a finding, and an
     # absent opf/site root fails closed. run() requires BOTH roots, so it is exercised over a two-root tree.
     rel_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
     with tempfile.TemporaryDirectory() as d4:
@@ -712,6 +865,20 @@ def _self_test():
         (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
+        os.remove(str(root4 / "opf" / "site" / "stale.html"))
+        # the opfiles.ai draft through the real two-root run(): a good draft passes, a draft landing page
+        # without its About link is a finding, and draft pages without a landing page are a finding.
+        (root4 / "opf" / "site" / "draft" / "model").mkdir(parents=True)
+        (root4 / "opf" / "site" / "draft" / "index.html").write_text(opf_draft_nav + about, encoding="utf-8")
+        (root4 / "opf" / "site" / "draft" / "model" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
+        if quiet_run(root4) != 0:
+            failures.append("a two-root tree with a good opf/site/draft/ did not pass (expected exit 0)")
+        (root4 / "opf" / "site" / "draft" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
+        if quiet_run(root4) != 1:
+            failures.append("an opf/site/draft/ landing page without its About link was not reported (expected 1)")
+        os.remove(str(root4 / "opf" / "site" / "draft" / "index.html"))
+        if quiet_run(root4) != 1:
+            failures.append("opf/site/draft/ pages without the landing page were not reported (expected 1)")
     # A 404 page carries the root-absolute /disclosure on either root: it passes there, and the relative
     # ./disclosure (which a nested missing URL would resolve below the root) is a missing link.
     with tempfile.TemporaryDirectory() as d4b:
@@ -752,8 +919,9 @@ def _self_test():
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs + {} #378 close-vector "
-          "runs + {} close-vector guard cases)".format(len(cases), close_runs, guard_cases))
+    print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + {} opfiles draft-rule "
+          "cases + run() exit-code legs + {} #378 close-vector runs + {} close-vector guard cases)".format(
+              len(cases), len(site_cases), len(opf_cases), close_runs, guard_cases))
     return 0
 
 

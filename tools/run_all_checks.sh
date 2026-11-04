@@ -103,6 +103,7 @@ run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --defaul
 run_gate "links"     python3 -I -B tools/check_links.py
 run_gate "site-selftest" python3 -I -B tools/check_selftest_execution.py --suite site-selftest
 run_gate "site"      python3 -I -B tools/check_site.py
+run_gate "site-scope-selftest" python3 -I -B tools/ci_site_scope.py --self-test
 run_gate "overclaim-selftest" python3 -I -B tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 -I -B tools/check_overclaim.py
 run_gate "license-qual-selftest" python3 -I -B tools/check_license_qualification.py --self-test
@@ -115,6 +116,12 @@ run_gate "newtab-selftest" python3 -I -B tools/check_newtab.py --self-test
 run_gate "newtab" python3 -I -B tools/check_newtab.py
 run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
+run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
+run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
+run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
+run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
+run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
 run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
 run_gate "security-txt" python3 -I -B tools/check_security_txt.py
 run_gate "sitemap-selftest" python3 -I -B tools/check_selftest_execution.py --suite sitemap-selftest
@@ -252,6 +259,7 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "ci-site-scope-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
 run_gate "git-fixture-env-core" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
 run_gate "git-fixture-env-config-combined" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
 run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed

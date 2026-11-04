@@ -1,0 +1,60 @@
+# The opfiles.ai draft adopt page (template reference/document.html): the assistant-led path in 3 steps,
+# then the 10 command verbs and their status as the reference CLI dispatches them.
+path = "adopt/index.html"
+title = "Adopt"
+kind = "document"
+label = "Adopt"
+heading = "Ask your assistant for a plan. Review it, then authorize."
+meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes, then inspect the scaffolded store and validation results."
+
+[[body]]
+component = "label"
+text = "How"
+
+[[body]]
+component = "steps"
+items = [
+  '''Give your assistant this site's machine-readable entry point, <a href="/llms.txt"><code>/llms.txt</code></a>, and the adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>, as the starting material.''',
+  "Review the plan it proposes: what it would create, import, or retire.",
+  "Authorize, then inspect the scaffolded store and the validation results.",
+]
+
+[[body]]
+component = "prose"
+html = "<p>Adopting by hand is the fallback for when you cannot use an assistant; both paths target the same store format.</p>"
+
+[[body]]
+component = "section"
+lbl = "The verbs"
+heading = "The 10 command verbs and their status"
+
+[[body]]
+component = "prose"
+html = "<p>The <code>opf</code> reference CLI is 1 implementation of the standard's command vocabulary. A base adopter can use their own tooling instead, or adopt by hand.</p>"
+
+[[body]]
+component = "table"
+caption = "The 10 command verbs and their status"
+head = ["Verb", "Does", "Status"]
+rows = [
+  ["<code>init</code>", "scaffolds the store", "implemented"],
+  ["<code>render</code>", "regenerates and checks the views", "implemented"],
+  ["<code>doctor</code>", "verifies the store", "implemented"],
+  ["<code>absorb</code>", "drafts changelog entries for human curation", "implemented"],
+  ["<code>record</code>", "authors 1 record change at a time", "implemented"],
+  ["<code>adopt</code>", "plan, approve, reconcile and status run; apply refuses every plan in this build and complete refuses with exit 2, so adoption cannot finish yet", "partly implemented"],
+  ["<code>upgrade</code>", "refuses with exit 2; the reference tooling defines no store upgrade", "refuses"],
+  ["<code>import</code>", "ordinary modes retired; refuse with exit 2", "retired"],
+  ["<code>migrate</code>", "specified, not yet implemented", "planned"],
+  ["<code>sync</code>", "specified, not yet implemented", "planned"],
+]
+
+[[body]]
+component = "prose"
+html = "<p><code>doctor</code> exits 0 when clean, 1 on a finding, and 2 when it cannot evaluate. <code>render --check</code> exits 1 for drift.</p>"
+
+[[body]]
+component = "next"
+html = "Back to the source, the view, and the gate."
+text = "See the model"
+href = "model/"

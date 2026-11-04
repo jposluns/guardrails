@@ -421,6 +421,36 @@ class = "pack-immutable"
 path = "site/assets/baseline/logos/aiqt-touch.png"
 class = "pack-immutable"
 
+# The staged aiqt.ai draft (tools/gen_draft_site.py pages plus the pinned baseline copy under
+# site/draft/assets/baseline/), one directory prefix like opf/site: it moves to the site root at promotion.
+[[release-class]]
+pattern = "site/draft/**"
+class = "pack-immutable"
+
+# The draft's page data files, 1 TOML file per page, the sources tools/gen_draft_site.py renders from.
+[[release-class]]
+pattern = "site/draft-src/**"
+class = "pack-immutable"
+
+# The baseline pin: version and SHA-256 of every file under each copy root, read by tools/check_baseline_pin.py.
+[[release-class]]
+path = ".baseline/pin.toml"
+class = "pack-immutable"
+
+# The opfiles.ai draft's baseline pin: the same format, naming only the opf/site/draft/assets/baseline copy root
+# (the opf/site/** selector below already covers the copy itself), read by tools/check_baseline_pin.py.
+[[release-class]]
+path = ".baseline/opfiles-pin.toml"
+class = "pack-immutable"
+
+# The site template's palette gate, copied byte for byte from the template package's tools/check_palette.py and
+# pinned in both baseline pins; run by tools/run_all_checks.sh and the Quality workflow (template specification
+# section 4 item 3 also requires it in the Pages build command, which is set outside this repository), never
+# served.
+[[release-class]]
+path = ".baseline/check_palette.py"
+class = "pack-immutable"
+
 # --- concern-1: the opfiles.ai site subtree (opf/site) -------------------------------------------------
 # The opfiles.ai website: the served site pages live directly under opf/site (Cloudflare Pages builds
 # opf/site as the site root). Hand-authored shippable site content, same class as the site/ pages above.
@@ -498,9 +528,14 @@ note = "The documented adopter vendoring location; reserved, never a pack-immuta
 # Apple touch icons copied byte for byte from the shared site template (baseline 1.3.1, CC0 1.0). They are
 # PNG images, so they are marked binary: git applies no text conversion and byte-canon does not read them;
 # their bytes match the template's SHA256SUMS and are pinned by the release manifest.
+# The site/draft/assets/baseline/ files are an unchanged copy of the published site template, pinned by
+# SHA-256 in .baseline/pin.toml: the fonts, the touch icons and the LinkedIn mark are binary formats, and palettes.css (2
+# trailing newlines) and marks/orcid-id.svg (no trailing newline) ship upstream outside the text canon, so all
+# of them are marked binary and keep their published bytes. The opf/site/draft/assets/baseline/ files are a
+# second copy of the same version, pinned in .baseline/opfiles-pin.toml, with the same binary set.
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml", "site/assets/baseline/logos/aiqt-touch.png", "opf/site/assets/baseline/logos/opfiles-touch.png"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml", "site/assets/baseline/logos/aiqt-touch.png", "opf/site/assets/baseline/logos/opfiles-touch.png", "site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2", "site/draft/assets/baseline/logos/aiqt-touch.png", "site/draft/assets/baseline/logos/auditthis-touch.png", "site/draft/assets/baseline/logos/cleanlanguage-touch.png", "site/draft/assets/baseline/logos/grclibrary-touch.png", "site/draft/assets/baseline/logos/opfiles-touch.png", "site/draft/assets/baseline/logos/secureconfig-touch.png", "site/draft/assets/baseline/marks/linkedin-in-bug.png", "site/draft/assets/baseline/marks/orcid-id.svg", "site/draft/assets/baseline/palettes.css", "opf/site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/logos/aiqt-touch.png", "opf/site/draft/assets/baseline/logos/auditthis-touch.png", "opf/site/draft/assets/baseline/logos/cleanlanguage-touch.png", "opf/site/draft/assets/baseline/logos/grclibrary-touch.png", "opf/site/draft/assets/baseline/logos/opfiles-touch.png", "opf/site/draft/assets/baseline/logos/secureconfig-touch.png", "opf/site/draft/assets/baseline/marks/linkedin-in-bug.png", "opf/site/draft/assets/baseline/marks/orcid-id.svg", "opf/site/draft/assets/baseline/palettes.css"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 
