@@ -112,7 +112,7 @@ text = "Security"
 
 [[body]]
 component = "prose"
-html = '''<p>To report a security vulnerability, see <a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">the vulnerability disclosure policy<span class="vh"> (opens in a new tab)</span></a>. For what these sites send to Cloudflare and the owner, see <a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">the privacy policy<span class="vh"> (opens in a new tab)</span></a>.</p>'''
+html = '''<p>To report a security vulnerability, see <a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">the vulnerability disclosure policy<span class="vh"> (opens in a new tab)</span></a>. For what reaches Cloudflare and the owner when you visit this site, see <a href="https://posluns.ca/privacy/" target="_blank" rel="noopener noreferrer">the privacy policy<span class="vh"> (opens in a new tab)</span></a>.</p>'''
 
 [[body]]
 component = "next"
