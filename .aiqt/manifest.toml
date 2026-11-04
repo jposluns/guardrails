@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "bda69135e2d88e2956452988d57959ad7e51812f2c135758f544c03e8fa59e9d"
+tree-sha256 = "787229216b2007626299421c14f4ea3b5de4a58285b2095cf9d93d76c4281dd7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2716,8 +2716,8 @@ sha256 = "2c06352da38b4bb30cb9315b62a8b5571dcd2272013a80c21e5d2b685af32872"
 
 [[sources]]
 path = "opf/site/draft-src/disclosure.toml"
-bytes = 8172
-sha256 = "43b85a7aa33d5d581559022e2f7ec20959f496275fb02c6d9dd33bdb5a968e58"
+bytes = 8324
+sha256 = "809cecdb8b1a06d1ff6b05c1c67196790ca75053791de95545865b9192edeec0"
 
 [[sources]]
 path = "opf/site/draft-src/home.toml"
@@ -3036,8 +3036,8 @@ sha256 = "43b62617425f5f9ae994ff069924dcc75de89a0b8d0b11fe7c78c12e0ed11097"
 
 [[sources]]
 path = "opf/site/draft/disclosure/index.html"
-bytes = 13953
-sha256 = "fd0efd042fd7c2dc4b46fc0b1af8a70dc627302ba6a1dd508ba27b6d88f18098"
+bytes = 14105
+sha256 = "7a88a24c283ed12ed8e177ce12e87acc9fc2d1e7e4528dcecb7ef20df4d583f6"
 
 [[sources]]
 path = "opf/site/draft/index.html"
@@ -3701,8 +3701,8 @@ sha256 = "5e1b6d658f1b6cd6c4b546e0504730bb189805bf665ecc83544ef877f5c1ca0c"
 
 [[sources]]
 path = "site/draft-src/disclosure.toml"
-bytes = 12868
-sha256 = "050b7c010d753056162738a10c595082316bdd3b1dc7dfcb5e582a03ea86a4b6"
+bytes = 13176
+sha256 = "0b46a887e2606b9e856d65b7d395243ab582a938ab497024a7e95175a94a262a"
 
 [[sources]]
 path = "site/draft-src/home.toml"
@@ -4021,8 +4021,8 @@ sha256 = "2c4e1f1a2cc00c49dc013fd421b16c14cdc89eb873fc57f7768be90604d4bf90"
 
 [[sources]]
 path = "site/draft/disclosure/index.html"
-bytes = 18640
-sha256 = "3ffc9e24bec53bc93250d7d44d9650f2662d336c86c8702389d6db28622439f4"
+bytes = 18948
+sha256 = "7b0899d6192b6158c37f50e9ceaa66691c457e232d1149195cdd92b637c4461e"
 
 [[sources]]
 path = "site/draft/index.html"
