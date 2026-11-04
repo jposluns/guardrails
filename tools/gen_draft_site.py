@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the staged draft sites (shared site template, baseline 1.6.0) under each site's draft/ root.
+"""Generate the staged draft sites (shared site template, baseline 1.6.1) under each site's draft/ root.
 
   gen_draft_site.py              write every registered page
   gen_draft_site.py --check      exit 1 if any target differs from a fresh build, 2 if one cannot be read
