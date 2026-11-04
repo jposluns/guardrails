@@ -5,7 +5,7 @@ title = "Adopt"
 kind = "document"
 label = "Adopt"
 heading = "Ask your assistant for a plan. Review it, then authorize."
-meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes, then inspect the scaffolded store and validation results."
+meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes, then inspect the scaffolded store and validation results. In this build the reference tooling stops after approval."
 
 [[body]]
 component = "label"
@@ -16,7 +16,7 @@ component = "steps"
 items = [
   '''Give your assistant this site's machine-readable entry point, <a href="/llms.txt"><code>/llms.txt</code></a>, and the adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>, as the starting material.''',
   "Review the plan it proposes: what it would create, import, or retire.",
-  "Authorize, then inspect the scaffolded store and the validation results.",
+  "Authorize, then inspect the scaffolded store and the validation results (the reference tooling cannot apply a plan yet).",
 ]
 
 [[body]]
