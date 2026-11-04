@@ -244,7 +244,10 @@ def _read(path):
     error (exit 2 via OSError), never a silent skip."""
     if not path.is_file():
         raise OSError("required surface missing: {}".format(path))
-    return path.read_text(encoding="utf-8")
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise OSError("{}: not UTF-8 ({})".format(path, exc)) from exc
 
 
 def expected_families(manifests):

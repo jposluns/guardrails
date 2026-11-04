@@ -1005,12 +1005,16 @@ def _page_from_doc(doc, where):
     """A validated page model from one parsed data file."""
     if not isinstance(doc, dict):
         raise RefusedPage("{}: the page must be a TOML table".format(where))
-    spec = _need(doc, where, ("path", "title", "kind", "body"), ("label", "heading", "meta"))
+    spec = _need(doc, where, ("path", "title", "kind", "body"), ("label", "heading", "meta", "description"))
     rel = _text(spec, where, "path")
     if REL_RE.fullmatch(rel) is None:
         raise RefusedPage("{}: {!r} is not a safe page path".format(where, rel))
     title = _text(spec, where, "title")
     meta = _text(spec, where, "meta") if "meta" in spec else None
+    # A head-only description, for a page that shows no meta line (the home and 404 pages).
+    description = _text(spec, where, "description") if "description" in spec else None
+    if meta is not None and description is not None:
+        raise RefusedPage("{}: set meta or description, not both".format(where))
     kind = _text(spec, where, "kind")
     if kind not in KINDS:
         raise RefusedPage("{}: kind must be one of {}".format(where, ", ".join(KINDS)))
@@ -1042,7 +1046,7 @@ def _page_from_doc(doc, where):
         if name == "about" and kind == "document" and position != len(body):
             raise RefusedPage("{}: the About region closes a document page".format(comp_where))
     return {"rel": rel, "title": title, "kind": kind, "label": spec.get("label"),
-            "heading": spec.get("heading"), "meta": meta, "body": body, "rail": rail,
+            "heading": spec.get("heading"), "meta": meta, "description": description, "body": body, "rail": rail,
             "where": where}
 
 
@@ -1253,12 +1257,13 @@ class _PlainText(HTMLParser):
 
 
 def _description(site, page):
-    """The page's meta as plain text (its inline markup reduced to the text, character references decoded,
-    whitespace runs folded to 1 space), or "" for a page without a meta."""
-    if not page["meta"]:
+    """The page's description, or else its meta, as plain text (its inline markup reduced to the text,
+    character references decoded, whitespace runs folded to 1 space), or "" for a page with neither."""
+    source = page.get("description") or page["meta"]
+    if not source:
         return ""
     reader = _PlainText()
-    reader.feed(_inline(site, page["meta"]))
+    reader.feed(_inline(site, source))
     reader.close()
     return " ".join("".join(reader.parts).split())
 
@@ -1624,7 +1629,7 @@ def _self_test():
         for model_page in _load_pages(ROOT / built_site["src"]):
             described[built_site["root"] + "/" + model_page["rel"]] = _description(built_site, model_page)
     expect("meta/description-every-page", sorted(described) == sorted(outputs), sorted(described))
-    expect("meta/description-both-kinds", any(described.values()) and not all(described.values()), described)
+    expect("meta/description-every-page-has-one", all(described.values()), described)
     for target, built in sorted(outputs.items()):
         lines = built.split("<head>\n", 1)[1].split("\n</head>", 1)[0].split("\n")
         ranks = [next((rank for rank, start in enumerate(head_order) if line.startswith(start)), None)

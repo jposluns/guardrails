@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "3f3534b6e0ac727843c692f6678f9a1835cf9751692fef1949590c0daf12e603"
+tree-sha256 = "4437273449068f089653c7cf3ce6f0260f074c09b4c443d7da8fcbea93dcbcc8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2701,8 +2701,8 @@ sha256 = "d3821bab62de48c90fd62dc80dc7ad7f766188ee9055de533dc00b40120b2dca"
 
 [[sources]]
 path = "opf/site/draft-src/404.toml"
-bytes = 480
-sha256 = "7b46a4d2f5c19bbc7e0fa29f8173d9672b277e4070166379cc231a3363abf227"
+bytes = 536
+sha256 = "83300f415d883b1132d54d2ef2d21aa375094650e6fdc93fc7bb6f1354028865"
 
 [[sources]]
 path = "opf/site/draft-src/adopt.toml"
@@ -2721,8 +2721,8 @@ sha256 = "43ec60a835f564ea13076c3ff86e742d56d79d416b4995a61dc0b943a6d35b37"
 
 [[sources]]
 path = "opf/site/draft-src/home.toml"
-bytes = 2065
-sha256 = "9610414a6b5eabf65a16635cef62bfd240f348dd1210557096d6368178c9976d"
+bytes = 2278
+sha256 = "d4344150e9a4d3384a582c9946d616f407e7a13b5228320979a48aa2b065e628"
 
 [[sources]]
 path = "opf/site/draft-src/license.toml"
@@ -2741,8 +2741,8 @@ sha256 = "9a6ebed3e6e204a1edcd60f24aeaba9a05cb6529c15801bb7b56d9bb8ca8f849"
 
 [[sources]]
 path = "opf/site/draft/404.html"
-bytes = 5876
-sha256 = "e06b26785791d9efc5223ded12b9e16d94adde4280d3d966916d77fb3f05bc0d"
+bytes = 6035
+sha256 = "e14881b03f1517222e39a6db7f5dbdd449225c9bbc856ddc9889d9be0815bcfc"
 
 [[sources]]
 path = "opf/site/draft/adopt/index.html"
@@ -3041,8 +3041,8 @@ sha256 = "7f2bbe55a93634e36e12052629aad07ca9324d8a15b7d7e941fa832e94889841"
 
 [[sources]]
 path = "opf/site/draft/index.html"
-bytes = 8417
-sha256 = "1e8596de1bffa2ec891f35b5dd0098935b97acc7e5fc18f6f9e6acf6fd22e050"
+bytes = 8900
+sha256 = "1a4aad1aedeb90b6fef9e3f581f5c971f6fc2a7f36156e5852a4695c77ec531f"
 
 [[sources]]
 path = "opf/site/draft/license/index.html"
@@ -3696,8 +3696,8 @@ sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
 path = "site/draft-src/404.toml"
-bytes = 475
-sha256 = "5e1b6d658f1b6cd6c4b546e0504730bb189805bf665ecc83544ef877f5c1ca0c"
+bytes = 521
+sha256 = "856bc0a179a007b2e133273b49451104157c187351acae1edb5b68c35a9e97cf"
 
 [[sources]]
 path = "site/draft-src/disclosure.toml"
@@ -3706,8 +3706,8 @@ sha256 = "d1707a55eac2638ff6b62308ca8be5d124d79805951856ac2393b9d415ec3321"
 
 [[sources]]
 path = "site/draft-src/home.toml"
-bytes = 2546
-sha256 = "d5b0a6d741b61feec1718f0549251a982649408e98ec8b108fb02126471bd447"
+bytes = 2857
+sha256 = "b6c52bd643fc8e4348951064e29cb977f5995959436406351e30f1c1b7f1979d"
 
 [[sources]]
 path = "site/draft-src/install.toml"
@@ -3736,8 +3736,8 @@ sha256 = "eeb5b75c46c8d103a22f86fbcf906ece4f0653c8ccc60f517f67dcaab912729a"
 
 [[sources]]
 path = "site/draft/404.html"
-bytes = 5832
-sha256 = "d34cfb6f20d249684f088311d91fa054a5ae948ff64ee1b9ca46a36e48006645"
+bytes = 5971
+sha256 = "adf09a470d90bd3b25af289f4d7f962d9a46d5d820848727950c25f099aab923"
 
 [[sources]]
 path = "site/draft/assets/baseline/LICENSE"
@@ -4026,8 +4026,8 @@ sha256 = "6e48b7e1e3b93441e89f1e46f2edf12525456ddfc8539582c6e17d1818744da7"
 
 [[sources]]
 path = "site/draft/index.html"
-bytes = 8840
-sha256 = "c0e00e471b1d3d44bcc3fcf75ab286bd598c11ee773eda94c127802069a738e8"
+bytes = 9509
+sha256 = "51a4b1d0cdcd59e0cd2fdfb70c99d5dbe06956c0473838a6453ce575932c2d51"
 
 [[sources]]
 path = "site/draft/install/index.html"
@@ -4451,8 +4451,8 @@ sha256 = "ddd59f0b7cd9ab298f97c57a029ae45d860bfb838099a9d9e85028c7629604d3"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 212310
-sha256 = "0b80fc196be7229465b3b01cdb74f7df6ef2a91c0bc2c104fcade3217a88baa7"
+bytes = 212432
+sha256 = "9b4fda1f8e6fb817201c232846d57f63387efb3e8c82df02960c8c575e1e3eef"
 
 [[sources]]
 path = "tools/check_release_build.py"
@@ -4601,8 +4601,8 @@ sha256 = "ee37d7b4db8fb441ddb3fb07e4003c94a5b36124e9714bca2f84ad4e7bb1b199"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 156522
-sha256 = "cfbc62135d90b5a42f7251b78613175953e047451774327d9ffd9104057fe978"
+bytes = 156919
+sha256 = "e434177dc99471a5ed901a50d3f66f23f3cffb2f0f440eb0eb96dbbe8af0fa6c"
 
 [[sources]]
 path = "tools/gen_enforceability.py"

@@ -3,6 +3,7 @@
 path = "index.html"
 title = "Home"
 kind = "landing"
+description = "AIQT Guardrails holds your AI assistant to one standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Open source."
 
 [[body]]
 component = "hero"

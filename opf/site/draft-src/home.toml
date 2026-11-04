@@ -3,6 +3,7 @@
 path = "index.html"
 title = "Home"
 kind = "landing"
+description = "OPFiles (OPF) is a neutral standard for a project's operational records. It pairs TOML sources with generated human-readable views and defines drift checks for use in a required commit or CI gate."
 
 [[body]]
 component = "hero"
