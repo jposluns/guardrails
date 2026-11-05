@@ -1,9 +1,9 @@
-# The aiqt.ai draft future plans page (not in the nav): what is planned for teams and enterprises.
+# The aiqt.ai draft page of ideas under consideration for teams and enterprises (not in the nav).
 path = "future/index.html"
-title = "Future plans"
+title = "Ideas for teams and enterprises"
 kind = "document"
 label = "Under consideration"
-heading = "What is coming for teams and enterprises"
+heading = "Ideas under consideration for teams and enterprises"
 meta = "Ideas under consideration, with no dates and no commitments: management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise."
 
 [[body]]

@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ee78ebae975bad3fc1c821dc0a2c2e67c6dfd0c433ad2a9611a28400d078c80e"
+tree-sha256 = "5c1e8a49bcb31fd3c334b3ef8864a8a07bb788e24980e5ebf2358cd0d7e532b5"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3611,8 +3611,8 @@ sha256 = "dba04f24a104f0f7761ebaf4ee2cd49b60fbe829e7f517b69bf7d4283c287c53"
 
 [[sources]]
 path = "site/draft-src/future.toml"
-bytes = 1503
-sha256 = "b095794d022a62936dab826537c1ae4f1cec1e001a839c0aeef740279e38d85b"
+bytes = 1532
+sha256 = "de18a296112be9ecee485c27375717e41b854fd3786d1793c4ac305dda480922"
 
 [[sources]]
 path = "site/draft-src/home.toml"
@@ -3626,8 +3626,8 @@ sha256 = "0f1ae9a1ad8421fd4a659ba676915428b89064b012a988f63b506d78a5deefd6"
 
 [[sources]]
 path = "site/draft-src/install.toml"
-bytes = 3531
-sha256 = "23185ebc8cf7d63004d007c10c9b139c2f9862b21e87fd3014eca2c6e35b3e3f"
+bytes = 3521
+sha256 = "e6d09e6c2c2c0e692a9d4b2c7c0591bb676a5e7d0e73bbeb96a261e13b272076"
 
 [[sources]]
 path = "site/draft-src/license.toml"
@@ -3951,8 +3951,8 @@ sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
 path = "site/future/index.html"
-bytes = 7358
-sha256 = "d87e275c12a89614feb5f70bb575e85609c06113f2c0dee49316f2f3e2a728e2"
+bytes = 7388
+sha256 = "615922269d8f5a493ba7a5c1bc54a790d8730b33a4855078bfe232d6a6cedd8f"
 
 [[sources]]
 path = "site/index.html"
@@ -3966,8 +3966,8 @@ sha256 = "b4da8ddb36f6df7c4110d1fbdf9dd49558e78a190105fed0badf0db870447c42"
 
 [[sources]]
 path = "site/install/index.html"
-bytes = 9201
-sha256 = "3bacc25b6a4c68936fdbe5a77b6183931580d7ff6cff45324946b414c53d73ea"
+bytes = 9189
+sha256 = "4ea6d4cda8270947fe758360cb989cf9604a4d33c1b328f536074c8dd71d83aa"
 
 [[sources]]
 path = "site/license/index.html"
