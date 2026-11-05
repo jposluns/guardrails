@@ -12239,7 +12239,9 @@ def _main_isolated(report_path=None):
                 ("ask/json-object-trailing-garbage-denies-armed",
                  '{"mode": "attended"} trailing\n', "deny"),
                 # The structured operating-mode record (mode plus only phase, set_by and set_at) is read by its
-                # mode exactly as the bare object is, in both directions:
+                # mode exactly as the bare object is. The attended vectors prove the record is accepted (a refused
+                # record arms and denies); the unattended vector pins the deny but cannot prove acceptance, since a
+                # refused record denies alike, so ask/json-mode-record-unattended-read-by-mode below proves it:
                 ("ask/json-mode-record-unattended-denies",
                  '{"mode": "unattended", "phase": null, "set_by": "operator",'
                  ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
@@ -12260,6 +12262,9 @@ def _main_isolated(report_path=None):
                 ("ask/json-mode-record-phase-number-denies-armed",
                  '{"mode": "attended", "phase": 2, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n',
                  "deny"),
+                ("ask/json-mode-record-phase-nested-object-denies-armed",
+                 '{"mode": "attended", "phase": {"mode": "attended"}, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
                 ("ask/json-mode-record-set-by-null-denies-armed",
                  '{"mode": "attended", "phase": null, "set_by": null, "set_at": "2026-11-04T17:47:04Z"}\n',
                  "deny"),
@@ -12290,6 +12295,20 @@ def _main_isolated(report_path=None):
                               {"questions": [{"question": "pick one"}]},
                               extra={"tool_use_id": "tu-1"})
             check(check_id, _verdict(ask()), want)
+        # An accepted unattended record and a refused one both read as the guards-armed `unattended` token, so
+        # the reader is observed at its classifier: an accepted record hands its own `mode` string to it, while
+        # a refused record fails closed before the classifier sees anything.
+        _rec_seen = []
+        _rec_classify = aiqt_hooks._orch_mode_classify
+        try:
+            aiqt_hooks._orch_mode_classify = lambda value: (_rec_seen.append(value), _rec_classify(value))[1]
+            _rec_token = aiqt_hooks._orch_mode_classify_text(
+                '{"mode": "unattended; overnight", "phase": null, "set_by": "operator",'
+                ' "set_at": "2026-11-04T17:47:04Z"}\n')
+        finally:
+            aiqt_hooks._orch_mode_classify = _rec_classify
+        check("ask/json-mode-record-unattended-read-by-mode", (_rec_token, _rec_seen),
+              ("unattended", ["unattended; overnight"]))
         # absent mode record fails open (no marker): the fixture DELETES the file, so this tests ABSENCE
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
