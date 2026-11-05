@@ -2,8 +2,10 @@
 # tools/check_ci_selection.py. Nothing selects or skips a step from it yet.
 #
 # job and step name the step (its job id and exact step name). categories and scope come from the
-# closed lists in that gate. triggers are segment globs over tracked paths (`**` spans segments, `*`
-# stays in one) whose change would select the step. weekly-only = true needs a
+# closed lists in that gate. triggers are segment globs over tracked paths whose change would select
+# the step: `**` spans whole segments and a trailing `**` needs at least one segment (`docs/**`
+# matches `docs/a.md` but never `docs` itself); `*` and `?` stay inside one segment; `[` carries no
+# bracket-class meaning and matches only a literal `[`. weekly-only = true needs a
 # weekly-only-authorization reference to the recorded maintainer authorization; no entry sets it.
 #
 # DRAFTS. Every entry below was generated from a static scan of the workflow and of the scripts each

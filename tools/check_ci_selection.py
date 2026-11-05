@@ -32,16 +32,34 @@ through importlib, a sys.path entry added at run time, or a script launched as a
 Cannot evaluate (exit 2), never a pass: a registry or workflow that is missing, not a regular file,
 unreadable, over MAX_BYTES or not UTF-8; a registry that is not TOML (TOMLDecodeError or a bare
 ValueError), nests too deeply (RecursionError) or exhausts memory (MemoryError); a format-version other
-than the integer 1; a workflow shape the line reader does not follow, a run: step without a name, or one
-job holding two run: steps of one name; a relative .py path in run: text that names no tracked file; a
-tracked-file listing that fails or is empty; a source in an import closure that cannot be read or parsed.
+than the integer 1; any workflow character, line or value outside the accepted grammar below, a run:
+step without a name, or one job holding two run: steps of one name; a relative .py path in run: text
+that names no tracked file; a tracked-file listing that fails or is empty; a source in an import
+closure that cannot be read or parsed.
 
-The workflow is read by a line reader, not a YAML parser, so the gate stays standard-library only: it
-follows the layout quality.yml uses (jobs at two spaces, job keys at four, steps under `steps:` at six,
-step keys at eight, a name or run: value on one line or a run: block under |, |-, > or >-) and refuses
-any other, including a flow or compact steps list, a job body at another indent, a repeated job key or
-jobs: block, a one-line name or run: value continued on a deeper line, and a value that starts with a
-YAML indicator (anchor, alias, tag, other block header).
+The workflow is read by a line reader, not a YAML parser, so the gate stays standard-library only. The
+reader is a positive grammar: it accepts exactly the shapes named here, and everything else is refused
+(exit 2), never skipped or guessed at. Accepted, in full:
+  characters   printable ASCII (U+0020 to U+007E) and the line feed, nothing else; the first CR, NEL,
+               U+2028, U+2029, form feed, vertical tab, tab, NUL, other C0 or C1 control, BOM or other
+               non-ASCII character is refused naming its line and character, before any line is read
+  lines        blank lines; full-line comments; top-level `key:` or `key: value` lines with one
+               `jobs:` block; job ids at indent 2 matching [A-Za-z_][A-Za-z0-9_-]*, each given once;
+               job keys at indent 4 (values other than a bare `steps:` are carried, not read); opaque
+               lines deeper than 4 under a job key other than steps:; steps under `steps:` starting
+               `- ` at indent 6 with step keys at indent 8, each key given once per step; nested
+               lines deeper than 8 under a step key other than name or run
+  scalars      a one-line name or run value that is single-quoted ('' doubling, no other quote),
+               double-quoted (no escapes, no inner quote), or plain starting with a letter,
+               underscore, dot or slash and not a value YAML types (null, ~, true/false/yes/no/on/off
+               in any case, an integer, float, hex, octal, binary or sexagesimal form with or without
+               underscores, a date or timestamp form) and holding no mapping indicator; a run: block
+               under |, |-, > or >- whose content is every line at or beyond the indent of its first
+               content line, ending at the first line at or under the key's indent or at a dedented
+               comment line (a comment, never run text; a dedented non-comment line is refused)
+  keys         a job id, job key or step key that YAML would type (on, off, yes, no, true, false,
+               null in any case) is refused; `jobs:` twice, a job id twice, or a step key twice in
+               one step is refused because YAML would keep only the last
 """
 import sys
 
@@ -96,12 +114,32 @@ UNDETERMINED_CEILING = 1
 REQUIRED_FIELDS = {"job": str, "step": str, "categories": list, "scope": str, "triggers": list, "reviewed": bool}
 OPTIONAL_FIELDS = {"weekly-only": bool, "weekly-only-authorization": str}
 
-JOB_RE = re.compile(r"  ([A-Za-z0-9_-]+):")
+JOB_RE = re.compile(r"  ([A-Za-z_][A-Za-z0-9_-]*):")
 KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*))?")
 PY_PATH_RE = re.compile(r"(?<![A-Za-z0-9_./-])[A-Za-z0-9_.][A-Za-z0-9_./-]*\.py(?![A-Za-z0-9_./-])")
-# The first characters that make a plain YAML scalar something other than text (or reserved).
-PLAIN_INDICATORS = "|>&*!%@`{}[],#?:'\""
 BLOCK_MARKERS = ("|", "|-", ">", ">-")
+# Every character the accepted grammar needs: printable ASCII and the line feed. Anything else (CR,
+# NEL, U+2028, U+2029, form feed, vertical tab, tab, NUL, any other C0 or C1 control, a BOM, all other
+# non-ASCII) can split, hide or pad a line or a scalar where YAML and a line reader disagree, so the
+# first such character is refused before any line is read.
+ACCEPTED_CHARS = frozenset(map(chr, range(0x20, 0x7F)))
+# Plain values YAML 1.1 reads as something other than the literal text: null and the booleans (the
+# yes/no/on/off words included, in any case), integer, float, hex, octal, binary and sexagesimal
+# number forms (underscores included), and date or timestamp forms. A plain scalar, job id, job key or
+# step key matching one is refused; quoting a scalar makes it text.
+TYPED_PLAIN_RE = re.compile(
+    r"(?i:~|null|true|false|yes|no|on|off)"
+    r"|[-+]?[0-9][0-9_]*(?::[0-9][0-9_]*)*"
+    r"|[-+]?(?:[0-9][0-9_]*)?\.[0-9_]*(?:[eE][-+]?[0-9]+)?"
+    r"|[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+"
+    r"|[-+]?\.(?i:inf)|\.(?i:nan)"
+    r"|[-+]?0(?i:x)[0-9a-fA-F_]+|[-+]?0(?i:b)[01_]+"
+    r"|[0-9]{4}-[0-9][0-9]?-[0-9][0-9]?(?:[Tt ][ -~]*)?")
+# The plain one-line scalars the gate accepts, positively: a letter, underscore, dot or slash first
+# (never a digit, sign or YAML indicator, so no number, date, anchor, alias, tag, flow or block form
+# can begin one), printable ASCII after. TYPED_PLAIN_RE still refuses the word and dotted forms
+# (null, yes, .inf) whose first character this pattern allows.
+PLAIN_SAFE_RE = re.compile(r"[A-Za-z_./][ -~]*")
 
 
 class CannotEvaluate(Exception):
@@ -150,13 +188,29 @@ def load_registry(text, where):
     return checks
 
 
+def _refuse_characters(text, where):
+    """Refuse the first character outside the accepted set, naming its line and character. The grammar
+    needs only printable ASCII and the line feed; every other character (CR, NEL, U+2028, U+2029, form
+    feed, vertical tab, tab, NUL, any other C0 or C1 control, a BOM, all other non-ASCII) can make YAML
+    read other lines or other text than a line reader."""
+    line, column = 1, 0
+    for char in text:
+        if char == "\n":
+            line += 1
+            column = 0
+            continue
+        column += 1
+        if char not in ACCEPTED_CHARS:
+            raise CannotEvaluate(
+                "{}:{}: character U+{:04X} at column {} is outside the accepted grammar "
+                "(printable ASCII and the line feed)".format(where, line, ord(char), column))
+
+
 def _scalar(value, where):
-    """A one-line YAML scalar: plain (cut at a ' #' comment), single-quoted or double-quoted without escapes.
-    An empty value, a tab, a plain value that starts with a YAML indicator (block scalar, anchor, alias,
-    tag, flow collection) or holds a mapping indicator, and a quote left inside a quoted value are refused,
-    since YAML reads each of them as something other than the literal text on the line."""
-    if "\t" in value:
-        raise CannotEvaluate("{}: tab in a scalar".format(where))
+    """A one-line YAML scalar the gate accepts, positively: single-quoted ('' doubling, no other inner
+    quote), double-quoted (no escapes, no inner quote), or plain from PLAIN_SAFE_RE (cut at a ' #'
+    comment) that is no TYPED_PLAIN_RE value and holds no mapping indicator. Everything else is
+    refused: YAML reads it as something other than the literal text on the line."""
     value = value.strip()
     if value.startswith("'"):
         if len(value) < 2 or not value.endswith("'") or "'" in value[1:-1].replace("''", ""):
@@ -167,20 +221,26 @@ def _scalar(value, where):
             raise CannotEvaluate("{}: double-quoted scalar not read by this gate".format(where))
         return value[1:-1]
     value = value.split(" #", 1)[0].rstrip()
-    if (not value or value[0] in PLAIN_INDICATORS or value == "-" or value.startswith("- ")
-            or ": " in value or value.endswith(":")):
-        raise CannotEvaluate("{}: scalar {!r} not read by this gate".format(where, value))
+    if not PLAIN_SAFE_RE.fullmatch(value) or ": " in value or value.endswith(":"):
+        raise CannotEvaluate("{}: plain scalar {!r} is outside the accepted grammar".format(where, value))
+    if TYPED_PLAIN_RE.fullmatch(value):
+        raise CannotEvaluate("{}: plain scalar {!r} is a value YAML types, not text; quote it to make "
+                             "it text".format(where, value))
     return value
 
 
 def workflow_run_steps(text, where=WORKFLOW):
-    """The run: steps of a workflow as (job, step name, run text, line), in file order."""
+    """The run: steps of a workflow as (job, step name, run text, line), in file order. The accepted
+    grammar is stated in the module docstring; a character, line or value outside it is CannotEvaluate,
+    never skipped or guessed at."""
+    _refuse_characters(text, where)
     lines = text.split("\n")
     steps, current = [], None
     in_jobs, job, in_steps = False, None, False
-    # seen_jobs refuses a second jobs: block; job_keys refuses a repeated job key (YAML keeps the last
-    # of either, which this reader would not); last_key is the step key a deeper line would continue.
-    seen_jobs, job_keys, last_key = False, None, None
+    # seen_jobs refuses a second jobs: block and job_ids a repeated job id; job_keys refuses a repeated
+    # job key (YAML keeps the last of each, which this reader would not); last_key is the step key a
+    # deeper line would continue.
+    seen_jobs, job_ids, job_keys, last_key = False, set(), None, None
 
     def flush():
         # The step's own bookkeeping keys start with a space, so no YAML key can collide with them.
@@ -197,8 +257,6 @@ def workflow_run_steps(text, where=WORKFLOW):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        if "\t" in line[:len(line) - len(line.lstrip())]:
-            raise CannotEvaluate("{}:{}: tab in indentation".format(where, number))
         indent = len(line) - len(line.lstrip(" "))
         if indent == 0:
             flush()
@@ -218,9 +276,13 @@ def workflow_run_steps(text, where=WORKFLOW):
             flush()
             current, in_steps, job_keys = None, False, set()
             match = JOB_RE.fullmatch(line.split(" #", 1)[0].rstrip())
-            if match is None:
-                raise CannotEvaluate("{}:{}: job key not read by this gate".format(where, number))
+            if match is None or TYPED_PLAIN_RE.fullmatch(match.group(1)):
+                raise CannotEvaluate("{}:{}: job id not in the accepted id grammar".format(where, number))
             job = match.group(1)
+            if job in job_ids:
+                raise CannotEvaluate("{}:{}: job id {} given twice (YAML would keep only the "
+                                     "last)".format(where, number, job))
+            job_ids.add(job)
             continue
         if job is None:
             raise CannotEvaluate("{}:{}: content under jobs: before any job".format(where, number))
@@ -232,7 +294,8 @@ def workflow_run_steps(text, where=WORKFLOW):
             # A job key is a plain key, with at most a comment after a bare steps: (YAML reads
             # `steps: # note` as `steps:`); a flow list, a compact list at indent 4 or a quoted key is refused.
             match = KEY_RE.fullmatch(stripped.split(" #", 1)[0].rstrip())
-            if match is None or (match.group(1) == "steps" and match.group(2) is not None):
+            if match is None or TYPED_PLAIN_RE.fullmatch(match.group(1)) \
+                    or (match.group(1) == "steps" and match.group(2) is not None):
                 raise CannotEvaluate("{}:{}: job key not read by this gate".format(where, number))
             if match.group(1) in job_keys:
                 raise CannotEvaluate("{}:{}: job {} gives {} twice".format(where, number, job, match.group(1)))
@@ -256,7 +319,7 @@ def workflow_run_steps(text, where=WORKFLOW):
         else:
             raise CannotEvaluate("{}:{}: step layout not read by this gate".format(where, number))
         match = KEY_RE.fullmatch(body)
-        if match is None:
+        if match is None or TYPED_PLAIN_RE.fullmatch(match.group(1)):
             raise CannotEvaluate("{}:{}: step key not read by this gate".format(where, number))
         key, value = match.group(1), match.group(2) or ""
         if key in current:
@@ -266,10 +329,29 @@ def workflow_run_steps(text, where=WORKFLOW):
             current["name"] = _scalar(value, "{}:{}".format(where, number))
         elif key == "run":
             if value.strip() in BLOCK_MARKERS:
-                block = []
-                while index < len(lines) and (not lines[index].strip()
-                                              or len(lines[index]) - len(lines[index].lstrip(" ")) > 8):
-                    block.append(lines[index].strip())
+                # The first content line sets the block's content indentation (YAML's auto-detection);
+                # the block is every later line at or beyond it, blank lines included, and ends at the
+                # first line at or under the key's indent or at a dedented comment line (a comment,
+                # never run text). A dedented non-comment line is outside the grammar.
+                block, content_indent = [], None
+                while index < len(lines):
+                    raw = lines[index]
+                    if not raw.strip():
+                        block.append("")
+                        index += 1
+                        continue
+                    line_indent = len(raw) - len(raw.lstrip(" "))
+                    if line_indent <= 8:
+                        break
+                    if content_indent is None:
+                        content_indent = line_indent
+                    elif line_indent < content_indent:
+                        if raw.lstrip(" ").startswith("#"):
+                            index += 1
+                            break
+                        raise CannotEvaluate("{}:{}: line under a run: block is dedented below its "
+                                             "content and is no comment".format(where, index + 1))
+                    block.append(raw.strip())
                     index += 1
                 current["run"] = "\n".join(block).strip()
             else:
@@ -729,7 +811,11 @@ def _self_test():
           and not glob_match("tools/" + "*a" * 24 + "Z.py", long_name)
           and not glob_match("**/" * 24 + "Z.py", "/".join("a" * 40) + "/b.py")
           and glob_match("tools/" + "*a" * 24 + "*.py", long_name), long_name)
-    got = _rules(_registry({"probe": ("lint", "Probe", "probe", ["tools/probe.py", "tools/" + "*" * 24 + "Z.py"])}))
+    # The dead-glob walk runs this glob against long_name, a tracked path long enough that a
+    # backtracking regex would not finish the mismatch, so the check holds glob_match itself to its
+    # non-backtracking bound, not only the finding.
+    got = _rules(_registry({"probe": ("lint", "Probe", "probe", ["tools/probe.py", "tools/" + "*a" * 24 + "Z.py"])}),
+                 tracked=FIXTURE_TRACKED + (long_name,))
     check("refuse/many-star-dead-glob", got == ["dead-glob"], got)
 
     got = _rules(_registry() + "[[check\n")
@@ -802,6 +888,82 @@ def _self_test():
                  workflow=FIXTURE_WORKFLOW.replace("tools/gate.py --self-test", "./tools/gate.py --self-test"))
     check("refuse/dot-slash-script-not-triggered", got == ["import-not-triggered"], got)
 
+    # Characters outside the accepted grammar, refused before any line is read, each naming its line
+    # and character. First the line breaks YAML honours where a line reader does not: each would hide
+    # one line inside another.
+    results = []
+    for breaker in ("\r", "\u0085", "\u2028", "\u2029"):
+        hidden = FIXTURE_WORKFLOW.replace(
+            "          git config --global core.autocrlf true\n",
+            "          git config --global core.autocrlf true" + breaker + "          echo hidden\n")
+        results.append(_rules(_registry(), workflow=hidden))
+    check("cannot-evaluate/char-hides-line",
+          all(got[0] == "cannot-evaluate" and "U+" in got[1] for got in results), results)
+    # Then the rest of the refused set: a BOM, a form feed in indentation or alone on a line, a
+    # vertical tab, a tab, a trailing no-break space (YAML keeps it, a line reader would strip it),
+    # a NUL and a C1 control.
+    mutations = (
+        "\ufeff" + FIXTURE_WORKFLOW,
+        FIXTURE_WORKFLOW.replace("      - name: Probe\n", "   \f   - name: Probe\n"),
+        FIXTURE_WORKFLOW.replace("      - name: Probe\n", "      \f\n      - name: Probe\n"),
+        FIXTURE_WORKFLOW.replace("- name: Probe", "- name: Pro\vbe"),
+        FIXTURE_WORKFLOW.replace("- name: Probe", "- name:\tProbe"),
+        FIXTURE_WORKFLOW.replace("- name: Probe", "- name: Probe\u00a0"),
+        FIXTURE_WORKFLOW.replace("- name: Probe", "- name: Pro\x00be"),
+        FIXTURE_WORKFLOW.replace("- name: Probe", "- name: Pro\x9bbe"),
+    )
+    results = [_rules(_registry(), workflow=workflow) for workflow in mutations]
+    check("cannot-evaluate/char-outside-grammar",
+          all(got[0] == "cannot-evaluate" and "U+" in got[1] for got in results), results)
+
+    # Plain scalars YAML types as something other than text are refused unless quoted; a quoted one
+    # stays the literal step name.
+    results = []
+    for value in ("null", "~", "yes", "Yes", "TRUE", "off", "1_000", "1.50", "1e3", ".inf",
+                  "2026-01-01", "2026-01-01 09:30:00", "12:30:45", "0x1F"):
+        typed = FIXTURE_WORKFLOW.replace("      - name: Probe\n", "      - name: {}\n".format(value))
+        results.append((value, _rules(_registry(), workflow=typed)))
+    check("cannot-evaluate/typed-plain-scalar",
+          all(got[0] == "cannot-evaluate" for _value, got in results), results)
+    got = _rules(_registry({"probe": ("lint", "null", "probe", ["tools/probe.py"])}),
+                 workflow=FIXTURE_WORKFLOW.replace("      - name: Probe\n", "      - name: 'null'\n"))
+    check("pass/quoted-typed-scalar-is-text", got == [], got)
+
+    # A job id YAML would type (or outside the id grammar) and a repeated job id are each refused:
+    # YAML would keep another key, or only the last body.
+    results = []
+    for job_id in ("null", "on", "Off", "007"):
+        extra_job = FIXTURE_WORKFLOW + "  {}:\n    steps:\n      - name: Extra\n        run: echo extra\n".format(job_id)
+        results.append((job_id, _rules(_registry(), workflow=extra_job)))
+    check("cannot-evaluate/typed-job-id",
+          all(got[0] == "cannot-evaluate" for _job_id, got in results), results)
+    got = _rules(_registry(), workflow=FIXTURE_WORKFLOW
+                 + "  lint:\n    steps:\n      - name: Extra\n        run: echo extra\n")
+    check("cannot-evaluate/repeated-job-id", got[0] == "cannot-evaluate" and "twice" in got[1], got)
+
+    # A comment line dedented below a run: block's content ends the block as a comment, never as run
+    # text; a dedented non-comment line there is outside the grammar.
+    dedented = FIXTURE_WORKFLOW.replace(
+        "        run: |\n          git config --global core.autocrlf true\n",
+        "        run: |\n            git config --global core.autocrlf true\n          # a note, not run text\n")
+    steps = workflow_run_steps(dedented)
+    check("workflow/block-comment-dedent-ends-run",
+          steps[2][2] == "git config --global core.autocrlf true"
+          and _rules(_registry(), workflow=dedented) == [], steps[2])
+    got = _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace(
+        "        run: |\n          git config --global core.autocrlf true\n",
+        "        run: |\n            git config --global core.autocrlf true\n          dedented content\n"))
+    check("cannot-evaluate/block-dedent-under-content", got[0] == "cannot-evaluate", got)
+
+    # A run: text naming a path through `..` resolves against the tracked set: one collapsing to a
+    # tracked path inside the tree passes; one leaving the tree names no tracked file.
+    got = _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace(
+        "python3 -I -B tools/probe.py", "python3 -I -B tools/../tools/probe.py"))
+    check("path/run-dot-dot-collapses", got == [], got)
+    got = _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace(
+        "python3 -I -B tools/probe.py", "python3 -I -B ../outside/probe.py"))
+    check("cannot-evaluate/run-dot-dot-escapes", got[0] == "cannot-evaluate", got)
+
     for name, value in (("cannot-evaluate/format-version-true", "true"),
                         ("cannot-evaluate/format-version-float", "1.0")):
         got = _rules(_registry().replace("format-version = 1", "format-version = " + value))
@@ -840,14 +1002,20 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_ci_selection {} checks (a fixture registry passes; a missing, unknown or "
           "duplicate entry, a field outside its enum or schema, empty triggers where the scope needs them, a "
-          "dead glob, an untriggered run script (also through ./) or direct or transitive import, an "
-          "unauthorized weekly-only and an authorization without weekly-only each fail; the undetermined "
-          "ceiling holds one under, at and over; globs with many wildcards finish; TOML decode, bare "
-          "ValueError, RecursionError and MemoryError, a format-version of 2, true or 1.0, unreadable inputs, "
-          "and the {} workflow shapes tested (an unnamed step, a duplicate step name, no run steps, and "
-          "compact, flow, off-indent, repeated or second-block steps, block run headers with a comment, "
-          "keep or indent indicator, a continued run or name, an untracked script, a folded, anchored or "
-          "badly quoted name) are cannot-evaluate; an unrecognized argument exits 2; the live tree "
+          "dead glob (held against a path long enough to need the non-backtracking match), an untriggered "
+          "run script (also through ./) or direct or transitive import, an unauthorized weekly-only and an "
+          "authorization without weekly-only each fail; the undetermined ceiling holds one under, at and "
+          "over; globs with many wildcards finish; TOML decode, bare ValueError, RecursionError and "
+          "MemoryError, a format-version of 2, true or 1.0, unreadable inputs, the {} workflow shapes "
+          "tested (an unnamed step, a duplicate step name, no run steps, and compact, flow, off-indent, "
+          "repeated or second-block steps, block run headers with a comment, keep or indent indicator, a "
+          "continued run or name, an untracked script, a folded, anchored or badly quoted name), every "
+          "character outside the accepted grammar (a CR, NEL, U+2028 or U+2029 that would hide a line, a "
+          "BOM, form feed, vertical tab, tab, NUL, C1 control or no-break space), a plain scalar or job id "
+          "YAML types, a repeated job id, a dedented non-comment line under a run: block and a run path "
+          "through .. that leaves the tree are cannot-evaluate; a quoted typed scalar stays text; a "
+          "dedented comment ends a run: block as a comment; a .. path that collapses to a tracked file "
+          "passes; an unrecognized argument exits 2; the live tree "
           "passes)".format(len(EXECUTED), 3 + sum(1 for name in EXECUTED if name.startswith("cannot-evaluate/shape-"))))
     return 0
 
