@@ -14,8 +14,7 @@ map-atlas-broad: [AML.T0057]
 map-iso-23894-broad: [A.8]
 map-owasp-llm-broad: [LLM02]
 map-owasp-asvs-broad: [V14]
-map-csa-ccm-tight: [DSP-08, DSP-12]
-map-csa-ccm-broad: [DSP-17]
+map-csa-ccm-broad: [DSP-08, DSP-12, DSP-17]
 map-csa-aicm-broad: [DSP-08, DSP-12, DSP-17, DSP-22]
 ---
 

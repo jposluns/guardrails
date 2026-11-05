@@ -10,10 +10,9 @@ map-nist-80053-broad: [IA-5, IR-4]
 map-atlas-broad: [AML.T0012, AML.T0091.000, AML.T0091.001]
 map-iso-23894-broad: [A.11]
 map-owasp-mcp-broad: [MCP01]
-map-owasp-cheatsheet-tight: [secrets-management]
-map-csa-ccm-tight: [IAM-14]
-map-csa-ccm-broad: [CEK-12, CEK-13, SEF-07]
-map-csa-aicm-broad: [CEK-12, CEK-19, IAM-14, SEF-07]
+map-owasp-cheatsheet-broad: [secrets-management]
+map-csa-ccm-broad: [CEK-12, CEK-13, IAM-14, SEF-07]
+map-csa-aicm-broad: [CEK-12, CEK-13, IAM-14, SEF-07]
 ---
 
 # Rotate a leaked secret

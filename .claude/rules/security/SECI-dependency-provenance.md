@@ -22,8 +22,7 @@ map-owasp-mcp-tight: [MCP04, MCP09]
 map-owasp-web-tight: [A03]
 map-owasp-web-broad: [A08]
 map-owasp-cheatsheet-tight: [software-supply-chain-security]
-map-csa-ccm-tight: [STA-01, STA-08, STA-09, STA-10]
-map-csa-ccm-broad: [UEM-02]
+map-csa-ccm-broad: [STA-01, STA-08, STA-09, STA-10, UEM-02]
 map-csa-aicm-broad: [MDS-02, MDS-09, MDS-12, STA-01, STA-08, STA-09, STA-10, UEM-02]
 ---
 

@@ -6,7 +6,6 @@ facet: SECI
 slug: fail-closed
 map-cwe-tight: [CWE-636]
 map-owasp-web-broad: [A10]
-map-owasp-cheatsheet-broad: [error-handling]
 ---
 
 # Fail closed in security-relevant paths
