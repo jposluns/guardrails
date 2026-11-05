@@ -11,7 +11,7 @@
       "source_artefact": "CSA AI Controls Matrix v1.1.0",
       "retrieved": "2026-07-07",
       "catalogue": "subset",
-      "ids_cited": 74,
+      "ids_cited": 73,
       "ids_total": null
     },
     "csa-ccm": {
@@ -447,8 +447,8 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "CEK-19",
-      "identifier_title": "Key Compromise"
+      "identifier": "CEK-13",
+      "identifier_title": "Key Revocation"
     },
     {
       "rule_id": "secrot",
@@ -649,16 +649,6 @@
       "fit": "broad",
       "identifier": "IAM-13",
       "identifier_title": "Strong Authentication"
-    },
-    {
-      "rule_id": "secfid",
-      "rule_title": "Validate federated identity and token flows",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "IAM-14",
-      "identifier_title": "Credentials Management"
     },
     {
       "rule_id": "secfid",
@@ -1466,7 +1456,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "IAM-05",
       "identifier_title": "Least Privilege"
     },
@@ -1527,8 +1517,8 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "SEF-07",
-      "identifier_title": "Incident Management and Response"
+      "identifier": "IAM-14",
+      "identifier_title": "Credentials Management"
     },
     {
       "rule_id": "secrot",
@@ -1536,7 +1526,17 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
+      "identifier": "SEF-07",
+      "identifier_title": "Incident Management and Response"
+    },
+    {
+      "rule_id": "secau1",
+      "rule_title": "Strong authentication",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "IAM-14",
       "identifier_title": "Credentials Management"
     },
@@ -1549,16 +1549,6 @@
       "fit": "tight",
       "identifier": "IAM-13",
       "identifier_title": "Strong Authentication"
-    },
-    {
-      "rule_id": "secau1",
-      "rule_title": "Strong authentication",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "IAM-14",
-      "identifier_title": "Credentials Management"
     },
     {
       "rule_id": "secazn",
@@ -1607,6 +1597,36 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
+      "identifier": "STA-01",
+      "identifier_title": "Supply Chain Risk Management Policies and Procedures"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "STA-08",
+      "identifier_title": "Supply Chain Inventory"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "STA-10",
+      "identifier_title": "Supply Chain Risk Management"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "UEM-02",
       "identifier_title": "Application and Service Approval"
     },
@@ -1617,38 +1637,8 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "STA-01",
-      "identifier_title": "Supply Chain Risk Management Policies and Procedures"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-08",
-      "identifier_title": "Supply Chain Inventory"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "STA-09",
       "identifier_title": "Service Bill of Material (BOM)"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-10",
-      "identifier_title": "Supply Chain Risk Management"
     },
     {
       "rule_id": "secfid",
@@ -1746,9 +1736,39 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CEK-10",
       "identifier_title": "Key Generation"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "CEK-12",
+      "identifier_title": "Key Rotation"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "CEK-13",
+      "identifier_title": "Key Revocation"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "CEK-14",
+      "identifier_title": "Key Destruction"
     },
     {
       "rule_id": "seckey",
@@ -1759,36 +1779,6 @@
       "fit": "tight",
       "identifier": "CEK-11",
       "identifier_title": "Key Purpose"
-    },
-    {
-      "rule_id": "seckey",
-      "rule_title": "Key management",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-12",
-      "identifier_title": "Key Rotation"
-    },
-    {
-      "rule_id": "seckey",
-      "rule_title": "Key management",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-13",
-      "identifier_title": "Key Revocation"
-    },
-    {
-      "rule_id": "seckey",
-      "rule_title": "Key management",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-14",
-      "identifier_title": "Key Destruction"
     },
     {
       "rule_id": "seclpt",
@@ -2107,16 +2097,6 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "DSP-17",
-      "identifier_title": "Sensitive Data Protection"
-    },
-    {
-      "rule_id": "secmin",
-      "rule_title": "Minimize personal data sent to AI services",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "DSP-08",
       "identifier_title": "Data Privacy by Design and Default"
     },
@@ -2126,9 +2106,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "DSP-12",
       "identifier_title": "Limitation of Purpose in Personal Data Processing"
+    },
+    {
+      "rule_id": "secmin",
+      "rule_title": "Minimize personal data sent to AI services",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "DSP-17",
+      "identifier_title": "Sensitive Data Protection"
     },
     {
       "rule_id": "secdrr",
@@ -2136,9 +2126,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "DSP-11",
       "identifier_title": "Personal Data Access, Reversal, Rectification and Deletion"
+    },
+    {
+      "rule_id": "secdrr",
+      "rule_title": "Honour residency, retention, and deletion",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "DSP-19",
+      "identifier_title": "Data Location"
     },
     {
       "rule_id": "secdrr",
@@ -2149,16 +2149,6 @@
       "fit": "tight",
       "identifier": "DSP-16",
       "identifier_title": "Data Retention and Deletion"
-    },
-    {
-      "rule_id": "secdrr",
-      "rule_title": "Honour residency, retention, and deletion",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "DSP-19",
-      "identifier_title": "Data Location"
     },
     {
       "rule_id": "secpur",
