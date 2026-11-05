@@ -8,7 +8,6 @@ slug: synthetic-fixture-data
 map-cwe-broad: [CWE-359, CWE-531]
 map-nist-80053-tight: [SA-3(2)]
 map-owasp-llm-broad: [LLM02]
-map-owasp-asvs-broad: [V14]
 map-csa-ccm-tight: [DSP-15]
 map-csa-aicm-tight: [DSP-15]
 ---

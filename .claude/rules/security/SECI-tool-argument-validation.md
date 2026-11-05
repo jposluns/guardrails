@@ -12,7 +12,7 @@ map-iso-23894-broad: [A.11]
 map-owasp-asi-broad: [ASI05]
 map-owasp-mcp-tight: [MCP05]
 map-owasp-web-broad: [A05]
-map-owasp-asvs-tight: [V2]
+map-owasp-asvs-broad: [V2]
 map-csa-aicm-tight: [AIS-09]
 map-csa-aicm-broad: [AIS-10, AIS-11]
 ---

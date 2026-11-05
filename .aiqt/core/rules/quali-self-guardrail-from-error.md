@@ -7,7 +7,7 @@ facet: QUALI
 secondary: [INTEG]
 slug: self-guardrail-from-error
 map-iso-42001-broad: [10.2]
-map-nist-airmf-tight: [MANAGE 2.3]
+map-nist-airmf-broad: [MANAGE 2.3]
 ---
 
 # Propose a guardrail when an error reveals a gap

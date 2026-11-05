@@ -109,7 +109,7 @@
       "source_artefact": "NIST AI 100-1, AI Risk Management Framework 1.0",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 24,
+      "ids_cited": 21,
       "ids_total": null
     },
     "nist-ssdf": {
@@ -179,7 +179,7 @@
       "source_artefact": "OWASP Cheat Sheet Series (OWASP/CheatSheetSeries repo, commit f54d8de, 2026-07-04)",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 27,
+      "ids_cited": 26,
       "ids_total": null
     },
     "owasp-llm": {
@@ -6587,8 +6587,8 @@
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
       "fit": "broad",
-      "identifier": "MEASURE 2.13",
-      "identifier_title": "Effectiveness of the employed TEVV metrics and processes in the MEASURE function are evaluated and documented."
+      "identifier": "MAP 2.3",
+      "identifier_title": "Scientific integrity and TEVV considerations are identified and documented, including those related to experimental design, data collection and selection, and construct validation."
     },
     {
       "rule_id": "grdinp",
@@ -6596,9 +6596,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-guard-input-soundness.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "MAP 2.3",
-      "identifier_title": "Scientific integrity and TEVV considerations are identified and documented, including those related to experimental design, data collection and selection, and construct validation."
+      "fit": "broad",
+      "identifier": "MEASURE 2.13",
+      "identifier_title": "Effectiveness of the employed TEVV metrics and processes in the MEASURE function are evaluated and documented."
     },
     {
       "rule_id": "estsep",
@@ -6681,24 +6681,14 @@
       "identifier_title": "Post-deployment AI system monitoring plans are implemented, including mechanisms for capturing and evaluating input from users and other relevant AI actors, appeal and override, decommissioning, incident response, recovery, and change management."
     },
     {
-      "rule_id": "brnrot",
-      "rule_title": "Cut branches from the live protected line and re-home after a rewrite",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md",
-      "framework": "nist-airmf",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "MANAGE 4.1",
-      "identifier_title": "Post-deployment AI system monitoring plans are implemented, including mechanisms for capturing and evaluating input from users and other relevant AI actors, appeal and override, decommissioning, incident response, recovery, and change management."
-    },
-    {
       "rule_id": "cmtidn",
       "rule_title": "Commit identity",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-commit-identity.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
       "fit": "broad",
-      "identifier": "GOVERN 2.1",
-      "identifier_title": "Roles and responsibilities and lines of communication related to mapping, measuring, and managing AI risks are documented."
+      "identifier": "GOVERN 3.2",
+      "identifier_title": "Policies and procedures are in place to define and differentiate roles and responsibilities for human-AI configurations and oversight."
     },
     {
       "rule_id": "gatdis",
@@ -6726,7 +6716,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "GOVERN 4.3",
       "identifier_title": "Organizational practices are in place to enable AI testing, identification of incidents, and information sharing."
     },
@@ -6736,7 +6726,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MANAGE 4.3",
       "identifier_title": "Incidents and errors are communicated to relevant AI actors, including affected communities. Processes for tracking, responding to, and recovering from incidents and errors are followed and documented."
     },
@@ -6846,7 +6836,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MANAGE 2.3",
       "identifier_title": "Procedures are followed to respond to and recover from a previously unknown risk when it is identified."
     },
@@ -6866,7 +6856,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "GOVERN 4.1",
       "identifier_title": "Organizational policies and practices are in place to foster a critical thinking and safety-first mindset."
     },
@@ -6941,16 +6931,6 @@
       "identifier_title": "Organizational policies and practices are in place to foster a critical thinking and safety-first mindset."
     },
     {
-      "rule_id": "clrfy1",
-      "rule_title": "Clarify before acting",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-clarify-before-acting.md",
-      "framework": "nist-airmf",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "MAP 1.6",
-      "identifier_title": "System requirements (e.g., \"the system shall respect the privacy of its users\") are elicited from and understood by relevant AI actors."
-    },
-    {
       "rule_id": "exauth",
       "rule_title": "Express authorization before execution",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md",
@@ -7016,7 +6996,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-escalation.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MANAGE 4.3",
       "identifier_title": "Incidents and errors are communicated to relevant AI actors, including affected communities. Processes for tracking, responding to, and recovering from incidents and errors are followed and documented."
     },
@@ -7036,7 +7016,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-ext.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MANAGE 4.3",
       "identifier_title": "Incidents and errors are communicated to relevant AI actors, including affected communities. Processes for tracking, responding to, and recovering from incidents and errors are followed and documented."
     },
@@ -7059,16 +7039,6 @@
       "fit": "tight",
       "identifier": "MAP 3.5",
       "identifier_title": "Processes for human oversight are defined, assessed, and documented in accordance with organizational policies."
-    },
-    {
-      "rule_id": "csttir",
-      "rule_title": "Cost tier",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/40-COST-cost-tier.md",
-      "framework": "nist-airmf",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "GOVERN 1.3",
-      "identifier_title": "Processes, procedures, and practices are in place to determine the needed level of risk management activities."
     },
     {
       "rule_id": "csttir",
@@ -7946,7 +7916,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md",
       "framework": "owasp-asi",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "ASI05",
       "identifier_title": "Unexpected Code Execution (RCE)"
     },
@@ -8001,16 +7971,6 @@
       "identifier_title": "Tool Misuse and Exploitation"
     },
     {
-      "rule_id": "secopd",
-      "rule_title": "Social pressure is not authorization",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-operator-deception.md",
-      "framework": "owasp-asi",
-      "relation": "addresses risk",
-      "fit": "tight",
-      "identifier": "ASI09",
-      "identifier_title": "Human-Agent Trust Exploitation"
-    },
-    {
       "rule_id": "secpsn",
       "rule_title": "Resist data, model, and memory poisoning",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
@@ -8026,7 +7986,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-preview-has-no-side-effects.md",
       "framework": "owasp-asi",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "ASI09",
       "identifier_title": "Human-Agent Trust Exploitation"
     },
@@ -8166,7 +8126,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V2",
       "identifier_title": "Validation and Business Logic"
     },
@@ -8196,7 +8156,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V1",
       "identifier_title": "Encoding and Sanitization"
     },
@@ -8206,7 +8166,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V1",
       "identifier_title": "Encoding and Sanitization"
     },
@@ -8216,7 +8176,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V2",
       "identifier_title": "Validation and Business Logic"
     },
@@ -8246,9 +8206,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V16",
       "identifier_title": "Security Logging and Error Handling"
+    },
+    {
+      "rule_id": "sectok",
+      "rule_title": "Secure session and token handling",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
+      "framework": "owasp-asvs",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "V9",
+      "identifier_title": "Self-contained Tokens"
     },
     {
       "rule_id": "sectok",
@@ -8259,16 +8229,6 @@
       "fit": "tight",
       "identifier": "V7",
       "identifier_title": "Session Management"
-    },
-    {
-      "rule_id": "sectok",
-      "rule_title": "Secure session and token handling",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
-      "framework": "owasp-asvs",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "V9",
-      "identifier_title": "Self-contained Tokens"
     },
     {
       "rule_id": "secspr",
@@ -8286,7 +8246,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V2",
       "identifier_title": "Validation and Business Logic"
     },
@@ -8311,36 +8271,6 @@
       "identifier_title": "Data Protection"
     },
     {
-      "rule_id": "secpur",
-      "rule_title": "Bind personal-data use to its authorized purpose",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-purpose-limitation.md",
-      "framework": "owasp-asvs",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "V14",
-      "identifier_title": "Data Protection"
-    },
-    {
-      "rule_id": "secsyn",
-      "rule_title": "Fixtures and examples use synthetic data",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-synthetic-fixture-data.md",
-      "framework": "owasp-asvs",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "V14",
-      "identifier_title": "Data Protection"
-    },
-    {
-      "rule_id": "chkfcl",
-      "rule_title": "A check fails closed on input it cannot read",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "error-handling",
-      "identifier_title": "Error Handling Cheat Sheet"
-    },
-    {
       "rule_id": "secsec",
       "rule_title": "Keep secrets out",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md",
@@ -8356,9 +8286,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "secrets-management",
       "identifier_title": "Secrets Management Cheat Sheet"
+    },
+    {
+      "rule_id": "secau1",
+      "rule_title": "Strong authentication",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
+      "framework": "owasp-cheatsheet",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "multifactor-authentication",
+      "identifier_title": "Multifactor Authentication Cheat Sheet"
     },
     {
       "rule_id": "secau1",
@@ -8371,26 +8311,6 @@
       "identifier_title": "Authentication Cheat Sheet"
     },
     {
-      "rule_id": "secau1",
-      "rule_title": "Strong authentication",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "multifactor-authentication",
-      "identifier_title": "Multifactor Authentication Cheat Sheet"
-    },
-    {
-      "rule_id": "secazn",
-      "rule_title": "Least-privilege authorization",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "mass-assignment",
-      "identifier_title": "Mass Assignment Cheat Sheet"
-    },
-    {
       "rule_id": "secazn",
       "rule_title": "Least-privilege authorization",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
@@ -8399,6 +8319,26 @@
       "fit": "tight",
       "identifier": "authorization",
       "identifier_title": "Authorization Cheat Sheet"
+    },
+    {
+      "rule_id": "secazn",
+      "rule_title": "Least-privilege authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
+      "framework": "owasp-cheatsheet",
+      "relation": "aligns with guidance",
+      "fit": "tight",
+      "identifier": "mass-assignment",
+      "identifier_title": "Mass Assignment Cheat Sheet"
+    },
+    {
+      "rule_id": "seccry",
+      "rule_title": "Sound cryptography",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md",
+      "framework": "owasp-cheatsheet",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "transport-layer-security",
+      "identifier_title": "Transport Layer Security Cheat Sheet"
     },
     {
       "rule_id": "seccry",
@@ -8411,16 +8351,6 @@
       "identifier_title": "Cryptographic Storage Cheat Sheet"
     },
     {
-      "rule_id": "seccry",
-      "rule_title": "Sound cryptography",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "transport-layer-security",
-      "identifier_title": "Transport Layer Security Cheat Sheet"
-    },
-    {
       "rule_id": "secsup",
       "rule_title": "Trusted, pinned dependency provenance",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
@@ -8429,16 +8359,6 @@
       "fit": "tight",
       "identifier": "software-supply-chain-security",
       "identifier_title": "Software Supply Chain Security Cheat Sheet"
-    },
-    {
-      "rule_id": "secfcl",
-      "rule_title": "Fail closed in security-relevant paths",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "error-handling",
-      "identifier_title": "Error Handling Cheat Sheet"
     },
     {
       "rule_id": "secfid",
@@ -8526,7 +8446,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "cross-site-scripting-prevention",
       "identifier_title": "Cross Site Scripting Prevention Cheat Sheet"
     },
@@ -8536,7 +8456,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "injection-prevention",
       "identifier_title": "Injection Prevention Cheat Sheet"
     },
@@ -8596,7 +8516,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
-      "fit": "broad",
+      "fit": "tight",
       "identifier": "cross-site-request-forgery-prevention",
       "identifier_title": "Cross-Site Request Forgery Prevention Cheat Sheet"
     },
