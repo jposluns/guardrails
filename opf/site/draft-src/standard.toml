@@ -1,0 +1,80 @@
+# The opfiles.ai draft standard page: the scope, the links to the canonical specification and
+# quickstart, what the specification defines, the conformance keywords and the draft status
+# (template reference/document.html; specification sections 7.5, 7.9, 7.10, 7.13 and 7.14).
+path = "standard/index.html"
+title = "The standard"
+kind = "document"
+label = "The standard"
+heading = "The specification, and how to read it"
+meta = "OPFiles is defined by a written specification. The canonical specification and quickstart are the Markdown source in the repository, linked here directly."
+
+[[body]]
+component = "scope"
+html = "The standard requires a tracked git store and a review flow. Schema and drift checks are intended to catch structural defects; review recorded claims against their evidence. <code>migrate</code> and <code>sync</code> are specified, not yet implemented; <code>upgrade</code> and <code>import</code> refuse with exit 2. <code>opf adopt</code> cannot finish yet: at base 2.0.0 <code>apply</code> and <code>reconcile</code> refuse with exit 2, and <code>complete</code> refuses with exit 2. The reference tooling initializes and validates base 2.0.0 stores with <code>homes = 2</code>."
+
+[[body]]
+component = "prose"
+html = '''<p><a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">Read OPF-SPEC.md<span class="vh"> (opens in a new tab)</span></a>; <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-QUICKSTART.md" target="_blank" rel="noopener noreferrer">read the quickstart<span class="vh"> (opens in a new tab)</span></a>.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Coverage"
+heading = "What the specification defines"
+
+[[body]]
+component = "list"
+variant = "three"
+items = [
+    "Store layout and naming",
+    "Pointer and discovery model",
+    "Git-repository and migration rules",
+    "Release triad and its gates",
+    "Record model and status grammar",
+    "Views and the closed transform vocabulary",
+    "Enforcement posture",
+    "Rotation and archive",
+    "Import",
+    "The genericization boundary",
+    "The conformance vocabulary",
+    "Residual-coverage disclosures",
+]
+
+[[body]]
+component = "section"
+lbl = "Conformance"
+heading = "Conformance language"
+
+[[body]]
+component = "prose"
+html = "<p>Conformance language follows common standards practice; statements without these keywords are descriptive.</p>"
+
+[[body]]
+component = "table"
+caption = "Conformance language"
+head = ["Keyword", "Meaning"]
+rows = [
+    ["MUST", "An absolute requirement."],
+    ["SHOULD", "A strong recommendation, departed from only for a recorded reason."],
+    ["MAY", "Genuinely optional."],
+]
+
+[[body]]
+component = "section"
+lbl = "Draft status"
+heading = "Draft status and self-asserted conformance"
+
+[[body]]
+component = "callout"
+label = "Rule"
+rule = true
+html = "<p>The specification is a working draft and the reference tooling lands verb by verb. Until the validation tooling covers a given claim, conformance to that claim is self-asserted, and a report says so: an unqualified \"conformant\" claim is never emitted, by tooling or by prose.</p>"
+
+[[body]]
+component = "prose"
+html = "<p>The specification is dated 2026-10-24.</p>"
+
+[[body]]
+component = "next"
+html = "Ask your assistant for a plan, review it, then authorize."
+text = "Adopt it"
+href = "adopt/"

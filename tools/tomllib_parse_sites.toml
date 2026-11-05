@@ -1080,6 +1080,17 @@ count = 1
 class = "EXEMPT"
 reason = "valueerror-passthrough"
 
+# the self-test saves tomllib.loads and restores it around an injected RecursionError and MemoryError at
+# each of the tool's two parse calls, the pin's (parse_pin) and the attribution file's (parse_attribution)
+# (neither error can be provoked safely), so the handler at each parse site is exercised
+[[site]]
+path = "tools/check_baseline_pin.py"
+function = "_self_test"
+form = "alias"
+count = 1
+class = "EXEMPT"
+reason = "test-code"
+
 # the self-test seam that reads tomllib.loads and tomllib.load as bound: the injection saves and restores
 # them around an injected MemoryError at the parse call (real memory exhaustion cannot be provoked
 # safely), and the restoration checks compare them with the pair bound at import
@@ -1264,6 +1275,14 @@ path = "tools/gen_crosswalk.py"
 function = "self_test"
 form = "alias"
 count = 2
+class = "EXEMPT"
+reason = "test-code"
+
+[[site]]
+path = "tools/gen_draft_site.py"
+function = "_self_test.model"
+form = "call"
+count = 1
 class = "EXEMPT"
 reason = "test-code"
 

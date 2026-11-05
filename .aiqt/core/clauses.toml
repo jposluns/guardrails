@@ -770,7 +770,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.2"
@@ -779,7 +779,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 13
 end-line = 13
 canonical-text = "Before recording or claiming that a fix shipped, confirm it is actually present in the commit that claims it: inspect the commit's file list (for example git show <ref> --stat) and confirm the changed lines are in the committed content, not only in the working tree or a since-reverted state."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.3"
@@ -788,7 +788,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The same discipline applies before independent verification is dispatched over a committed state: the artefact under review is committed first, the verification declares the revision it reviews and the set of paths under review, and the dispatcher reconciles that declaration against the repository before any verifier runs."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.4"
@@ -797,7 +797,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision resolves to a single commit, and the base its changed set is computed against is derived from that commit's own raw structure rather than named by the declarer: the diff is taken against the sole parent for an ordinary commit, against the first parent for a merge commit, and against the empty tree for a root commit."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.5"
@@ -806,7 +806,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "A declaration that is missing, malformed, or irreconcilable is a cannot-evaluate, per the guard-input-soundness rule: the dispatch is withheld with a distinct unverifiable outcome, never treated as a pass and never widened into a whole-tree cleanliness demand the declaration did not make."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.6"
@@ -815,7 +815,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared revision is not trusted as the declarer names it: it is derived from, or validated against, the authoritative task revision the review is for (the change-request head, the dispatched commit, or the task revision under gate), exactly as the guard-input-soundness rule requires a target or context parameter to be derived from or validated against its authoritative source at the point of use. A declarer-named revision that reconciles to no authoritative task revision is a cannot-evaluate, not a pass, so a review pointed at an unrelated or superseded commit whose own diff happens to be empty or clean cannot stand in for the revision actually under gate."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.7"
@@ -824,7 +824,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The parent list that base derivation rests on is read from the commit's raw object bytes with replacement-ref and graft resolution disabled, never from a graph view that a replacement ref, a grafts entry, or a commit-graph cache could rewrite, and a parent the object names but whose object is absent is itself a cannot-evaluate rather than a root, so a shallow or truncated history cannot present as a root whose empty-tree diff reviews nothing."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.8"
@@ -833,7 +833,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The declared changed set is reconciled for equality against the paths that revision changed relative to that derived base, so a declared path the commit did not change, and a path the commit changed that the declaration omits, are each surfaced rather than silently absorbed; this equality catches a declared path absent from the commit and a committed change absent from the declaration, but it cannot catch a path the change semantically needs that is omitted from both the commit and the declaration together, which remains the disclosed under-scoped-declaration residual below."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.9"
@@ -842,7 +842,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The working-tree cleanliness the dispatch requires over each declared path covers the whole of that path's uncommitted state, a difference between the declared revision and the index, a difference between the index and the tracked working tree, and an untracked entry at the path including one that recreates a path the commit deleted, so a staged-but-uncommitted or untracked change cannot slip through a worktree-only comparison; each path is matched as a literal byte path rather than a pathspec pattern, and a cleanliness probe whose result is unreadable or malformed is a cannot-evaluate, not a clean pass."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.10"
@@ -851,7 +851,7 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "The verifier reads the reviewed content from the declared revision, never from the ambient working tree, with the verdict recording the revision it read."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "vfxcmt.11"
@@ -860,7 +860,16 @@ source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
 start-line = 15
 end-line = 15
 canonical-text = "This defence against substituted bytes is not confined to the parent read: every git operation the reconciliation and the verifier depend on, the revision resolution, the parent and object-existence checks, the changed-set diff against the derived base, the scoped working-tree cleanliness comparison, and the verifier's read of the reviewed content, reads the content bound to the declared revision's exact object identity with no object substitution applied, or the dispatch is withheld as a cannot-evaluate, so no dependent read the reconciliation or the verifier relies on resolves to bytes other than the authoritative commit's, and where that cannot be guaranteed the dispatch is withheld unverifiable; and the mechanisms that can substitute object content for a named revision, a replacement ref, a grafts entry, the commit-graph cache, and, for materialized content, a checkout filter and a submodule gitlink, are the substitution surface the dispatcher must neutralize by its platform's means or disclose, per the adopter hardening guidance, so a replacement ref, a grafts entry, or the commit-graph cache cannot empty a real changed set into a clean declaration or feed the verifier substituted content."
-source-digest = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
+
+[[clause]]
+clause-id = "vfxcmt.12"
+corpus-id = "vfxcmt"
+source-path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
+start-line = 17
+end-line = 17
+canonical-text = "For example, build a non-root commit's review copy from a snapshot bound to the authoritative task revision, diff the commit against its first parent, not a moving main branch, and keep the reviewer's context files from that snapshot, not only selected changed files."
+source-digest = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[clause]]
 clause-id = "csttir.1"
@@ -1850,7 +1859,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 16
 end-line = 17
 canonical-text = "A change that alters behaviour lands together with an automated test or gate that fails when the change is\nabsent."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.2"
@@ -1859,7 +1868,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 17
 end-line = 18
 canonical-text = "Verification leaves a durable artefact that keeps guarding the behaviour after the one-time\nverification pass has moved on."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.3"
@@ -1868,7 +1877,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 20
 end-line = 26
 canonical-text = "The check is confirmed to run, not merely to exist. A test or gate that is present but never reached,\nmisplaced in its file, wrongly indented, or never registered with the runner, provides no coverage, and a\npassing suite is not evidence that it holds: a check that never executed and one that executed and passed are\nindistinguishable from the suite's green alone. Before that green is trusted for the new behaviour, confirm\nthe check executed, by observing it run or by a deliberate flip that shows it failing without the change, and\nprefer a runner that reports the count or identity of the checks it actually ran over a hand-maintained\nassertion that they are all present."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.4"
@@ -1877,7 +1886,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 28
 end-line = 29
 canonical-text = "A check that asserts an absence, that a finding is not raised, an error is not thrown, or an action is not\ntaken, is held to a stricter form of that confirmation."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.5"
@@ -1886,7 +1895,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 29
 end-line = 31
 canonical-text = "Observing such a check run is not evidence that it\nguards the change, because an absence assertion passes both when the feature under test suppresses the\noutcome and when the input never reaches the path that would produce it."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.6"
@@ -1895,7 +1904,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 31
 end-line = 33
 canonical-text = "The check discriminates only when\nits input is one the feature under test changes, so that removing the feature makes the asserted outcome\nappear."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.7"
@@ -1904,7 +1913,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 33
 end-line = 34
 canonical-text = "Each such check is paired with a deliberate flip that removes or disables the feature, and it is\nobserved to fail under that flip before its pass is trusted."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.8"
@@ -1913,7 +1922,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 34
 end-line = 36
 canonical-text = "A flip that yields only a build failure, an\nexecution error, or an unrelated outcome establishes no discrimination; the flip counts only when the\nasserted outcome itself appears."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.9"
@@ -1922,7 +1931,7 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 36
 end-line = 38
 canonical-text = "Where the feature can be disabled within the suite, the pairing is kept as a\ndurable companion case that asserts the outcome does appear without the feature, so a later change that stops\nthe input reaching that path fails the suite rather than passing silently."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "chgchk.10"
@@ -1931,7 +1940,16 @@ source-path = ".aiqt/core/rules/quali-change-carries-check.md"
 start-line = 38
 end-line = 40
 canonical-text = "This attaches to an absence check\nrelied on as the check a change carries, not to an incidental negative assertion inside a check whose\ndiscrimination already rests on a positive assertion."
-source-digest = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
+
+[[clause]]
+clause-id = "chgchk.11"
+corpus-id = "chgchk"
+source-path = ".aiqt/core/rules/quali-change-carries-check.md"
+start-line = 42
+end-line = 46
+canonical-text = "A fix to code that sorts text into verdicts, such as a lint, parser, pattern matcher, or guard over command\ntext, is tested on cases sibling to the reported input, derived from the specification or other authoritative\nsource that defines its input forms. The cases cover the outcomes the fix changes and those it preserves at\nthe boundaries it affects. The tests of changed outcomes are observed to fail with the fix reverted; tests of\npreserved outcomes need not, since they exist to catch a fix that wrongly moves a sibling's verdict."
+source-digest = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[clause]]
 clause-id = "cmpmig.1"

@@ -185,7 +185,7 @@ REGISTRY_REL = "tools/selftest_checks.toml"
 DECLARATION_REL = "opf/tools/opf-declaration.toml"
 MODULE_REL = "opf/tools/_opf_declaration.py"
 VERSION_REL = "VERSION"
-DOC_SURFACES = ("opf/site/tooling.html", "opf/spec/OPF-QUICKSTART.md", "RELEASING.md")
+DOC_SURFACES = ("opf/spec/OPF-QUICKSTART.md", "RELEASING.md")
 DIGEST_LOCATION = (MODULE_REL, "SHIPPED_DECLARATION_SHA256")
 _HTML_OPEN = '<div class="tree"><pre id="opf-declaration">'
 _HTML_CLOSE = "</pre></div>"

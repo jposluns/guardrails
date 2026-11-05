@@ -18,7 +18,7 @@
 # `opf record import --batch` does not exist, and the procedure marks that step not yet executable.
 format = "opf.prompt-pack/v1"
 version = "0.7.2"
-digest = "sha256:e568b255fcfb92e8bf722fb06eb3a0f00108c83e9ac2e8240f40d24b97c2e27b"
+digest = "sha256:5e366ffeccc17f239f4557ea1317f4ba2bc15bb5cea892523daffae76a8afacb"
 
 [[members]]
 path = "adopt/SKILL.md"
@@ -26,7 +26,7 @@ sha256 = "1c29e74e575452b7a25b1568bf7de909c5d983beaea96b64df5091dccbd3726c"
 
 [[members]]
 path = "adopt/clean-start.md"
-sha256 = "02ef9143f2bd829546ec306c23cf035e71f73a9d5307e5db285aeca4913a4bcf"
+sha256 = "bf55c99487a6b86d66503ccf82c522f6e2951dbc57930ea5bb3675b370432c29"
 
 [[members]]
 path = "flow/SKILL.md"

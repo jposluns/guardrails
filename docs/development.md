@@ -172,10 +172,8 @@ sidebar-active = "development"
     </div>
     <div class="cta" style="justify-content:flex-start">
       <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub</a>
-      <a class="btn ghost" href="/teams">Rolling it out to a team? Teams &amp; Enterprise</a>
     </div>
     <p style="margin-top:1.4rem">Contributing an improvement back is Rule 5's voluntary Guardrail-Seed give-back, separate from
-      the software licence. Rolling it out across an organization is covered on
-      <a href="/teams">Teams &amp; Enterprise</a>.</p>
+      the software licence.</p>
   </div>
 </section>

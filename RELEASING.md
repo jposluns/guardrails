@@ -87,8 +87,9 @@ pull request (CLAUDE.md, Gates and CI).
    happens with each release cut. A bump that misses spot a leaves
    the assertion firing (fail-closed exit 2); a bump that misses spot b, c, or d is caught by the relevant
    drift or portability gate; a bump that misses spot e is caught by `gen_skill.py --check`. Next, run
-   `python3 tools/gen_install.py` to repoint the install-page
-   download button at the new versioned filename. Finally, set the `Version X.Y.Z` line in the three
+   repoint the install page's download at the new versioned filename: set it in
+   `site/draft-src/install.toml` and in `KEPT_LIVE_PATHS` in `tools/gen_draft_site.py`, then run
+   `python3 tools/gen_draft_site.py`. Finally, set the `Version X.Y.Z` line in the three
    hand-written condensations (`site/downloads/aiqt-instructions-8k.txt`, `-5k.txt`, `-1_5k.txt`) and
    re-bless them with `python3 tools/check_sized_instructions.py --update`. Before the generator sweep,
    confirm that both index changes are in place: `git rm site/downloads/aiqt-skill-<old>.zip` and
@@ -104,8 +105,7 @@ pull request (CLAUDE.md, Gates and CI).
    `opf/tools/_opf_declaration.py` as `SHIPPED_DECLARATION_SHA256`. Its `release` is the pack release
    version, so each release cut sets, in one change: `release` in that file;
    `RELEASE_IDENTITY`, `SHIPPED_DECLARATION_BYTES` and `SHIPPED_DECLARATION_SHA256` in
-   `_opf_declaration.py`; and the restatement below, in `opf/site/tooling.html` and in
-   `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
+   `_opf_declaration.py`; and the restatement below and in `opf/spec/OPF-QUICKSTART.md`. A change of the supported `spec_version`, homes generation or worklog
    storage generation (`_opf_store.py`) changes the same places. `python3 -I -B
    tools/check_opf_declaration.py` must then exit 0. It refuses a restatement that differs from the file
    and a release other than `VERSION`. This release declares:

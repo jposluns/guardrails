@@ -1,0 +1,349 @@
+# The opfiles.ai draft core files page (template reference/reference.html): the 5 core store files in
+# full, then the record indexes and the files around them, 1 line each. The section and heading ids are
+# the 20 short-link anchors of opf/site/_redirects, so every kept anchor resolves on this page.
+path = "core-files/index.html"
+title = "Technical details"
+kind = "document"
+label = "Reference"
+heading = "Technical details: the store and the tooling"
+meta = "The store's control and ledger files: the manifest that declares the store, the ID counters, the version ledger, the worklog (appended per change, correctable until released, then frozen), and the concurrency lease. The record indexes and the files around them follow, 1 line each, then the reference tooling: its commands, what it checks, and how to verify it."
+
+[[body]]
+component = "section"
+lbl = "manifest.toml"
+id = "manifest"
+heading = "The store manifest"
+rail = "The store manifest"
+
+[[body]]
+component = "lead"
+html = '''The store's control document and discovery marker: declarations for its schema, types, views, modules, and enforcement posture. Closed keysets throughout: an unknown key in any base section is a validation finding. The base <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code>, the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:'''
+
+[[body]]
+component = "code"
+id = "manifest-toml"
+file = ".working/toml/manifest.toml"
+text = '''[opf]
+standard = "opf"
+spec_version = "2.0.0"
+homes = 2
+layout = "inline"
+posture = "required"
+import_status = "none"
+
+[modules]
+governance = false'''
+
+[[body]]
+component = "callout"
+label = "Note"
+html = '''<p>The reference tooling's scaffold writes <code>spec_version = "2.0.0"</code> with <code>homes = 2</code>.</p>'''
+
+[[body]]
+component = "subhead"
+heading = "The top-level tables"
+
+[[body]]
+component = "label"
+text = "11 tables"
+
+[[body]]
+component = "table"
+caption = "The top-level tables of the store manifest"
+head = ["Table", "Holds"]
+rows = [
+  # The trailing space in this first cell is deliberate: with the tags stripped, it keeps "[opf]" and
+  # "standard" apart, so the row reads as the pinned text check_opf_homes.py holds this page to.
+  ["<code>[opf]</code> ","standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)"],
+  ["<code>[store]</code>", "sync_target (empty under the in-repo default)"],
+  ["<code>[modules]</code>", "governance, delivery_assurance, operational_policy, concurrent_operation"],
+  ["<code>[profiles.*]</code>", "additive requirement bundles; may only add requirements"],
+  ["<code>[types.*]</code>", "1 table per enabled type, carrying its normative namespace"],
+  ["<code>[providers.*]</code>", "handler and roles (create, auth, sync); local-directory and generic-git-remote ship as universal fallbacks"],
+  ["<code>[views.*]</code>", "kind (deterministic, composed or projection), sources, target"],
+  ["<code>[deliverables.*]</code>", "the curated CHANGELOG.md declaration"],
+  ["<code>[archive]</code>", "period (\"year\")"],
+  ["<code>[unmanaged]</code>", "pre-existing files kept in place, enumerated"],
+  ["<code>[vendors]</code>", "registered x-&lt;vendor&gt; extension namespaces"],
+]
+
+[[body]]
+component = "pullquote"
+html = "Declare the store contract so tools need not infer it."
+
+[[body]]
+component = "prose"
+html = "<p>A tool validates the base before operating, enforces only what is declared, and records a profile it does not support as present-but-unevaluated rather than failing over it. Tooling locates the machine store by finding exactly 1 immediate subdirectory of <code>.working/</code> whose manifest declares the token. 0 matches or more than 1 stops the tool, never guesses.</p>"
+
+[[body]]
+component = "label"
+text = "At a glance"
+
+[[body]]
+component = "record"
+
+[[body.items]]
+term = "Declares"
+html = "<code>[opf]</code> <code>[modules]</code> <code>[types.*]</code> <code>[views.*]</code> <code>[providers.*]</code> <code>[profiles.*]</code>"
+
+[[body.items]]
+term = "Read by"
+html = "<code>opf render</code>, <code>opf doctor</code>, <code>opf absorb</code>, <code>opf record</code>"
+
+[[body.items]]
+term = "Written by"
+html = "<code>opf init</code>, a reviewed adopter edit, and <code>opf migrate</code> (planned; not yet implemented in the reference CLI)"
+
+[[body]]
+component = "section"
+lbl = "counters.toml"
+id = "counters"
+heading = "The ID counters"
+rail = "The ID counters"
+
+[[body]]
+component = "prose"
+html = "<p>The ID authority: 1 monotonic high-water value per record namespace.</p>"
+
+[[body]]
+component = "section"
+lbl = "version.toml"
+id = "version"
+heading = "The version ledger"
+rail = "The version ledger"
+
+[[body]]
+component = "prose"
+html = "<p>The version and release ledger: numbers, dates, spans, and digests, never release prose.</p>"
+
+[[body]]
+component = "section"
+lbl = "worklog.toml"
+id = "worklog"
+heading = "The worklog"
+rail = "The worklog"
+
+[[body]]
+component = "prose"
+html = "<p>The detailed operational record: 1 entry per change, appended as the work happens. Entries are correctable until released, then frozen.</p>"
+
+[[body]]
+component = "section"
+lbl = "lease.toml"
+id = "lease"
+heading = "The single-writer lease"
+rail = "The single-writer lease"
+
+[[body]]
+component = "prose"
+html = "<p>Present only while a run holds the store's single-writer lease; its absence is the normal state.</p>"
+
+[[body]]
+component = "section"
+lbl = "Record indexes"
+id = "backlog-item"
+heading = "The backlog"
+rail = "Record indexes"
+
+[[body]]
+component = "prose"
+html = '''<p>11 baseline typed indexes, their declared generated views, and the planned module schemas. One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified.</p>'''
+
+[[body]]
+component = "subhead"
+id = "done"
+heading = "Completion receipts"
+
+[[body]]
+component = "prose"
+html = "<p>A durable completion receipt, created in its single terminal state and immutable from birth.</p><p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>"
+
+[[body]]
+component = "subhead"
+id = "finding"
+heading = "The finding register"
+
+[[body]]
+component = "prose"
+html = "<p>An observation worth acting on, which links its remediation rather than containing it.</p>"
+
+[[body]]
+component = "subhead"
+id = "pending-decision"
+heading = "Pending decisions"
+
+[[body]]
+component = "prose"
+html = "<p>A question that must be answered before dependent work settles.</p>"
+
+[[body]]
+component = "subhead"
+id = "autonomous-decision"
+heading = "Self-made decisions, on the record"
+
+[[body]]
+component = "prose"
+html = "<p>A call an actor was authorized to make itself, with its basis, the action taken, and links to what it affected.</p>"
+
+[[body]]
+component = "subhead"
+id = "maintainer-decision"
+heading = "Rulings the maintainer made"
+
+[[body]]
+component = "prose"
+html = "<p>A created-terminal, immutable ruling carrying its decision, the answer plus its rationale.</p>"
+
+[[body]]
+component = "subhead"
+id = "preference-pattern"
+heading = "Standing preferences, distilled"
+
+[[body]]
+component = "prose"
+html = "<p>The reusable rule beneath a family of individual rulings.</p>"
+
+[[body]]
+component = "subhead"
+id = "block"
+heading = "Blocks"
+
+[[body]]
+component = "prose"
+html = "<p>A record that named work cannot proceed; it scopes an enumerated list of record IDs.</p>"
+
+[[body]]
+component = "subhead"
+id = "handoff"
+heading = "The session handoff"
+
+[[body]]
+component = "prose"
+html = "<p>The durable state snapshot a session resumes from, with at most 1 current handoff at any time.</p>"
+
+[[body]]
+component = "subhead"
+id = "reference"
+heading = "Sources, captured at the claim"
+
+[[body]]
+component = "prose"
+html = "<p>An immutable captured source, recorded at the moment a claim or artefact that rests on it is produced.</p>"
+
+[[body]]
+component = "subhead"
+id = "contribution"
+heading = "Work proposed or sent to a peer project"
+
+[[body]]
+component = "prose"
+html = "<p>It tracks proposal, delivery, and outcome.</p>"
+
+[[body]]
+component = "subhead"
+id = "modules"
+heading = "Optional modules and importer types"
+
+[[body]]
+component = "prose"
+html = "<p>4 optional modules, default-off.</p>"
+
+[[body]]
+component = "prose"
+html = '''<p><strong>Reserved namespace</strong> No module toggle: the standard reserves <code>LF</code> unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.</p><p><strong>(none)</strong> <code>LF</code> reserved unassigned; the reference tooling still recognizes <code>legacy_fragment</code> (<code>quarantined &#8594; resolved | ignored</code>) in stores holding such records from its retired import path.</p>'''
+
+[[body]]
+component = "prose"
+html = '''<p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.</p><p>Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.</p><p>Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.</p><p>A new store's counters file has no <code>LF</code> namespace; a store scaffolded by earlier reference tooling may carry <code>LF</code> (at zero, or higher if it imported records), and its manifest declares a spec_version below 2.0.0, which the reference tooling refuses as a store, as the standard's section 9.2 validation does.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Around the records"
+id = "pointer"
+heading = "The store pointer"
+rail = "Pointer, archive and projection"
+
+[[body]]
+component = "prose"
+html = "<p>The committed pointer that names where the store repository lives. A pointer that does not resolve stops the tool and never falls back silently to the default location.</p>"
+
+[[body]]
+component = "subhead"
+id = "archive"
+heading = "The archive"
+
+[[body]]
+component = "prose"
+html = "<p>1 rotation manifest per calendar-year bucket: rotation is relocation, never deletion, and never ID reuse.</p>"
+
+[[body]]
+component = "subhead"
+id = "decisions-projection"
+heading = "The decisions projection"
+
+[[body]]
+component = "prose"
+html = "<p>The machine projection, generated at <code>.working/DECISIONS.toml</code> and rendered from the 4 decision types.</p>"
+
+[[body]]
+component = "section"
+lbl = "Tooling"
+heading = "The reference tooling"
+id = "tooling"
+rail = "Tooling"
+
+[[body]]
+component = "prose"
+html = '''<p>The <code>opf</code> reference CLI is 1 implementation of the standard's 10 command verbs. It implements 5 in full (init, render, doctor, absorb, and record) and adopt in part; upgrade and the ordinary import modes refuse with exit 2, and migrate and sync are planned. A base adopter can use their own tooling instead, or adopt by hand.</p>'''
+
+[[body]]
+component = "table"
+caption = "The command verbs"
+head = ["Verb", "What it does"]
+rows = [
+  ["<code>init</code>", "Scaffolds validated store sources and the committed pointer; surfaces, never absorbs, anything already at the store location."],
+  ["<code>render</code>", "Regenerates the declared views. <code>--check</code> compares bytes read-only and exits 1 on drift."],
+  ["<code>doctor</code>", "Runs the whole-store integrity layer read-only: exit 0 valid, 1 on a finding, 2 when it cannot evaluate."],
+  ["<code>absorb</code>", "Drafts changelog entries for human curation, or computes a curated entry's freeze digest; writes no files."],
+  ["<code>record</code>", "Authors 1 record change at a time and leaves it uncommitted for your review."],
+  ["<code>adopt</code>", "Plan, approve, reconcile, and status run; apply and complete refuse, so adoption cannot finish yet."],
+  ["<code>upgrade</code>", "Refuses with exit 2 and writes nothing: the reference tooling defines no store upgrade."],
+  ["<code>import</code>", "The ordinary modes are retired and refuse with exit 2; clean-start adoption is the intake."],
+  ["<code>migrate</code>", "Planned: relocate the whole store, keeping git history and the worklog."],
+  ["<code>sync</code>", "Planned: the pull and push step of the store consistency contract."],
+]
+
+[[body]]
+component = "section"
+lbl = "Coverage"
+heading = "What doctor checks"
+id = "doctor-checks"
+
+[[body]]
+component = "prose"
+html = '''<p>Schema validity; ID uniqueness and counter monotonicity; bidirectional index reconciliation; transition legality where observations suffice; byte drift for the declared baseline views; the root release-version file; worklog span tiling and frozen digests; changelog coverage and freeze; archive integrity; the tracked-store requirement; pointer and sync-target agreement; and path containment. At the strictest posture, an unreadable, unparseable, or unresolvable declared input is a failure, never an empty or clean result.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Integrity"
+heading = "Verify what you install"
+id = "integrity"
+
+[[body]]
+component = "prose"
+html = '''<p>Before applying a downloaded pack, compare its digest with the reference published for that release at <a href="https://posluns.dev/hashes.txt" target="_blank" rel="noopener noreferrer">posluns.dev/hashes.txt<span class="vh"> (opens in a new tab)</span></a>, and refuse on a mismatch. The tooling also checks its own declaration file, <code>opf/tools/opf-declaration.toml</code>, against a shipped digest before it touches a store, and refuses with exit 2 if the file is missing or altered. <code>python3 -I -B opf/tools/opf.py --declaration</code> runs that check alone.</p>'''
+
+[[body]]
+component = "code"
+id = "declaration"
+file = "opf/tools/opf-declaration.toml"
+text = '''release = "1.0.5"
+spec_version = "2.0.0"
+homes = 2
+worklog = 1'''
+
+[[body]]
+component = "next"
+html = "Create the store with <code>opf init</code>, or ask your assistant for a plan."
+text = "Adopt it"
+href = "adopt/"

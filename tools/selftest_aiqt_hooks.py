@@ -2939,6 +2939,229 @@ def _psm_oracle(failures, handler):
                                                  run.stdout[:200], run.stderr[:200]))
 
 
+# Foreground trkasy rows with no '&' byte anywhere: a quoted here-document write followed by another command
+# reads its body as code, so an apostrophe there left the scan open and the guard denied a detach the
+# command cannot hold. The full row has the shape of a real markdown brief (quotes, backquotes, parentheses,
+# a '#' heading) written with cat, then hashed.
+_TRKASY_NOAMP_FULL = (
+    "cat > /abs/qa/brief.md <<'EOF'\n# Verify the fix (the ci-status check)\n\n"
+    "You are an independent reviewer. Check that the findings are fixed; do not just confirm.\n\n"
+    "## Target\n\nRead MANIFEST.txt first: it lists what main/ and prev/ hold (with their sha256 values).\n"
+    "1. `bash tools/test-ci-status.sh` (expect: all pass, exit 0).\n"
+    "2. A present null head_sha was reported as \"missing required field\".\n"
+    "Keep this well under one hour; the branch's newest commit holds the fix.\nEOF\n"
+    "sha256sum /abs/qa/brief.md")
+_TRKASY_NOAMP_ALLOW_ROWS = (
+    ("trkasy-noamp-min", "'"),
+    ("trkasy-noamp-heredoc-min", "cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/f"),
+    ("trkasy-noamp-full", _TRKASY_NOAMP_FULL),
+)
+_TRKASY_REAL_AMP_DENY_ROWS = (
+    ("trkasy-amp-trailing", "sleep 5 &"),
+    ("trkasy-amp-then-command", "sleep 5 & echo done"),
+    ("trkasy-amp-unquoted-heredoc-compound", "while read x; do sleep 1 & done <<EOF\nit's\nEOF"),
+    ("trkasy-amp-after-noamp-full", _TRKASY_NOAMP_FULL + "\nsleep 5 &"),
+)
+# Runtime start forms that can start a background job with no '&' byte, each beside an apostrophe in a
+# here-document body read as code and beside an uncertain '#': the open quote or '#' still denies, since
+# the guard takes the no-'&' allow only for a command holding no such form. The plain forms are the
+# disclosed silent allow and are not rows here.
+_TRKASY_RUNTIME_START_FORMS = (
+    ("coproc", "coproc sleep 5"),
+    ("eval-runtime-amp", "eval \"sleep 5 $(printf '\\x26')\""),
+    ("setsid-f", "setsid -f sleep 5"),
+    ("herestring-bash", "bash <<< $'sleep 5 \\x26'"),
+    ("herestring-sh", "sh <<< $'sleep 5 \\x26'"),
+    ("source-file", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; source /abs/j.sh"),
+    ("dot-file", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; . /abs/j.sh"),
+    ("procsub-in", ": <(sleep 5)"),
+    ("procsub-out", ": >(sleep 5)"),
+    ("disown", "coproc sleep 5\ndisown"),
+    ("disown-alone", "disown -a"),
+)
+# The same forms split by a backslash-newline, which bash joins before it reads words, so each still runs.
+_TRKASY_RUNTIME_START_SPLIT_FORMS = (
+    ("split-eval", "ev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("split-coproc", "co\\\nproc sleep 5"),
+    ("split-procsub-in", ": <\\\n(sleep 5)"),
+    ("split-herestring", "bash <<\\\n< $'sleep 5 \\x26'"),
+    ("split-setsid", "set\\\nsid -f sleep 5"),
+    ("split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh; sou\\\nrce /abs/j.sh"),
+)
+# A start word after a backslash-newline pair bash does not join (its backslash escaped, or ending a comment
+# line), so the word runs as written; removing the pair would glue it to the word before it. A pair inside
+# single quotes is one bash does not join either: a start word right after it, the quote closed before or
+# after the word, is glued the same way, and bash reads that word as part of the quoted word, so those rows
+# pin only that the scan's verdict stands.
+_TRKASY_RUNTIME_START_UNJOINED_FORMS = (
+    ("unjoined-escaped-backslash-eval", ": x\\\\\neval \"sleep 5 $(printf '\\x26')\""),
+    ("unjoined-comment-eval", "# note\\\neval \"sleep 5 $(printf '\\x26')\""),
+    ("unjoined-single-quote-closed-before-eval", "echo 'x\\\n'eval \"sleep 5 $(printf '\\x26')\""),
+    ("unjoined-single-quote-closed-after-eval", "echo 'x\\\neval' \"sleep 5 $(printf '\\x26')\""),
+)
+# DISCLOSED RESIDUAL, not a deny: when a start word, or a '.' and the blank after it, is split by a
+# backslash-newline pair and any other backslash-newline pair comes before it in the command, the search
+# may miss it. The first text it reads keeps the form split, and the second also removes the earlier pair,
+# so the split word can be glued to whatever stood before that pair; where the lookbehind refuses what is
+# glued in front (a word character, a '.' or a '-' before a start word; anything but whitespace, ';', '|',
+# '(', '{' or a backquote before a '.'), the no-'&' allow is taken although bash runs the form. These rows
+# are known shapes, examples and not the full set: every start word after a pair whose backslash is
+# escaped and after a comment line's pair, a '.' and a '-' as the glued character, both '.' shapes, and a
+# pair bash joins or a second escaped pair before the escaped one, which glues the form to the 'x' in
+# front of the first pair. They assert that CURRENT allow, so a change that makes any of them deny fails
+# here and has to update them.
+_TRKASY_RUNTIME_START_MIXED_RESIDUAL_FORMS = (
+    ("mixed-escaped-backslash-split-eval", ": x\\\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("mixed-comment-split-source", "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n# c\\\nsou\\\nrce /abs/j.sh"),
+    ("mixed-escaped-backslash-split-coproc", ": x\\\\\nco\\\nproc sleep 5"),
+    ("mixed-escaped-backslash-split-setsid", ": x\\\\\nset\\\nsid -f sleep 5"),
+    ("mixed-escaped-backslash-split-disown", ": x\\\\\ndis\\\nown -a"),
+    ("mixed-escaped-backslash-split-source",
+     "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n: x\\\\\nsou\\\nrce /abs/j.sh"),
+    ("mixed-comment-split-coproc", "# c\\\nco\\\nproc sleep 5"),
+    ("mixed-comment-split-eval", "# c\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("mixed-comment-split-setsid", "# c\\\nset\\\nsid -f sleep 5"),
+    ("mixed-comment-split-disown", "# c\\\ndis\\\nown -a"),
+    ("mixed-escaped-backslash-glued-dot-split-eval", ": x.\\\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("mixed-comment-glued-dash-split-source",
+     "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n#-\\\nsou\\\nrce /abs/j.sh"),
+    ("mixed-escaped-backslash-split-dot", "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n: x\\\\\n.\\\n /abs/j.sh"),
+    ("mixed-bare-comment-split-dot", "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n#\\\n.\\\n /abs/j.sh"),
+    ("mixed-joined-then-escaped-backslash-split-eval",
+     ": x\\\n\\\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("mixed-two-escaped-backslash-split-eval", ": x\\\\\n\\\\\nev\\\nal \"sleep 5 $(printf '\\x26')\""),
+    ("mixed-joined-then-escaped-backslash-split-dot",
+     "printf 'sleep 5 \\x26\\n' > /abs/j.sh\n: x\\\n\\\\\n.\\\n /abs/j.sh"),
+)
+# eval spelled with quotes or a backslash, which bash removes before it runs the word.
+_TRKASY_RUNTIME_START_QUOTED_FORMS = (
+    ("quoted-eval-apos", "e'v'al \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-dq", "\"eval\" \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-backslash", "\\eval \"sleep 5 $(printf '\\x26')\""),
+    ("quoted-eval-inner-backslash", "ev\\al \"sleep 5 $(printf '\\x26')\""),
+)
+
+
+def _trkasy_start_rows(forms, contexts=("heredoc-apos", "uncertain-hash")):
+    """Deny rows for runtime start forms, each beside the named contexts: an apostrophe in a here-document body
+    read as code, and an uncertain '#'."""
+    prefixes = {"heredoc-apos": "cat <<'EOF'\nit's\nEOF\n", "uncertain-hash": "(true)# x\n"}
+    return tuple(("trkasy-start-" + context + "-" + label, prefixes[context] + form)
+                 for label, form in forms for context in contexts)
+
+
+_TRKASY_RUNTIME_START_DENY_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_FORMS)
+_TRKASY_RUNTIME_START_SPLIT_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_SPLIT_FORMS)
+_TRKASY_RUNTIME_START_UNJOINED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_UNJOINED_FORMS)
+_TRKASY_RUNTIME_START_QUOTED_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_QUOTED_FORMS, ("heredoc-apos",))
+_TRKASY_RUNTIME_START_MIXED_RESIDUAL_ROWS = _trkasy_start_rows(_TRKASY_RUNTIME_START_MIXED_RESIDUAL_FORMS)
+
+
+def _test_trkasy_no_amp(failures, tmp):
+    """Foreground trkasy rows in registry scope: each no-'&' row allows, and is red with the no-'&' branch of
+    _orch_foreground_detach_lexed restored to the raw scan's verdict; each real bare-'&' row denies; each
+    runtime start form row denies, and is red with that branch allowing every command with no '&'; each row
+    split by a backslash-newline is red with the search reading only the text with no pair removed; each row
+    with a start word after a pair bash does not join is red with the search reading only the text with
+    every pair removed; the disown-alone rows are red with disown removed from the pattern; and the e'v'al
+    and ev\\al rows are red with the search reading the raw command ("eval" and \\eval match there too, so
+    those rows deny either way). Each disclosed-residual row (a start word or a '.' split by a
+    backslash-newline pair with another pair before it, glued by the pairs removed to what its lookbehind
+    refuses) allows, the current behaviour, so a change that makes that row deny shows here."""
+    root = tmp / "trkasy-noamp"
+    (root / ".aiqt").mkdir(parents=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_truncation_guard
+    for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "allow":
+            failures.append("({}) a foreground command with no '&' must allow in registry scope; got {}"
+                            .format(label, got))
+    for label, command in _TRKASY_REAL_AMP_DENY_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "deny":
+            failures.append("({}) a real bare '&' must deny in registry scope; got {}".format(label, got))
+    start_rows = (_TRKASY_RUNTIME_START_DENY_ROWS + _TRKASY_RUNTIME_START_SPLIT_ROWS
+                  + _TRKASY_RUNTIME_START_UNJOINED_ROWS + _TRKASY_RUNTIME_START_QUOTED_ROWS)
+    single_quote_labels = frozenset(label for label, _command in _TRKASY_RUNTIME_START_UNJOINED_ROWS
+                                    if "-unjoined-single-quote-" in label)
+    for label, command in start_rows:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "deny" and label in single_quote_labels:
+            failures.append("({}) bash runs no start form here (the start word is part of the quoted word), so "
+                            "this row pins an over-deny the scan's verdict keeps in registry scope; got {}"
+                            .format(label, got))
+        elif got != "deny":
+            failures.append("({}) a runtime start form beside an open quote or uncertain '#' must deny in "
+                            "registry scope; got {}".format(label, got))
+    for label, command in _TRKASY_RUNTIME_START_MIXED_RESIDUAL_ROWS:
+        got = _decision(handler, command, cwd=str(root))
+        if got != "allow":
+            failures.append("({}) disclosed residual (a start word or '.' split by a backslash-newline pair "
+                            "with another pair before it, which the search may miss since removing the "
+                            "earlier pair can glue it to whatever stood before that pair) allows today; "
+                            "got {}, so update this row and the residual it pins".format(label, got))
+    readings = aiqt_hooks._orch_runtime_start_readings
+    pattern = aiqt_hooks._ORCH_RUNTIME_START_RE
+    no_disown = re.compile(pattern.pattern.replace("|disown", ""))
+    if no_disown.pattern == pattern.pattern:
+        failures.append("(trkasy-start-disown-flip) the runtime start pattern no longer holds |disown")
+    quoted_raw_red = tuple(row for row in _TRKASY_RUNTIME_START_QUOTED_ROWS
+                           if row[0].endswith(("-quoted-eval-apos", "-quoted-eval-inner-backslash")))
+    unquote = aiqt_hooks._ORCH_RUNTIME_START_UNQUOTE
+    flips = (
+        ("join", "_orch_runtime_start_readings", lambda command: (command.translate(unquote),),
+         _TRKASY_RUNTIME_START_SPLIT_ROWS, "the search reading only the text with no pair removed"),
+        ("joined-only", "_orch_runtime_start_readings",
+         lambda command: (command.replace("\\\n", "").translate(unquote),),
+         _TRKASY_RUNTIME_START_UNJOINED_ROWS, "the search reading only the text with every pair removed"),
+        ("raw", "_orch_runtime_start_readings", lambda command: (command,), quoted_raw_red,
+         "the search reading the raw command"),
+        ("disown", "_ORCH_RUNTIME_START_RE", no_disown,
+         tuple(row for row in _TRKASY_RUNTIME_START_DENY_ROWS if row[0].endswith("-disown-alone")),
+         "disown removed from the runtime start pattern"))
+    for flip, name, stand_in, rows, how in flips:
+        setattr(aiqt_hooks, name, stand_in)
+        try:
+            for label, command in rows:
+                got = _decision(handler, command, cwd=str(root))
+                if got != "allow":
+                    failures.append("({}-{}-flip) the row must allow with {}, so it pins that; got {}"
+                                    .format(label, flip, how, got))
+        finally:
+            aiqt_hooks._orch_runtime_start_readings = readings
+            aiqt_hooks._ORCH_RUNTIME_START_RE = pattern
+    fixed = aiqt_hooks._orch_foreground_detach_lexed
+
+    def no_start_forms(command, lifts=None):
+        if "&" not in command:
+            return None
+        return fixed(command, lifts)
+    aiqt_hooks._orch_foreground_detach_lexed = no_start_forms
+    try:
+        for label, command in start_rows:
+            got = _decision(handler, command, cwd=str(root))
+            if got != "allow":
+                failures.append("({}-flip) the row must allow with the no-'&' branch allowing every command, "
+                                "so it pins the runtime start forms; got {}".format(label, got))
+    finally:
+        aiqt_hooks._orch_foreground_detach_lexed = fixed
+
+    def unfixed(command, lifts=None):
+        if "&" not in command:
+            return aiqt_hooks._orch_foreground_detach_kind(command)
+        return fixed(command, lifts)
+    aiqt_hooks._orch_foreground_detach_lexed = unfixed
+    try:
+        for label, command in _TRKASY_NOAMP_ALLOW_ROWS:
+            got = _decision(handler, command, cwd=str(root))
+            if got != "deny":
+                failures.append("({}-flip) the row must deny with the no-'&' branch reading the raw scan, "
+                                "so it pins that branch; got {}".format(label, got))
+    finally:
+        aiqt_hooks._orch_foreground_detach_lexed = fixed
+
+
 def _test_pgrep_self_match(failures):
     """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
     must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
@@ -4979,6 +5202,25 @@ _DEADLINE_HASH_DECISIONS = {
 def _deadline_hash_decision(name, shape, size):
     """The decision a handler must reach on an uncertain '#' shape of that size (_DEADLINE_HASH_DECISIONS)."""
     return _DEADLINE_HASH_DECISIONS.get((name, shape, size), _DEADLINE_HASH_DECISIONS.get((name, shape), "allow"))
+# The truncation guard times each uncertain '#' shape with one '&' glued to its last '#' word, one separator
+# fewer keeping the size (paren_hash4 drops one '(' and one ')' and is one byte shorter, n where it was n + 1):
+# that '&' is comment text where the '#' starts a comment and a bare detach where it does not, so the guard
+# scans the whole command and denies it, as a detach on four shapes and, on seps_hash5, with the open-quote
+# or uncertain '#' reason. A command with no '&' byte and no runtime start form holds no detach, which the
+# guard allows without a scan, so the shapes as written would time no scan there. The other handlers keep
+# the shapes as written.
+_DEADLINE_HASH_DETACH_SHAPES = {
+    ("orch_truncation_guard", "seps_hash"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 21)
+                                                                      + " #a #b #c #d&\n)"}),
+    ("orch_truncation_guard", "seps_hash_lines"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 27)
+                                                                            + " #a\n #b\n #c\n #d&\n)"}),
+    ("orch_truncation_guard", "seps_hash_nested"): lambda n, base: ("Bash", {"command": "(((" + ";" * (n - 25)
+                                                                             + " #a #b #c #d&\n)))"}),
+    ("orch_truncation_guard", "paren_hash4"): lambda n, base: ("Bash", {"command": "(" * ((n - 13) // 2)
+                                                                        + " #a #b #c #d&\n" + ")" * ((n - 13) // 2)}),
+    ("orch_truncation_guard", "seps_hash5"): lambda n, base: ("Bash", {"command": "(" + ";" * (n - 25)
+                                                                       + " #a #b #c #d #e&\n)"}),
+}
 _DEADLINE_CASES = {
     "absolute_paths": ("write_content", "read_deep_path"),
     "bash_absolute_paths": ("git_words", "redirects_many", "nest_parens", "nest_cmdsubst", "dq_case_substs",
@@ -5057,15 +5299,19 @@ _DEADLINE_SIZES = (65536, 262144, 1048576)
 # within 0.01 s of that; before them, five handlers took 15 to 39 s or more at 64 KB. A further run on a
 # 24-core host with Python 3.14.4 (2026-10-16) measured at most 0.10, 0.48 and 2.07 s of CPU (2.07 s on
 # nest_parens under git_stash_ref), each within 0.01 s of its wall-clock time. Each bound keeps a margin of
-# about 15, 6 and 3.4 times the slowest of those runs and stays under PRETOOL_BUDGET_SECONDS. These are
+# about 15, 6 and 3.4 times the slowest of those runs and stays under PRETOOL_BUDGET_SECONDS. The truncation
+# guard on seps_hash_lines with its '&' (_DEADLINE_HASH_DETACH_SHAPES) later measured about 2.9 to 3.2 s of
+# CPU at 1 MB with Python 3.14.4 (2026-11-02), which leaves the 1 MB bound a margin of about 2.2 times. These are
 # measured bounds on these cases, not a complexity guarantee: they fail a return of the growth the old
 # scans had, but an implementation whose super-linear cost is small enough on these sizes fits all three.
 _DEADLINE_BOUNDS = {65536: 1.5, 262144: 3.0, 1048576: 7.0}
 # Wall-clock seconds one such call may take on any size: PRETOOL_BUDGET_SECONDS, the deadline main() gives
 # the same call in production, so a regression whose time goes to waiting (a sleep, a lock, a slow
 # filesystem), which the CPU bounds do not see, fails here as that call would fail closed there. Against
-# the slowest wall-clock times above (at most 0.10, 0.49 and 2.07 s) the 8-second gate leaves a margin of
-# about 80, 16 and 3.9 times. A run over this bound fails, whatever a later run does: a case whose run
+# the slowest wall-clock times above at 64 KB and 256 KB (at most 0.10 and 0.49 s) the 8-second gate leaves
+# a margin of about 80 and 16 times; at 1 MB the truncation guard on seps_hash_lines with its '&'
+# (_DEADLINE_HASH_DETACH_SHAPES) measured about 2.9 to 3.2 s of CPU, its wall-clock time within 0.01 s of
+# that, a margin of about 2.5 times. A run over this bound fails, whatever a later run does: a case whose run
 # reached a decision over it is run once more only as a diagnostic, and the failure carries both runs'
 # wall-clock times, CPU times and outcomes, so a stall of a loaded host is reported as one, never passed
 # over, and an intermittent wait cannot pass on its second run.
@@ -5110,7 +5356,7 @@ def _deadline_shape_case(name, shape, size, cwd):
     """One (handler, shape, size) case, in-process under a _DeadlineWindow of _DEADLINE_HANG_SECONDS:
     (cpu_seconds, wall_seconds, outcome), the outcome being the reduced decision, "deadline" when the window
     fired, "hard-block" for an exit 2, or "crash: <type>"."""
-    tool, tool_input = _DEADLINE_SHAPES[shape](size, cwd)
+    tool, tool_input = _DEADLINE_HASH_DETACH_SHAPES.get((name, shape), _DEADLINE_SHAPES[shape])(size, cwd)
     data = {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input,
             "cwd": cwd, "session_id": "deadline-session", "tool_use_id": "deadline-call"}
     window = aiqt_hooks._DeadlineWindow(_DEADLINE_HANG_SECONDS)
@@ -5292,6 +5538,77 @@ def _deadline_shape_rerun_failures():
     return out
 
 
+class _WindowClocks:
+    """Stand-ins for aiqt_hooks.time (`time`) and aiqt_hooks.signal (`signal`), each passing everything
+    else to the module, that log in order each clock read a _DeadlineWindow makes, as ("read", the window,
+    the value), and a time.monotonic read made just after each setitimer returns, as ("set", that read). A
+    setitimer that raises logs nothing, but a stand-in that makes the call and raises once it has returned
+    (a _FaultySignal with `after`) leaves the entry; no case that logs through these stand-ins makes
+    setitimer fault that way, so in each the one that took or re-armed a timer is the next one logged."""
+
+    class _Through:
+        """A module with the functions given in place of its own."""
+
+        def __init__(self, module, **functions):
+            self.__dict__.update(functions)
+            self._module = module
+
+        def __getattr__(self, attr):
+            return getattr(self._module, attr)
+
+    def __init__(self):
+        self.log = []
+        self.time = self._Through(time, monotonic=self._monotonic)
+        self.signal = self._Through(signal, setitimer=self._setitimer)
+
+    def _monotonic(self):
+        window = sys._getframe(1).f_locals.get("self")
+        value = time.monotonic()
+        if isinstance(window, aiqt_hooks._DeadlineWindow):
+            self.log.append(("read", window, value))
+        return value
+
+    def _setitimer(self, *args):
+        result = signal.setitimer(*args)
+        self.log.append(("set", time.monotonic()))
+        return result
+
+    def windows(self):
+        """The windows that read the clock, in the order of their first read."""
+        return list(dict.fromkeys(entry[1] for entry in self.log if entry[0] == "read"))
+
+    def settled(self, window, read, sets=1):
+        """The time from window's clock read number `read` (0 its take's, 1 its restore's) to the monotonic
+        read just after the `sets`-th setitimer to return after it (at least the time from that clock read to
+        that setitimer), or None where there is no such read or setitimer."""
+        reads = [at for at, entry in enumerate(self.log) if entry[0] == "read" and entry[1] is window]
+        if read >= len(reads):
+            return None
+        after = [entry[1] for entry in self.log[reads[read] + 1:] if entry[0] == "set"]
+        return after[sets - 1] - self.log[reads[read]][2] if len(after) >= sets else None
+
+
+def _restored_countdown_bounds(seconds, armed, read, clocks=None, holder=None):
+    """(low, high) for a countdown of `seconds` set between the time.monotonic reads armed[0] and armed[1]
+    and read by getitimer between read[0] and read[1]: the countdown is right when low <= countdown <= high.
+    Left alone it has run on from its setting to its read, by at least read[0] - armed[1] and at most
+    read[1] - armed[0]. Borrowed meanwhile by the window `holder` (clocks the _WindowClocks standing in for
+    aiqt_hooks.time and aiqt_hooks.signal throughout), it comes back elapsed-aware: early by the time from
+    the take's clock read to the setitimer that takes it, which only the low end allows, and late by the time
+    from the restore's clock read to the setitimer that re-arms it, which only the high end allows, each
+    measured up to the monotonic read just after that setitimer returned. Rounding to the microsecond moves
+    the low end by two microseconds (getitimer, and a take's setitimer, read a countdown rounded down) and the
+    high end by one (a re-arming setitimer rounds up). Nothing else is allowed for: a host stall outside the
+    two gaps moves both ends with the reads, and one inside a gap widens only that gap's end, by the stall.
+    With either gap not measured, no countdown is in bounds."""
+    early = late = 0.0
+    if holder is not None:
+        early, late = clocks.settled(holder, 0), clocks.settled(holder, 1)
+        if early is None or late is None:
+            return float("inf"), float("-inf")
+    return (seconds - (read[1] - armed[0]) - early - 2e-6,
+            seconds - (read[0] - armed[1]) + late + 1e-6)
+
 _DEADLINE_PAYLOAD = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash",
                                 "tool_input": {"command": "git status"}, "cwd": "/"})
 
@@ -5434,19 +5751,59 @@ def _deadline_restore_failures():
                    "delivered once and resume its period, got exit {}, fired {!r}, timer {!r}".format(
                        code, fired, after))
 
-    outer = aiqt_hooks._DeadlineWindow(0.3)
-    began = time.monotonic()
-    try:
-        with outer:
-            with _stub_handler("diff_source_pretool", _sleeper(1.5)):
-                caught = "returned {}".format(_main_run("diff_source_pretool")[0])
-    except aiqt_hooks._HookDeadline as exc:
-        caught = "outer" if exc.args[:1] == (outer,) else "another window"
-    used = time.monotonic() - began
-    if (caught != "outer" or used >= 1.0 or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
-            or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
+    # The inner call's body reads the inner window's countdown, then sleeps 60 s, so once that read is made
+    # only a deadline ends the body: a sleep that returns means the outer deadline did not end the inner
+    # call, and a countdown that comes due after the outer window's (by more than the time from the inner
+    # window's clock read to its arming setitimer, and a microsecond of rounding) means the inner window
+    # outlives it. A host stall of over 0.3 s before that read lets the outer deadline end the run with
+    # nothing read; such a run is not judged on the countdown or the sleep, and the case runs again, up to
+    # three runs, failing when none reaches the read. In every run the outer deadline must reach its owner
+    # and the timer and the disposition must be left as found.
+    for run in range(1, 4):
+        outer = aiqt_hooks._DeadlineWindow(0.3)
+        clocks = _WindowClocks()
+        seen, slept = [], []
+
+        def outlives(_data):
+            seen.append((time.monotonic(), signal.getitimer(signal.ITIMER_REAL)))
+            time.sleep(60.0)
+            slept.append(True)
+            return (0, None, None)
+
+        began = entered = time.monotonic()
+        try:
+            aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
+            with outer:
+                entered = time.monotonic()
+                with _stub_handler("diff_source_pretool", outlives):
+                    caught = "returned {}".format(_main_run("diff_source_pretool")[0])
+        except aiqt_hooks._HookDeadline as exc:
+            caught = "outer" if exc.args[:1] == (outer,) else "another window"
+        finally:
+            aiqt_hooks.time, aiqt_hooks.signal = time, signal
+        used = time.monotonic() - began
+        inner = [window for window in clocks.windows() if window is not outer]
+        armed = clocks.settled(inner[0], 0, sets=2) if inner else None
+        # The outer countdown, armed before `entered`, has at most 0.3 s less the time since then left, and
+        # the inner window arms what it read of it at its take.
+        if (caught != "outer" or slept or len(seen) > 1
+                or seen and (armed is None
+                             or not 0.0 < seen[0][1][0] <= 0.3 - (seen[0][0] - entered) + armed + 1e-6)
+                or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
+                or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
+            problem = ("got {} after {:.2f}s in run {}, inner countdown {!r} with {!r}s from the inner window's "
+                       "clock read to its arming, sleep returned {}".format(
+                           caught, used, run, seen, armed, bool(slept)))
+            break
+        if seen:
+            problem = None
+            break
+    else:
+        problem = ("none of 3 runs reached the inner body's countdown read before the outer deadline (the last "
+                   "ended after {:.2f}s), so the inner countdown was never judged".format(used))
+    if problem:
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
-                   "the timer as found, got {} after {:.2f}s".format(caught, used))
+                   "the timer as found, {}".format(problem))
     with aiqt_hooks._DeadlineWindow(5.0):
         with _stub_handler("diff_source_pretool", _sleeper(1.0)):
             code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
@@ -6847,14 +7204,15 @@ class _FaultySignal:
     signal.ItimerError on its next `times` calls that `matches` accepts and that the function whose code is
     `caller` makes (by default _DeadlineWindow._twice, which makes each restore operation and no other call,
     so _fire's read of the pending signals is left alone), before the call runs or, with `after`, once it
-    has returned."""
+    has returned. Every call that runs goes to `base` (by default the signal module)."""
 
-    def __init__(self, name, matches, times, after=False, caller=None):
+    def __init__(self, name, matches, times, after=False, caller=None, base=None):
         self.name, self.matches, self.times, self.after = name, matches, times, after
         self.caller = aiqt_hooks._DeadlineWindow._twice.__code__ if caller is None else caller
+        self.base = signal if base is None else base
 
     def __getattr__(self, attr):
-        real = getattr(signal, attr)
+        real = getattr(self.base, attr)
         if attr != self.name:
             return real
 
@@ -6886,7 +7244,10 @@ def _deadline_restore_fault_failures():
     expiry) is made to raise signal.ItimerError by a _FaultySignal installed inside the window, for a
     caller's periodic 30-second timer (unnested) and for a 600-second outer window (nested), raising on its
     first call ("once") and on its first two calls ("twice"). Each operation runs in the scenario
-    _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body ends; "expired", a 0.2-second
+    _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body sleeps 0.05 s, so that a restore
+    that counts the window's time twice, or not at all, is off by at least that much, while a host stall
+    inside the restore's gap widens the bounds by only the stall (_restored_countdown_bounds) and passes
+    such a restore only when it lasts about as long as the body; "expired", a 0.2-second
     window whose body ends while the first instruction of _give_back waits (up to 1 s, from an opcode trace
     stage) until the window's own expiry is pending, so the restore discards it; "due", the window's own
     expiry at a caller timer due 0.05 s in. Each case is checked at return from the with statement, before
@@ -6909,19 +7270,35 @@ def _deadline_restore_fault_failures():
         fired.append(signum)
 
     def state():
-        return signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        """The disposition and timer, with the monotonic reads just before and just after them."""
+        began = time.monotonic()
+        seen = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+        return seen, (began, time.monotonic())
 
-    def caller_back(handler, timer):
-        return handler is caller_alarm and timer[1] == 30.0 and 29.0 < timer[0] <= 30.0
+    def ran_on(value, seconds, armed, read, clocks=None, holder=None):
+        """A countdown of `seconds` set between the reads `armed`, read as `value` between the reads `read`,
+        borrowed meanwhile by the window `holder` if one is given (_restored_countdown_bounds)."""
+        low, high = _restored_countdown_bounds(seconds, armed, read, clocks, holder)
+        return low <= value <= high
 
-    def outer_back(handler, timer, outer):
-        return getattr(handler, "__self__", None) is outer and timer[1] == 0.0 and 599.0 < timer[0] <= 600.0
+    def caller_back(seen, read, armed, due, clocks, holder):
+        # The caller's first expiry is 0.05 s after its arming when due, 30 s otherwise, then every 30 s.
+        handler, timer = seen
+        return (handler is caller_alarm and timer[1] == 30.0
+                and ran_on(timer[0], 30.05 if due else 30.0, armed, read, clocks, holder))
 
-    def unchanged(before, after):
-        """The same disposition and timer, the countdown only run on (by less than 10 ms), not re-armed."""
+    def outer_back(seen, read, outer, armed, clocks, holder):
+        handler, timer = seen
+        return (getattr(handler, "__self__", None) is outer and timer[1] == 0.0
+                and ran_on(timer[0], 600.0, armed, read, clocks, holder))
+
+    def unchanged(before, before_read, after, after_read):
+        """The same disposition and timer, the countdown only run on by the time between the reads, not
+        re-armed (the earlier reading, itself rounded down, set the countdown: _restored_countdown_bounds
+        allows that rounding on both ends)."""
         (handler, (value, interval)), (handler_after, (value_after, interval_after)) = before, after
         return (handler == handler_after and interval == interval_after
-                and (value == value_after == 0.0 or 0.0 <= value - value_after < 0.01))
+                and (value == value_after == 0.0 or ran_on(value_after, value, before_read, after_read)))
 
     def wait_pending():
         waited = time.monotonic() + 1.0
@@ -6943,26 +7320,35 @@ def _deadline_restore_fault_failures():
             fired.clear()
             signal.signal(signal.SIGALRM, caller_alarm)
             signal.setitimer(signal.ITIMER_REAL, 0)
+            armed = (time.monotonic(),)
             if due or not nested:
                 signal.setitimer(signal.ITIMER_REAL, 0.05 if due else 30.0, 30.0)
+            armed += (time.monotonic(),)
             outer = aiqt_hooks._DeadlineWindow(600.0) if nested else contextlib.nullcontext()
             inner = aiqt_hooks._DeadlineWindow(0.2 if scenario == "expired" else 5.0)
             tracer, at = _window_tracer(inner, (lambda frame: frame.f_code is give_back, wait_pending))
-            faulty = _FaultySignal(name, matches, times, after=after)
-            inside = armed_at_return = None
+            # Both windows read the clock and set the timer through `clocks`, which logs what bounds the
+            # countdowns they give back.
+            clocks = _WindowClocks()
+            faulty = _FaultySignal(name, matches, times, after=after, base=clocks.signal)
+            holder = outer if nested else inner
+            inside = inside_read = armed_at_return = None
+            outer_armed = (time.monotonic(),)
             try:
+                aiqt_hooks.time, aiqt_hooks.signal = clocks.time, clocks.signal
                 with outer:
+                    outer_armed += (time.monotonic(),)
                     try:
                         with inner:
                             aiqt_hooks.signal = faulty
                             if scenario == "expired":
                                 sys.settrace(tracer)
-                            time.sleep(1.0 if due else 0.0)
+                            time.sleep(1.0 if due else 0.05 if scenario == "plain" else 0.0)
                     finally:
                         sys.settrace(None)
-                        aiqt_hooks.signal = signal
+                        aiqt_hooks.signal = clocks.signal
                         armed_at_return = inner.armed
-                        inside = state()
+                        inside, inside_read = state()
             except signal.ItimerError as exc:
                 escaped = str(exc)
             except aiqt_hooks._HookDeadline as exc:
@@ -6973,10 +7359,10 @@ def _deadline_restore_fault_failures():
                 escaped = None
             finally:
                 sys.settrace(None)
-                aiqt_hooks.signal = signal
-            first = state()
+                aiqt_hooks.time, aiqt_hooks.signal = time, signal
+            first, first_read = state()
             inner._give_back()
-            later, count = state(), len(fired)
+            (later, later_read), count = state(), len(fired)
             broken = getattr(inner, "broken", False) is True
             problems = []
             if scenario == "expired" and not at:
@@ -6986,28 +7372,34 @@ def _deadline_restore_fault_failures():
             if armed_at_return or inner.armed or broken != (times == 2) or (nested and outer.armed):
                 problems.append("inner armed {} at return from the with statement, broken {}".format(
                     armed_at_return, getattr(inner, "broken", None)))
-            if not unchanged(first, later):
-                problems.append("a later _give_back changed {!r} to {!r}".format(first, later))
+            if not unchanged(first, first_read, later, later_read):
+                problems.append("a later _give_back changed {!r} to {!r} in {:.6f}s".format(
+                    first, later, later_read[1] - first_read[0]))
             if due:
                 want_escaped = "the outer deadline" if nested and times == 1 else want
                 want_count = 0 if times == 2 and not nested else 1
-                if escaped != want_escaped or count != want_count or not caller_back(*first):
-                    problems.append("escaped {!r}, deliveries {}, state {!r}".format(escaped, count, first))
+                if (escaped != want_escaped or count != want_count
+                        or not caller_back(first, first_read, armed, due, clocks, holder)):
+                    problems.append("escaped {!r}, deliveries {}, state {!r}, want a countdown in {!r}".format(
+                        escaped, count, first,
+                        _restored_countdown_bounds(30.05, armed, first_read, clocks, holder)))
             else:
                 if escaped != want or count:
                     problems.append("escaped {!r}, deliveries {}".format(escaped, count))
                 if nested:
-                    if times == 1 and not outer_back(*inside, outer):
-                        problems.append("inside the outer window {!r}".format(inside))
+                    if times == 1 and not outer_back(inside, inside_read, outer, outer_armed, clocks, inner):
+                        problems.append("inside the outer window {!r}, want a countdown in {!r}".format(
+                            inside, _restored_countdown_bounds(600.0, outer_armed, inside_read, clocks, inner)))
                     if first != (caller_alarm, (0.0, 0.0)):
                         problems.append("after the outer window {!r}".format(first))
-                elif times == 1 and not caller_back(*first):
-                    problems.append("caller left {!r}".format(first))
+                elif times == 1 and not caller_back(first, first_read, armed, due, clocks, holder):
+                    problems.append("caller left {!r}, want a countdown in {!r}".format(
+                        first, _restored_countdown_bounds(30.0, armed, first_read, clocks, holder)))
             if problems:
                 out.append("{} {}".format(case, "; ".join(problems)))
     finally:
         sys.settrace(None)
-        aiqt_hooks.signal = signal
+        aiqt_hooks.time, aiqt_hooks.signal = time, signal
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
     return out
@@ -27381,6 +27773,7 @@ def _main_isolated(monitor):
 
         _test_git_stash_ref(failures)
         _test_pgrep_self_match(failures)
+        _test_trkasy_no_amp(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)

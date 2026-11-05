@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0f20220c6f6f3340a94fd9e53e77c61c19b46302be876f88886f7b0c0f292a1f"
+tree-sha256 = "7220c572e94ab73cc31e98249dd75fed7e3a8c5fbe8770a35b4e6f58580dfa31"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -16,8 +16,8 @@ sha256 = "9bf86b7a1a51656b13907f3422bf3bf974d3d41fa6cf2c9bc4b04686ee8f8190"
 
 [[sources]]
 path = ".aiqt/attribution.toml"
-bytes = 11109
-sha256 = "52275f88fbcb6c310a13d4e4ec3a9fc18b9959ac9a5e390c4ec1b8d385f3395c"
+bytes = 12189
+sha256 = "e1bc4fd9a974aa49ec48fdaebe0a59ef157f8ef85f2b18ace01e9cd568884b9a"
 
 [[sources]]
 path = ".aiqt/core/adapter-blocks.toml"
@@ -41,8 +41,8 @@ sha256 = "15d8d9d85050558c0be30c9b5b591818f94d9a2aca057db681aa3ff0ba069c75"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 312645
-sha256 = "34d882c4b77e724ac79ce44c3061e2f2218e5e9f721ca6f4ce91786a5b2eb277"
+bytes = 313958
+sha256 = "70cfb4c418049877dc406abb608f6ae8b570aad82addc17528904da2d2a0ff9d"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -56,8 +56,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 12600
-sha256 = "67ac85bed59964e99d6c40ad84dbfb48a91b465e68daff5297bb4f1e36bd253b"
+bytes = 12603
+sha256 = "6dad058b0c711f005e2ed978d1854bc2f796072016e6044ff65c75a45b48002e"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -71,18 +71,18 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 557430
-sha256 = "f1d394d42d5fdc93eead176f4a2a49dadc69b1bd01ce752bd993eea139e8a40b"
+bytes = 580765
+sha256 = "8081c4d4461e905ee8ffa5575d7b716c3fc72dbc466808a0cf4710ef4ed826de"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
-bytes = 152465
-sha256 = "722004eea19b1bd45c4b5d6ad3576f609917e27f540aba7adc8f1698d7ea2749"
+bytes = 155832
+sha256 = "d6e9ab43b1c98a9b5cf7023b7b43cfd447607673e6128bfd06c4812551d32c7e"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 474730
-sha256 = "45de1ea3ec956e07bcc04d7dd4f6279721d8bc6ee2326b471fad35da01ce660c"
+bytes = 479330
+sha256 = "7e51d246d7fba98d6e02f9bfe90c61735e0514c03af61915c469e930df36b611"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
@@ -91,18 +91,18 @@ sha256 = "5abcd3d73c58dad02c8bc2bdf6bfd297c01ee14dd6fc3aa672b9f372d146f084"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 2424436
-sha256 = "0a41f25327774308e3029e56f0e03d86334aa28169e4e51a33f8e9691316d78e"
+bytes = 2437574
+sha256 = "31584cfe90c544db7324e1dfab5d79af60530f43e04f28211b5d193081aa3de9"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 39063
-sha256 = "a8a979708bfa628d4f342017f353f97c327962af2ed6376317180ca56f3d7ed5"
+bytes = 39163
+sha256 = "c9a92dd42cfcb033e26bd075c93481b0b51eb502ec4b3f7cd0ad361b0689cf59"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
-bytes = 9336
-sha256 = "96c990fb17f48e1cd12ce3be2f87065a6c5cd064d7411fb7e8d7ddd742073ca2"
+bytes = 10094
+sha256 = "6ae1be96d17859d124d79a217c33d20756d5cb2f1609bcefbac6055c2a83692f"
 
 [[sources]]
 path = ".aiqt/core/migration/crosswalk-schema.toml"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 20920
-sha256 = "23ad6a6c57f853ce497581ae8a66188001143683aaef7438cc0a14f26388f5e0"
+bytes = 25780
+sha256 = "f33fcf1f14284901daddbb599b6e95fb2b05b3406c1886071f22598513f3111c"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -131,8 +131,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9230
-sha256 = "543106c1f52149a4bd1fe004fc6e1980646793fad14b69961cde7dec52bcc253"
+bytes = 9358
+sha256 = "0abfc036c36fcddad87ffe68685d74372deb18b05255e1e22ff007ed4cb21c57"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "5c4dd825f4a903d50e51a9f79d0f8353daf70aba311dc6dbafc0ed7f3c740c5f"
+sha256 = "3ad149ff533174e0768011ef09382e375f991379bb381774d2d776233e357fad"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -241,8 +241,8 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
-bytes = 6416
-sha256 = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+bytes = 6685
+sha256 = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[sources]]
 path = ".aiqt/core/rules/cost-tier.md"
@@ -381,8 +381,8 @@ sha256 = "11fb788e9b4da6deb19b0e2ccde54822a3dd084c9044a94c44acc4d189ad9e3e"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-change-carries-check.md"
-bytes = 2527
-sha256 = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+bytes = 3065
+sha256 = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-compatibility-or-migration.md"
@@ -826,8 +826,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1077512
-sha256 = "a979473a46888c0bf2c474acc371f9a30656b938fd30ce5b79e9be45234cc1ef"
+bytes = 1103398
+sha256 = "312e5f1b275137eac1d6b678b900dc0507693bf54f62c705761bd7a3e97ae1d1"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -836,8 +836,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 11636
-sha256 = "657cce3844484eed0b683dd2beac8206ae1eddf8cbac9b09e7d19c6f9a024e96"
+bytes = 14429
+sha256 = "38c233f15c91514038a062ba51f7d73521b6baf44d07d35b155475b3c929c0ec"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -847,7 +847,7 @@ sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
 bytes = 1104
-sha256 = "5cc6a87a90ac27965ce339da1f0826966983351555612562ca31875d8d7e20f8"
+sha256 = "142b4ac57f326c4d30a677e45e6c4daddf3661259b0714f1747db59c3f8ff7dd"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -943,6 +943,21 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 path = ".aiqt/tracker-label-baseline.toml"
 bytes = 5109
 sha256 = "92cc1de18bcbfd32afa4750fd9ad2263e74af1b902343b0a3573aa62aba2edd3"
+
+[[sources]]
+path = ".baseline/check_palette.py"
+bytes = 18643
+sha256 = "cae71e9a43e87c5687bc50dc75784e83b3a5b643a4e9a07298294b9d270971a4"
+
+[[sources]]
+path = ".baseline/opfiles-pin.toml"
+bytes = 7974
+sha256 = "ca2004fe16d4adf88d28892b1aec7ec1026533a1beebf92d07245557fb4e4f21"
+
+[[sources]]
+path = ".baseline/pin.toml"
+bytes = 7626
+sha256 = "d58fe4c372546838672266f6cd25e04ed5a58ef730228f913e9196a7222acb90"
 
 [[sources]]
 path = ".claude/RULES-INDEX.md"
@@ -1046,8 +1061,8 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
-bytes = 6416
-sha256 = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+bytes = 6685
+sha256 = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
@@ -1171,8 +1186,8 @@ sha256 = "11fb788e9b4da6deb19b0e2ccde54822a3dd084c9044a94c44acc4d189ad9e3e"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-change-carries-check.md"
-bytes = 2527
-sha256 = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+bytes = 3065
+sha256 = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-compatibility-or-migration.md"
@@ -1716,8 +1731,8 @@ sha256 = "39450a642d366c83c20ca4e9d345afb163a2e76742bf758cbf11285f4866464d"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
-bytes = 6322
-sha256 = "ab6c217f51f55eff350fdc6bce64b821d28beae71e91fccc2ddbc80bd1665065"
+bytes = 6591
+sha256 = "b6a7eb197c245c08294d318df231ca38472891f91266cf844d2577f1c8208602"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-anything-wrong-fixed-first.mdc"
@@ -1841,8 +1856,8 @@ sha256 = "868392342c7c5a916cf0db183a6b0c952ddf13618eef7fb592352add2be1ad01"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-change-carries-check.mdc"
-bytes = 2333
-sha256 = "4fc82e69ee6af859cdc754921c29e7a17e40bc35095a41abc1121e67d5d03dcf"
+bytes = 2871
+sha256 = "cf695e1c9858ef5c0c6d7db11dba130c221291e2f4506732a5539424e830857c"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-compatibility-or-migration.mdc"
@@ -2291,13 +2306,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 44900
-sha256 = "5ce43fcce9f93f5e56bbcbf69edfd8d3abcc7b731f08a323fdecfe29c1a098f1"
+bytes = 53397
+sha256 = "5bb6db8e5ea298cd518ead97ffbd9597abb9fc95a5cf495c9c43bb2d207303f2"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 117537
-sha256 = "9c29bdebdb607d3e5aedb9504f1f9dddbb26d3a2ca2fa32527727097c367ff55"
+bytes = 118344
+sha256 = "691af95f3c9d4027588d596789171785f5946b2fec5bf8df820a4c2e2dba16b1"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2361,8 +2376,8 @@ sha256 = "35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 117498
-sha256 = "5e6f0fa2f401c44d3ff7040a5c3bf547147a8e46e661aea97937f905a18c7664"
+bytes = 118305
+sha256 = "4bf8d8ab972164cd9a26d3ac433eb1e7ccc834d1319c82e8e15b69a52311ab7b"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2371,23 +2386,23 @@ sha256 = "e9bbf7da0e25d113ca0f33db652fd131283a00e234f29bb0dfde29ef1d2da965"
 
 [[sources]]
 path = "DISCLOSURE.md"
-bytes = 10150
-sha256 = "a774875eea19a3157fea5127bcd61fbc659d1d56679592bcd3d6e2d2c0d196b1"
+bytes = 10237
+sha256 = "9d9dc82bc15b51253c963859c4096be63b6400008847621074eb5de59a30efd9"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 625059
-sha256 = "a6f73abda6907bae06a892ddcf5c03909ad6be9bf63d09491a6db40e41e83f72"
+bytes = 641748
+sha256 = "ddc37fb1d8af727087d52108c50733b8f11ece02af69932fd4ddd4dca5995250"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 117533
-sha256 = "b46e1a9688af272eb75d27d761fbd9e7b092089e5bf7699de60b9b3e4535ceca"
+bytes = 118340
+sha256 = "1727df6305d9d62224d8c9c1836adbc02874a02e3f5cf8458d26947a150ae593"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
 bytes = 3839
-sha256 = "410047d8c2555f3c3a82ddb3a23d8f64a682bd1016cec9a2e65eeae905b7702f"
+sha256 = "ce7b4ac097cbcaf1191f56a9190267df036358d36b7a5d5323ba47bee7edd9b0"
 
 [[sources]]
 path = "LICENSE"
@@ -2396,18 +2411,18 @@ sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
 
 [[sources]]
 path = "NOTICE"
-bytes = 11026
-sha256 = "aaf972bbdd8b8520076c1bb6f9d701fab580ed6fd34a91c2ba125d39d463aa11"
+bytes = 11968
+sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "d24d220ca10295450bcafa514a64b63da574e521e1bb5d8720aaaea7b8bda9a5"
+sha256 = "efb030611d8e3faf4b51f80293bc3677f1e37672a2d3638ede3deaa9e0c85c65"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 16980
-sha256 = "1eb5757507ffc1abc424402ff983c7740d7784f9c781182b0d7099cf8f2c8e2c"
+bytes = 17052
+sha256 = "d6a02a6e8b0074ee95d0c5aa0789f3cfc9644bc7661108350d8b1507b9018fbe"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -2446,53 +2461,23 @@ sha256 = "63d8e3c586b876cf601fbde6bbb5158aa3aae4a5ff492538d01c8c952e5966a3"
 
 [[sources]]
 path = "disclosure.toml"
-bytes = 14312
-sha256 = "51898c16c9b7e27efa3def2cfc7f9e995f72103515b195b8507ee5e2a8c08038"
+bytes = 14550
+sha256 = "023a1aa4048dfc10639560b8077d30be17bac123cf78b4ec929d56184b1d231a"
 
 [[sources]]
 path = "docs/_shell.html"
-bytes = 4040
-sha256 = "48a28b04ef26a052023b570623aa30918c4a5ef49666695a7c7dd8a0ad79a9dd"
-
-[[sources]]
-path = "docs/about.md"
-bytes = 6195
-sha256 = "2422016ee6acabb49fabd39b64a8dcee0ccd355cd4974bcefaac1f682bf3a2e9"
+bytes = 3919
+sha256 = "a6fd9e203ef15013dbf5bba5dae4553eaea4e8319a8c4bb1945b7b7b9459b626"
 
 [[sources]]
 path = "docs/development.md"
-bytes = 10828
-sha256 = "09ec29e47aaa5bfcdba4f95d4cae2e9db7e3af21ad33087660f2f67e62483e11"
+bytes = 10631
+sha256 = "5518db6074be2ca03014125e1c7382f4c4c3c330a44b2976c95ff297a182c6bd"
 
 [[sources]]
 path = "docs/evidence.md"
-bytes = 5387
-sha256 = "29be9e1733805d6540b53dff4f53da825e962168a988320d0a7926d6af00a114"
-
-[[sources]]
-path = "docs/examples.md"
-bytes = 16739
-sha256 = "22aa04cf10939eeb86e95a1507deae2b74b77aaf78b916944ab1bf0cd179c093"
-
-[[sources]]
-path = "docs/learn.md"
-bytes = 2805
-sha256 = "c7c392786b7a544bc004e3317a52683ee918e5f8837dd405ff898253e095f154"
-
-[[sources]]
-path = "docs/rules.md"
-bytes = 17231
-sha256 = "a378b8f99940f9b4ace66948dde541b7e3b2d514f1aa925c0bba9797b127dd11"
-
-[[sources]]
-path = "docs/standard.md"
-bytes = 5516
-sha256 = "2107eb0ae021c8abc849693590810af430326747ee0a8d4978b8bbe92714899a"
-
-[[sources]]
-path = "docs/teams.md"
-bytes = 10024
-sha256 = "2818866d1bd23a906f4b6f7350dd6d97cbb4791b20626854c77b2e1e40f1b348"
+bytes = 5348
+sha256 = "01f4029a280cd4cb55f8002b0573ce347d28f40bd9734b7761c57ddfa65bea35"
 
 [[sources]]
 path = "opf/enforcement/ci/github-actions.yml"
@@ -2541,8 +2526,8 @@ sha256 = "cd48ca45fc01a32cf5c134e8b3e12a2509f0195ab6a299d5a1bda1fe984eec2a"
 
 [[sources]]
 path = "opf/enforcement/precommit/pre-commit"
-bytes = 10627
-sha256 = "02f97b775948be98897e6ffb2b28999a37c387ad4170104dc72ea38f5cd8bc64"
+bytes = 11208
+sha256 = "c887f57f0c5e787b6f6422533304b2a4f448c7eb11fcd32873b1fafa56b041c6"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
@@ -2551,8 +2536,8 @@ sha256 = "1c29e74e575452b7a25b1568bf7de909c5d983beaea96b64df5091dccbd3726c"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/clean-start.md"
-bytes = 5426
-sha256 = "02ef9143f2bd829546ec306c23cf035e71f73a9d5307e5db285aeca4913a4bcf"
+bytes = 5718
+sha256 = "bf55c99487a6b86d66503ccf82c522f6e2951dbc57930ea5bb3675b370432c29"
 
 [[sources]]
 path = "opf/prompt-pack/flow/SKILL.md"
@@ -2627,22 +2612,27 @@ sha256 = "d73988b74fb317acf23ca8f017086faacead2946d8f4b42e20e082256d7f2401"
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
 bytes = 3994
-sha256 = "84930af98c67759d70095d9cf9776211f80bf8bf9129c933486fb28b6a9d26c7"
+sha256 = "70971b0932eaa1fa00e656d550eb1263af2fd19c99e6dd5e049b2ef3dbe259da"
+
+[[sources]]
+path = "opf/site/.well-known/security.txt"
+bytes = 234
+sha256 = "3a50b56c27e838cd2af9bd215543a51c6e369d38cc50e3f34d9f89bf2e379807"
+
+[[sources]]
+path = "opf/site/404.html"
+bytes = 5965
+sha256 = "2a116e1e2670076f830ff5bf28568edc25fb6e49c00581b22c128d3106c855f6"
+
+[[sources]]
+path = "opf/site/_headers"
+bytes = 1009
+sha256 = "d3cad7bde216afb88008c28bb4ba02c3e33b824fbb1aefd1d549d859e558885e"
 
 [[sources]]
 path = "opf/site/_redirects"
-bytes = 1285
-sha256 = "c20179ba1112b772147d104d5fb975adb473c158442bfc49b449d69a9320ac9b"
-
-[[sources]]
-path = "opf/site/about.html"
-bytes = 5079
-sha256 = "44fabb8f383a49b5344a6d3e1ff0b4e2ef3afe2411e3d2f0c0b00829bafecccb"
-
-[[sources]]
-path = "opf/site/adopt.html"
-bytes = 45294
-sha256 = "10505976487ad44a822bec7d5eb57224f82e640f0444faedea0c062dd29deb80"
+bytes = 310
+sha256 = "d3fdf33ff292a4665b42e306a2734a9ade48c24e27d6d1873252ee6498cb3dff"
 
 [[sources]]
 path = "opf/site/adopt.md"
@@ -2650,74 +2640,389 @@ bytes = 8902
 sha256 = "e7ffe4f2866b2d28c2c3a6b3e5e064717c233aacf5be3b70cb98210b3e596a8e"
 
 [[sources]]
-path = "opf/site/aiqt.html"
-bytes = 10616
-sha256 = "eaed62d078dfb77eadaa53369fe653325fe15c6b9303c390e9846b0deb03ab76"
+path = "opf/site/adopt/index.html"
+bytes = 12988
+sha256 = "ad510793a53a4521131adeffb4d50bb70e9e654f80684861a86ab92ed2e3b1a1"
 
 [[sources]]
-path = "opf/site/core-files.html"
-bytes = 34044
-sha256 = "3714bf1a765c9d76d565e532677df97d28bda1733084e353369fcbb512000b7d"
+path = "opf/site/assets/baseline/logos/opfiles-touch.png"
+bytes = 5292
+sha256 = "f55098b6da69f606b347f53553f59fdc8d3275ade45793a562a6bff767b1b2f3"
 
 [[sources]]
-path = "opf/site/disclosure.html"
-bytes = 12181
-sha256 = "412a8468083a6a1ddf15b09a7980fd7c6b7ed24c836c9048c9185c0b7be49355"
+path = "opf/site/core-files/index.html"
+bytes = 20049
+sha256 = "39b52601593879cf977789fbd0b8da66ab4c2044c3d2fe5e5fa66eccbdadbe17"
 
 [[sources]]
-path = "opf/site/favicon.svg"
-bytes = 744
-sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
+path = "opf/site/disclosure/index.html"
+bytes = 15475
+sha256 = "2d8d0b82761a0b2a33d3a211d9f705d8e460a601fbde8d4c71a198aef6d3e8b0"
+
+[[sources]]
+path = "opf/site/draft-src/404.toml"
+bytes = 536
+sha256 = "83300f415d883b1132d54d2ef2d21aa375094650e6fdc93fc7bb6f1354028865"
+
+[[sources]]
+path = "opf/site/draft-src/adopt.toml"
+bytes = 7015
+sha256 = "4649e374d719cfaecb7500f2da9a4a770f457e97d5361fbeb5c3c553eac2f7b4"
+
+[[sources]]
+path = "opf/site/draft-src/core-files.toml"
+bytes = 14950
+sha256 = "f6f4dee6b011add27c711776aed71fee4eece1f77665914168fbfc125145d76e"
+
+[[sources]]
+path = "opf/site/draft-src/disclosure.toml"
+bytes = 9504
+sha256 = "a65f9633d4b46c3fcf84dedd9ce57619888ab717a494541005bee36199ea27e0"
+
+[[sources]]
+path = "opf/site/draft-src/draft.toml"
+bytes = 643
+sha256 = "88a07c6cee4af960ba877aff2a9b35529ef154ed98c20707bc7ef49d221665a5"
+
+[[sources]]
+path = "opf/site/draft-src/home.toml"
+bytes = 2553
+sha256 = "df135fdd1cdc7fa8f8f445058d88029f82c82f246b318e5917fe122a3331258a"
+
+[[sources]]
+path = "opf/site/draft-src/license.toml"
+bytes = 5565
+sha256 = "c376a98ba7e6151bfb185a9cd0f9c9f6d631b15a9d454bbf83d19564618bc6e3"
+
+[[sources]]
+path = "opf/site/draft-src/model.toml"
+bytes = 3497
+sha256 = "869143d917ef63085c0a7ca1aa950396a30da31016fe4990c1d1bfb23ae87e33"
+
+[[sources]]
+path = "opf/site/draft-src/standard.toml"
+bytes = 3382
+sha256 = "0b6ee4cfc927646f9ab18062295fe9f93910b001bcce13004e054a92c1e386f8"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/LICENSE"
+bytes = 7048
+sha256 = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/NOTICE.md"
+bytes = 1242
+sha256 = "deeffb1a277a0b1f591feea15ecc10fbf4fc916cf0db07885625a288cc6e3b1e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/baseline.css"
+bytes = 66876
+sha256 = "8a902e09bc770744e4f1a15066a0c5ef33095d829a5dc59486a502c567dac777"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/copy.js"
+bytes = 1337
+sha256 = "9bf99b50471889b768c795af5a4f84f526cecf7622a1f1265ca3d088b31339a4"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts.css"
+bytes = 1611
+sha256 = "a309a8ff4026a67fb5d10dea2c02e5b9ea2c1b32d4b18d7892015e038397396a"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt"
+bytes = 4442
+sha256 = "c02c0002d3bbd41a16933c162888c400469c7029f1362ca9d60d5ed20ea7d157"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2"
+bytes = 42708
+sha256 = "51acdc0e009e1d84cca6b654c4218275d8ee33dd243f3df25f7412a824a78d99"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/jetbrains-mono-LICENSE.txt"
+bytes = 4524
+sha256 = "403581b69dac5cff4079205e01c6b467e56af449ecbd7247693ddb1baafa005b"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2"
+bytes = 42964
+sha256 = "a8afa085e9ca5e53434e2ee918ba6b65c7dd4dda56509976b36591478c99d62e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2"
+bytes = 40404
+sha256 = "18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/newsreader-LICENSE.txt"
+bytes = 4520
+sha256 = "26028ec4e13b650065fa525a09532176f8a668b76ff849ea01c564a7480f91e7"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2"
+bytes = 64520
+sha256 = "48bc8861b9b2ca9300747cad4fd6a3b4ac3028d364df00bd1b72097baa75e509"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2"
+bytes = 58084
+sha256 = "62981321d9a3cc7a61a73792729043703fd6112da86e8ec848bb57f088578757"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/public-sans-LICENSE.txt"
+bytes = 4503
+sha256 = "705a497c781f6463ff819abb513bb495f3fb05256f1d20321e3275813c0bafa5"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2"
+bytes = 28292
+sha256 = "16dc93252adb78785ae56a6465494f73b604b39817760ea92bd4046521bb5a35"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2"
+bytes = 26832
+sha256 = "5ed4d31c988e73b258894244f209069ebe77dc7e564861954b21198b6de90d68"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt-card.svg"
+bytes = 1181
+sha256 = "9192924345aeb6c086bc096c5e59f3bc1dbe74df06f44406be7a90520b9565aa"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt-favicon.svg"
+bytes = 540
+sha256 = "8a082befc210b86f795cecce1141ff813940652a5ecabb900214f27976352965"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt-mono.svg"
+bytes = 1152
+sha256 = "dc2718f4cf579ffe9b3e02bd4edce71c51e1c4954e915d59660964cceadc4118"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt-touch.png"
+bytes = 5625
+sha256 = "600f0ca0d03b23eccb36670313a573644a5642277a684df5bfb5c3a684f44ec5"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/aiqt.svg"
+bytes = 1171
+sha256 = "66ab34a8a0c03ef260e73cec128f53a714183cd8ba3c675969e9a04feb222781"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis-card.svg"
+bytes = 2158
+sha256 = "187d433274a30812c978b492895245ac728f6b9e3d73e17ca07504e1a9f57fb6"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis-favicon.svg"
+bytes = 774
+sha256 = "41ea619415ab55ff13aea87ddd9d1ed5cdeae6300e54501d30a70ae55560f504"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis-mono.svg"
+bytes = 1973
+sha256 = "198aa04cb150ddcee4c2130218c81e61bd52f23983903e2e16f7ec03dd7797d4"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis-touch.png"
+bytes = 6539
+sha256 = "2730c58989818670116a40a199741cb17e9635020cc6e2cca43ffec0da47d0e2"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/auditthis.svg"
+bytes = 2148
+sha256 = "0f2fb19cd2917e8d39e57c08172987bbc72ca0597a096d892aaed44ff5374572"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage-card.svg"
+bytes = 1702
+sha256 = "ace7ce40a3bd16f66e136739853dd81fe0f8058412580cacf8af5948da773751"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage-favicon.svg"
+bytes = 618
+sha256 = "3ebe565b9e5d7ec0eef1ae7092f92cafa56985fcca31a3499abc6fda23b1fa1d"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage-mono.svg"
+bytes = 2096
+sha256 = "3d9c927bbe57ed53c724da4c24eae84682878d06b693188059c4a6a8d70bad1d"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage-touch.png"
+bytes = 6138
+sha256 = "b75fdf0780b168595b01dda57185bce0778e09d1093739be4b8c8239c722957e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/cleanlanguage.svg"
+bytes = 1692
+sha256 = "285c37c1d77bc24206e31c3eb99837a79ba79f6c16b4ccbd7470f1fbfc58f985"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary-card.svg"
+bytes = 1961
+sha256 = "6c8add330f2a99263df464055fdd6635c0163ba850f2c2572152d1aa41a5884b"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary-favicon.svg"
+bytes = 675
+sha256 = "f1fe54a61a9c75d5e588bea38c7378cd397eaf7466d32642bf2f283df1d39588"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary-mono.svg"
+bytes = 1704
+sha256 = "3a5495b7d810fc95ddffef3dcc9a03c1e7751bf370c93940b9118e79a2c0db90"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary-touch.png"
+bytes = 5288
+sha256 = "4b191cd0f40bd836d8e0e6c254ccfd7460fa5c1f33853853e4f61de50ce0d9ca"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/grclibrary.svg"
+bytes = 1951
+sha256 = "8ad4d338a68ce7afc781c02be91ee7e87ce464d44d0ed56eb10d5cddf80b45f8"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles-card.svg"
+bytes = 2741
+sha256 = "1b605de22dc5b2f8a86fe82c58a0e22092ea3c5fc2c566e9b88f2f2617ab61ef"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles-favicon.svg"
+bytes = 691
+sha256 = "e48c0de54ea7f31ffe5af118a803791fc5e4b469143bdcf80261944b77e3c17a"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles-mono.svg"
+bytes = 3091
+sha256 = "3886f2eec2739e0dcaf4e6e9c02b67be142d63ab7ccd3f5626e1d15d7ea995eb"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles-touch.png"
+bytes = 5292
+sha256 = "f55098b6da69f606b347f53553f59fdc8d3275ade45793a562a6bff767b1b2f3"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/opfiles.svg"
+bytes = 2731
+sha256 = "f294e493b3ad949b72e8f25500a507fa8f47e41f58247904f44b0434637d4f0c"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig-card.svg"
+bytes = 1911
+sha256 = "21f74d06b216d72d1e8d483a444d3e439847ede8e523427c147ba2ba59cd553e"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig-favicon.svg"
+bytes = 555
+sha256 = "526ca1f3606625306c4876bf8fe6ba5af86e87f622729cf003ef60949e26ccbd"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig-mono.svg"
+bytes = 1924
+sha256 = "5fd490079642b41ab12863bc1692e5481a737cc4f8f764319dd31f13a2037b86"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig-touch.png"
+bytes = 5758
+sha256 = "5897da9f6f9a556358584faee1d33b210a96de56b7ef6177d32a5bd940f0c0c7"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/logos/secureconfig.svg"
+bytes = 1901
+sha256 = "a74c1604acb4032e763afe0cf0a9ed9b4e5f4bdb76790d24a3de16a48eda5c1b"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/NOTICE.md"
+bytes = 2892
+sha256 = "b39a747fb9f73ec9373bd2329060af372e14185fcdc7f91fa67ea2cda3b6dd20"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/github-invertocat-black.svg"
+bytes = 1559
+sha256 = "693d7abe6f899646cc2e96856723b45e95f71885a54910b2749f6decdf7e1ee1"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/github-invertocat-white.svg"
+bytes = 1559
+sha256 = "ccd84c89b1056345608fc3489357f8acc7397e49a3cdc2d418b6c8016911d47b"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/linkedin-in-bug.png"
+bytes = 8375
+sha256 = "3c0149f26168b5fe0f43e68664abe40341a6443b3cd435d18a73e12f64f8b600"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/marks/orcid-id.svg"
+bytes = 2016
+sha256 = "195be086656233fc1a0089086d9190d28dc6abce39c2290612d1893233e1f166"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/palettes.css"
+bytes = 24177
+sha256 = "cf4bed49e0c3c16fcc8272acbf8263753e2f392db6dcdac96313540b0da220f2"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/rail.js"
+bytes = 2809
+sha256 = "36535faf2df8637e694ff2a57af982b9c67c9f410f80d4dfceb193c4f2d601ca"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/scheme.js"
+bytes = 2730
+sha256 = "39d035d986f53c987cbe92516b9a5fd499af5c7fcdda701ea896c63c45ef1634"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/search.js"
+bytes = 10585
+sha256 = "ff39a504d988c51510be466b2ad7e5eb2edf8299eead35b4070a20ac768359bb"
+
+[[sources]]
+path = "opf/site/draft/assets/baseline/select.js"
+bytes = 2954
+sha256 = "2c4e1f1a2cc00c49dc013fd421b16c14cdc89eb873fc57f7768be90604d4bf90"
+
+[[sources]]
+path = "opf/site/draft/index.html"
+bytes = 6048
+sha256 = "5659c70e0c39e64fbdfb24f24ece115debf1c5b6de7d7631a88f0b6c0f000e58"
 
 [[sources]]
 path = "opf/site/index.html"
-bytes = 23745
-sha256 = "8fd235d5b775231a6cd0512498397048ec6f86e8d43c170edb73adc438f2e8d2"
+bytes = 9055
+sha256 = "addaf07acf79eec8c41f455e9611562aad084a106da1840f8dc414c5eb4ec0f2"
+
+[[sources]]
+path = "opf/site/license/index.html"
+bytes = 11175
+sha256 = "90ab63ca9f9fd0436ac2f5f6f38ad7904bcf9856727a52e305c035a1cb2b2c6f"
 
 [[sources]]
 path = "opf/site/llms.txt"
-bytes = 2438
-sha256 = "ac17bd0d98d48dbc372c1da2688b9bdcc837a956fc816b57609f3f56c700111b"
+bytes = 1874
+sha256 = "e58593a04cbbb1b821445fc26fd9ffbc52bae136b40192edd23755af7fb6ee01"
 
 [[sources]]
-path = "opf/site/record-indexes.html"
-bytes = 71544
-sha256 = "d1ea2f0a87b5d30c547a8866ae8fcdfbdbd9f35a65aef9a5698959efb9812206"
-
-[[sources]]
-path = "opf/site/roadmap.html"
-bytes = 6341
-sha256 = "455e9ade35c89e25408229b0148beb951e12b1aab6de810c5b7b78ec0f53adb4"
+path = "opf/site/model/index.html"
+bytes = 12390
+sha256 = "bc7e36af456f907b0369f3236781ad5c2d8b7216631da2336d3997475da00644"
 
 [[sources]]
 path = "opf/site/robots.txt"
-bytes = 37
-sha256 = "c2612ca82a1165f8517bed2e5a5ee00efb558f5e6c813822545607b7a5cf850c"
+bytes = 77
+sha256 = "eba10c258c8ce46ab3a85417f3d6968ca17b6cfb283afc8ccf357de667428dbc"
 
 [[sources]]
-path = "opf/site/standard.html"
-bytes = 7350
-sha256 = "87bdc663c9f18f398335c6102468d295a4cc007445f41a6a1b4ad083d720c690"
+path = "opf/site/sitemap.xml"
+bytes = 763
+sha256 = "d9e7588c10dba7885012449dabf84651d0bb4569b69f44d040699e037b698e57"
 
 [[sources]]
-path = "opf/site/store-meta.html"
-bytes = 18823
-sha256 = "be26df2f7127617f57fbfdc481276d6f6f32d4ea93d5b9d59aaf8b8c49f1150b"
-
-[[sources]]
-path = "opf/site/styles.css"
-bytes = 39915
-sha256 = "c6de48ae8b289c5cd9c163bced31e9d6f5b7457bc29e091d223361c8c4b5bb63"
-
-[[sources]]
-path = "opf/site/theme.js"
-bytes = 4433
-sha256 = "60d56244cf05535c7c4a5cd04750f8f9f1815cf0d6708474de5c6f8e7e43b79a"
-
-[[sources]]
-path = "opf/site/tooling.html"
-bytes = 14601
-sha256 = "69d732dbf08063f6ac0f5bd9a31508ab014b008b12b8ddfe86fe959e3e8490e0"
+path = "opf/site/standard/index.html"
+bytes = 8994
+sha256 = "e33fcc7339fd59814bbff20e5765d97012f8a078db20b47f541082b693de1179"
 
 [[sources]]
 path = "opf/spec/OPF-IMPLEMENTATION-PROMPT.md"
@@ -2736,13 +3041,13 @@ sha256 = "abb2fd37f2c21e528febf1f8970ecc9f6022e8bd74284e550639f3d4a8a92a5f"
 
 [[sources]]
 path = "opf/spec/OPF-QUICKSTART.md"
-bytes = 19099
-sha256 = "a7d91a422be8510b0e90b38746616a93c8bd7745456ba33de0f84c947d9308cb"
+bytes = 19373
+sha256 = "1d8187f54e294d3bce410a212f78f1fbf3796bf45ffde1d0fe49ab76b4af407b"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 189184
-sha256 = "a93de7ce2f963de30fb7b0f125c35eaad645988112a3462b847de52499f5b426"
+bytes = 191421
+sha256 = "ed052cab6616b1f409ce924e8cd6d231703e198ed7a244f93c2594826ea52c1a"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -2781,13 +3086,13 @@ sha256 = "f0d9fdb8c3ea19585a823f31cb366bb1998d0799b16d15e7e26de0e1a16ccfbe"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_apply.py"
-bytes = 1594208
-sha256 = "56ed7a8971e124bc45ec476c5895a81255f39118115e9cccf3b7f8466306e3e7"
+bytes = 1596032
+sha256 = "7e38038ef352f2a95d09f0a42452177158b8ddeb4c1cebb3d68c6d576d333044"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_complete.py"
-bytes = 186863
-sha256 = "bc3f342f6862daa2d7261f4ddd69457f07c199ed9c4476c449217b8afbd6cdd9"
+bytes = 189560
+sha256 = "ea6f78def79b0348054dec2205fe10ac7db284769978cea8d36110f9d0af589b"
 
 [[sources]]
 path = "opf/tools/_opf_adopt_discover.py"
@@ -2821,13 +3126,13 @@ sha256 = "0613ae87479779a2ffd616b17217cf67d6443b575e1887a8b3cf1eb8128ea300"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 808448
-sha256 = "8d96fd53534280d56e416b0b923b9a4684e2910614da4572b7be3c0033f0ff00"
+bytes = 844801
+sha256 = "f0d4ed591ad3748ec98c5ea64de07e731f46a29ba82f4f51934022546db3ec20"
 
 [[sources]]
 path = "opf/tools/_opf_declaration.py"
-bytes = 28288
-sha256 = "94d5e3771f9073c5f97a362e93d2a752c802ffa67e3789e54cbdd10855a1d876"
+bytes = 28265
+sha256 = "d4f20a4b0304125ee81ffb3419f03bb325fedf9c0f9ca4dd6187405683650f02"
 
 [[sources]]
 path = "opf/tools/_opf_emit.py"
@@ -2891,13 +3196,13 @@ sha256 = "098312f9a1694c39c4deaf4fb78d0da5ac6330ee0be152df8bc19c496a359797"
 
 [[sources]]
 path = "opf/tools/_opf_observe.py"
-bytes = 121297
-sha256 = "f1d98da98ca4c6c1cfafbb8a1e926e6d00d5c4b51c06fba6e6c6b3d4d4a2aa79"
+bytes = 122187
+sha256 = "7ae0b3848b5f92afb2113c4e5d57d6cecebff7d87a69deb6146d524d98c6ea12"
 
 [[sources]]
 path = "opf/tools/_opf_oplock.py"
-bytes = 583112
-sha256 = "58d839e29c7b5bd8ac06cc9347b7e1435c1471c27d4bdfc8f0c24f70f032a46f"
+bytes = 600221
+sha256 = "032863416e91865584c65d37a6cdc208a6b0699916c5abe3d933c9dce8290dfe"
 
 [[sources]]
 path = "opf/tools/_opf_pack_manifest.py"
@@ -3106,8 +3411,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 383000
-sha256 = "b4dad602e1551bcedf0182d8cd3469c34dd96f24bf24ee5910b59ce05434662f"
+bytes = 384480
+sha256 = "c5e457f8067372777ab5b7b53f05856968c886220ae7d12d022ed4af58c39a32"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"
@@ -3116,8 +3421,8 @@ sha256 = "6ad4c80a38549a287e6f2f0fb913566c07a5f239c093995daed7f0a1fb8baaa1"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 881374
-sha256 = "9922d921d3d7d4b272a716c3cae3a91c3e54bacecf9bbb8552896a21658cb50c"
+bytes = 882658
+sha256 = "0bd6d792e5ab75f2b35521b2302e51c0e01ff1032430af2385681e67ee5eb2f5"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
@@ -3151,8 +3456,8 @@ sha256 = "ece985a127931180d2096ff17e1293d11be46f68bd8a2266b160a4f47c279181"
 
 [[sources]]
 path = "opf/tools/check_opf_record.py"
-bytes = 589254
-sha256 = "91ba2841974621c811ba194bf21f5aa4a54e89014248de2092e9f74bb3ad7922"
+bytes = 594879
+sha256 = "a13ec01cf0fa61fd6ce6a6d6d84e88e9234460c07f5720974867e24fdc28f2d2"
 
 [[sources]]
 path = "opf/tools/opf-declaration.toml"
@@ -3161,8 +3466,8 @@ sha256 = "4b448a4b30fa2358ce1b19587897276d0d79ffc43a4db89355105eb4a739db4f"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1370241
-sha256 = "e8b0e7651842413caaaa9d5e76b8ef5e88696605a2970fe899e34b1ba84788c5"
+bytes = 1370442
+sha256 = "f655e3e8697629287841e39ca41f07c4659e089ae3c00027bfd45e558550a802"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -3191,8 +3496,8 @@ sha256 = "4c734ec904247a0b33d0ee7a5f0c2abcb4b80de3e308ce4d04b92da5b256f6c2"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 2424436
-sha256 = "0a41f25327774308e3029e56f0e03d86334aa28169e4e51a33f8e9691316d78e"
+bytes = 2437574
+sha256 = "31584cfe90c544db7324e1dfab5d79af60530f43e04f28211b5d193081aa3de9"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3200,29 +3505,39 @@ bytes = 1744
 sha256 = "07bb5c6991deeb24d767ac2cba8b36ac0355947a5a5350619e0055f9b4bda031"
 
 [[sources]]
+path = "site/.well-known/security.txt"
+bytes = 231
+sha256 = "fa3cf1540bf6cd48215de57bdb4148aec97bf44717c3909e4f445967535588ad"
+
+[[sources]]
 path = "site/404.html"
-bytes = 4215
-sha256 = "3e21e9bf33381b8e3c14005bdcccd68796384c1d14c34add58bb71581ba08140"
+bytes = 5880
+sha256 = "2c383d920d1fb2c3f529ced889ffcf5be4866eb17f3351f3dbec3685de0e97b9"
+
+[[sources]]
+path = "site/_headers"
+bytes = 1009
+sha256 = "d3cad7bde216afb88008c28bb4ba02c3e33b824fbb1aefd1d549d859e558885e"
 
 [[sources]]
 path = "site/_redirects"
-bytes = 296
-sha256 = "4d099b360f7f3eedef41572525006f7d6be3c67abad9fb08b487fc1f1afb5c09"
+bytes = 293
+sha256 = "6f3ce37fbb23b4f465c73c8e68e850272ec07c020266b22dfe1b6aca5e6f5e4a"
 
 [[sources]]
-path = "site/about.html"
-bytes = 10050
-sha256 = "9bf194d541fdc879d05ca10d4bf71a97658822ab75bea64ed8bbbd490248cd72"
+path = "site/assets/baseline/logos/aiqt-touch.png"
+bytes = 5625
+sha256 = "600f0ca0d03b23eccb36670313a573644a5642277a684df5bfb5c3a684f44ec5"
 
 [[sources]]
 path = "site/development.html"
-bytes = 14677
-sha256 = "c16df5707630ccdc0e4450a6c98de69da51facf271be662b2f53f5feb62fa949"
+bytes = 14359
+sha256 = "d854908193c51cd9bbaa1bcc21791b951ed077b20f387c8f82c5d0e973d614bb"
 
 [[sources]]
-path = "site/disclosure.html"
-bytes = 17593
-sha256 = "7eef97107b9fc25383dcb9b0e87cb187a3177c17f2dbf11fadc17bb562494f60"
+path = "site/disclosure/index.html"
+bytes = 19315
+sha256 = "5b8a95ccfd13f17a97cde833e166d39a401e713f27b285061211e18d93df1c98"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3280,19 +3595,354 @@ bytes = 404567
 sha256 = "e5760448ade9fc0d5f59b9a6761e07f5e0e122157379ae7fcc0aa1fc59f0d0c2"
 
 [[sources]]
+path = "site/draft-src/404.toml"
+bytes = 521
+sha256 = "856bc0a179a007b2e133273b49451104157c187351acae1edb5b68c35a9e97cf"
+
+[[sources]]
+path = "site/draft-src/disclosure.toml"
+bytes = 13205
+sha256 = "c5696a9007cc3882d31f2504c485459f88bfa6cfd81a812ec8ddb4f86c34caa3"
+
+[[sources]]
+path = "site/draft-src/draft.toml"
+bytes = 637
+sha256 = "dba04f24a104f0f7761ebaf4ee2cd49b60fbe829e7f517b69bf7d4283c287c53"
+
+[[sources]]
+path = "site/draft-src/future.toml"
+bytes = 1404
+sha256 = "f888bc67448bd472ad96cd81b0839e8869cd2c475fde106978c26cd0958609f8"
+
+[[sources]]
+path = "site/draft-src/home.toml"
+bytes = 2857
+sha256 = "b6c52bd643fc8e4348951064e29cb977f5995959436406351e30f1c1b7f1979d"
+
+[[sources]]
+path = "site/draft-src/install-details.toml"
+bytes = 9684
+sha256 = "24cd55e0fc5cf9c638158e97d0736c05dac66d1fe28b7f7de8d6b4bb0d644aba"
+
+[[sources]]
+path = "site/draft-src/install.toml"
+bytes = 3106
+sha256 = "b99ab35b9c0511a0da016155252f30b1d3100e9cddc576388fb73b219ce81c97"
+
+[[sources]]
+path = "site/draft-src/license.toml"
+bytes = 6150
+sha256 = "3b9d623ff00cae2717f6b78c71ffe84435326789ace4ba0af7a36581caa967c1"
+
+[[sources]]
+path = "site/draft-src/mappings.toml"
+bytes = 7843
+sha256 = "8342e5e80fd3bafba32aa04908723dacf7e59e8ac7386287ef6eee243ff7f51b"
+
+[[sources]]
+path = "site/draft-src/rules.toml"
+bytes = 4062
+sha256 = "2d42d232d872eda17463889371672aeed1f1a92dcd155ff4c51b1716989b5ffe"
+
+[[sources]]
+path = "site/draft-src/standard.toml"
+bytes = 12645
+sha256 = "d08ba7eec579f657aad35de096f3d4129206754cc0e5c3a8a2a65179e8bb4a95"
+
+[[sources]]
+path = "site/draft/assets/baseline/LICENSE"
+bytes = 7048
+sha256 = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
+
+[[sources]]
+path = "site/draft/assets/baseline/NOTICE.md"
+bytes = 1242
+sha256 = "deeffb1a277a0b1f591feea15ecc10fbf4fc916cf0db07885625a288cc6e3b1e"
+
+[[sources]]
+path = "site/draft/assets/baseline/baseline.css"
+bytes = 66876
+sha256 = "8a902e09bc770744e4f1a15066a0c5ef33095d829a5dc59486a502c567dac777"
+
+[[sources]]
+path = "site/draft/assets/baseline/copy.js"
+bytes = 1337
+sha256 = "9bf99b50471889b768c795af5a4f84f526cecf7622a1f1265ca3d088b31339a4"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts.css"
+bytes = 1611
+sha256 = "a309a8ff4026a67fb5d10dea2c02e5b9ea2c1b32d4b18d7892015e038397396a"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt"
+bytes = 4442
+sha256 = "c02c0002d3bbd41a16933c162888c400469c7029f1362ca9d60d5ed20ea7d157"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2"
+bytes = 42708
+sha256 = "51acdc0e009e1d84cca6b654c4218275d8ee33dd243f3df25f7412a824a78d99"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/jetbrains-mono-LICENSE.txt"
+bytes = 4524
+sha256 = "403581b69dac5cff4079205e01c6b467e56af449ecbd7247693ddb1baafa005b"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2"
+bytes = 42964
+sha256 = "a8afa085e9ca5e53434e2ee918ba6b65c7dd4dda56509976b36591478c99d62e"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2"
+bytes = 40404
+sha256 = "18be452724bfdc236c074ca94a249a7f41a86752c7d04ab258ce9ed5651f6a7e"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/newsreader-LICENSE.txt"
+bytes = 4520
+sha256 = "26028ec4e13b650065fa525a09532176f8a668b76ff849ea01c564a7480f91e7"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2"
+bytes = 64520
+sha256 = "48bc8861b9b2ca9300747cad4fd6a3b4ac3028d364df00bd1b72097baa75e509"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2"
+bytes = 58084
+sha256 = "62981321d9a3cc7a61a73792729043703fd6112da86e8ec848bb57f088578757"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/public-sans-LICENSE.txt"
+bytes = 4503
+sha256 = "705a497c781f6463ff819abb513bb495f3fb05256f1d20321e3275813c0bafa5"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2"
+bytes = 28292
+sha256 = "16dc93252adb78785ae56a6465494f73b604b39817760ea92bd4046521bb5a35"
+
+[[sources]]
+path = "site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2"
+bytes = 26832
+sha256 = "5ed4d31c988e73b258894244f209069ebe77dc7e564861954b21198b6de90d68"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt-card.svg"
+bytes = 1181
+sha256 = "9192924345aeb6c086bc096c5e59f3bc1dbe74df06f44406be7a90520b9565aa"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt-favicon.svg"
+bytes = 540
+sha256 = "8a082befc210b86f795cecce1141ff813940652a5ecabb900214f27976352965"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt-mono.svg"
+bytes = 1152
+sha256 = "dc2718f4cf579ffe9b3e02bd4edce71c51e1c4954e915d59660964cceadc4118"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt-touch.png"
+bytes = 5625
+sha256 = "600f0ca0d03b23eccb36670313a573644a5642277a684df5bfb5c3a684f44ec5"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/aiqt.svg"
+bytes = 1171
+sha256 = "66ab34a8a0c03ef260e73cec128f53a714183cd8ba3c675969e9a04feb222781"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis-card.svg"
+bytes = 2158
+sha256 = "187d433274a30812c978b492895245ac728f6b9e3d73e17ca07504e1a9f57fb6"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis-favicon.svg"
+bytes = 774
+sha256 = "41ea619415ab55ff13aea87ddd9d1ed5cdeae6300e54501d30a70ae55560f504"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis-mono.svg"
+bytes = 1973
+sha256 = "198aa04cb150ddcee4c2130218c81e61bd52f23983903e2e16f7ec03dd7797d4"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis-touch.png"
+bytes = 6539
+sha256 = "2730c58989818670116a40a199741cb17e9635020cc6e2cca43ffec0da47d0e2"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/auditthis.svg"
+bytes = 2148
+sha256 = "0f2fb19cd2917e8d39e57c08172987bbc72ca0597a096d892aaed44ff5374572"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage-card.svg"
+bytes = 1702
+sha256 = "ace7ce40a3bd16f66e136739853dd81fe0f8058412580cacf8af5948da773751"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage-favicon.svg"
+bytes = 618
+sha256 = "3ebe565b9e5d7ec0eef1ae7092f92cafa56985fcca31a3499abc6fda23b1fa1d"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage-mono.svg"
+bytes = 2096
+sha256 = "3d9c927bbe57ed53c724da4c24eae84682878d06b693188059c4a6a8d70bad1d"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage-touch.png"
+bytes = 6138
+sha256 = "b75fdf0780b168595b01dda57185bce0778e09d1093739be4b8c8239c722957e"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/cleanlanguage.svg"
+bytes = 1692
+sha256 = "285c37c1d77bc24206e31c3eb99837a79ba79f6c16b4ccbd7470f1fbfc58f985"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary-card.svg"
+bytes = 1961
+sha256 = "6c8add330f2a99263df464055fdd6635c0163ba850f2c2572152d1aa41a5884b"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary-favicon.svg"
+bytes = 675
+sha256 = "f1fe54a61a9c75d5e588bea38c7378cd397eaf7466d32642bf2f283df1d39588"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary-mono.svg"
+bytes = 1704
+sha256 = "3a5495b7d810fc95ddffef3dcc9a03c1e7751bf370c93940b9118e79a2c0db90"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary-touch.png"
+bytes = 5288
+sha256 = "4b191cd0f40bd836d8e0e6c254ccfd7460fa5c1f33853853e4f61de50ce0d9ca"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/grclibrary.svg"
+bytes = 1951
+sha256 = "8ad4d338a68ce7afc781c02be91ee7e87ce464d44d0ed56eb10d5cddf80b45f8"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles-card.svg"
+bytes = 2741
+sha256 = "1b605de22dc5b2f8a86fe82c58a0e22092ea3c5fc2c566e9b88f2f2617ab61ef"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles-favicon.svg"
+bytes = 691
+sha256 = "e48c0de54ea7f31ffe5af118a803791fc5e4b469143bdcf80261944b77e3c17a"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles-mono.svg"
+bytes = 3091
+sha256 = "3886f2eec2739e0dcaf4e6e9c02b67be142d63ab7ccd3f5626e1d15d7ea995eb"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles-touch.png"
+bytes = 5292
+sha256 = "f55098b6da69f606b347f53553f59fdc8d3275ade45793a562a6bff767b1b2f3"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/opfiles.svg"
+bytes = 2731
+sha256 = "f294e493b3ad949b72e8f25500a507fa8f47e41f58247904f44b0434637d4f0c"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig-card.svg"
+bytes = 1911
+sha256 = "21f74d06b216d72d1e8d483a444d3e439847ede8e523427c147ba2ba59cd553e"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig-favicon.svg"
+bytes = 555
+sha256 = "526ca1f3606625306c4876bf8fe6ba5af86e87f622729cf003ef60949e26ccbd"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig-mono.svg"
+bytes = 1924
+sha256 = "5fd490079642b41ab12863bc1692e5481a737cc4f8f764319dd31f13a2037b86"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig-touch.png"
+bytes = 5758
+sha256 = "5897da9f6f9a556358584faee1d33b210a96de56b7ef6177d32a5bd940f0c0c7"
+
+[[sources]]
+path = "site/draft/assets/baseline/logos/secureconfig.svg"
+bytes = 1901
+sha256 = "a74c1604acb4032e763afe0cf0a9ed9b4e5f4bdb76790d24a3de16a48eda5c1b"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/NOTICE.md"
+bytes = 2892
+sha256 = "b39a747fb9f73ec9373bd2329060af372e14185fcdc7f91fa67ea2cda3b6dd20"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/github-invertocat-black.svg"
+bytes = 1559
+sha256 = "693d7abe6f899646cc2e96856723b45e95f71885a54910b2749f6decdf7e1ee1"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/github-invertocat-white.svg"
+bytes = 1559
+sha256 = "ccd84c89b1056345608fc3489357f8acc7397e49a3cdc2d418b6c8016911d47b"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/linkedin-in-bug.png"
+bytes = 8375
+sha256 = "3c0149f26168b5fe0f43e68664abe40341a6443b3cd435d18a73e12f64f8b600"
+
+[[sources]]
+path = "site/draft/assets/baseline/marks/orcid-id.svg"
+bytes = 2016
+sha256 = "195be086656233fc1a0089086d9190d28dc6abce39c2290612d1893233e1f166"
+
+[[sources]]
+path = "site/draft/assets/baseline/palettes.css"
+bytes = 24177
+sha256 = "cf4bed49e0c3c16fcc8272acbf8263753e2f392db6dcdac96313540b0da220f2"
+
+[[sources]]
+path = "site/draft/assets/baseline/rail.js"
+bytes = 2809
+sha256 = "36535faf2df8637e694ff2a57af982b9c67c9f410f80d4dfceb193c4f2d601ca"
+
+[[sources]]
+path = "site/draft/assets/baseline/scheme.js"
+bytes = 2730
+sha256 = "39d035d986f53c987cbe92516b9a5fd499af5c7fcdda701ea896c63c45ef1634"
+
+[[sources]]
+path = "site/draft/assets/baseline/search.js"
+bytes = 10585
+sha256 = "ff39a504d988c51510be466b2ad7e5eb2edf8299eead35b4070a20ac768359bb"
+
+[[sources]]
+path = "site/draft/assets/baseline/select.js"
+bytes = 2954
+sha256 = "2c4e1f1a2cc00c49dc013fd421b16c14cdc89eb873fc57f7768be90604d4bf90"
+
+[[sources]]
+path = "site/draft/index.html"
+bytes = 5979
+sha256 = "942dd72789dd8f14f350365172b4ae4b252d8e23615791eb68222c319707cb64"
+
+[[sources]]
 path = "site/enforcement.html"
-bytes = 684603
-sha256 = "64006e846e8d6a9ebe8205854f70cd3b4c0ebcae5d17c5ce604f588b1bf585a1"
+bytes = 701298
+sha256 = "817243b44c2724e1ff3e7c937af87e690279098e2dd22ec6b97d8f0ef91195d3"
 
 [[sources]]
 path = "site/evidence.html"
-bytes = 9239
-sha256 = "e65178cebf5bd5ad74004096bb77bb69e07154b0d986060f44008b0028b998b1"
-
-[[sources]]
-path = "site/examples.html"
-bytes = 20591
-sha256 = "e0612b4b25763a20a86da9d47eb1c727e4dab1d19cb9158424ba4764d24a868d"
+bytes = 9079
+sha256 = "b0631cb97af5b065f80b3aa317758bbe752000a6b1ff5d9a54f17777e102d22a"
 
 [[sources]]
 path = "site/favicon.svg"
@@ -3300,49 +3950,59 @@ bytes = 744
 sha256 = "b58efc0e9a4fbdcfc05d18178292d32f047be4aa8bed31648fa7684c06d9dd60"
 
 [[sources]]
+path = "site/future/index.html"
+bytes = 7193
+sha256 = "1251e6f35d9b8ca72bef5cc5092e92115498eaf2dd8b72c99ef7858caf3597f3"
+
+[[sources]]
 path = "site/index.html"
-bytes = 17364
-sha256 = "3b5b6f10c4c139ad180e05502cb9b7bbca267a540ea7493f5ee1a0844e243e6d"
+bytes = 9376
+sha256 = "166c40c72854a17e3c965cd1dbfe721c86ca5ad599f4941a9277aae1cabe9be4"
 
 [[sources]]
-path = "site/install.html"
-bytes = 24273
-sha256 = "7e9e29d3a67b8a6571325fe1db672d1a6bcd56eac16efbd23a0186aeb0d4647b"
+path = "site/install/details/index.html"
+bytes = 16605
+sha256 = "c38185c1482dac143f3ee88bb0f3c1893b9543588619283c709a09af5c0dd516"
 
 [[sources]]
-path = "site/js/install.js"
-bytes = 4771
-sha256 = "2d7a781ba483087accec69cc0142ad40c4b50b90509889f043d7f23a48eb7253"
+path = "site/install/index.html"
+bytes = 8734
+sha256 = "548f6036482e180396a4e90aa26cd40af98cb12cd7d0fb75e7ce7449322124a6"
 
 [[sources]]
-path = "site/learn.html"
-bytes = 6660
-sha256 = "809e486f5de8fb67c38a1c1d5dd106b9696a562c9e17c607653cac1aed0d12fc"
+path = "site/license/index.html"
+bytes = 11716
+sha256 = "081d282610b850c8b18bf6c4e796a6ab9c0cf2345797b9d7f7a98bcdc09c05ed"
 
 [[sources]]
-path = "site/mappings.html"
-bytes = 487233
-sha256 = "78d35151c4e66fe4d9dd91444ac439b8d79f20ffa5f87a33ec8c4bb4e86d1705"
+path = "site/llms.txt"
+bytes = 2387
+sha256 = "1bb5926f7002841c2ab1b6ba63515ef002cec4f82d981d6ba7082b157b57e51d"
 
 [[sources]]
-path = "site/roadmap.html"
-bytes = 7439
-sha256 = "bc03b190cd386ad5f1542032511619726047770228edd94cb981d6684ecec773"
+path = "site/mappings/index.html"
+bytes = 432182
+sha256 = "f8cd1db45eca35d7ac75f2fc1aa964a906578b3b955932f31c6595f81713458d"
 
 [[sources]]
 path = "site/robots.txt"
-bytes = 34
-sha256 = "e6ba55a1a23472e554deec7b68202c21e911525451f1dc1c5611dfd570873a5d"
+bytes = 71
+sha256 = "fd49919e451ce851893074027b8073b76e87a4d9ba7888fa734d4d5dc970b362"
 
 [[sources]]
-path = "site/rules.html"
-bytes = 21086
-sha256 = "8a3dbc2dd4db87ee46728bae5ea8d90e1da4778481cd67b21c995300025fe000"
+path = "site/rules/index.html"
+bytes = 10515
+sha256 = "b03bc6af1046c28c83cd4a0959bfe69ce464dfe1d67e1dcbc5fcc6f5f360dc28"
 
 [[sources]]
-path = "site/standard.html"
-bytes = 9368
-sha256 = "0cbfe0d3947ccb007b79a296d05c7da33ed2b977990ef05868fabe4bc7160782"
+path = "site/sitemap.xml"
+bytes = 1305
+sha256 = "e84990647039661ef0f3ef9d81ef0be0ed9c2a9a66d4899c64a2b3a1644be696"
+
+[[sources]]
+path = "site/standard/index.html"
+bytes = 18919
+sha256 = "a45965d47f801932915ed8afdbe3d5d94db260168dbe60f0615c5b190662c7e1"
 
 [[sources]]
 path = "site/styles.css"
@@ -3350,14 +4010,9 @@ bytes = 39818
 sha256 = "3a7c8983ab9fca0e04dc69f88afef82b0ff9e533dc150c86f250aae2c3a4d3d3"
 
 [[sources]]
-path = "site/teams.html"
-bytes = 13887
-sha256 = "b92f3ad68ff7fc20fa7c9f8100b1692575471961fdbd833dd114a806c36a23e5"
-
-[[sources]]
 path = "site/tech-details.html"
-bytes = 22974
-sha256 = "6a0c94397f100fa9a467ce9bc55fd503795461bfcafa1211fab86e5458fd857d"
+bytes = 22774
+sha256 = "6a6bc010c6eaf387fca8e509c2c7f471060402c9670531121fa2e9176488e9ca"
 
 [[sources]]
 path = "site/theme.js"
@@ -3390,6 +4045,16 @@ bytes = 10632
 sha256 = "f96440610c978d5138acf597d202323a5c661f90816452c03a38b3e3bf660978"
 
 [[sources]]
+path = "tools/_input_declarations.py"
+bytes = 71262
+sha256 = "2bb76aa1921c97908b37ad4db4bfc2d96d913c58834f8c2b6bf02d6b41b86b41"
+
+[[sources]]
+path = "tools/_input_declarations_child.py"
+bytes = 2563
+sha256 = "26a3371c747fdfefde2b66126a6df4faaea5c890689347867c7b34f56db8b106"
+
+[[sources]]
 path = "tools/_load_bound.py"
 bytes = 200804
 sha256 = "e0c35587f4c6f13238f36a2ae33889ac5f179e84769f9b016061c63969a48503"
@@ -3413,6 +4078,11 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 path = "tools/_standards.py"
 bytes = 55753
 sha256 = "621f5ab2c54599d742cbe291204672bc9935ec5127b8d77f7a825996e7bc0b47"
+
+[[sources]]
+path = "tools/_template_pages.py"
+bytes = 2862
+sha256 = "792211660bff5157deae6f7203bb5a5cc77ea653a2b9d5ee3553ec06b0702d03"
 
 [[sources]]
 path = "tools/_walk.py"
@@ -3445,14 +4115,19 @@ bytes = 26351
 sha256 = "670497debf8f21b516b24f4d4647f9ac0f2b165a7cd930f7a5d67e3c8f7b5ed0"
 
 [[sources]]
+path = "tools/check_baseline_pin.py"
+bytes = 47829
+sha256 = "e79aff5679466a9ea6b5e8022e93158cf8e3979b8cc1e7b00a6942e0bca86703"
+
+[[sources]]
 path = "tools/check_branch_root.py"
-bytes = 29611
-sha256 = "8e1c6b93ccceb818cb6ccc411c8945591c1ab34d187ec38b3607fdee17ceece9"
+bytes = 92920
+sha256 = "9ec3224a7e8f517b357ab6738f82a4ce41a9bca6fcba66c3194b3a9157ff9ce0"
 
 [[sources]]
 path = "tools/check_brief_capability.py"
-bytes = 385461
-sha256 = "a29289638b321a117996804ac51588beaa9a91cbd034bc9bb02840bebd1b7cd5"
+bytes = 467983
+sha256 = "f1f93f0537417fa191bf33dea22e426c2a6988676d906e9450c0b88d68b367d4"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
@@ -3461,13 +4136,13 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 212416
-sha256 = "03b35fefdb48facfc5be542dde1ee60e0669c3a4f804be0f0fe2eb1cf5b06c98"
+bytes = 218944
+sha256 = "fc5ad18d98b7cbfa51272aa4f5566f13526f6b2728b83ca07a91974679df9675"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 440666
-sha256 = "8c0ba6418f3590337de28c467131841612026b992e3a89009b1d7fc8117086e7"
+bytes = 465207
+sha256 = "ce070d61a381d0c1c78c7ca43ae40ef1a80bb501d7735d89646c5aa1c6ce01c1"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -3501,8 +4176,8 @@ sha256 = "752660aa80ae6cb147fef22c31d97084947df740172afe97ef9d0db391c25f3e"
 
 [[sources]]
 path = "tools/check_footer.py"
-bytes = 73473
-sha256 = "ae247523c96924dec2827bbd7cb29e6e668bb5124e8b719521df96a8c5d7fbd9"
+bytes = 110991
+sha256 = "86cfa0e2453c22a9887cc47ee6eded2d2774a32fc3e47b8e886a863ab26bd9b2"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
@@ -3520,24 +4195,24 @@ bytes = 55773
 sha256 = "034c0c5acd6ebf7916e7c72ae184e86d0a70ea1baafc93cb86015461fd18f2d8"
 
 [[sources]]
+path = "tools/check_headers.py"
+bytes = 32132
+sha256 = "7de00bde82268e3d13fe503a84ccbcbc1042cb96e9d91df6cd0781bee044b841"
+
+[[sources]]
 path = "tools/check_hooks_preview.py"
 bytes = 49992
 sha256 = "8dfc2f59805c973c295196b7bf618cb6c938da109e7a0fc3544449a8ab99fc49"
 
 [[sources]]
-path = "tools/check_install_page.py"
-bytes = 36040
-sha256 = "8fe9b1d1b5f81ae00c8451bb5a5d5bcc9577626b87cf8cca8516502e4e64f67b"
-
-[[sources]]
 path = "tools/check_instruction_budget.py"
-bytes = 218205
-sha256 = "07ae345c9a00855f6f2ad3cfef14e1bece69ed0852a53d2d9656cf8abaa8942e"
+bytes = 224926
+sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 230734
-sha256 = "1aa473a81111e35ce4b87455014b220aa1cabedd38c2c156a0d36614b1e2059d"
+bytes = 239507
+sha256 = "fd606702f9b49af5ec849d5b0623be38231ab001fdea206a2be0ffc97eea2005"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -3591,8 +4266,8 @@ sha256 = "70cfd07cbabd684ff0a8f009d81ba5582bcb2643f84fe1e8b6c739d455118e78"
 
 [[sources]]
 path = "tools/check_opf_declaration.py"
-bytes = 135144
-sha256 = "2e1316f34e8b5f8de27163b577664a90c3031df37817307c9d3f614dd437f895"
+bytes = 135119
+sha256 = "92a99c73a8c2d49ef7cbc7275421d52e143ba0d7671a6324647ceb114c952d57"
 
 [[sources]]
 path = "tools/check_opf_enforce_platforms.py"
@@ -3616,13 +4291,13 @@ sha256 = "ec1cf77885f467ad74e94587104a53d2460b907802225a47ba5e6991f9701a79"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 264351
-sha256 = "eac06e9e10fb9351ad7c060a0a29b0baf703d7a87a71b9c26a4ea70d4f1e5d0c"
+bytes = 279305
+sha256 = "e49d075bd5be12345247cb37af21435ab85a7b831c83857e69213c951e2002ce"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
-bytes = 266653
-sha256 = "0e28c1d2af11f64718c2f74ae527f574eb57c27d5461ef30dabb15998bbfcf20"
+bytes = 270363
+sha256 = "770c60a0329ec269b2fc9eafbdc51006815b7b809102e93a9bc341a53f7c7aa6"
 
 [[sources]]
 path = "tools/check_python_launcher_isolation.py"
@@ -3641,8 +4316,8 @@ sha256 = "ddd59f0b7cd9ab298f97c57a029ae45d860bfb838099a9d9e85028c7629604d3"
 
 [[sources]]
 path = "tools/check_reference_facts.py"
-bytes = 207948
-sha256 = "638270cdb398210a9aa8a031f0ac8cee6eab0cd9519f43edcbb375e473054807"
+bytes = 211938
+sha256 = "afa71f83ee44292d03653809bfe3875af246e4975d938a142ced11e796f76465"
 
 [[sources]]
 path = "tools/check_release_build.py"
@@ -3661,8 +4336,8 @@ sha256 = "3a6a6f2242c4967cd9428cc3330e207b084e2abd7fcab9c300964fb0b772da63"
 
 [[sources]]
 path = "tools/check_relied_exit_pipes.py"
-bytes = 217682
-sha256 = "8432b91994571a4d2e8a41007d84d32b24990b15c772a134449a7b3cd57440a3"
+bytes = 269049
+sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -3675,19 +4350,29 @@ bytes = 69413
 sha256 = "853c49e22dc8bcd1a7f8457ce16be36c558d717f5e101261abec730fe7fe97bd"
 
 [[sources]]
+path = "tools/check_security_txt.py"
+bytes = 15851
+sha256 = "3421fe6941ea1cf9dbf1cea5fa9f96fda6c643ffd18ed1c014e2ab4853a0d04a"
+
+[[sources]]
 path = "tools/check_selftest_execution.py"
 bytes = 158431
 sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_site.py"
-bytes = 22339
-sha256 = "e8b76e12aea5b311603589c8da51cd343988e61d847e13a0215c866cd497dd56"
+bytes = 92224
+sha256 = "b31c386b66c27d8bfa0526d29d756d81ba0e466f0cc426795b124bb371be1060"
 
 [[sources]]
 path = "tools/check_site_versions.py"
 bytes = 22186
 sha256 = "1175d7eaddb28a6c59696b2ef6501b576ce1c92fd21d35507ec5d10912be411f"
+
+[[sources]]
+path = "tools/check_sitemap.py"
+bytes = 23332
+sha256 = "250fe7e3c86bc5ab7da725b90290f26ed5b1aadc9a4b11544de64bcb96cc103f"
 
 [[sources]]
 path = "tools/check_sized_instructions.py"
@@ -3706,8 +4391,8 @@ sha256 = "7422a69b4ce6513111622aa77115546fa1b82883c1dee2e3fdc7d9a52e9c9579"
 
 [[sources]]
 path = "tools/check_verifier_delivery.py"
-bytes = 241114
-sha256 = "2e93c49c158cac221c278d351550f504ebf4cf5930f0fe8eb6084581cc8970fb"
+bytes = 265105
+sha256 = "5085bc596addf315b6aa33d3dd7b150d8e1f54bdb444eb6057fb0d8806590a0b"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"
@@ -3721,8 +4406,13 @@ sha256 = "7a1d4b43ed1953ae2efb555354f5e2f1661a9fa47ed83459a071abfc0c3f7c75"
 
 [[sources]]
 path = "tools/ci-status.sh"
-bytes = 96172
-sha256 = "0eb34c0b00ca261d6a9a242df1edf8f7b6cbcbb3e416a2cea02581d4296cde3a"
+bytes = 103007
+sha256 = "fdd61f58fb504cc82fac35ba74f65ce87c45d2e0e2d0db40eb1614267cc51b0c"
+
+[[sources]]
+path = "tools/ci_site_scope.py"
+bytes = 58719
+sha256 = "5c11ec76c34975264d4070560859c8d77d451af47eb2ca655cb24a5a6d25b94d"
 
 [[sources]]
 path = "tools/conformance.py"
@@ -3771,8 +4461,13 @@ sha256 = "70246325789acca1a97298fcfb3fd16a0e610d051390a527cb380d3304dbeb71"
 
 [[sources]]
 path = "tools/gen_disclosure.py"
-bytes = 31140
-sha256 = "ee37d7b4db8fb441ddb3fb07e4003c94a5b36124e9714bca2f84ad4e7bb1b199"
+bytes = 28424
+sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
+
+[[sources]]
+path = "tools/gen_draft_site.py"
+bytes = 162114
+sha256 = "f00f4a8ee1266f64b2893e12d6dc7c118925871f01e5c9740d10554f70e08d04"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
@@ -3800,19 +4495,14 @@ bytes = 256515
 sha256 = "3ce2e5984ce55f0d589ce0a3ff1f045ee02b61c44f40fdbbbfa0e417afd9cf8b"
 
 [[sources]]
-path = "tools/gen_install.py"
-bytes = 12239
-sha256 = "686bd14a80481d924639c34e2350c654395ab3ad24aecaa03763b3a8a701a38d"
-
-[[sources]]
 path = "tools/gen_manifest.py"
 bytes = 102020
 sha256 = "4f507211e5fa3e31f25e012072f6a834d433137bf66a164a5963d5f071b901c2"
 
 [[sources]]
 path = "tools/gen_mappings.py"
-bytes = 31183
-sha256 = "45b0a4ec64083f496fba7bf051c1f5eac3bf5207aa4ed901d9bfe4947f3292c6"
+bytes = 29399
+sha256 = "8b8d3d77b5269703cb578bd72aa60ef75464dce5f4cdc6fac17709eaafe8fec0"
 
 [[sources]]
 path = "tools/gen_notice.py"
@@ -3831,8 +4521,8 @@ sha256 = "54f698d13acd59da703a713a2dc68658bf145fe57f718e35181b07dabb64c8e2"
 
 [[sources]]
 path = "tools/gen_roadmap.py"
-bytes = 3842
-sha256 = "c59e2c19b2cb65c877d9600bd688f1e6984146f0145dad92cb559aa863978ba2"
+bytes = 2479
+sha256 = "ae2ed51a4df01f32279b8742a630036ad795e5694baeec217ee93eb84a943b47"
 
 [[sources]]
 path = "tools/gen_rules.py"
@@ -3846,13 +4536,13 @@ sha256 = "5765bfa41902a4d9455c44b1ad0ddba692333fed3ff2c6704230cd1dc360d46b"
 
 [[sources]]
 path = "tools/gen_site.py"
-bytes = 79177
-sha256 = "21718709006069468838902fc670014cc3421f76c76d8119ffd6567be7537717"
+bytes = 78200
+sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 135901
-sha256 = "4de6e2f03054de6c56e13ebd3ddd69457a8829ef56bd90db731977ba25bec00e"
+bytes = 135263
+sha256 = "d697c77a64b2f505bea792b791018e7043affd5b8674bbfee899f74c80049344"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"
@@ -3911,8 +4601,8 @@ sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 28243
-sha256 = "d1abc34f1bf8fdb2cb5b25462d7f9c15a57820d6ee2bfaac1eb2a44845086bcc"
+bytes = 29250
+sha256 = "d9976c36b4011f452b237e0e427f667dd3f3efd7c78c4f6f701bb50c07f39ada"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -3921,23 +4611,23 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2100609
-sha256 = "dbd27322c775afe7fa9dfc9062c9828c186338fa52f8ba6e3f2d6ef2f3743935"
+bytes = 2126695
+sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 189427
-sha256 = "345b744eaa6ac15eb73b23faccc7bc2af857555ab047908e4863ce5edef7d50d"
+bytes = 215040
+sha256 = "849fb4a1c8527457beb85ad1046b66f7fea094c12ab6720975d9fe6c5d23c7a9"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
-bytes = 196080
-sha256 = "8d11b8cd543f2ca5da0fa0788d05b476a94635c9919df4e66ff8a19affbc7caa"
+bytes = 225021
+sha256 = "541dd76db02d8933cde43260fbfb48af6baf5f418e923dd5245c4eb139b5785c"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"
-bytes = 455822
-sha256 = "cc51377744a6c1c849eccf728daf84c7ae29af43c19c48335a48d3d1f206cff4"
+bytes = 459288
+sha256 = "420cf32fa183ade14a2eb81d58dbe8162f2d7e9c4027f5ea16f205c5a2ef6e6a"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_combined.py"
@@ -3946,8 +4636,8 @@ sha256 = "a24680b1c642a5477f9c0a1bb04e50a421a40411d1a4e3251534ab69af1d50ae"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_malformed.py"
-bytes = 7809
-sha256 = "238d257ca5634d105ec1fdd443c05255603174635e9d46d79bc1ddebfa776ea3"
+bytes = 7853
+sha256 = "1afb0a2cda984296a85f4a1fd4e96bfe213d38ebd9f5d5a0b4dc760603bf7358"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_config_system.py"
@@ -3956,8 +4646,8 @@ sha256 = "99ab55b196362e770f00811e84c2a9f962c1d1ea1d7f871169ca2464d0f84d67"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env_core.py"
-bytes = 195385
-sha256 = "599f7680b223cff53e514d1ab340232635b603e34808615a1d49a6c758d1bca5"
+bytes = 195384
+sha256 = "c64cde71986a9161bf589954f2b6b6aaf73513324ecb9072f332db99e4850ea2"
 
 [[sources]]
 path = "tools/selftest_opf_render.py"
@@ -3966,8 +4656,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1119339
-sha256 = "6ddcf87c61c33f711b89431ded6452348bd89a0ef5abc5b0dc9caf9d18b68b53"
+bytes = 1141496
+sha256 = "a3f874ef96cb6d11cef6a2f57ac717695d11102fabd953cc3ebd3ab46946b49d"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
@@ -3976,8 +4666,8 @@ sha256 = "9159f0c51f6269626c2c446b4db76977b6d5fe84bc9cfe4cd9df50bafc6944f0"
 
 [[sources]]
 path = "tools/tomllib_parse_sites.toml"
-bytes = 28758
-sha256 = "f9708f658fea73201f4ed4c7e18f808c1657d5373ed694391fc7c6b04f99ea11"
+bytes = 29328
+sha256 = "c9e8abe333da25696df83313bb92188b8b1d710f190a7af55d81d6cae9501a5d"
 
 [[artifacts]]
 artifact-id = "claude:.claude/RULES-INDEX.md"
@@ -4097,7 +4787,7 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
 path = ".claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
 kind = "file"
-sha256 = "f3ceb565910c155b18735a542cf32070241cfa0215acffc37cd88a6689be37ee"
+sha256 = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
@@ -4247,7 +4937,7 @@ sha256 = "11fb788e9b4da6deb19b0e2ccde54822a3dd084c9044a94c44acc4d189ad9e3e"
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-change-carries-check.md"
 path = ".claude/rules/aiqt/10-QUALI-change-carries-check.md"
 kind = "file"
-sha256 = "f0d64dd9542cc5c544853576120c7591f52a91d70c6838d609f02cc3cd87eb1f"
+sha256 = "44b17524652d304cf05d59544ff90c35ce9a8de84a541b60863f7e6d5d44a143"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-compatibility-or-migration.md"
@@ -4901,7 +5591,7 @@ sha256 = "39450a642d366c83c20ca4e9d345afb163a2e76742bf758cbf11285f4866464d"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
 kind = "file"
-sha256 = "ab6c217f51f55eff350fdc6bce64b821d28beae71e91fccc2ddbc80bd1665065"
+sha256 = "b6a7eb197c245c08294d318df231ca38472891f91266cf844d2577f1c8208602"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-anything-wrong-fixed-first.mdc"
@@ -5051,7 +5741,7 @@ sha256 = "868392342c7c5a916cf0db183a6b0c952ddf13618eef7fb592352add2be1ad01"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-change-carries-check.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-change-carries-check.mdc"
 kind = "file"
-sha256 = "4fc82e69ee6af859cdc754921c29e7a17e40bc35095a41abc1121e67d5d03dcf"
+sha256 = "cf695e1c9858ef5c0c6d7db11dba130c221291e2f4506732a5539424e830857c"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-compatibility-or-migration.mdc"
@@ -5591,13 +6281,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "9c29bdebdb607d3e5aedb9504f1f9dddbb26d3a2ca2fa32527727097c367ff55"
+sha256 = "691af95f3c9d4027588d596789171785f5946b2fec5bf8df820a4c2e2dba16b1"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "5e6f0fa2f401c44d3ff7040a5c3bf547147a8e46e661aea97937f905a18c7664"
+sha256 = "4bf8d8ab972164cd9a26d3ac433eb1e7ccc834d1319c82e8e15b69a52311ab7b"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -5610,7 +6300,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "b46e1a9688af272eb75d27d761fbd9e7b092089e5bf7699de60b9b3e4535ceca"
+sha256 = "1727df6305d9d62224d8c9c1836adbc02874a02e3f5cf8458d26947a150ae593"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
