@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" class="site-aiqt" data-scheme="light">
+<html lang="en" class="site-aiqt" data-scheme="dark">
 <head>
 <meta charset="utf-8">
 <title>AIQT.ai card</title>
@@ -8,13 +8,47 @@
 <link rel="stylesheet" href="card.css">
 </head>
 <body>
-<main class="card">
-<img src="../../site/draft/assets/baseline/logos/aiqt-card.svg" alt="">
-<div>
-<p class="name">AIQT<span class="tld">.ai</span></p>
+<main class="safe">
+<div class="row">
+<div class="text">
+<h1 class="name">AIQT<span class="tld">.ai</span></h1>
 <span class="rule"></span>
-<p class="tagline">Rules your AI follows. Controls that catch what slips.</p>
+<div class="tagline">
+<p>Rules your AI follows.</p>
+<p>Controls that catch what slips.</p>
+</div>
+<p class="sub">You cannot tell from the tone whether an assistant knows or is guessing.</p>
+</div>
+<div class="art"><img src="../../site/draft/assets/baseline/logos/aiqt-card.svg" alt=""></div>
 </div>
 </main>
+<script>
+(function () {
+  var run = function () {
+  var max = 592;
+  var name = document.querySelector(".name");
+  var size = 112;
+  while (name.getBoundingClientRect().width > max && size > 60) {
+    size -= 1;
+    name.style.fontSize = size + "px";
+  }
+  document.querySelector(".rule").style.width = Math.round(name.getBoundingClientRect().width) + "px";
+  var lines = Array.prototype.slice.call(document.querySelectorAll(".tagline p"));
+  var widest = function () {
+    return Math.max.apply(null, lines.map(function (p) { return p.getBoundingClientRect().width; }));
+  };
+  var fit = 48;
+  while (widest() > max && fit > 20) {
+    fit -= 1;
+    lines.forEach(function (p) { p.style.fontSize = fit + "px"; });
+  }
+  };
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(run);
+  } else {
+    run();
+  }
+})();
+</script>
 </body>
 </html>

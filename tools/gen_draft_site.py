@@ -85,9 +85,10 @@ ASSETS = "assets/baseline/"
 DRAFT_DIR = "draft/"
 MAX_PAGE_BYTES = 1 << 20
 # The link-preview card each site's pages name as og:image and twitter:image: a PNG under the site's live root
-# (rendered by tools/render_og_cards.py from tools/og-cards/), at the size the link previews ask for.
-CARD = "assets/{}-og.png"
-CARD_WIDTH, CARD_HEIGHT = 1200, 627
+# (rendered by tools/render_og_cards.py from tools/og-cards/), at the path and size the whole site family
+# publishes (/images/<site>-card.png, 1200 by 630).
+CARD = "images/{}-card.png"
+CARD_WIDTH, CARD_HEIGHT = 1200, 630
 # The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,
 # before the stylesheets, with data-cfasync="false" before src and no defer or async, so a stored scheme
 # applies before the first paint; the button is the last child of header.mast, after nav.nav, and stays
@@ -206,6 +207,7 @@ OPF_KEPT_LIVE_PATHS = (
 # page, discovered by listing it), its output root, its live root (where its kept live paths must exist),
 # its base path ("/draft/" while staging, "/" at its own promotion; both sites are promoted), its asset
 # base (the URL folder holding assets/baseline/, kept at "/draft/" where the files are served), its key and name, its logo alt text,
+# its card tagline (the hero tagline its home page carries, named in the card image's alt text),
 # its kept live paths and its nav. Nav items are the site's own pages, then GitHub last; Disclosure and
 # Licence are not in the bar (the home page's About region links them). An internal nav item is emitted
 # only once its page's data file is registered, so every nav link resolves while the pages land one at a
@@ -215,6 +217,7 @@ SITES = (
     {"key": "aiqt", "name": "AIQT", "src": "site/draft-src", "root": "site", "live": "site",
      "base": "/", "assets": DRAFT_BASE, "control": True,
      "logo-alt": "A shield bearing a check mark, set on a guardrail",
+     "tagline": "Rules your AI follows. Controls that catch what slips.",
      "github": "https://github.com/jposluns/guardrails",
      "kept": KEPT_LIVE_PATHS,
      "nav": (("install/", "Install"), ("standard/", "The standard"), ("rules/", "The 5 rules"),
@@ -222,6 +225,7 @@ SITES = (
     {"key": "opfiles", "name": "OPFiles", "src": "opf/site/draft-src", "root": "opf/site",
      "live": "opf/site", "base": "/", "assets": DRAFT_BASE, "control": False,
      "logo-alt": "A machine-written source record and its generated view, joined by a drift gate",
+     "tagline": "Operational records, governed like code.",
      "github": "https://github.com/jposluns/guardrails/tree/main/opf",
      "kept": OPF_KEPT_LIVE_PATHS,
      "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Technical details"),
@@ -264,16 +268,19 @@ def _social_metas(site, page):
     """The Open Graph and Twitter card metas: the page's absolute URL and full title, the site name, and the
     site's card image with its size and alt text."""
     image = "{}/{}".format(_origin(site), CARD.format(site["key"]))
+    alt = "{}.ai: {}".format(site["name"], site["tagline"])
     values = (("property", "og:type", "website"),
               ("property", "og:title", "{} | {}.ai".format(page["title"], site["name"])),
               ("property", "og:url", _origin(site) + _page_url(site, page["rel"])),
               ("property", "og:site_name", site["name"] + ".ai"),
               ("property", "og:image", image),
+              ("property", "og:image:type", "image/png"),
               ("property", "og:image:width", str(CARD_WIDTH)),
               ("property", "og:image:height", str(CARD_HEIGHT)),
-              ("property", "og:image:alt", "{}.ai: {}".format(site["name"], site["logo-alt"])),
+              ("property", "og:image:alt", alt),
               ("name", "twitter:card", "summary_large_image"),
-              ("name", "twitter:image", image))
+              ("name", "twitter:image", image),
+              ("name", "twitter:image:alt", alt))
     return ['<meta {}="{}" content="{}">'.format(kind, key, _attr(value)) for kind, key, value in values]
 
 
@@ -1713,19 +1720,21 @@ def _self_test():
             built_site = next(s for s in built_sites if target.startswith(s["root"] + "/"))
             rel = target[len(built_site["root"]) + 1:]
             origin = {"aiqt": "https://aiqt.ai", "opfiles": "https://opfiles.ai"}[built_site["key"]]
-            card = '{}/assets/{}-og.png'.format(origin, built_site["key"])
+            card = '{}/images/{}-card.png'.format(origin, built_site["key"])
             title = re.search(r"<title>(.* \| [A-Za-z]+\.ai)</title>", built).group(1)
+            alt = '{}.ai: {}'.format(built_site["name"], _attr(built_site["tagline"]))
             wanted = ['<meta property="og:type" content="website">',
                       '<meta property="og:title" content="{}">'.format(title),
                       '<meta property="og:url" content="{}{}">'.format(origin, _page_url(built_site, rel)),
                       '<meta property="og:site_name" content="{}.ai">'.format(built_site["name"]),
                       '<meta property="og:image" content="{}">'.format(card),
+                      '<meta property="og:image:type" content="image/png">',
                       '<meta property="og:image:width" content="1200">',
-                      '<meta property="og:image:height" content="627">',
-                      '<meta property="og:image:alt" content="{}.ai: {}">'.format(
-                          built_site["name"], _attr(built_site["logo-alt"])),
+                      '<meta property="og:image:height" content="630">',
+                      '<meta property="og:image:alt" content="{}">'.format(alt),
                       '<meta name="twitter:card" content="summary_large_image">',
-                      '<meta name="twitter:image" content="{}">'.format(card)]
+                      '<meta name="twitter:image" content="{}">'.format(card),
+                      '<meta name="twitter:image:alt" content="{}">'.format(alt)]
             head = built.split("</head>", 1)[0].split("\n")
             expect("meta/card-metas " + target, all(head.count(meta) == 1 for meta in wanted), head)
     expect("meta/card-url-home", '<meta property="og:url" content="https://opfiles.ai/">'

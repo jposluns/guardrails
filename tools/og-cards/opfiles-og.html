@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" class="site-opfiles" data-scheme="light">
+<html lang="en" class="site-opfiles" data-scheme="dark">
 <head>
 <meta charset="utf-8">
 <title>OPFiles.ai card</title>
@@ -8,13 +8,47 @@
 <link rel="stylesheet" href="card.css">
 </head>
 <body>
-<main class="card">
-<img src="../../opf/site/draft/assets/baseline/logos/opfiles-card.svg" alt="">
-<div>
-<p class="name">OPFiles<span class="tld">.ai</span></p>
+<main class="safe">
+<div class="row">
+<div class="text">
+<h1 class="name">OPFiles<span class="tld">.ai</span></h1>
 <span class="rule"></span>
-<p class="tagline">Operational records, governed like code.</p>
+<div class="tagline">
+<p>Operational records,</p>
+<p>governed like code.</p>
+</div>
+<p class="sub">OPFiles keeps each record in a fixed, machine-written form and generates the readable version from it; a check, set as a required step, fails the moment the 2 disagree.</p>
+</div>
+<div class="art"><img src="../../opf/site/draft/assets/baseline/logos/opfiles-card.svg" alt=""></div>
 </div>
 </main>
+<script>
+(function () {
+  var run = function () {
+  var max = 592;
+  var name = document.querySelector(".name");
+  var size = 112;
+  while (name.getBoundingClientRect().width > max && size > 60) {
+    size -= 1;
+    name.style.fontSize = size + "px";
+  }
+  document.querySelector(".rule").style.width = Math.round(name.getBoundingClientRect().width) + "px";
+  var lines = Array.prototype.slice.call(document.querySelectorAll(".tagline p"));
+  var widest = function () {
+    return Math.max.apply(null, lines.map(function (p) { return p.getBoundingClientRect().width; }));
+  };
+  var fit = 48;
+  while (widest() > max && fit > 20) {
+    fit -= 1;
+    lines.forEach(function (p) { p.style.fontSize = fit + "px"; });
+  }
+  };
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(run);
+  } else {
+    run();
+  }
+})();
+</script>
 </body>
 </html>

@@ -4,7 +4,7 @@ tools/og-cards/ with headless Chrome.
 
   render_og_cards.py    render every card with /usr/bin/google-chrome
 
-Each card is a 1200 by 627 PNG under its site's live root, below 1 MB; a render that gives another size or a
+Each card is a 1200 by 630 PNG under its site's live root, below 1 MB; a render that gives another size or a
 larger file is refused (exit 1) and nothing is kept. Exit 2 when Chrome cannot be started.
 """
 import sys
@@ -30,12 +30,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CHROME = "/usr/bin/google-chrome"
-WIDTH, HEIGHT = 1200, 627
+WIDTH, HEIGHT = 1200, 630
 MAX_BYTES = 1 << 20
 # (composition under tools/og-cards/, card path under the repository root)
 CARDS = (
-    ("aiqt-og.html", "site/assets/aiqt-og.png"),
-    ("opfiles-og.html", "opf/site/assets/opfiles-og.png"),
+    ("aiqt-og.html", "site/images/aiqt-card.png"),
+    ("opfiles-og.html", "opf/site/images/opfiles-card.png"),
 )
 
 

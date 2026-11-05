@@ -532,7 +532,6 @@ opf/site/_redirects text eol=lf
 opf/site/adopt.md text eol=lf
 opf/site/adopt/index.html text eol=lf
 opf/site/assets/baseline/logos/opfiles-touch.png binary
-opf/site/assets/opfiles-og.png binary
 opf/site/core-files/index.html text eol=lf
 opf/site/disclosure/index.html text eol=lf
 opf/site/draft-src/404.toml text eol=lf
@@ -601,6 +600,7 @@ opf/site/draft/assets/baseline/scheme.js text eol=lf
 opf/site/draft/assets/baseline/search.js text eol=lf
 opf/site/draft/assets/baseline/select.js text eol=lf
 opf/site/draft/index.html text eol=lf
+opf/site/images/opfiles-card.png binary
 opf/site/index.html text eol=lf
 opf/site/license/index.html text eol=lf
 opf/site/llms.txt text eol=lf
@@ -708,7 +708,6 @@ site/.well-known/security.txt text eol=lf
 site/404.html text eol=lf
 site/_headers text eol=lf
 site/_redirects text eol=lf
-site/assets/aiqt-og.png binary
 site/assets/baseline/logos/aiqt-touch.png binary
 site/development.html text eol=lf
 site/disclosure/index.html text eol=lf
@@ -795,6 +794,7 @@ site/enforcement.html text eol=lf
 site/evidence.html text eol=lf
 site/favicon.svg text eol=lf
 site/future/index.html text eol=lf
+site/images/aiqt-card.png binary
 site/index.html text eol=lf
 site/install/details/index.html text eol=lf
 site/install/index.html text eol=lf

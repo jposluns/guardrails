@@ -1,26 +1,65 @@
-/* The 1200 by 627 link-preview card: the site's card artwork beside its name and tagline, on the site's
-   light palette (palettes.css), rendered by tools/render_og_cards.py. */
+/* The 1200 by 630 link-preview card, in the family style of the other posluns.ca sites: a dark navy
+   ground with a soft radial glow in the site's own hue, the wordmark (name in the site's dark-scheme
+   brand token, ".ai" in the family gold) over a gold rule as wide as the wordmark, two bold white
+   tagline lines and a lighter supporting line on the left, and the site's card artwork on the right.
+   The site hue comes from palettes.css (data-scheme="dark" on the composition's html element), the
+   fitted wordmark and tagline sizes from the inline script in each composition, and the PNG from
+   tools/render_og_cards.py. */
 html, body { margin: 0; padding: 0; }
 body {
+  position: relative;
   width: 1200px;
-  height: 627px;
+  height: 630px;
   overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Public Sans", sans-serif;
+  background:
+    radial-gradient(900px 620px at 1040px 560px, color-mix(in srgb, var(--brand) 40%, transparent), transparent 60%),
+    radial-gradient(700px 500px at 120px 60px, rgba(41, 64, 102, 0.7), transparent 60%),
+    #0b1730;
+  color: #fff;
+  font-family: "Public Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-.card {
-  box-sizing: border-box;
+.safe {
+  position: absolute;
+  left: 120px;
+  top: 75px;
+  width: 960px;
+  height: 480px;
   display: flex;
-  align-items: center;
-  gap: 56px;
-  width: 1200px;
-  height: 627px;
-  padding: 0 88px 16px;
-  border-bottom: 16px solid var(--brand);
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
 }
-.card img { width: 420px; height: 420px; flex: none; }
-.name { margin: 0; font-size: 104px; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
-.tld { color: var(--accent); }
-.rule { display: block; width: 120px; height: 8px; margin: 32px 0; background: var(--brand); }
-.tagline { margin: 0; font-family: "Newsreader", serif; font-size: 46px; line-height: 1.2; }
+.row { display: flex; align-items: center; justify-content: space-between; }
+.text { display: flex; flex-direction: column; align-items: flex-start; gap: 16px; width: 592px; }
+.name {
+  margin: 0;
+  font-size: 112px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  text-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  color: var(--brand);
+  white-space: nowrap;
+}
+.tld { color: #fbbf24; }
+.rule { display: block; height: 6px; border-radius: 3px; margin: 2px 0; background: #fbbf24; }
+.tagline { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.tagline p {
+  margin: 0;
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.015em;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+}
+.sub {
+  margin: 0;
+  font-size: 27px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: rgba(255, 255, 255, 0.88);
+  text-wrap: balance;
+}
+.art { display: flex; align-items: center; justify-content: flex-end; width: 340px; height: 430px; flex: none; }
+.art img { max-width: 340px; max-height: 430px; filter: drop-shadow(0 18px 28px rgba(0, 0, 0, 0.45)); }
