@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "24d37b1cfd0251b190164c81bfa8e98c83113c9a7d5d7e1a942f8846ab233901"
+tree-sha256 = "f95bede468729dc9d0b95da7dff71af1a4afc44dddb0873290f9c2831129144a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -42,7 +42,7 @@ sha256 = "15d8d9d85050558c0be30c9b5b591818f94d9a2aca057db681aa3ff0ba069c75"
 [[sources]]
 path = ".aiqt/core/clauses.toml"
 bytes = 313958
-sha256 = "40298d251d99ecc7ce15e82b6fd0dcdfbfc24b5264a75627a43aa6cf4d65d06b"
+sha256 = "b7e2d7fe1e1298d19b246e40b1a7b75e92e2a77dd2234d4df91c5cf25026fddf"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -452,7 +452,7 @@ sha256 = "aa32523af6c8b44dd81bf8ac87fec8c5265d817a035d8df3130d6333f680823f"
 [[sources]]
 path = ".aiqt/core/rules/quali-surface-counterproductive-instructions.md"
 bytes = 615
-sha256 = "719222158b013eeb041ea718feea6dc909c665417eed79ac67b8d0ec0d6e4533"
+sha256 = "c9833d62db95e68321edc4e7766c02222fe31b01ceaf7ba7fc6b632caed641f7"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-test-hermeticity.md"
@@ -482,7 +482,7 @@ sha256 = "3887d72029fda00c8045e62f17f1400a012d3209d4dadd08a9a616c8178639d4"
 [[sources]]
 path = ".aiqt/core/rules/security-secc-data-boundary.md"
 bytes = 712
-sha256 = "aaf4d13f27000bc88021c0c3dbcaf9d523e9f97a487a7cf4f3cf1e0667726cc9"
+sha256 = "27f7ee1833bd5d0f21699ea9c1c4f7b8e93ad448861b509f08154ab5cb37ceca"
 
 [[sources]]
 path = ".aiqt/core/rules/security-secc-egress-destinations.md"
@@ -612,7 +612,7 @@ sha256 = "735f5fe67281bc175484c7cee60bbd4be18a8b79d9ecad45c83f64943ea32106"
 [[sources]]
 path = ".aiqt/core/rules/security-seci-poisoning-resistance.md"
 bytes = 1118
-sha256 = "48590dd48d9c95cae0ec7807fcedce6e80b16e8a610ff39ee3423f79a4b45160"
+sha256 = "bba736af77e64df4e79104edbd84631c97db5bce09103f9f7ae1da741e9c332b"
 
 [[sources]]
 path = ".aiqt/core/rules/security-seci-prefer-removing-a-path.md"
@@ -1257,7 +1257,7 @@ sha256 = "aa32523af6c8b44dd81bf8ac87fec8c5265d817a035d8df3130d6333f680823f"
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
 bytes = 615
-sha256 = "719222158b013eeb041ea718feea6dc909c665417eed79ac67b8d0ec0d6e4533"
+sha256 = "c9833d62db95e68321edc4e7766c02222fe31b01ceaf7ba7fc6b632caed641f7"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-test-hermeticity.md"
@@ -1402,7 +1402,7 @@ sha256 = "3887d72029fda00c8045e62f17f1400a012d3209d4dadd08a9a616c8178639d4"
 [[sources]]
 path = ".claude/rules/security/SECC-data-boundary.md"
 bytes = 712
-sha256 = "aaf4d13f27000bc88021c0c3dbcaf9d523e9f97a487a7cf4f3cf1e0667726cc9"
+sha256 = "27f7ee1833bd5d0f21699ea9c1c4f7b8e93ad448861b509f08154ab5cb37ceca"
 
 [[sources]]
 path = ".claude/rules/security/SECC-egress-destinations.md"
@@ -1532,7 +1532,7 @@ sha256 = "735f5fe67281bc175484c7cee60bbd4be18a8b79d9ecad45c83f64943ea32106"
 [[sources]]
 path = ".claude/rules/security/SECI-poisoning-resistance.md"
 bytes = 1118
-sha256 = "48590dd48d9c95cae0ec7807fcedce6e80b16e8a610ff39ee3423f79a4b45160"
+sha256 = "bba736af77e64df4e79104edbd84631c97db5bce09103f9f7ae1da741e9c332b"
 
 [[sources]]
 path = ".claude/rules/security/SECI-prefer-removing-a-path.md"
@@ -3597,12 +3597,12 @@ sha256 = "bac47d1a3f4543cb63b8d74d99823cf93caaf303e17648c67810189d4c884702"
 [[sources]]
 path = "site/downloads/mappings.csv"
 bytes = 239654
-sha256 = "8fb1860bc0e41c2f0e48ac34368285a030cba9ab679d2118f4395396beff0f87"
+sha256 = "c2cfb3524f019f3ebb7b3d8b1ffab359b1d77b425a3d9c26748c725349aaf059"
 
 [[sources]]
 path = "site/downloads/mappings.json"
 bytes = 379393
-sha256 = "4e0ab89b78465c3825b2aa311ae97a63b1cb378b103e3e11a3d3ebb1c517fde2"
+sha256 = "e0f8bb8dda16039213a4370e6814f4d15fbfbc5fb7e0a0f690df0f0ca2cf9cdc"
 
 [[sources]]
 path = "site/draft-src/404.toml"
@@ -3992,7 +3992,7 @@ sha256 = "1bb5926f7002841c2ab1b6ba63515ef002cec4f82d981d6ba7082b157b57e51d"
 [[sources]]
 path = "site/mappings/index.html"
 bytes = 409929
-sha256 = "6619334e93c06d51c8e2a10d336c7141460612114e05e44d1caefa01311d5c3f"
+sha256 = "325d5556ca6af5f754c1c1e30cd86868e0912ce3c5fedd0a2a3663b9aa35c0e1"
 
 [[sources]]
 path = "site/robots.txt"
@@ -5051,7 +5051,7 @@ sha256 = "aa32523af6c8b44dd81bf8ac87fec8c5265d817a035d8df3130d6333f680823f"
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
 path = ".claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
 kind = "file"
-sha256 = "719222158b013eeb041ea718feea6dc909c665417eed79ac67b8d0ec0d6e4533"
+sha256 = "c9833d62db95e68321edc4e7766c02222fe31b01ceaf7ba7fc6b632caed641f7"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-test-hermeticity.md"
@@ -5225,7 +5225,7 @@ sha256 = "3887d72029fda00c8045e62f17f1400a012d3209d4dadd08a9a616c8178639d4"
 artifact-id = "rules:.claude/rules/security/SECC-data-boundary.md"
 path = ".claude/rules/security/SECC-data-boundary.md"
 kind = "file"
-sha256 = "aaf4d13f27000bc88021c0c3dbcaf9d523e9f97a487a7cf4f3cf1e0667726cc9"
+sha256 = "27f7ee1833bd5d0f21699ea9c1c4f7b8e93ad448861b509f08154ab5cb37ceca"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/security/SECC-egress-destinations.md"
@@ -5381,7 +5381,7 @@ sha256 = "735f5fe67281bc175484c7cee60bbd4be18a8b79d9ecad45c83f64943ea32106"
 artifact-id = "rules:.claude/rules/security/SECI-poisoning-resistance.md"
 path = ".claude/rules/security/SECI-poisoning-resistance.md"
 kind = "file"
-sha256 = "48590dd48d9c95cae0ec7807fcedce6e80b16e8a610ff39ee3423f79a4b45160"
+sha256 = "bba736af77e64df4e79104edbd84631c97db5bce09103f9f7ae1da741e9c332b"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/security/SECI-prefer-removing-a-path.md"
