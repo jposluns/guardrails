@@ -2188,11 +2188,17 @@ def _scan_asset_closure(root):
         if rel:
             assets.add(rel)
     # (d) each resolved same-origin asset: whole-text scan (raw) + content: injection + @import graph.
+    # The pinned template baseline (assets/baseline/ under the template asset base, byte-pinned by
+    # check_baseline_pin.py and shared by every template page) is chrome whose CSS comments legitimately
+    # carry layout vocabulary ("serve any element"), not marketing copy, so its whole-text scan keeps the
+    # release-integrity patterns and drops the guarantee-flavoured site deny-list; the content:-injection
+    # scan and the @import graph still run on it unchanged.
     for rel in sorted(assets):
         asset_path = root / "site" / rel
         text = _read_bounded(asset_path, "asset site/{}".format(rel))
         where = "site/{}".format(rel)
-        for name, snip in scan(text, site=True):
+        pinned_chrome = rel.startswith("draft/assets/baseline/")
+        for name, snip in scan(text, site=not pinned_chrome):
             findings.append("{}: overclaim [{}] -> {}".format(where, name, snip))
         if rel.endswith(".css"):
             _scan_css_content_strings(_normalize_css(text), where, findings, attr_index)

@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Generate site/<name>.html pages from docs/<name>.md sources via the shared themed shell.
+"""Generate site/<name>.html pages from docs/<name>.md sources on the shared site template shell.
 
 Single source of truth for each documentation page: a Markdown file under docs/ with a TOML frontmatter
 block (delimited by `+++` fences) carries the page's per-page metadata and content, and this generator
-composes it into site/<name>.html by substituting into docs/_shell.html. Every page shares the same
-themed head, topbar, sidebar, footer, and theme.js bootstrap; the frontmatter's `sidebar-active` slug
-marks the current-page link in the shared sidebar. This lets the docs and the site never diverge and
-lets a page migrate from hand-authored HTML to a Markdown source without changing what the site renders.
+composes it into site/<name>.html through gen_draft_site.compose_shell, the SAME shell every template
+page is built from (head, top bar, scheme button, family footer), so a docs-driven page and a template
+page can never diverge in chrome. The composed page passes the template's own refusal and link rules
+(compose_shell enforces them), so a body carrying an inline style, an `on*` attribute, a dash, or an
+external link without the new-tab attributes and hint is refused rather than shipped.
 
-Pilot scope (OPF-1 Phase 2 first-page milestone): docs/rule1.md -> site/rule1.html, byte-parity round
-trip against the pre-migration hand-authored rule1. Later PRs migrate rule2..5, then the non-rule
-pages, then the landing page hand-authored escape hatch (frontmatter `hand-authored = true`), then CI
-turns on the drift gate for the full site.
+The retired docs/_shell.html token-substitution renderer (render_page and the shell validators below)
+is kept as an in-memory component with its adversarial self-test corpus: the frontmatter parsing, the
+escaping contracts, and the bounded Markdown converter it exercises are the ones the live composition
+path still uses.
 
 Body conversion is a bounded stdlib converter, deliberately NOT a full Markdown implementation: an
 external dependency (markdown, mistune) would enter through the project's dependency-provenance gate.
@@ -122,39 +123,43 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
+import gen_draft_site  # noqa: E402  the shared site template shell every served page composes through
 
-# The gensrc registry declaration. Only the pilot page is generated today; later PRs add the other
-# docs/*.md -> site/*.html pairs, each as its own row, so the registry lists every generated page
-# individually. Consistent with how gen_skill declares its per-artefact outputs. This tuple is the
-# AUTHORITATIVE list of pages this generator produces: the `--check` path enforces every declared
-# source is present as a regular non-symlink file (so a deleted or renamed docs/*.md fails closed
-# rather than silently reading as an absent source that trips no check).
+# The gensrc registry declaration: each docs/*.md -> site/*.html pair is its own row, so the registry
+# lists every generated page individually. The shell chrome comes from gen_draft_site.compose_shell, so
+# tools/gen_draft_site.py is a source of every page. This tuple is the AUTHORITATIVE list of pages this
+# generator produces: the `--check` path enforces every declared source is present as a regular
+# non-symlink file (so a deleted or renamed docs/*.md fails closed rather than silently reading as an
+# absent source that trips no check).
 GENSRC_OUTPUTS = (
     {"target": "site/development.html", "kind": "file",
-     "sources": ("docs/_shell.html", "docs/development.md"),
+     "sources": ("tools/gen_draft_site.py", "docs/development.md"),
      "regenerate": "python3 tools/gen_site.py"},
     {"target": "site/evidence.html", "kind": "file",
-     "sources": ("docs/_shell.html", "docs/evidence.md"),
+     "sources": ("tools/gen_draft_site.py", "docs/evidence.md"),
+     "regenerate": "python3 tools/gen_site.py"},
+    {"target": "site/tech-details.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "docs/tech-details.md"),
      "regenerate": "python3 tools/gen_site.py"},
 )
 
 DOCS_DIR = "docs"
 SITE_DIR = "site"
-SHELL_REL = "docs/_shell.html"
 CONTENT_TOKEN = "{{content}}"
 FENCE = "+++"
 
-# The frontmatter fields the shell template consumes, mapped to (token, sink). A required field
+# The frontmatter fields. The template shell consumes `title` and `description` (compose_shell escapes
+# each for its sink); the other fields belong to the retired docs/_shell.html renderer and stay OPTIONAL
+# so its in-memory corpus keeps parsing, but a live page no longer carries them. A required field
 # missing from a page's frontmatter is a SchemaError (fail-closed exit 2); an unexpected key is also
 # a SchemaError so a typo cannot silently drop metadata. The sink names the HTML context the token
 # sits in: 'text' is content position (inside `<title>...</title>` or visible text); 'attr' is
 # quoted-attribute position (inside `content="..."` or `href="..."`). Each value is HTML-escaped for
 # its sink before substitution; the text sink escapes `&<>` and the attr sink additionally escapes
 # `"` and `'` so a value cannot escape its surrounding attribute quotes.
-REQUIRED_FIELDS = ("title", "description", "canonical",
-                   "og-title", "og-description", "og-url",
-                   "sidebar-active")
-OPTIONAL_FIELDS = ("hand-authored",)
+REQUIRED_FIELDS = ("title", "description")
+OPTIONAL_FIELDS = ("canonical", "og-title", "og-description", "og-url",
+                   "sidebar-active", "hand-authored")
 FIELD_TO_TOKEN = {
     "title": ("{{title}}", "text"),
     "description": ("{{description}}", "attr"),
@@ -261,12 +266,15 @@ def parse_frontmatter(fm_text, source_rel):
     for field in REQUIRED_FIELDS:
         if field not in data:
             raise SchemaError("{}: frontmatter is missing required key '{}'".format(source_rel, field))
+    for field in REQUIRED_FIELDS + OPTIONAL_FIELDS:
+        if field == "hand-authored" or field not in data:
+            continue
         if not isinstance(data[field], str):
             raise SchemaError("{}: frontmatter key '{}' must be a string".format(source_rel, field))
         _reject_controls(data[field], "frontmatter key '{}'".format(field), source_rel)
     if "hand-authored" in data and not isinstance(data["hand-authored"], bool):
         raise SchemaError("{}: frontmatter key 'hand-authored' must be a bool".format(source_rel))
-    slug = data["sidebar-active"]
+    slug = data.get("sidebar-active", "")
     if slug and slug not in SIDEBAR_SLUG_TO_HREF:
         raise SchemaError("{}: frontmatter 'sidebar-active' = {!r} is not a known sidebar slug"
                           .format(source_rel, slug))
@@ -639,7 +647,7 @@ def render_page(shell, source_text, source_rel):
     substitutions = {"content": body_html}
     for field, (token, sink) in FIELD_TO_TOKEN.items():
         name = token[2:-2]  # strip `{{` and `}}`
-        substitutions[name] = _escape_field(data[field], sink)
+        substitutions[name] = _escape_field(data.get(field, ""), sink)
 
     def repl(m):
         name = m.group(1)
@@ -651,8 +659,31 @@ def render_page(shell, source_text, source_rel):
             .format(source_rel, m.group(0)))
 
     page = _TOKEN_RE.sub(repl, shell)
-    page = _mark_active(page, data["sidebar-active"], source_rel)
+    page = _mark_active(page, data.get("sidebar-active", ""), source_rel)
     return page
+
+
+def _aiqt_site():
+    """The aiqt.ai site context from gen_draft_site.SITES, the one whose shell these pages compose."""
+    for site in gen_draft_site.SITES:
+        if site["key"] == "aiqt":
+            return site
+    raise SchemaError("gen_draft_site.SITES declares no 'aiqt' site")
+
+
+def compose_md_page(source_text, source_rel, target_rel):
+    """One site/<name>.html on the shared site template shell: the frontmatter's title and description
+    plus the converted body, served at /<name> (the extensionless URL of the target). compose_shell
+    enforces the template's refusal and link rules on the whole composed page (RefusedPage on a body
+    that breaks them); `pages=None` emits every top-bar item, the same set every registered template
+    page renders today."""
+    fm_text, body = split_frontmatter(source_text, source_rel)
+    data = parse_frontmatter(fm_text, source_rel)
+    body_html = md_to_html(body, source_rel)
+    name = target_rel.rsplit("/", 1)[-1]
+    current = "/" + name[:-len(".html")] if name.endswith(".html") else "/" + name
+    return gen_draft_site.compose_shell(_aiqt_site(), data["title"], data["description"],
+                                        current, body_html, label=source_rel)
 
 
 def _bound_under(path, root, label, root_label):
@@ -763,12 +794,14 @@ def _discover_md(docs_root, root):
     return sorted(found)
 
 
-def main(argv):
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    if "--self-test" in argv:
+        return _self_test()
     check = "--check" in argv
     root = repo_root()
     docs_root = root / DOCS_DIR
     site_root = root / SITE_DIR
-    shell_path = root / SHELL_REL
     # Reject a root directory that is itself a symlink; the resolved-path bounding rests on the pinned
     # roots being real directories.
     for name, d in ((DOCS_DIR, docs_root), (SITE_DIR, site_root)):
@@ -778,15 +811,7 @@ def main(argv):
         if not d.is_dir():
             print("error: {}/ is missing or not a directory".format(name), file=sys.stderr)
             return 2
-    if shell_path.is_symlink() or not shell_path.is_file():
-        print("error: {} is missing, not a regular file, or a symbolic link".format(SHELL_REL),
-              file=sys.stderr)
-        return 2
-    shell = _read(shell_path)
     try:
-        _validate_shell_placeholders(shell, SHELL_REL)
-        _validate_token_sinks(shell, SHELL_REL)
-        _validate_shell_sidebar(shell, SHELL_REL)
         entries = _declared_md_sources()
     except SchemaError as exc:
         print("error: {}".format(exc), file=sys.stderr)
@@ -822,8 +847,8 @@ def main(argv):
         try:
             _validate_source_path(src, source_rel, docs_root)
             _validate_target_path(target, target_rel, site_root)
-            page = render_page(shell, _read(src), source_rel)
-        except SchemaError as exc:
+            page = compose_md_page(_read(src), source_rel, target_rel)
+        except (SchemaError, gen_draft_site.RefusedPage) as exc:
             print("error: {}".format(exc), file=sys.stderr)
             return 2
         if reconcile(target, page, check, root):
@@ -1351,7 +1376,6 @@ def _self_test():
         td2 = Path(td2)
         (td2 / "docs").mkdir()
         (td2 / "site").mkdir()
-        (td2 / "docs" / "_shell.html").write_text(nav_base, encoding="utf-8")
         # Populate every docs/*.md source the live GENSRC_OUTPUTS declares, so this baseline exercises
         # the real registry and stays valid as pages are migrated in (a hardcoded single source would
         # fail closed on the next declared-but-absent page).
@@ -1472,7 +1496,60 @@ def _self_test():
     return 0
 
 
+# The child-status guard: an inline copy of the canonical guard in opf/tools/_child_status.py, which
+# tools/check_child_status_coverage.py pins this copy to by AST. This entry point's self-test reads the
+# exit status of child runs, so under an ignored SIGCHLD a failing child would read as a pass; it
+# refuses at its entry line instead, before main() runs.
+# The status the probe child exits with; any value other than 0 and the refusal exit would do.
+_CHILD_STATUS_PROBE_CODE = 77
+
+
+def _child_status_refusal():
+    """None when this process can read a child's exit status, otherwise the reason it cannot."""
+    import os
+    import signal
+    if not hasattr(signal, "SIGCHLD"):
+        return None
+    disposition = signal.getsignal(signal.SIGCHLD)
+    if disposition is not signal.SIG_DFL:
+        return ("SIGCHLD is ignored (SIG_IGN) in this process" if disposition is signal.SIG_IGN
+                else "SIGCHLD is not at its default disposition in this process")
+    if not hasattr(os, "fork"):
+        return None
+    try:
+        pid = os.fork()
+    except OSError as exc:
+        return "the child-status probe could not fork ({})".format(type(exc).__name__)
+    if pid == 0:
+        os._exit(_CHILD_STATUS_PROBE_CODE)
+    try:
+        waited, status = os.waitpid(pid, 0)
+    except ChildProcessError:
+        return "the probe child was reaped before its exit status could be read (ECHILD)"
+    except OSError as exc:
+        return "the probe child's exit status could not be read ({})".format(type(exc).__name__)
+    if waited != pid or os.waitstatus_to_exitcode(status) != _CHILD_STATUS_PROBE_CODE:
+        return "a probe child that exited {} was read back as wait status {}".format(
+            _CHILD_STATUS_PROBE_CODE, status)
+    return None
+
+
+def _child_status_refusal_exit(name):
+    """0 when a child's exit status is observable; otherwise write the named refusal and exit 2 at once
+    (os._exit, so no exit-time stream flush can replace the status)."""
+    import os
+    reason = _child_status_refusal()
+    if reason is None:
+        return 0
+    try:
+        sys.stderr.write("error: {} refuses to run: {}, so a failed child would read as a success. Nothing "
+                         "was run (cannot evaluate). Start it from a parent that leaves SIGCHLD at "
+                         "SIG_DFL.\n".format(name, reason))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
+
 if __name__ == "__main__":
-    if "--self-test" in sys.argv[1:]:
-        sys.exit(_self_test())
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(_child_status_refusal_exit("gen_site.py") or main())

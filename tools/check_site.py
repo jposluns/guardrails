@@ -378,10 +378,47 @@ def touch_icon_findings(label, page_rel, icons, page_dir, site_root, template=Fa
     return out
 
 
+# Shell-class rule: every served page carries the site template shell's root element, so no page can stay
+# on a retired shell. The rule reads every .html of a coverage root outside the folders the template
+# declaration stages drafts in (_template_pages.draft_folders); a generated template page is exempt (the
+# generator writes the element on every page it builds, under its own refusals). A page that cannot carry
+# the template shell yet is recorded in SHELL_CLASS_EXCLUSIONS with the reason it stays off it; an
+# exclusion whose reason is empty is itself a finding, so the record can never decay into a silent skip.
+SHELL_CLASS_KEYS = {"site": "aiqt", "opf/site": "opfiles"}
+SHELL_CLASS_EXCLUSIONS = {}  # {"<root>/<page path>": "why the page cannot carry the template shell yet"}
+
+
+def shell_class_findings(subdir, page_rel, label, text, template, draft_folders):
+    """Findings for one page against the shell-class rule. `page_rel` is the page's POSIX path under its
+    coverage root `subdir`, `label` names it in a finding, `template` says whether it is a generated
+    template page, and `draft_folders` holds the root's staged-draft folders."""
+    key = SHELL_CLASS_KEYS.get(subdir)
+    if key is None or template or any(page_rel.startswith(folder) for folder in draft_folders):
+        return []
+    record = "{}/{}".format(subdir, page_rel)
+    if record in SHELL_CLASS_EXCLUSIONS:
+        if not SHELL_CLASS_EXCLUSIONS[record].strip():
+            return ["{}: shell-class exclusion records no reason".format(label)]
+        return []
+    marker = '<html lang="en" class="site-{}">'.format(key)
+    if marker not in text:
+        return ["{}: not on the template shell (missing {}) and not a recorded exclusion".format(
+            label, marker)]
+    return []
+
+
+# The generated pages composed on the template shell outside the template declaration (tools/gen_site.py
+# and tools/gen_enforcement_register.py write them, through the same compose_shell every template page is
+# built from), held to the link-preview card exactly like a generated template page.
+COMPOSED_PAGES = {"site": frozenset(("development.html", "evidence.html", "tech-details.html",
+                                     "enforcement.html"))}
+
+
 # The link-preview card metas every generated template page carries (tools/gen_draft_site.py), and the
 # smallest card image the large link previews take.
-CARD_METAS = ("og:type", "og:title", "og:description", "og:url", "og:site_name", "og:image", "og:image:width",
-              "og:image:height", "og:image:alt", "twitter:card", "twitter:image")
+CARD_METAS = ("og:type", "og:title", "og:description", "og:url", "og:site_name", "og:image", "og:image:type",
+              "og:image:width", "og:image:height", "og:image:alt", "twitter:card", "twitter:title",
+              "twitter:description", "twitter:image", "twitter:image:alt")
 CARD_MIN_SIZE = (1200, 627)
 CARD_MAX_READ = 8 << 20
 
@@ -820,7 +857,8 @@ def _self_test():
         draft.mkdir(parents=True)
         (r / "opf" / "site" / "touch.png").write_bytes(b"png")
         (r / "opf" / "site" / "index.html").write_text(
-            '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/touch.png"><nav></nav>',
+            '<!doctype html><html lang="en" class="site-opfiles"><title>t</title>'
+            '<link rel="apple-touch-icon" href="/touch.png"><nav></nav>',
             encoding="utf-8")
         # These pages are not generator targets, so they are live pages and carry the touch icon.
         icon = '<link rel="apple-touch-icon" href="/touch.png">'
@@ -923,7 +961,8 @@ def _self_test():
             (r / subdir / "t.png").write_bytes(b"png")
             (r / subdir / "card.png").write_bytes(_png(1200, 627))
             (r / subdir / "index.html").write_text(
-                '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png">'
+                '<!doctype html><html lang="en" class="site-{}"><title>t</title>'
+                '<link rel="apple-touch-icon" href="/t.png">'.format(SHELL_CLASS_KEYS[subdir])
                 + _card_head(card_host[subdir]), encoding="utf-8")
         draft_page = '<!doctype html><title>t</title>' + _card_head("CARD-HOST") + '<img src="/t.png" alt="">'
         scan_cases = (
@@ -986,6 +1025,7 @@ def _self_test():
     _touch_icon_self_test(quiet)
     _card_self_test(quiet)
     _not_found_links_self_test()
+    _shell_class_self_test()
     _declaration_self_test()
     _use_staged_declaration(False)
     # The real declaration is the promoted one: the root's 404.html is a template page, a nested draft/ page
@@ -1011,6 +1051,32 @@ def _self_test():
                                       len(draft_404_cases) + len(scan_cases) + len(promoted_scan_cases),
                                       len(EXECUTED)))
     return 0
+
+
+def _shell_class_self_test():
+    """The shell-class rule: a page on the template shell passes; an old-shell page flips the rule red; a
+    recorded exclusion with a reason passes; an exclusion whose reason is empty is itself a finding."""
+    draft = frozenset(("draft/",))
+    on_shell = '<!doctype html><html lang="en" class="site-aiqt"><title>t</title>'
+    off_shell = '<!doctype html><html lang="en"><title>t</title>'
+    got = shell_class_findings("site", "a.html", "site/a.html", on_shell, False, draft)
+    check("shell-class/template-shell-page-passes", got == [], got)
+    got = shell_class_findings("site", "a.html", "site/a.html", off_shell, False, draft)
+    check("shell-class/old-shell-page-fails",
+          len(got) == 1 and "not on the template shell" in got[0], got)
+    saved = dict(SHELL_CLASS_EXCLUSIONS)
+    SHELL_CLASS_EXCLUSIONS.clear()
+    try:
+        SHELL_CLASS_EXCLUSIONS["site/a.html"] = "stays on the retired shell until its generator lands"
+        got = shell_class_findings("site", "a.html", "site/a.html", off_shell, False, draft)
+        check("shell-class/recorded-exclusion-passes", got == [], got)
+        SHELL_CLASS_EXCLUSIONS["site/a.html"] = " "
+        got = shell_class_findings("site", "a.html", "site/a.html", off_shell, False, draft)
+        check("shell-class/exclusion-without-reason-fails",
+              len(got) == 1 and "records no reason" in got[0], got)
+    finally:
+        SHELL_CLASS_EXCLUSIONS.clear()
+        SHELL_CLASS_EXCLUSIONS.update(saved)
 
 
 def _declaration_self_test():
@@ -1133,9 +1199,11 @@ def _card_head(host):
     values = (("property", "og:type", "website"), ("property", "og:title", "T"),
               ("property", "og:description", "D"), ("property", "og:url", "https://{}/".format(host)),
               ("property", "og:site_name", "S"), ("property", "og:image", image),
+              ("property", "og:image:type", "image/png"),
               ("property", "og:image:width", "1200"), ("property", "og:image:height", "627"),
               ("property", "og:image:alt", "A"), ("name", "twitter:card", "summary_large_image"),
-              ("name", "twitter:image", image))
+              ("name", "twitter:title", "T"), ("name", "twitter:description", "D"),
+              ("name", "twitter:image", image), ("name", "twitter:image:alt", "A"))
     return "".join('<meta {}="{}" content="{}">'.format(*value) for value in values)
 
 
@@ -1172,8 +1240,10 @@ def _card_self_test(quiet):
         def metas(changes=None):
             got = {"og:type": "website", "og:title": "T", "og:description": "D", "og:url": "https://aiqt.ai/",
                    "og:site_name": "AIQT.ai", "og:image": "https://aiqt.ai/assets/card.png",
+                   "og:image:type": "image/png",
                    "og:image:width": "1200", "og:image:height": "627", "og:image:alt": "A",
-                   "twitter:card": "summary_large_image", "twitter:image": "https://aiqt.ai/assets/card.png"}
+                   "twitter:card": "summary_large_image", "twitter:title": "T", "twitter:description": "D",
+                   "twitter:image": "https://aiqt.ai/assets/card.png", "twitter:image:alt": "A"}
             got.update(changes or {})
             return {key: value for key, value in got.items() if value is not None}
 
@@ -1189,11 +1259,15 @@ def _card_self_test(quiet):
                           ("og:url", "card/missing-og-url-fails"),
                           ("og:site_name", "card/missing-og-site_name-fails"),
                           ("og:image", "card/missing-og-image-fails"),
+                          ("og:image:type", "card/missing-og-image-type-fails"),
                           ("og:image:width", "card/missing-og-image-width-fails"),
                           ("og:image:height", "card/missing-og-image-height-fails"),
                           ("og:image:alt", "card/missing-og-image-alt-fails"),
                           ("twitter:card", "card/missing-twitter-card-fails"),
-                          ("twitter:image", "card/missing-twitter-image-fails")):
+                          ("twitter:title", "card/missing-twitter-title-fails"),
+                          ("twitter:description", "card/missing-twitter-description-fails"),
+                          ("twitter:image", "card/missing-twitter-image-fails"),
+                          ("twitter:image:alt", "card/missing-twitter-image-alt-fails")):
             covered.append(key)
             got = card_findings("a.html", metas({key: None}), site_root, hosts)
             check(name, len(got) == 1 and "missing or empty <meta> " + key in got[0], got)
@@ -1238,16 +1312,28 @@ def _card_self_test(quiet):
         check("card/parser-reads-metas", page.metas.get("og:image") == "https://aiqt.ai/assets/card.png"
               and page.metas.get("description") == "x", page.metas)
 
-        # A generated page is held to the card; a live page is not.
+        # A generated template page is held to the card; a composed page (COMPOSED_PAGES) is held too;
+        # a live page on the template shell outside both sets is not.
         (root / "assets" / "t.png").write_bytes(b"png")
         template = '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/assets/t.png">'
-        (root / "index.html").write_text(template + head.replace(
-            '<meta property="twitter:', '<meta name="twitter:'), encoding="utf-8")
+        card_head = head.replace('<meta property="twitter:', '<meta name="twitter:')
+        (root / "index.html").write_text(template + card_head, encoding="utf-8")
         targets = frozenset({"site/index.html"})
         check("card/scan-passes-with-card", quiet(_scan_root, base, "site", targets) == 0, None)
         (root / "index.html").write_text(template, encoding="utf-8")
         check("card/scan-reports-missing-card", quiet(_scan_root, base, "site", targets) == 1, None)
+        on_shell = ('<!doctype html><html lang="en" class="site-aiqt"><title>t</title>'
+                    '<link rel="apple-touch-icon" href="/assets/t.png">')
+        (root / "index.html").write_text(on_shell, encoding="utf-8")
         check("card/live-page-not-held", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+        composed = root / "development.html"
+        composed.write_text(on_shell + card_head, encoding="utf-8")
+        check("card/composed-page-with-card-passes", quiet(_scan_root, base, "site", frozenset()) == 0, None)
+        composed.write_text(on_shell + card_head.replace(
+            '<meta property="og:image" content="https://aiqt.ai/assets/card.png">', ""), encoding="utf-8")
+        check("card/composed-page-missing-og-image-fails",
+              quiet(_scan_root, base, "site", frozenset()) == 1, None)
+        composed.unlink()
 
 
 def _touch_icon_self_test(quiet):
@@ -1338,13 +1424,14 @@ def _touch_icon_self_test(quiet):
                   '<link rel="stylesheet" href="/s.css">')
         check("touch-icon/parser-reads-link", page.touch_icons == [("/t.png", 1)], page.touch_icons)
 
+        shell = '<!doctype html><html lang="en" class="site-aiqt">'
         (root / "index.html").write_text(
-            '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/assets/logos/t.png">',
+            shell + '<title>t</title><link rel="apple-touch-icon" href="/assets/logos/t.png">',
             encoding="utf-8")
-        (root / "sub" / "a.html").write_text("<!doctype html><title>t</title><p>x</p>", encoding="utf-8")
+        (root / "sub" / "a.html").write_text(shell + "<title>t</title><p>x</p>", encoding="utf-8")
         check("touch-icon/scan-reports-missing-link", quiet(_scan_root, base, "site") == 1, None)
         (root / "sub" / "a.html").write_text(
-            '<!doctype html><title>t</title><link rel="apple-touch-icon" href="../assets/logos/t.png">',
+            shell + '<title>t</title><link rel="apple-touch-icon" href="../assets/logos/t.png">',
             encoding="utf-8")
         check("touch-icon/scan-passes-when-linked", quiet(_scan_root, base, "site") == 0, None)
 
@@ -1377,6 +1464,7 @@ def _not_found_links_self_test():
         return [line for line in output.splitlines()[1:] if not line.endswith(" allowlist")]
 
     icon ='<link rel="apple-touch-icon" href="/t.png">'
+    shell = '<!doctype html><html lang="en" class="site-aiqt">'
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "site"
@@ -1384,12 +1472,12 @@ def _not_found_links_self_test():
         for directory in (root, root / "sub"):
             for asset in ("s.css", "f.svg", "j.js", "i.png", "l.png", "t.png"):
                 (directory / asset).write_bytes(b"x")
-            (directory / "b.html").write_text("<!doctype html><title>t</title>" + icon, encoding="utf-8")
-        (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
+            (directory / "b.html").write_text(shell + "<title>t</title>" + icon, encoding="utf-8")
+        (root / "index.html").write_text(shell + '<title>t</title>' + icon +
                                          '<a class="logo" href="./"><img src="l.png" alt=""></a>', encoding="utf-8")
 
         def page(head, body):
-            return "<!doctype html><title>t</title>" + head + "<body>" + body + "</body>"
+            return shell + "<title>t</title>" + head + "<body>" + body + "</body>"
 
         stylesheet = '<link rel="stylesheet" href="s.css">'
         favicon = '<link rel="icon" href="f.svg">'
@@ -1421,7 +1509,7 @@ def _not_found_links_self_test():
                         '<p id="top"><img src="/i.png" alt=""></p><nav><a href="/b">B</a>'
                         '<a href="#top">T</a></nav><a class="logo" href="/"><img src="/l.png" alt=""></a>')
         (root / "404.html").write_text(absolute, encoding="utf-8")
-        (root / "index.html").write_text('<!doctype html><title>t</title>' + icon +
+        (root / "index.html").write_text(shell + '<title>t</title>' + icon +
                                          '<a class="logo" href="./"><img src="/l.png" alt=""></a>', encoding="utf-8")
         got = scan(base)
         check("404-links/root-absolute-and-fragment-links-pass", got[0] in (0, 1) and not other_findings(got[1]),
@@ -1642,6 +1730,7 @@ def _scan_root(root, subdir, targets=None):
         except (OSError, ValueError) as exc:
             print("error: cannot read the template page targets ({}); fail-closed".format(exc), file=sys.stderr)
             return 2
+    draft_dirs = _template_pages.draft_folders(subdir, targets)
     docs, ids_by_path, findings = [], {}, []
     try:
         html_files = sorted(walk_files(site, suffixes={".html"}))
@@ -1678,6 +1767,8 @@ def _scan_root(root, subdir, targets=None):
         # to the draft structural allowlist; every other 404.html keeps the live list. The reference rule is the
         # same for every 404 page.
         template = _template_pages.is_template_page(subdir, f.relative_to(site), targets)
+        findings.extend(shell_class_findings(subdir, f.relative_to(site).as_posix(), str(rel), text,
+                                             template, draft_dirs))
         if f.name == NOT_FOUND_PAGE:
             findings.extend(not_found_reference_findings(rel, text))
             findings.extend(not_found_structure_findings(rel, text, draft=template))
@@ -1722,7 +1813,7 @@ def _scan_root(root, subdir, targets=None):
                     findings.append("{}:{}: broken anchor -> {} (#{} not found)".format(rel, line, v, frag))
         findings.extend(touch_icon_findings(rel, f.relative_to(site), page.touch_icons, f.parent, site_root,
                                             template))
-        if template:
+        if template or f.relative_to(site).as_posix() in COMPOSED_PAGES.get(subdir, frozenset()):
             findings.extend(card_findings(rel, page.metas, site_root, hosts))
     # Logo consistency: the header logo block is duplicated per page (no page generator yet), so it
     # must stay byte-identical on every page that carries it; an outlier is drift.
