@@ -12374,6 +12374,52 @@ def _main_isolated(report_path=None):
                  '{"mode": "attended", "x": 1}\n', "deny"),
                 ("ask/json-object-trailing-garbage-denies-armed",
                  '{"mode": "attended"} trailing\n', "deny"),
+                # The structured operating-mode record (mode plus only phase, set_by and set_at) is read by its
+                # mode exactly as the bare object is. The attended vectors prove the record is accepted (a refused
+                # record arms and denies); the unattended vector pins the deny but cannot prove acceptance, since a
+                # refused record denies alike, so ask/json-mode-record-unattended-read-by-mode below proves it:
+                ("ask/json-mode-record-unattended-denies",
+                 '{"mode": "unattended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-attended-allows",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "allow"),
+                ("ask/json-mode-record-attended-compound-phase-allows",
+                 '{"mode": "attended (iPad); continuous mode", "phase": "review", "set_by": "operator",'
+                 ' "set_at": "2026-11-04T23:59:59Z"}\n', "allow"),
+                ("ask/json-mode-record-attended-subset-allows",
+                 '{"mode": "attended", "set_at": "2026-11-04T00:00:00Z"}\n', "allow"),
+                # A record that breaks the shape fails CLOSED to armed even with an attended mode:
+                ("ask/json-mode-record-extra-key-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z", "note": "x"}\n', "deny"),
+                ("ask/json-mode-record-mode-not-string-denies-armed",
+                 '{"mode": 1, "phase": null, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-phase-number-denies-armed",
+                 '{"mode": "attended", "phase": 2, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-phase-nested-object-denies-armed",
+                 '{"mode": "attended", "phase": {"mode": "attended"}, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-set-by-null-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": null, "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-set-at-malformed-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator", "set_at": "2026-11-04 17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-set-at-offset-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T17:47:04+00:00"}\n', "deny"),
+                ("ask/json-mode-record-set-at-trailing-newline-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T17:47:04Z\\n"}\n', "deny"),
+                ("ask/json-mode-record-set-at-hour-24-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T24:00:00Z"}\n', "deny"),
+                ("ask/json-mode-record-set-at-month-13-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-13-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-set-at-number-denies-armed",
+                 '{"mode": "attended", "set_at": 1793814424}\n', "deny"),
+                ("ask/json-mode-record-duplicate-key-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z", "set_at": "2026-11-04T17:47:05Z"}\n', "deny"),
                 # Prose merely MENTIONING a mode word, with no declaration line and no JSON, stays fail-open:
                 ("ask/prose-mentions-mode-allows",
                  "Yesterday we worked unattended; today attended.\n", "allow"),
@@ -12385,6 +12431,20 @@ def _main_isolated(report_path=None):
                               {"questions": [{"question": "pick one"}]},
                               extra={"tool_use_id": "tu-1"})
             check(check_id, _verdict(ask()), want)
+        # An accepted unattended record and a refused one both read as the guards-armed `unattended` token, so
+        # the reader is observed at its classifier: an accepted record hands its own `mode` string to it, while
+        # a refused record fails closed before the classifier sees anything.
+        _rec_seen = []
+        _rec_classify = aiqt_hooks._orch_mode_classify
+        try:
+            aiqt_hooks._orch_mode_classify = lambda value: (_rec_seen.append(value), _rec_classify(value))[1]
+            _rec_token = aiqt_hooks._orch_mode_classify_text(
+                '{"mode": "unattended; overnight", "phase": null, "set_by": "operator",'
+                ' "set_at": "2026-11-04T17:47:04Z"}\n')
+        finally:
+            aiqt_hooks._orch_mode_classify = _rec_classify
+        check("ask/json-mode-record-unattended-read-by-mode", (_rec_token, _rec_seen),
+              ("unattended", ["unattended; overnight"]))
         # absent mode record fails open (no marker): the fixture DELETES the file, so this tests ABSENCE
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
