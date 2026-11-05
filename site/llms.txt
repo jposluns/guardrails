@@ -1,10 +1,12 @@
 # AIQT Guardrails
 
-AIQT Guardrails holds your AI assistant to one standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Open source.
+AIQT Guardrails holds your AI assistant to 1 standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Open source.
 
 ## Key pages
 
-- [Add AIQT to your assistant](/install/): add AIQT to your chat assistant on one page: pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, get the file it needs, and follow a short guide.
+- [Install](/install/): give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project's records; a chat assistant uses the Skill download instead.
+- [Install the skill, step by step](/install/details/): add AIQT to your chat assistant: pick the AI you use, Claude, ChatGPT, Gemini, Copilot, Copilot Studio, or any other, get the file it needs, and follow a short guide.
+- [What is coming](/future/): planned directions for teams and enterprises; everything on that page is planned, and none of it ships today.
 - [The standard](/standard/): the AIQT standard in plain terms: the four things it holds your assistant to (Accuracy, Integrity, Quality, Trust) and the one priority ordering that decides every close call.
 - [The five rules](/rules/): the five working rules of AIQT: surface what a guardrail catches, re-anchor the standard with a self-check, fix in-scope issues before shipping, surface out-of-scope issues, and propose an underlying guardrail.
 - [The development assistant](/development): the AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects.

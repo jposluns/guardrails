@@ -44,6 +44,6 @@ Conformance you assert by hand is self-asserted until the reference validator ha
 ## More
 
 - The standard: /standard
-- Reference tooling: /tooling
+- Reference tooling: /core-files/#tooling
 - The prompt pack: `opf/prompt-pack/` in the reference repository
 - The disclosure of current limits: /disclosure

@@ -9,7 +9,7 @@ description = "That page could not be found."
 
 [[body]]
 component = "lead"
-html = "Install, The standard, The 5 rules and Mappings are linked from the bar above."
+html = "Install, The standard, The 5 rules, and Mappings are linked from the bar above."
 
 [[body]]
 component = "next"

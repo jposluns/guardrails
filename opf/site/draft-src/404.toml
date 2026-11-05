@@ -9,7 +9,7 @@ description = "This page does not exist on opfiles.ai."
 
 [[body]]
 component = "lead"
-html = "The top bar links to the model, the standard, the core store files and adoption."
+html = "The top bar links to the model, the standard, the technical details, and adoption."
 
 [[body]]
 component = "next"

@@ -37,7 +37,7 @@ s = "regenerate and diff"
 
 [[body]]
 component = "section"
-lbl = "In 1 file"
+lbl = "Side by side"
 heading = "Edit the source. Run the renderer. Check the view."
 
 [[body]]
@@ -97,5 +97,5 @@ html = "<p>Schema validation and drift checks are intended to catch structural d
 [[body]]
 component = "next"
 html = "Next, read the manifest that declares every pair and the 4 files beside it."
-text = "The 5 core store files"
+text = "Technical details"
 href = "core-files/"

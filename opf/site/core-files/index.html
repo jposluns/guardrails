@@ -48,7 +48,7 @@ governance = false</pre>
 <dl class="record"><div><dt>Declares</dt><dd><code>[opf]</code> <code>[modules]</code> <code>[types.*]</code> <code>[views.*]</code> <code>[providers.*]</code> <code>[profiles.*]</code></dd></div><div><dt>Read by</dt><dd><code>opf render</code>, <code>opf doctor</code>, <code>opf absorb</code>, <code>opf record</code></dd></div><div><dt>Written by</dt><dd><code>opf init</code>, a reviewed adopter edit, and <code>opf migrate</code> (planned; not yet implemented in the reference CLI)</dd></div></dl>
 <p class="lbl sec">counters.toml</p>
 <h2 id="counters">The ID counters</h2>
-<p>The ID authority: 1 monotonic high-water value per record namespace.</p>
+<p>The ID authority: 1 monotonic high-water value per record namespace and series, a clean row and an imported row per enabled type (spec section 8.2).</p>
 <p class="lbl sec">version.toml</p>
 <h2 id="version">The version ledger</h2>
 <p>The version and release ledger: numbers, dates, spans, and digests, never release prose.</p>
@@ -82,7 +82,7 @@ governance = false</pre>
 <h3 id="contribution">Work proposed or sent to a peer project</h3>
 <p>It tracks proposal, delivery, and outcome.</p>
 <h3 id="modules">Optional modules and importer types</h3>
-<p>4 optional modules, default-off.</p>
+<p>4 optional modules, default-off: governance, delivery_assurance, operational_policy, and concurrent_operation, each enabling its module-tier record types (spec section 8.1).</p>
 <p><strong>Reserved namespace</strong> No module toggle: the standard reserves <code>LF</code> unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.</p><p><strong>(none)</strong> <code>LF</code> reserved unassigned; the reference tooling still recognizes <code>legacy_fragment</code> (<code>quarantined &#8594; resolved | ignored</code>) in stores holding such records from its retired import path.</p>
 <p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.</p><p>Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.</p><p>Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.</p><p>A new store's counters file has no <code>LF</code> namespace; a store scaffolded by earlier reference tooling may carry <code>LF</code> (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.</p>
 <p class="lbl sec">Around the records</p>

@@ -15,7 +15,7 @@ source_href = "https://github.com/jposluns/guardrails"
 
 [[body]]
 component = "scope"
-html = '''Both shipped files are prose instructions and reference material only, with no executable code and no network calls. Claude loads a Skill when it judges the Skill relevant; an always-on instruction line instructs the assistant to apply AIQT on each turn. Results still depend on the platform and the model, and you stay in charge.'''
+html = '''The shipped artefacts, the Skill and the instruction files, are prose instructions and reference material only, with no executable code and no network calls. Claude loads a Skill when it judges the Skill relevant; an always-on instruction line instructs the assistant to apply AIQT on each turn. Results still depend on the platform and the model, and you stay in charge.'''
 
 [[body]]
 component = "prose"
@@ -66,7 +66,7 @@ label = "The Skill"
 href = "/downloads/aiqt-skill-1.0.6.zip"
 filename = "aiqt-skill-1.0.6.zip"
 size = "zip, 28 KB"
-html = '''For assistants that accept Skills, such as Claude and paid ChatGPT. Do not unzip it. The Skill carries its own version, 1.0.6, which ships under AIQT pack release 1.0.5.'''
+html = '''For assistants that accept Skills, such as Claude and paid ChatGPT. Do not unzip it. The Skill and the instruction files carry their own version, 1.0.6, which ships under AIQT pack release 1.0.5. To verify the download, compare its SHA-256 digest: <code>aiqt-skill-1.0.6.zip</code> is <code>d185bf6caa96a139b2b7c21fc83a03a04d5f214e39c93d16525362e11ab83a7e</code>.'''
 
 [[body]]
 component = "download"
@@ -74,7 +74,7 @@ label = "The instruction file"
 href = "/downloads/aiqt-instructions.txt"
 filename = "aiqt-instructions.txt"
 size = "text, full, 16 KB"
-html = '''For assistants that cannot use Skills. The standard as prose, in 4 sizes: the full and 8k files carry the standard in full, the 5k trims the finer detail, and the 1.5k is a compact pointer. The other sizes are <a href="/downloads/aiqt-instructions-8k.txt">compact, 8k</a>; <a href="/downloads/aiqt-instructions-5k.txt">condensed, 5k</a>; and <a href="/downloads/aiqt-instructions-1_5k.txt">pointer, 1.5k</a>.'''
+html = '''For assistants that cannot use Skills. The standard as prose, in 4 sizes: the full file carries the standard in full, the 8k and 5k are condensed variants that carry less of the finer detail, and the 1.5k is a compact pointer. The other sizes are <a href="/downloads/aiqt-instructions-8k.txt">condensed, 8k</a>; <a href="/downloads/aiqt-instructions-5k.txt">condensed, 5k</a>; and <a href="/downloads/aiqt-instructions-1_5k.txt">pointer, 1.5k</a>.'''
 
 [[body]]
 component = "label"
@@ -162,7 +162,7 @@ family = "copilotstudio"
 lbl = "Copilot Studio"
 heading = "Add AIQT to Copilot Studio"
 verified = "Last verified: pending"
-intro = '''<p><strong>Copilot Studio takes AIQT as a Skill.</strong> The zip holds a single SKILL.md at its root, the layout Copilot Studio reads.</p>'''
+intro = '''<p><strong>Copilot Studio takes AIQT as a Skill.</strong> The zip holds SKILL.md and the licence text at its root, the layout Copilot Studio reads.</p>'''
 steps = [
     '''<strong>Open or create a Skills-capable agent.</strong>''',
     '''<strong>Add the Skill to that agent.</strong> Upload the zip in the agent's Skills.''',
