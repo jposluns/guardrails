@@ -5155,6 +5155,10 @@ expected-check-ids = [
   "declaration/full-entry-list-target-scan-exits-2",
   "declaration/full-entry-int-target-refused",
   "declaration/full-entry-int-target-scan-exits-2",
+  "shell-class/template-shell-page-passes",
+  "shell-class/old-shell-page-fails",
+  "shell-class/recorded-exclusion-passes",
+  "shell-class/exclusion-without-reason-fails",
 ]
 
 [[suite]]

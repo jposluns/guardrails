@@ -273,11 +273,13 @@ def _brand(site):
 
 
 def _nav(site, pages, current):
-    registered = {_page_url(site, page["rel"]) for page in pages}
+    # `pages` None emits every nav item: a caller composing a page outside the generator's own page set
+    # (gen_site.py, gen_enforcement_register.py) has no page list, and every nav page is registered today.
+    registered = None if pages is None else {_page_url(site, page["rel"]) for page in pages}
     items = []
     for path, label in site["nav"]:
         href = _url(site, path)
-        if href not in registered:
+        if registered is not None and href not in registered:
             continue
         mark = ' aria-current="page"' if href == current else ""
         items.append('<a href="{}"{}>{}</a>'.format(href, mark, label))
@@ -1292,15 +1294,24 @@ def _description(site, page):
     return " ".join("".join(reader.parts).split())
 
 
-def render_page(site, pages, page):
-    rel, title = page["rel"], page["title"]
+def compose_shell(site, title, description, current, main_html,
+                  pages=None, noindex=False, page_scripts=(), label=None):
+    """The whole page around `main_html`: the one shared shell (template specification section 5): the head
+    (charset, viewport, the robots noindex meta where `noindex`, the description and og:description metas,
+    the title `<Page> | <Name>.ai`, the favicon, the touch icon, scheme.js, the stylesheets, then
+    `page_scripts` with defer), the skip link, the top bar with `current` marked, the scheme button,
+    `main#main-content` holding `main_html`, the family footer and the `#copy-status` live region.
+
+    `title` and `description` are text, escaped here for their sinks; `main_html` is markup, inserted
+    verbatim. `pages` limits the top bar to the site's registered pages (None emits every nav item). The
+    composed page must pass the template's code-style refusals and the link rules; a page that does not is
+    refused (RefusedPage, named by `label` or `current`), so no caller can ship a page off the shell's
+    rules. Specification section 5 does not place the description metas; they join the other metas before
+    the title, where every reference page keeps its robots meta, so the elements it lists keep their order.
+    """
     head = ['<meta charset="utf-8">', '<meta name="viewport" content="width=device-width, initial-scale=1">']
-    if site["base"] == DRAFT_BASE or (site["base"] == "/" and rel.startswith(DRAFT_DIR)):
+    if noindex:
         head.append('<meta name="robots" content="noindex, nofollow">')
-    # The page's meta text, as plain text, is also its search and link-preview description. Specification
-    # section 5 does not place these metas; they join the other metas before the title, where every
-    # reference page keeps its robots meta, so the elements section 5 lists keep their order.
-    description = _description(site, page)
     if description:
         head.append('<meta name="description" content="{}">'.format(_attr(description)))
         head.append('<meta property="og:description" content="{}">'.format(_attr(description)))
@@ -1313,7 +1324,7 @@ def render_page(site, pages, page):
     head.append('<script data-cfasync="false" src="{}"></script>'.format(scheme_src))
     for sheet in ("fonts.css", "palettes.css", "baseline.css"):
         head.append('<link rel="stylesheet" href="{}">'.format(_asset(site, sheet)))
-    scripts = [_asset(site, script) for script in _page_scripts(page)]
+    scripts = [_asset(site, script) for script in page_scripts]
     for src in scripts:
         head.append('<script src="{}" defer></script>'.format(src))
     html = "\n".join([
@@ -1324,9 +1335,9 @@ def render_page(site, pages, page):
         "<body>",
         '<a class="skip" href="#main-content">Skip to content</a>',
         '<header class="mast">{}{}{}</header>'.format(
-            _brand(site), _nav(site, pages, _page_url(site, rel)), SCHEME_BUTTON),
+            _brand(site), _nav(site, pages, current), SCHEME_BUTTON),
         '<main id="main-content">',
-        _body_html(site, page),
+        main_html,
         "</main>",
         _footer(site),
         '<p class="vh" id="copy-status" role="status" aria-live="polite"></p>',
@@ -1335,8 +1346,18 @@ def render_page(site, pages, page):
     ]) + "\n"
     refusals = refusals_for(html) + _link_findings(site, html, scripts, scheme_src)
     if refusals:
-        raise RefusedPage("{}/{}: {}".format(site["root"], rel, "; ".join(refusals)))
+        raise RefusedPage("{}: {}".format(label or current, "; ".join(refusals)))
     return html
+
+
+def render_page(site, pages, page):
+    rel = page["rel"]
+    # The page's meta text, as plain text, is also its search and link-preview description.
+    return compose_shell(
+        site, page["title"], _description(site, page), _page_url(site, rel), _body_html(site, page),
+        pages=pages,
+        noindex=site["base"] == DRAFT_BASE or (site["base"] == "/" and rel.startswith(DRAFT_DIR)),
+        page_scripts=_page_scripts(page), label="{}/{}".format(site["root"], rel))
 
 
 DASHES = ("–", "—")

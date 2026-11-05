@@ -43,6 +43,22 @@ def is_template_page(subdir, page_rel, targets=None):
     return "{}/{}".format(subdir, PurePosixPath(Path(page_rel).as_posix())) in targets
 
 
+def draft_folders(subdir, targets=None):
+    """The staged-draft folders under the coverage root `subdir`, each as "<folder>/": the top-level
+    draft/ directory of every declared target staged under one. Empty when the declaration stages no
+    page under a draft/ folder of that root."""
+    if targets is None:
+        targets = template_targets()
+    prefix = subdir + "/"
+    out = set()
+    for target in targets:
+        if target.startswith(prefix):
+            parts = PurePosixPath(target[len(prefix):]).parts
+            if len(parts) > 1 and parts[0] == "draft":
+                out.add(parts[0] + "/")
+    return frozenset(out)
+
+
 def template_base(subdir, targets=None):
     """The folder under `subdir` holding all its generated pages, as "" or "<folder>/"; None with none."""
     if targets is None:

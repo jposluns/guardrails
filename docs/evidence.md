@@ -1,11 +1,6 @@
 +++
 title = "AIQT evidence and assurance: the proof behind the claims"
 description = "The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
-canonical = "https://aiqt.ai/evidence"
-og-title = "AIQT evidence and assurance: the proof behind the claims"
-og-description = "The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
-og-url = "https://aiqt.ai/evidence"
-sidebar-active = "evidence"
 +++
 
 <div class="wrap pagehead">
@@ -21,11 +16,11 @@ sidebar-active = "evidence"
     <p class="eyebrow">The release</p>
     <h2>AIQT 1.0.5</h2>
     <ul class="clean">
-      <li><b style="color:var(--ink)">Version:</b> 1.0.5, the chat-assistant Skill. The chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
-      <li><b style="color:var(--ink)">The artefact:</b> the packaged skill zip, plus a
+      <li><b>Version:</b> 1.0.5, the chat-assistant Skill. The chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
+      <li><b>The artefact:</b> the packaged skill zip, plus a
         portable instruction file, both on the <a href="/install">install page</a>.</li>
-      <li><b style="color:var(--ink)">Built from:</b> <span class="evidence-label">the exact source tag or commit: pending</span></li>
-      <li><b style="color:var(--ink)">Checksum:</b> <span class="evidence-label">pending</span></li>
+      <li><b>Built from:</b> <span class="evidence-label">the exact source tag or commit: pending</span></li>
+      <li><b>Checksum:</b> <span class="evidence-label">pending</span></li>
     </ul>
   </div>
 </section>
@@ -80,9 +75,10 @@ sidebar-active = "evidence"
     <p class="eyebrow">Change history</p>
     <h2>What changed, and when</h2>
     <p class="lead">Every substantive change to AIQT is recorded; the public change log is a
-      curated release-level view. <a href="https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">The public change log</a></p>
-    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
-      <a class="btn ghost" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View the source on GitHub</a>
+      curated release-level view. <a href="https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">The public change log<span class="vh"> (opens in a new tab)</span></a></p>
+    <div class="cta">
+      <a class="btn ghost" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View the source on GitHub<span class="vh"> (opens in a new tab)</span></a>
     </div>
+    <nav aria-label="Project"><a href="/disclosure/">Disclosure</a></nav>
   </div>
 </section>

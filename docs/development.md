@@ -1,11 +1,6 @@
 +++
 title = "The AIQT development assistant: governance that installs into your project"
 description = "The AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
-canonical = "https://aiqt.ai/development"
-og-title = "The AIQT development assistant: governance that installs into your project"
-og-description = "The AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects. Updates write only inside .aiqt/, so nothing else in your repository changes without your say-so."
-og-url = "https://aiqt.ai/development"
-sidebar-active = "development"
 +++
 
 <div class="wrap pagehead">
@@ -17,7 +12,7 @@ sidebar-active = "development"
       up, one doctor verifies it, and a write guard keeps every update inside a single directory
       you can inspect. The pack it installs is open source and readable today.</p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub</a>
+      <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub<span class="vh"> (opens in a new tab)</span></a>
       <a class="btn ghost" href="/tech-details">Technical details</a>
     </div>
 </div>
@@ -142,7 +137,7 @@ sidebar-active = "development"
     <p class="lead">Want the detail? The project-practice files AIQT sets up, the config file
       you own, how a new guardrail can travel back, the CI integration, and per-language depth
       are all on the technical details page.</p>
-    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
+    <div class="cta">
       <a class="btn primary" href="/tech-details">Read the technical details</a>
     </div>
   </div>
@@ -152,7 +147,7 @@ sidebar-active = "development"
   <div class="wrap">
     <p class="eyebrow">Availability</p>
     <h2>The same core, and where 1.1.0 stands</h2>
-    <div class="card" style="margin-bottom:1rem">
+    <div class="card">
       <span class="pill now">Available now</span>
       <h3>The governance core, and the chat assistant</h3>
       <p>The standard 1.1.0 will install already exists and is readable in full, the pack on GitHub: the ordering, the
@@ -170,10 +165,11 @@ sidebar-active = "development"
         design, and we ship it when it does what these pages say it does. Until then, the
         best way to evaluate AIQT is the way we would want you to: read the source.</p>
     </div>
-    <div class="cta" style="justify-content:flex-start">
-      <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub</a>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub<span class="vh"> (opens in a new tab)</span></a>
     </div>
-    <p style="margin-top:1.4rem">Contributing an improvement back is Rule 5's voluntary Guardrail-Seed give-back, separate from
+    <p>Contributing an improvement back is Rule 5's voluntary Guardrail-Seed give-back, separate from
       the software licence.</p>
+    <nav aria-label="Project"><a href="/disclosure/">Disclosure</a></nav>
   </div>
 </section>
