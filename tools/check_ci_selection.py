@@ -32,13 +32,16 @@ through importlib, a sys.path entry added at run time, or a script launched as a
 Cannot evaluate (exit 2), never a pass: a registry or workflow that is missing, not a regular file,
 unreadable, over MAX_BYTES or not UTF-8; a registry that is not TOML (TOMLDecodeError or a bare
 ValueError), nests too deeply (RecursionError) or exhausts memory (MemoryError); a format-version other
-than 1; a workflow shape the line reader does not follow, a run: step without a name, or one job holding
-two run: steps of one name; a tracked-file listing that fails or is empty; a source in an import closure
-that cannot be read or parsed.
+than the integer 1; a workflow shape the line reader does not follow, a run: step without a name, or one
+job holding two run: steps of one name; a relative .py path in run: text that names no tracked file; a
+tracked-file listing that fails or is empty; a source in an import closure that cannot be read or parsed.
 
 The workflow is read by a line reader, not a YAML parser, so the gate stays standard-library only: it
-follows the layout quality.yml uses (jobs at two spaces, steps under `steps:` at six, step keys at eight)
-and refuses any other.
+follows the layout quality.yml uses (jobs at two spaces, job keys at four, steps under `steps:` at six,
+step keys at eight, a name or run: value on one line or a run: block under |, |-, > or >-) and refuses
+any other, including a flow or compact steps list, a job body at another indent, a repeated job key or
+jobs: block, a one-line name or run: value continued on a deeper line, and a value that starts with a
+YAML indicator (anchor, alias, tag, other block header).
 """
 import sys
 
@@ -56,6 +59,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import ast
 import os
+import posixpath
 import re
 import stat
 import subprocess
@@ -95,6 +99,9 @@ OPTIONAL_FIELDS = {"weekly-only": bool, "weekly-only-authorization": str}
 JOB_RE = re.compile(r"  ([A-Za-z0-9_-]+):")
 KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*))?")
 PY_PATH_RE = re.compile(r"(?<![A-Za-z0-9_./-])[A-Za-z0-9_.][A-Za-z0-9_./-]*\.py(?![A-Za-z0-9_./-])")
+# The first characters that make a plain YAML scalar something other than text (or reserved).
+PLAIN_INDICATORS = "|>&*!%@`{}[],#?:'\""
+BLOCK_MARKERS = ("|", "|-", ">", ">-")
 
 
 class CannotEvaluate(Exception):
@@ -131,7 +138,8 @@ def load_registry(text, where):
         data = tomllib.loads(text)
     except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("{}: is not valid TOML: {}: {}".format(where, type(exc).__name__, exc)) from None
-    if data.get("format-version") != 1:
+    # type() first: True == 1 and 1.0 == 1 in Python, and neither is the integer 1 TOML must carry.
+    if type(data.get("format-version")) is not int or data["format-version"] != 1:
         raise CannotEvaluate("{}: format-version is not 1".format(where))
     unknown = sorted(set(data) - {"format-version", "check"})
     if unknown:
@@ -143,17 +151,26 @@ def load_registry(text, where):
 
 
 def _scalar(value, where):
-    """A one-line YAML scalar: plain (cut at a ' #' comment), single-quoted or double-quoted without escapes."""
+    """A one-line YAML scalar: plain (cut at a ' #' comment), single-quoted or double-quoted without escapes.
+    An empty value, a tab, a plain value that starts with a YAML indicator (block scalar, anchor, alias,
+    tag, flow collection) or holds a mapping indicator, and a quote left inside a quoted value are refused,
+    since YAML reads each of them as something other than the literal text on the line."""
+    if "\t" in value:
+        raise CannotEvaluate("{}: tab in a scalar".format(where))
     value = value.strip()
     if value.startswith("'"):
-        if len(value) < 2 or not value.endswith("'"):
-            raise CannotEvaluate("{}: unterminated single-quoted scalar".format(where))
+        if len(value) < 2 or not value.endswith("'") or "'" in value[1:-1].replace("''", ""):
+            raise CannotEvaluate("{}: single-quoted scalar not read by this gate".format(where))
         return value[1:-1].replace("''", "'")
     if value.startswith('"'):
-        if len(value) < 2 or not value.endswith('"') or "\\" in value:
+        if len(value) < 2 or not value.endswith('"') or "\\" in value or '"' in value[1:-1]:
             raise CannotEvaluate("{}: double-quoted scalar not read by this gate".format(where))
         return value[1:-1]
-    return value.split(" #", 1)[0].rstrip()
+    value = value.split(" #", 1)[0].rstrip()
+    if (not value or value[0] in PLAIN_INDICATORS or value == "-" or value.startswith("- ")
+            or ": " in value or value.endswith(":")):
+        raise CannotEvaluate("{}: scalar {!r} not read by this gate".format(where, value))
+    return value
 
 
 def workflow_run_steps(text, where=WORKFLOW):
@@ -161,6 +178,9 @@ def workflow_run_steps(text, where=WORKFLOW):
     lines = text.split("\n")
     steps, current = [], None
     in_jobs, job, in_steps = False, None, False
+    # seen_jobs refuses a second jobs: block; job_keys refuses a repeated job key (YAML keeps the last
+    # of either, which this reader would not); last_key is the step key a deeper line would continue.
+    seen_jobs, job_keys, last_key = False, None, None
 
     def flush():
         # The step's own bookkeeping keys start with a space, so no YAML key can collide with them.
@@ -183,13 +203,20 @@ def workflow_run_steps(text, where=WORKFLOW):
         if indent == 0:
             flush()
             current, job, in_steps = None, None, False
-            in_jobs = line.rstrip() == "jobs:"
+            head = line.split(" #", 1)[0].rstrip()
+            match = KEY_RE.fullmatch(head)
+            if match is None or (match.group(1) == "jobs" and (head != "jobs:" or seen_jobs)):
+                raise CannotEvaluate("{}:{}: top-level line not read by this gate".format(where, number))
+            in_jobs = head == "jobs:"
+            seen_jobs = seen_jobs or in_jobs
             continue
         if not in_jobs:
             continue
+        if indent in (1, 3):
+            raise CannotEvaluate("{}:{}: indentation not read by this gate".format(where, number))
         if indent == 2:
             flush()
-            current, in_steps = None, False
+            current, in_steps, job_keys = None, False, set()
             match = JOB_RE.fullmatch(line.split(" #", 1)[0].rstrip())
             if match is None:
                 raise CannotEvaluate("{}:{}: job key not read by this gate".format(where, number))
@@ -197,12 +224,28 @@ def workflow_run_steps(text, where=WORKFLOW):
             continue
         if job is None:
             raise CannotEvaluate("{}:{}: content under jobs: before any job".format(where, number))
+        if not job_keys and indent != 4:
+            raise CannotEvaluate("{}:{}: job {} body not at indent 4".format(where, number, job))
         if indent == 4:
             flush()
             current = None
-            in_steps = line.rstrip() == "    steps:"
+            # A job key is a plain key, with at most a comment after a bare steps: (YAML reads
+            # `steps: # note` as `steps:`); a flow list, a compact list at indent 4 or a quoted key is refused.
+            match = KEY_RE.fullmatch(stripped.split(" #", 1)[0].rstrip())
+            if match is None or (match.group(1) == "steps" and match.group(2) is not None):
+                raise CannotEvaluate("{}:{}: job key not read by this gate".format(where, number))
+            if match.group(1) in job_keys:
+                raise CannotEvaluate("{}:{}: job {} gives {} twice".format(where, number, job, match.group(1)))
+            job_keys.add(match.group(1))
+            in_steps = match.group(1) == "steps"
             continue
-        if not in_steps or indent > 8:
+        if not in_steps:
+            continue
+        if indent > 8:
+            # Deeper lines belong to a nested key (with:, env:) and are skipped; under a one-line name or
+            # run value they would continue that scalar, so the value read would be wrong.
+            if current is None or last_key in ("name", "run"):
+                raise CannotEvaluate("{}:{}: continued step {} not read by this gate".format(where, number, last_key))
             continue
         if indent == 6 and stripped.startswith("- "):
             flush()
@@ -218,10 +261,11 @@ def workflow_run_steps(text, where=WORKFLOW):
         key, value = match.group(1), match.group(2) or ""
         if key in current:
             raise CannotEvaluate("{}:{}: step key {} given twice".format(where, number, key))
+        last_key = key
         if key == "name":
             current["name"] = _scalar(value, "{}:{}".format(where, number))
         elif key == "run":
-            if value.strip() in ("|", "|-", ">", ">-"):
+            if value.strip() in BLOCK_MARKERS:
                 block = []
                 while index < len(lines) and (not lines[index].strip()
                                               or len(lines[index]) - len(lines[index].lstrip(" ")) > 8):
@@ -229,7 +273,7 @@ def workflow_run_steps(text, where=WORKFLOW):
                     index += 1
                 current["run"] = "\n".join(block).strip()
             else:
-                current["run"] = value.strip()
+                current["run"] = _scalar(value, "{}:{}".format(where, number))
         else:
             current[key] = value
     flush()
@@ -243,20 +287,56 @@ def workflow_run_steps(text, where=WORKFLOW):
     return steps
 
 
-def glob_regex(glob):
-    """The compiled full-match regex of a segment glob (`**` spans segments; `*` and `?` stay in one)."""
-    out = []
-    segments = glob.split("/")
-    for position, segment in enumerate(segments):
-        last = position == len(segments) - 1
-        if segment == "**":
-            out.append(".*" if last else "(?:[^/]+/)*")
-            continue
-        for char in segment:
-            out.append("[^/]*" if char == "*" else "[^/]" if char == "?" else re.escape(char))
-        if not last:
-            out.append("/")
-    return re.compile("".join(out))
+def glob_match(glob, path):
+    """Whether path fully matches a segment glob (`**` spans segments; `*` and `?` stay in one).
+    The match tracks the set of reachable path segments and matches one segment without backtracking,
+    so its time stays polynomial in the glob and path lengths; a backtracking regex is exponential on a
+    glob with many wildcards."""
+    names = path.split("/")
+    parts = glob.split("/")
+    reach = {0}
+    for position, part in enumerate(parts):
+        if part == "**":
+            if position == len(parts) - 1:
+                # A trailing ** takes every remaining segment, at least one.
+                return any(start < len(names) for start in reach)
+            # ** before another segment takes zero or more whole nonempty segments.
+            nxt = set()
+            for start in reach:
+                end = start
+                while True:
+                    nxt.add(end)
+                    if end >= len(names) or not names[end]:
+                        break
+                    end += 1
+            reach = nxt
+        else:
+            reach = {start + 1 for start in reach if start < len(names) and _segment_match(part, names[start])}
+        if not reach:
+            return False
+    return len(names) in reach
+
+
+def _segment_match(part, name):
+    """Whether one path segment matches one glob segment of `*` and `?`: the greedy match that returns
+    to the last `*` on a mismatch, O(len(part) * len(name))."""
+    p = n = 0
+    star, mark = -1, 0
+    while n < len(name):
+        if p < len(part) and part[p] == "*":
+            star, mark = p, n
+            p += 1
+        elif p < len(part) and (part[p] == "?" or part[p] == name[n]):
+            p += 1
+            n += 1
+        elif star >= 0:
+            p, mark = star + 1, mark + 1
+            n = mark
+        else:
+            return False
+    while p < len(part) and part[p] == "*":
+        p += 1
+    return p == len(part)
 
 
 def glob_shape_error(glob):
@@ -268,6 +348,18 @@ def glob_shape_error(glob):
     if any(ord(char) < 0x21 or ord(char) == 0x7F for char in glob):
         return "carries a space or control character"
     return None
+
+
+def run_scripts(run, tracked, where):
+    """The tracked .py paths a step's run text names, with `./` and `..` collapsed. A relative .py path
+    that names no tracked file is CannotEvaluate: its import closure could not be followed."""
+    found = set()
+    for token in PY_PATH_RE.findall(run):
+        path = posixpath.normpath(token)
+        if path not in tracked:
+            raise CannotEvaluate("{}: run text names {}, which is not a tracked file".format(where, token))
+        found.add(path)
+    return sorted(found)
 
 
 def import_closure(primary, tracked, read_source, cache=None):
@@ -350,6 +442,8 @@ def _entry_findings(index, entry):
     authorization = entry.get("weekly-only-authorization")
     if isinstance(authorization, str) and not authorization.strip():
         findings.append(("bad-field", "{}: weekly-only-authorization is empty".format(label)))
+    if "weekly-only-authorization" in entry and entry.get("weekly-only") is not True:
+        findings.append(("bad-field", "{}: weekly-only-authorization without weekly-only = true".format(label)))
     return findings, label, not findings
 
 
@@ -391,12 +485,11 @@ def evaluate(workflow_text, registry_text, tracked, read_source):
                 undetermined += 1
             if not triggers and scope not in SCOPES_WITHOUT_TRIGGERS:
                 findings.append(("empty-triggers", "{}: scope {} needs triggers".format(label, scope)))
-            patterns = [glob_regex(glob) for glob in triggers]
-            for glob, pattern in zip(triggers, patterns):
+            for glob in triggers:
                 if glob not in live:
                     # A glob with no wildcard names one path, so set membership decides it.
                     live[glob] = (glob in tracked if "*" not in glob and "?" not in glob
-                                  else any(pattern.fullmatch(path) for path in tracked))
+                                  else any(glob_match(glob, path) for path in tracked))
                 if not live[glob]:
                     findings.append(("dead-glob", "{}: trigger {!r} matches no tracked file".format(label, glob)))
             if entry.get("weekly-only") is True and not entry.get("weekly-only-authorization"):
@@ -404,14 +497,14 @@ def evaluate(workflow_text, registry_text, tracked, read_source):
                                  "{}: weekly-only = true has no weekly-only-authorization reference".format(label)))
             if key not in runs:
                 continue
-            primaries = sorted({path for path in PY_PATH_RE.findall(runs[key][0]) if path in tracked})
+            primaries = run_scripts(runs[key][0], tracked, "{}:{}".format(WORKFLOW, runs[key][1]))
             closure = set()
             for primary in primaries:
                 if primary not in closures:
                     closures[primary] = import_closure(primary, tracked, read_source, imports)
                 closure |= closures[primary]
             for path in sorted(closure):
-                if not any(pattern.fullmatch(path) for pattern in patterns):
+                if not any(glob_match(glob, path) for glob in triggers):
                     findings.append(("import-not-triggered",
                                      "{}: {} is in the check's import closure but matches no trigger".format(
                                          label, path)))
@@ -623,12 +716,21 @@ def _self_test():
         got = _rules(_registry(changes))
         check(name, (got == ["undetermined-over-ceiling"]) if refused else (got == []), (count, got))
 
-    check("glob/star-stays-in-segment", not glob_regex("docs/*.md").fullmatch("docs/sub/b.md")
-          and glob_regex("docs/*.md").fullmatch("docs/a.md") is not None, "docs/*.md")
-    check("glob/double-star-spans", all(glob_regex(g).fullmatch("docs/sub/b.md") for g in (
-        "**", "docs/**", "**/b.md", "docs/**/b.md")) and not glob_regex("docs/**/b.md").fullmatch("b.md"), "**")
-    check("glob/question-one-char", glob_regex("docs/?.md").fullmatch("docs/a.md") is not None
-          and not glob_regex("docs/?.md").fullmatch("docs/ab.md"), "?")
+    check("glob/star-stays-in-segment", not glob_match("docs/*.md", "docs/sub/b.md")
+          and glob_match("docs/*.md", "docs/a.md"), "docs/*.md")
+    check("glob/double-star-spans", all(glob_match(g, "docs/sub/b.md") for g in (
+        "**", "docs/**", "**/b.md", "docs/**/b.md")) and not glob_match("docs/**/b.md", "b.md"), "**")
+    check("glob/question-one-char", glob_match("docs/?.md", "docs/a.md")
+          and not glob_match("docs/?.md", "docs/ab.md"), "?")
+    # Globs a backtracking regex takes exponential time on: many stars in one segment, stars split by a
+    # repeated letter, and many ** segments, each against a long path it does not match.
+    long_name = "tools/" + "a" * 60 + ".py"
+    check("glob/many-wildcards-bounded", not glob_match("tools/" + "*" * 24 + "Z.py", long_name)
+          and not glob_match("tools/" + "*a" * 24 + "Z.py", long_name)
+          and not glob_match("**/" * 24 + "Z.py", "/".join("a" * 40) + "/b.py")
+          and glob_match("tools/" + "*a" * 24 + "*.py", long_name), long_name)
+    got = _rules(_registry({"probe": ("lint", "Probe", "probe", ["tools/probe.py", "tools/" + "*" * 24 + "Z.py"])}))
+    check("refuse/many-star-dead-glob", got == ["dead-glob"], got)
 
     got = _rules(_registry() + "[[check\n")
     check("cannot-evaluate/toml-decode-error", got[0] == "cannot-evaluate" and "TOMLDecodeError" in got[1], got)
@@ -661,6 +763,53 @@ def _self_test():
     got = _rules(_registry(), workflow="jobs:\n  lint:\n    steps:\n      - uses: actions/checkout@v4\n")
     check("cannot-evaluate/no-run-steps", got[0] == "cannot-evaluate", got)
 
+    # Workflow shapes YAML reads as a step, a name or a run text other than the one the line reader
+    # would take; each is cannot-evaluate, never a pass on a misread step.
+    extra = FIXTURE_WORKFLOW + "  extra:\n    runs-on: ubuntu-latest\n"
+    unregistered = "      - name: Unregistered\n        run: echo unregistered\n"
+    probe_step = "      - name: Probe\n        run: python3 -I -B tools/probe.py\n"
+    for name, workflow in (
+        ("cannot-evaluate/shape-compact-steps-list",
+         extra + "    steps:\n    - name: Unregistered\n      run: echo unregistered\n"),
+        ("cannot-evaluate/shape-flow-steps", extra + "    steps: [{name: Unregistered, run: echo unregistered}]\n"),
+        ("cannot-evaluate/shape-job-body-indent-6",
+         FIXTURE_WORKFLOW + "  extra:\n      runs-on: ubuntu-latest\n      steps:\n"
+         "        - name: Unregistered\n          run: echo unregistered\n"),
+        ("cannot-evaluate/shape-second-jobs-block", FIXTURE_WORKFLOW + "jobs: # again\n  extra:\n    steps:\n"
+         + unregistered),
+        ("cannot-evaluate/shape-repeated-job-key", FIXTURE_WORKFLOW + "    steps:\n" + unregistered),
+        ("cannot-evaluate/shape-block-run-comment", FIXTURE_WORKFLOW.replace(
+            "        run: python3 -I -B tools/probe.py\n", "        run: | # note\n          python3 -I -B tools/gate.py\n")),
+        ("cannot-evaluate/shape-block-run-keep", FIXTURE_WORKFLOW.replace(
+            "        run: python3 -I -B tools/probe.py\n", "        run: |+\n          python3 -I -B tools/gate.py\n")),
+        ("cannot-evaluate/shape-block-run-indent-indicator", FIXTURE_WORKFLOW.replace(
+            "        run: python3 -I -B tools/probe.py\n", "        run: |2\n            python3 -I -B tools/gate.py\n")),
+        ("cannot-evaluate/shape-plain-run-continued", FIXTURE_WORKFLOW.replace(
+            "        run: python3 -I -B tools/probe.py\n", "        run: python3 -I -B\n          tools/gate.py\n")),
+        ("cannot-evaluate/shape-run-untracked-script", FIXTURE_WORKFLOW.replace("tools/probe.py", "tools/absent.py")),
+        ("cannot-evaluate/shape-name-continued", FIXTURE_WORKFLOW.replace(
+            probe_step, "      - name: Probe\n          (renamed)\n        run: python3 -I -B tools/probe.py\n")),
+        ("cannot-evaluate/shape-name-folded", FIXTURE_WORKFLOW.replace(
+            "      - name: Probe\n", "      - name: >-\n          Probe\n")),
+        ("cannot-evaluate/shape-name-anchor", FIXTURE_WORKFLOW.replace("      - name: Probe\n", "      - name: &n Probe\n")),
+        ("cannot-evaluate/shape-name-quote-inside", FIXTURE_WORKFLOW.replace("'Gate self-test'", "'Gate' self-test'")),
+    ):
+        got = _rules(_registry(), workflow=workflow)
+        check(name, tuple(got[:1]) == ("cannot-evaluate",), got)
+    got = _rules(_registry(), workflow=extra + "    steps: # note\n" + unregistered)
+    check("refuse/missing-entry-after-steps-comment", got == ["missing-entry"], got)
+    got = _rules(_registry({"gate": ("lint", "Gate self-test", "self-test", ["tools/_helper.py", "tools/_deep.py"])}),
+                 workflow=FIXTURE_WORKFLOW.replace("tools/gate.py --self-test", "./tools/gate.py --self-test"))
+    check("refuse/dot-slash-script-not-triggered", got == ["import-not-triggered"], got)
+
+    for name, value in (("cannot-evaluate/format-version-true", "true"),
+                        ("cannot-evaluate/format-version-float", "1.0")):
+        got = _rules(_registry().replace("format-version = 1", "format-version = " + value))
+        check(name, tuple(got[:1]) == ("cannot-evaluate",), got)
+    authorization = 'weekly-only-authorization = "record 7"'
+    got = [_rules(_registry({"probe": weekly + (flag + authorization,)})) for flag in ("", "weekly-only = false\n")]
+    check("refuse/authorization-without-weekly-only", got == [["bad-field"], ["bad-field"]], got)
+
     import tempfile
     with tempfile.TemporaryDirectory(prefix="ci-selection-selftest-") as tmp:
         missing, directory, wide = Path(tmp) / "absent", Path(tmp) / "dir", Path(tmp) / "wide"
@@ -691,10 +840,15 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_ci_selection {} checks (a fixture registry passes; a missing, unknown or "
           "duplicate entry, a field outside its enum or schema, empty triggers where the scope needs them, a "
-          "dead glob, an untriggered run script or direct or transitive import, and an unauthorized "
-          "weekly-only each fail; the undetermined ceiling holds one under, at and over; TOML decode, bare "
-          "ValueError, RecursionError and MemoryError, unreadable inputs and unread workflow shapes are "
-          "cannot-evaluate; an unrecognized argument exits 2; the live tree passes)".format(len(EXECUTED)))
+          "dead glob, an untriggered run script (also through ./) or direct or transitive import, an "
+          "unauthorized weekly-only and an authorization without weekly-only each fail; the undetermined "
+          "ceiling holds one under, at and over; globs with many wildcards finish; TOML decode, bare "
+          "ValueError, RecursionError and MemoryError, a format-version of 2, true or 1.0, unreadable inputs, "
+          "and the {} workflow shapes tested (an unnamed step, a duplicate step name, no run steps, and "
+          "compact, flow, off-indent, repeated or second-block steps, block run headers with a comment, "
+          "keep or indent indicator, a continued run or name, an untracked script, a folded, anchored or "
+          "badly quoted name) are cannot-evaluate; an unrecognized argument exits 2; the live tree "
+          "passes)".format(len(EXECUTED), 3 + sum(1 for name in EXECUTED if name.startswith("cannot-evaluate/shape-"))))
     return 0
 
 
