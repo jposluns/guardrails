@@ -1577,6 +1577,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_applies.py
 
+      - name: Standards mappings self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite mappings-selftest
       - name: Standards mappings
         shell: bash
         run: python3 -I -B tools/check_mappings.py

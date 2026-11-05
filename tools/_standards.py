@@ -51,6 +51,9 @@ REQUIRED = ("map-key", "name", "publisher", "edition", "kind", "status", "citati
 KINDS = {"risk", "control", "guidance", "technique", "weakness"}   # how the public page words the relation
 STATUSES = {"stable", "beta", "snapshot"}                 # edition stability, surfaced as a badge
 CATALOGUES = {"full", "subset"}   # is the id set the complete pinned-edition catalogue, or curated
+# The optional per-id status: an id the pinned edition still lists but marks withdrawn stays in the id
+# set (so it is still a recognized id) and no rule may map to it.
+ID_STATUSES = {"withdrawn"}
 
 
 class ManifestError(ValueError):
@@ -75,7 +78,7 @@ def natkey(text):
 class Manifest:
     __slots__ = ("path", "map_key", "name", "publisher", "edition", "kind", "status",
                  "citation_unit", "id_pattern", "source_artefact", "retrieved", "catalogue", "url",
-                 "ids", "id_set", "titles")
+                 "ids", "id_set", "titles", "withdrawn")
 
     def __init__(self, path, data):
         self.path = path
@@ -145,7 +148,7 @@ class Manifest:
         rows = data.get("id")
         if not isinstance(rows, list) or not rows:
             raise ManifestError("{}: at least one [[id]] entry is required".format(path.name))
-        self.ids, self.titles = [], {}
+        self.ids, self.titles, self.withdrawn = [], {}, {}
         for row in rows:
             if not isinstance(row, dict):
                 raise ManifestError("{}: every [[id]] must be a table".format(path.name))
@@ -162,9 +165,32 @@ class Manifest:
                 raise ManifestError("{}: title for '{}' must be a string".format(path.name, code))
             self.titles[code] = title
             self.ids.append(code)
+            # status is optional and, when present, must be a value from ID_STATUSES; anything else
+            # (another string, a non-string) fails closed rather than reading as an active id.
+            # incorporated-into names the id a withdrawn one was folded into and needs status withdrawn.
+            if "status" in row:
+                id_status = row["status"]
+                if not isinstance(id_status, str) or id_status not in ID_STATUSES:
+                    raise ManifestError("{}: status for '{}' must be one of {}; got {!r}".format(
+                        path.name, code, "/".join(sorted(ID_STATUSES)), id_status))
+                self.withdrawn[code] = None
+            if "incorporated-into" in row:
+                into = row["incorporated-into"]
+                if code not in self.withdrawn:
+                    raise ManifestError("{}: incorporated-into for '{}' needs status = \"withdrawn\"".format(
+                        path.name, code))
+                if not isinstance(into, str) or not into:
+                    raise ManifestError("{}: incorporated-into for '{}' must be a non-empty string".format(
+                        path.name, code))
+                self.withdrawn[code] = into
         if self.ids != sorted(self.ids, key=natkey):
             raise ManifestError("{}: [[id]] entries must be in natural-sorted order".format(path.name))
         self.id_set = set(self.ids)
+        for code, into in self.withdrawn.items():
+            # The successor must be a listed id that is itself active, so a mapping fix can cite it.
+            if into is not None and (into not in self.id_set or into in self.withdrawn):
+                raise ManifestError("{}: incorporated-into for '{}' names '{}', which is not an active "
+                                    "id in this manifest".format(path.name, code, into))
 
 
 # The probe primitive, named so a self-test can refuse it without filesystem permissions (a
@@ -881,8 +907,8 @@ def validate_mappings(corpus, manifests):
     """Shared C4 / check_mappings id-validation loop. Returns (findings, mapped, tight, broad).
 
     Each rule's `map-<fw>-tight` / `map-<fw>-broad` frontmatter list is validated against its
-    fit-stripped BASE manifest (`map-<fw>`): id-pattern match, membership in the pinned id set,
-    per-list duplicate, and per-list natural-sort. Two fit-notation checks sit on top of the bare-key
+    fit-stripped BASE manifest (`map-<fw>`): id-pattern match, membership in the pinned id set, not
+    withdrawn in it (an [[id]] with status = "withdrawn"), per-list duplicate, and per-list natural-sort. Two fit-notation checks sit on top of the bare-key
     loop this replaces:
       - a map key must carry a `-tight`/`-broad` fit suffix (a bare or bad-suffix key is a finding,
         defence in depth for a hand-edited tree, mirroring the no-manifest guard);
@@ -932,6 +958,11 @@ def validate_mappings(corpus, manifests):
                 elif cid not in manifest.id_set:
                     findings.append("{}: {}: id '{}' is not in {} {}".format(
                         src.name, key, cid, manifest.name, manifest.edition))
+                elif cid in manifest.withdrawn:
+                    into = manifest.withdrawn[cid]
+                    findings.append("{}: {}: id '{}' is withdrawn in {} {}{}".format(
+                        src.name, key, cid, manifest.name, manifest.edition,
+                        "" if into is None else " (incorporated into {})".format(into)))
         for base, lists in per_base.items():
             both = set(lists["tight"]) & set(lists["broad"])
             if both:

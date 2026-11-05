@@ -41,7 +41,7 @@ residual are in the docstring of `tools/check_cited_standards.py`.
   suffix, a bad suffix, or a `map-*` key with no manifest is rejected as an unknown frontmatter key.
 - `tools/check_mappings.py` (a CI gate, and part of `run_all_checks.sh`) validates every mapped id in
   the corpus against its manifest: the id must match the manifest `id-pattern` and appear verbatim in
-  the manifest's id set. It also enforces per-list hygiene (no duplicates, natural-sorted order) and
+  the manifest's id set, and must not be marked withdrawn there. It also enforces per-list hygiene (no duplicates, natural-sorted order) and
   mutual exclusivity (an id is not asserted both tight and broad for one rule+framework). A malformed
   manifest fails closed (exit 2). Both are stdlib-only and offline: CI never reaches the network or the
   private source catalogues.
@@ -82,6 +82,12 @@ Top-level fields (all required):
 Then one `[[id]]` table per id, each with a `code` (required, must match `id-pattern`) and an optional
 `title`. Ids must be unique and in natural-sorted order.
 
+An id the pinned edition lists as withdrawn keeps its `[[id]]` table and adds `status = "withdrawn"`, and,
+where the source names a successor, `incorporated-into = "<id>"` naming an active id in the same manifest.
+A rule mapping to a withdrawn id fails `tools/check_mappings.py` (exit 1, naming the rule, the key and the
+id); a `status` other than `"withdrawn"`, or an `incorporated-into` without it, naming no active id or not
+a string, is a malformed manifest (exit 2). Without `status` the id is active.
+
 Attribution (licence, source URL) is intentionally NOT carried here; it is added, per-source verified,
 with the public NOTICE, because this file's job is to make an id verifiable, not to assert a licence.
 
@@ -89,7 +95,9 @@ with the public NOTICE, because this file's job is to make an id verifiable, not
 
 1. Read the ids from the authoritative published source, in a session with access to it. Never map from
    memory or an unversioned page. Record the exact `edition` and `source-artefact`.
-2. Use the bare canonical id token; keep the edition in `edition`, never in the id.
+2. Use the bare canonical id token; keep the edition in `edition`, never in the id. Record every id the
+   source marks withdrawn with `status = "withdrawn"` (and `incorporated-into` where the source names
+   one) rather than dropping it, so a mapping to it is refused with the reason.
 3. Run `python3 tools/check_mappings.py` and `python3 tools/gen_rules.py --check` locally.
 4. On an edition bump, any rule citing a removed id fails the gate on the same change, so an orphaned
    mapping cannot pass silently: fix the rule in the same change.

@@ -5262,3 +5262,19 @@ expected-check-ids = [
   "bound/size-over",
   "live/real-tree-passes",
 ]
+
+[[suite]]
+id = "mappings-selftest"
+runner = "tools/check_mappings.py"
+expected-check-ids = [
+  "refuse/mapping-to-withdrawn-id",
+  "pass/same-id-not-withdrawn",
+  "pass/withdrawn-id-unmapped",
+  "refuse/malformed-status-value",
+  "refuse/malformed-status-type",
+  "refuse/malformed-status-empty",
+  "refuse/incorporated-without-withdrawn",
+  "refuse/incorporated-unknown-id",
+  "refuse/incorporated-not-string",
+  "refuse/unrecognized-argument",
+]

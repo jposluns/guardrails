@@ -539,7 +539,7 @@ rules = []
 platform = "ci"
 default = "block"
 class = "a"
-residue = "It validates every standards-mapping id against its pinned framework manifest. Its linkage to a single corpus rule is arguable, so none is claimed here."
+residue = "It validates every standards-mapping id against its pinned framework manifest, and refuses a mapping to an id the manifest marks withdrawn; it knows an id is withdrawn only when the vendored manifest records it, so an id the source withdrew after the manifest was vendored still passes. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
 id = "cited-standards"
