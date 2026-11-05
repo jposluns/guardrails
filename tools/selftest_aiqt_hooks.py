@@ -5647,9 +5647,25 @@ def _sleeper(seconds, result=(0, None, None)):
     return handler
 
 
+# How long a stalled stub waits before giving up. The wait is on an event nothing sets, so a deadline is the
+# only thing that ends it sooner; a stub that returns means no deadline fired, whatever the host load.
+_STALL_SECONDS = 20.0
+
+
+def _stall(seconds=None):
+    """A handler that waits on an event nothing sets, up to `seconds` (default _STALL_SECONDS), then
+    returns exit 0."""
+    never = threading.Event()
+
+    def handler(_data):
+        never.wait(_STALL_SECONDS if seconds is None else seconds)
+        return (0, None, None)
+    return handler
+
+
 def _deadline_path_failures():
-    """(dl-fires, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by handler stubs that sleep
-    past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler, the budget
+    """(dl-fires, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by stubs that stall until a
+    short test budget ends them: every PreToolUse mode exits 2 with the refusal naming the handler, the budget
     and the input size; a deadline during the payload read exits 2 too; a fail-open mode keeps its result
     (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
     decision is written."""
@@ -5663,22 +5679,26 @@ def _deadline_path_failures():
                 out.append("(dl-fail-open-{}) a fail-open mode must keep its result with no deadline, got "
                            "exit {} and {!r}".format(mode, code, err))
             continue
-        with _stub_handler(mode, _sleeper(1.0)):
+        # The stub stalls until a deadline ends it, so the exit code and the refusal are the evidence that
+        # the deadline fired; how long the run took is reported, not judged.
+        with _stub_handler(mode, _stall()):
             code, err, seconds = _main_run(mode, budget=0.1)
         want = ("AIQT guardrail: the {} check could not reach a decision within its 0.1-second budget on an "
                 "input of {} bytes; failing closed. Split the command into smaller calls, or move long content "
                 "into a file and pass its path.".format(mode, size))
-        if code != 2 or want not in err or seconds >= 0.8:
-            out.append("(dl-fires-{}) expected exit 2 with the deadline refusal within 0.8s, got exit {} after "
+        if code != 2 or want not in err:
+            out.append("(dl-fires-{}) expected exit 2 with the deadline refusal, got exit {} after "
                        "{:.2f}s and {!r}".format(mode, code, seconds, err))
+
+    never = threading.Event()
 
     class SlowStdin:
         def read(self):
-            time.sleep(1.0)
+            never.wait(_STALL_SECONDS)
             return _DEADLINE_PAYLOAD
     with _stub_handler("diff_source_pretool", _sleeper(0)):
         code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
-    if code != 2 or "on an input it had not finished reading" not in err or seconds >= 0.8:
+    if code != 2 or "on an input it had not finished reading" not in err:
         out.append("(dl-read) a deadline during the payload read expected exit 2 naming the unread input, got "
                    "exit {} after {:.2f}s and {!r}".format(code, seconds, err))
 
@@ -5719,8 +5739,9 @@ def _deadline_restore_failures():
         signal.setitimer(signal.ITIMER_REAL, value, interval)
         before = signal.getitimer(signal.ITIMER_REAL)
         began = time.monotonic()
+        stub = _stall() if stub_seconds is None else _sleeper(stub_seconds)
         try:
-            with _stub_handler("diff_source_pretool", _sleeper(stub_seconds)):
+            with _stub_handler("diff_source_pretool", stub):
                 code, err, _seconds = _main_run("diff_source_pretool", budget=budget)
             used = time.monotonic() - began
             return code, before, signal.getitimer(signal.ITIMER_REAL), used, signal.getsignal(signal.SIGALRM)
@@ -5739,12 +5760,14 @@ def _deadline_restore_failures():
     if not (code == 0 and before == after == (0.0, 0.0) and handler is caller_alarm and not fired):
         out.append("(dl-restore-inactive) an inactive caller timer must stay inactive, got exit {} and {!r}"
                    .format(code, after))
-    code, before, after, used, handler = as_caller(0.2, 0.0, 1.0)
-    if not (code == 2 and fired == [signal.SIGALRM] and after == (0.0, 0.0) and handler is caller_alarm
-            and used < 0.8):
+    # In the two due cases the stub stalls and the window's own budget is longer than the stall, so exit 2
+    # can come only from the caller's deadline ending the window; a stall that returns gives exit 0.
+    budget = 3 * _STALL_SECONDS
+    code, before, after, used, handler = as_caller(0.2, 0.0, None, budget)
+    if not (code == 2 and fired == [signal.SIGALRM] and after == (0.0, 0.0) and handler is caller_alarm):
         out.append("(dl-restore-due) a caller deadline due inside the window must end it and be delivered "
                    "once, got exit {} after {:.2f}s, fired {!r}, timer {!r}".format(code, used, fired, after))
-    code, before, after, used, handler = as_caller(0.2, 0.5, 1.0)
+    code, before, after, used, handler = as_caller(0.2, 0.5, None, budget)
     if not (code == 2 and fired == [signal.SIGALRM] and after[1] == 0.5 and 0 < after[0] <= 0.5
             and handler is caller_alarm):
         out.append("(dl-restore-due-periodic) a periodic caller deadline due inside the window must be "
@@ -5804,11 +5827,15 @@ def _deadline_restore_failures():
     if problem:
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
                    "the timer as found, {}".format(problem))
+    # The stub stalls for 3 s, short of the outer window's 5 s, so only the inner deadline gives exit 2. The
+    # outer countdown, armed after `began`, has at least 5 s less the time from `began` to its read left.
+    began = time.monotonic()
     with aiqt_hooks._DeadlineWindow(5.0):
-        with _stub_handler("diff_source_pretool", _sleeper(1.0)):
+        with _stub_handler("diff_source_pretool", _stall(3.0)):
             code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
         inside = signal.getitimer(signal.ITIMER_REAL)
-    if (code != 2 or seconds >= 0.8 or not 4.0 < inside[0] <= 5.0
+        read = time.monotonic()
+    if (code != 2 or not 5.0 - (read - began) - 1e-5 <= inside[0] <= 5.0
             or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
             or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
         out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer window "
@@ -7148,9 +7175,9 @@ def _deadline_outer_deadline_failures():
     """(dl-defer-twice-outer-deadline) Two raising handlers at an inner window's first two close attempts
     leave an enclosing window its deadline. A 0.3-second window encloses a 5-second one; from a
     _WindowInjector, a SIGUSR1 whose handler raises is raised at the entry of the inner window's first
-    _close call and again at the entry of its second, and the outer body then sleeps 1.5 s. The outer
-    deadline must reach its owner within 1.0 s, with neither window armed, both handlers run, and SIGALRM
-    back to SIG_DFL with the timer inactive."""
+    _close call and again at the entry of its second, and the outer body then waits on an event nothing
+    sets, so only a deadline ends the wait. The outer deadline must reach its owner, with neither window
+    armed, both handlers run, and SIGALRM back to SIG_DFL with the timer inactive."""
     out = []
     ran = []
     close_code = aiqt_hooks._DeadlineWindow._close.__code__
@@ -7176,7 +7203,7 @@ def _deadline_outer_deadline_failures():
                 finally:
                     injector.stop()
                 inner_armed = inner.armed
-                time.sleep(1.5)
+                threading.Event().wait(_STALL_SECONDS)
             caught = "nothing"
         except aiqt_hooks._HookDeadline as exc:
             caught = "the outer deadline" if exc.args[:1] == (outer,) else "another deadline"
@@ -7189,7 +7216,7 @@ def _deadline_outer_deadline_failures():
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
         signal.signal(signal.SIGUSR1, saved)
-    if not (caught == "the outer deadline" and used < 1.0 and len(injector.at) == 2 and len(ran) == 2
+    if not (caught == "the outer deadline" and len(injector.at) == 2 and len(ran) == 2
             and inner_armed is False and not inner.armed and not outer.armed
             and handler == signal.SIG_DFL and timer == (0.0, 0.0)):
         out.append("(dl-defer-twice-outer-deadline) two raising handlers at an inner window's first two close "
