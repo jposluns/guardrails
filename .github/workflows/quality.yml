@@ -34,6 +34,11 @@ on:
     types: [labeled]
   push:
     branches: [main]
+  # A manual full run. Run on main it runs every heavy job (the job-level if: below); run on any other
+  # ref the heavy jobs are skipped, so Quality gates fails there. A manual or scheduled run is
+  # advisory: tools/ci-status.sh never counts it as merge evidence and never reads its failure as a
+  # veto, so it never blocks a merge.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -74,8 +79,10 @@ jobs:
   # is the one required status of this workflow and aggregates every job (msg-leaks.yml is a second).
   # The heavy jobs (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, the
   # git-fixture-env-core canary, the five host-patch jobs and byte-canon-matrix) carry one pinned job-level if:,
-  # so they run only on a push and on a pull request whose head is a merge-train-* branch of this
-  # repository; every other job runs in every run. That if: is the second layer behind the labeled
+  # so they run only on a push, on a workflow_dispatch or schedule run of refs/heads/main, and on a pull
+  # request whose head is a merge-train-* branch of this repository; every other job runs in every run.
+  # This workflow carries no schedule: trigger yet; the schedule arm makes a future scheduled run on
+  # main a full run, as a manual run on main is. That if: is the second layer behind the labeled
   # trigger above, which already keeps a member head from running at all. In any other pull request
   # run (a label added to a pull request that is not a train) the heavy jobs are skipped
   # and Quality gates fails by design (skipped is not success): such a change merges only by riding a
@@ -475,7 +482,7 @@ jobs:
   # exactly one line here, in a heavy job.
   opf-tooling-a:
     name: OPF tooling gates A (3.14)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -539,7 +546,7 @@ jobs:
 
   opf-tooling-b:
     name: OPF tooling gates B (3.14)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -607,7 +614,7 @@ jobs:
 
   opf-tooling-c:
     name: OPF tooling gates C (3.14)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -885,8 +892,14 @@ jobs:
           if [ "$EVENT_NAME" = "pull_request" ]; then
             python3 -I -B tools/check_release_cut.py
           else
-            # Check every first-parent transition in the pushed range.
-            python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+            if [ "$EVENT_NAME" = "push" ]; then
+              # Check every first-parent transition in the pushed range.
+              python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}" --base "$PUSH_BEFORE"
+            else
+              # A workflow_dispatch or schedule run has no pushed range: the gate compares the
+              # checked-out tip with its first parent, and refuses any other event.
+              python3 -I -B tools/check_release_cut.py --protected "origin/${GITHUB_REF_NAME}"
+            fi
           fi
 
       - name: Version monotonicity self-test
@@ -1179,7 +1192,7 @@ jobs:
 
   selftest-execution:
     name: Execution-reconciled self-tests
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -1256,7 +1269,7 @@ jobs:
 
   git-fixture-env-core:
     name: Git-fixture-env core self-test
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-latest
     steps:
@@ -1308,7 +1321,7 @@ jobs:
   # request's title or body starts no Quality run.
   opf-host-patch:
     name: OPF tooling (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1340,7 +1353,7 @@ jobs:
 
   git-fixture-env-core-host-patch:
     name: Git-fixture-env core self-test (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1368,7 +1381,7 @@ jobs:
 
   git-fixture-env-config-combined-host-patch:
     name: Git-fixture-env combined config lane (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1396,7 +1409,7 @@ jobs:
 
   git-fixture-env-config-malformed-host-patch:
     name: Git-fixture-env malformed config lane (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1424,7 +1437,7 @@ jobs:
 
   git-fixture-env-config-system-host-patch:
     name: Git-fixture-env system config lane (host patch)
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ubuntu-24.04
     steps:
@@ -1696,7 +1709,7 @@ jobs:
   # would surface as a carriage-return finding, failing the job.
   byte-canon-matrix:
     name: Byte canon vectors (${{ matrix.os }})
-    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
+    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || ((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && github.ref == 'refs/heads/main') || (startsWith(github.head_ref, 'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository))
     needs: scope
     runs-on: ${{ matrix.os }}
     strategy:

@@ -1695,6 +1695,45 @@ def _run_checks():
         check("ci/plain-quality-run-satisfied", satisfied,
               [(0, 1, False), (0, 1, False), (0, 6, False)])
 
+        # THE ADVISORY RUNS: a scheduled or manual quality.yml run on the head is neither a veto nor
+        # merge evidence. Beside valid merge evidence (a push run in a plain read, a conforming
+        # pull_request run under --require-base) a failed advisory run of either event stays green,
+        # and so does a successful one; an advisory success alone is missing evidence (exit 1, one
+        # read; five under --wait); beside failed merge evidence it rescues nothing (exit 1). A failed
+        # push run, the control, still vetoes, so only the two advisory events are exempt.
+        advisory_note = "NOTE: advisory run(s)"
+        failed_merge = workflow_run(927, "completed", "failure", "Quality", head_sha,
+                                    event="push", pull_requests=[])
+        advisory_cases = []
+        for event in ("schedule", "workflow_dispatch"):
+            advisory_failed = workflow_run(925, "completed", "failure", "Quality", head_sha,
+                                           event=event, pull_requests=[])
+            advisory_green = workflow_run(926, "completed", "success", "Quality", head_sha,
+                                          event=event, pull_requests=[])
+            for runs, extra, wait in (
+                    ([plain_push, advisory_failed], (), False),
+                    ([plain_push, advisory_failed], (), True),
+                    ([pr_quality, advisory_failed], require, False),
+                    ([plain_push, advisory_green], (), False),
+                    ([advisory_green], (), False),
+                    ([advisory_green], (), True),
+                    ([advisory_green], require, False),
+                    ([failed_merge, advisory_green], (), False)):
+                rc, output, calls = fixture.invoke([[page(runs)]], wait=wait, extra_args=extra)
+                advisory_cases.append((rc, calls, advisory_note in output,
+                                       "CI concluded with non-success" in output,
+                                       "no completed successful run of the workflow file" in output))
+        rc, output, calls = fixture.invoke([[page([plain_push, failed_merge])]])
+        advisory_cases.append((rc, calls, advisory_note in output,
+                               "CI concluded with non-success" in output,
+                               "no completed successful run of the workflow file" in output))
+        check("ci/advisory-run-neither-veto-nor-evidence", advisory_cases,
+              [(0, 1, True, False, False), (0, 5, True, False, False),
+               (0, 1, True, False, False), (0, 1, True, False, False),
+               (1, 1, True, False, True), (1, 5, True, False, True),
+               (1, 1, True, False, True), (1, 1, True, True, False)] * 2
+              + [(1, 1, False, True, False)])
+
         # A second positional rev is refused (exit 2) before any git or API
         # read, never read last-wins: a stray positional that resolves (a branch name, say)
         # would silently change which commit is checked.
@@ -2792,6 +2831,25 @@ def _run_checks():
             wrong_file.append((rc, fixture.gh_reads("git/commits/"), unmatched in output))
         check("ci/match-tree-wrong-workflow-file-refused", wrong_file,
               [(1, 0, True), (1, 0, True), (0, 1, False)])
+
+        # An advisory run (THE ADVISORY RUNS) on the same tree is neither a candidate nor a veto: a
+        # failed scheduled or manual run beside a successful push run passes (exit 0), and a
+        # successful one alone refuses (exit 1, no commit read). The control: the same failed run
+        # recorded as a push event vetoes (exit 1).
+        tree_advisory = []
+        for event in ("schedule", "workflow_dispatch"):
+            failed_advisory = workflow_run(730, "completed", "failure", "Quality", same_sha, event=event)
+            green_advisory = workflow_run(731, "completed", "success", "Quality", same_sha, event=event)
+            for runs in ([failed_advisory, quality_same], [green_advisory]):
+                rc, output, _calls = fixture.invoke([], rev=None, extra_args=match,
+                                                    tree=tree_listing(runs, commits))
+                tree_advisory.append((rc, fixture.gh_reads("git/commits/"), unmatched in output))
+        failed_push = workflow_run(732, "completed", "failure", "Quality", same_sha, event="push")
+        rc, output, _calls = fixture.invoke([], rev=None, extra_args=match,
+                                            tree=tree_listing([failed_push, quality_same], commits))
+        tree_advisory.append((rc, fixture.gh_reads("git/commits/"), unmatched in output))
+        check("ci/match-tree-advisory-run-ignored", tree_advisory,
+              [(0, 1, False), (1, 0, True)] * 2 + [(1, 1, False)])
 
         # A successful same-tree run whose named job concluded skipped, ran none of that name, has one
         # of two same-named jobs skipped, or has it still running, never stands as that job's evidence

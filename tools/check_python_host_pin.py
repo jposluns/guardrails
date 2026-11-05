@@ -478,7 +478,8 @@ CONCURRENCY_BLOCK = (
     "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
 )
 # The keys a host-patch job may carry, and the one job-level if: line it must also carry, exactly as written
-# (a trailing comment included): it runs the job on a push and on a pull request whose head is a
+# (a trailing comment included): it runs the job on a push, on a workflow_dispatch or schedule run of
+# refs/heads/main (never on another ref), and on a pull request whose head is a
 # merge-train-* branch of this repository, except when the scope job's site_only output is true (the
 # site fast lane: every changed path of the pull request is in the site allowlist, so the heavy suites
 # are skipped under the maintainer's recorded authorization; the Quality gates job passes a skipped
@@ -490,6 +491,8 @@ CONCURRENCY_BLOCK = (
 # if: at all (outside-judge), so the jobs leg still runs outside these jobs on every event.
 JOB_KEYS = {"name", "runs-on", "steps"}
 HEAVY_JOB_IF_LINE = ("    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || "
+                     "((github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') && "
+                     "github.ref == 'refs/heads/main') || "
                      "(startsWith(github.head_ref, 'merge-train-') && "
                      "github.event.pull_request.head.repo.full_name == github.repository))")
 HEAVY_JOB_NEEDS_LINE = "    needs: scope"
@@ -2277,6 +2280,20 @@ def _job_cases():
         ("jobs/job-if-scope-condition-dropped-finding",
          ((OPF, pinned_if, "    if: github.event_name == 'push' || (startsWith(github.head_ref, "
            "'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)\n"),),
+         (), "opf-host-patch carries if:", "job-keys"),
+        # A manual or scheduled run runs a host-patch job only on main: the dispatch arm without its
+        # main ref condition (a dispatch of any other ref would run the job) and the arm on another
+        # ref are refused by job-keys; so is the line from before the arm was added.
+        ("jobs/job-if-dispatch-any-ref-finding",
+         ((OPF, pinned_if, pinned_if.replace(" && github.ref == 'refs/heads/main'", "", 1)),),
+         (), "opf-host-patch carries if:", "job-keys"),
+        ("jobs/job-if-dispatch-other-ref-finding",
+         ((GFE, pinned_if, pinned_if.replace("'refs/heads/main'", "'refs/heads/dev'", 1)),),
+         (), GFE + " carries if:", "job-keys"),
+        ("jobs/job-if-dispatch-arm-dropped-finding",
+         ((OPF, pinned_if, "    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' "
+           "|| (startsWith(github.head_ref, 'merge-train-') && "
+           "github.event.pull_request.head.repo.full_name == github.repository))\n"),),
          (), "opf-host-patch carries if:", "job-keys"),
         # HEAVY_JOB_NEEDS_LINE is the one needs: a host-patch job carries: without it the pinned if:
         # line reads an empty site_only output, another target reads another job's output, and the
