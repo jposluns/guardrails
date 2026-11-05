@@ -11771,6 +11771,142 @@ def _record_surface_cases(tmp, hooks=aiqt_hooks, hooks_file=None):
         check(cid, (len(want), got[1] == got[0], got[2] == got[0]), (len(starts), True, True))
 
 
+# Enumerator-supplied text in the stop-family reasons: each named id, title and reason field is one line and
+# cut to its fixed maximum with a visible mark, so a reason stays bounded however long or however many lines
+# that text has. Every row below fails with aiqt_hooks._orch_clip replaced by plain str.
+_NAMED_TEXT_TOTAL_MAX = 6000  # characters: the stated ceiling on one reason built from 256 maximum-length items
+_NAMED_TEXT_BREAKS = "\n\r\x0b\x0c\x1c\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}"  # what str.splitlines breaks on
+
+
+class _EnumeratorRunStub:
+    """Stands in for the hooks module's subprocess so _orch_enumerate sees a chosen run outcome."""
+    SubprocessError = subprocess.SubprocessError
+
+    def __init__(self, run):
+        self.run = run
+
+
+def _one_line(text):
+    return len(text.splitlines()) == 1
+
+
+def _named_field_kept(hooks, reason, fill, length, limit):
+    """True when a field of `length` copies of `fill` appears in reason exactly as the clip renders it: whole
+    up to limit, else cut to limit characters ending in the clip mark, with no longer run of fill present."""
+    mark = hooks._ORCH_CLIP_MARK
+    kept = length if length <= limit else limit - len(mark)
+    rendered = fill * kept + ("" if length <= limit else mark)
+    return rendered in reason and fill * (kept + 1) not in reason
+
+
+def _named_text_cases(hooks):
+    """(check id, got, want) rows for the bounded named-text checks, built against hooks."""
+    base = {"kind": "stop", "escape": False, "loop_signal": False, "counter": 0,
+            "enum_status": "ok", "enum_detail": "", "actionable": [], "waiting": [],
+            "blocked": [], "proposed": [], "wake_named": None,
+            "schedule_denials": 0, "basis_unchanged": False}
+    id_max, title_max = hooks._ORCH_NAMED_ID_MAX, hooks._ORCH_NAMED_TITLE_MAX
+    reason_max, brk = hooks._ORCH_NAMED_REASON_MAX, _NAMED_TEXT_BREAKS
+    kinds = ("stop", "schedule_idle", "ask")
+    rows = []
+
+    def reason(**kw):
+        return hooks.decide_yield(dict(base, **kw))[1]
+
+    def limits(fill, limit, build):
+        # just inside, exactly at, and one over the field limit
+        return tuple(_named_field_kept(hooks, build(fill * n), fill, n, limit)
+                     for n in (limit - 1, limit, limit + 1))
+
+    def bounded(r):
+        return (len(r) <= _NAMED_TEXT_TOTAL_MAX, _one_line(r), "; and 246 more" in r)
+
+    def ids(n):
+        return ["{:03d}".format(j) + "~" * (n - 3) for j in range(256)]
+
+    for kind in kinds:
+        k = {"kind": kind}
+        r = reason(actionable=[("A" + brk + "B", "t" + brk, "w" + brk)], **k)
+        rows.append(("core/named-text-one-line-actionable-" + kind,
+                     (_one_line(r), "A" + " " * len(brk) + "B" in r, "Two" in r), (True, True, True)))
+        r = reason(actionable=[("A", "^" * 2048, "w")], **k)
+        rows.append(("core/named-text-2kb-title-cut-" + kind,
+                     (_named_field_kept(hooks, r, "^", 2048, title_max), len(r) < 2048), (True, True)))
+        for field, fill, limit in (("id", "~", id_max), ("title", "^", title_max),
+                                   ("reason", "@", reason_max)):
+            def build(v, field=field, k=k):
+                entry = dict({"id": "I", "title": "T", "reason": "W"}, **{field: v})
+                return reason(actionable=[(entry["id"], entry["title"], entry["reason"])], **k)
+            rows.append(("core/named-text-{}-limit-{}".format(field, kind),
+                         limits(fill, limit, build), (True, True, True)))
+        sizes = []
+        for n_id, n_text in ((id_max, title_max), (4096, 4096)):
+            act = [(i, "^" * n_text, "@" * max(n_text, reason_max)) for i in ids(n_id)]
+            held = [(i, "cannot-evaluate", "held") for i in ids(n_id)] if kind == "ask" else []
+            sizes.append(bounded(reason(actionable=act, cannot_evaluate=held, **k)))
+        rows.append(("core/named-text-256-items-bounded-" + kind, sizes, [(True, True, True)] * 2))
+        r = reason(cannot_evaluate=[("C" + brk + "E", "cannot-evaluate", "held")], **k)
+        rows.append(("core/named-text-one-line-cannot-evaluate-" + kind,
+                     (_one_line(r), "(cannot-evaluate)" in r), (True, True)))
+        rows.append(("core/named-text-cannot-evaluate-id-limit-" + kind,
+                     limits("~", id_max, lambda v, k=k: reason(
+                         cannot_evaluate=[(v, "cannot-evaluate", "held")], **k)), (True, True, True)))
+        rows.append(("core/named-text-256-cannot-evaluate-bounded-" + kind,
+                     [bounded(reason(cannot_evaluate=[(i, "cannot-evaluate", "held") for i in ids(n)], **k))
+                      for n in (id_max, 4096)], [(True, True, True)] * 2))
+    held_ctx = {"kind": "ask", "actionable": [("A", "T", "W")]}
+    r = reason(cannot_evaluate=[("H" + brk + "D", "cannot-evaluate", "held")], **held_ctx)
+    rows.append(("core/named-text-one-line-held-ask", (_one_line(r), "Additionally" in r), (True, True)))
+    rows.append(("core/named-text-held-id-limit-ask",
+                 limits("~", id_max, lambda v: reason(
+                     cannot_evaluate=[(v, "cannot-evaluate", "held")], **held_ctx)), (True, True, True)))
+    pend = {"kind": "schedule_idle", "wake_named": False}
+    r = reason(waiting=[("P" + brk + "D", "tracked-task", "t9")], **pend)
+    rows.append(("core/named-text-one-line-pending-schedule_idle",
+                 (_one_line(r), r.startswith("wake hygiene")), (True, True)))
+    rows.append(("core/named-text-pending-id-limit-schedule_idle",
+                 limits("~", id_max, lambda v: reason(waiting=[(v, "tracked-task", "t9")], **pend)),
+                 (True, True, True)))
+    # the enumerator-error detail: the two named formats, then their raw-id and raw-text siblings
+    envelope = {"version": 1, "generated_at_utc": now_iso(0), "source": {"locator": "selftest"}}
+    long_id = ("~" + brk) * 400
+    detail_max = id_max + reason_max + 60
+
+    def detail(**fields):
+        raw = dict({"id": "X", "title": "t", "state": "open", "granted": True, "blocker": None}, **fields)
+        return hooks.validate_enumeration(dict(envelope, items=[raw]))[1]
+    d = detail(id=long_id, state="s" + brk * 400)
+    rows.append(("core/enum-detail-invalid-state-one-line-bounded",
+                 ("invalid state" in d, _one_line(d), len(d) <= detail_max,
+                  [_one_line(reason(kind=kind, enum_status="ENUMERATOR_ERROR", enum_detail=d))
+                   for kind in kinds]),
+                 (True, True, True, [True, True, True])))
+    dup = {"id": long_id, "title": "t", "state": "open", "granted": True}
+    siblings = [detail(id=long_id, title=7), detail(id=long_id, granted="yes"),
+                detail(id=long_id, blocker={"kind": "bogus"}),
+                detail(id=long_id, blocker={"kind": "external", "ref": "r", "evidence": 7}),
+                hooks.validate_enumeration(dict(envelope, items=[dup, dict(dup)]))[1],
+                hooks.validate_enumeration(dict(envelope, version="v" * 4096, items=[]))[1]]
+    rows.append(("core/enum-detail-raw-id-formats-one-line-bounded",
+                 [(_one_line(x), len(x) <= detail_max) for x in siblings], [(True, True)] * 6))
+
+    def fail_run(*_a, **_k):
+        raise OSError("enumerator " + ("x" + brk) * 1000)
+
+    def exit_run(argv, **_k):
+        return subprocess.CompletedProcess(argv, 3, "", ("e" + brk) * 1000)
+    for name, run in (("core/enum-detail-failed-to-run-one-line-bounded", fail_run),
+                      ("core/enum-detail-exit-stderr-one-line-bounded", exit_run)):
+        saved = hooks.subprocess
+        hooks.subprocess = _EnumeratorRunStub(run)
+        try:
+            status, d = hooks._orch_enumerate({"enumerator": {"argv": ["selftest-enumerator"]}}, ".")
+        finally:
+            hooks.subprocess = saved
+        rows.append((name, (status, _one_line(d), len(d) <= detail_max), ("ENUMERATOR_ERROR", True, True)))
+    return rows
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -16505,6 +16641,8 @@ def _main_isolated(report_path=None):
         check("core/ask-enum-error-with-actionable-cap-still-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed, actionable=[]))
         check("core/ask-cannot-evaluate-only-cap-relieves", v, "ALLOW_WITH_FINDINGS")
+        for name, got, want in _named_text_cases(aiqt_hooks):
+            check(name, got, want)
 
         # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
         # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued
