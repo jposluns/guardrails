@@ -9,7 +9,7 @@ map-cwe-broad: [CWE-287]
 map-owasp-asvs-tight: [V9, V10]
 map-owasp-proactive-broad: [C7]
 map-owasp-cheatsheet-tight: [json-web-token, oauth2]
-map-csa-ccm-broad: [IAM-13, IAM-14, IAM-15]
+map-csa-ccm-broad: [IAM-13, IAM-15]
 map-csa-aicm-broad: [IAM-13, IAM-14, IAM-15]
 ---
 

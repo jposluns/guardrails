@@ -6,7 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [INTEG]
 slug: self-guardrail-from-error
-map-iso-42001-tight: [10.2]
+map-iso-42001-broad: [10.2]
 map-nist-airmf-tight: [MANAGE 2.3]
 ---
 

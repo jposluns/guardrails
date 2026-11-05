@@ -7,14 +7,14 @@ slug: tool-argument-validation
 map-cwe-tight: [CWE-20, CWE-88]
 map-cwe-broad: [CWE-22, CWE-77]
 map-nist-80053-tight: [SI-10, SI-10(6)]
-map-atlas-broad: [AML.T0050, AML.T0102]
+map-atlas-broad: [AML.T0050]
 map-iso-23894-broad: [A.11]
 map-owasp-asi-broad: [ASI05]
-map-owasp-mcp-broad: [MCP05]
+map-owasp-mcp-tight: [MCP05]
 map-owasp-web-broad: [A05]
 map-owasp-asvs-tight: [V2]
-map-csa-ccm-broad: [AIS-04]
-map-csa-aicm-tight: [AIS-09, AIS-11, AIS-13, IAM-18]
+map-csa-aicm-tight: [AIS-09]
+map-csa-aicm-broad: [AIS-10, AIS-11]
 ---
 
 # Validate tool arguments before use

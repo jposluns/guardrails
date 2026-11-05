@@ -6,7 +6,7 @@ tier: 10
 facet: INTEG
 secondary: [QUALI]
 slug: check-fails-closed-on-unreadable
-map-nist-80053-tight: [SI-17]
+map-nist-80053-broad: [SI-17]
 map-owasp-cheatsheet-broad: [error-handling]
 ---
 
