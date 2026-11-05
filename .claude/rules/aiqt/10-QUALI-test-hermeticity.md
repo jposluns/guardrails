@@ -6,8 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [ACCUR, INTEG]
 slug: test-hermeticity
-map-nist-80053-tight: [SA-11]
-map-nist-80053-broad: [SA-8(29)]
+map-nist-80053-broad: [SA-8(29), SA-11]
 map-nist-ssdf-broad: [PW.8.2]
 map-iso-42001-broad: [A.6.2.4]
 ---

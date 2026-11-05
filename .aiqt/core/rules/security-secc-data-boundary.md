@@ -12,7 +12,7 @@ map-owasp-llm-broad: [LLM02]
 map-csa-ccm-tight: [DSP-04]
 map-csa-ccm-broad: [DSP-10, DSP-17]
 map-csa-aicm-tight: [DSP-04]
-map-csa-aicm-broad: [DSP-10, DSP-17, DSP-24, IAM-16]
+map-csa-aicm-broad: [DSP-10, DSP-17, IAM-16]
 ---
 
 # Classify content by sensitivity tier
