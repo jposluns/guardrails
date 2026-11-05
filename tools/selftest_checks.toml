@@ -4735,6 +4735,18 @@ expected-check-ids = [
   "tracker/shape-reviewer-source-caught",
   "tracker/negative-controls-unflagged",
   "tracker/same-line-multiplicity-counted",
+  # ---------- the swept-path zero-tolerance rows and their controls ----------
+  "swept/row-family-grade",
+  "swept/row-family-letter-grade",
+  "swept/row-qa-then-family",
+  "swept/row-bare-qa-round",
+  "swept/row-qa-round-word",
+  "swept/row-family-round",
+  "swept/row-family-mutation",
+  "swept/row-bare-round",
+  "swept/row-bare-round-hyphen",
+  "swept/clean-controls-unflagged",
+  "swept/prefix-membership-decides",
   # ---------- path-only exemptions, scope membership, no line marker ----------
   "tracker/frozen-allowlist-sha-bound",
   "tracker/history-allowlist-path-bound",

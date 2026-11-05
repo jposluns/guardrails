@@ -1081,7 +1081,7 @@ def _self_test():
     import unittest
 
     here = os.path.abspath(__file__)
-    # Commands bash 5.3 ran a CI rerun for (stub gh and glab on a stub-only PATH): the round 4 to 7 reproductions.
+    # Commands bash 5.3 ran a CI rerun for (stub gh and glab on a stub-only PATH): the earlier reproductions.
     ACCEPT = ('gh run rerun 12345 --failed', 'gh run rerun 7', 'gh run rerun 9', "echo '#' ; gh run rerun 1",
               'echo a#b; gh run rerun 1', "# it's\ngh run rerun 4", 'for id in 5 6; do gh run rerun $id; done',
               'if true; then gh run rerun 5; fi', 'time gh run rerun 5', '{ gh run rerun 5; }', '! gh run rerun 5',
@@ -1114,7 +1114,7 @@ def _self_test():
               '$(:)$(:) gh run rerun 7', 'exec $x gh run rerun 7', 'command $x gh run rerun 7',
               'gh 2>&1""- run rerun 7', 'gh >"a b" run rerun $\'7\'', '$empty$other gh run rerun 7',
               '${empty:-} gh run rerun 7', '/usr/bin/gh run rerun 1', 'command -p -- gh run rerun 1',
-              # Rounds 8 and 9: off-grammar reruns a search of the text missed; each is a possible CI rerun now.
+              # off-grammar reruns a search of the text missed; each is a possible CI rerun now.
               'echo "$(date)" # CI failed on main\\\ngh run rerun 123 --failed', 'echo "$(date)" a\\\\\ngh run rerun 7',
               'ls $((1))  # see C:\\temp\\\nglab ci retry 9', 'gh {run,rerun} 7', 'gh run {rerun,7}',
               '{gh,run,rerun} 7', 'glab {ci,retry} 7', 'gh run re$(true)run 7', 'gh run re`true`run 7',
@@ -1191,7 +1191,7 @@ def _self_test():
 
         def tearDown(self):
             shutil.rmtree(self.tmp, ignore_errors=True)
-            # Round 25 fix for QA round 24 (claude MINOR): a test that patches a module global restores the real one.
+            # a test that patches a module global restores the real one.
             g = globals()
             self.assertIs(g.get("fcntl"), real_fcntl)
             self.assertIs(g["after_tool"], real_after_tool)
@@ -1249,7 +1249,7 @@ def _self_test():
                        "session ran a command that names a CI rerun and was not reported as failed, or saw a check "
                        "pass on a rerun after a recorded failure")
             self.assertEqual(out["systemMessage"], allowed + " (loop cap)")
-            # Round 13 (codex MEDIUM): the same warning when the refusal count cannot be saved (no state path).
+            # the same warning when the refusal count cannot be saved (no state path).
             state = dict(new_state(), flags=["CI rerun command: false && gh run rerun 7; true"], blocks=1)
             self.assertEqual(at_stop(dict(last_assistant_message="All tests pass.", stop_hook_active=True), state, True,
                                      None), dict(systemMessage=allowed + " (refusal count cannot be saved)"))
@@ -1273,7 +1273,7 @@ def _self_test():
             self.assertIsNone(self.bash("pytest"))
             self.bash("tox", ok=False)
             self.bash("tox")
-            # Round 21: a stop with reruns outstanding and no final message in the payload is allowed with a warning.
+            # a stop with reruns outstanding and no final message in the payload is allowed with a warning.
             self.assertEqual(decide(dict(hook_event_name="Stop", session_id="s"), self.env),
                              dict(systemMessage=NO_MESSAGE))
             self.assertIsNone(decide(dict(hook_event_name="Stop", session_id="other",
@@ -1290,7 +1290,7 @@ def _self_test():
             path = state_path(dict(session_id="s"), self.env)
             with open(path, "w", encoding="ascii") as fh:
                 fh.write("\x7bbroken")
-            self.assertEqual(self.stop("All checks pass."), dict(systemMessage=UNREAD))  # round 21: it warns
+            self.assertEqual(self.stop("All checks pass."), dict(systemMessage=UNREAD))  # it warns
 
         def test_10_classifiers(self):
             for c in ("pytest", "python3 -m pytest -x", "python3 -B -m unittest", "make -C d check",
@@ -1688,8 +1688,8 @@ def _self_test():
                     "record the failure, investigate it as an intermittent result, and do not present the later "
                     "pass as conclusive verification.")
             self.assertIsNone(self.bash("pytest -q", ok=False))
-            # A certain CI rerun's tail asserts neither a rerun nor an earlier failure (round 12, claude MEDIUM-1 and
-            # MINOR-3); an uncertain rerun's tail asserts no rerun and no earlier check failure.
+            # A certain CI rerun's tail asserts neither a rerun nor an earlier failure; an uncertain
+            # rerun's tail asserts no rerun and no earlier check failure.
             ci_tail = (" This does not show that a rerun was started (a later command, || true, a background &, a ! "
                        "or an if or while condition can hide the exit status of a refused call, with or without "
                        "pipefail set, and so can a pipe under default bash options) or that CI failed before. If CI "
@@ -1771,14 +1771,14 @@ def _self_test():
 
         def test_41_an_uncertain_rerun_is_note_only(self):
             path = state_path(dict(session_id="s"), self.env)
-            # Round 10: the standard heredoc commit is off-grammar, and no rerun or failure happened.
+            # the standard heredoc commit is off-grammar, and no rerun or failure happened.
             out = self.bash("git commit -m \"$(cat <<'EOF'\nFix parser\nEOF\n)\"")["hookSpecificOutput"]
             for s in ("could not parse", "a CI rerun cannot be ruled out", "does not show that CI was rerun"):
                 self.assertIn(s, out["additionalContext"])
             self.assertNotIn("investigate it as an intermittent", out["additionalContext"])
             self.assertIsNone(self.stop("Committed; all tests pass."))
             self.assertIsNone(self.stop("Committed; all tests pass.", active=True))
-            # Round 11 (codex 1): false && gh run rerun 7 exits 1 with no gh call; (claude MEDIUM-1): gh run rerun 7
+            # false && gh run rerun 7 exits 1 with no gh call;: gh run rerun 7
             # refused with an HTTP 403. Neither started a rerun, and the note asserts none.
             for c in ("false && gh run rerun 7", "gh run rerun 7"):
                 out = self.bash(c, ok=False)["hookSpecificOutput"]["additionalContext"]
@@ -1787,7 +1787,7 @@ def _self_test():
                     self.assertNotIn(s, out)
                 self.assertIsNone(self.stop("All tests pass."), c)
                 self.assertIsNone(self.stop("CI is green."), c)
-            # Round 11 (codex 2, claude MINOR-1): real reruns outside the grammar are note-only, so no wording of a
+            # real reruns outside the grammar are note-only, so no wording of a
             # final message clears or arms anything.
             for c in ("gh {run,rerun} 7", "gh run rerun \"$(gh run list -L1 --json databaseId -q .[0].databaseId)\""):
                 self.assertIn("possible CI rerun", self.bash(c)["hookSpecificOutput"]["additionalContext"])
@@ -1805,7 +1805,7 @@ def _self_test():
             for real, flag in ((lambda: self.bash("gh run rerun 7"), "CI rerun command: gh run rerun 7"),
                                (lambda: (self.bash("pytest -q", ok=False), self.bash("pytest -q")),
                                 "local rerun: pytest -q")):
-                self.bash("echo $; true")  # uncertain: never kept beside the certain rerun (codex 3)
+                self.bash("echo $; true")  # uncertain: never kept beside the certain rerun
                 real()
                 self.assertEqual(load_state(path)[0]["flags"], [flag])
                 for m in ("No CI reruns failed; all tests pass.", "The documentation says \"CI was not retriggered\". "
@@ -1816,7 +1816,7 @@ def _self_test():
                                      "failure (" + flag +
                                      "). State any earlier failure and that it is unresolved (intermittent), and do "
                                      "not call the later pass conclusive (refusal 1 of at most 2).", m)
-                # Any disclosure word clears, wherever it stands, also inside a denial (claude MINOR-2).
+                # Any disclosure word clears, wherever it stands, also inside a denial.
                 self.assertIsNone(self.stop("I did not rerun CI; all tests pass."))
                 self.assertEqual(load_state(path)[0]["flags"], [])
                 self.assertIsNone(self.stop("All tests pass."))
@@ -1833,7 +1833,7 @@ def _self_test():
                 self.assertNotIn("was started", out, c)
                 self.assertIsNone(self.bash("gh run view 7"))  # read-only: green on a later look
                 self.assertIsNone(self.stop("CI is green."), c)  # uncertain: a note, no refusal
-            # Round 11 (claude MEDIUM-2): an off-grammar check that fails and then passes is uncertain: note-only,
+            # an off-grammar check that fails and then passes is uncertain: note-only,
             # and its note does not say both that the call failed and that nothing failed.
             self.tearDown()
             self.setUp()
@@ -1863,11 +1863,11 @@ def _self_test():
             # The name rule ignores whether the words ran: this call succeeds, starts no rerun, and is kept.
             out = self.bash("false && gh run rerun 7; true")["hookSpecificOutput"]["additionalContext"]
             self.assertIn("(false && gh run rerun 7; true) was not reported as failed (no failure event", out)
-            self.assertNotIn("succeeded", out)  # round 15 (codex MINOR 2): the note says what the Stop messages say
+            self.assertNotIn("succeeded", out)  # the note says what the Stop messages say
             refusal = self.stop("All tests pass.")
             self.assertEqual(refusal["decision"], "block")
-            # Round 13 (codex MEDIUM): at the loop cap the warning asserts no CI rerun either. Round 14 (codex MINOR 3,
-            # claude MINOR-2): neither the refusal nor the warning says the call succeeded, only that it was not
+            # at the loop cap the warning asserts no CI rerun either. neither the refusal nor the warning
+            # says the call succeeded, only that it was not
             # reported as failed.
             self.stop("All tests pass.", active=True)
             warning = self.stop("All tests pass.", active=True)["systemMessage"]
@@ -1875,27 +1875,27 @@ def _self_test():
             for text in (refusal["reason"], warning):
                 self.assertNotIn("succeeded", text)
                 self.assertIn("names a CI rerun and was not reported as failed", text)
-            # Round 14 (gemini): the docstring says what the warning asserts (it names a local rerun it saw).
+            # the docstring says what the warning asserts (it names a local rerun it saw).
             doc = " ".join(__doc__.split())
             self.assertIn("the same as the refusal: it asserts no CI rerun either, and names a local rerun only", doc)
             self.assertNotIn("asserts no rerun either", doc)
-            # Round 13 (claude MINOR-2): the hook reads only the event, interrupted and an integer exit-code field.
+            # the hook reads only the event, interrupted and an integer exit-code field.
             for n, response in enumerate((dict(exit_code="1"), dict(exit_code=1.0), dict(exitStatus=1),
                                           dict(stderr="HTTP 403", is_error=True))):
                 self.env = dict(AIQT_HOOK_STATE_DIR=os.path.join(self.tmp, "r" + str(n)))
                 out = self.bash("gh run rerun 7", **response)["hookSpecificOutput"]["additionalContext"]
                 self.assertIn("(gh run rerun 7) was not reported as failed (no failure event", out, response)
                 self.assertNotIn("succeeded", out, response)
-            # Round 12 (claude MEDIUM-1): an exit status of 0 can hide a gh call the server refused. Each command runs
+            # an exit status of 0 can hide a gh call the server refused. Each command runs
             # the stub gh, which exits 1, and under default bash options exits 0 itself (REFUSED; with pipefail set,
             # the pipe exits 1), so it is kept as certain: its note says only that the call was not reported as
             # failed, and Stop refuses (a false refusal). The pipe under pipefail is note-only.
-            # Round 14 (claude MINOR-4): a background &, a ! and an if condition exit 0 even with pipefail set.
+            # a background &, a ! and an if condition exit 0 even with pipefail set.
             refused = (("gh run rerun 7 2>&1 | tail -5", (), 0), ("gh run rerun 7 || true", (), 0),
                        ("gh run rerun 7; echo done", (), 0), ("gh run rerun 7 2>&1 | tail -5", ("-o", "pipefail"), 1),
                        ("gh run rerun 7 &", ("-o", "pipefail"), 0), ("! gh run rerun 7", ("-o", "pipefail"), 0),
                        ("if gh run rerun 7; then :; fi", ("-o", "pipefail"), 0),
-                       ("while gh run rerun 7; do :; done", (), 0),  # round 15 (claude NIT): a while condition too
+                       ("while gh run rerun 7; do :; done", (), 0),  # a while condition too
                        ("while gh run rerun 7; do :; done", ("-o", "pipefail"), 0),
                        ("gh run rerun 7 || true", ("-o", "pipefail"), 0))
             for n, (c, opts, rc) in enumerate(refused):
@@ -1910,7 +1910,7 @@ def _self_test():
                               "rerun was started (a later command, || true, a background &, a ! or an if or while "
                               "condition can hide the exit status of a refused call, with or without pipefail set", out)
                 self.assertEqual(self.stop("CI is green.")["decision"], "block", c)
-            # The exit statuses above are what bash gives with stub gh and tail (round 13, gemini: a missing bash is a
+            # The exit statuses above are what bash gives with stub gh and tail (gemini: a missing bash is a
             # skip, never a silent pass).
             bash, stubs, log = "/usr/bin/bash", os.path.join(self.tmp, "bin"), os.path.join(self.tmp, "log")
             if not os.access(bash, os.X_OK):
@@ -1931,7 +1931,7 @@ def _self_test():
                     self.assertEqual((got, fh.read()), (rc, "STUB gh run rerun 7\n"), (c, opts))
 
         def test_45_a_state_without_the_current_version_is_discarded(self):
-            # Round 12 (codex MAJOR, claude MINOR-1): an earlier revision kept a failed call as "CI rerun: ...", and
+            # an earlier revision kept a failed call as "CI rerun: ...", and
             # another kept "possible CI rerun: ..."; a state without STATE_VERSION is read as no earlier runs.
             path = state_path(dict(session_id="s"), self.env)
             legacy = dict(change=0, checks=dict(), blocks=0, flags=["CI rerun: false && gh run rerun 7",
@@ -1958,7 +1958,7 @@ def _self_test():
             self.bash("gh run rerun 8")
             self.assertIn("(refusal 1 of at most 2)", self.stop("All tests pass.", active=True)["reason"])
             self.assertEqual(load_state(path)[0]["version"], STATE_VERSION)
-            # Round 13 (codex MINOR): a current-version flag without a prefix this version keeps is malformed and
+            # a current-version flag without a prefix this version keeps is malformed and
             # arms nothing; the known prefixes are kept (the state file is trusted within them).
             for flags, kept in ((["possible CI rerun: echo $"], False), (["CI rerun: gh run rerun 7"], False),
                                 (["local rerun: pytest -q", "ci rerun command: x"], False), (["local rerun"], False),
@@ -1966,12 +1966,12 @@ def _self_test():
                 self.assertTrue(save_state(path, dict(new_state(), flags=flags)))
                 self.assertEqual(load_state(path), (dict(new_state(), flags=flags), True) if kept else
                                  (unknown_state(), False), flags)
-                out = self.stop("All tests pass.")  # round 21: a malformed state warns at a conclusive stop
+                out = self.stop("All tests pass.")  # a malformed state warns at a conclusive stop
                 self.assertEqual(out.get("decision") if kept else out, "block" if kept else dict(systemMessage=UNREAD),
                                  flags)
 
         def test_46_the_check_key_keeps_quoting(self):
-            # Round 12 (codex MEDIUM): pytest 'a  b' and pytest 'a b' pass different arguments. A stub pytest exits 1
+            # pytest 'a  b' and pytest 'a b' pass different arguments. A stub pytest exits 1
             # for the first and 0 for the second: the pass is not a rerun of the failure.
             # The exit statuses rcs are what bash gives with that stub (checked last, reported as a skip without bash).
             c1, c2, rcs, bash = "pytest 'a  b'", "pytest 'a b'", [1, 0], "/usr/bin/bash"
@@ -1990,7 +1990,7 @@ def _self_test():
                          ("pytest x 2>f", "pytest x  2>f")):
                 self.assertEqual(check_key(a), check_key(b), a)
             self.assertEqual(check_key("pytest  'a  b'  2>&1|tail"), "pytest 'a  b' 2>& 1 | tail")
-            # Round 13 (claude MINOR-1): leading and trailing newlines and a final ; after a word or ) do not count;
+            # leading and trailing newlines and a final ; after a word or ) do not count;
             # a ; after another operator, a leading ;, a final & and an inner operator do.
             for a in ("pytest -q\n", "\npytest -q", "\n\npytest -q;\n\n", "pytest -q;", "pytest -q ; # c",
                       "# c\npytest -q\n# d\n"):
@@ -1998,19 +1998,19 @@ def _self_test():
             self.assertEqual(check_key("( pytest -q );"), check_key("( pytest -q )"))
             for a, b in (("pytest -q\n;", "pytest -q"), ("; pytest -q", "pytest -q"), ("pytest -q &", "pytest -q"),
                          ("pytest -q; ls", "pytest -q\nls"), ("pytest -q &&\nls", "pytest -q && ls"),
-                         ("pytest -q &;", "pytest -q &"), ("pytest -q |;", "pytest -q |")):  # round 14 (claude MINOR-1)
+                         ("pytest -q &;", "pytest -q &"), ("pytest -q |;", "pytest -q |")):  # an earlier version
                 self.assertNotEqual(check_key(a), check_key(b), a)
             self.assertIsNone(self.bash("pytest -q", exit_code=1))
             self.assertIn("the check `pytest -q` failed earlier and passed on a rerun",
                           self.bash("pytest -q\n", exit_code=0)["hookSpecificOutput"]["additionalContext"])
-            # Round 13 (codex MINOR, claude MINOR-3): a tab, a newline or another control character is shown escaped,
+            # a tab, a newline or another control character is shown escaped,
             # in one $'...' string, so checks that check_key keeps apart are never shown as the same text.
             for cmd, text in (("pytest 'a\tb'", "$'pytest \\'a\\tb\\''"), ("pytest 'a\nb'", "$'pytest \\'a\\nb\\''"),
                               ("pytest 'a\rb'", "$'pytest \\'a\\rb\\''"),
                               ("pytest 'a\x0bb'", "$'pytest \\'a\\x0bb\\''"),
                               ("pytest 'a\x7f' a\\ b", "$'pytest \\'a\\x7f\\' a\\\\ b'"),
                               ("pytest 'a b' a\\ b", "pytest 'a b' a\\ b"), ("  pytest -q\n", "pytest -q"),
-                              ("pytest 'a\x85b'", "$'pytest \\'a\\u0085b\\''"),  # round 14 (claude MINOR-3): C1 too
+                              ("pytest 'a\x85b'", "$'pytest \\'a\\u0085b\\''"),  # C1 too
                               ("pytest 'a\x9bb'", "$'pytest \\'a\\u009bb\\''"),
                               ("pytest '\xa0\xe9'", "pytest '\xa0\xe9'")):
                 self.assertEqual(shown(cmd), text, cmd)
@@ -2025,7 +2025,7 @@ def _self_test():
             self.assertIn("the check `$'pytest \\'a\\tb\\''` failed earlier",
                           self.bash("pytest 'a\tb'", exit_code=0)["hookSpecificOutput"]["additionalContext"])
             if not os.access(bash, os.X_OK):
-                self.skipTest("no /usr/bin/bash")  # round 13 (gemini): a missing bash is a skip, never a silent pass
+                self.skipTest("no /usr/bin/bash")  # a missing bash is a skip, never a silent pass
             stubs = os.path.join(self.tmp, "bin")
             os.makedirs(stubs)
             with open(os.path.join(stubs, "pytest"), "w", encoding="ascii") as fh:
@@ -2034,9 +2034,9 @@ def _self_test():
             self.assertEqual([subprocess.run([bash, "--noprofile", "--norc", "-c", c], cwd=self.tmp,
                                              stdin=subprocess.DEVNULL, capture_output=True, timeout=5,
                                              env=dict(PATH=stubs, HOME=self.tmp)).returncode for c in (c1, c2)], rcs)
-            # Round 15 (claude MINOR): read by bash in a UTF-8 locale, each $'...' shown text is the command that
+            # read by bash in a UTF-8 locale, each $'...' shown text is the command that
             # ran (\xHH is one byte, so C1 controls are spelled \u00HH).
-            # Round 16 (codex MEDIUM): bash decodes \u00HH only in a locale it can use, so a probe that does not
+            # bash decodes \u00HH only in a locale it can use, so a probe that does not
             # use shown() decides first whether this host has one; without it the round trip is a skip.
             utf8 = "C.UTF-8"
             probe = subprocess.run([bash, "--noprofile", "--norc", "-c", "printf %s $'\\u00e9'"], cwd=self.tmp,
@@ -2044,7 +2044,7 @@ def _self_test():
                                    env=dict(PATH=stubs, HOME=self.tmp, LC_ALL=utf8))
             if (probe.returncode, probe.stdout, probe.stderr) != (0, b"\xc3\xa9", b""):
                 self.skipTest("bash cannot use the " + utf8 + " locale")
-            # Round 17 (codex MEDIUM): the command goes to bash as UTF-8 bytes, so Python's own host encoding (ASCII
+            # the command goes to bash as UTF-8 bytes, so Python's own host encoding (ASCII
             # under LC_ALL=C without UTF-8 mode) cannot decide the result.
             for cmd in ("pytest 'a\x85b'", "pytest 'a\x9b\x7f\x0b\tb'\n", "pytest '\x80\x9f\xa0'"):
                 line = ("printf %s " + shown(cmd)).encode("utf-8")
@@ -2054,7 +2054,7 @@ def _self_test():
                 self.assertEqual(got, cmd.strip().encode("utf-8"), cmd)
 
         def test_47_an_expanding_check_is_never_compared(self):
-            # Round 14 (codex MEDIUM): "\npytest $LINENO" passes 2 and "pytest $LINENO" passes 1; a stub pytest
+            # "\npytest $LINENO" passes 2 and "pytest $LINENO" passes 1; a stub pytest
             # exits 0 only for 1, so the pass is not a rerun of the failure. A check whose words hold an expansion
             # is never compared with another run (a missed note, never a false one).
             c1, c2, bash = "\npytest $LINENO", "pytest $LINENO", "/usr/bin/bash"
@@ -2073,13 +2073,13 @@ def _self_test():
                 self.assertFalse(expands(c), c)
             for c in ("pytest $(date)", "pytest `date`", "pytest ${X:-a}"):  # off-grammar: noted, never compared
                 self.assertIn("could not parse", self.bash(c, exit_code=1)["hookSpecificOutput"]["additionalContext"])
-            # Expansion-free commands keep the newline and final ; normalization, and (round 14, codex MINOR 2) a
+            # Expansion-free commands keep the newline and final ; normalization, and (an earlier review 2) a
             # check command followed by a final ; is recognized as one.
             for a, b in (("pytest", "pytest;"), ("make test", "make test;"), ("pytest -q", "\npytest -q\n")):
                 self.assertIsNone(self.bash(a, exit_code=1), a)
                 self.assertIn("the check `" + shown(b) + "` failed earlier and passed on a rerun",
                               self.bash(b, exit_code=0)["hookSpecificOutput"]["additionalContext"], b)
-            # Round 15 (codex MINOR 1, claude MEDIUM): a change made beside an expanding check is still counted, so
+            # a change made beside an expanding check is still counted, so
             # the next pass of another check is no rerun; a read-only command beside one is no change.
             for beside, change in (('sed -i s/a/b/ app.py; pytest "$X"', 1),
                                    ("pip install -e . && pytest tests/*.py", 1), ('ls; pytest "$X"', 0)):
@@ -2106,7 +2106,7 @@ def _self_test():
             self.assertEqual([(p.returncode, p.stdout) for p in got], [(1, b"2\n"), (0, b"1\n")])
 
         def test_48_readme_paragraphs_are_wrapped(self):
-            # Round 14 (claude NIT): the README paragraphs about this hook wrap like their neighbours.
+            # the README paragraphs about this hook wrap like their neighbours.
             readme = os.path.join(os.path.dirname(here), "README.md")
             if not os.path.exists(readme):
                 self.skipTest("no README.md beside the hook")
@@ -2122,8 +2122,8 @@ def _self_test():
                     self.assertLessEqual(len(line), 110, n)
                     items[-1].append(line)
             self.assertEqual(len(items), 2)
-            # Round 15 (claude NIT): each Stop message also names a local rerun, so "only" is scoped to its CI clause.
-            # Round 16 (codex MINOR): the README may quote old wording elsewhere, so both read the hook description.
+            # each Stop message also names a local rerun, so "only" is scoped to its CI clause.
+            # the README may quote old wording elsewhere, so both read the hook description.
             text = [" ".join(" ".join(item).split()) for item in items]
             desc = [t for t in text if t.startswith("- **`rerun-pass-check.py`** keeps an earlier failure in view")]
             self.assertEqual(len(desc), 1)
@@ -2132,14 +2132,14 @@ def _self_test():
             self.assertNotIn("(each says only", desc[0])
 
         def test_49_the_cap_holds_without_stop_hook_active(self):
-            # Round 20: with the stop_hook_active field absent from the payload the count was reset at every
+            # with the stop_hook_active field absent from the payload the count was reset at every
             # Stop, so the cap was never reached. Each stop() below omits that field, except one explicit
-            # false; the round-23 leg drives at_stop with all three values.
+            # false; the earlier leg drives at_stop with all three values.
             path = state_path(dict(session_id="s"), self.env)
             allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
                        "session ran a command that names a CI rerun and was not reported as failed, or saw a check "
                        "pass on a rerun after a recorded failure")
-            self.prompt()  # round 21: a missing state file is an unknown count until a new turn
+            self.prompt()  # a missing state file is an unknown count until a new turn
             self.bash("gh run rerun 7")
             outs = [self.stop("All tests pass.", active=None) for _ in range(BLOCK_CAP + 3)]
             refusals = [o for o in outs if o.get("decision") == "block"]
@@ -2154,8 +2154,8 @@ def _self_test():
             self.assertIsNone(self.stop("It was flaky; all tests pass.", active=None))  # a disclosure resets
             self.bash("gh run rerun 9")
             self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
-            # A refusal that cannot be saved is allowed with a warning, also under an explicit false (round 23,
-            # codex MEDIUM: an unsaved refusal on an explicit false let the count run 1, 1, 2 against a cap of 2).
+            # A refusal that cannot be saved is allowed with a warning, also under an explicit false (an
+            # unsaved refusal on an explicit false once let the count run 1, 1, 2 against a cap of 2).
             state = dict(new_state(), flags=["CI rerun command: gh run rerun 7"])
             for active in (None, True, False):
                 payload = dict(last_assistant_message="All tests pass.")
@@ -2165,7 +2165,7 @@ def _self_test():
                                  dict(systemMessage=allowed + " (refusal count cannot be saved)"), active)
             doc = " ".join(__doc__.split())
             self.assertNotIn("per continuous stop_hook_active run", doc)
-            # Round 21 (claude MEDIUM): an explicit false resets the count, so the cap does not hold whatever the field.
+            # an explicit false resets the count, so the cap does not hold whatever the field.
             self.assertNotIn("does not rely on the platform's stop_hook_active field", doc)
             self.assertNotIn("absent, false or true", doc)
             self.assertIn("so the cap holds when the platform's stop_hook_active field is absent or true", doc)
@@ -2179,7 +2179,7 @@ def _self_test():
                 self.assertNotIn("does not rely on the `stop_hook_active` input field", text)
 
         def test_50_a_lost_state_is_an_unknown_count_not_zero(self):
-            # Round 21 (codex MAJOR): a malformed or deleted state was rewritten with a count of 0 at the next tool
+            # a malformed or deleted state was rewritten with a count of 0 at the next tool
             # call, so the cap restarted with no new turn: five rounds of a lost state gave five refusals in a row.
             path = state_path(dict(session_id="s"), self.env)
             allowed = ("rerun-pass-check: turn end allowed; the final message presents a pass as conclusive, and this "
@@ -2206,7 +2206,7 @@ def _self_test():
                 self.bash("gh run rerun 7")
                 reset()  # an accepted new-turn signal sets the count to 0
                 self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
-            # Round 23 (claude 2, codex 5): every failure branch of load_state gives an unknown count, which a tool
+            # every failure branch of load_state gives an unknown count, which a tool
             # call keeps and the next conclusive Stop reports; a mutant reading any of them as a fresh 0 fails here.
             good = dict(new_state(), flags=["CI rerun command: gh run rerun 7"], blocks=1)
             target = os.path.join(self.tmp, "target.json")
@@ -2264,13 +2264,13 @@ def _self_test():
                     self.assertIn(expect, out.get("reason", out.get("systemMessage")), (blocks, version))
 
         def test_54_a_tool_call_cannot_restore_a_count_a_stop_saved_meanwhile(self):
-            # Round 23 (codex MAJOR): a tool call loaded the state, a conclusive Stop saved count 1, and the tool
+            # a tool call loaded the state, a conclusive Stop saved count 1, and the tool
             # call then saved its stale copy with count 0, so the interleaving repeated gave "refusal 1 of at most
             # 2" without end. Each round below holds a tool call between its load and its save while a Stop runs.
-            # Round 24 (codex MEDIUM): the tool call is released only once the Stop has met the held lock (seen
+            # the tool call is released only once the Stop has met the held lock (seen
             # through the flock seam) or has finished, never after a fixed wait, so a slow scheduler cannot let
             # the Stop run after the tool call's save; a Stop that does neither within the bound fails the test.
-            # Round 25 fix for QA round 24 (codex MEDIUM): the tool call ignored a timed-out wait and resumed on its
+            # the tool call ignored a timed-out wait and resumed on its
             # own, so a Stop delayed past it ran after the tool call's save and the test passed. The tool call now
             # stays paused until released (also in cleanup), a timed-out pause fails the test, and a Stop that
             # finished only after the tool call resumed is not counted as contended.
@@ -2316,7 +2316,7 @@ def _self_test():
             self.assertEqual(load_state(path)[0]["blocks"], BLOCK_CAP)
 
         def test_55_a_state_lock_not_taken_saves_nothing_and_never_refuses(self):
-            # Round 23 (codex MAJOR): a run that cannot take the state lock in time skips its update, and a Stop
+            # a run that cannot take the state lock in time skips its update, and a Stop
             # that would refuse is allowed with a warning that names the lock.
             if fcntl is None:
                 self.skipTest("SKIPPED, no flock on this platform")
@@ -2353,7 +2353,7 @@ def _self_test():
             self.assertIn("(refusal 2 of", self.stop("All tests pass.", active=None)["reason"])
 
         def test_56_an_explicit_false_resets_an_unreadable_state(self):
-            # Round 23 (claude MINOR 3): the reset of an explicit false runs before the readable check.
+            # the reset of an explicit false runs before the readable check.
             path = state_path(dict(session_id="s"), self.env)
             self.prompt()
             self.bash("gh run rerun 7")
@@ -2365,7 +2365,7 @@ def _self_test():
             self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
 
         def test_57_a_lost_record_of_earlier_reruns_is_silent_and_documented(self):
-            # Round 23 (codex 3, claude 4): a deleted or emptied state rewritten by a tool call keeps an unknown
+            # a deleted or emptied state rewritten by a tool call keeps an unknown
             # count but no record of earlier reruns, so a conclusive Stop is silent; the documents say exactly so.
             path = state_path(dict(session_id="s"), self.env)
             for lose in (lambda: os.unlink(path), lambda: open(path, "w", encoding="ascii").close()):
@@ -2392,10 +2392,10 @@ def _self_test():
                 self.assertIn("any other is silent, and a lost record of earlier reruns is silent", text)
 
         def test_58_a_lock_file_deleted_mid_run_does_not_let_two_runs_interleave(self):
-            # Round 24 (claude MEDIUM): the lock file deleted while a tool call held it let a Stop lock a new file
+            # the lock file deleted while a tool call held it let a Stop lock a new file
             # and the tool call then save its stale count back, so the count stayed 0 every round. Now a run saves
             # only while the lock path still names the file it locked.
-            # Round 25 fix for QA round 24: the pause no longer ends on its own (a timed-out pause fails the test),
+            # the pause no longer ends on its own (a timed-out pause fails the test),
             # and the flock seam is undone with the real module kept before patching, not the patched global.
             if fcntl is None:
                 self.skipTest("SKIPPED, no flock on this platform")
@@ -2458,7 +2458,7 @@ def _self_test():
             self.assertFalse(pause.timed_out, "the tool call's pause timed out")
 
         def test_61_a_lock_file_moved_away_and_back_does_not_let_a_stale_save_through(self):
-            # Round 25 fix for QA round 24 (codex MEDIUM): with the lock file moved away, a Stop locked a new file
+            # with the lock file moved away, a Stop locked a new file
             # and saved its refusal, the original lock file was put back, and the paused tool call then passed its
             # lock check and wrote its stale count back, so the count stayed 0 every round. A run now saves only
             # while the state file is the one it loaded or last saved itself.
@@ -2479,7 +2479,7 @@ def _self_test():
             self.assertEqual(load_state(path)[0]["blocks"], BLOCK_CAP)
 
         def test_62_a_state_directory_moved_away_mid_run_is_silent_and_documented(self):
-            # Round 25 fix for QA round 24 (codex MINOR): the next Stop reads no state and passes silently.
+            # the next Stop reads no state and passes silently.
             path = state_path(dict(session_id="s"), self.env)
             self.prompt()
             self.bash("gh run rerun 7")
@@ -2496,7 +2496,7 @@ def _self_test():
             self.assertFalse("so a run that locked the new file is not overwritten" in doc)
 
         def test_59_a_lock_path_that_is_not_a_regular_file_is_never_locked(self):
-            # Round 24 (claude MINOR): a FIFO at the lock path is refused like a symbolic link.
+            # a FIFO at the lock path is refused like a symbolic link.
             if fcntl is None or not hasattr(os, "mkfifo"):
                 self.skipTest("SKIPPED, no flock or no mkfifo on this platform")
             path = state_path(dict(session_id="s"), self.env)
@@ -2513,7 +2513,7 @@ def _self_test():
             self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
 
         def test_60_an_explicit_false_without_the_lock_names_the_lock(self):
-            # Round 24 (codex and claude MINOR): without the lock an explicit false at the cap or with an unknown
+            # without the lock an explicit false at the cap or with an unknown
             # count was reported as the cap or the unknown count; the reset now holds in memory for that Stop.
             if fcntl is None:
                 self.skipTest("SKIPPED, no flock on this platform")
@@ -2539,7 +2539,7 @@ def _self_test():
                 self.assertEqual(load_state(path), before, blocks)  # nothing saved
 
         def test_51_an_explicit_false_resets_before_the_early_returns(self):
-            # Round 21 (codex MEDIUM): an explicit false on a stop that presents no pass as conclusive was discarded,
+            # an explicit false on a stop that presents no pass as conclusive was discarded,
             # so the count stayed at the cap.
             self.prompt()
             self.bash("gh run rerun 7")
@@ -2555,7 +2555,7 @@ def _self_test():
             self.assertIn("(refusal 1 of", self.stop("All tests pass.", active=None)["reason"])
 
         def test_52_every_stop_let_pass_where_a_refusal_could_be_due_says_why(self):
-            # Round 21 (codex MEDIUM): the docstring promised a warning for no readable state and for no final message,
+            # the docstring promised a warning for no readable state and for no final message,
             # but both were silent.
             path = state_path(dict(session_id="s"), self.env)
             self.prompt()
@@ -2582,7 +2582,7 @@ def _self_test():
             self.assertIsNone(decide(dict(hook_event_name="Stop", session_id="s"), self.env))
 
         def test_53_a_prompt_the_user_submits_resets_the_count(self):
-            # Round 21 (claude MINOR): without the field a new human turn never reset the count.
+            # without the field a new human turn never reset the count.
             path = state_path(dict(session_id="s"), self.env)
             self.prompt()
             self.bash("gh run rerun 7")

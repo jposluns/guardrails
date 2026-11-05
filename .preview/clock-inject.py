@@ -62,10 +62,10 @@ hook, step 4) describes those cases. The payload is read as BYTES and parsed by 
 does not depend on the process locale.
 Unparseable hook input still emits the clock line under PostToolUse (the clock does not
 depend on the payload). An error writing the output (a closed or full stdout) is swallowed and the hook
-still exits 0 (round 24); if the stream cannot even be pointed at /dev/null, the hook ends at once with
+still exits 0; if the stream cannot even be pointed at /dev/null, the hook ends at once with
 os._exit(0), so no exit-time flush can fail it. Kill-switch: a subordinate worker process, detected as env
 AIQT_HOOKS_WORKER=1 (legacy spellings are also accepted, see _is_worker), exits 0 with no stdout, so it never
-distorts worker output; it writes one warning line to stderr (round 24), which on exit 0 reaches only the
+distorts worker output; it writes one warning line to stderr, which on exit 0 reaches only the
 host's debug log.
 In-session subagents are deliberately NOT skipped (there is no agent_id check): they benefit from the true
 time too, and this hook only adds context, it never blocks.
@@ -550,7 +550,7 @@ def clock_line(now_utc, start=None):
 
 
 def _emit_line(text, *stream):
-    """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN (round 24): it is
+    """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN: it is
     swallowed, and the stream's descriptor is pointed at /dev/null so the interpreter's exit flush cannot fail
     either, so the hook still exits 0. If that rescue fails too, the process ends at once with os._exit(0)
     (no flush is retried), since any later write or exit flush could fail the hook."""
@@ -588,7 +588,7 @@ def main(argv):
         return _self_test()
     try:
         if _is_worker():
-            # round 24: the skip is no longer silent (stderr only, so worker output is never distorted)
+            # the skip is no longer silent (stderr only, so worker output is never distorted)
             _emit_line("clock-inject: skipped, worker marker present (AIQT_HOOKS_WORKER=1 or a legacy spelling)",
                        sys.stderr)
             return 0
@@ -793,7 +793,7 @@ def _self_test():
                     f.write(f"Active-session: {bad}\nActive-session: sess-20200101T000000Z\n")
                 self.assertIsNone(lease_start(self.lease), bad)
 
-        # -- round 13 (peer report): lease start sources --
+        # -- lease start sources (a peer report) --
         def write_lease(self, text):
             with open(self.lease, "w") as f:
                 f.write(text)
@@ -879,7 +879,7 @@ def _self_test():
                              (LEASE_MAX_BYTES, TRANSCRIPT_PREFIX_BYTES))
 
 
-        # -- round 24 (field validation of round 12) --
+        # -- field validation of the lease fields --
         def test_r24_worker_skip_warns_and_output_error_fails_open(self):
             old_err, sys.stderr = sys.stderr, io.StringIO()
             try:

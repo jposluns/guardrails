@@ -1162,7 +1162,7 @@ def main(argv):
     readable = isinstance(argv, (list, tuple)) and bool(argv) and all(isinstance(a, str) for a in argv)
     if readable and list(argv[1:]) == ["--self-test"]:
         return _self_test()
-    if _is_worker(os.environ):  # before the argv notes: a worker process writes nothing to stdout (QA round 15)
+    if _is_worker(os.environ):  # before the argv notes: a worker process writes nothing to stdout
         _emit_line(_WORKER_LINE, sys.stderr)
         return 0
     if not readable:  # a bad argv: it checks nothing, and says so, reading nothing
@@ -1228,7 +1228,7 @@ def _self_test():
     # start-up, the host's scheduling and the time to report the result all come out of it, so a reader that waits
     # its whole deadline exits before the kill only while those delays total under 10 seconds, and a verdict
     # there depends on how fast the host runs the child only when the host stalls it (or this test) for about
-    # that long (QA rounds 11 to 14). The arguments main passes, stdin at the
+    # that long. The arguments main passes, stdin at the
     # production deadline, are pinned in process (T.scheduled with via_main); the script's own entry point runs
     # on the actual command line in T.hook and T.child with [here].
     MAIN = "\n".join((
@@ -1368,7 +1368,7 @@ def _self_test():
         # sleeps within the 60-second bound, a mixed-case loop variable, and a sleep after the shape
         "sleep 30; sleep 30; pkill -f qa-x/", "sleep 1m; pkill -f qa-x/", "pkill -f qa-x/; sleep 99999d",
         "for Pid in $(pgrep -f qa-x/); do kill $Pid; done",
-        # R right after the last word, as bash reads it: `>` ends the word (the QA round 2 table)
+        # R right after the last word, as bash reads it: `>` ends the word (the earlier table)
         "pkill -f qa-r2-adj/>/dev/null", "kill $(pgrep -f qa-r2-adj/)>/dev/null", "pkill -f qa-r2-adj/ >/dev/null",
         "while pgrep -f qa-x/>/dev/null; do sleep 1; done", "pgrep -f qa-x/ | xargs kill>/dev/null",
         "pkill -f qa-x/&>/dev/null", 'pkill -f "qa-x/">/dev/null 2>&1',
@@ -1383,7 +1383,7 @@ def _self_test():
         # auto_resume and histchars are neither readonly nor change the value assigned
         "for histchars in $(pgrep -f qa-x/); do kill $histchars; done",
         "for auto_resume in $(pgrep -f qa-x/); do kill $auto_resume; done",
-        # a word of digits with a blank, quoted, or not digits alone before `>` is a pattern (QA round 3)
+        # a word of digits with a blank, quoted, or not digits alone before `>` is a pattern
         "pkill -f 15 >/dev/null", 'pkill -f "15">/dev/null', "pkill -f '8080'>/dev/null", "pkill -f qa-x/15>/dev/null",
         "pkill -f 15&>/dev/null", "pkill -f -- 15 >/dev/null", "while pgrep -f 7 >/dev/null; do sleep 1; done",
         # the trailing CMD of a shape may carry R
@@ -1394,7 +1394,7 @@ def _self_test():
     false_deny_witnesses = [
         "while pgrep -c -f qa-selfmatch472/; do printf '-v' PATH /nonexistent; done",
         "for p in $(pgrep -f qa-x/); do printf '-v' p not_a_pid; kill \"$p\"; done",
-        "for UID in $(pgrep -f qa472readonly/); do kill \"$UID\"; done",
+        "for UID in $(pgrep -f tk472readonly/); do kill \"$UID\"; done",
         "printf '-v' PATH x; pkill -f qa-x/", "while pgrep -f qa-x/; do printf '-v' PATH x; done",
         "for p in $(pgrep -f qa-x/); do printf '-v' p x; kill $p; done",
         "printf '%999999999d' 1; pkill -f qa-x/", "printf x; pkill -f qa-x/",
@@ -1403,7 +1403,7 @@ def _self_test():
         "sleep 99999d; pkill -f qa-x/", "sleep 30; sleep 31; pkill -f qa-x/",
         "for p in $(pgrep -f qa-x/); do sleep 61; kill $p; done",
         "for p in $(pgrep -f qa-x/); do kill $p && sleep 61; done", "sleep 61; while pgrep -f qa-x/; do :; done",
-        # a bare word of digits alone directly before `>` is a descriptor number in bash: no pattern (QA round 3)
+        # a bare word of digits alone directly before `>` is a descriptor number in bash: no pattern
         "pkill -f 15>/dev/null", "pkill -f 8080>/dev/null", "pkill -f -- 15>/dev/null", "pkill -f 15>/dev/null 2>&1",
         "while pgrep -f 7>/dev/null; do sleep 1; done", "until ! pgrep -f 7>/dev/null; do sleep 1; done",
     ] + ["for V in $(pgrep -f qa-x/); do kill $V; done".replace("V", name) for name in (
@@ -1411,16 +1411,16 @@ def _self_test():
         "PATH", "HOME", "SHELLOPTS", "BASHOPTS", "BASHPID", "BASH_pid", "MYPID", "_")]
     # The counterexamples: each must not be denied; each gets a note.
     counter_vectors = [
-        "pkill -f 'qa2451newline\nend'",
-        "until pgrep -f qa2451until/ >/dev/null; do sleep 1; done",
-        "while ! pgrep -f qa2451while/ >/dev/null; do sleep 1; done",
+        "pkill -f 'tk2451newline\nend'",
+        "until pgrep -f tk2451until/ >/dev/null; do sleep 1; done",
+        "while ! pgrep -f tk2451while/ >/dev/null; do sleep 1; done",
         "while pgrep -f x/; do sleep 1; break; done",
-        "ps -p 1 -o pid,args | grep qa2451/ | awk '{print $1}' | xargs -r kill",
-        "pgrep -f qa2451/ | tr -d '0-9' | xargs -r kill",
+        "ps -p 1 -o pid,args | grep tk2451/ | awk '{print $1}' | xargs -r kill",
+        "pgrep -f tk2451/ | tr -d '0-9' | xargs -r kill",
         "pgrep -f x/ | awk '{print $2}' | xargs kill",
         'for p in $(pgrep -f x/); do kill "$recorded_pid"; break; done',
-        "exec pkill -f qa2451exec/",
-        "pkill -x -f 'qa2451/\\|.*'",
+        "exec pkill -f tk2451exec/",
+        "pkill -x -f 'tk2451/\\|.*'",
         "pkill -f 'w[t]-x/'",
         "pkill -f 'qq7\\.dot'",
     ]
@@ -1669,7 +1669,7 @@ def _self_test():
 
         def test_09_process_outputs(self):
             # the script on the actual command line, through its own entry point (hook): a deny, the note and
-            # silence for a well-formed payload (QA round 12)
+            # silence for a well-formed payload
             rc, out, err = self.hook(payload_bytes("pkill -f qa-x/"))
             self.assertEqual((rc, err), (0, b""))
             self.assertTrue(out.endswith(b"\n") and out.count(b"\n") == 1, out)
@@ -1730,7 +1730,7 @@ def _self_test():
 
         def test_09_process_fail_open(self):
             # a payload the hook cannot read is allowed WITH the cannot-evaluate note, never silently; each one on
-            # the actual command line, through the script's own entry point (QA round 13): those that fit in the
+            # the actual command line, through the script's own entry point: those that fit in the
             # pipe's buffer written before the child starts (hook), the one over the 16 MiB read bound written
             # while it reads (child with [here]), where the note is the verdict whether the hook stops at the bound
             # or at its production deadline. That one also runs through main (run_hook), whose reader's 20-second
@@ -1738,8 +1738,8 @@ def _self_test():
             huge = payload_bytes("pkill -f qa-x/ #" + "x" * (17 * 1024 * 1024))  # over the 16 MiB read bound
             bad = (b"", b"not json", b"[1, 2]", b"7", b"\xff\xfe\x00garbage", b'{"tool_name": "Bash"',
                    payload_bytes("pkill -f qa-x/")[:-1], payload_bytes("echo hi").replace(b"hi", b"h\xffi"), huge)
-            bad += tuple(not_strict_utf8())  # not strict UTF-8 without a BOM (QA round 5)
-            bad += tuple(non_json_constants())  # NaN, Infinity and -Infinity are not JSON (QA round 6)
+            bad += tuple(not_strict_utf8())  # not strict UTF-8 without a BOM
+            bad += tuple(non_json_constants())  # NaN, Infinity and -Infinity are not JSON
             for data in bad:
                 for rc, out, err in ((self.hook(data),) if data is not huge else
                                      (self.child([here], [(0, data)]), self.run_hook(data))):
@@ -1776,7 +1776,7 @@ def _self_test():
             so it gets the cannot-evaluate note, never silence; the same interval before the end of input (or
             before blanks) leaves the payload read as sent. Through main on injected schedules (scheduled with
             via_main, at the production deadline), the idle wait taking 0.2 seconds, so no verdict depends on how
-            fast the host runs the test (QA round 11). The cases that get the note are also run as the hook's own
+            fast the host runs the test. The cases that get the note are also run as the hook's own
             process (child), where the note is the verdict whenever the bytes arrive."""
             whole, note = payload_bytes("echo hi"), json.dumps(dict(systemMessage=_NOTE_PAYLOAD)) + "\n"
             for chunks, want in (((whole, b"garbage"), note), ((payload_bytes("pkill -f qa-x/"), b"x"), note),
@@ -1790,9 +1790,8 @@ def _self_test():
                                      (0, want.encode(), b""), chunks)
 
         def test_10_argv(self):
-            # a bad argv gets the argv note on stdout, nothing on stderr, and _read_complete is never called (QA
-            # round 14); under a worker marker it gets the worker line on stderr instead, nothing on stdout (QA
-            # round 15)
+            # a bad argv gets the argv note on stdout, nothing on stderr, and _read_complete is never
+            # called; under a worker marker it gets the worker line on stderr instead, nothing on stdout
             def read(*args, **kw):
                 reads.append(args)
                 raise OSError("stdin read")
@@ -1829,7 +1828,7 @@ def _self_test():
             # read; under each worker marker the hook honours, an argv it does not accept gets the worker line on
             # stderr and nothing on stdout. The payload and its end of input are in the pipe before the child
             # starts, and the pipe's read end, kept open here, still holds the whole payload after the child
-            # exits (QA rounds 12 to 15)
+            # exits
             data = payload_bytes("pkill -f qa-x/")
             note = _NOTE_ARGV.format("an argument list it does not accept")
             note = (json.dumps(dict(systemMessage=note)) + "\n").encode()
@@ -2328,8 +2327,8 @@ def _self_test():
             """In process, on injected schedules (scheduled), with no thread and nothing timed: the vendored reader
             alone (the hook does not call it) returns a whole JSON value that an idle wait follows, and the hook's
             reader reads on to the end of input and refuses the bytes after it unless they are JSON blanks. The
-            payload is decoded as strict UTF-8 before it is parsed (QA rounds 4 and 5), and NaN, Infinity and
-            -Infinity are refused (QA round 6)."""
+            payload is decoded as strict UTF-8 before it is parsed, and NaN, Infinity and
+            -Infinity are refused."""
             whole = payload_bytes("echo hi")
 
             def read(reader, tail):
@@ -2351,25 +2350,25 @@ def _self_test():
             def whole_input(data):
                 """_read_complete on data and then the end of input."""
                 return self.scheduled([(0.0, data), (0.0, b"")], deadline=30.0)[0]
-            # invalid UTF-8 inside the JSON is refused, not decoded with replacement characters (QA round 4: the
+            # invalid UTF-8 inside the JSON is refused, not decoded with replacement characters (the
             # parse is no longer inside the vendored block, whose hash pinned it)
             for bad in (b'{"a": "\xff"}', whole.replace(b"hi", b"h\xffi")):
                 out = whole_input(bad)
                 self.assertTrue(refused(out), (bad, out))
             # the payload is decoded as strict UTF-8 before it is parsed: json.loads on the bytes takes each of these
-            # (encoded surrogates, a BOM, and the other encodings it detects), the reader refuses them (QA round 5)
+            # (encoded surrogates, a BOM, and the other encodings it detects), the reader refuses them
             for bad in not_strict_utf8():
                 json.loads(bad)  # parsed when the bytes go to json.loads undecoded
                 out = whole_input(bad)
                 self.assertTrue(refused(out), (bad[:12], out))
             # the matrix is the thirteen its docstring names: the UTF-16 and UTF-32 ones in both byte orders, each
-            # without and with its BOM, built explicitly rather than in the interpreter's own byte order (QA round 6)
+            # without and with its BOM, built explicitly rather than in the interpreter's own byte order
             self.assertEqual(len(not_strict_utf8()), 13)
             self.assertEqual([bad[:4].hex() for bad in not_strict_utf8()[5:]],
                              ["7b002200", "fffe7b00", "007b0022", "feff007b",
                               "7b000000", "fffe0000", "0000007b", "0000feff"])
             # NaN, Infinity and -Infinity are not JSON: json.loads takes them by default, the reader refuses them
-            # (QA round 6)
+            #
             for bad in non_json_constants():
                 json.loads(bad)  # parsed without a parse_constant that refuses them
                 name = bad.rsplit(b" ", 1)[1][:-1].decode()
@@ -2447,7 +2446,7 @@ def _self_test():
             bound. That is a NOMINAL margin, reduced by the child's start-up, the host's scheduling and the time
             to report the result, so a reader that waits its whole deadline exits before the kill only while those
             delays total under 10 seconds, and these verdicts depend on how fast the host runs the child only when
-            the host stalls it (or this test) for about that long (QA rounds 11 to 14); scheduled with via_main
+            the host stalls it (or this test) for about that long; scheduled with via_main
             pins that main reads stdin at the production deadline."""
             return self.child(["-c", MAIN, here] + list(argv), [(0, data)], env=env)
 
@@ -2458,7 +2457,7 @@ def _self_test():
             deadline, finds them whenever it starts, and no pause or write of this test can make it late; a
             correct hook fails here only if the host stalls the child itself for about that deadline while it
             reads them, or stalls the child or this test for about the child's parent-observed 30-second bound
-            (QA round 12). data must fit in the pipe's buffer. Returns (status, stdout, stderr)."""
+           . data must fit in the pipe's buffer. Returns (status, stdout, stderr)."""
             return self.child([here] + list(argv), [(0, data)], env=env, before=True)
 
         def child_read(self, parts, deadline=20.0, end=True, reader="_read_complete", max_input=None,
@@ -2470,7 +2469,7 @@ def _self_test():
             nothing on stderr within bound seconds (child). The default deadline of 20 seconds is 10 seconds below
             the default parent-observed bound of 30, a NOMINAL margin reduced by the child's start-up, the host's
             scheduling and the time to report the result, so a reader that waits its whole deadline exits, and is
-            reported, before the kill only while those delays total under 10 seconds (QA rounds 13 and 14); every
+            reported, before the kill only while those delays total under 10 seconds; every
             caller that passes a deadline of None (the production 2.0 seconds) passes a bound of 12, the same
             nominal 10-second margin."""
             rc, out, err = self.child(["-c", DRIVER, here, reader, "-" if deadline is None else repr(deadline),
@@ -2488,22 +2487,22 @@ def _self_test():
             (closes the pipe for b"" and reports it ready; reports it not ready for None); each read moves the
             clock on read_takes seconds (a list: each read in turn its own entry). held, when given, is (k,
             seconds): clock reading number k is taken and the clock then moves on that many seconds before the
-            reader uses it, as when the OS runs the reader late (QA round 4). mutant, when given, wraps the
+            reader uses it, as when the OS runs the reader late. mutant, when given, wraps the
             injected select (the reader as a mutant changes it). via_main: the reader is main's own call of
             _read_complete (the worker check off, stdout captured), which must be one call on stdin (descriptor
-            0) at the production _READ_DEADLINE, its arguments recorded and the defaults filled in (QA round 11);
+            0) at the production _READ_DEADLINE, its arguments recorded and the defaults filled in;
             the result is then main's output. The injected time has monotonic and sleep, the injected select has
             select, the injected os has read, and any other name the reader reaches through time, select or os
             fails the test, so a blocking call there cannot go unseen; sleep moves the clock on and is recorded.
-            The deadline assertions cover the total injected time (QA round 11): once the reader has read a time
+            The deadline assertions cover the total injected time: once the reader has read a time
             at or past the deadline, it must return without another wait, read or sleep; and when it returns, the
             clock must have moved by the waits, the reads and a held reading alone. So a reader that sleeps,
             before a refusal or anywhere else, fails the test by assertion. Not seen here: a delay through a name
             the harness does not patch (__import__("time").sleep, threading, another module's clock, a busy
             loop). More waits than steps fail the test, and so do more reads than steps (a read follows a wait)
             and over 100 clock readings, so a reader that loops without waiting fails the test rather than
-            hanging it (QA round 9). Both pipe ends are closed on every path from the moment os.pipe returns them
-            (QA round 11). Returns (the payload, "refused: <message>" or main's output; the timeouts in order; the
+            hanging it. Both pipe ends are closed on every path from the moment os.pipe returns them
+           . Returns (the payload, "refused: <message>" or main's output; the timeouts in order; the
             number of reads)."""
             case, real_os, real_read = self, os, _read_complete
             r, w = real_os.pipe()
@@ -2631,7 +2630,7 @@ def _self_test():
             0.0799999999999983 seconds, since no timeout here is lower; a wait for the whole deadline given only
             while more than 2 - 2 ** -10 seconds are left, since no wait here after the first has more left (at
             the 2-second deadline such a wait is given less than 2 ** -10 seconds more than the time left); and
-            any timeout that is wrong only on other schedules (QA round 8)."""
+            any timeout that is wrong only on other schedules."""
             one = json.dumps(dict(a=1)).encode()
 
             def waits(steps, read_takes=0.0, deadline=1.0):
@@ -2646,11 +2645,11 @@ def _self_test():
             self.assertEqual(waits([(0.25, one[:3]), (0.25, one[3:]), (0.125, b"")]),
                              (dict(a=1), [1.0, 0.75, 0.5]))
             # each read takes 0.125 seconds: the time left is taken after the read, not from the reading before it
-            # (that would give 0.75 and 0.375) (QA round 7)
+            # (that would give 0.75 and 0.375)
             self.assertEqual(waits([(0.25, one[:3]), (0.25, one[3:]), (0.0625, b"")], read_takes=0.125),
                              (dict(a=1), [1.0, 0.625, 0.25]))
-            # steps off the 0.125-second grid (0.1, 0.3 and 0.2 seconds) and five waits (QA round 8), compared
-            # exactly with the clock's own float sums (QA round 10): the last time left is 0.08 seconds in decimal
+            # steps off the 0.125-second grid (0.1, 0.3 and 0.2 seconds) and five waits, compared
+            # exactly with the clock's own float sums: the last time left is 0.08 seconds in decimal
             # and 0.0799999999999983 by the clock, so a floor above that (0.08 itself included) is caught here
             self.assertEqual(waits([(0.1, one[:3]), (0.3, None), (0.2, one[3:]), (0.3, None), (0.25, None)]),
                              ("refused: " + _LATE, [1.0, 0.9000000000000057, 0.6000000000000085,
@@ -2662,12 +2661,12 @@ def _self_test():
             # the read of the end of input takes the clock exactly to the deadline, 2 ** -10 seconds past it, and
             # 2 ** -10 seconds short of it (each value exact in binary): the end is refused at and past the
             # deadline, by the check after the read (without that check, or with > for >=, the end read at the
-            # deadline is accepted), and taken short of it (QA round 8)
+            # deadline is accepted), and taken short of it
             for last, out in ((0.125, "refused: " + _LATE), (0.125 + 2 ** -10, "refused: " + _LATE),
                               (0.125 - 2 ** -10, dict(a=1))):
                 self.assertEqual(waits([(0.25, one[:3]), (0.25, one[3:]), (last, b"")], read_takes=0.125),
                                  (out, [1.0, 0.625, 0.25]), last)
-            # the production deadline of 2.0 seconds, so waits with more than 1.0 second left (QA round 10). Reads
+            # the production deadline of 2.0 seconds, so waits with more than 1.0 second left. Reads
             # with 2 - 2 ** -10 and 1.25 seconds left, and the input never ends: a wait for the whole deadline
             # whenever more than 1.0 second is left would give the second, third and fourth 2.0
             self.assertEqual(waits([(2 ** -10, one[:3]), (0.5 - 2 ** -10, None), (0.25, one[3:]), (0.5, None),
@@ -2680,7 +2679,7 @@ def _self_test():
 
         def test_m46_wait_for_time_left(self):
             """The deterministic check of the remaining-time logic, and the only verdict on the timeouts
-            (wait_for_time_left, QA rounds 6 to 11): on its schedules each wait is for the time left by the clock,
+            (wait_for_time_left): on its schedules each wait is for the time left by the clock,
             compared exactly, and an end of input read at or after the deadline is refused."""
             self.wait_for_time_left()
 
@@ -2689,7 +2688,7 @@ def _self_test():
             every wait, from the fourth wait on, or whenever more than 1.0 or 1.99 seconds are left; rounded up to
             eighths of a second or to the nearest 0.01 seconds; held at a floor of 0.24, 0.08 or 0.0800000001
             seconds. The limits wait_for_time_left states pass it: a floor of 0.0799999999999983 seconds, and the
-            whole deadline whenever more than 2 - 2 ** -10 seconds are left (QA round 10)."""
+            whole deadline whenever more than 2 - 2 ** -10 seconds are left."""
             class Changed(object):
                 """A mutant's select: wait number n (from 1) is given change(n, timeout, the first wait's timeout,
                 which is the whole deadline)."""
@@ -2721,7 +2720,7 @@ def _self_test():
 
         def test_m46_delay_mutants(self):
             """Readers that delay through the names the injected harness patches fail the deterministic check by
-            assertion, not by an error (QA round 11): one that sleeps 1 second before each refusal for lateness,
+            assertion, not by an error: one that sleeps 1 second before each refusal for lateness,
             one that sleeps 2 ** -10 seconds before it first reads the clock, and one that waits through
             select.poll. A delay through a name the harness does not patch is not seen there (scheduled); the
             parent-observed bound on the production-deadline runs in test_m46_input_still_open catches one of
@@ -2751,10 +2750,10 @@ def _self_test():
             write end kept open until the child exits) is refused with the deadline's message by the reader at its
             production deadline, although a whole JSON value has been written; through main it gets the
             cannot-evaluate note, not the deny that payload gets once read. A reader with no deadline never
-            returns on that input, and one that takes a whole JSON value without its end of input (QA round 3
+            returns on that input, and one that takes a whole JSON value without its end of input (an earlier review
             mutant B) returns it: each fails here. Each child has a parent-observed bound (child) of 30 seconds,
             and the two at the production deadline one of 12 seconds, with their input open throughout: the
-            refusal must come by then, from the child's exit (QA round 11). That bound starts just after the
+            refusal must come by then, from the child's exit. That bound starts just after the
             child is started, and the reader's deadline once the child has started up (about 0.05 seconds here;
             the 0.3-second pause runs within the deadline), so the margin after the deadline is just under 10
             seconds, less any stall of this test process. So a reader that delays its refusal by just under 10
@@ -2772,8 +2771,8 @@ def _self_test():
 
         def test_m47_one_input_budget(self):
             """Every byte read through the end of input counts toward the one 16 MiB budget, whether the blanks
-            after the payload are written with it or 0.15 seconds after it (QA round 3). The reader runs in a
-            child process (child_read) and the hook as one (child, with its non-blocking writes, QA round 11);
+            after the payload are written with it or 0.15 seconds after it. The reader runs in a
+            child process (child_read) and the hook as one (child, with its non-blocking writes);
             neither verdict depends on when the reader saw the bytes, and nothing is asserted on the time taken
             beyond each child's 30-second bound."""
             whole, blanks = payload_bytes("echo hi"), b" " * 65536
@@ -2801,7 +2800,7 @@ def _self_test():
             for command in ("pkill -f 15 >/dev/null", 'pkill -f "15">/dev/null', "pkill -f qa-x/15>/dev/null",
                             "pkill -f 15&>/dev/null"):
                 self.assertEqual(outcome(command), "deny", command)
-            # digits must be the whole word: bash reads 2fa and 15.0 as words (QA round 4)
+            # digits must be the whole word: bash reads 2fa and 15.0 as words
             self.kill_mutant(dict(_DIGITS_RE=re.compile(r"[0-9]+")),
                              ["pkill -f 2fa>/dev/null", "pkill -f 15.0>/dev/null"], "deny", "note")
             # bash 5.3.9 reads digits up to 2147483647 as a descriptor (that one is a bad descriptor, and pgrep
@@ -2837,13 +2836,13 @@ def _self_test():
 
         def test_m51_late_end_of_input(self):
             """An end of input that comes after the deadline is refused even when the OS runs the hook late (QA
-            round 4): the clock is read again after each wait and after each read, before an end of input is
-            accepted. On injected schedules (scheduled), with no thread and nothing timed (QA round 11), at a
+            an earlier version): the clock is read again after each wait and after each read, before an end of input is
+            accepted. On injected schedules (scheduled), with no thread and nothing timed, at a
             deadline of 0.05 seconds: no reading held, then each of the six clock readings in turn held off 0.12
             seconds between taking it and using it, on a schedule whose second wait ends the input and takes 0.08
             seconds; a wait reported at once whose read then takes the clock past the deadline; and a wait that
             takes 1.0 second, so it ends about 0.95 seconds past the deadline, which is not followed by a read
-            (asserted on the count of reads, QA round 10). Through main, at the production
+            (asserted on the count of reads). Through main, at the production
             deadline, waits that each take 1.1 seconds: the end of input is seen at 2.2 seconds and gets the
             cannot-evaluate note."""
             late, one = "refused: " + _LATE, b"{}"
@@ -2869,7 +2868,7 @@ def _self_test():
 
         def test_m52_schedule_pipe_closed(self):
             """scheduled closes both pipe ends on every path from the moment os.pipe returns them: an injected
-            failure of os.set_blocking, its first call after os.pipe, leaves neither end open (QA round 11)."""
+            failure of os.set_blocking, its first call after os.pipe, leaves neither end open."""
             real_os, made = os, []
 
             class Failing(object):
