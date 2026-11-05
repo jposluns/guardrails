@@ -21115,6 +21115,11 @@ _ORCH_MODE_DECL_LINE_RE = re.compile(r"^[ \t]*Operating-mode:[ \t]*(.*)$")
 # `attended (ipad); continuous mode` begin with the mode word and classify. Order: unattended before attended.
 _ORCH_MODE_UNATTENDED_RE = re.compile(r"unattended(\b|$)")
 _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
+# The structured operating-mode record a JSON mode file may carry instead of the bare {"mode": ...} object:
+# its keys include `mode` and are otherwise drawn only from these, and its `set_at` is a UTC time written
+# YYYY-MM-DDTHH:MM:SSZ in ASCII digits (matched whole, so a trailing newline or offset does not pass).
+_ORCH_MODE_RECORD_KEYS = frozenset(("mode", "phase", "set_by", "set_at"))
+_ORCH_MODE_SET_AT_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 # The guards-armed posture a present-but-unusable mode marker fails closed to: it carries the `unattended`
 # token, so the ask blocker arms on it and _orch_scope_live reads it as a live (non-None) mode. A recognized
 # mode value carries the `attended`/`unattended` family token (so both `unattended` and `attended` spellings,
@@ -21826,6 +21831,33 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_object_ok(obj):
+    """True when a parsed JSON object is a mode marker whose `mode` string the reader classifies: the bare
+    {"mode": str} object, or a structured operating-mode record whose keys include `mode` and are otherwise
+    drawn only from `phase`, `set_by` and `set_at` (_ORCH_MODE_RECORD_KEYS), with `mode` a string, `phase`
+    null or a string, `set_by` a string, and `set_at` a string of the form YYYY-MM-DDTHH:MM:SSZ that names a
+    real calendar time. False for anything else (another key, a wrong type, a malformed or impossible
+    `set_at`), which the caller fails closed to guards-armed. A duplicate key never reaches here: the parse
+    refuses it first (_orch_reject_duplicate_keys)."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("mode"), str):
+        return False
+    if not set(obj) <= _ORCH_MODE_RECORD_KEYS:
+        return False
+    if "phase" in obj and obj["phase"] is not None and not isinstance(obj["phase"], str):
+        return False
+    if "set_by" in obj and not isinstance(obj["set_by"], str):
+        return False
+    if "set_at" in obj:
+        m = _ORCH_MODE_SET_AT_RE.fullmatch(obj["set_at"]) if isinstance(obj["set_at"], str) else None
+        if m is None:
+            return False
+        try:
+            datetime.datetime(*(int(part) for part in m.groups()))
+        except ValueError:
+            return False                  # the form matched but the time does not exist (month 13, 24:00:00)
+    return True
+
+
 def _orch_mode_read(path):
     """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
     ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
@@ -21908,9 +21940,11 @@ def _orch_mode_detail(reg, root):
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
-        keys), or that parses to anything other than a dict with EXACTLY the single key `mode` whose value is a
-        string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
-        object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
+        keys), or that parses to anything other than an accepted mode object (_orch_mode_object_ok: the bare
+        {"mode": str} object, or a structured operating-mode record that adds only `phase`, `set_by` and
+        `set_at` of their stated types) whose `mode` string begins with attended or unattended (a scalar, an
+        array, an object with another key or a wrong-typed value or a malformed `set_at`, or an object whose
+        `mode` is absent, non-string, or an unrecognized value all fail closed here);
       - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
         `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
         the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
@@ -21923,8 +21957,9 @@ def _orch_mode_detail(reg, root):
       3. The value and the JSON `mode` string are classified by the word-anchored mode grammar
          (_orch_mode_classify), a prefix match at the start, never a substring, so `disattended` and
          `not-attended` do NOT match `attended`.
-      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and an exactly-{"mode": str} shape,
-         so duplicate keys, extra keys, and non-object or non-string-mode values all fail closed."""
+      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and a closed shape (the bare
+         {"mode": str} object or the structured record of _orch_mode_object_ok), so duplicate keys, other
+         keys, wrong-typed record fields, and non-object or non-string-mode values all fail closed."""
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
@@ -21960,11 +21995,11 @@ def _orch_mode_classify_text(text):
         # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
         # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
-    if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
+    if _orch_mode_object_ok(obj):
         classified = _orch_mode_classify(obj["mode"])
         return classified if classified is not None else _ORCH_MODE_ARMED
-    # Any other JSON (a scalar, an array, an object with extra keys, or a dict without a string `mode`) is a
-    # present-but-unrecognized marker and fails CLOSED to guards-armed.
+    # Any other JSON (a scalar, an array, an object with a key outside the record keys or a value of the wrong
+    # type, or a dict without a string `mode`) is a present-but-unrecognized marker and fails CLOSED.
     return _ORCH_MODE_ARMED
 
 
