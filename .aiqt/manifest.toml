@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d469d5ade5a8299b0d0c9a55462c6e5fdc95816f3aed0667ccd7267a1cd2e142"
+tree-sha256 = "75aafa74fc04bccf0d1b3fb7147cd8969e39f92a3a101428d9fd696bb0c0da11"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2641,8 +2641,8 @@ sha256 = "6ac7ff656e0373e654f9cf820b65e08c58af55c4eba280207c6c7ac02bf4d0ec"
 
 [[sources]]
 path = "opf/site/adopt/index.html"
-bytes = 13564
-sha256 = "486fa61ec5fcf46a2833798667fd535b53e4f38c3ec0d535f1c44e0e61da46aa"
+bytes = 13523
+sha256 = "64007957f326fc559a8571a6a33512bc7584bdf7986df170d2ac5e1712746643"
 
 [[sources]]
 path = "opf/site/assets/baseline/logos/opfiles-touch.png"
@@ -2666,8 +2666,8 @@ sha256 = "9954e9507d39296d00d657a3a260c04cbd77085bc42fa115a8cb739a354586bb"
 
 [[sources]]
 path = "opf/site/draft-src/adopt.toml"
-bytes = 7471
-sha256 = "01ecf7318824aca746f47586e37bfad9b355f79c2d47064c82e6750f6b326744"
+bytes = 7430
+sha256 = "4575ce3f47135ab388198037452760c0d2caf4d7f88b0428212931b6be09fba5"
 
 [[sources]]
 path = "opf/site/draft-src/core-files.toml"
@@ -3537,7 +3537,7 @@ sha256 = "d854908193c51cd9bbaa1bcc21791b951ed077b20f387c8f82c5d0e973d614bb"
 [[sources]]
 path = "site/disclosure/index.html"
 bytes = 19534
-sha256 = "cc66ff2351ad959805283f8db8d67cf01fb182077466ab901fb32c23d05944b8"
+sha256 = "6b6c6a51117bfa523426e8cf30c304c94b8091869e86704b3101368b4dde1b64"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3602,7 +3602,7 @@ sha256 = "a6d72829acb499c049b2d73ccfc3a6b22f81d76036d65a1db1478c5aa78f7eaf"
 [[sources]]
 path = "site/draft-src/disclosure.toml"
 bytes = 13424
-sha256 = "9dc5a49fea7fdadf3d28b1cc0046c1065fa66e10627b309266942958de59bee1"
+sha256 = "37c17296dbb6439472ebbfac52260717e27ba96d07b499876e5056c4b2049f0b"
 
 [[sources]]
 path = "site/draft-src/draft.toml"
@@ -3616,8 +3616,8 @@ sha256 = "b095794d022a62936dab826537c1ae4f1cec1e001a839c0aeef740279e38d85b"
 
 [[sources]]
 path = "site/draft-src/home.toml"
-bytes = 3033
-sha256 = "1c3537e735629d94a459c7320834c646e8606ac1c9aa61d88db8e25a7ecebd6b"
+bytes = 3054
+sha256 = "5f94f479e7030f4b764580f562c505c34a90b6c76165489b3277d8f3e4a7bc1d"
 
 [[sources]]
 path = "site/draft-src/install-details.toml"
@@ -3956,8 +3956,8 @@ sha256 = "d87e275c12a89614feb5f70bb575e85609c06113f2c0dee49316f2f3e2a728e2"
 
 [[sources]]
 path = "site/index.html"
-bytes = 9550
-sha256 = "26958660a5f9b5e08530aee37a1265ca36592e78be80883339502fa1b8d2e012"
+bytes = 9571
+sha256 = "1933e3781439cdf197311415d131bae726dbe3061f0118aa8717b05da50e0294"
 
 [[sources]]
 path = "site/install/details/index.html"

@@ -39,7 +39,7 @@ d = "How an assistant applies the standard, change by change, quoted from the st
 href = "mappings/"
 title = "Framework mappings"
 n = "17 frameworks"
-d = "How 105 of the pack's 133 rules relate to ISO/IEC, NIST, OWASP, MITRE ATLAS, MITRE CWE, and CSA frameworks, and the enforcement register."
+d = "How 105 of the pack's 133 rules relate to ISO/IEC, NIST, OWASP, MITRE ATLAS, MITRE CWE, and CSA frameworks, and how all 133 stand in the enforcement register."
 
 [[body]]
 component = "value"

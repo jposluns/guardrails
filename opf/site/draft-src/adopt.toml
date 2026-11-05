@@ -95,7 +95,7 @@ html = '''<p>The reference tooling's <code>opf init</code> does not scaffold a 2
 
 [[body]]
 component = "prose"
-html = "<p>The <code>opf</code> reference CLI, its 10 command verbs, and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>. The pack's <a href=\"https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md\" target=\"_blank\" rel=\"noopener noreferrer\">change log<span class=\"vh\"> (opens in a new tab)</span></a> has no OPFiles entry yet: no pack release so far includes OPFiles.</p>"
+html = "<p>The <code>opf</code> reference CLI, its 10 command verbs, and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>. The pack's <a href=\"https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md\" target=\"_blank\" rel=\"noopener noreferrer\">change log<span class=\"vh\"> (opens in a new tab)</span></a> has no OPFiles entry yet.</p>"
 
 [[body]]
 component = "next"
