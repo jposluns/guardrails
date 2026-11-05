@@ -1123,7 +1123,7 @@ Baseline types:
 | pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision MUST carry none of `decision`, `decided_at`, `decided_by`; a decided one MUST carry all. A decided record MAY be superseded by a new decision linking `supersedes`; exactly one current effective resolution MUST exist per chain. |
 | autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning MUST be a new record (or maintainer decision) linking it. |
 | block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it MUST NOT count toward blocked-ness or justify a stop until a maintainer ratifies it. |
-| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act; at most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). The previous handoff is the one clean `current` handoff authored by a non-importer actor; a first handoff, posted while none stands, supersedes nothing. The superseded handoff lands the status the posting actor's transition takes (section 8.4): unqualified `superseded` for a maintainer, `superseded/proposed` for an assistant or automation. An importer-authored `current` handoff is history: it neither blocks a posting nor is superseded by one. A handoff MUST NOT return to `current` while another such `current` handoff stands (section 8.8). |
+| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act; at most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). The previous handoff is the one clean `current` handoff authored by a non-importer actor; a first handoff, posted while none stands, supersedes nothing. The superseded handoff lands the status the posting actor's transition takes (section 8.4): unqualified `superseded` for a maintainer, `superseded/proposed` for an assistant or automation. An importer-authored `current` handoff is history: it neither blocks a posting nor is superseded by the posting's own supersession. A handoff MUST NOT return to `current` while another such `current` handoff stands (section 8.8). |
 | reference | `recorded` | Immutable captured reference. |
 | contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project proposes or sends to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` MUST be present once sent, `sent_at` MUST NOT be present before, and the receipt fields MAY appear only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome MUST live in `summary`/`x-<vendor>`, never as a state. A re-send MUST be a new record linking `supersedes`; the superseded record records `superseded`. |
 | maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` MUST be `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning MUST be a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
@@ -1209,9 +1209,9 @@ inclusion, block actionability, counters, lock ordering, or actor attribution.
 
 `opf record` is the reference tooling's record-authoring verb. It writes the record and worklog
 shapes this specification defines, and it adds one optional envelope key of its own: `proposed_from`
-(section 8.3), which appears only on `/proposed` records written by `opf record transition`. Its
-clean-series subcommands use the strict record model; the `import` write mode uses the separate
-imported model. Import is not a flag
+(section 8.3), which appears only on `/proposed` records written by `opf record transition` or by a
+handoff `create`'s supersession (section 8.5). Its clean-series subcommands use the strict record
+model; the `import` write mode uses the separate imported model. Import is not a flag
 that relaxes `create`, and the clean-series subcommands MUST refuse `actor.kind = "importer"`:
 an importer authors only through `import`. The clean-series subcommands MUST also refuse an
 importer-authored record as their operand: acting on imported history is a new clean record
@@ -1230,8 +1230,8 @@ linking back (section 8.6). Its subcommands:
   `detail` and a `relates` link to the superseded record. With no such handoff standing, a store
   holding only superseded handoffs included, the create supersedes nothing and writes no
   `supersedes` link. An importer-authored `current` handoff is outside this selection (section
-  8.6): it neither blocks the posting nor is superseded, and its record is left unchanged. Before
-  anything is written, a handoff `create` MUST refuse a requested `supersedes` link that names the
+  8.6): it neither blocks the posting nor is superseded by the posting's own supersession, and its
+  record is left unchanged. Before anything is written, a handoff `create` MUST refuse a requested `supersedes` link that names the
   handoff it supersedes, more than one such `current` handoff, such a `current` handoff found in
   the archive (section 12), an archive input that the doctor's archive walk finds defective, and a
   previous handoff that is not schema-valid or whose `updated_at` is not earlier than the
