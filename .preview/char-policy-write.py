@@ -1089,33 +1089,33 @@ def _self_test():
         return "\n".join(lines[:at] + [code] + lines[at:])
 
     # Rebindings outside the region that H12 must find, in either file, before the region and after it. The
-    # first four are the mutants that survived QA round 2 (a plain and a conditional rebinding of _TOP_KEYS, a
+    # first four are the mutants that survived an earlier review (a plain and a conditional rebinding of _TOP_KEYS, a
     # plain and a conditional redefinition of _rel_ok); the next ones are the other ways a statement can bind
-    # a name, one vector or more for each branch of bindings(); then the stores of QA round 3's mutants (A, B
+    # a name, one vector or more for each branch of bindings(); then the stores of an earlier version's mutants (A, B
     # and C) and their variants, one vector or more for each branch of stores() (a def's decorators, defaults
     # and keyword-only defaults, a lambda's defaults, a class body, a deletion, a chain through sys.modules)
     # and for each import form the alias map reads (import X, import X as Y, import X.Y as Z, from X import Y,
-    # from X import Y as Z); then QA round 4's shadowed aliases, where an import of another module under the
-    # same name in a function body must not hide a module-level store; the last ones are QA round 6's stores
+    # from X import Y as Z); then an earlier version's shadowed aliases, where an import of another module under the
+    # same name in a function body must not hide a module-level store; the last ones are an earlier version's stores
     # through a chain that does not start from a name or that passes through sys, json, builtins or modules,
     # each reproduction both reviewers listed, and one vector for each kind of store whose target can be such
     # a chain (an assignment, an augmented and an annotated assignment, a del, a for, with and comprehension
-    # target); then QA round 7's stores through a name that an import of this module (import __main__, the gate
+    # target); then an earlier version's stores through a name that an import of this module (import __main__, the gate
     # imported under any name), a from-import from it, or a for, with, comprehension or match target binds, each
     # reproduction the reviewer listed and one vector for each of those binding forms; the three stores that
     # only the sys, builtins and modules links catch, one for each; and the documented watched-key and
-    # call-start cases; then QA round 8's: a for, with, match and comprehension target over sys.modules[...]
+    # call-start cases; then an earlier version's: a for, with, match and comprehension target over sys.modules[...]
     # (this module), each way of naming sys.modules in a source (the name, sys imported under another name,
     # modules imported from sys), a comprehension as a source, a match on sys.modules, an async for and an
     # async with target (a vector each, in a def that declares the name global, with the source a name and a
-    # call), and an import in a def that declares its name global and in a class body; then QA round 9's scope
+    # call), and an import in a def that declares its name global and in a class body; then an earlier version's scope
     # cases: a class body in a def whose own scope declares the name global (an import and a for, the
     # reviewer's reproductions), a def-local or class-local alias as the source of a target declared global, a
     # store in a class body through a class-local for target and through a comprehension's own target, and a
     # call's positional argument named like a builtin that the file binds (at module scope, in a class body,
     # and in a def that declares it global), a store in a class body before the class binds the name, a
     # comprehension's first iterable read in the class body around it, a def's default read outside the def,
-    # and a store in a comprehension through a name a walrus in it binds outside it; then QA round 10's: a class
+    # and a store in a comprehension through a name a walrus in it binds outside it; then an earlier version's: a class
     # body in a def, the class's own scope declaring a for target global, whose iterable names a name the class
     # binds after the loop and the def binds too, so the read finds the module's import, never the def's (the
     # reviewers' reproductions, and the class nested in another class), and a class that does not bind the name,
@@ -1284,17 +1284,17 @@ def _self_test():
     )
     # Ordinary module-level code that H12 must not flag, in either file, before the region and after it: a
     # store to an item of sys.path or os.environ, to an item of a module-level dict, to a class attribute, and
-    # through a for target whose iterable names no region name; then QA round 8's false positives, each one
+    # through a for target whose iterable names no region name; then an earlier version's false positives, each one
     # both reviewers listed: a for or match target over a call to a builtin the region reads (list, dict,
     # sorted, len as a keyword argument), and a function-local loop target or import, with no global
     # declaration (a nested def's own declaration does not count), whose name module-level code then binds
-    # and stores through; then QA round 9's: a class-local import and for target (the reviewer's
+    # and stores through; then an earlier version's: a class-local import and for target (the reviewer's
     # reproductions), a comprehension's target and a class body's loop target, each later bound and stored
     # through at module scope, a comprehension target named like a region name, a nonlocal name (an
     # assignment and an import, in a def and in a class body), a builtin passed as a positional argument
     # (map(list, ...), map(dict, ...), filter(len, ...)), a target over sys.path and over a slice of an alias
     # of sys.path, and a comprehension's later iterable in a class body, which skips the class's own names; then
-    # QA round 10's: a class body in a def, the class's own scope declaring a for target global, whose iterable
+    # an earlier version's: a class body in a def, the class's own scope declaring a for target global, whose iterable
     # names a name the class binds after the loop and the def imports, so the read finds the module's dict,
     # never the def's import (the reviewers' reproductions).
     ordinary = (
@@ -1719,7 +1719,7 @@ def _self_test():
                                           self.env))
 
         def test_h21_no_policy_file(self):
-            # QA round 3: under a root without a policy file, these three malformed calls were allowed silently;
+            # an earlier review: under a root without a policy file, these three malformed calls were allowed silently;
             # each gets a note, in process and through the hook as launched, while the well-formed call is silent
             empty = os.path.join(self.tmp, "empty")
             os.makedirs(empty)
@@ -1743,7 +1743,7 @@ def _self_test():
                 self.is_unchecked(json.loads(p.stdout), needle)
 
         def test_h22_payload_reader(self):
-            # QA round 4: each payload in bad was allowed silently; each now gets the cannot-evaluate note, in
+            # an earlier review: each payload in bad was allowed silently; each now gets the cannot-evaluate note, in
             # process and through the hook as launched, while the same call as UTF-8 JSON is evaluated. QA round
             # 6: a payload with a key twice in one object was judged on the last value (allowed silently or
             # denied); it now gets the same note, whichever value comes last
@@ -1896,7 +1896,7 @@ def _self_test():
                                                "end within the read deadline)")
 
         def test_h23_unresolvable_path(self):
-            # QA round 4: a symbolic link loop resolved silently; now every resolution fault other than a missing
+            # an earlier review: a symbolic link loop resolved silently; now every resolution fault other than a missing
             # component gets a note, before the out-of-scope and no-policy returns: under a root without a policy
             # file, inside the root, outside it, and through a component that is not a directory
             empty, outside = os.path.join(self.tmp, "empty"), os.path.join(self.tmp, "outside")

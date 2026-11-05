@@ -2254,7 +2254,7 @@ def _self_test():
                       "pytest; echo PASS >> r; ;;"):
                 self.assertAllow(c)
 
-        # the round-1 review items: each passes only with its fix present
+        # the earlier review items: each passes only with its fix present
         def test_qa_runner_options(self):
             for c in ("make -j test; echo PASS >> r", "make -j 4 -C sub test; echo PASS >> r",
                       "make --jobs check; echo PASS >> r", "npm --prefix web test; echo PASS >> r",
@@ -2299,7 +2299,7 @@ def _self_test():
                 self.assertEqual((p.returncode, p.stdout, p.stderr), (0, b"", b""), extra)
             self.assertEqual(main([]), 0)
 
-        # the round-2 review items: each passes only with its fix present
+        # the earlier review items: each passes only with its fix present
         def test_r2_printf_precision_and_assembly(self):
             for c in ("pytest; printf '%10.10s\\n' PASS >> r", "pytest; printf '%.4s\\n' PASSED >> r",
                       "pytest; printf '%s%s\\n' PA SS >> r", "pytest; printf '%c%c%c%c' P A S S >> r",
@@ -2361,7 +2361,7 @@ def _self_test():
             for c in ("pytest; builtin -- grep PASS >> r", "pytest; timeout 1 builtin echo PASS >> r"):
                 self.assertAllow(c)  # timeout runs a program, and builtin is none: nothing is written
 
-        # the round-3 review items: each passes only with its fix present
+        # the earlier review items: each passes only with its fix present
         def test_r3_printf_reuse_cost(self):
             for make in (lambda k: "pytest; printf '%" + "0" * k + "s ' " + "x " * (k // 8) + "PASS >> r",
                          lambda k: "pytest; printf '" + "y" * k + "%s' " + "x " * (k // 8) + "PASS >> r",
@@ -2407,7 +2407,7 @@ def _self_test():
                       "pytest; printf '%b' 'x\\x50ASS' >> r"):
                 self.assertAllow(c)
 
-        # the round-4 review items: each passes only with its fix present
+        # the earlier review items: each passes only with its fix present
         def test_r4_backslash_before_brace_closes(self):
             # bash writes `x PASS` (an escaped backslash, then the closing brace): the brace must close here, so
             # an escaped brace (`\\}`), which looks the same once read, closes too, a disclosed false deny
@@ -2428,7 +2428,7 @@ def _self_test():
                       "pytest; printf '%s%s x' PA SS >> r"):
                 self.assertDeny(c)
 
-        # the round-5 review items: each passes only with its fix present
+        # the earlier review items: each passes only with its fix present
         def test_r5_escaped_quote_opens_no_span(self):
             self.assertDeny("X=x; pytest; echo \"${X:-\\'} PASS '\" >> r")  # bash writes x PASS '
             self.assertDeny('X=x; pytest; echo "${X:-\\\\} PASS" >> r')  # an escaped backslash, then the brace

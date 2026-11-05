@@ -689,7 +689,7 @@ def _self_test():
 
         def tearDown(self):
             shutil.rmtree(self.tmp, ignore_errors=True)
-            # Round 25 fix for QA round 24 (claude MINOR): a test that patches a module global restores the real one.
+            # a test that patches a module global restores the real one.
             g = globals()
             self.assertIs(g.get("fcntl"), real_fcntl)
             self.assertIs(g["status"], real_status)
@@ -751,7 +751,7 @@ def _self_test():
             self.assertIn("(refusal 1 of", self.call("Stop", 30, stop_hook_active=False)["reason"])  # a new turn
 
         def test_23_the_cap_holds_without_stop_hook_active(self):
-            # Round 20: with the stop_hook_active field absent from the payload the count was reset at every
+            # with the stop_hook_active field absent from the payload the count was reset at every
             # Stop, so the cap was never reached. Each Stop below omits that field.
             self.compact()
             outs = [self.call("Stop", s) for s in range(5, 5 + BLOCK_CAP + 3)]
@@ -776,7 +776,7 @@ def _self_test():
             os.utime(self.spath(), (mtime, mtime))
             self.assertIn("refusal count unknown", self.call("Stop", 5)["systemMessage"])
             self.assertIn("refusal count unknown", self.call("Stop", 6, stop_hook_active=True)["systemMessage"])
-            # Round 21 (claude MINOR): the unknown count persists over Stops until a new-turn signal.
+            # the unknown count persists over Stops until a new-turn signal.
             for s in range(8, 11):
                 self.assertIn("refusal count unknown", self.call("Stop", s).get("systemMessage"))
             self.assertEqual(load_state(self.spath())[0], "bad")
@@ -852,7 +852,7 @@ def _self_test():
             try:
                 if os.access(d, os.W_OK):
                     self.skipTest("SKIPPED, running with privileges that ignore directory modes")
-                # Round 23 (codex MEDIUM): an explicit false whose refusal cannot be saved is allowed too, so the
+                # an explicit false whose refusal cannot be saved is allowed too, so the
                 # count never runs 1, 1, 2, 3 against a cap of 3 once storage recovers.
                 self.assertIn("cannot be saved", self.call("Stop", 5, stop_hook_active=False)["systemMessage"])
                 self.assertIn("cannot be saved", self.call("Stop", 6, stop_hook_active=True)["systemMessage"])
@@ -943,19 +943,19 @@ def _self_test():
             ctx = self.compact()["hookSpecificOutput"]["additionalContext"]
             self.assertIn("at most " + str(BLOCK_CAP) + " times in a row before the stop is allowed", ctx)
             self.assertNotIn("is held", ctx)
-            doc = " ".join(__doc__.split())  # round 20: the docstring describes the cap as it works
+            doc = " ".join(__doc__.split())  # the docstring describes the cap as it works
             self.assertNotIn("Exit status: always 0", doc)
             self.assertNotIn("per continuous stop_hook_active run", doc)
-            # Round 21 (claude MEDIUM): an explicit false resets the count, so the cap does not hold whatever the field.
+            # an explicit false resets the count, so the cap does not hold whatever the field.
             self.assertNotIn("does not rely on the platform's stop_hook_active field", doc)
             self.assertNotIn("absent, false or true", doc)
             self.assertIn("so the cap holds when the platform's stop_hook_active field is absent or true", doc)
             self.assertIn("the cap does not hold against a host that sends false on a Stop that does continue a "
                           "refusal", doc)
-            # Round 21 (claude MINOR): an unknown count persists until a new-turn signal, and both sections say so.
+            # an unknown count persists until a new-turn signal, and both sections say so.
             self.assertIn("An unknown count persists: a Stop does not repair the state", doc)
             self.assertIn("a state file that cannot be parsed (an unknown count) has the same effect", doc)
-            # Round 23 (codex 4, claude 1): no wording promises a bound the explicit-false caveat breaks.
+            # no wording promises a bound the explicit-false caveat breaks.
             self.assertNotIn("so it never blocks without bound", doc)
             self.assertIn("so a turn end is not held past the cap, unless the host sends stop_hook_active false on a "
                           "turn end that continues a refusal", doc)
@@ -975,12 +975,12 @@ def _self_test():
                               "false on a turn end that continues a refusal", text)
 
         def test_25_a_stop_cannot_write_back_an_older_compaction(self):
-            # Round 23 (codex MAJOR, checked here too): a Stop loaded the state, a new compaction saved a fresh one,
+            # a Stop loaded the state, a new compaction saved a fresh one,
             # and the Stop then saved the older compaction time, so the new compaction was forgotten.
-            # Round 24 (codex MEDIUM): the Stop is released only once the compaction has met the held lock (seen
+            # the Stop is released only once the compaction has met the held lock (seen
             # through the flock seam) or has finished, never after a fixed wait, so a slow scheduler cannot let
             # the compaction run after the Stop's save; one that does neither within the bound fails the test.
-            # Round 25 fix for QA round 24 (codex MEDIUM): the Stop ignored a timed-out wait and resumed on its own,
+            # the Stop ignored a timed-out wait and resumed on its own,
             # so a compaction delayed past it finished after the Stop's save and the test passed. The Stop now
             # stays paused until released (also in cleanup), a timed-out pause fails the test, and a compaction
             # that finished only after the Stop resumed is not counted as contended.
@@ -1052,7 +1052,7 @@ def _self_test():
             self.assertIn("(refusal " + str(BLOCK_CAP) + " of", self.call("Stop", 24)["reason"])
 
         def test_27_a_state_file_lost_mid_window_forgets_the_compaction(self):
-            # Round 23 (claude MINOR 5): documented in RESIDUAL COVERAGE; pinned here as it behaves.
+            # documented in RESIDUAL COVERAGE; pinned here as it behaves.
             self.compact()
             self.assertEqual(self.call("Stop", 1)["decision"], "block")
             os.unlink(self.spath())
@@ -1060,10 +1060,10 @@ def _self_test():
             self.assertIsNone(self.call("Stop", 3))
 
         def test_28_a_lock_file_deleted_mid_call_does_not_let_two_calls_interleave(self):
-            # Round 24 (claude MEDIUM): the lock file deleted while a Stop held it let a compaction lock a new file
+            # the lock file deleted while a Stop held it let a compaction lock a new file
             # and the Stop then save the older compaction time back. Now a call saves only while the lock path
             # still names the file it locked.
-            # Round 25 fix for QA round 24: the pause no longer ends on its own (a timed-out pause fails the test),
+            # the pause no longer ends on its own (a timed-out pause fails the test),
             # and the flock seam is undone with the real module kept before patching, not the patched global.
             if fcntl is None:
                 self.skipTest("SKIPPED, no flock on this platform")
@@ -1117,7 +1117,7 @@ def _self_test():
             self.assertEqual(load_state(self.spath()), ("ok", at(100), 1))
 
         def test_29_a_lock_path_that_is_not_a_regular_file_is_never_locked(self):
-            # Round 24 (claude MINOR): a FIFO at the lock path is refused like a symbolic link.
+            # a FIFO at the lock path is refused like a symbolic link.
             if fcntl is None or not hasattr(os, "mkfifo"):
                 self.skipTest("SKIPPED, no flock or no mkfifo on this platform")
             self.compact()
@@ -1162,7 +1162,7 @@ def _self_test():
             return outs[0]
 
         def test_30_a_lock_file_moved_away_and_back_does_not_let_a_stale_save_through(self):
-            # Round 25 fix for QA round 24 (codex MEDIUM): with the lock file moved away, a compaction locked a new
+            # with the lock file moved away, a compaction locked a new
             # file and saved, the original lock file was put back, and the paused Stop then passed its lock check
             # and wrote the older compaction time over the new one. A call now saves only while the state file is
             # the one it loaded or last saved itself.
@@ -1184,7 +1184,7 @@ def _self_test():
             self.assertEqual(load_state(self.spath()), ("ok", at(100), 1))
 
         def test_31_a_state_directory_moved_away_mid_call_forgets_the_compaction(self):
-            # Round 25 fix for QA round 24 (codex MINOR): documented in RESIDUAL COVERAGE; pinned here as it behaves.
+            # documented in RESIDUAL COVERAGE; pinned here as it behaves.
             self.compact()
             d = os.path.dirname(self.spath())
             out = self.paused_stop(lambda: os.rename(d, d + ".away"))
@@ -1198,7 +1198,7 @@ def _self_test():
                 self.assertTrue(phrase in doc, phrase)
 
         def test_32_a_call_that_saved_can_save_again_through_the_same_lock(self):
-            # Round 26 fix for QA round 25 (claude MINOR 3): no call of this hook saves twice through one lock
+            # no call of this hook saves twice through one lock
             # (each _decide path saves at most once), so no call-level test reaches StateLock.saved; this drives
             # save_state twice through one lock directly. Without saved() recording the call's own save, the
             # second save would read as another call's and write nothing.

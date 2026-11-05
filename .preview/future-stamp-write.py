@@ -48,7 +48,7 @@ fragment itself carries a future literal with no immediately preceding keyword (
 spans are exempt there too, but not fences, whose context the fragment cannot see); a time-only fragment (for
 example `17:45` to `22:25`) in such a file is not caught (disclosed below). An UNREADABLE target (it could not
 be opened or read, or is not a regular file, so nothing of it was read) fails OPEN except for what the new
-content itself introduces (round 24): an Edit or MultiEdit literal that already appears in that edit's
+content itself introduces: an Edit or MultiEdit literal that already appears in that edit's
 old_string (text the file held) is not counted, and a Write's content is checked line by line as for an
 absent file (with the file unread, all of it is new content). No shell expansion happens in
 these tools, so every character is literal (a `$(...)` is text, not a substitution).
@@ -57,41 +57,41 @@ Bash. A lexical rule (quoting is followed to find write indicators, their target
 carries, and date substitutions): DENY when a WRITE indicator's TARGET is a store path (a word holding a store
 path token: a configured store root spelled absolutely, standing alone within the target word: not preceded
 by a path character and followed
-by `/`, whitespace, a quote, a shell operator, or the end; or, round 31, a RELATIVE target that resolves
-under a store root, see WHICH DIRECTORY below) AND a future-dated literal is DATA of that write (round 31, see
-WHICH LITERALS below; until round 30 any literal anywhere in the command counted). Round
-24 binds each write to its target, so a command TARGETS a store path only through: a redirection's operand; a
-tee operand; an operand of an in-place sed or perl (not its program: round 26, a sed or perl given no -e, -E,
+by `/`, whitespace, a quote, a shell operator, or the end; or, an earlier version, a RELATIVE target that resolves
+under a store root, see WHICH DIRECTORY below) AND a future-dated literal is DATA of that write (see
+WHICH LITERALS below; until an earlier version any literal anywhere in the command counted). The rule
+now binds each write to its target, so a command TARGETS a store path only through: a redirection's operand; a
+tee operand; an operand of an in-place sed or perl (not its program: an earlier version, a sed or perl given no -e, -E,
 -f, --expression, or --file takes its first operand as the program); the destination of cp, mv, or install
 (every -t, -tDIR, --target-directory DIR, or --target-directory=DIR argument, else the LAST operand); a dd of=
-operand; a truncate, ed, or ex operand; or the file ex's -i, -w, -W, --startuptime, or --log writes. Round 26:
+operand; a truncate, ed, or ex operand; or the file ex's -i, -w, -W, --startuptime, or --log writes. an earlier version:
 each command's option arguments are consumed before its operands are collected, walking a short cluster
 letter by letter as getopt does, so an option's argument is never read as a target: sed's -e, -f, -l,
 --expression, --file, --line-length; perl's -e, -E, -I, -M, -m (and its attached -i, -x, -D, -F, -0, -l, -C,
 -d, -V forms); truncate's -r, -s, --reference, --size; ed's -p, --prompt; ex's -c, -S, -u, -U, -T, -t,
 --cmd; cp's and mv's -S, --suffix (and cp's --sparse, --no-preserve); install's -m, -o, -g, -S, --mode,
---owner, --group, --suffix, --strip-program. Round 27: where the real tool stops parsing options at its
+--owner, --group, --suffix, --strip-program. where the real tool stops parsing options at its
 first operand, so does this model: perl does (observed with perl 5.40.1: `perl -pi -e CODE X -I S` edits X,
 fails to open a file named `-I`, and edits S), so every word after perl's first operand is an operand; the
 other modeled commands permute (observed with GNU sed 4.9, GNU cp and mv 9.7, GNU ed 1.22.4, vim 9.1 as ex,
-and uutils install, truncate, and tee 0.8.0: an option after an operand is still an option). Round 27 also
+and uutils install, truncate, and tee 0.8.0: an option after an operand is still an option). an earlier version also
 reads SCRIPT TEXT: a sed expression (-e, --expression, or the program operand of a sed given no -e or -f),
 an ex command (-c, --cmd), or a perl program (-e, -E) that names a store path makes that write's target
 UNKNOWN (the text itself can write the path: a sed `w` command or `s///w` flag, an ex `w!`, a perl `open`),
 whether or not the sed or perl has an in-place option; an option argument that names a FILE (sed -f, perl
--I or its program file, truncate -r, ex -u) is still consumed and never a target. Round 28: a sed with NO
+-I or its program file, truncate -r, ex -u) is still consumed and never a target. a sed with NO
 in-place option whose program (its -e pieces, or its program operand; not a -f file) is parsed with
 confidence and holds no command that can write (no `w`, `W`, or `e` command, no `s///w` or `s///e` flag) is
 no write, even when its program MENTIONS a store path (`sed -n '\\|<store file> <future>|p' audit.log`); an
 in-place sed, a -f program, --posix, or a program not parsed with confidence (any `$` in it included) keeps
-the round-27 UNKNOWN target, and ex -c and perl -e script text is unchanged. Round 29: a long option is
+the earlier UNKNOWN target, and ex -c and perl -e script text is unchanged. a long option is
 resolved as the real tool resolves it before its argument is consumed: GNU sed, cp, and mv, GNU ed, and uutils
 install, tee, and truncate (observed on this host) accept any UNAMBIGUOUS prefix of a long option, so
 `--expr`, `--in`, `--po`, `--targ`, or `--suf` is read as `--expression`, `--in-place`, `--posix`,
 `--target-directory`, or `--suffix` (aliases of one option, such as sed's `--quiet` and `--silent`, count
 once); vim's ex accepts only its exact long options and perl none, so on sed, perl, or ex a `--` word that
 is AMBIGUOUS or UNRECOGNIZED makes the write's target UNKNOWN, while on the other commands it is read as an
-option with no argument (the tool rejects it and writes nothing). Round 30: perl accepts exactly two long
+option with no argument (the tool rejects it and writes nothing). perl accepts exactly two long
 options, `--help` and `--version` (exact, no abbreviation, no `=value`), and exits at once on either while its
 options are still parsed, touching no file and running no program (observed with perl 5.40.1, even after
 `-pi -e CODE`), so such a perl writes nothing; after perl's first operand either word is an operand as before.
@@ -104,15 +104,15 @@ takes an OPTIONAL argument whose arity differs between implementations: GNU inst
 consumes the SEPARATE next word when it is `-` or does not start with `-` (`install src <store file>
 --context foo` writes the store file, `foo` being the context); the model takes the conservative union, keeping
 that word as an operand and taking as destination candidates both the last operand and the last operand
-other than that word. Round 30 also swept every recorded long option, and each modeled command's short
+other than that word. an earlier version also swept every recorded long option, and each modeled command's short
 letters, for separate-word consumption against the real tools on this host; every other recorded arity
-matched. Round 31: GNU cp, mv, sed, and ed and uutils install, tee, and truncate also exit at once on `--help` or
+matched. GNU cp, mv, sed, and ed and uutils install, tee, and truncate also exit at once on `--help` or
 `--version` (or an unambiguous abbreviation), wherever it stands before `--`, since they permute, and reject an
 attached `=value` before writing anything (observed on this host), so such a command writes nothing (after
 `--` either word is an operand, and as the separate argument of an option, `cp -S --version`, it is that
 argument); ex is not given this, since vim opens a -w script-out file before it reaches --version.
 
-WHICH DIRECTORY (round 31). A relative write target (not starting with `/` or `~`) is resolved against every
+WHICH DIRECTORY. A relative write target (not starting with `/` or `~`) is resolved against every
 directory the command can be in at that point: the payload's cwd, then each confidently understood `cd` or
 `pushd` (one literal operand, after -L, -P, -e, -@, or `--`, naming an existing directory; with CDPATH set in
 the hook's environment, a relative operand not starting with `./` or `../` is unknown). A cd that surely runs
@@ -121,19 +121,19 @@ not in the background) REPLACES the set; any other cd JOINS it; a cd to anything
 a missing directory), and popd, adds an UNKNOWN directory. A target that resolves under a store root from any
 directory in the set is a store target; with an unknown directory in the set it is UNKNOWN (it then counts only
 when the command names a store path, as any unknown target). A substitution starts from the directories of the
-command holding it, and a cd inside it applies only there. Round 32: a `( ... )` subshell SCOPES the set: the
+command holding it, and a cd inside it applies only there. a `( ... )` subshell SCOPES the set: the
 set in force at its `(` is restored at its `)`, so `(cd <store dir> && ls); printf ... > state.md` resolves
-state.md in the parent's directory (round 31 let the subshell's cd leak into the parent); inside the subshell a
+state.md in the parent's directory (an earlier version let the subshell's cd leak into the parent); inside the subshell a
 cd first in its list, outside any other compound, replaces the set as at the top. A `{ ... }` group does not
 scope, as in bash. A stream the walk finds unreliable keeps the join-only walk (no replacement, no scoping). At
 most MAX_CWDS (32) directories are tracked per command point: a larger set spends the work budget (fail OPEN).
 
-SHELL -c (round 31). bash, sh, dash, or zsh with -c (a short option cluster holding c; -o, -O, --rcfile, and
+SHELL -c. bash, sh, dash, or zsh with -c (a short option cluster holding c; -o, -O, --rcfile, and
 --init-file take an argument) whose command string is ONE single-quoted string, or ONE double-quoted string with
 no unescaped `$`, backtick, or quote (a backslash before `$`, a backtick, `"`, or a backslash yields that
 character and one before a newline removes both, as bash reads it), is analysed recursively (to SHELL_C_DEPTH,
 3 levels) with the same directories: its store writes are the enclosing command's (so that command's pipeline
-feeds them), and a literal inside the string counts when that inner analysis decides it does. Round 32: it
+feeds them), and a literal inside the string counts when that inner analysis decides it does. it
 ALSO counts, as for echo, when the WRAPPER's output reaches a store write: `bash -c 'echo heartbeat: <literal>'
 >> <store file>` and `sh -c 'echo heartbeat: <literal>' | tee <store file>` are denied. The wrapper is then
 judged like a read command whose data is the whole string: its own redirection or substitution writing a store
@@ -148,7 +148,7 @@ counts whenever the enclosing command is not a pure read (the conservative direc
 running through several shell -c strings are followed only as far as the words and targets each one exposes.
 Any other command string (a variable, an expansion, a concatenation of quotes) is not inspected, as before.
 
-WHICH LITERALS (round 31). A future literal counts only when it is DATA of a store write: in the store write's
+WHICH LITERALS. A future literal counts only when it is DATA of a store write: in the store write's
 own simple command (its arguments, here-string, redirections, and substitutions), in a here-document body of
 it, in another command of its pipeline, or anywhere inside a compound command (`{ ... }`, `( ... )`, if, while,
 until, for, select) whose output is redirected or piped onward. A literal does NOT count when it lies in a
@@ -160,11 +160,11 @@ READ_COMMANDS and tee whose writes all go to KNOWN files that no store-writing c
 /tmp/log; echo checked >> <store file>` is allowed, while `printf <literal> > x; cp x <store dir>` counts, the
 store write naming x, as a word or a resolved path, transitively through further staged files); or as the
 PATTERN of a grep, egrep, fgrep, or rg inside a command substitution made only of such searches and wc, reading
-no redirected input, whose pipeline's output CANNOT hold the pattern (round 32): the pipeline ends in wc or in a
+no redirected input, whose pipeline's output CANNOT hold the pattern: the pipeline ends in wc or in a
 search with a count, quiet, or file-list option (-c, -q, -l, grep -L, or an exact long form such as --count or
 --files-with-matches), as in `n=$(grep -cF <literal> <store file>); echo "n=$n" >> <store file>`. A MATCHING
 search that prints lines prints file text holding its pattern (with -o, exactly the pattern), so `echo "$(grep
--oF <literal> hits.log)" >> <store file>` counts (round 31 exempted every search pattern, stating wrongly that
+-oF <literal> hits.log)" >> <store file>` counts (an earlier version exempted every search pattern, stating wrongly that
 a search never prints its pattern); rg -r or --replace and grep --label, which print their argument, are
 excluded as before. Every other literal counts, the conservative direction: an assignment (`x=<literal>; echo "$x" >>
 <store file>`), a command outside READ_COMMANDS, a for or select word list, and every literal of a command
@@ -173,17 +173,17 @@ a compound the walk cannot match, or of a command that cannot be parsed. BY DESI
 branch that never runs is judged as written, so `if false; then <future store write>; fi`, or a write guarded by
 a sentinel test (`[ -e <missing file> ] && <future store write>`), is denied.
 
-WORK BUDGET (round 31). The Bash analysis runs under BASH_WORK_BUDGET (80,000) steps: a character-loop step of
+WORK BUDGET. The Bash analysis runs under BASH_WORK_BUDGET (80,000) steps: a character-loop step of
 the tokenizer counts 3, a token taken by its regex fast path 1, a reserved or special word it inspects in full
 2 more, a here-document line 1, a substitution frame 8 in the tokenizer and 8 again in the analysis, the
 command-position walk 2 per token, a nested shell -c 30, and the later walks (simple commands, compound
-structure, pipelines, staging) 1 to 4 per token or command they visit. Round 32: DIRECTORY work is charged too,
-BEFORE it is done (round 31 left it unbudgeted, so 64 KiB of `(cd <dir>);` repeats over 400 directories took
+structure, pipelines, staging) 1 to 4 per token or command they visit. DIRECTORY work is charged too,
+BEFORE it is done (an earlier version left it unbudgeted, so 64 KiB of `(cd <dir>);` repeats over 400 directories took
 about 200 ms): CWD_COST (6) per directory in the set each cd is resolved from, each write target or staged word
 is resolved against, and each set union joins, and a set above MAX_CWDS (32) spends the budget at once; a
-budget step of directory work measured cheaper on this host than a tokenizer step. Round 33: the shell -c WRAPPER
+budget step of directory work measured cheaper on this host than a tokenizer step. the shell -c WRAPPER
 check is charged too: each pipeline's aggregates are computed ONCE, charged before the pass, and each wrapper then
-costs one step (round 32 rescanned the whole pipeline per wrapper, unbudgeted, so 64 KiB of 450 piped `sh -c`
+costs one step (an earlier version rescanned the whole pipeline per wrapper, unbudgeted, so 64 KiB of 450 piped `sh -c`
 wrappers took about 107 ms; that input now spends the budget). A command that spends it is
 ALLOWED unchecked (fail OPEN, as for any input the hook cannot evaluate), so no input holds the hook past its
 latency bound: 64 KiB of dense
@@ -193,12 +193,12 @@ ordinary commands, including 64 KiB of prose, a quoted here-document, or a scrip
 `echo <text> >> <file>`, stay inside it. A read-only search, or a
 write whose target lies elsewhere, is allowed even when the command also names a store path and a future
 literal. A parsed target that is a
-store path establishes the store write by itself (round 26: `cp -t<store dir> x`, whose attached spelling the
+store path establishes the store write by itself (`cp -t<store dir> x`, whose attached spelling the
 raw command text does not show as a standalone token, is caught). A write whose target is UNKNOWN counts as
 targeting the store (the fail-toward-writing direction) only when the command text names a store path
 anywhere: an unparseable command, a redirection with no operand, a target word holding a `$` (a variable or a
 substitution's value), a find `{}` placeholder, a write command run through xargs, which adds operands
-from its input, or (round 27) sed, ex, or perl script text that names a store path. A write indicator is, outside quotes
+from its input, or sed, ex, or perl script text that names a store path. A write indicator is, outside quotes
 and `#` comments, an output redirection (`>`, `>>`, `>|`, `&>`, an fd-prefixed `N>`, or `<>`) whose target
 is not /dev/null (an fd duplication is not one: a `>&` whose operand, after optional whitespace and after
 dequoting, is a descriptor number, a number followed by `-`, or `-`, such as `2>&1`, `>&2`, `1>& 2`, or
@@ -220,7 +220,7 @@ word after -exec, -execdir, -ok, or -okdir in a simple command whose command wor
 command's terminating `;` or `+` word), so `rg -e tee <store file>` and `printf '%s' -exec tee` are reads;
 or, in command position, sed or perl with an in-place option (`-i`, a short cluster of letters
 and digits holding i such as `-pi`, `-i.bak`, `-0777pi`, `-0pi`, or `-l0pi`, or sed's `--in-place` or an
-unambiguous abbreviation of it such as `--in`, round 29) later in the same simple command; an unterminated quote, an unterminated substitution, or a redirection with no target
+unambiguous abbreviation of it such as `--in`) later in the same simple command; an unterminated quote, an unterminated substitution, or a redirection with no target
 counts as a write. Inside a `[[ ... ]]` conditional (a `[[` word in command position up to its `]]`
 word; command position here also survives bash's `time` reserved word and its `-p` then `--` or `--`
 options, and `!`, so `if time [[ ... > ... ]]` and `! [[ ... ]]` are conditionals), everything up to
@@ -282,8 +282,8 @@ SCHED_GAP_TOKENS (3) word tokens before the literal (a word token holds a letter
 count), as in "next_run: T", "due T", "deadline: T", "scheduled for T", "until T", "not before T", "by T".
 Keywords (case-insensitive, each a whole word, optionally plural, except the stem `expir`, which covers
 expires and expiry): due, deadline, expir, until, next, scheduled, not before, not-before, eta, planned, "target date",
-"target:", `by ` (with its trailing space), and (round 24, the validity words, as in "valid through T")
-through and valid. Each keyword matches as a WHOLE word, optionally plural (round 24: "validated",
+"target:", `by ` (with its trailing space), and (the validity words, as in "valid through T")
+through and valid. Each keyword matches as a WHOLE word, optionally plural ("validated",
 "throughput", "duet", or "etag" exempt nothing), except the stem `expir`. A keyword after the literal, or further back, does not exempt it.
 
 Table-header exemption (Write, and Edit/MultiEdit on a reconstructed whole file only). A future literal in a
@@ -335,11 +335,11 @@ by json.loads, so its decoding does not depend on the process locale. An
 error writing the DENY line (a closed or full stdout, a broken pipe) no longer fails open: a deny that
 cannot be both written and flushed never provably reached the platform, so the hook notes the failure on
 stderr (best-effort) and ends at once with the blocking exit 2 through os._exit (a lost deny blocks, never
-allows; through round 24 this case was swallowed and the hook exited 0 with the deny lost). An error
+allows; through an earlier version this case was swallowed and the hook exited 0 with the deny lost). An error
 writing any OTHER line (the worker-skip stderr warning) still fails open: it is swallowed, the stream's
 descriptor is pointed at /dev/null so the exit-time flush cannot fail either, and the hook exits 0; if even
 that rescue fails, it ends at once with os._exit(0). Kill-switch: a subordinate worker process, detected as env AIQT_HOOKS_WORKER=1
-(legacy spellings are also accepted, see _is_worker), allows, writing one warning line to stderr (round 24;
+(legacy spellings are also accepted, see _is_worker), allows, writing one warning line to stderr (an earlier version;
 never stdout, and on exit 0 stderr reaches only the host's debug log, so the skip is logged, not shown).
 Subagent calls (a payload carrying agent_id or agent_type) are DELIBERATELY checked exactly like
 main-session calls, with no skip: a subagent applies store writes on the main session's behalf, and a helper
@@ -376,7 +376,7 @@ the value on that line, or a pipe that makes it a piped row. MISS (disclosed): b
 open through pipe-free lines until a blank line, prose written directly under a table with no blank line
 stays in it, and a later prose line that happens to hold an unescaped pipe (a shell pipe, say) is read as a
 piped row, so text before its first pipe gets column 0's header exemption; leave a blank line after a
-table. Bash is lexical by design. FALSE POSITIVES: (round 31) a future literal in an assignment, a command
+table. Bash is lexical by design. FALSE POSITIVES: a future literal in an assignment, a command
 outside READ_COMMANDS, or a loop's word list counts for a store write anywhere in the same command (`ts=<future>;
 echo ok >> <store file>` is denied), as does every literal of a command the structure walk finds unreliable (a
 case, a function definition, coproc, a bare exec, an unmatched compound), and a write in a branch that never
@@ -384,20 +384,20 @@ runs is judged as written (by design, see WHICH LITERALS); a write whose target 
 when the command names a store path anywhere, so `rg <future> <store file> > /dev/shm/out-$(date +%s)` (a `$`
 in the target), a `find /elsewhere ... -exec cp <store file> {} +` (the `{}` TARGET is unknown; a
 `-exec cp {} /elsewhere` from a store dir is allowed, `{}` being cp's source), and an xargs-run write to /elsewhere are
-denied (round 31: a here-document body is no longer read as command text: a quoted delimiter's body is skipped,
+denied (a here-document body is no longer read as command text: a quoted delimiter's body is skipped,
 and an unquoted one is scanned only for the substitutions that run in it, so a `>` in a body is text, as bash
 reads it), as is a command where an `i` in a sed or perl short cluster is really an option
 argument rather than the in-place switch (`sed -ei...`, `perl -Mstrict`), or where a write-command name
-lands in command position only lexically (the argument of `command -v`, say); likewise (round 27, as in
-round 25) a sed expression or program, an ex -c or --cmd command, or a perl -e or -E program that merely
+lands in command position only lexically (the argument of `command -v`, say); likewise (as in
+an earlier version) a sed expression or program, an ex -c or --cmd command, or a perl -e or -E program that merely
 MENTIONS a store path while writing elsewhere (`sed -i 's#<store dir>/a#b#' /dev/shm/x`, a pattern) makes
-the target unknown and is denied (round 28 narrows this for sed only: a sed with no in-place option whose
+the target unknown and is denied (an earlier version narrows this for sed only: a sed with no in-place option whose
 program parses as holding no `w`, `W`, `e`, `s///w`, or `s///e` is allowed; a sed program the conservative
 parser does not accept, for example one holding any `$` such as `\\|<store file>$|p`, a label or a/i/c text
 it does not model, or a backslash inside a bracket expression, is still denied, and ex is NOT narrowed: an
 ex -c or --cmd command naming a store path is denied even when it only prints or searches, such as `-c
 'g#<store file>#p'`, because ex's command grammar, with `|` chaining, :global and :normal nesting, shell
-escapes, and many abbreviated write commands, cannot be parsed here with confidence); (round 30) under
+escapes, and many abbreviated write commands, cannot be parsed here with confidence); under
 install's bare `--context` the next word is ALSO a destination candidate, so where uutils consumes a store
 path there as the context while the real destination lies elsewhere (`install src /elsewhere --context
 <store dir>`) the command is denied, and `install -d` or `mv --exchange` naming a store path is denied
@@ -405,30 +405,30 @@ whenever the command also holds a future literal; and a perl `-i`
 placed after perl's first operand (a file name to perl,
 not the in-place switch) still arms in-place detection; rephrase or split the
 command. MISSES: a write whose target reaches a store file by a spelling neither the store path token rule
-nor the round-31 directory resolution follows (a relative path after a cd the model cannot follow, a
-symlink, a variable, a glob); round 31 resolves `cd <store dir> && echo <future> > state.md`, a miss until round
+nor the earlier directory resolution follows (a relative path after a cd the model cannot follow, a
+symlink, a variable, a glob); an earlier version resolves `cd <store dir> && echo <future> > state.md`, a miss until round
 30; a write whose
 option parsing differs from the modeled getopt subset: an option's separate argument the model does not list
-is read as an operand (round 29 closes the abbreviated-long-option case, `cp src <store file> --suf .bak`,
-which round 26 disclosed as a miss: `--suf` now resolves to `--suffix` and `.bak` is consumed; a long option
+is read as an operand (an earlier version closes the abbreviated-long-option case, `cp src <store file> --suf .bak`,
+which an earlier version disclosed as a miss: `--suf` now resolves to `--suffix` and `.bak` is consumed; a long option
 the recorded per-command set lacks, on a command other than sed, perl, or ex, still takes no argument here;
 the arities recorded are those of the tools observed on this host, GNU sed, cp, mv, and ed and uutils
 install, tee, and truncate, so another implementation whose option arity differs, beyond install's
 `--context` modeled as the union above, is not modeled),
 and POSIXLY_CORRECT in the environment is not modeled: under it GNU sed, cp, and mv stop at
-their first operand (observed, round 27), so `sed -i s/a/b/ X -f <store file>` then edits the store file
+their first operand (observed), so `sed -i s/a/b/ X -f <store file>` then edits the store file
 while this model consumes it as the -f script file; a store write performed by a script the command names
 as a FILE rather than carrying as text (a sed -f file, an ex -S or -u file, a perl program file or -M
 module, each holding a `w` or an `open`), or by script text whose store path is spelled other than as a
 store path token (relative, or through a variable); a write command
 run through a wrapper not listed as a prefix (ssh, su -c, parallel, watch, or a shell -c string that is not
-one quoted literal with no expansion: round 31 inspects a literal one), named through
+one quoted literal with no expansion: an earlier version inspects a literal one), named through
 a variable or substitution (`$T`, `"$(command -v tee)"`), or placed after an option of a listed prefix that
 takes a separate argument but is not listed for it (the argument is then read as the command, and the write
 command after it is not in command position); a store path reached through a variable, a glob, a `cd` the
 model cannot follow (see WHICH DIRECTORY), a symlink, or, in an absolute word, a `..` or doubled-slash
 spelling; a future literal that reaches the store through a file the store write names only by a variable,
-glob, or other spelling than the staging write's (round 31: that staging pipeline's literals are then not
+glob, or other spelling than the staging write's (that staging pipeline's literals are then not
 counted); a write
 through a program or script with no write indicator in the command text (`python -c`, `python3 script.py`,
 `awk -i inplace`, `rsync`, `ln`, an editor, a heredoc-fed interpreter), or a script that writes internally;
@@ -515,7 +515,7 @@ SCHED_GAP_TOKENS = 3
 TIME_GRAMMAR = r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?"
 ZONE_GRAMMAR = r"(?:[ ]?(Z)|[ ]?([+-]\d{2}(?::?\d{2})?)|[ ](UTC|GMT|[A-Z]{2,6}))(?![A-Za-z0-9])"
 
-# Round 24: a keyword matches as a WHOLE word (an optional plural `s`, then no further letter or digit), so
+# a keyword matches as a WHOLE word (an optional plural `s`, then no further letter or digit), so
 # "validated", "throughput", "duet", or "etag" exempt nothing; only a listed STEM matches as a prefix ("expir"
 # covers expires, expiry, expiration).
 SCHED_STEMS = ("expir",)
@@ -538,7 +538,7 @@ _FENCE_RE = re.compile(r"`{3,}|~{3,}")
 # ---- store paths ----
 
 class _StoreCtx:
-    """Round 31: store-root matching computed ONCE per evaluation (round 30 re-read the environment, re-tested
+    """store-root matching computed ONCE per evaluation (an earlier version re-read the environment, re-tested
     the lease file with a stat, and rebuilt the token pattern for every target word): the roots, one compiled
     store-path token pattern, and memos for word tests, relative-path resolution, and directory tests."""
     __slots__ = ("roots", "token_re", "names_memo", "under_memo", "isdir_memo")
@@ -570,7 +570,7 @@ class _StoreCtx:
         return got
 
 
-_ACTIVE = None  # round 31: the _StoreCtx of the evaluation in progress (set by evaluate()), else None
+_ACTIVE = None  # the _StoreCtx of the evaluation in progress (set by evaluate()), else None
 
 
 def _store_ctx():
@@ -578,7 +578,7 @@ def _store_ctx():
 
 
 def store_roots():
-    """The configured store roots (env AIQT_STORE_ROOT; there is no default); see the docstring. Round 31:
+    """The configured store roots (env AIQT_STORE_ROOT; there is no default); see the docstring. an earlier version:
     within one evaluation the value is computed once (_StoreCtx)."""
     if _ACTIVE is not None:
         return _ACTIVE.roots
@@ -899,7 +899,7 @@ def apply_edits(original, edits):
 
 # ---- shell (lexical only) ----
 
-_DS_TOP_RE = re.compile(r"[\\$`\"'()]")  # round 31: the characters date_spans() acts on outside quotes
+_DS_TOP_RE = re.compile(r"[\\$`\"'()]")  # the characters date_spans() acts on outside quotes
 _DS_DQ_RE = re.compile(r'[\\$`"]')  # ... inside double quotes
 _DS_ANSI_RE = re.compile(r"[\\']")  # ... inside $'...'
 
@@ -910,7 +910,7 @@ def date_spans(cmd, budget=None):
     quote state; inside single quotes (or $'...', which honours backslash escapes) nothing is special; inside
     double quotes only `$(` and backticks open frames and a parenthesis is literal. A span is recorded only
     when its frame closes, so an unmatched opener or an unterminated quote starts no span. The `date` test
-    looks ahead a bounded DATE_LOOKAHEAD characters. Round 31: the pass jumps straight to the next character
+    looks ahead a bounded DATE_LOOKAHEAD characters. the pass jumps straight to the next character
     that can matter in the current quote state (a regex search), not one character per step; `budget`, when
     given, is charged one unit per step (_Exhausted when it runs out)."""
     def is_date(j):
@@ -1023,11 +1023,11 @@ _ASSIGN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=.*", re.S)
 
 
 class _Exhausted(Exception):
-    """Round 31: the Bash analysis spent its work budget (BASH_WORK_BUDGET); the hook then fails open."""
+    """the Bash analysis spent its work budget (BASH_WORK_BUDGET); the hook then fails open."""
 
 
 class _Budget:
-    """Round 31: a counter of Bash analysis steps (tokenizer iterations, heredoc lines, tokens and units walked),
+    """a counter of Bash analysis steps (tokenizer iterations, heredoc lines, tokens and units walked),
     shared by one evaluation and its nested shell -c analyses; spend() raises _Exhausted when it runs out."""
     __slots__ = ("left",)
 
@@ -1041,7 +1041,7 @@ class _Budget:
 
 
 class _Tokens:
-    """Round 31: what _tokenize() returns. streams: the token streams (as _shell_tokens() returns them, the
+    """what _tokenize() returns. streams: the token streams (as _shell_tokens() returns them, the
     top-level stream last); poss: per stream, a (start, end) raw offset pair per token ((-1, -1) for a separator
     the tokenizer inserts itself); spans: per stream, the raw (start, end) of its frame; heredocs: (operator
     offset, body start, body end) per here-document body; comments: the raw (start, end) of each comment."""
@@ -1051,14 +1051,14 @@ class _Tokens:
         self.streams, self.poss, self.spans, self.heredocs, self.comments = streams, poss, spans, heredocs, comments
 
 
-_HD_SPECIAL_RE = re.compile(r"\\|\$\(|`")  # round 31: what runs in an unquoted here-document body
-_PLAIN_RUN_RE = re.compile(r"[^\s\\'\"`$<>()|&;#]+")  # round 31: word characters with no shell meaning
+_HD_SPECIAL_RE = re.compile(r"\\|\$\(|`")  # what runs in an unquoted here-document body
+_PLAIN_RUN_RE = re.compile(r"[^\s\\'\"`$<>()|&;#]+")  # word characters with no shell meaning
 _PLAIN_SPECIAL = frozenset("\\'\"`$<>()|&;#")
-_DQ_RUN_RE = re.compile(r'[^"\\`$]+')  # round 31: double-quoted text with no shell meaning
-_BLANK_RUN_RE = re.compile(r"[^\S\n]+")  # round 31: whitespace other than a newline
-# round 31: the words flush() must inspect (every other word takes the fast path)
+_DQ_RUN_RE = re.compile(r'[^"\\`$]+')  # double-quoted text with no shell meaning
+_BLANK_RUN_RE = re.compile(r"[^\S\n]+")  # whitespace other than a newline
+# the words flush() must inspect (every other word takes the fast path)
 _FLUSH_WORDS = frozenset(("case", "esac", "[[", "for", "function", "time")) | _CMD_PREFIX_WORDS
-# round 31: one SIMPLE token after optional blanks, as the tokenizer's regex fast path takes it: a plain word (ended
+# one SIMPLE token after optional blanks, as the tokenizer's regex fast path takes it: a plain word (ended
 # by whitespace, an operator, or the end), `>>`, `>|`, or `>` (not `>&`), a plain `<`, or a separator; group 5
 # takes any other character, which ends the run (so a finditer from any offset never skips text)
 _FAST_TOK_RE = re.compile(r"[^\S\n]*(?:([^\s\\'\"`$<>()|&;#]+)(?=[\s;|&<>()]|\Z)|(>>|>\||>(?!&))|(<(?![<>(&]))"
@@ -1068,8 +1068,8 @@ _FAST_TOK_RE = re.compile(r"[^\S\n]*(?:([^\s\\'\"`$<>()|&;#]+)(?=[\s;|&<>()]|\Z)
 def _frame(kind, cmdpos, start, arith_cmd=False):
     """A tokenizer frame (see _tokenize): [kind, toks, word chars, has word, in double quotes, paren depth, open
     cases, word quoted, command position, inside [[, function header state, time state, arithmetic command or
-    `for` seen, word start (round 31), token positions (round 31), pending here-documents (round 31), awaiting
-    a here-document delimiter (round 31), frame start (round 31)]."""
+    `for` seen, word start, token positions, pending here-documents, awaiting
+    a here-document delimiter, frame start]."""
     return [kind, [], [], False, False, 0, 0, False, cmdpos, False, 0, 0, arith_cmd, 0, [], [], None, start]
 
 
@@ -1097,7 +1097,7 @@ def _tokenize(cmd, budget=None):
     followed by a separator (bash takes a `do`, `then`, or `{` after it with or without a `;` first). A
     conditional still open when its frame ends (at the end of input, at a closing backtick, or at an
     unterminated quote; a `)` inside it is operand text, so a `$(...)` never closes over it) makes the whole
-    result None, never a silent pass (round 22: there is no loose re-read, so a grouping `)` glued to `]]`,
+    result None, never a silent pass (there is no loose re-read, so a grouping `)` glued to `]]`,
     `[[ ( -n x )]]`, which bash does close, leaves the conditional open here and the command unparseable). This
     never applies to `[ ... ]` or `test`, where an unquoted `>` is a real redirection. A substitution, unquoted or inside double quotes, is its own
     frame with its own quoting context (as in date_spans()), its body a separate stream, and it leaves a `$`
@@ -1125,7 +1125,7 @@ def _tokenize(cmd, budget=None):
     `$(...)` or backtick substitution inside it is still its own scanned stream. A `)` at the arithmetic's
     own level not followed by `)` (bash then re-reads the text as nested groups) returns None. Returns None
     for an unterminated quote, substitution, arithmetic, or `[[` conditional (in any frame).
-    Round 31: the pass also records where each token lies in `cmd` (the raw offsets the analysis attributes
+    the pass also records where each token lies in `cmd` (the raw offsets the analysis attributes
     literals and writes by), each substitution frame's span, each comment, and each here-document body: at
     the newline ending a line that holds `<<` or `<<-` operators, their bodies run through their delimiter
     lines, and they are never tokenized as commands: when every such delimiter was quoted (no expansion in the
@@ -1145,11 +1145,11 @@ def _tokenize(cmd, budget=None):
             w = "".join(f[2])
             f[1].append(("w", w))
             f[14].append((f[13], i))
-            if f[16] is not None:  # round 31: the delimiter word of a pending here-document
+            if f[16] is not None:  # the delimiter word of a pending here-document
                 f[15].append((w, f[16][0], f[7], f[16][1]))
                 f[16] = None
             if not f[9] and not f[10] and not f[11] and w not in _FLUSH_WORDS:
-                f[8] = f[12] = False  # round 31: the common case, an ordinary word, decided without the chain below
+                f[8] = f[12] = False  # the common case, an ordinary word, decided without the chain below
                 f[2], f[3], f[7] = [], False, False
                 return
             nonlocal steps
@@ -1160,7 +1160,7 @@ def _tokenize(cmd, budget=None):
                 elif w == "esac" and f[6]:
                     f[6] -= 1
             closed = False  # this word is the `]]` that closes a [[ ... ]] conditional command
-            if f[9]:  # the main loop decides where the conditional closes (round 20), never the word alone
+            if f[9]:  # the main loop decides where the conditional closes, never the word alone
                 closed = closing
                 f[9] = False if closing else f[9]
             elif not f[7] and f[8] and w == "[[":
@@ -1184,12 +1184,12 @@ def _tokenize(cmd, budget=None):
 
     def sep(f, at, synthetic=False):
         f[1].append(("s",))
-        f[14].append((at, at) if synthetic else (at, at + 1))  # round 31: an inserted separator is zero-width
+        f[14].append((at, at) if synthetic else (at, at + 1))  # an inserted separator is zero-width
         f[8], f[10], f[11], f[12] = True, 0, 0, False
         f[16] = None  # a separator before a here-document's delimiter word: bash rejects it; no body
 
     def bodies(f, start):
-        """Round 31: record the bodies of the here-documents pending in frame `f`, which start at `start` (just
+        """record the bodies of the here-documents pending in frame `f`, which start at `start` (just
         past the newline ending their operator's line), each through its delimiter line (tabs stripped first
         for `<<-`), or to the end of input when none follows. When EVERY pending delimiter was quoted the bodies
         are literal text in bash (no expansion), and when the bodies hold no `$(` and no backtick nothing in them
@@ -1230,7 +1230,7 @@ def _tokenize(cmd, budget=None):
         if steps >= limit:
             raise _Exhausted()
         f, c = stack[-1], cmd[i]
-        if f[0] == "hd":  # round 31: here-document body mode (see bodies()): only substitutions run
+        if f[0] == "hd":  # here-document body mode (see bodies()): only substitutions run
             m = _HD_SPECIAL_RE.search(cmd, i, f[5])
             if m is None:
                 stack.pop()
@@ -1241,7 +1241,7 @@ def _tokenize(cmd, budget=None):
             if c == "\\":
                 i += 2
                 continue
-        # round 31: runs of characters with no shell meaning are consumed whole (identical results, far fewer steps)
+        # runs of characters with no shell meaning are consumed whole (identical results, far fewer steps)
         if f[4]:
             if c not in '"\\`$':
                 m = _DQ_RUN_RE.match(cmd, i)
@@ -1250,7 +1250,7 @@ def _tokenize(cmd, budget=None):
                 continue
         elif not f[9] and f[0] not in ("((", "hd"):
             if not f[3] and f[16] is None and not f[10] and not f[11]:
-                # round 31: a run of SIMPLE tokens (a plain word that is none of _FLUSH_WORDS, `;`, `|`, `&`, a
+                # a run of SIMPLE tokens (a plain word that is none of _FLUSH_WORDS, `;`, `|`, `&`, a
                 # newline unless a here-document is pending, `>`, `>>`, `>|`, or a plain `<`, each after optional
                 # blanks) is tokenized by anchored regex matches, exactly as the character loop below would
                 toks, tpos, f8, f12, pend, at = f[1], f[14], f[8], f[12], f[15], i
@@ -1310,7 +1310,7 @@ def _tokenize(cmd, budget=None):
             continue
         if c == "`" and f[0] == "`":
             flush(f)
-            if f[9]:  # a conditional still open when its backtick frame closes: unparseable (round 22)
+            if f[9]:  # a conditional still open when its backtick frame closes: unparseable
                 return None
             streams.append(f[1])
             poss.append(f[14])
@@ -1346,7 +1346,7 @@ def _tokenize(cmd, budget=None):
         if c == "'" or (c == "$" and cmd.startswith("$'", i)):
             if not f[3]:
                 f[13] = i
-            if c == "'":  # round 31: the quoted text is taken whole, not one character per step
+            if c == "'":  # the quoted text is taken whole, not one character per step
                 j = cmd.find("'", i + 1)
                 if j < 0:
                     return None
@@ -1376,7 +1376,7 @@ def _tokenize(cmd, budget=None):
             f[3] = f[4] = f[7] = True
             i += 1
             continue
-        if f[9]:  # inside [[ ... ]] (round 20): everything up to the closing `]]` is operand text
+        if f[9]:  # inside [[ ... ]]: everything up to the closing `]]` is operand text
             if c in "<>" and cmd.startswith("(", i + 1):  # a process substitution: its body is its own
                 flush(f)  # scanned stream, as a `$(...)` is, and its value joins the word
                 f[13] = i
@@ -1389,7 +1389,7 @@ def _tokenize(cmd, budget=None):
             if cmd.startswith("]]", i) and (i + 2 >= n or cmd[i + 2].isspace() or cmd[i + 2] in ";&|<>)" or (
                     cmd[i + 2] == "`" and f[0] == "`")) and not f[3] and cmd[i - 1].isspace():
                 flush(f)  # the `]]` word closes the conditional: it starts a word (after unquoted whitespace;
-                f[2], f[3], f[7], f[13] = ["]", "]"], True, False, i  # a glued `)]]` never closes, round 22) and
+                f[2], f[3], f[7], f[13] = ["]", "]"], True, False, i  # a glued `)]]` never closes) and
                 flush(f, True)  # a metacharacter, the end, or the closing backtick of this backtick frame (round
                 i += 2  # 23) follows it; the next word is again in command position, with or without a `;` first
                 continue
@@ -1421,7 +1421,7 @@ def _tokenize(cmd, budget=None):
             continue
         if c in "<>()|&":
             flush(f)  # a metacharacter ends the word before it (`if((`, `while((`, `!((` first end their reserved
-            if f[9]:  # word); a `[[` ended so opens the conditional (round 21): re-read this character as
+            if f[9]:  # word); a `[[` ended so opens the conditional: re-read this character as
                 continue  # conditional text, never as a separator or a redirection (`[[(-f x) ]]`)
         if c == "(" and cmd.startswith("((", i) and (f[8] or f[12]):
             if not f[3]:
@@ -1434,7 +1434,7 @@ def _tokenize(cmd, budget=None):
             continue
         if c == "#" and not f[3]:  # (inside [[ ... ]] a `#` never reaches here: it is operand text)
             nl = cmd.find("\n", i)
-            comments.append((i, n if nl < 0 else nl))  # round 31: recorded, so a literal there feeds no write
+            comments.append((i, n if nl < 0 else nl))  # recorded, so a literal there feeds no write
             i = n if nl < 0 else nl
             continue
         if c == ">" or (c == "&" and cmd.startswith("&>", i)):
@@ -1472,7 +1472,7 @@ def _tokenize(cmd, budget=None):
         if c in _SHELL_SEPARATORS:
             flush(f)
             sep(f, i)
-            if c == "\n" and f[15]:  # round 31: here-document bodies start after this newline
+            if c == "\n" and f[15]:  # here-document bodies start after this newline
                 i = bodies(f, i + 1)
                 continue
             i += 1
@@ -1489,7 +1489,7 @@ def _tokenize(cmd, budget=None):
             f[1].append(("i",))
             f[14].append((at, i))
             if heredoc:
-                f[16] = (strip, at)  # round 31: the next word is the here-document's delimiter
+                f[16] = (strip, at)  # the next word is the here-document's delimiter
             continue
         if c.isspace():
             flush(f)
@@ -1528,10 +1528,10 @@ def bash_writes(cmd):
 
 
 def bash_store_write(cmd, cwd=None):
-    """True when a write in the command TARGETS a store path (round 24): a redirection target, a tee operand, a
+    """True when a write in the command TARGETS a store path: a redirection target, a tee operand, a
     sed -i or perl -i operand, a cp, mv, or install destination (the -t or --target-directory argument, else the
     last operand), a dd of= operand, or a truncate, ed, or ex operand, each tested with the same lexical store
-    path token rule as names_store_path(). Round 26: a PARSED target that is a store path establishes the store
+    path token rule as names_store_path(). a PARSED target that is a store path establishes the store
     write by itself (an attached `cp -t<store dir>` spelling included, which the raw command text does not show
     as a standalone store path token); only a command that cannot be parsed, or a write whose target is unknown
     (a redirection with no operand, a `$` target, an xargs-run write), falls back to the raw test and counts as
@@ -1545,7 +1545,7 @@ def bash_store_write(cmd, cwd=None):
         return False
 
 
-# Round 26: how each modeled write command's options take arguments, so an option's argument (a sed script
+# how each modeled write command's options take arguments, so an option's argument (a sed script
 # file, a truncate reference file, an install mode) is consumed before the destination operands are collected
 # and is never read as a write target. Per command: "req", short letters taking a REQUIRED argument (the rest of
 # the cluster, else the next word); "opt", short letters taking an OPTIONAL argument only when attached (the
@@ -1554,30 +1554,30 @@ def bash_store_write(cmd, cwd=None):
 # (`--opt value` or `--opt=value`; any other long option takes none, or only an attached `=value`); "target",
 # the letters and long options whose argument IS a write target; "script", the letters and long options that
 # supply the program, or None for a command with no program operand (a sed or perl given none of them takes its
-# FIRST operand as the program, not as a file); "text" (round 27), the letters and long options whose argument
+# FIRST operand as the program, not as a file); "text", the letters and long options whose argument
 # is SCRIPT TEXT the tool runs (a sed expression, an ex command, a perl program), and "text_prog", whether the
 # dropped program operand is script text too (sed's, never perl's, which names a program FILE): script text
 # that names a store path makes the write's target UNKNOWN (a sed `w` command or `s///w` flag, or an ex `w!`,
 # can write that path), while an option argument that names a FILE (sed -f, truncate -r, perl -I) stays
-# consumed; "stop" (round 27), option parsing ends at the FIRST operand, as the real tool does, so every later
-# word is an operand; "all" (round 30), the letters and long options under which EVERY operand (and every
+# consumed; "stop", option parsing ends at the FIRST operand, as the real tool does, so every later
+# word is an operand; "all", the letters and long options under which EVERY operand (and every
 # target-directory argument) is written: mv's --exchange swaps each source with its destination, and install's
 # -d or --directory creates every operand as a directory (an existing one has its mode set); "optsep" (round
 # 30), long options whose optional argument one implementation takes only attached (`--opt=value`: GNU
 # install's --context) and another also takes as the SEPARATE next word when that word is `-` or does not
 # start with `-` (uutils install 0.8.0, this host's install), so that word is kept as an operand AND the
-# destination is also computed without it (the union of both readings); "exit" (round 30), long options on
+# destination is also computed without it (the union of both readings); "exit", long options on
 # which the tool exits at once, touching no file and running no program, when they are met while options are
-# still parsed (perl's --help and --version; an attached `=value` is unrecognized; round 31: also --help and
+# still parsed (perl's --help and --version; an attached `=value` is unrecognized; also --help and
 # --version of cp, mv, install, tee, truncate, ed, and sed, which permute, so either stops them wherever it
 # stands before `--`; "exit_eq", the tool also rejects an attached `=value` before writing anything, observed
 # on this host with GNU cp and mv 9.7, GNU sed 4.9, GNU ed 1.22.4, and uutils install, tee, and truncate 0.8.0;
 # ex is not given them, since vim opens a -w script-out file before it reaches --version). Observed on this host
-# (round 27): perl 5.40.1 stops at its first operand (`perl -pi -e
+#: perl 5.40.1 stops at its first operand (`perl -pi -e
 # CODE X -I S` edits X, fails to open `-I`, and edits S); GNU sed 4.9, GNU cp and mv 9.7, GNU ed 1.22.4, vim 9.1
 # as ex, and uutils 0.8.0 install, truncate, and tee all permute (an option after an operand is still an
 # option); GNU sed, cp, and mv stop at the first operand only under POSIXLY_CORRECT (not modeled; disclosed).
-_EXITS = ("--help", "--version")  # round 31: long options on which the tool exits at once, writing nothing
+_EXITS = ("--help", "--version")  # long options on which the tool exits at once, writing nothing
 _OPTION_SPECS = {
     "cp": {"req": "St", "long": ("--suffix", "--target-directory", "--sparse", "--no-preserve"),
            "target": ("t", "--target-directory"), "exit": _EXITS, "exit_eq": True},
@@ -1603,18 +1603,18 @@ _OPTION_SPECS = {
 }
 _DEST_COMMANDS = frozenset(("cp", "mv", "install"))  # the destination is the -t argument, else the last operand
 
-# Round 29: every long option each modeled command accepts, so an abbreviated spelling resolves as the real tool
+# every long option each modeled command accepts, so an abbreviated spelling resolves as the real tool
 # resolves it (a MISS before: `sed --expr='s/x/<future>/w <store file>' log` and `sed --in s/x/<future>/ <store
 # file>` wrote the store unseen). Observed on this host: GNU sed 4.9, GNU cp and mv 9.7, and GNU ed 1.22.4
 # (getopt_long, or ed's own parser) and uutils 0.8.0 install, tee, and truncate (clap, inferring long names)
 # accept any UNAMBIGUOUS prefix, a prefix of several aliases of ONE option counting once (`sed --z`, `sed
 # --q`), and reject an ambiguous one (`sed --f`: --file or --follow-symlinks; `cp --s`; `ed --s`); vim 9.1 as ex
 # accepts only an exact long option (`--cm` and `--cmdx` are errors, and `--CMD` is not --cmd); perl 5.40.1
-# accepts exactly two, --help and --version, each only exact and without `=value` (round 30: `perl --vers`,
+# accepts exactly two, --help and --version, each only exact and without `=value` (`perl --vers`,
 # `perl --version=1`, and `perl --in` are unrecognized switches), and exits at once on either. The sets are the
 # tools' --help lists plus the hidden spellings observed (sed --binary and --zero-terminated, cp --path) and
-# ex's modeled --startuptime and --log. Round 30: ed's --script is its -s, not an alias of --quiet (-q).
-# Round 30 swept every long option here, and each modeled command's short letters, for separate-word
+# ex's modeled --startuptime and --log. ed's --script is its -s, not an alias of --quiet (-q).
+# an earlier version swept every long option here, and each modeled command's short letters, for separate-word
 # consumption against the real tools on this host (the tool run with the option followed by a word, and
 # whether that word was then used as an operand); every recorded arity matched except uutils install's
 # --context, now modeled ("optsep").
@@ -1649,7 +1649,7 @@ _STRICT_LONG_COMMANDS = frozenset(("sed", "perl", "ex"))  # an unresolvable `--`
 
 
 def _resolve_long(kind, name):
-    """Round 29: the long option `name` (a `--` word up to any `=`) stands for on command `kind`, or None when it
+    """the long option `name` (a `--` word up to any `=`) stands for on command `kind`, or None when it
     is UNRECOGNIZED or AMBIGUOUS. An exact known name is itself; on a command whose tool accepts abbreviations
     (_ABBREV_COMMANDS) a prefix of exactly one known option, or of several aliases of one option, is that
     option (its canonical name when it is an alias's); any other word is None. A command with no recorded set
@@ -1666,13 +1666,13 @@ def _resolve_long(kind, name):
 
 
 def _is_inplace_opt(kind, w):
-    """Round 29: True when the argument word `w` of sed or perl `kind` is an in-place option: a short cluster
+    """True when the argument word `w` of sed or perl `kind` is an in-place option: a short cluster
     _INPLACE_OPT_RE matches, or a `--` word resolving to sed's --in-place (`--in-place`, `--in`, `--in=.bak`)."""
     if w.startswith("--"):
         return _resolve_long(kind, w.partition("=")[0]) == "--in-place"
     return bool(_INPLACE_OPT_RE.match(w))
 
-# Round 28: the GNU sed program grammar the read-only classifier accepts (observed with GNU sed 4.9). Commands
+# the GNU sed program grammar the read-only classifier accepts (observed with GNU sed 4.9). Commands
 # taking no argument, commands taking an optional number, and the command-ending characters.
 _SED_PLAIN = frozenset("=dDgGhHnNpPxzF")
 _SED_NUMBERED = frozenset("lqQ")
@@ -1680,11 +1680,11 @@ _SED_S_FLAGS = frozenset("gpiImM0123456789")
 
 
 def _sed_program_cannot_write(prog):
-    """Round 28: True only when the sed program `prog` (its -e pieces joined by newlines, as sed joins them) is
+    """True only when the sed program `prog` (its -e pieces joined by newlines, as sed joins them) is
     parsed with CONFIDENCE and holds no command that can write a file or run one: no `w` or `W` command, no `e`
     command, and no `w` or `e` flag on an `s` command (GNU sed opens a `w` file while parsing, so any `w` counts,
     wherever the program later fails). Anything this conservative parser does not recognize with confidence
-    returns False (the caller then keeps the round-27 UNKNOWN target): a `$` anywhere (shell text the tokenizer
+    returns False (the caller then keeps the earlier UNKNOWN target): a `$` anywhere (shell text the tokenizer
     left unexpanded, or a substitution placeholder, could expand into a command), a backslash or newline inside
     a bracket expression, a newline inside a regex, an a, i, or c text line ending in a backslash or an
     `a\\text` one-liner, a label holding anything unusual, a second `!`, unbalanced braces, an unknown command
@@ -1895,19 +1895,19 @@ def _sed_program_cannot_write(prog):
 
 
 def _write_targets(kind, words, inplace=True):
-    """The TARGET words of one write command `kind` given its argument `words` (round 24): the destination of
+    """The TARGET words of one write command `kind` given its argument `words`: the destination of
     cp, mv, or install (every -t, -tDIR, --target-directory DIR, or --target-directory=DIR argument, else the
     last operand); the of= operand of dd; and every operand (a word that is not an option, and every word
     after `--`) of tee, truncate, ed, ex, and an in-place sed or perl, plus ex's written-file option arguments.
-    Round 26: every option argument the command's _OPTION_SPECS entry declares is consumed first (a short
+    every option argument the command's _OPTION_SPECS entry declares is consumed first (a short
     cluster is walked letter by letter, as getopt does), so `sed -f <file>`, `sed -e <script>`, `truncate -r
     <file>`, or `perl -I <dir>` never names a target, and a sed or perl given no -e/-f style option drops its
-    first operand, the program. Round 27: for a command whose spec sets "stop" (perl), option parsing ends at
+    first operand, the program. for a command whose spec sets "stop" (perl), option parsing ends at
     the FIRST operand, as the real tool's does, so a later option-looking word (`X -I S`) is an operand; and
     None (an UNKNOWN target) when any SCRIPT TEXT argument ("text", or sed's dropped program) names a store
     path, since that text can itself write the path (a sed `w` command or `s///w` flag, an ex `w!`). With
     `inplace` False (a sed or perl with no in-place option, which edits no operand) the result is [] unless
-    such script text makes it None. Round 30: under an "all" option (mv --exchange, install -d or --directory)
+    such script text makes it None. under an "all" option (mv --exchange, install -d or --directory)
     every operand and every target-directory argument is a target; after install's bare --context the next
     word, when it is `-` or does not start with `-`, may be its argument (uutils) or an operand (GNU), so the
     destination candidates are the last operand under BOTH readings; and a perl --help or --version met while
@@ -1919,11 +1919,11 @@ def _write_targets(kind, words, inplace=True):
     long_req, target, script = spec.get("long", ()), spec.get("target", ()), spec.get("script")
     text, stop = spec.get("text", ()), spec.get("stop", False)
     operands, dirs, ends, pending, scripted, texts = [], [], False, None, False, []
-    filescript = False  # round 28: a program option whose argument names a FILE (sed -f, --file) was given
-    posix = False  # round 29: sed's --posix, or an unambiguous abbreviation of it, was given
+    filescript = False  # a program option whose argument names a FILE (sed -f, --file) was given
+    posix = False  # sed's --posix, or an unambiguous abbreviation of it, was given
     every_opts, optsep, exits = spec.get("all", ()), spec.get("optsep", ()), spec.get("exit", ())
-    every = False  # round 30: an "all" option was given: every operand is written
-    maybe, optional = set(), False  # round 30: operand indices an "optsep" option may have consumed
+    every = False  # an "all" option was given: every operand is written
+    maybe, optional = set(), False  # operand indices an "optsep" option may have consumed
     for w in words:
         optional_next, optional = optional, False
         if pending is not None:  # the separate argument word of the option `pending`
@@ -1933,23 +1933,23 @@ def _write_targets(kind, words, inplace=True):
                 texts.append(w)
             pending = None
         elif optional_next and not ends and (w == "-" or not w.startswith("-")):
-            maybe.add(len(operands))  # round 30: install --context's argument (uutils) or an operand (GNU)
+            maybe.add(len(operands))  # install --context's argument (uutils) or an operand (GNU)
             operands.append(w)
         elif ends or not w.startswith("-") or w == "-":
             operands.append(w)
-            ends = ends or stop  # round 27: perl parses no option after its first operand
+            ends = ends or stop  # perl parses no option after its first operand
         elif w == "--":
             ends = True
         elif w.startswith("--"):
             name, eq, value = w.partition("=")
-            name = _resolve_long(kind, name)  # round 29: `--expr` is --expression, as the real tool reads it
+            name = _resolve_long(kind, name)  # `--expr` is --expression, as the real tool reads it
             if name is None:
                 if kind in _STRICT_LONG_COMMANDS:
                     return None  # an ambiguous or unrecognized long option on sed, perl, or ex: target UNKNOWN
                 continue  # elsewhere the tool rejects it and writes nothing: an option with no argument
             posix = posix or name == "--posix"
             if name in exits:
-                # round 30: perl exits at once on --help or --version, and `=value` is an unknown switch; round 31:
+                # perl exits at once on --help or --version, and `=value` is an unknown switch; an earlier version:
                 # GNU cp, mv, sed, and ed and uutils install, tee, and truncate also exit at once on either (an
                 # abbreviation included), wherever it stands before `--`, and reject `=value` without writing
                 return None if eq and not spec.get("exit_eq") else []
@@ -1989,23 +1989,23 @@ def _write_targets(kind, words, inplace=True):
             texts.append(operands[0])  # sed's program operand is script text; perl's names a program FILE
         operands = operands[1:]  # no -e/-f style option: the first operand is the program, never a target
     if any(names_store_path(t) for t in texts):
-        # round 28: a sed with no in-place option whose program is parsed with confidence and holds no command
+        # a sed with no in-place option whose program is parsed with confidence and holds no command
         # that can write (no w, W, or e command, and no s///w or s///e flag) edits nothing, so a store path it
         # merely MENTIONS (a search pattern) is no write target; any other script text naming a store path (an
         # in-place sed, a program read from a -f file, a program not parsed with confidence, an ex -c command,
-        # a perl program) keeps the round-27 UNKNOWN target
+        # a perl program) keeps the earlier UNKNOWN target
         read_only = (kind == "sed" and not inplace and not filescript and not posix
                      and _sed_program_cannot_write("\n".join(texts)))
         if not read_only:
-            return None  # round 27: script text naming a store path can write it: the target is UNKNOWN
+            return None  # script text naming a store path can write it: the target is UNKNOWN
     if not inplace:
         return []
     if kind in _DEST_COMMANDS:
         if every:
-            return operands + dirs  # round 30: mv --exchange or install -d writes every operand
+            return operands + dirs  # mv --exchange or install -d writes every operand
         if dirs or not operands:
             return dirs
-        # round 30: the last operand, and (after install's bare --context) the last one not possibly consumed
+        # the last operand, and (after install's bare --context) the last one not possibly consumed
         last = {len(operands) - 1} | {max((i for i in range(len(operands)) if i not in maybe), default=-1)}
         return [operands[i] for i in sorted(last) if i >= 0]
     return operands + dirs
@@ -2026,7 +2026,7 @@ def _stream_writes(toks):
 
 def _stream_targets(toks):
     """The write indicators of one token stream (see _stream_writes, whose command-position rules this
-    applies), one entry per indicator (round 24): the list of that write's TARGET words (_write_targets for a
+    applies), one entry per indicator: the list of that write's TARGET words (_write_targets for a
     write command, possibly empty, as for a bare `tee`; the operand word for an output redirection), or None
     when its target is unknown: a redirection with no operand, a target word holding a `$` expansion or a find
     `{}` placeholder, or a write command run through xargs (which supplies more operands on stdin)."""
@@ -2034,7 +2034,7 @@ def _stream_targets(toks):
 
 
 def _stream_write_detail(toks):
-    """Round 31: _stream_targets() with each entry paired with the index in `toks` of the token that makes it
+    """_stream_targets() with each entry paired with the index in `toks` of the token that makes it
     (the write command's word, or the redirection's operand or operator), so the analysis can tell which
     simple command, and so which data, each write belongs to."""
     out, cur = [], None  # cur: the simple command's write command, [kind, argument words, in-place option
@@ -2044,7 +2044,7 @@ def _stream_write_detail(toks):
     def finish():
         if cur is not None:
             in_place = cur[0] not in INPLACE_COMMANDS or cur[2]
-            # round 27: a sed or perl with no in-place option edits no operand, but its script text can still
+            # a sed or perl with no in-place option edits no operand, but its script text can still
             # write a named store path (a sed `w`), so it is a write of UNKNOWN target exactly when that text
             # names one; otherwise it is no write at all
             targets = _write_targets(cur[0], cur[1], in_place)
@@ -2087,7 +2087,7 @@ def _stream_write_detail(toks):
             fdef, cmdpos = (2, False) if fdef == 1 else (0, w in _CMD_PREFIX_WORDS)
             continue
         if cmdpos:
-            base = os.path.basename(w)  # round 31: computed only where it is used (a command word)
+            base = os.path.basename(w)  # computed only where it is used (a command word)
             if prefix is not None:
                 if optarg:
                     optarg = False
@@ -2128,19 +2128,19 @@ def _stream_write_detail(toks):
     return out
 
 
-# ---- round 31: which data each write carries ----
+# ---- which data each write carries ----
 
-# Round 31: the work budget of one Bash evaluation (tokenizer steps, here-document lines, tokens and units walked,
+# the work budget of one Bash evaluation (tokenizer steps, here-document lines, tokens and units walked,
 # nested shell -c analyses included). A command that spends it is ALLOWED unchecked (fail open), so no input can
 # hold the hook past its latency bound; ordinary commands, and 64 KiB of ordinary text, stay well inside it.
 BASH_WORK_BUDGET = 80_000
-STREAM_COST = 8  # round 31: budget steps charged per substitution frame, in the tokenizer and again in the analysis
-SHELL_C_COST = 30  # round 31: budget steps charged per nested shell -c analysis
-SHELL_C_DEPTH = 3  # round 31: nesting depth to which literal bash/sh/dash/zsh -c strings are analysed
-CWD_COST = 6  # round 32: budget steps charged per directory, BEFORE a cd is resolved from, or a target or staged
+STREAM_COST = 8  # budget steps charged per substitution frame, in the tokenizer and again in the analysis
+SHELL_C_COST = 30  # budget steps charged per nested shell -c analysis
+SHELL_C_DEPTH = 3  # nesting depth to which literal bash/sh/dash/zsh -c strings are analysed
+CWD_COST = 6  # budget steps charged per directory, BEFORE a cd is resolved from, or a target or staged
 #               word resolved against, each directory the command can be in, and per directory in a set union
-MAX_CWDS = 32  # round 32: the most directories a command point can be in; a larger set spends the budget (fail open)
-# Round 31: commands that only read (their output goes to the caller, never into a file of their own choosing), so
+MAX_CWDS = 32  # the most directories a command point can be in; a larger set spends the budget (fail open)
+# commands that only read (their output goes to the caller, never into a file of their own choosing), so
 # a literal in a pipeline of these, with no redirection or write anywhere in it, feeds no write
 READ_COMMANDS = frozenset((
     "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "wc", "ls", "stat", "file", "diff", "cmp", "echo",
@@ -2157,7 +2157,7 @@ _SHELL_HINT_RE = re.compile(r"(?<![^\s;&|()`{}/])(?:bash|sh|dash|zsh)(?![^\s;&|(
 
 
 def _is_pipe(b):
-    """Round 31: True when the separator text `b` between two simple commands is a pipe (`|` or `|&`, possibly
+    """True when the separator text `b` between two simple commands is a pipe (`|` or `|&`, possibly
     with a subshell's parentheses or newlines after it), not a list operator (`;`, `&`, `&&`, `||`, a newline)."""
     s = b.replace("(", "").replace(")", "")
     if "~" in s:  # the separator the tokenizer inserted after `]]` or `))`: one command, not a list
@@ -2170,7 +2170,7 @@ def _is_pipe(b):
 
 
 def _units(toks, pos, cmd):
-    """Round 31: split one token stream into its simple commands. Returns (units, bounds, tok_unit): units are
+    """split one token stream into its simple commands. Returns (units, bounds, tok_unit): units are
     [first token, end token (exclusive), raw start, raw end] per simple command, bounds[k] the separator text
     before unit k (bounds[len(units)] the text after the last; a separator the tokenizer inserted after a closed
     `]]` or `))` reads `~`, joining its neighbours like a pipe), and tok_unit the unit index of every token (a
@@ -2201,7 +2201,7 @@ def _units(toks, pos, cmd):
 
 
 def _unit_words(toks, a, b):
-    """Round 31: the (token index, word) pairs of tokens a..b, less redirection operands and the descriptor
+    """the (token index, word) pairs of tokens a..b, less redirection operands and the descriptor
     number of an `N>` or `N<` redirection."""
     out, skip = [], False
     for k in range(a, b):
@@ -2219,7 +2219,7 @@ def _unit_words(toks, a, b):
 
 
 def _classify(words, cmd, pos):
-    """Round 31: (kind, rest) of one simple command whose leading reserved words are already removed: "empty" (no
+    """(kind, rest) of one simple command whose leading reserved words are already removed: "empty" (no
     command word), "assign" (assignments only), "exec" (a bare exec: its redirections apply to every later
     command), "shell" (bash, sh, dash, or zsh; rest: its argument words), "cd" or "popd" (rest: the arguments),
     "tee", "read" (a READ_COMMANDS word, printf without -v, `[[`, or an arithmetic command), or "other". Leading
@@ -2270,12 +2270,12 @@ def _classify(words, cmd, pos):
 
 
 class _Structure:
-    """Round 31: the compound structure of one token stream (see _structure())."""
+    """the compound structure of one token stream (see _structure())."""
     __slots__ = ("kinds", "rest", "depth", "tainted", "opens", "closes", "unreliable")
 
 
 def _structure(toks, pos, units, bounds, cmd):
-    """Round 31: walk the simple commands of one stream, tracking compound commands: a `(` in a separator opens
+    """walk the simple commands of one stream, tracking compound commands: a `(` in a separator opens
     a subshell and a `)` closes it; a leading `{`, `if`, `while`, `until`, `for`, or `select` opens a compound and
     a leading `}`, `fi`, or `done` closes it (a `then`, `do`, `else`, `elif`, or `!` passes). A compound whose
     output is redirected (a `>` after its closer) or piped onward TAINTS every simple command inside it: all their
@@ -2355,9 +2355,9 @@ def _structure(toks, pos, units, bounds, cmd):
 
 
 def _cd_target(kind, rest, cwds, ctx, budget=None):
-    """Round 31: the directories a cd or pushd with arguments `rest` (word pairs) can leave, from each directory
+    """the directories a cd or pushd with arguments `rest` (word pairs) can leave, from each directory
     in `cwds` (None: unknown): an existing directory named literally, else None (unknown); popd is unknown.
-    Round 32: CWD_COST per directory of `cwds` is charged to `budget` BEFORE any is resolved."""
+    CWD_COST per directory of `cwds` is charged to `budget` BEFORE any is resolved."""
     if budget is not None:
         budget.spend(CWD_COST * (len(cwds) + 1))
     if kind != "cd":
@@ -2387,10 +2387,10 @@ def _cd_target(kind, rest, cwds, ctx, budget=None):
 
 
 def _target_status(w, cwds, ctx, budget=None):
-    """Round 31: "store", "unknown", or "other" for one write TARGET word. A word holding a store path token is a
+    """"store", "unknown", or "other" for one write TARGET word. A word holding a store path token is a
     store target (the lexical rule of earlier rounds); any other relative word is resolved against every
     directory the command can be in at that point (`cwds`, from the payload cwd and any cd before it): under a store root from any of them is a
-    store target, and an unknown directory (None) or a `~` word makes it unknown. Round 32: CWD_COST per
+    store target, and an unknown directory (None) or a `~` word makes it unknown. CWD_COST per
     directory is charged to `budget` BEFORE the resolution."""
     if budget is not None:
         budget.spend(CWD_COST * (len(cwds) + 1))
@@ -2410,7 +2410,7 @@ def _target_status(w, cwds, ctx, budget=None):
 
 
 def _shell_c_string(rest):
-    """Round 31: the token index of the command string of a shell run with -c (a short option cluster holding
+    """the token index of the command string of a shell run with -c (a short option cluster holding
     c; `-o`, `-O`, `--rcfile`, and `--init-file` take a separate argument), or None."""
     cflag, j = False, 0
     while j < len(rest):
@@ -2446,12 +2446,12 @@ _SEARCH_ARG_SHORT = frozenset("efmABCdDgtTMj")  # a short option taking an argum
 
 
 def _search_patterns(toks, pos=None, cmd=""):
-    """Round 31: the token indices of the PATTERN words in a token stream made only of grep, egrep, fgrep, rg,
+    """the token indices of the PATTERN words in a token stream made only of grep, egrep, fgrep, rg,
     and wc commands (each unit's first word; no redirection, here-string, or here-document; no rg -r or
     --replace, which prints the replacement text, and no grep --label, which prints its text), else an empty
     set. A pattern is the argument of -e or --regexp (attached or separate), else the first operand; an option
     listed in _SEARCH_ARG_OPTS takes the next word; anything else starting with `-` is taken as a flag.
-    Round 32: a MATCHING search prints file text that holds its pattern (with -o, exactly the pattern), so a
+    a MATCHING search prints file text that holds its pattern (with -o, exactly the pattern), so a
     pattern is returned only when its pipeline's output cannot hold it: the pipeline's LAST command is wc, or a
     search with a count, quiet, or file-list option (-c, -q, -l, grep -L, or the long forms --count,
     --count-matches, --quiet, --silent, --files-with-matches, --files-without-match; exact spellings only, an
@@ -2538,7 +2538,7 @@ def _search_patterns(toks, pos=None, cmd=""):
 
 
 def _literal_shell_string(raw):
-    """Round 31: (text, offsets) of a shell -c command string whose raw word `raw` is ONE single-quoted string, or
+    """(text, offsets) of a shell -c command string whose raw word `raw` is ONE single-quoted string, or
     ONE double-quoted string with no expansion (no unescaped `$`, backtick, or quote; a backslash before `$`, a
     backtick, `"`, or a backslash yields that character and one before a newline removes both, as bash reads
     it); offsets[i] is the offset within `raw` of text[i]. Anything else is None (left uninspected)."""
@@ -2571,9 +2571,9 @@ def _literal_shell_string(raw):
 
 
 class _Analysis:
-    """Round 31: the result of _analyze(): `store`, whether the command writes a store path (a parsed store
+    """the result of _analyze(): `store`, whether the command writes a store path (a parsed store
     target, or an unknown target in a command naming a store path); `counts(p)`, whether a literal starting at
-    offset p is data of a store write (see _analyze). Round 32, for an enclosing analysis of a shell -c string:
+    offset p is data of a store write (see _analyze). an earlier version, for an enclosing analysis of a shell -c string:
     `targets`, the (word, directories) pairs of its writes to KNOWN non-store files; `unknown`, whether it has a
     write whose target is unknown; `words()`, the (word, directories) pairs of every word it holds (the files
     its store write can read, for staging)."""
@@ -2590,7 +2590,7 @@ def _span_index(spans, starts, p):
 
 
 def _analyze(cmd, cwds, ctx, budget, depth=0):
-    """Round 31: which store writes a Bash command makes, and which literals are their DATA. A literal counts
+    """which store writes a Bash command makes, and which literals are their DATA. A literal counts
     only for the write it can feed: the store write's own simple command (its arguments, its here-string, its
     redirections), its here-document bodies, and the other commands of its pipeline (their output is its input),
     or every command inside a compound command whose output is redirected or piped to it. A literal is NOT
@@ -2605,7 +2605,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
     the cd runs unconditionally at the top of its stream, joining it otherwise; any other cd adds an unknown).
     A bash, sh, dash, or zsh -c whose command string is a single- or double-quoted literal with no expansion is
     analysed recursively (to SHELL_C_DEPTH) with the same directories; its store writes are the enclosing
-    command's, and literals inside the string are decided by that inner analysis. Round 32: a `( ... )` subshell
+    command's, and literals inside the string are decided by that inner analysis. a `( ... )` subshell
     scopes the directory set (restored at its `)`); directory work is charged to `budget` before it is done and
     a set above MAX_CWDS spends it; a literal inside a shell -c string ALSO counts when the wrapper's output
     reaches a store write (wrapper_counts), and the string's writes and, for a string with a store write, its
@@ -2660,9 +2660,9 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
             cur, out, saved = start, [], []
             for u in range(len(units)):
                 if not st.unreliable:
-                    # round 32: a `( ... )` subshell SCOPES directory state: the set in force at its `(` is
-                    # restored at its `)` (round 31 let a subshell's cd leak into the parent); a `{ ... }` group
-                    # does not scope, as in bash. An unreliable stream keeps round 31's join-only walk.
+                    # a `( ... )` subshell SCOPES directory state: the set in force at its `(` is
+                    # restored at its `)` (an earlier version let a subshell's cd leak into the parent); a `{ ... }` group
+                    # does not scope, as in bash. An unreliable stream keeps an earlier version's join-only walk.
                     for ch in bounds[u]:
                         if ch == "(":
                             saved.append(cur)
@@ -2680,10 +2680,10 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
                     sure = (not st.unreliable and st.depth[u] == len(saved) and (saved or not st.tainted[u])
                             and set(before) <= {";", "\n"} and not _is_pipe(after) and after.strip("\n;") != "&")
                     if not sure:
-                        budget.spend(CWD_COST * (len(cur) + len(new)))  # round 32: the union, charged first
+                        budget.spend(CWD_COST * (len(cur) + len(new)))  # the union, charged first
                     cur = new if sure else cur | new
                     if len(cur) > MAX_CWDS:
-                        raise _Exhausted()  # round 32: too many possible directories: fail open
+                        raise _Exhausted()  # too many possible directories: fail open
             unit_cwds[s] = out
             pstack.append(s)
 
@@ -2753,7 +2753,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
     unknown_out = any(w[2] == "unknown" for w in writes) or any(d[2].unknown for d in delegates)
 
     def words_out():
-        """Round 32: the (word, directories) pairs of every word of this command (its streams and its literal
+        """the (word, directories) pairs of every word of this command (its streams and its literal
         shell -c strings), for an enclosing staging walk."""
         got = []
         for s in range(ns):
@@ -2824,7 +2824,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
                 t_unknown[u] = True
             else:
                 t_targets[u].extend((w, dirs) for w in targets)
-        # round 32: the store writes of a literal shell -c string, kept apart per unit (d_store: the raw offsets
+        # the store writes of a literal shell -c string, kept apart per unit (d_store: the raw offsets
         # of the delegated strings with a store write), and its other writes, which are the unit's writes too
         own = list(t_store)
         d_store, extra = [[] for _ in range(nt)], [[] for _ in range(nt)]
@@ -2843,7 +2843,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
             t_unknown[u] = t_unknown[u] or d[2].unknown
             t_targets[u].extend(d[2].targets)
             if d[2].store:
-                extra[u].extend(d[2].words())  # the files its store write can read: staged through (round 32)
+                extra[u].extend(d[2].words())  # the files its store write can read: staged through
         nonread = [False] * nt
         words = [set() for _ in range(nt)]
         for s in range(ns):
@@ -2854,7 +2854,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
             if sst.unreliable or any(kd not in ("read", "empty") for kd in sst.kinds):
                 nonread[u] = True
             words[u].update(t[1] for t in streams[s] if t[0] == "w")
-        budget.spend(len(ttoks) + nt)  # round 33: charged before the walk below, not after it
+        budget.spend(len(ttoks) + nt)  # charged before the walk below, not after it
         pipe = [0] * nt
         for u in range(1, nt):
             pipe[u] = pipe[u - 1] if _is_pipe(bounds[u]) else u
@@ -2862,8 +2862,8 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
         for u in range(nt):
             members.setdefault(pipe[u], []).append(u)
             words[u].update(t[1] for t in ttoks[units[u][0]:units[u][1]] if t[0] == "w")
-        # round 33: each pipeline's aggregates, computed ONCE (charged before the pass), so that excluding one
-        # unit (a shell -c wrapper, see wrapper_counts) takes constant time; round 32 rescanned the whole pipeline
+        # each pipeline's aggregates, computed ONCE (charged before the pass), so that excluding one
+        # unit (a shell -c wrapper, see wrapper_counts) takes constant time; an earlier version rescanned the whole pipeline
         # and rebuilt its separator text per wrapper, work of wrappers x pipeline length the budget never saw.
         # Per pipeline: whether it is not plain or holds a non-read substitution or an unknown write ("bad"), and
         # how many of its units are not a non-writing read, are not a read or tee, and have a store write.
@@ -2876,14 +2876,14 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
                         sum(1 for u in us if st.kinds[u] != "read" or t_write[u]),
                         sum(1 for u in us if st.kinds[u] not in ("read", "tee")),
                         sum(1 for u in us if t_store[u]))
-        # per unit, whether its delegated store writes hold two distinct strings, and its first (round 33: so that
+        # per unit, whether its delegated store writes hold two distinct strings, and its first (so that
         # "a delegated store write other than this wrapper's" is a constant-time test)
         d_multi = [bool(x) and any(y != x[0] for y in x) for x in d_store]
 
         def klass(pid, as_read=-1):
-            """The class of pipeline `pid` apart from any store write in it, the unit `as_read` (round 32: a
+            """The class of pipeline `pid` apart from any store write in it, the unit `as_read` (a
             shell -c wrapper whose string is judged by its own analysis, a member of the pipeline) taken as a
-            read. Round 33: from the pipeline's aggregates, adjusted for `as_read` in constant time."""
+            read. from the pipeline's aggregates, adjusted for `as_read` in constant time."""
             bad, n_read, n_stage, _n = agg[pid]
             if bad:
                 return "other"
@@ -2906,7 +2906,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
         return lazy
 
     def resolved(w, dirs):
-        budget.spend(CWD_COST * (len(dirs) + 1))  # round 32: charged before the resolution
+        budget.spend(CWD_COST * (len(dirs) + 1))  # charged before the resolution
         out = {w}
         if w.startswith("/"):
             out.add(os.path.normpath(w))
@@ -2933,7 +2933,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
             for u in pl["members"][pid]:
                 budget.spend(len(pl["words"][u]) + 1)
                 dirs = cwd_of(top, pl["units"][u][0])
-                # round 32: a literal shell -c string's store write names files too (`bash -c 'cp <staged file>
+                # a literal shell -c string's store write names files too (`bash -c 'cp <staged file>
                 # <store file>'`), each resolved against the directories it runs in
                 for w, wd in [(w, dirs) for w in pl["words"][u]] + pl["extra"][u]:
                     for r in resolved(w, wd):
@@ -2951,7 +2951,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
         """True when offset p lies in the PATTERN word of a grep, egrep, fgrep, or rg inside a command
         substitution whose every command is such a search or wc, reading no here-string, here-document, or
         other input redirection and writing nothing (rg with a replacement, or grep with --label, excluded),
-        and whose pipeline ends in wc or a counting, quiet, or file-list search (round 32, see _search_patterns):
+        and whose pipeline ends in wc or a counting, quiet, or file-list search (see _search_patterns):
         that output is a count, a status, or file names, never the pattern, so the pattern feeds no write
         (`n=$(grep -cF <literal> <store file>); echo "n=$n" >> <store file>`). A matching search printing
         lines prints text holding its pattern, so its pattern is not exempted."""
@@ -2991,7 +2991,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
             offs = d[3]  # the outer offset of each inner character, ascending
             if d[2].counts(bisect.bisect_left(offs, p)):
                 return True
-            # round 32: whatever the inner analysis decides, a literal in the string is also data of the WRAPPER
+            # whatever the inner analysis decides, a literal in the string is also data of the WRAPPER
             # command, as for echo: it counts when the wrapper's output reaches a store write
             got = wrapper_memo.get(d[6])
             if got is None:
@@ -3017,14 +3017,14 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
     wrapper_memo = {}
 
     def wrapper_counts(d):
-        """Round 32: whether the output of the shell -c wrapper of delegate `d` reaches a store write: the
+        """whether the output of the shell -c wrapper of delegate `d` reaches a store write: the
         wrapper's own redirection or substitution writes a store path, another command of its pipeline writes
         one, it lies in an unreliable stream or a compound whose output is redirected or piped, or its pipeline,
         the wrapper taken as a read, is not a pure read (a staging one only when a store write names a file it
         writes). The store writes of the string itself are judged by the inner analysis, so they are set aside
         (a string with its own store write does not, by that alone, make every literal in it data)."""
         pl = pipelines()
-        budget.spend(1)  # round 33: constant work per wrapper, from the pipeline aggregates (see pipelines)
+        budget.spend(1)  # constant work per wrapper, from the pipeline aggregates (see pipelines)
         s, k, a = d[4], d[5], d[6]
         u = pl["tok_unit"][k] if s == top and k < len(pl["tok_unit"]) else pl["unit_at"](fspans[s][0])
         if pl["st"].unreliable or pl["st"].tainted[u]:
@@ -3063,7 +3063,7 @@ def _analyze(cmd, cwds, ctx, budget, depth=0):
 
 def bash_future(cmd, now_us, cwd=None):
     """Future observed-time literals that are DATA of a Bash command's store write (else []; see _analyze).
-    `cwd` is the payload's working directory, against which relative write targets resolve (round 31). Round
+    `cwd` is the payload's working directory, against which relative write targets resolve. Round
     31: the analysis runs under BASH_WORK_BUDGET; a command that spends it is allowed (fail open)."""
     if _STAMP_RE.search(cmd) is None:
         return []  # no literal at all: nothing to deny, and the tokenizer need not run
@@ -3081,7 +3081,7 @@ def bash_future(cmd, now_us, cwd=None):
             base += len(line) + 1
         return bad
     except _Exhausted:
-        return []  # round 31: the work budget ran out: fail open, as for any input the hook cannot evaluate
+        return []  # the work budget ran out: fail open, as for any input the hook cannot evaluate
 
 
 def _s(value):
@@ -3097,7 +3097,7 @@ LITERAL_MIN_LEN, LITERAL_MAX_LEN = 16, 36
 def _literal_substrings(text):
     """The set of substrings of `text` that COULD equal a literal: from every position where the literal prefix
     starts, each length from LITERAL_MIN_LEN to LITERAL_MAX_LEN. `lit in _literal_substrings(text)` is exactly
-    `lit in text` for any literal _STAMP_RE matched (round 26), in time linear in `text`, once per text, instead
+    `lit in text` for any literal _STAMP_RE matched, in time linear in `text`, once per text, instead
     of a full rescan of `text` per literal."""
     held = set()
     for m in _LIT_PREFIX_RE.finditer(text):
@@ -3107,7 +3107,7 @@ def _literal_substrings(text):
 
 
 def evaluate(payload, now):
-    """Return a list of offending future literals (empty = allow). `now` is an aware datetime. Round 31: the
+    """Return a list of offending future literals (empty = allow). `now` is an aware datetime. the
     store roots are read once for the whole evaluation (_StoreCtx). With no store root configured the hook is
     inert: nothing is evaluated and the call is allowed."""
     global _ACTIVE
@@ -3147,13 +3147,13 @@ def _evaluate(payload, now):
             return [] if result is None else future_in_changed_lines(result, original, now_us)
         # not read whole (over the cap, unreadable, not regular): no reconstruction is possible, so each
         # fragment is checked on its own lines with no table context; a time-only fragment here is a disclosed miss
-        # round 24: an UNREADABLE target (not read at all: "" with whole False, unlike an over-cap prefix) fails
+        # an UNREADABLE target (not read at all: "" with whole False, unlike an over-cap prefix) fails
         # OPEN except for what the new content itself introduces: a literal already in the edit's old_string (text
         # the file held) is not counted, so only a future literal the new_string brings in can deny
         unreadable = original == ""
         bad, seen = [], set()
         for old, new, _every in edits:
-            held = None  # round 26: old's literal-shaped substrings, indexed once per edit (was `lit in old` per literal)
+            held = None  # old's literal-shaped substrings, indexed once per edit (was `lit in old` per literal)
             for lit in future_in_changed_lines(new, old, now_us, tables=False, fences=False):
                 if unreadable:
                     if held is None:
@@ -3171,7 +3171,7 @@ def _evaluate(payload, now):
 
 
 def _emit_line(text, *stream):
-    """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN (round 24): it is
+    """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN: it is
     swallowed, and the stream's descriptor is pointed at /dev/null so the interpreter's exit flush cannot fail
     either, so the hook still exits 0. If that rescue fails too, the process ends at once with os._exit(0)
     (no flush is retried), since any later write or exit flush could fail the hook. Every line this path
@@ -3543,7 +3543,7 @@ def main(argv):
         return _self_test()
     try:
         if _is_worker():
-            # round 24: the skip is no longer silent (stderr only, so worker output is never distorted)
+            # the skip is no longer silent (stderr only, so worker output is never distorted)
             _emit_line("future-stamp-write: skipped, worker marker present (AIQT_HOOKS_WORKER=1 or a legacy "
                        "spelling)", sys.stderr)
             return 0
@@ -3569,7 +3569,7 @@ def _self_test():
     import tempfile
     import unittest
 
-    # round 26 (finding 6): timed runs execute in a child interpreter under a subprocess timeout, so a hang is
+    # an earlier version (finding 6): timed runs execute in a child interpreter under a subprocess timeout, so a hang is
     # INTERRUPTED (subprocess.TimeoutExpired fails the test) rather than stalling the self-test before any bound
     # is checked. The child loads this file, pins the zone, sets the fixture store root, and defines `best`.
     # Every fixture path lives under one private temporary base: STORE is the fixture store root (set as
@@ -3608,7 +3608,7 @@ def _self_test():
         "        run(n)\n"
         "        times.append(time.process_time() - t0)\n"
         "    return min(times)\n"
-        # round 32: a load spike during one size's runs skewed a growth ratio (one flake at load 34); the sizes
+        # a load spike during one size's runs skewed a growth ratio (one flake at load 34); the sizes
         # are now INTERLEAVED, best of `reps` each, so a spike lands on both sizes' samples alike. A sample near
         # the timer's and scheduler's noise floor is still a coin toss on a loaded host (a sibling's ~1 ms
         # baseline read 2.677x on a loaded 16-core host, and sound 0.1 s wall samples still read 2.7x at load
@@ -3661,7 +3661,7 @@ def _self_test():
         An inherited allocator override (MALLOC_TOP_PAD_, MALLOC_MMAP_THRESHOLD_, MALLOC_TRIM_THRESHOLD_,
         MALLOC_MMAP_MAX_, a GLIBC_TUNABLES glibc.malloc.* entry) pins glibc's thresholds and disables their
         dynamic adaptation, so a timed verdict would rest on the operator's ambient allocator policy (QA
-        round 4, in the sibling stamp-truth-stop.py: healthy code false-REDs at 2.0 to 3.1x under load); a
+        an earlier version, in the sibling stamp-truth-stop.py: healthy code false-REDs at 2.0 to 3.1x under load); a
         timed child runs under the default policy only."""
         return {k: v for k, v in os.environ.items() if not k.startswith("MALLOC_") and k != "GLIBC_TUNABLES"}
 
@@ -3743,7 +3743,7 @@ def _self_test():
             self.assertTrue(self.ev("Write", file_path=self.store, content="2026-09-23T23:00+02:00"))
 
         def test_spaced_numeric_zone(self):
-            # finding (codex r2): a space-separated numeric zone was dropped and the literal read as naive
+            # finding: a space-separated numeric zone was dropped and the literal read as naive
             os.environ["TZ"] = "UTC0"
             time.tzset()
             self.assertEqual(self.ev("Write", file_path=self.store, content="[2026-09-23 22:45 +05]"), [])
@@ -3796,7 +3796,7 @@ def _self_test():
             self.assertTrue(self.ev("Write", file_path=fp, content="hb: 2099-01-01T00:00Z\nhb: 2099-01-01T00:00Z\n"))
 
         def test_edit_fragments_reconstructed_on_whole_lines(self):
-            # finding (codex r2): Edit checked the replacement fragment, not the changed file line
+            # finding: Edit checked the replacement fragment, not the changed file line
             fp = self.store_file("deadline: 2099-01-01T00:00Z\nheartbeat: 2026-09-23T17:45Z\n"
                                  "next_run: 2099-03-01T00:00Z\n")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="deadline", new_string="heartbeat"),
@@ -3812,7 +3812,7 @@ def _self_test():
                                      replace_all=True), ["2099-02-02T00:00Z"])
 
         def test_edit_old_string_absent_on_whole_file_allowed(self):
-            # finding (gemini r3 M2): a non-applying edit fell back to naked fragments (false deny); on a file
+            # finding: a non-applying edit fell back to naked fragments (false deny); on a file
             # read whole the tool itself fails, so the call is allowed
             fp = self.store_file("a\n")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="zzz", new_string="hb 2099-01-01T00:00Z"), [])
@@ -3824,7 +3824,7 @@ def _self_test():
                                      new_string="hb 2099-01-01T00:00Z"), [])
 
         def test_edit_beyond_read_cap_checks_fragment(self):
-            # finding (codex r3 m): past the cap the hook cannot reconstruct; the fragment is checked on its own
+            # finding: past the cap the hook cannot reconstruct; the fragment is checked on its own
             fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2) + "hb: 2026-09-23T17:45Z\n")
             self.assertEqual(read_existing(fp, EXISTING_MAX_BYTES)[1], False)
             self.assertTrue(self.ev("Edit", file_path=fp, old_string="hb: 2026-09-23T17:45Z",
@@ -3914,7 +3914,7 @@ def _self_test():
                 self.assertTrue(self.ev("Bash", command=cmd), cmd)
 
         def test_bash_parse_evasions_now_denied(self):
-            # findings (codex/gemini r2): comment heredoc, wrapper options, and $(echo ...) evaded parsing
+            # earlier findings: comment heredoc, wrapper options, and $(echo ...) evaded parsing
             for cmd in (f"# <<EOF\nprintf '%s\\n' 'hb: 2099-01-01T00:00Z' > {PROJ}/private/s.md",
                         f"printf '%s\\n' '<<EOF'\nprintf 'hb: 2099-01-01T00:00Z' > {PROJ}/private/s.md",
                         f"echo 2099-01-01T00:00Z | env -i tee {PROJ}/private/s.md",
@@ -3925,14 +3925,14 @@ def _self_test():
                 self.assertTrue(self.ev("Bash", command=cmd), cmd)
 
         def test_bash_documented_false_positives(self):
-            # round 24 (item 3): these were documented false positives (the write was not bound to the store
+            # an earlier version (item 3): these were documented false positives (the write was not bound to the store
             # path, so a write ELSEWHERE was denied); the write is now bound to its target, so they are allowed
             for cmd in (f"cp -t /dev/shm/ {PROJ}/private/report-2099-01-01T00:00Z.md",
                         f"grep 2099-01-01T00:00Z {PROJ}/private/s.md > /dev/shm/out",
                         f"echo 'hb 2099-01-01T00:00Z' >> {PROJ}/repo/n.md # cf {PROJ}/private/old.md"):
                 self.assertTrue(bash_writes(cmd), cmd)
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
-            # round 13: a write-command name as an ARGUMENT is no longer a write (it was a disclosed false positive)
+            # a write-command name as an ARGUMENT is no longer a write (it was a disclosed false positive)
             self.assertEqual(self.ev("Bash", command=f"grep tee {PROJ}/private/s.md 2099-01-01T00:00Z"), [])
 
         def test_r7_read_only_store_inspection_allowed(self):
@@ -3977,7 +3977,7 @@ def _self_test():
             self.assertTrue(bash_writes("cat f >"))
 
         def test_r7_bash_writes_is_linear(self):
-            # round 32: best of 3 in a child under the hang ceiling (one in-process run flaked on a loaded host).
+            # best of 3 in a child under the hang ceiling (one in-process run flaked on a loaded host).
             # The verdict is the growth from n to GROWTH * n (up to the former sizes), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
                 "def run(n):\n"
@@ -3999,7 +3999,7 @@ def _self_test():
             self.assertTrue(self.ev("Bash", command=f"echo $(date -u 2099-01-01T00:00Z > {PROJ}/private/s.md"))
 
         def test_bash_without_store_token_allowed(self):
-            # round 31: `echo <future> > notes.md` with the cwd in the store (a documented miss until round 30) is
+            # `echo <future> > notes.md` with the cwd in the store (a documented miss until an earlier version) is
             # now resolved against the cwd and denied (test_r31_relative_targets_resolve_against_cwd_and_cd)
             for cwd, cmd in ((f"{PROJ}/private", "printf '%s' 2099-01-01T00:00Z > /dev/shm/example"),
                              (f"{PROJ}/repo", "echo 2099-01-01T00:00Z > notes.md"),
@@ -4019,8 +4019,8 @@ def _self_test():
                              [])
 
         def test_bash_scan_is_linear(self):
-            # finding (codex r2): unmatched $( openers rescanned the suffix quadratically
-            # round 31: at this size (1.35 MB) the analysis spends BASH_WORK_BUDGET and fails OPEN (allowed), still
+            # finding: unmatched $( openers rescanned the suffix quadratically
+            # at this size (1.35 MB) the analysis spends BASH_WORK_BUDGET and fails OPEN (allowed), still
             # within the timeout; a hundredth of it stays inside the budget and is still denied (unparseable).
             # The timeout is the hang guard only; linearity is the growth from n to GROWTH * n (up to that size)
             for scale, want in ((100, True), (1, False)):
@@ -4092,9 +4092,9 @@ def _self_test():
                          "_wall_clock_alias_fixtures"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
 
-        # -- round 4 --
+        # -- an earlier version --
         def test_r4_date_span_respects_quoting(self):
-            # finding (codex r3 M2): a quoted paren inside $(date ...) extended the span over a later literal
+            # finding: a quoted paren inside $(date ...) extended the span over a later literal
             deny = (f"echo \"$(date '+(')\" \"hb: 2099-01-01T00:00Z\" > {PROJ}/private/s.md; echo ')'",
                     f"echo '$(date -d 2099-01-01T00:00Z)' > {PROJ}/private/s.md",
                     f"echo $'$(date \\' 2099-01-01T00:00Z' > {PROJ}/private/s.md",
@@ -4110,7 +4110,7 @@ def _self_test():
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
 
         def test_r4_env_prefix_date_span(self):
-            # finding (gemini r3 m1): `env TZ=UTC date` was not a date substitution
+            # finding: `env TZ=UTC date` was not a date substitution
             for cmd in (f"echo \"hb $(env TZ=UTC date -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md",
                         f"echo \"hb $(/usr/bin/env TZ=UTC date -d 2099-01-01T00:00Z)\" > {PROJ}/private/s.md"):
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
@@ -4125,9 +4125,9 @@ def _self_test():
                 self.assertEqual(self.ev("Write", file_path=self.store, content=line), [], line)
 
         def test_r4_scan_is_linear(self):
-            # round 25 (finding 3): a 1.0 s wall-clock budget flaked on a loaded host (1.094 s observed); the
+            # an earlier version (finding 3): a 1.0 s wall-clock budget flaked on a loaded host (1.094 s observed); the
             # check is now the growth ratio from N to 2N (best of 3 each), which does not depend on host speed.
-            # Round 26 (finding 6): the in-process 30 s ceiling ran only after every timed run had returned, so it
+            # the in-process 30 s ceiling ran only after every timed run had returned, so it
             # could not interrupt a hang; the runs now execute in a child under a subprocess timeout (the hang guard)
             code = TIMED_PRELUDE + (
                 f"S='{PROJ}/private/state.md'\n"
@@ -4147,7 +4147,7 @@ def _self_test():
                 self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (name, small, large))
 
         def test_r5_many_distinct_literals_linear_and_bounded(self):
-            # finding (codex r4, sibling pattern): the fragment path scanned the growing list per literal
+            # finding: the fragment path scanned the growing list per literal
             lits = [f"2099-{1 + i % 12:02d}-{1 + (i // 12) % 28:02d}T{(i // 336) % 24:02d}:{(i // 8064) % 60:02d}Z"
                     for i in range(40000)]
             fp = self.store_file("x\n" * (EXISTING_MAX_BYTES // 2 + 1))  # over the cap: the fragment path
@@ -4184,12 +4184,12 @@ def _self_test():
             self.assertIn(f" and {40000 - MAX_REPORTED} more", reason)
             self.assertLess(len(reason), 2000)
 
-        # -- round 6: markdown-table header exemption --
+        # -- markdown-table header exemption --
         def tw(self, *lines):
             return self.ev("Write", file_path=self.store, content="\n".join(lines) + "\n")
 
         def test_r6_table_header_keyword_column_allowed(self):
-            # finding (codex r5 MAJOR): the scheduling keyword lived in the header cell, not on the row's line
+            # finding: the scheduling keyword lived in the header cell, not on the row's line
             self.assertEqual(self.tw("| Item | Due | Owner |", "|---|---|---|", "| x | 2099-01-01T00:00Z | me |"), [])
             self.assertEqual(self.tw("| Item | Next run |", "| :--- | ---: |", "| x | 2099-01-01T00:00Z |",
                                      "| y | 2099-02-01T00:00Z |"), [])
@@ -4204,7 +4204,7 @@ def _self_test():
         def test_r6_table_ended_row_denied(self):
             self.assertTrue(self.tw("| Item | Due |", "|---|---|", "| x | 2099-01-01T00:00Z |", "",
                                     "| y | 2099-02-01T00:00Z |"))
-            # round 11: a pipe-free line is a one-cell row (GFM), so it no longer ends the table
+            # a pipe-free line is a one-cell row (GFM), so it no longer ends the table
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "text", "| y | 2099-02-01T00:00Z |"), [])
 
         def test_r6_table_without_delimiter_denied(self):
@@ -4255,7 +4255,7 @@ def _self_test():
             small, large = run_timed(code, HANG_TIMEOUT)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        # -- round 7 (codex round-6 findings) --
+        # -- an earlier version (an earlier review findings) --
         def test_r7_dq_substitution_write_seen(self):
             # finding 1 (HIGH): a write inside a double-quoted command substitution was hidden
             for cmd in (f"result=\"$(printf '%s\\n' 'heartbeat: 2099-01-01T00:00Z' | tee {PROJ}/private/s.md)\"",
@@ -4297,7 +4297,7 @@ def _self_test():
             self.assertEqual(self.tw("Due | Seen", "---|---", "2099-01-01T00:00Z | 2099-02-01T00:00Z"),
                              ["2099-02-01T00:00Z"])
             self.assertEqual(self.tw("Item | Due", "---|---", "x | 2099-01-01T00:00Z", "no pipe here",
-                                     "y | 2099-02-01T00:00Z"), [])  # round 11: a pipeless line is a row (GFM)
+                                     "y | 2099-02-01T00:00Z"), [])  # a pipeless line is a row (GFM)
 
         def test_r7_header_repurpose_rechecks_rows(self):
             # finding 4 (MED): a header or delimiter change must re-check every row of its table
@@ -4330,7 +4330,7 @@ def _self_test():
                         f"echo 2099-01-01T00:00Z >&'{PROJ}/private/s.md'",
                         f"echo 2099-01-01T00:00Z >& $fd {PROJ}/private/s.md"):  # a `$` target is unknown: denied
                 self.assertTrue(self.ev("Bash", command=cmd), cmd)
-            # round 24 (item 3): `&> 2` and `>& 2x` are still writes (to files named 2 and 2x, not duplications),
+            # an earlier version (item 3): `&> 2` and `>& 2x` are still writes (to files named 2 and 2x, not duplications),
             # but their targets are not the store path, which appears only as a comment or an echo argument
             for cmd in (f"echo 2099-01-01T00:00Z &> 2 # {PROJ}/private/s.md",
                         f"echo 2099-01-01T00:00Z >& 2x {PROJ}/private/s.md"):
@@ -4349,7 +4349,7 @@ def _self_test():
             self.assertIn("DELIBERATELY checked", __doc__)
 
         def test_r7_shell_tokens_linear(self):
-            # round 32: best of 3 in a child under the hang ceiling (2.08 s in-process was observed at load 30,
+            # best of 3 in a child under the hang ceiling (2.08 s in-process was observed at load 30,
             # and a 2.0 s ceiling failed at 2.53 s on a slower CI runner). The verdict is the growth from n to
             # GROWTH * n (up to the former sizes), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
@@ -4360,7 +4360,7 @@ def _self_test():
             small, large = run_timed(code, HANG_TIMEOUT)
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
-        # -- round 8 (codex round-7 findings) --
+        # -- an earlier version (an earlier review findings) --
         def test_r8_new_block_ends_table(self):
             # finding 1 (HIGH): a list item, heading, blockquote, or fence after a Due table inherited its context
             hdr = ("| Item | Due |", "|---|---|", "| a | 2026-09-01T00:00Z |")
@@ -4370,7 +4370,7 @@ def _self_test():
                          ("```text | x", "| b | 2099-01-02T00:00Z |"), ("~~~ | x", "| b | 2099-01-02T00:00Z |"),
                          ("", "hb | 2099-01-02T00:00Z"), ("hb 2099-01-02T00:00Z",)):
                 self.assertEqual(self.tw(*(hdr + tail)), ["2099-01-02T00:00Z"], tail)
-            # round 13: a `>` line ends the table AND is quoted text, exempt whatever its column (item 4)
+            # a `>` line ends the table AND is quoted text, exempt whatever its column (item 4)
             self.assertEqual(self.tw(*(hdr + ("> hb | 2099-01-02T00:00Z", "| b | 2099-01-02T00:00Z |"))),
                              ["2099-01-02T00:00Z"])  # the row after the quote is outside the table: checked
             # still rows: a leading-pipe row, a row of a pipeless-header table, a hyphen cell that is no list marker
@@ -4382,7 +4382,7 @@ def _self_test():
                                               "| b | 2099-01-02T00:00Z |"))), [])
 
         def test_r10_bare_row_under_leading_pipe_header(self):
-            # codex round-8 [H]: GFM leading pipes are optional per line, so a bare row continues a `| ... |` table
+            # an earlier review [H]: GFM leading pipes are optional per line, so a bare row continues a `| ... |` table
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "release | 2099-01-01T00:00Z"), [])
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a | x |", "release | 2099-01-01T00:00Z |"), [])
             # the column is counted from the row's own leading pipe: a bare row's Item column is not exempt
@@ -4395,11 +4395,11 @@ def _self_test():
             self.assertNotIn("stricter than GFM", __doc__)
 
         def test_r11_pipe_free_row_continues_table(self):
-            # codex round-10 [H]: GFM example 202, a pipe-free body row continues the table (one cell, column 0)
+            # an earlier review [H]: GFM example 202, a pipe-free body row continues the table (one cell, column 0)
             body = "| Item | Due |\n|---|---|\nTBD\nrelease | %s\n"
             self.assertEqual(self.tw(*(body % "2099-01-01T00:00Z").splitlines()), [])
             fp = os.path.join(self.tmp, "r11.md")
-            os.environ["AIQT_STORE_ROOT"] = self.tmp  # round 12: the Edit must reach a store path to count
+            os.environ["AIQT_STORE_ROOT"] = self.tmp  # the Edit must reach a store path to count
             with open(fp, "w") as f:
                 f.write(body % "2026-09-01T00:00Z")
             self.assertEqual(self.ev("Edit", file_path=fp, old_string="2026-09-01T00:00Z",
@@ -4416,7 +4416,7 @@ def _self_test():
                              ["2099-01-01T00:00Z"])
 
         def test_r11_pipe_free_line_is_column_zero(self):
-            # a pipe-free paragraph line after a table stays in it until a blank line, but (round 12) it never
+            # a pipe-free paragraph line after a table stays in it until a blank line, but it never
             # gets a header exemption: it is checked like an ordinary line, even under a scheduling cell 0
             self.assertEqual(self.tw("| Item | Due |", "|---|---|", "| a | x |", "hb 2099-01-01T00:00Z"),
                              ["2099-01-01T00:00Z"])
@@ -4435,7 +4435,7 @@ def _self_test():
             self.assertNotIn("so it is exempt only when header cell 0 carries a keyword", __doc__)
 
         def test_r12_pipe_free_heartbeat_under_due_header_denied(self):
-            # codex round-11 [H]: a pipe-free line under `| Due | Item |` inherited column 0's exemption, so
+            # an earlier review [H]: a pipe-free line under `| Due | Item |` inherited column 0's exemption, so
             # a fabricated future heartbeat was allowed through Write, Edit, and MultiEdit
             fut = "2099-01-01T00:00Z"
             body = "| Due | Item |\n| --- | --- |\n| 2099-02-01T09:00Z | release |\nLast-heartbeat: %s\n"
@@ -4453,7 +4453,7 @@ def _self_test():
 
         def test_r8_table_context_carry_over_scales(self):
             # finding 2 (MED perf): a row key compared the full header text, so time grew with header x rows
-            # round 32: interleaved best of 3 in a child under the hang ceiling (was one in-process run each)
+            # interleaved best of 3 in a child under the hang ceiling (was one in-process run each)
             code = TIMED_PRELUDE + (
                 "def run(hl):\n"
                 "    old = '\\n'.join(['| Item | Due | ' + 'h' * hl + ' |', '|---|---|---|']\n"
@@ -4480,7 +4480,7 @@ def _self_test():
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
 
         def test_r9_hash_row_continues_pipeless_table(self):
-            # round 9 finding 1 (HIGH, false deny): any `#` line ended a table, so an issue-number row lost its
+            # an earlier version finding 1 (HIGH, false deny): any `#` line ended a table, so an issue-number row lost its
             # Due-column exemption; only an ATX heading (1 to 6 `#` then whitespace or the line end) ends one
             for rows in (("#123 | 2099-12-31T00:00Z",), ("x | 2026-09-01T00:00Z", "#7 | 2099-12-31T00:00Z"),
                          ("####### | 2099-12-31T00:00Z",), ("#tag | 2099-12-31T00:00Z",)):
@@ -4490,7 +4490,7 @@ def _self_test():
                 self.assertEqual(self.tw("Issue | Due", "---|---", head), ["2099-12-31T00:00Z"], head)
 
         def test_r9_case_counted_only_in_command_position(self):
-            # round 9 finding 2 (HIGH, false deny): a `case` ARGUMENT inside a substitution opened a case
+            # an earlier version finding 2 (HIGH, false deny): a `case` ARGUMENT inside a substitution opened a case
             # construct, left the substitution unterminated, and read as a write
             reads = (f'x="$(rg case {PROJ}/private/s.md | grep 2099-12-31T00:00Z)"',
                      f'x="$(echo case; grep 2099-12-31T00:00Z {PROJ}/private/s.md)"',
@@ -4512,7 +4512,7 @@ def _self_test():
         def test_r4_threat_model_stated(self):
             self.assertIn("THREAT MODEL", __doc__.split("\n\n")[1])
 
-        # -- round 13 (peer adoption QA) --
+        # -- an earlier version (peer adoption QA) --
         def main_out(self, payload):
             old_in, old_out, old_env = sys.stdin, sys.stdout, dict(os.environ)
             sys.stdin, sys.stdout = io.StringIO(json.dumps(payload)), io.StringIO()
@@ -4606,7 +4606,7 @@ def _self_test():
                 self.assertEqual((getattr(mod, name).pattern, getattr(mod, name).flags),
                                  (globals()[name].pattern, globals()[name].flags), name)
 
-        # -- round 14 --
+        # -- an earlier version --
         def r14(self, cmds, want):
             store = f"{PROJ}/private/state.md"
             for cmd in cmds:
@@ -4672,7 +4672,7 @@ def _self_test():
                     else:
                         os.environ[k] = old
 
-        # -- round 15 --
+        # -- an earlier version --
         def test_r15_function_body_is_command_position(self):
             # item 1 (regression from r12/r13): `function NAME {` consumed command position, so an in-place
             # write in the body was missed; detected whether or not the function is called (conservative)
@@ -4715,9 +4715,9 @@ def _self_test():
             self.assertTrue({"b1", "b2", "b3", "b4", "b5"} <= made, made)
             self.assertFalse({"c%d" % k for k in range(1, 9)} & made, made)
 
-        # -- round 16 --
+        # -- an earlier version --
         def test_r16_arithmetic_is_not_redirection(self):
-            # codex round-15 finding (false deny): `>` inside `(( ... ))` and `$(( ... ))` read as a redirection
+            # an earlier review finding (false deny): `>` inside `(( ... ))` and `$(( ... ))` read as a redirection
             self.r14(("count=$(grep -Fc 'F' S)\nif (( count > 0 )); then printf '%s\\n' \"$count\"; fi",
                       "count=$(grep -Fc 'F' S)\nprintf '%s\\n' \"$(( count > 0 ))\"",
                       "rg -c F S; (( x = 1 << 2 ))", "rg -c F S; echo $(( a >> 1 ))", "rg F S; (( a > b ))",
@@ -4748,9 +4748,9 @@ def _self_test():
                 subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5"})
 
-        # -- round 17 --
+        # -- an earlier version --
         def test_r17_for_arith_header_restores_command_position(self):
-            # codex round-16 finding (MISS, a regression from r12/r15): after a `for ((...))` header the body
+            # an earlier review finding (MISS, a regression from r12/r15): after a `for ((...))` header the body
             # lost command position, so `do tee` and `do sed -i` were missed; bash takes `do` with or without a
             # `;` or newline before it, and `{` in place of `do`
             self.r14(("for ((i=0;i<1;i++)) do tee S <<< 'Last-heartbeat: F'; done",
@@ -4771,7 +4771,7 @@ def _self_test():
             self.assertEqual(toks[:4], [("w", "for"), ("w", "$"), ("s",), ("w", "do")], toks)
 
         def test_r17_keyword_touching_arith_is_arithmetic(self):
-            # codex round-16 finding (false deny): the reserved word before `((` was not flushed at the `(`
+            # an earlier review finding (false deny): the reserved word before `((` was not flushed at the `(`
             # metacharacter, so `if((` read as a subshell and its `>` as a redirection
             self.r14(("count=$(grep -Fc 'F' S); if(( count > 0 )); then echo found; fi",
                       "count=$(grep -Fc 'F' S); while(( count > 5 )); do break; done",
@@ -4799,9 +4799,9 @@ def _self_test():
                 subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4"})
 
-        # -- round 18 --
+        # -- an earlier version --
         def test_r18_function_compound_body_without_parens(self):
-            # round-17 finding (false deny): after `function NAME` with no `()` the body word lost command
+            # an earlier version's finding (false deny): after `function NAME` with no `()` the body word lost command
             # position, so `function NAME (( ... ))` read its `>` as a redirection; a sibling of the same class
             # (a MISS) hid a write in a `function NAME while|until|if` body
             self.r14(("count=$(grep -c 'F' S); function has_matches (( count > 0 ))", "function g [[ 1 < 2 ]]",
@@ -4819,7 +4819,7 @@ def _self_test():
             self.assertTrue(bash_writes(f"function f until tee {PROJ}/private/state.md; do :; done"))
             self.assertFalse(bash_writes(f"function f until rg -q x {PROJ}/private/state.md; do :; done"))
             # the tokenizer opens an arithmetic frame for the body: one `$` word, no redirection token (and, since
-            # round 19, the separator that restores command position after a closed arithmetic command)
+            # an earlier version, the separator that restores command position after a closed arithmetic command)
             self.assertEqual(_shell_tokens("function f (( c > 0 ))")[-1],
                              [("w", "function"), ("w", "f"), ("w", "$"), ("s",)])
 
@@ -4838,9 +4838,9 @@ def _self_test():
                 subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6"})
 
-        # -- round 19 --
+        # -- an earlier version --
         def test_r19_arith_and_conditional_command_restore_command_position(self):
-            # round-18 finding (MISS, a round-12 regression): only a `for ((...))` header restored command position
+            # an earlier version's finding (MISS, an earlier version's regression): only a `for ((...))` header restored command position
             # at its closing `))`, so a `while`, `until`, or `if` condition that is a plain `((...))` or a
             # `[[ ... ]]`, followed by `do` or `then` with no `;`, hid the body's write
             self.r14(("until ((a>b)) do tee S <<< 'Last-heartbeat: F'; break; done",
@@ -4864,7 +4864,7 @@ def _self_test():
             self.assertEqual(_shell_tokens("echo $((1)) tee")[-1], [("w", "echo"), ("w", "$"), ("w", "tee")])
 
         def test_r19_conditional_operand_text_is_not_a_separator(self):
-            # codex round-18 finding (false deny, pre-existing): inside [[ ... ]] a regex operand's `(`, `)`, and
+            # an earlier review finding (false deny, pre-existing): inside [[ ... ]] a regex operand's `(`, `)`, and
             # `|` were separators, so `cp` in `=~ operation=(cp|mv)` read as a command word
             self.r14(("record=$(grep -c 'F' S)\n[[ \"$record\" =~ operation=(cp|mv) ]]",
                       "record=$(grep -c 'F' S); function check [[ \"$record\" =~ operation=(cp|mv) ]]",
@@ -4872,7 +4872,7 @@ def _self_test():
                       "rg F S; [[ a && (b || c) ]]", "rg F S; [[ x =~ ^(tee|dd)$ ]] && echo y",
                       "rg F S; [[ ( a > b ) || (cp) ]]", "if [[ $(rg -c F S) =~ (sed|tee) ]] then echo y; fi"), False)
             # a substitution inside the conditional is still its own scanned stream, and a redirection after `]]`
-            # still counts; a `>(...)` process substitution is now scanned too (round 18 dropped its `>` inside [[)
+            # still counts; a `>(...)` process substitution is now scanned too (an earlier version dropped its `>` inside [[)
             self.r14(("[[ x =~ ($(tee S <<< F)|y) ]]", "[[ x =~ (`tee S <<< F`|y) ]]",
                       "function check [[ x =~ ($(tee S <<< F)) ]]", "[[ -n <(tee S <<< F) ]]",
                       "[[ -e >(cat > S <<< F) ]]", "[[ x =~ (cp|mv) ]] > S F",
@@ -4894,9 +4894,9 @@ def _self_test():
                 subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3", "b4", "b5", "b6", "b7"})
 
-        # -- round 20 --
+        # -- an earlier version --
         def test_r20_conditional_hash_is_operand_text(self):
-            # codex round-19 finding (false deny, present since round 17): inside [[ ... ]] the `#` of a regex
+            # an earlier review finding (false deny, present since an earlier version): inside [[ ... ]] the `#` of a regex
             # operand such as `(#|$)` started a comment that swallowed the closing `]]`, so the command read as
             # an unterminated conditional (a write); a newline inside the conditional is no separator either
             self.r14(("record=$(grep 'F' S)\n[[ \"$record\" =~ ^[[:space:]]*(#|$) ]]",
@@ -4908,23 +4908,23 @@ def _self_test():
                       "[[ x =~ (#|$($(tee S <<< F))) ]]"), True)
 
         def test_r20_conditional_closes_only_at_a_closing_word(self):
-            # codex round-19 finding (miss): a `]]` glued to a regex word's `)` closed the conditional, so the
+            # an earlier review finding (miss): a `]]` glued to a regex word's `)` closed the conditional, so the
             # real closing `]]` read as a command word and the `then` body after it lost command position
             self.r14(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
                       "if [[ 'x]]' =~ (x)]] ]]\nthen tee S <<< 'Last-heartbeat: F'; fi",
                       "[[ x == x]] ]] && tee S <<< F", "[[ a ]]>S F", "while [[ a =~ (b)]] ]] do tee S <<< F; done",
                       "[[ ( a )]] && tee S <<< F"), True)
-            # a regex word glued to `]]` before the real `]]` is no false deny (round 22: a grouping `)` glued to
+            # a regex word glued to `]]` before the real `]]` is no false deny (a grouping `)` glued to
             # `]]` with no later close leaves the command unparseable; see test_r22_*)
             self.r14(("rg F S; [[ x =~ (a)]] ]] && echo ok",
                       "rg F S; ( [[ x ]])", "if [[ $(rg -c F S) =~ (x)]] ]] then echo y; fi"), False)
             self.assertEqual(_shell_tokens("[[ a =~ (#|x)]] ]] && tee y")[-1],
                              [("w", "[["), ("w", "a"), ("w", "=~"), ("w", "#x]]"), ("w", "]]"), ("s",), ("s",),
                               ("s",), ("w", "tee"), ("w", "y")])
-            self.assertIsNone(_shell_tokens("[[ ( a )]] && echo ok"))  # round 22: no loose re-read
+            self.assertIsNone(_shell_tokens("[[ ( a )]] && echo ok"))  # no loose re-read
 
         def test_r20_real_bash_agrees(self):
-            # the syntax round 20 rests on, observed in real bash: a `#` inside a regex word is no comment, a `]]`
+            # the syntax an earlier version rests on, observed in real bash: a `#` inside a regex word is no comment, a `]]`
             # glued to a regex word's `)` does not close the conditional while one glued to a grouping `)` does, a
             # newline after `&&` stays inside the conditional, and a `>` right after the closing `]]` redirects
             if not shutil.which("bash"):
@@ -4939,9 +4939,9 @@ def _self_test():
                 subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 10)})
 
-        # -- round 21 --
+        # -- an earlier version --
         def test_r21_touching_conditional_opener_is_no_separator(self):
-            # codex round-20 finding (false deny, an r20 regression): in a compact `[[(`, flushing `[[` opened the
+            # an earlier review finding (false deny, an r20 regression): in a compact `[[(`, flushing `[[` opened the
             # conditional only after its branch was passed, so the `(` became a separator (and, in a substitution,
             # a depth change that left the substitution unterminated)
             self.r14(("result=$( [[(-f S) ]] && grep -c 'F' S )", "result=$( [[(-f S) ]] &&\n grep -c 'F' S )",
@@ -4953,12 +4953,12 @@ def _self_test():
                               ("s",), ("w", "y")])
 
         def test_r21_glued_close_never_closes_before_a_later_close(self):
-            # codex round-20 finding (false deny): the removed alternate reading closed at the regex word `(x)]]`
+            # an earlier review finding (false deny): the removed alternate reading closed at the regex word `(x)]]`
             # and invented a redirection out of the string comparison `>` after it; with the single rule a `]]`
             # glued to preceding text never closes while a word-initial `]]` follows
             self.r14(("record=$(grep 'F' S)\n[[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]]",
                       "record=$(grep 'F' S); [[ \"$record\" =~ (x)]] || \"$record\" > 'F' ]] && echo ok"), False)
-            # the round-19 item-2 miss stays caught, and a lone glued close (unparseable since round 22) still
+            # the earlier item-2 miss stays caught, and a lone glued close (unparseable since an earlier version) still
             # denies a write after it
             self.r14(("if [[ 'x]]' =~ (x)]] ]] then tee S <<< 'Last-heartbeat: F'; fi",
                       "[[ ( -n x )]] && tee S <<< F", "[[ ( a )]] && [[ ( b )]] && tee S <<< F"), True)
@@ -4972,7 +4972,7 @@ def _self_test():
             self.assertFalse(bash_writes(f"[[ ( a )]] && tee {PROJ}/private/state.md <<< 2099-01-01T00:00Z; [[ x ]]"))
 
         def test_r21_real_bash_agrees(self):
-            # the syntax round 21 rests on, observed in real bash: a compact `[[(` opens the conditional, a regex
+            # the syntax an earlier version rests on, observed in real bash: a compact `[[(` opens the conditional, a regex
             # word `(x)]]` does not close it before a later `]]` (so the `>` after it compares strings), a comment
             # may follow the opening `[[`, a lone `|` is a legal regex operand, and the disclosed miss is real
             if not shutil.which("bash"):
@@ -4986,10 +4986,10 @@ def _self_test():
                 subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b%d" % k for k in range(1, 9)})
 
-        # -- round 22 --
+        # -- an earlier version --
         def test_r22_conditional_open_at_frame_end_is_unparseable(self):
-            # codex round-21 finding (miss, an r21 regression): a backtick frame closed while its conditional was
-            # open, so the round-21 fallback never ran and the write read as conditional operand text; the
+            # an earlier review finding (miss, an r21 regression): a backtick frame closed while its conditional was
+            # open, so the earlier fallback never ran and the write read as conditional operand text; the
             # fallback is removed, and a conditional open when its frame ends makes the command unparseable
             self.r14(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
                       "result=`[[ ( -n x )]]` && tee S <<< F", "x=$( [[ ( -n y )]] && tee S <<< F )",
@@ -5000,7 +5000,7 @@ def _self_test():
             self.assertEqual(list(inspect.signature(_shell_tokens).parameters), ["cmd"])  # no re-read machinery
 
         def test_r22_glued_group_close_is_disclosed_false_deny(self):
-            # codex round-21 finding (false deny from the fallback's loose closing, now removed): the rule leaves
+            # an earlier review finding (false deny from the fallback's loose closing, now removed): the rule leaves
             # the first conditional's glued `)]]` unclosed, so the command is unparseable and denies only
             # because it names a store and holds a future literal (the disclosed exotic false deny); the same
             # holds for the former glued-close allows, pinned here so a future fix flips them deliberately
@@ -5028,9 +5028,9 @@ def _self_test():
                 self.assertEqual((rc, out), (0, ""), c)
 
         def test_r22_real_bash_agrees(self):
-            # the syntax round 22 rests on, observed in real bash: a glued grouping `)]]` closes the conditional
+            # the syntax an earlier version rests on, observed in real bash: a glued grouping `)]]` closes the conditional
             # inside a backtick or `$(...)` frame and at top level (so the backtick counterexample writes), and
-            # codex's three-line command writes nothing (the pinned deny above is a genuine false deny)
+            # a three-line command that writes nothing (the pinned deny above is a genuine false deny)
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
             cmds = ("r=`[[ ( -n x )]] && echo > b1`", "r=$( [[ ( -n x )]] && echo > b2 )",
@@ -5041,9 +5041,9 @@ def _self_test():
                 subprocess.run(["bash", "-c", c], cwd=self.tmp, capture_output=True, timeout=5)
             self.assertEqual(set(os.listdir(self.tmp)) - before, {"b1", "b2", "b3"})
 
-        # -- round 23 --
+        # -- an earlier version --
         def test_r23_word_initial_close_before_closing_backtick(self):
-            # codex round-22 finding (false deny, an r22 regression): a word-initial `]]` glued to the closing
+            # an earlier review finding (false deny, an r22 regression): a word-initial `]]` glued to the closing
             # backtick of the backtick frame being scanned was not a close, so the conditional was still open at
             # the frame end and a read was unparseable; that backtick now closes it, as `)` does for `$(...)`
             self.r14(("record=`grep 'F' S && [[ -s S ]]`", "record=`grep 'F' S && [[ -s S ]] `",
@@ -5052,7 +5052,7 @@ def _self_test():
                       "x=$(echo `rg F S && [[ -s S ]]`)", "r=`[[ -s S ]]`; rg F S"), False)
             self.assertEqual(_shell_tokens("r=`g && [[ -s x ]]`")[0],
                              [("w", "g"), ("s",), ("s",), ("w", "[["), ("w", "-s"), ("w", "x"), ("w", "]]"), ("s",)])
-            # the round-21 glued-grouping backtick write still denies, and a write after the close is caught
+            # the earlier glued-grouping backtick write still denies, and a write after the close is caught
             self.r14(("result=`[[ ( -n x )]] && tee S <<< 'Last-heartbeat: F'`",
                       "result=`[[ -n x ]]` && tee S <<< F", "result=`[[ -n x ]] && tee S <<< F`"), True)
             # genuinely unclosed conditionals stay unparseable: a glued close, a `]]` glued to a following word,
@@ -5063,7 +5063,7 @@ def _self_test():
                 self.assertIsNone(_shell_tokens(c), c)
 
         def test_r23_real_bash_agrees(self):
-            # the syntax round 23 rests on, observed in real bash: a word-initial `]]` glued to the closing
+            # the syntax an earlier version rests on, observed in real bash: a word-initial `]]` glued to the closing
             # backtick closes the conditional (the command runs and its status is the conditional's), while a
             # `]]` glued to a following word inside the backtick does not
             if not shutil.which("bash"):
@@ -5078,7 +5078,7 @@ def _self_test():
             self.assertFalse(os.path.exists(os.path.join(self.tmp, "b2")))
 
 
-        # -- round 24 (field validation of round 12) --
+        # -- an earlier version (field validation of an earlier version) --
         def test_r24_item3_write_bound_to_store_target(self):
             # item 3: a write-indicator word, a store path, and a future literal merely co-occurring denied
             # read-only searches and writes elsewhere; a Bash command is denied only when a write TARGETS the store
@@ -5257,7 +5257,7 @@ def _self_test():
             for s in ("compared as local wall time", "TARGETS a store path", "fails OPEN", "through", "valid"):
                 self.assertIn(s, doc)
 
-        # -- round 25 (claude-fable-5 expensive QA of round 24) --
+        # -- earlier review regressions --
         def test_r25_item2_find_exec_false_positive_example_is_accurate(self):
             # finding 2 (LOW): the FALSE POSITIVES text named `find <store dir> ... -exec cp {} /elsewhere` as
             # denied, but it is allowed ({} is cp's source); the example now has {} as the TARGET, and each
@@ -5273,14 +5273,14 @@ def _self_test():
             # a {} target under a find over the store itself is a true store write, denied
             self.assertEqual(self.ev("Bash", command=f"find {S} -type f -exec tee {{}} \\; <<< {F}"), [F])
 
-        # -- round 26 (codex gpt-6-astra high QA of round 25) --
+        # -- earlier review regressions --
         def test_r26_item2_option_arguments_are_not_targets(self):
             # finding 2 (MED): a command-specific option argument was read as a write target, so a read-only
             # store file named by sed -f or truncate -r denied a write elsewhere; fixed at class width for every
             # modeled command (sed, perl, truncate, ed, ex, cp, mv, install)
             S, F, X = f"{PROJ}/private", "2099-01-01T00:00Z", "/dev/shm/X"
             allowed = (f"sed -i -f {S}/rules.sed -e 's/new/{F}/' {X}", f"sed -i --file={S}/rules.sed {X} <<< {F}",
-                       # round 27: a sed EXPRESSION or program naming a store path (formerly `--expression
+                       # a sed EXPRESSION or program naming a store path (formerly `--expression
                        # {S}/x` and `'s#{S}/a#b#'` here) is script text that can write it, now an unknown
                        # target and denied (test_r27_script_text_naming_store_is_unknown_target)
                        f"sed -i --file {S}/rules.sed {X} <<< {F}", f"sed -i -e 's/a/b/' --expression 's/c/d/' {X} <<< {F}",
@@ -5391,14 +5391,14 @@ def _self_test():
 
         def test_r26_item7_trailing_flag_residual_removed(self):
             # finding 7 (LOW): the residual said `install src <store file> -v` is skipped, but it is denied; only a
-            # demonstrated unsupported-option case is disclosed now (round 29: that case, `--suf`, is closed by the
+            # demonstrated unsupported-option case is disclosed now (that case, `--suf`, is closed by the
             # long-option resolution, so it is denied too)
             doc = " ".join(__doc__.split())
             self.assertNotIn("`install src <store file> -v`", doc)
             self.assertIn("`cp src <store file> --suf .bak`", doc)
             S, F = f"{PROJ}/private/s.md", "2099-01-01T00:00Z"
             self.assertEqual(self.ev("Bash", command=f"install /dev/shm/src {S} -v <<< {F}"), [F])
-            self.assertEqual(self.ev("Bash", command=f"cp /dev/shm/src {S} --suf .bak <<< {F}"), [F])  # round 29: closed
+            self.assertEqual(self.ev("Bash", command=f"cp /dev/shm/src {S} --suf .bak <<< {F}"), [F])  # closed
             if not shutil.which("cp"):
                 self.skipTest("cp absent")
             os.mkdir(os.path.join(self.tmp, "store"))
@@ -5407,21 +5407,21 @@ def _self_test():
             subprocess.run(["cp", "src", "store/s.md", "--suf", ".bak"], cwd=self.tmp, timeout=10, check=True)
             self.assertTrue(os.path.exists(os.path.join(self.tmp, "store", "s.md")))  # the write is real
 
-        # -- round 27 (codex gpt-6-astra high and claude QA of round 26) --
+        # -- earlier review regressions --
         def real_env(self):
             # the real tools run with POSIXLY_CORRECT removed, as the model assumes (test hermeticity)
             return {k: v for k, v in os.environ.items() if k != "POSIXLY_CORRECT"}
 
         def test_r27_perl_stops_parsing_options_at_first_operand(self):
-            # finding (codex MED, a round-26 regression): the option parser consumed `-I S` after perl's first
+            # finding: the option parser consumed `-I S` after perl's first
             # operand, but perl parses no option there, so S was a file perl edited in place and the store write
-            # was allowed (round 25 denied it)
+            # was allowed (an earlier version denied it)
             S, F, X = f"{PROJ}/private", "2099-01-01T00:00Z", "/dev/shm/X"
             for cmd in (f"perl -pi -e 's/old/{F}/' {X} -I {S}/s.md", f"perl -pi -e 1 {X} -e {S}/s.md <<< {F}",
                         f"perl -pi /dev/shm/prog.pl {X} -I {S}/s.md <<< {F}", f"perl -pi -e 1 {X} -- {S}/s.md <<< {F}",
                         f"perl -pi -e 1 {X} -M {S}/s.md <<< {F}", f"perl -0777 -pi -e 1 {X} -x {S}/s.md <<< {F}"):
                 self.assertEqual(self.ev("Bash", command=cmd), [F], cmd)
-            # before the first operand an option still consumes its argument (round 26 behaviour kept)
+            # before the first operand an option still consumes its argument (an earlier version behaviour kept)
             for cmd in (f"perl -pi -I {S}/lib -e 1 {X} <<< {F}", f"perl -pi -e 1 {X} -I /dev/shm/lib <<< '{F} {S}/s.md'",
                         f"perl -pi -M{S}/x -e 1 {X} <<< {F}"):
                 self.assertEqual(self.ev("Bash", command=cmd), [], cmd)
@@ -5455,8 +5455,8 @@ def _self_test():
             self.assertEqual(os.path.getsize(os.path.join(self.tmp, "T")), 0)
 
         def test_r27_script_text_naming_store_is_unknown_target(self):
-            # finding (claude LOW, a round-26 regression): a sed program or an ex -c argument that itself writes a
-            # store file was allowed once round 26 consumed option arguments and dropped the sed program; script
+            # finding: a sed program or an ex -c argument that itself writes a
+            # store file was allowed once an earlier version consumed option arguments and dropped the sed program; script
             # text naming a store path now makes the target UNKNOWN, while a FILE-naming argument stays consumed
             S, F, X = f"{PROJ}/private", "2099-01-01T00:00Z", "/dev/shm/X"
             denied = (f"sed -i 's/ts: .*/ts: {F}/w {S}/cap.md' /dev/shm/in",
@@ -5511,10 +5511,10 @@ def _self_test():
                            env=self.real_env())
             self.assertEqual(open(exw).read(), f"ts: {F}\n")
 
-        # -- round 28 (codex gpt-6-astra high QA of round 27) --
+        # -- earlier review regressions --
         def test_r28_read_only_sed_mentioning_store_is_no_write(self):
-            # finding (codex MED, a round-27 regression): `sed -n '\|S F|p' audit.log` only prints matching lines,
-            # but its program MENTIONS a store path, so round 27 made its target unknown and denied it (round 26
+            # finding: `sed -n '\|S F|p' audit.log` only prints matching lines,
+            # but its program MENTIONS a store path, so an earlier version made its target unknown and denied it (an earlier version
             # allowed it); a sed with no in-place option whose program parses as unable to write is now no write
             S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
             allowed = (f"sed -n '\\|{S}/s.md {F}|p' audit.log", f"sed -n 's|{S}/s.md|X|p' audit.log <<< {F}",
@@ -5528,7 +5528,7 @@ def _self_test():
                       f"sed -n 's/x/{F}/gw {S}/s.md' audit.log", f"sed -n '1{{w {S}/s.md}}' audit.log <<< {F}",
                       f"sed -n '1e cat {S}/s.md' audit.log <<< {F}", f"sed 's/x/y/e;\\|{S}|p' audit.log <<< {F}",
                       f"sed -n 'W {S}/s.md' audit.log <<< {F}",
-                      # an in-place sed keeps the round-27 treatment even when its program cannot write
+                      # an in-place sed keeps the earlier treatment even when its program cannot write
                       f"sed -i 's#{S}/a#b#' /dev/shm/x <<< {F}", f"sed -ni '\\|{S}|p' /dev/shm/x <<< {F}",
                       # a program read from a FILE, or under --posix, is not parsed: kept unknown
                       f"sed -n -f /dev/shm/r.sed -e '\\|{S}|p' audit.log <<< {F}",
@@ -5558,7 +5558,7 @@ def _self_test():
             self.assertIsNone(_write_targets("sed", ["-i", f"s#{S}/a#x#", "log"]))
             self.assertIsNone(_write_targets("ex", ["-c", f"g#{S}/s.md#p", "x"]))
             doc = " ".join(__doc__.split())
-            for s in ("Round 28: a sed with NO in-place option", "ex is NOT narrowed", "MENTIONS a store path"):
+            for s in ("a sed with NO in-place option", "ex is NOT narrowed", "MENTIONS a store path"):
                 self.assertIn(s, doc)
             # the real tool, observed: the read-only search writes nothing; a `w` file is opened while the program is
             # PARSED (so even a program that later fails writes it), and an s flag after a space is still a flag
@@ -5579,9 +5579,9 @@ def _self_test():
                            check=True, env=self.real_env())
             self.assertEqual(open(os.path.join(store, "flag")).read(), f"{F}\n")
 
-        # -- round 29 (claude QA of round 28) --
+        # -- earlier review regressions --
         def test_r29_long_option_abbreviations_resolved(self):
-            # finding (claude LOW): GNU long-option ABBREVIATIONS were not modelled, so `sed --expr='s/x/F/w S' log`
+            # finding: GNU long-option ABBREVIATIONS were not modelled, so `sed --expr='s/x/F/w S' log`
             # and `sed --in 's/x/F/' S` were allowed while real GNU sed 4.9 wrote the store; a long option is now
             # resolved as the real tool resolves it, and on sed, perl, or ex an ambiguous or unrecognized one makes
             # the target UNKNOWN
@@ -5589,7 +5589,7 @@ def _self_test():
             denied = (f"sed --expr='s/x/{F}/w {S}/s.md' audit.log", f"sed --in 's/x/{F}/' {S}/state.md",
                       f"sed --in=.bak 's/x/{F}/' {S}/state.md", f"sed --expr 's/x/{F}/w {S}/s.md' audit.log",
                       f"sed -n --e='w {S}/c' audit.log <<< {F}", f"sed --i -n 'p' {S}/s.md <<< {F}",
-                      f"sed --po -n '\\|{S}|p' audit.log <<< {F}",  # --posix: the program is not parsed (round 28)
+                      f"sed --po -n '\\|{S}|p' audit.log <<< {F}",  # --posix: the program is not parsed
                       f"sed --f -n '\\|{S}|p' audit.log <<< {F}",  # ambiguous: --file or --follow-symlinks
                       f"sed --bogus -n '\\|{S}|p' audit.log <<< {F}",  # unrecognized
                       f"perl --in -pe 1 {S}/s.md <<< {F}",  # perl has no long options
@@ -5628,7 +5628,7 @@ def _self_test():
             self.assertEqual(_write_targets("cp", ["a", "D", "--suf", ".bak"]), ["D"])
             self.assertEqual(_write_targets("truncate", ["--ref", "R", "X"]), ["X"])
             doc = " ".join(__doc__.split())
-            for s in ("Round 29: a long option is resolved as the real tool resolves it", "UNAMBIGUOUS prefix",
+            for s in ("a long option is resolved as the real tool resolves it", "UNAMBIGUOUS prefix",
                       "AMBIGUOUS or UNRECOGNIZED makes the write's target UNKNOWN"):
                 self.assertIn(s, doc)
             # the real tools, observed: GNU sed accepts the abbreviations and writes the store, and rejects an
@@ -5661,9 +5661,9 @@ def _self_test():
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("Unrecognized switch", r.stderr)
 
-        # -- round 30 (codex gpt-6-astra high and claude-fable-5 QA of round 29) --
+        # -- earlier review regressions --
         def test_r30_perl_help_and_version_exit_writing_nothing(self):
-            # finding (codex MED, a round-29 regression): perl's option table was empty, so `perl --version` (a
+            # finding: perl's option table was empty, so `perl --version` (a
             # read-only diagnostic) made the target UNKNOWN and a later read-only store search in the same command
             # was denied; perl accepts exactly --help and --version and exits at once on either
             S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
@@ -5684,9 +5684,9 @@ def _self_test():
             self.assertEqual(_write_targets("perl", ["-pi", "-e", "1", "X", "--version"]), ["X", "--version"])
             self.assertIsNone(_write_targets("perl", ["--version=1", "-pi", "-e", "1", "X"]))
             doc = " ".join(__doc__.split())
-            self.assertIn("Round 30: perl accepts exactly two long options", doc)
+            self.assertIn("perl accepts exactly two long options", doc)
             with open(os.path.abspath(__file__)) as f:
-                self.assertNotIn("perl has " + "none", f.read())  # the round-29 comment corrected
+                self.assertNotIn("perl has " + "none", f.read())  # the earlier comment corrected
             # the real tool, observed: it exits 0 on either, before editing the file or running the program
             if not shutil.which("perl"):
                 self.skipTest("perl absent")
@@ -5706,7 +5706,7 @@ def _self_test():
                 self.assertIn("Unrecognized switch", r.stderr, bad)
 
         def test_r30_every_operand_written_under_exchange_or_directory(self):
-            # finding (codex MED, pre-existing): `mv -T --exchange S T` swaps S and T, so it WRITES S (the first
+            # finding: `mv -T --exchange S T` swaps S and T, so it WRITES S (the first
             # operand), but only the destination was a target; under mv's --exchange, and install's -d or
             # --directory, every operand (and every -t directory) is now a target
             S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
@@ -5748,7 +5748,7 @@ def _self_test():
                 self.assertTrue(os.path.isdir(os.path.join(store, "d1")))
 
         def test_r30_install_context_arity_union(self):
-            # finding (claude MED): uutils install 0.8.0 consumes a SEPARATE word after --context (GNU install takes
+            # finding: uutils install 0.8.0 consumes a SEPARATE word after --context (GNU install takes
             # only an attached value), so `install src <store file> --context foo` wrote the store file while the
             # model read `foo` as the destination; the model now takes the union of both readings
             S, F = f"{PROJ}/private", "2099-01-01T00:00Z"
@@ -5796,7 +5796,7 @@ def _self_test():
             self.assertIn("missing destination", r.stderr)
 
         def test_r30_recorded_long_option_arity_matches_real_tools(self):
-            # the round-30 sweep, kept as a check: for cp, mv, and install, every recorded long option is run as
+            # the earlier sweep, kept as a check: for cp, mv, and install, every recorded long option is run as
             # `TOOL a D OPT WORD` (D an existing directory, WORD a name that does not exist); the tool CONSUMED
             # WORD as the option's argument exactly when it copied or moved a into D and succeeded, and read WORD
             # as an operand exactly when it failed on WORD as the destination. The model must agree: an option
@@ -5835,7 +5835,7 @@ def _self_test():
                 self.skipTest("cp, mv, and install absent")
             self.assertGreater(checked, 40)
 
-        # -- round 31 (codex gpt-6-astra high and claude-fable-5 QA of round 30) --
+        # -- earlier review regressions --
         def bash_run(self, cmd, cwd):
             """Run `cmd` in real bash in `cwd` (inside self.tmp), with no inherited environment beyond PATH."""
             return subprocess.run(["bash", "-c", cmd], cwd=cwd, capture_output=True, text=True, timeout=10,
@@ -5851,7 +5851,7 @@ def _self_test():
             return store
 
         def test_r31_work_budget_bounds_the_bash_analysis(self):
-            # finding (codex HIGH): a 65,536-byte command of `: > x;` repeats before a future store write took about
+            # finding: a 65,536-byte command of `: > x;` repeats before a future store write took about
             # 75 ms of analysis; the analysis now runs under a work budget and fails OPEN when it is spent, with the
             # per-token work cut (store roots read once, regex fast path, lazy per-literal decisions)
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
@@ -5883,11 +5883,11 @@ def _self_test():
             self.assertLess(large_t / max(small_t, 1e-3), LINEAR_LIMIT, (small_t, large_t))
             self.assertLess(dense_t / max(ref_t, 1e-3), PEER_LIMIT, (dense_t, ref_t))
             doc = " ".join(__doc__.split())
-            for s in ("WORK BUDGET (round 31)", "is ALLOWED unchecked (fail OPEN", "an EXOTIC, disclosed miss"):
+            for s in ("WORK BUDGET", "is ALLOWED unchecked (fail OPEN", "an EXOTIC, disclosed miss"):
                 self.assertIn(s, doc)
 
         def test_r31_relative_targets_resolve_against_cwd_and_cd(self):
-            # finding (codex MED): a relative Bash destination bypassed store detection: `printf ... > store/state.md`
+            # finding: a relative Bash destination bypassed store detection: `printf ... > store/state.md`
             # with the cwd holding store/, and `cd <store> && printf ... > state.md`, wrote the future heartbeat
             store = self.r31_store()
             F = "2099-01-01T00:00Z"
@@ -5918,7 +5918,7 @@ def _self_test():
                                       self.now), [])
             self.assertEqual(evaluate({"tool_name": "Bash", "tool_input": {
                 "command": f"echo {F} >> x.md # {store}"}}, self.now), [F])
-            self.assertIn("WHICH DIRECTORY (round 31)", " ".join(__doc__.split()))
+            self.assertIn("WHICH DIRECTORY", " ".join(__doc__.split()))
             # real bash agrees: every denied command above writes the future heartbeat into the store
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
@@ -5931,7 +5931,7 @@ def _self_test():
                     self.assertIn(F, f.read(), cmd)
 
         def test_r31_literal_shell_c_strings_are_inspected(self):
-            # finding (codex MED): `bash -c "printf ... > <store file>"` was allowed although real bash wrote the
+            # finding: `bash -c "printf ... > <store file>"` was allowed although real bash wrote the
             # future heartbeat; a statically known -c string is now analysed recursively with the same cwd
             store = self.r31_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
@@ -5955,7 +5955,7 @@ def _self_test():
             self.assertEqual(_literal_shell_string('"a\\"b"'), ('a"b', [1, 3, 4]))
             for raw in ('"a $x"', '"a `b`"', "'a'b'", '"a', '"a\\"'):
                 self.assertIsNone(_literal_shell_string(raw), raw)
-            self.assertIn("SHELL -c (round 31)", " ".join(__doc__.split()))
+            self.assertIn("SHELL -c", " ".join(__doc__.split()))
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
             for cmd in denied[:3] + denied[6:7] + denied[8:9]:
@@ -5966,7 +5966,7 @@ def _self_test():
                     self.assertIn(F, f.read(), cmd)
 
         def test_r31_literal_counts_only_for_the_write_it_feeds(self):
-            # finding (codex MED): an unrelated literal tainted every store write in the command: a search for the
+            # finding: an unrelated literal tainted every store write in the command: a search for the
             # literal, then an audit append, and a literal only in a comment, were denied although bash appended
             # only `checked`; a literal now counts only as DATA of a store write
             store = self.r31_store()
@@ -5996,7 +5996,7 @@ def _self_test():
                       f"echo \"$(echo 'hb {F}')\" >> {S}")
             for cmd in denied:
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=cmd), [F], cmd)
-            self.assertIn("WHICH LITERALS (round 31)", " ".join(__doc__.split()))
+            self.assertIn("WHICH LITERALS", " ".join(__doc__.split()))
             # real bash: the allowed commands never put the literal into the store; the denied ones do
             if not shutil.which("bash"):
                 self.skipTest("bash absent")
@@ -6008,7 +6008,7 @@ def _self_test():
                     self.assertEqual(F in f.read(), want, cmd)
 
         def test_r31_unexecuted_conditional_write_is_judged_as_written(self):
-            # by design (maintainer ruling on codex's MED): a write in a branch that never runs is judged as
+            # by design (maintainer ruling on an earlier review): a write in a branch that never runs is judged as
             # written, and the docstring says so
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             for cmd in (f"if false; then printf '%s\\n' 'heartbeat: {F}' > {S}; fi",
@@ -6018,7 +6018,7 @@ def _self_test():
             self.assertIn("BY DESIGN (not modeled): a write in a branch that never runs is judged as written", doc)
 
         def test_r31_help_and_version_exit_on_every_modeled_tool(self):
-            # finding (claude LOW): only perl's --help and --version were modeled as exiting, so `cp --version src
+            # finding: only perl's --help and --version were modeled as exiting, so `cp --version src
             # <store file>` was denied although cp exits at once; GNU cp, mv, sed, and ed and uutils install, tee,
             # and truncate exit on either wherever it stands before `--` (they permute)
             store = self.r31_store()
@@ -6038,7 +6038,7 @@ def _self_test():
             for kind in ("cp", "mv", "install", "tee", "truncate", "ed", "sed"):
                 self.assertEqual(_write_targets(kind, ["--help", "a", "b"]), [], kind)
                 self.assertEqual(_write_targets(kind, ["a", "b", "--version=1"]), [], kind)
-            self.assertIsNone(_write_targets("perl", ["--version=1", "-pi", "-e", "1", "X"]))  # round 30, unchanged
+            self.assertIsNone(_write_targets("perl", ["--version=1", "-pi", "-e", "1", "X"]))  # an earlier version, unchanged
             self.assertNotIn("exit", _OPTION_SPECS["ex"])
             # the real tools, observed: each exits 0 and leaves the store file unchanged
             with open(os.path.join(self.tmp, "src"), "w") as f:
@@ -6066,7 +6066,7 @@ def _self_test():
             self.assertEqual([cmd[a:b] for _op, a, b in t.heredocs], ["b > z\n", "$(tee w)\n"])
             self.assertEqual([cmd[a:b] for a, b in t.comments], ["# c"])
             self.assertEqual(len(t.streams), 2)  # the unquoted body's substitution is still scanned
-            # a body is text, never commands: its `>` writes nothing (a false deny until round 30), while a write in
+            # a body is text, never commands: its `>` writes nothing (a false deny until an earlier version), while a write in
             # a substitution in an unquoted body still counts
             S, F = f"{PROJ}/private/state.md", "2099-01-01T00:00Z"
             for delim in ("E", "'E'"):
@@ -6081,16 +6081,16 @@ def _self_test():
 
         def test_r31_disclosures(self):
             doc = " ".join(__doc__.split())
-            for s in ("WHICH DIRECTORY (round 31)", "SHELL -c (round 31)", "WHICH LITERALS (round 31)",
-                      "WORK BUDGET (round 31)", "Round 31: GNU cp, mv, sed, and ed and uutils install, tee, and truncate",
-                      "one quoted literal with no expansion: round 31 inspects a literal one",
-                      "round 31 resolves `cd <store dir> && echo <future> > state.md`"):
+            for s in ("WHICH DIRECTORY", "SHELL -c", "WHICH LITERALS",
+                      "WORK BUDGET", "GNU cp, mv, sed, and ed and uutils install, tee, and truncate",
+                      "one quoted literal with no expansion: an earlier version inspects a literal one",
+                      "an earlier version resolves `cd <store dir> && echo <future> > state.md`"):
                 self.assertIn(s, doc)
             for s in ("(a relative path is never resolved", "no heredoc or wrapper analysis",
                       "AND the command holds a future-dated literal"):
                 self.assertNotIn(s, doc)
 
-        # -- round 32 (codex gpt-6-astra high and claude QA of round 31; the bounded final round) --
+        # -- earlier review regressions --
         def r32_check_bash(self, cases, store, cwd=None):
             """Real bash agrees with each (command, wants-denied) case: it writes F into the store exactly when the
             hook denies."""
@@ -6108,7 +6108,7 @@ def _self_test():
                     self.assertEqual("2099-01-01T00:00Z" in f.read(), want, cmd)
 
         def test_r32_item2_directory_work_is_budgeted(self):
-            # finding (codex HIGH): directory-set expansion, path resolution, and set union were not charged to the
+            # finding: directory-set expansion, path resolution, and set union were not charged to the
             # work budget, so 64 KiB of `(cd <dir>);` over 400 directories took about 200 ms in-process. They are
             # now charged BEFORE they are done, and a set above MAX_CWDS spends the budget (fail open)
             store = self.r31_store()
@@ -6135,7 +6135,7 @@ def _self_test():
             # the codex construct: 400 directories, 800 `(cd .);`, a future store write, padded to 65,536 bytes:
             # analysed in-process well under the latency bound, or the budget is spent (best of 5 in a child). The
             # bound is a PEER check: at most PEER_LIMIT times an ordinary 64 KiB command judged in full on the same
-            # host (round 31's uncharged directory work took about 200 ms), not a wall-clock ceiling
+            # host (an earlier version's uncharged directory work took about 200 ms), not a wall-clock ceiling
             code = TIMED_PRELUDE + (
                 "D = %r\n"
                 "os.environ['AIQT_STORE_ROOT'] = os.path.join(D, 'store')\n"
@@ -6156,7 +6156,7 @@ def _self_test():
             self.assertEqual((globals().get("CWD_COST"), globals().get("MAX_CWDS")), (6, 32))
 
         def test_r32_item3_subshell_scopes_directory_state(self):
-            # finding (codex MED, a round-31 regression): a subshell's cd leaked into the parent, so
+            # finding: a subshell's cd leaked into the parent, so
             # `(cd <store> && ls >/dev/null); printf ... > state.md` was denied although bash wrote only the cwd's
             # state.md; `( ... )` now scopes the directory set, and `{ ... }` does not, as in bash
             store = self.r31_store()
@@ -6173,7 +6173,7 @@ def _self_test():
             self.r32_check_bash([(c, False) for c in allowed] + [(c, True) for c in denied], store)
 
         def test_r32_item4_shell_c_output_reaching_the_store_counts(self):
-            # finding (codex MED MISS): a literal shell -c string whose OUTPUT is redirected or piped into a store
+            # finding: a literal shell -c string whose OUTPUT is redirected or piped into a store
             # target was allowed; a literal in the string is now also data of the wrapper, as for echo
             store = self.r31_store()
             S, F = os.path.join(store, "state.md"), "2099-01-01T00:00Z"
@@ -6191,7 +6191,7 @@ def _self_test():
             self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
 
         def test_r32_item5_staging_through_shell_c(self):
-            # finding (codex MED): a file staged by the outer command and copied by a literal shell -c string
+            # finding: a file staged by the outer command and copied by a literal shell -c string
             # (`printf ... > stage; bash -c 'cp stage <store file>'`) was allowed; the string's store write now
             # exposes the words it names, and its own writes, to the enclosing staging walk
             store = self.r31_store()
@@ -6209,7 +6209,7 @@ def _self_test():
             self.r32_check_bash([(c, True) for c in denied] + [(c, False) for c in allowed], store)
 
         def test_r32_matching_search_pattern_counts(self):
-            # finding (claude LOW EXOTIC): every grep/rg pattern in a search-only substitution was exempt, "a search
+            # finding: every grep/rg pattern in a search-only substitution was exempt, "a search
             # prints file text or a count, never its pattern", but a MATCHING search prints file text holding its
             # pattern (with -o, exactly it); only a pipeline ending in wc or a counting/quiet/file-list search is
             # exempt now
@@ -6262,7 +6262,7 @@ def _self_test():
             # a wall-clock bound in any test is rejected by test_no_wall_clock_verdict (an AST scan)
 
         def test_interleaved_refuses_sub_floor_samples(self):
-            # QA round 2 (codex 3): at the multiplier cap interleaved() returned sub-floor samples, voiding
+            # an earlier review: at the multiplier cap interleaved() returned sub-floor samples, voiding
             # the every-sample floor; it now fails closed. The child's CPU clock is replaced by a counter
             # that barely advances, so the cap is reached the same way on any host
             code = TIMED_PRELUDE + (
@@ -6279,7 +6279,7 @@ def _self_test():
             self.assertIn("cannot measure above the floor", str(ctx.exception))
 
         def test_timed_child_ignores_ambient_allocator_policy(self):
-            # QA round 4 (codex MAJOR, in the sibling stamp-truth-stop.py): a timed child inherited the
+            # an earlier review: a timed child inherited the
             # parent's environment, so an ambient MALLOC_* variable or GLIBC_TUNABLES entry pinned glibc's
             # thresholds and false-REDed healthy code under load (2.0 to 3.1x); every timed child now
             # launches with child_env(). Deterministic: the probe reports the child's environment, no
@@ -6322,9 +6322,9 @@ def _self_test():
                 self.assertIn(s, doc)
 
         def test_r33_wrapper_check_is_constant_per_wrapper(self):
-            # finding (codex HIGH, a round-32 regression): each shell -c wrapper rescanned its whole pipeline and
+            # finding: each shell -c wrapper rescanned its whole pipeline and
             # rebuilt its separator text, work of wrappers x pipeline length the budget never saw: 64 KiB of 450
-            # piped `sh -c` wrappers and 1,050 `:` took about 107 ms in-process (round 31: 14.5 ms) with 1,794
+            # piped `sh -c` wrappers and 1,050 `:` took about 107 ms in-process (14.5 ms) with 1,794
             # budget steps left. Each pipeline's aggregates are now computed once, charged before the pass
             store = self.r31_store()
             F = "2099-01-01T00:00Z"
@@ -6353,8 +6353,8 @@ def _self_test():
                 self.assertEqual(self.ev("Bash", cwd=self.tmp, command=c), [F])
                 self.assertGreaterEqual(spend(c), 4 * 4 * w)
             # in a child under the hang ceiling: the codex construction in-process against an ordinary 64 KiB
-            # command judged in full (a PEER check, about 1.2 on the development host; round 32 took about 107 ms),
-            # and the growth from 37 to GROWTH * 37 wrappers (interleaved, best of 5; round 32's per-wrapper
+            # command judged in full (a PEER check, about 1.2 on the development host; an earlier version took about 107 ms),
+            # and the growth from 37 to GROWTH * 37 wrappers (interleaved, best of 5; an earlier version's per-wrapper
             # rescan grew it by about 3.2 times per doubling)
             code = TIMED_PRELUDE + (
                 "D = %r\n"
@@ -6373,7 +6373,7 @@ def _self_test():
             self.assertLess(t_codex / max(ref_t, 1e-3), PEER_LIMIT, (t_codex, ref_t))
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
             doc = " ".join(__doc__.split())
-            self.assertIn("Round 33: the shell -c WRAPPER check is charged too", doc)
+            self.assertIn("the shell -c WRAPPER check is charged too", doc)
 
         # -- no wall-clock verdict (a 2.0 s ceiling failed at 2.53 s on a slower CI runner) --
         HANG_GUARD_TESTS = ("test_r26_item6_hang_guard_interrupts",)

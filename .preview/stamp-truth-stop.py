@@ -29,8 +29,8 @@ when a scheduling keyword IMMEDIATELY precedes it: the keyword ends at most SCHE
 before the claim (a word token holds a letter or digit, so `:`, `[`, or `**` do not count), as in "next run
 at T", "due T", "deadline: T", "scheduled for T", "until T", "not before T", "by T", "valid through T".
 Keywords (case-insensitive, whole words; see below): due, deadline, expir, until, next, scheduled, not before,
-not-before, eta, planned, "target date", "target:", `by ` with its trailing space, and (round 24, the
-validity words) through and valid. Each matches as a WHOLE word, optionally plural (round 24: "validated",
+not-before, eta, planned, "target date", "target:", `by ` with its trailing space, and (the
+validity words) through and valid. Each matches as a WHOLE word, optionally plural ("validated",
 "throughput", "duet", or "etag" exempt nothing), except the stem `expir`, which also covers expires, expiry,
 and expiration. A keyword never exempts a line-leading status stamp, a keyword AFTER a
 claim does not exempt it, and a keyword further back does not.
@@ -43,11 +43,11 @@ RULES, against the message's reference time REF:
      is in the bracketed console form (a `[` immediately before the stamp, as in `[2026-09-23 13:45:02 EDT]`);
      such a header must be no more than 10 minutes before REF (30 minutes for the final message, which can be
      long in generation). An unbracketed first status stamp is a historical date, never checked for BEHIND
-     (round 24: "2020-01-01T00:00Z service launched" is truthful history). Later status stamps
+     ("2020-01-01T00:00Z service launched" is truthful history). Later status stamps
      (a bulleted history list under the header) are not checked for BEHIND. Every status stamp is checked for
      AHEAD whatever keywords its line carries. Quoted history mid-line is never checked for BEHIND. A claim
      that cannot be converted (an invalid date such as 2020-02-30, or a letter abbreviation that is not the local
-     zone at that wall time) cannot be evaluated and FAILS OPEN, status stamp or not (round 26).
+     zone at that wall time) cannot be evaluated and FAILS OPEN, status stamp or not.
   3. ELAPSED FOOTER: the LAST elapsed footer in the message that lies outside fenced code, blockquote lines,
      and inline code spans is checked, wherever it sits (a completion marker, a `---`, or a quote line after
      it does not displace it). Two forms are footers, and the last occurrence of EITHER form wins: "Session
@@ -107,10 +107,10 @@ the scan; supplied before its arrival it spends none, and a refusal of it record
 the arrival still owed. No entry a scan consumed is saved back, so a repeat beyond
 the recorded refusals is never excused, the final record included. Pending entries are dropped at any new genuine user message and
 when the transcript is reset (shorter than OFFSET, or the bytes before OFFSET changed), which also discards
-OFFSET and is RECORDED in the state (round 40, see BLOCK CAP). A blocked final message already in the transcript creates no exception. The boundary is never
+OFFSET and is RECORDED in the state (see BLOCK CAP). A blocked final message already in the transcript creates no exception. The boundary is never
 inferred from message text. State dir: $XDG_RUNTIME_DIR/clock-truth when XDG_RUNTIME_DIR is absolute, else
 /dev/shm/clock-truth-<euid>, created 0700 and used only when it is a real directory owned by this user with
-no group or other permission bits; round 30: each transcript has its own SUBDIRECTORY there, named by the
+no group or other permission bits; each transcript has its own SUBDIRECTORY there, named by the
 SHA-256 of transcript_path plus `.d`, created 0700 and opened no-follow relative to the state dir, held to the
 same private-directory test, and holding the one state file `state`, opened no-follow and
 written via an exclusive temp file and an atomic rename. ABSENT state (a usable dir with no file for this
@@ -131,56 +131,56 @@ STOP_HOOK_ACTIVE (the corrective loop after a block): violations only in message
 never block; a bad FINAL message still blocks, and then older violations are reported with it. So a corrected
 final message always passes.
 BLOCK CAP (defence in depth against a loop the model cannot satisfy, for example a hook defect): when this
-Stop would block and its stop_hook_active field is true OR ABSENT (round 38: an absent field is not read as a
+Stop would block and its stop_hook_active field is true OR ABSENT (an absent field is not read as a
 new turn, so the cap binds on a host that omits the field; before, the cap ran only under an explicit true,
 so such a host could be refused at every stop), the consecutive block cycles of this hook immediately
-preceding it are the LARGER of two counts (round 24). (i) The hook's own recovery-state counter: the state
+preceding it are the LARGER of two counts. (i) The hook's own recovery-state counter: the state
 file (see WHICH MESSAGES) also records `blocks`, set to 1 by a block that starts a count, incremented
 by each further block, kept at a capped allow AND at a pass that is not an observed new turn
-(rounds 27, 38), set to the cap at a fail-open allow and at such a pass whose counter was
+(38), set to the cap at a fail-open allow and at such a pass whose counter was
 unreadable (so the rest of that corrective loop stays capped), and reset to 0 ONLY by an observable new-turn
 signal: a Stop whose stop_hook_active field is explicitly false (trusted as the platform's statement of a
 new turn, so the cap does not hold against a host that sends false on a Stop that continues a refusal), or a
 new genuine user message read past the boundary by a persisting Stop with a readable counter and no explicit
-true (this hook registers only Stop, so the transcript is its UserPromptSubmit analogue; round 39: only past
+true (this hook registers only Stop, so the transcript is its UserPromptSubmit analogue; only past
 a stored boundary that HELD, since a reset scan re-reads OLD user messages from the start, and a block on
 such a new turn whose boundary save FAILS is unrecorded and fails open, since an unmoved boundary would
-re-arm the signal at every Stop; round 40: only from a READABLE scan, an unreadable one keeping an unmoved
+re-arm the signal at every Stop; only from a READABLE scan, an unreadable one keeping an unmoved
 boundary too, and only while the state records NO earlier reset scan, since a resetting Stop saves its
 re-scanned boundary, often 0, which the next Stop verifies trivially, so a truncation followed by a restore
-would otherwise replay the OLD user message as new one Stop later; round 43: and only while the state
-carries NO UNKNOWN-history marker (round 42 allowed a new turn past a held non-trivial marker boundary,
+would otherwise replay the OLD user message as new one Stop later; and only while the state
+carries NO UNKNOWN-history marker (an earlier version allowed a new turn past a held non-trivial marker boundary,
 but a repair cannot see a truncation that preceded the state fault, so its boundary can sit on truncated
 content, and a staged restore of the old records, one per Stop, holds every boundary along the way; a
 held boundary is never proof of new user content once the history is unknown). An allowed stop
 alone never resets it. While stop_hook_active is true the counter NEVER decreases, whatever the transcript shows
-(round 26) and whatever the final message is (round 27): a transcript reset or rewrite, or a user-role entry
+ and whatever the final message is: a transcript reset or rewrite, or a user-role entry
 read as a genuine user message, resets the boundary and the late-arrival exception but never the counter,
-and a clean pass inside the loop keeps it (in round 26 a clean pass reset it, so alternating with ANOTHER Stop
+and a clean pass inside the loop keeps it (in an earlier version a clean pass reset it, so alternating with ANOTHER Stop
 hook that rejected the clean message, 1, 0, 1, 0, let this hook block every other Stop without limit); where
 the host omits the field, a NEW user-role entry read as a genuine user message can still restart the count,
 and an externally deleted state file reads as an established 0 and erases the recorded reset history (the
-round-26 count protections need the explicit true, and even under it such a deletion read as CLEARED reset
-history until round 42, which records it as the unknown marker below), each a disclosed residual, but a
+earlier count protections need the explicit true, and even under it such a deletion read as CLEARED reset
+history until an earlier version, which records it as the unknown marker below), each a disclosed residual, but a
 transcript reset or rewrite
-never restarts it, on the Stop that reads the reset or on any later Stop (round 39: a reset scan is not a
-new-turn signal; round 40: the reset is RECORDED in the state, and from then on only an explicit false, never
+never restarts it, on the Stop that reads the reset or on any later Stop (a reset scan is not a
+new-turn signal; the reset is RECORDED in the state, and from then on only an explicit false, never
 transcript content, re-enables the transcript-derived new-turn signal; before, a truncation that saved a zero
 boundary let the next Stop read the restored old user message as new, so a truncate-restore alternation
 blocked at every Stop). Where the host omits the field, a recorded reset therefore suppresses every
 transcript-derived new turn, a genuinely NEW user message included, until an explicit false: once the count
 reaches the cap, the hook stays in CAPPED-ALLOW mode for the rest of that transcript (each violating Stop
 is allowed with the cap warning, the fail-open direction), a disclosed residual of recording the reset.
-Round 41: an UNREADABLE state hides any recorded reset, so the history is UNKNOWN, never read as cleared
+an UNREADABLE state hides any recorded reset, so the history is UNKNOWN, never read as cleared
 (read as False, it let the save-time repair re-arm restored old transcript bytes one Stop later, so a
-failed state read followed by a restore restarted the count without new user input). Round 42: unknown
+failed state read followed by a restore restarted the count without new user input). unknown
 history is recorded as its own UNKNOWN marker in the state, a separate field so a state fault stays
 distinguishable from an observed truncation, and an ABSENT state under an explicit true, an unknown count
-since round 26, is unknown HISTORY too, where before the deletion read as CLEARED history and erased a
+since an earlier version, is unknown HISTORY too, where before the deletion read as CLEARED history and erased a
 recorded reset; a CLEAN Stop that discovers an absent state under an explicit true persists the marker too
-(round 43), on the readable and the unreadable transcript branches alike, so the discovery survives to the
+, on the readable and the unreadable transcript branches alike, so the discovery survives to the
 next Stop, and a clean Stop whose state READ failed persists it the same way, on both transcript branches
-(round 43: before, with the transcript unreadable and the field omitted or explicitly true, neither save
+(before, with the transcript unreadable and the field omitted or explicitly true, neither save
 predicate held, so the one Stop that observed the fault wrote nothing and a later genuine user turn
 restarted the count); on the READABLE transcript branch a Stop whose state read failed also re-reads the
 state under the still-held lock BEFORE the messages are checked, and the pending reconciliation is ONE
@@ -207,7 +207,7 @@ EVERY stored pending entry can be lost and each late-arriving already-reported m
 excused can be re-reported once, the disclosed readable-branch residual (see RESIDUAL COVERAGE). Round
 43: the marker FAILS CLOSED, exactly like the recorded reset: while either stands, no
 transcript-derived user message is a new turn, at ANY offset, and ONLY an explicit-false Stop clears them
-(round 42 cleared the marker at a genuinely new user message past a held NON-trivial boundary, reasoning
+(an earlier version cleared the marker at a genuinely new user message past a held NON-trivial boundary, reasoning
 that bytes past a boundary that held were appended after the repair; but the repair cannot see a truncation
 that preceded the state fault, so its boundary can sit on truncated content, and a STAGED restore of the
 old records, one record per Stop, holds every boundary along the way, so restored old content restarted the
@@ -221,7 +221,7 @@ marker); a LATER deletion or prune of the state ends the capped-allow mode early
 an explicit true reading the absent state as an established 0, the disclosed deletion residual. A clean
 explicit-false Stop SAVES whenever a reset or an unknown marker stands,
 clearing it even at offset 0 and counter 0, where it previously wrote nothing and the flag stuck, and
-(round 42) even when BOTH the state and the transcript are unreadable; there (round 43) it re-reads the
+ even when BOTH the state and the transcript are unreadable; there it re-reads the
 state under the lock and keeps a stored boundary and pending list that read back (every Stop of that
 both-unreadable branch whose state read failed re-reads the same way, the clean faulting Stop above
 included), so a transient
@@ -229,13 +229,13 @@ state-read fault does not overwrite them with 0 and an empty list, while a state
 re-read is cleared to boundary 0, whose one-time recheck can re-report an already-reported old message
 once, a disclosed residual; the clear is DURABLE only as far as persistence allows: a Stop that finds the
 lock held writes nothing, a Stop that cannot persist at all (locking unavailable, or no usable private
-state directory) writes nothing, and a failed or SHORT write (round 43: save_state writes every byte of
+state directory) writes nothing, and a failed or SHORT write (save_state writes every byte of
 the serialized state or fails, keeping the previous state) leaves the stored flag standing, the
 conservative direction. An explicit-false Stop that read a TRUNCATED transcript clears the recorded reset
 like any other (the field is the platform's own new-turn statement), so restoring the old content after
 it can restart the count, once per restored old user record under a STAGED restore (each restarting Stop
 records normally, so each restart is bounded at the cap), a disclosed residual. A v2 state written before
-round 40 carries no reset field and one written before round 42 no unknown field, each read as False,
+an earlier version carries no reset field and one written before an earlier version no unknown field, each read as False,
 never True, so history lost before the upgrade can let restored old user messages restart the count, once
 per restored old user record under a staged restore (each such Stop records normally, so each restart is
 bounded at the cap), a disclosed residual in deliberate tension with the unknown-history rule: a missing
@@ -244,13 +244,13 @@ reading it as unknown would put each upgraded transcript into the suppressed
 mode at once. So within one continuous run of Stops that carries no new-turn signal this
 hook blocks at most BLOCK_CAP times, for any interleaving of
 other hooks' feedback, transcript contents, and clean or violating messages (the argument is at the counter
-code in _evaluate()). Round 28: that bound assumes the Stops for one transcript are SERIALIZED (two concurrent
+code in _evaluate()). that bound assumes the Stops for one transcript are SERIALIZED (two concurrent
 evaluations, one loading the counter and saving it back after the other raised it, re-armed it every time),
-so the whole load, evaluate, and save runs under an EXCLUSIVE, NON-BLOCKING lock. Round 29: the lock is an
+so the whole load, evaluate, and save runs under an EXCLUSIVE, NON-BLOCKING lock. the lock is an
 fcntl.flock on the private state DIRECTORY itself, opened once per evaluation (no-follow, O_DIRECTORY) and
 required to be an own-uid directory with no group or other permission bits, and EVERY state-file read and
 write of that evaluation is made relative to that same directory descriptor, so the lock and the data are
-bound to one directory inode that no single-file unlink can replace (round 28 locked a separate `.lock` file,
+bound to one directory inode that no single-file unlink can replace (an earlier version locked a separate `.lock` file,
 and deleting only that file mid-evaluation let a second evaluation lock a new inode and interleave, re-arming
 the counter; there is no `.lock` file now). A directory removed or renamed away and recreated mid-evaluation
 takes the first evaluation's save with it (into the orphaned directory, or nowhere), while the next Stop finds
@@ -259,15 +259,15 @@ another evaluation FAILS OPEN: it is allowed with its claims unchecked and a one
 and writes no state, so the counter is unchanged. A Stop that cannot lock for another reason (the directory
 cannot be opened or is not private, no fcntl, or a failed flock) writes NO state, as for an unpersistable
 state: only its final message can block, and under stop_hook_active nothing blocks (each violation fails open
-with a warning), so the counter is unchanged. Round 30: the locked directory is the transcript's OWN state
+with a warning), so the counter is unchanged. the locked directory is the transcript's OWN state
 subdirectory (see WHICH MESSAGES), not the whole state dir, so only Stops of the SAME transcript contend
-(round 29's per-user directory lock was held for a whole evaluation, which scans up to 64 MiB of transcript,
+(an earlier version's per-user directory lock was held for a whole evaluation, which scans up to 64 MiB of transcript,
 so every other session's Stop that overlapped it passed unchecked); the directory-inode binding above holds
 for the subdirectory unchanged. PRUNING: a Stop that creates its transcript's subdirectory then, after
 releasing its own lock, removes stale subdirectories so their number stays bounded: it lists the names in the
 state dir (one directory read, no per-entry call), sorts the subdirectory-shaped ones, and examines at most
-4096 of them in that sorted order, starting just after a persisted CURSOR name and wrapping around (round 31:
-round 30 examined the first 4096 entries in directory order on every prune, so an eligible subdirectory listed
+4096 of them in that sorted order, starting just after a persisted CURSOR name and wrapping around (an earlier version:
+an earlier version examined the first 4096 entries in directory order on every prune, so an eligible subdirectory listed
 beyond them was never examined; the cursor makes successive prunes advance through the whole set), and removes
 at most 32 subdirectories, each only when its name has the subdirectory
 shape, it opens no-follow as a private own-uid directory, a NON-BLOCKING exclusive flock on it succeeds (so
@@ -275,7 +275,7 @@ one an evaluation holds is never touched), and, checked with that lock held, it 
 days; its entries are unlinked relative to its descriptor and it is removed only while its name still refers
 to the locked inode. The cursor is the file `prune-cursor` in the state dir (opened no-follow relative to the
 state dir's descriptor, a regular own-uid file holding one subdirectory name; anything else reads as no
-cursor, so the scan starts at the first name; round 32: it is WRITTEN only through an exclusively created
+cursor, so the scan starts at the first name; it is WRITTEN only through an exclusively created
 regular temporary file renamed over it, never by opening the existing entry, so a FIFO or other special file
 planted there cannot block the Stop): it records the last name examined when a prune stops short of
 the whole sorted set (the 4096-name window or the 32-removal batch), and it is removed once a prune has
@@ -287,7 +287,7 @@ locked when they were examined, and eligible ones the cursor has not reached yet
 prune (a prune runs only when a Stop creates a new transcript's subdirectory, so a backlog drains only as new
 transcripts arrive). Two concurrent prunes can each write the cursor, the later write winning; a name either
 skips is examined when the cursor next wraps round to it.
-On each Stop that is not an observed new turn (stop_hook_active true or absent, round 38) the save also
+On each Stop that is not an observed new turn (stop_hook_active true or absent) the save also
 re-reads the stored counter and never
 writes a lower value, and a block whose write would not raise the stored counter fails open. It is written
 even when the transcript is unreadable (the boundary is then kept as loaded). (ii) The transcript count: walking back at
@@ -308,9 +308,9 @@ byte bound leaves it unestablished. At 3 or more the Stop is ALLOWED instead, wi
 was hit, counts the unresolved claims, and names the first (see MESSAGES). The own counter is the REQUIRED brake: whenever the counter is
 unusable under stop_hook_active (no usable private state dir, no transcript_path to key it, a state file that
 cannot be read, or a block that cannot be written to it), and equally on a Stop whose field is ABSENT when
-it has a transcript_path (round 38; rounds 39 and 40: a new genuine user message read by such a Stop is
+it has a transcript_path (a new genuine user message read by such a Stop is
 consumed as a new turn only when it was read by a READABLE scan past a boundary that held, with no reset
-recorded in the state, no unknown marker standing at any boundary (rounds 42 and 43), and the block
+recorded in the state, no unknown marker standing at any boundary, and the block
 it lets through saves its moved boundary, so a block whose save fails
 takes this same fail-open, never a restarted count that blocks at every Stop; with neither the field nor a
 transcript_path the Stop blocks normally,
@@ -320,16 +320,16 @@ so the Stop FAILS OPEN at once with a one-line warning counting the unresolved c
 first (see MESSAGES), WHATEVER the
 transcript count says (the transcript count alone is never the only brake). An ABSENT state file in a usable
 private dir is an established count of 0 only OUTSIDE the corrective loop. Under stop_hook_active it is an
-UNKNOWN count (round 26): this hook writes the file at every block it makes and never deletes it while it is
-in use (round 30: it prunes only a subdirectory unwritten for 7 days, see PRUNING), so a file
+UNKNOWN count: this hook writes the file at every block it makes and never deletes it while it is
+in use (it prunes only a subdirectory unwritten for 7 days, see PRUNING), so a file
 missing mid-loop was removed by something else (a tmp cleaner deleting it between Stops, or its directory
 removed or replaced after the evaluation opened it) or pruned after 7 idle days,
 and the Stop FAILS OPEN at once as for an unusable counter,
-never restarting the count at 0; that closes the round-25 residual in which such a deletion, or a transcript
+never restarting the count at 0; that closes the earlier residual in which such a deletion, or a transcript
 reset or a synthetic user-role entry resetting the counter, let every corrective Stop block. The absence test needs the explicit true: where the host
 omits the field an absent state still reads as an established count of 0 (otherwise the first Stop of every
 transcript would fail open), so there an externally deleted state file restarts the count, a disclosed
-residual (round 38). Each warning is delivered to the user as a top-level {"systemMessage": ...} on stdout (the
+residual. Each warning is delivered to the user as a top-level {"systemMessage": ...} on stdout (the
 hooks reference's common JSON output field), ONE line (see MESSAGES); its detail
 (the true UTC, elapsed, and the first violation in full) goes to ONE different diagnostic line on stderr, which
 on exit 0 reaches only the host's debug log, so stderr is diagnostic logging, not a user-visible channel.
@@ -357,7 +357,7 @@ at most 64 MiB, each record at most 4 MiB (a longer record is skipped unparsed);
 Contract: pass = no stdout, exit 0; block = top-level {"decision": "block", "reason": ...} on stdout, exit 0
 (the Claude Code hooks reference, Stop decision control, specifies top-level decision and reason for Stop);
 capped or fail-open allow (see BLOCK CAP), or a busy Stop (see RESIDUAL COVERAGE) = top-level
-{"systemMessage": ...} on stdout (the user-visible warning), exit 0. Round 33: every Stop writes at most ONE
+{"systemMessage": ...} on stdout (the user-visible warning), exit 0. every Stop writes at most ONE
 stdout line, and a block or an allow with a warning then writes at most ONE stderr diagnostic line that
 differs from the stdout text, as diagnostic logging only (on exit 0 the host sends stderr to its debug log);
 see MESSAGES for the shapes and caps. Fail-OPEN silently on unparseable hook input or any internal error outside the per-claim
@@ -367,7 +367,7 @@ depend on the process locale. An error writing the output (a closed or full stdo
 24): it is swallowed and the hook exits 0; if the stream cannot even be pointed at /dev/null, the hook ends
 at once with os._exit(0), so no exit-time flush can fail it. Skipped entirely: a subordinate worker process,
 detected as env AIQT_HOOKS_WORKER=1 (legacy spellings are also accepted, see _is_worker), and a payload
-carrying agent_id (a subagent's stop). The worker skip writes one warning line to stderr (round 24; never to
+carrying agent_id (a subagent's stop). The worker skip writes one warning line to stderr (never to
 stdout, so worker output is not distorted, and on exit 0 stderr reaches only the host's debug log, so the
 skip is logged, not shown); that line is at most 100 characters. The one exception to exit 0 is an
 interpreter older than Python 3.14 that can start the hook: the guard at the top of this file reads no input,
@@ -385,13 +385,13 @@ compile this file (Python 3.4 and 3.5 cannot: it uses f-strings) exits 1, a non-
 goes ahead unchecked, as with the guard; .preview/README.md (Installing a hook, step 4) describes those
 cases.
 
-MESSAGES (round 33; round 34; round 35; round 36; round 37). Every message is ONE physical line: no newline
+MESSAGES. Every message is ONE physical line: no newline
 and no carriage return. The block reason's CORE is never shortened and never dropped: BLOCK_PREFIX unchanged
 (the recovery marker that block_cycles counts), then the FIRST violation in report order (the final message
 first, in line order with its elapsed footer last, then earlier messages oldest first), whether it is a
 timestamp, a status stamp, or an elapsed footer, as its literal WHOLE in a code span (never cut, no ellipsis;
 a timestamp or status stamp VERBATIM; an elapsed-footer literal verbatim except that each internal whitespace
-run is collapsed to one space (round 37), which keeps a padded footer to one short line), and its compact
+run is collapsed to one space, which keeps a padded footer to one short line), and its compact
 offset (+Nm: N minutes AHEAD of the true value; -Nm: N minutes BEHIND), and for a footer also the true
 elapsed, as in `Session elapsed 09:00` +333m, true 03:27; then "; +K more" (the other unresolved
 violations) whenever K > 0. Then extras in this order, each added only while the whole line stays within a
@@ -399,7 +399,7 @@ soft cap of MSG_CAP (200) characters (an extra that does not fit is SKIPPED, nev
 shorter ones are still tried): the remedy "; run `date`, `date -u`" (or "; run `date -u`" when only that
 fits); when a violation is a time AHEAD of the clock, the future-fact hint "; a genuine future time: put it
 in a `code span` or after 'due'" (or a shorter form); when the true elapsed is known and an elapsed-footer
-violation is not the claim shown (it is behind "+K more"), "; elapsed now HH:MM" (round 36: the true session
+violation is not the claim shown (it is behind "+K more"), "; elapsed now HH:MM" (the true session
 elapsed, which `date` does not give, so the footer can be corrected in the same cycle); and "; UTC now ...".
 A core longer than the soft cap
 is sent whole, with no extras. Every systemMessage is one line: a capped or fail-open allow counts the
@@ -437,7 +437,7 @@ written in any other shape (`(session 2h 5m)`, `(2h 5m session)`, `(session: 2h 
 recognized and not checked. AHEAD applies to EVERY zoned claim
 (that breadth is the drift catch), so a genuine FUTURE time mentioned mid-line without an immediately
 preceding keyword blocks, for example "the eclipse occurs 2027-08-02T18:00Z" ("valid through 2027-..." passes
-since round 24); remedy: precede it with a keyword ("expires 2027-...", "until 2027-...") or put it in a
+since an earlier version); remedy: precede it with a keyword ("expires 2027-...", "until 2027-...") or put it in a
 `code span`. A correction that repeats the rejected future value in plain prose re-blocks; quote it in a
 `code span` or a `>` line, or omit it. A genuinely scheduled time written as the FIRST token of a line blocks
 (put a label such as "Next run:" before it). Only a BRACKETED first line-leading stamp claims the current
@@ -453,7 +453,7 @@ written. Inline code-span detection is
 per line and approximate (an unclosed backtick run hides later spans on that line, so their claims are
 checked, failing toward checking). A letter abbreviation is trusted as local when it matches the process
 zone's abbreviation; a foreign zone sharing that abbreviation is not distinguished, and a claim with a foreign
-abbreviation or an invalid date is not checked anywhere, a line-leading status stamp included (round 26: it
+abbreviation or an invalid date is not checked anywhere, a line-leading status stamp included (it
 fails open, so a fabricated `[2026-09-24 09:00 PDT]` header in an Eastern-zone process is a MISS). Genuine-user detection is heuristic on entry shape and a fixed list of
 notification prefixes. The recovery boundary lives in volatile per-user storage: it is lost on reboot (the
 state is then absent and the whole current turn is evaluated once more). READABLE-BRANCH RESIDUAL:
@@ -463,23 +463,23 @@ the recovered boundary (an unreadable or RESET rescan keeps the stored pair unto
 a Stop records no NEW late hash of its own, so its blocked final can be re-reported once at its late
 arrival); a state STILL unreadable at that re-read loses the pending ENTRIES, every one of them, so EACH
 already-reported message they excused is re-reported once at its late arrival. Two OVERLAPPING Stops for one
-transcript (round 28): the one that finds the lock held is allowed UNCHECKED with a warning (the fail-open
+transcript: the one that finds the lock held is allowed UNCHECKED with a warning (the fail-open
 direction), so a violation in it passes. The window is one whole evaluation, which grows with the transcript
 scanned: milliseconds on a short turn, but about 1.2 s on a 49 MiB turn and 1.6 s on a 63 MiB one, near the
-64 MiB scan cap (measured round 30 on the development host). Round 30: the lock is the transcript's own state
-subdirectory, so only overlapping Stops of the SAME transcript contend (round 29's lock was the whole per-user
+64 MiB scan cap (measured an earlier version on the development host). the lock is the transcript's own state
+subdirectory, so only overlapping Stops of the SAME transcript contend (an earlier version's lock was the whole per-user
 state directory, so a Stop of any other session of the same user overlapping that window was also allowed
 unchecked). Per-transcript subdirectories are pruned only after 7 days unwritten (see PRUNING), so the state
 of a transcript idle that long is gone: its next Stop finds it ABSENT (outside the corrective loop the whole
-turn is evaluated; inside it the Stop fails open once). A state file that round 29 or earlier left directly
-in the state dir (a flat `<sha>` file, or round 28's `.lock` file) is neither read nor removed by round 30
+turn is evaluated; inside it the Stop fails open once). A state file that earlier versions left directly
+in the state dir (a flat `<sha>` file, or an earlier version's `.lock` file) is neither read nor removed by an earlier version
 (volatile storage clears it at reboot), so a corrective loop running across the upgrade finds its state
 ABSENT and fails open once. A same-uid process
 that rewrites the state file directly while holding no lock, or swaps a state directory holding a lower count
 into place, is outside the threat model (it can set the counter to any value anyway). Where flock is
 unavailable (no fcntl, or a filesystem that refuses it), no state is ever written, so, as with an unpersistable state, only final messages are
 checked and every violation on a Stop that is not an observed new turn (stop_hook_active true or absent,
-round 38) is allowed with a warning. A record over 4 MiB and anything beyond
+an earlier version) is allowed with a warning. A record over 4 MiB and anything beyond
 64 MiB back are not scanned. Only the host clock is authoritative, so a wrong host clock is enforced
 faithfully. The elapsed check is only as right as the lease (a stale, wrong-clock, or another session's
 lease yields a false block or a false pass; so does a stale Session-start-UTC value, trusted as written).
@@ -491,29 +491,29 @@ footer unchecked. Subagent output is not checked. BLOCK CAP: after 3
 consecutive block cycles a still-wrong final message PASSES with only a warning (by design: an unsatisfiable
 hook must not wedge the actor), and when the count cannot be established at all it PASSES at once with a
 one-line warning (the fail-open direction: a possible loop is never risked for an unverifiable count). The
-cap counts blocks per continuous run without a new-turn signal, not per violation (round 27): a corrected message that
+cap counts blocks per continuous run without a new-turn signal, not per violation: a corrected message that
 passes here but is rejected by another Stop hook keeps the loop running, and a NEW violation later in that
 same loop gets only the blocks the run has left, possibly none (then a capped allow with a warning), until a
 Stop whose stop_hook_active field is explicitly false, or a new genuine user message read by a persisting
 Stop from a readable scan past a boundary that held, with a readable counter, no reset recorded in the state,
 no unknown-history marker standing, no explicit true, and a boundary save that succeeds, starts a new
-count (round 38: a Stop whose field is
-merely ABSENT does not; rounds 39 and 40: nor does one whose scan reset, failed to read, or follows a
+count (a Stop whose field is
+merely ABSENT does not; nor does one whose scan reset, failed to read, or follows a
 recorded reset, an explicit false being the only signal that clears a recorded reset). The cap exists ONLY as defence in depth against a loop the model cannot
 satisfy; it is not how a violation is normally resolved. The marker record shape (a user-role entry whose
 text starts "Stop hook feedback" and carries this hook's block-reason prefix) is INFERRED from the host's
 documented Stop feedback and has NOT been observed in a live transcript; if the host records Stop feedback in
 any other shape (a `system` record, an isMeta-only record, a different prefix) the transcript count never
-reaches the cap, and the cap then rests on the hook's own recovery-state counter alone (round 24). A feedback record beyond the 8 MiB or
+reaches the cap, and the cap then rests on the hook's own recovery-state counter alone. A feedback record beyond the 8 MiB or
 512-record tail is not counted; an isMeta user entry between cycles does not end the run, while any other
 user entry does; a corrective continuation longer than 10 assistant entries is not counted as a consecutive
 cycle by the transcript count (the own recovery-state counter still counts it). The counter lives in the
 same volatile per-user state as the boundary; with that state unusable (or absent under an explicit true,
-round 26), a Stop that is not an observed new turn (stop_hook_active true or absent, round 38) is allowed
+an earlier version), a Stop that is not an observed new turn (stop_hook_active true or absent) is allowed
 with a warning (fail open), so a violation in the corrective loop then goes
 unenforced. Where the host omits the field an absent state reads as an established count of 0, which still
 blocks below the cap. That includes a corrective loop this hook did not start (another Stop hook blocked) in a session
-where this hook has never yet written its state for the transcript (round 26: the absence cannot be told
+where this hook has never yet written its state for the transcript (the absence cannot be told
 apart from a deletion, so it fails open rather than risk a loop). The capped
 warning reaches
 the user only through systemMessage, so its visibility depends on the host honouring that field; the stderr
@@ -593,7 +593,7 @@ SCHED_GAP_TOKENS = 3
 TIME_GRAMMAR = r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?"
 ZONE_GRAMMAR = r"(?:[ ]?(Z)|[ ]?([+-]\d{2}(?::?\d{2})?)|[ ](UTC|GMT|[A-Z]{2,6}))(?![A-Za-z0-9])"
 
-# Round 24: a keyword matches as a WHOLE word (an optional plural `s`, then no further letter or digit), so
+# a keyword matches as a WHOLE word (an optional plural `s`, then no further letter or digit), so
 # "validated", "throughput", "duet", or "etag" exempt nothing; only a listed STEM matches as a prefix ("expir"
 # covers expires, expiry, expiration).
 SCHED_STEMS = ("expir",)
@@ -1181,7 +1181,7 @@ def _check_claim(m, status, sched, ref, behind, where, cache=None, header=None):
         if cache is not None:
             cache[literal] = got
     if got is None:
-        # round 26: a claim that cannot be converted (an invalid date such as 2020-02-30, or a letter abbreviation
+        # a claim that cannot be converted (an invalid date such as 2020-02-30, or a letter abbreviation
         # that is not the local zone at that wall time) cannot be evaluated, so it FAILS OPEN, status stamp or not
         return None
     diff = got - ref
@@ -1218,7 +1218,7 @@ def check_message(text, ref, start, where, behind):
                 if lead is None:
                     lead = _lead_end(line)
                 status = m.start() == lead
-                # round 24: only a header in the bracketed console form CLAIMS the current time; an unbracketed
+                # only a header in the bracketed console form CLAIMS the current time; an unbracketed
                 # leading date (a history line such as "2020-01-01T00:00Z service launched") is never BEHIND
                 header = status and not header_seen and line[m.start() - 1:m.start()] == "["
                 header_seen = header_seen or status
@@ -1242,7 +1242,7 @@ def check_message(text, ref, start, where, behind):
         try:
             off = _footer_minutes(foot) * MINUTE - true_el
             if true_el >= 0 and (off > ELAPSED_AHEAD_US or -off > behind):
-                # round 37: each internal whitespace run collapsed to one space (documented in MESSAGES), so a
+                # each internal whitespace run collapsed to one space (documented in MESSAGES), so a
                 # padded footer stays one short line
                 bad.append(f"\"{' '.join(foot.group(0).split())}\" (last elapsed footer in {where}): true elapsed "
                            f"when written was {fmt_elapsed_us(true_el)} ({_minutes(off)})")
@@ -1436,7 +1436,7 @@ def prior_block_cycles(path, cap=BLOCK_CAP):
 
 def block_cycles(path, cap=BLOCK_CAP):
     """(count, established) for prior_block_cycles. `established` is False when the count could not be
-    established (round 24): the transcript is unreadable or not a regular file, the walk ended at a counting
+    established: the transcript is unreadable or not a regular file, the walk ended at a counting
     gap (more than CAP_GAP_ASSISTANT assistant entries) or at the record or byte bound before reaching `cap`, a
     genuine user entry, or the start of the file."""
     try:
@@ -1468,7 +1468,7 @@ def block_cycles(path, cap=BLOCK_CAP):
                     grouped = False  # only a real assistant turn separates two cycles
                 gap += 1  # an isMeta entry still counts toward the gap: the under-counting direction
                 if gap > CAP_GAP_ASSISTANT:
-                    established = False  # a counting gap (round 24: the count is then not established)
+                    established = False  # a counting gap (the count is then not established)
                     break  # a long stretch without a block: the run of consecutive cycles ends here
             elif _is_block_marker(entry):
                 if not grouped:
@@ -1498,17 +1498,17 @@ def default_state_dir():
     return f"/dev/shm/clock-truth-{os.geteuid()}"
 
 
-STATE_FILE = "state"  # round 30: the state file's name inside its per-transcript subdirectory
-PRUNE_AGE_NS = 7 * 86400 * 10 ** 9  # round 30: a per-transcript subdirectory unwritten this long may be pruned
-PRUNE_SCAN = 4096  # round 30: at most this many subdirectory names are examined per prune
-PRUNE_BATCH = 32  # round 30: at most this many subdirectories are removed per prune
-PRUNE_CURSOR = "prune-cursor"  # round 31: the file in the state root naming where the next prune resumes
+STATE_FILE = "state"  # the state file's name inside its per-transcript subdirectory
+PRUNE_AGE_NS = 7 * 86400 * 10 ** 9  # a per-transcript subdirectory unwritten this long may be pruned
+PRUNE_SCAN = 4096  # at most this many subdirectory names are examined per prune
+PRUNE_BATCH = 32  # at most this many subdirectories are removed per prune
+PRUNE_CURSOR = "prune-cursor"  # the file in the state root naming where the next prune resumes
 
 
 def state_subdir(tp):
-    """Round 30: the name of the per-transcript state SUBDIRECTORY for transcript path `tp`, inside the private
+    """the name of the per-transcript state SUBDIRECTORY for transcript path `tp`, inside the private
     state root: the SHA-256 of the path plus `.d` (the suffix keeps it apart from the flat `<sha>` state files
-    that rounds 29 and earlier left directly in the root, which are neither read nor removed)."""
+    that earlier versions left directly in the root, which are neither read nor removed)."""
     return _sha(tp) + ".d"
 
 
@@ -1532,8 +1532,8 @@ def _check_private(fd):
 def _open_private_dir(path, create=True, dir_fd=None):
     """A descriptor for `path` as a private (0700-or-stricter, own-uid, real) directory, or raise OSError. It is
     created 0700 when missing (unless `create` is False), opened no-follow with O_DIRECTORY, and checked on the
-    OPENED object (round 29), so every later read and write made relative to the descriptor stays in the
-    directory that was checked. Round 30: with `dir_fd` the name is created and opened RELATIVE to that
+    OPENED object, so every later read and write made relative to the descriptor stays in the
+    directory that was checked. with `dir_fd` the name is created and opened RELATIVE to that
     descriptor (the per-transcript subdirectory inside the private root)."""
     if create:
         try:
@@ -1545,7 +1545,7 @@ def _open_private_dir(path, create=True, dir_fd=None):
 
 
 def _open_state_dir(sdir, tp, create=True):
-    """Round 30: a descriptor for the private per-transcript subdirectory of `tp` inside the private state root
+    """a descriptor for the private per-transcript subdirectory of `tp` inside the private state root
     `sdir`, created (both, 0700, no-follow) when missing unless `create` is False, or raise OSError (a missing
     subdirectory with `create` False raises FileNotFoundError)."""
     root = _open_private_dir(sdir)
@@ -1564,11 +1564,11 @@ def load_state(sdir, tp, extra=None, dfd=None):
     state is genuinely ABSENT (a usable private dir holding no file for this transcript); ok is False with
     (0, None, []) when the state is UNAVAILABLE: the dir cannot be created or is not private, or the file
     cannot be opened, is not a regular own-uid file, cannot be read, or is malformed. When `extra` (a dict) is
-    given and ok is True, extra["blocks"] receives the consecutive-block counter (0 when absent; round 24), a
-    READ state also sets extra["reset"], the recorded reset-scan flag, and (round 42) extra["unknown"], the
+    given and ok is True, extra["blocks"] receives the consecutive-block counter (0 when absent; an earlier version), a
+    READ state also sets extra["reset"], the recorded reset-scan flag, and extra["unknown"], the
     recorded unknown-history marker (each False in a state written before its round), and an absent state
-    also sets extra["absent"] (round 26: under stop_hook_active the caller reads
-    absence as an unknown count, not 0). Round 29: with `dfd` (the evaluation's locked state-dir descriptor) the file is
+    also sets extra["absent"] (under stop_hook_active the caller reads
+    absence as an unknown count, not 0). with `dfd` (the evaluation's locked state-dir descriptor) the file is
     opened RELATIVE to it, never through `sdir`; without it the dir is opened and checked for this call. Round
     30: `dfd` is the transcript's own state SUBDIRECTORY (see state_subdir), holding the file STATE_FILE; without
     it, a missing subdirectory is an ABSENT state (it is not created by a read)."""
@@ -1577,7 +1577,7 @@ def load_state(sdir, tp, extra=None, dfd=None):
 
     def absent():
         if extra is not None:
-            extra["blocks"], extra["absent"] = 0, True  # round 26: the caller decides what absence means
+            extra["blocks"], extra["absent"] = 0, True  # the caller decides what absence means
         return 0, None, [], True
     try:
         if own:
@@ -1600,9 +1600,9 @@ def load_state(sdir, tp, extra=None, dfd=None):
                 return unavailable
             obj = json.loads(os.read(fd, STATE_MAX_BYTES))
             off, tail, pending = obj.get("offset"), obj.get("tail"), obj.get("pending")
-            blocks = obj.get("blocks", 0)  # absent in a state written before round 24: no blocks counted
-            reset = obj.get("reset", False)  # absent in a state written before round 40: no reset recorded
-            unknown = obj.get("unknown", False)  # absent before round 42: no unknown history recorded
+            blocks = obj.get("blocks", 0)  # absent in a state written before an earlier version: no blocks counted
+            reset = obj.get("reset", False)  # absent in a state written before an earlier version: no reset recorded
+            unknown = obj.get("unknown", False)  # absent before an earlier version: no unknown history recorded
             if obj.get("v") != 2 or type(off) is not int or off < 0 or not isinstance(pending, list) \
                     or not (tail is None or _is_hash(tail)) or (off > 0) != (tail is not None) \
                     or not all(_is_hash(h) for h in pending) or type(blocks) is not int or blocks < 0 \
@@ -1621,22 +1621,22 @@ def load_state(sdir, tp, extra=None, dfd=None):
 
 
 def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None, reset=False, unknown=False):
-    """Record the boundary, pending late-arrival hashes, the consecutive-block counter, (round 40) `reset`: a
+    """Record the boundary, pending late-arrival hashes, the consecutive-block counter, `reset`: a
     scan of this transcript RESET (its stored boundary did not hold), recorded until an explicit-false Stop
-    clears it, and (round 42) `unknown`: the reset history at this write was UNKNOWN (the state unreadable,
-    or absent under an explicit true), recorded until an explicit false clears it (round 43: it fails
+    clears it, and `unknown`: the reset history at this write was UNKNOWN (the state unreadable,
+    or absent under an explicit true), recorded until an explicit false clears it (it fails
     closed, exactly like the reset flag). Returns True only
-    when the COMPLETE serialized state was written (round 43: the write loops until every byte is written,
+    when the COMPLETE serialized state was written (the write loops until every byte is written,
     and zero progress is a failure) and atomically renamed into place; the atomic rename is the COMMIT
-    point (round 43): any failure BEFORE it keeps the previous state file byte-identical and returns False,
+    point: any failure BEFORE it keeps the previous state file byte-identical and returns False,
     and a failure after it leaves the committed state standing and still returns True (never raises either
     way). Cleanup is BEST EFFORT, handled apart from that outcome: the temp file of a failed write is
     unlinked, but a failed unlink only leaves it behind, never shadowing the state file, which only the
     rename names; and a failed close of an OWNED directory descriptor (a direct call without `dfd`) is
     suppressed, never raised and never a rollback (before, it escaped a successful rename as an OSError
-    with the state already replaced). Round 29: with `dfd` the temp file, the rename, and any cleanup are all RELATIVE to that
+    with the state already replaced). with `dfd` the temp file, the rename, and any cleanup are all RELATIVE to that
     descriptor (os.replace with src_dir_fd and dst_dir_fd), so the write lands in the directory the caller
-    locked; without it the dir is opened and checked for this call. Round 30: `dfd` is the transcript's own
+    locked; without it the dir is opened and checked for this call. `dfd` is the transcript's own
     state SUBDIRECTORY; without it the subdirectory is created when missing."""
     tmp, own = None, dfd is None
     try:
@@ -1649,12 +1649,12 @@ def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None, reset=False,
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_NONBLOCK
                      | getattr(os, "O_CLOEXEC", 0), 0o600, dir_fd=dfd)
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):  # round 32: never write a non-regular file
+            if not stat.S_ISREG(os.fstat(fd).st_mode):  # never write a non-regular file
                 raise OSError("state temporary is not a regular file")
             data = memoryview(json.dumps({"v": 2, "offset": offset, "tail": tail,
                                           "pending": list(pending)[-MAX_PENDING:], "blocks": blocks,
                                           "reset": bool(reset), "unknown": bool(unknown)}).encode())
-            while data:  # round 43: a SHORT write is not persistence; write every byte, or fail below
+            while data:  # a SHORT write is not persistence; write every byte, or fail below
                 n = os.write(fd, data)
                 if not isinstance(n, int) or n <= 0:  # zero progress would loop forever: a failure
                     raise OSError("state write made no progress")
@@ -1680,9 +1680,9 @@ def save_state(sdir, tp, offset, tail, pending, blocks=0, dfd=None, reset=False,
 
 
 def lock_state(sdir, tp, info=None):
-    """Round 29: take the EXCLUSIVE, NON-BLOCKING evaluation lock, an fcntl.flock on a private state DIRECTORY
+    """take the EXCLUSIVE, NON-BLOCKING evaluation lock, an fcntl.flock on a private state DIRECTORY
     itself, opened once (no-follow, O_DIRECTORY) and checked on the opened object to be an own-uid directory
-    with no group or other permission bits. Round 30: the locked directory is the transcript's OWN state
+    with no group or other permission bits. the locked directory is the transcript's OWN state
     subdirectory (state_subdir(tp), created 0700 and opened no-follow RELATIVE to the private root), so only
     Stops of the SAME transcript contend. Returns (dfd, status): "held" (dfd holds the lock until it is
     closed; every state read and write of the evaluation is made relative to it); "busy" (another evaluation
@@ -1690,7 +1690,7 @@ def lock_state(sdir, tp, info=None):
     failed: dfd is open for READS only, and the caller must write nothing); or "nodir" (the root or the
     subdirectory cannot be created or opened, or is not private: no state can be read or written; dfd is
     None). When `info` (a dict) is given, info["created"] is True when this call created the subdirectory.
-    The caller closes a returned dfd. Never raises. (Round 28 locked a separate `.lock` file, whose deletion
+    The caller closes a returned dfd. Never raises. (an earlier version locked a separate `.lock` file, whose deletion
     let a second evaluation lock a new inode: a directory cannot be replaced by a single-file unlink.)"""
     try:
         root = _open_private_dir(sdir)
@@ -1720,7 +1720,7 @@ def lock_state(sdir, tp, info=None):
 
 
 def _read_prune_cursor(root):
-    """Round 31: the subdirectory name stored in PRUNE_CURSOR (opened no-follow relative to the state root's
+    """the subdirectory name stored in PRUNE_CURSOR (opened no-follow relative to the state root's
     descriptor `root`; it must be a regular own-uid file holding one state_subdir-shaped name), else None."""
     try:
         fd = os.open(PRUNE_CURSOR, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
@@ -1740,8 +1740,8 @@ def _read_prune_cursor(root):
 
 
 def _write_prune_cursor(root, name):
-    """Round 31: record `name` in PRUNE_CURSOR (relative to `root`), or remove the cursor when `name` is None.
-    Round 32: the existing PRUNE_CURSOR is NEVER opened for writing (a FIFO planted there blocked round 31's
+    """record `name` in PRUNE_CURSOR (relative to `root`), or remove the cursor when `name` is None.
+    the existing PRUNE_CURSOR is NEVER opened for writing (a FIFO planted there blocked an earlier version's
     write-only open forever, hanging the Stop). The name is written to an EXCLUSIVELY created regular temporary
     file in the same directory (O_CREAT|O_EXCL|O_NOFOLLOW|O_NONBLOCK, checked regular on the opened object) and
     atomically renamed over PRUNE_CURSOR (os.replace relative to `root`), which replaces whatever entry was
@@ -1774,11 +1774,11 @@ def _write_prune_cursor(root, name):
 
 
 def prune_state(sdir, keep=None, now_ns=None):
-    """Round 30: remove per-transcript state subdirectories left by transcripts no longer in use, so their
+    """remove per-transcript state subdirectories left by transcripts no longer in use, so their
     number stays bounded. Lists the private root `sdir` (opened no-follow, never created), sorts its
     state_subdir-shaped names (less `keep`), and examines at most PRUNE_SCAN of them, starting just after the
-    persisted cursor name (round 31, PRUNE_CURSOR) and wrapping around, so successive prunes advance through the
-    whole sorted set (round 30 examined the first PRUNE_SCAN entries in directory order every time, starving any
+    persisted cursor name (PRUNE_CURSOR) and wrapping around, so successive prunes advance through the
+    whole sorted set (an earlier version examined the first PRUNE_SCAN entries in directory order every time, starving any
     listed beyond them). It removes at most PRUNE_BATCH subdirectories, each only when ALL of these hold: it
     opens no-follow as a private own-uid directory; a NON-BLOCKING exclusive flock on it SUCCEEDS (a
     subdirectory an evaluation holds is never touched); and, checked after the lock is taken, it has not been
@@ -1830,7 +1830,7 @@ def prune_state(sdir, keep=None, now_ns=None):
                 continue
             finally:
                 os.close(cfd)
-        # round 31: resume after the last name examined, or start afresh once every name has been examined
+        # resume after the last name examined, or start afresh once every name has been examined
         whole = len(names) <= PRUNE_SCAN and last == (window[-1] if window else None)
         _write_prune_cursor(root, None if whole else last)
     except Exception:
@@ -1847,19 +1847,19 @@ def evaluate(payload, now, start, sdir=None, notes=None, report=None, diag=None,
     only after it returns True, so a refusal whose write failed stores no entry; a successful local write
     is not proof that the host received it, and a process killed between the write and the commit stores
     none (the disclosed residual, see LATE-ARRIVAL EXCEPTION). Without `emit` (a caller that delivers the
-    reason itself) the entry is stored with the block's own save. Round 28: the WHOLE load, evaluate, and
-    save runs under an exclusive non-blocking lock (lock_state; round 29: on a state directory itself, with
-    every state read and write relative to the locked directory descriptor; round 30: on the transcript's own
+    reason itself) the entry is stored with the block's own save. the WHOLE load, evaluate, and
+    save runs under an exclusive non-blocking lock (lock_state; on a state directory itself, with
+    every state read and write relative to the locked directory descriptor; on the transcript's own
     state subdirectory), so two concurrent Stops can never interleave a load of the recovery state with
     another's save. A Stop that finds the lock HELD by another
     evaluation FAILS OPEN: it is allowed unchecked with a one-line warning appended to `notes`, and it reads and
     writes no state, so the counter is unchanged. A Stop that cannot lock for any other reason (locking
     unavailable, or no usable private state dir) is evaluated but WRITES NO STATE, exactly as for an
     unpersistable state: only its final message can block, and on a Stop that is not an observed new turn
-    (stop_hook_active true or absent, round 38) nothing can block (a
+    (stop_hook_active true or absent) nothing can block (a
     block there must record its raised counter, and none is recorded, so every violation fails open with a
     warning), so the counter is unchanged and no loop can form. With no transcript_path there is nothing to key
-    a state file and no state is ever read or written. Round 30: a Stop that CREATED its transcript's
+    a state file and no state is ever read or written. a Stop that CREATED its transcript's
     subdirectory then prunes stale ones (prune_state), after its own lock is released. `report` (a list), if
     given, receives the full violation list behind a block or an allow with a warning; `diag` (a list) receives
     the one stderr diagnostic line (see MESSAGES)."""
@@ -1904,7 +1904,7 @@ def _deliver(reason, emit, owed):
 def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, owed=None):
     """Return a block reason string, or None to pass. `now` and `start` are aware datetimes (start may be None).
     When the block cap turns a block into an allow, the warning is appended to `notes` (a list) if given.
-    Called by evaluate() with the lock held (round 28). Round 29: `dfd` is the locked state-dir descriptor (round
+    Called by evaluate() with the lock held. `dfd` is the locked state-dir descriptor (round
     30: the transcript's own state subdirectory) and
     every state read and write is made relative to it (None: no usable private state dir, so the state is
     UNAVAILABLE); `persist` False (the lock could not be taken: locking unavailable, or no usable private state
@@ -1913,7 +1913,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     block; a callable that commits it is appended instead, for evaluate() to run once the reason has been
     written."""
     bad, seen, over = [], set(), [0]  # a bounded report list; `seen` dedupes in O(1); `over` counts the rest
-    # round 37: whether a violation past MAX_REPORTED (never the claim shown) is an elapsed footer or a time AHEAD,
+    # whether a violation past MAX_REPORTED (never the claim shown) is an elapsed footer or a time AHEAD,
     # so the elapsed and future-fact extras do not depend on the report truncation
     over_footer, over_ahead = [False], [False]
 
@@ -1935,7 +1935,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     lam = lam if isinstance(lam, str) and lam.strip() else None
     tp = payload.get("transcript_path")
     tp = tp if isinstance(tp, str) and tp else None
-    extra = {}  # receives the consecutive-block counter when the state is readable (round 24)
+    extra = {}  # receives the consecutive-block counter when the state is readable
     if not tp:
         offset, tail, pending, state_ok = 0, None, [], True
     elif dfd is None:
@@ -1943,64 +1943,64 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     else:
         offset, tail, pending, state_ok = load_state(None, tp, extra, dfd)
     blocks = extra.get("blocks")  # None: the counter is unavailable (no transcript_path, or unusable state)
-    reset_seen = bool(extra.get("reset"))  # round 40: a reset scan recorded by an earlier Stop still stands
-    unknown_seen = bool(extra.get("unknown"))  # round 42: unknown history recorded by an earlier Stop's repair
+    reset_seen = bool(extra.get("reset"))  # a reset scan recorded by an earlier Stop still stands
+    unknown_seen = bool(extra.get("unknown"))  # unknown history recorded by an earlier Stop's repair
     active = payload.get("stop_hook_active") is True
-    new_turn = payload.get("stop_hook_active") is False  # round 38: an ABSENT field is NOT a new turn
-    # round 41: an UNREADABLE state hides any recorded reset, so the history is UNKNOWN, never read as
+    new_turn = payload.get("stop_hook_active") is False  # an ABSENT field is NOT a new turn
+    # an UNREADABLE state hides any recorded reset, so the history is UNKNOWN, never read as
     # cleared (reading it as False let the save-time repair write the counter at the cap with the flag
     # CLEAR, so restored OLD transcript bytes re-armed the new-turn signal one Stop later and the count
     # restarted without new user input); a transcript-derived message is never a new turn on such a Stop
     # regardless: state_ok False means `extra` is empty, so `blocks` is None and `fresh` below can only
-    # come from an explicit false. Round 42: unknown history is recorded as its own UNKNOWN marker
+    # come from an explicit false. unknown history is recorded as its own UNKNOWN marker
     # (new_unknown below), a separate field so a state fault stays distinguishable from an observed
     # truncation, and an ABSENT state under an explicit true is unknown history too: the count is unknown
-    # there (round 26), and reading its reset history as cleared let an external deletion under the
-    # explicit true erase a recorded reset. Round 43: the marker FAILS CLOSED exactly like the recorded
-    # reset, cleared ONLY by an explicit false (round 42 cleared it at a new user message past a held
+    # there, and reading its reset history as cleared let an external deletion under the
+    # explicit true erase a recorded reset. the marker FAILS CLOSED exactly like the recorded
+    # reset, cleared ONLY by an explicit false (an earlier version cleared it at a new user message past a held
     # non-trivial boundary, but the repair cannot see a truncation that preceded the state fault, so a
     # staged restore of the old records, one per Stop, held every boundary the repairs saved and replayed
     # old content as new turns; the disclosed cost is capped-allow after one state fault on a host that
     # omits the field, until an explicit false)
-    absent_unknown = active and bool(extra.get("absent"))  # a deletion met under an explicit true (round 42)
+    absent_unknown = active and bool(extra.get("absent"))  # a deletion met under an explicit true
     reset_unknown = not state_ok or absent_unknown
     if active and extra.get("absent"):
-        # round 26: this hook writes the state at the block that starts a corrective loop, so an ABSENT state under
+        # this hook writes the state at the block that starts a corrective loop, so an ABSENT state under
         # stop_hook_active (deleted between Stops, or its directory removed mid-call) is an UNKNOWN count, never 0
         blocks = None
-    # round 41: a recorded reset is state too (a round-40 review: a READABLE clean explicit-false Stop at
+    # a recorded reset is state too (an earlier version's review: a READABLE clean explicit-false Stop at
     # offset 0, counter 0 and the flag set skipped the save, so the one signal that clears the flag left
-    # it standing and every later transcript-derived new turn stayed suppressed); round 42: so is the
+    # it standing and every later transcript-derived new turn stayed suppressed); so is the
     # unknown marker, for the same reason
     had_state = bool(offset or pending or blocks or reset_seen or unknown_seen)
     t = turn_messages(tp, offset, tail) if tp else {"msgs": [], "size": None}
     msgs = t["msgs"]
-    # round 38: the count restarts ONLY at an observable new-turn signal: a Stop whose stop_hook_active field
+    # the count restarts ONLY at an observable new-turn signal: a Stop whose stop_hook_active field
     # is explicitly false (the platform's statement that this stop does not continue a stop-hook refusal,
     # trusted even over an unknown stored counter), or a NEW genuine user message past the boundary on a
     # persisting Stop whose field is not explicitly true (this hook registers only Stop, so the transcript is
-    # its UserPromptSubmit analogue; trusted only with a readable counter, a READABLE scan (round 40: an
+    # its UserPromptSubmit analogue; trusted only with a readable counter, a READABLE scan (an
     # unreadable scan, size None, cannot move its boundary, so a block that kept the loaded boundary would
     # re-arm the signal at every Stop), a scan whose stored boundary HELD, and NO reset recorded in the
-    # state (round 40: the round-39 exclusion bound only the resetting Stop, which saved its re-scanned
+    # state (the earlier exclusion bound only the resetting Stop, which saved its re-scanned
     # boundary, often 0; the next Stop verified that trivial boundary and read the RESTORED old user message
     # as new, so a truncation alternating with a restore blocked at every Stop without reaching the cap; the
     # reset is now carried in the state until an explicit false, the one independently trustworthy new-turn
     # signal, clears it), and consumed by a block only when the moved boundary is SAVED, since a boundary
-    # that never moves would re-arm the signal at every Stop: round 39, a reset scan re-reads OLD user
+    # that never moves would re-arm the signal at every Stop: an earlier version, a reset scan re-reads OLD user
     # messages from the start and is never a new turn, and a block on a user-message new turn whose save
     # fails is unrecorded and fails open below; `persist` alone says only that the lock is held, never that
     # the boundary moved).
-    # Before round 38 any Stop
+    # Before an earlier version any Stop
     # without the field restarted the count, so on a host that omits the field the cap never bound and an
     # unsatisfiable violation was refused at every stop. An allowed stop alone never resets. Under an explicit
-    # true the counter is PRESERVED whatever the transcript shows (round 26: a transcript rewrite that resets
+    # true the counter is PRESERVED whatever the transcript shows (a transcript rewrite that resets
     # the boundary, or a user-role entry read as a genuine user message, reset it and let a loop block without
     # limit; where the host omits the field, a NEW user-role entry read as a genuine user message can still
-    # restart the count, a disclosed residual; round 39: a rewrite or reset alone no longer restarts it
-    # there, and round 40: nor does any later Stop while the recorded reset stands; rounds 42 and 43: an
+    # restart the count, a disclosed residual; a rewrite or reset alone no longer restarts it
+    # there, nor does any later Stop while the recorded reset stands; an
     # unknown marker, see new_unknown below, suppresses the transcript-derived signal the same way while
-    # it stands, at ANY offset (round 42 suppressed it only at a trivial offset-0 boundary, but a staged
+    # it stands, at ANY offset (an earlier version suppressed it only at a trivial offset-0 boundary, but a staged
     # restore of the old records, one per Stop, holds every boundary the repairs saved, so a held boundary
     # is no proof of new content once the history is unknown); only the explicit false clears it)
     fresh = new_turn or (persist and not active and blocks is not None and not t.get("reset")
@@ -2113,7 +2113,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     readable = bool(tp) and t["size"] is not None
     if not readable:
         earlier_bad = []  # no readable transcript size: no boundary can be persisted
-    # BLOCK CAP (round 24): on a Stop that is not an observed new turn (round 38: stop_hook_active true OR
+    # BLOCK CAP: on a Stop that is not an observed new turn (stop_hook_active true OR
     # absent, so the cap binds on a host that omits the field) the prior consecutive blocks are the larger of
     # this hook's OWN counter in the recovery state and the transcript marker count; when neither can be
     # established the Stop FAILS OPEN with a one-line warning, and at BLOCK_CAP it is allowed with the cap
@@ -2123,44 +2123,44 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     if (final_bad or earlier_bad) and not fresh and (active or tp):
         tcount, tknown = block_cycles(tp) if tp else (0, False)
         known = [c for c in (blocks, tcount if tknown else None) if c is not None]
-        # the transcript count is never the only brake: without a usable own counter, fail open (round 24)
+        # the transcript count is never the only brake: without a usable own counter, fail open
         cap = "open" if blocks is None else "cap" if max(known) >= BLOCK_CAP else None
     will_block = bool(final_bad or earlier_bad) and cap is None
-    # The counter this Stop records (round 27: while stop_hook_active holds it NEVER decreases; round 38: nor
+    # The counter this Stop records (while stop_hook_active holds it NEVER decreases; nor
     # does any other Stop that is not an observed new turn, an absent field included).
     #   block: loaded + 1. A block on a Stop that is not a new turn happens only with a loaded integer counter
     #          below the cap (an unknown one gives cap "open", a count at the cap gives "cap"; with neither
     #          the field nor a transcript_path nothing is keyed, loaded, or saved).
     #   a new-turn Stop (fresh: stop_hook_active explicitly false, or a new genuine user message read by a
     #          READABLE scan past a boundary that HELD, on a persisting Stop with a readable counter, no
-    #          reset recorded in its state (round 40), no unknown marker standing at any boundary
-    #          (rounds 42 and 43), and no explicit true): 0 then
+    #          reset recorded in its state, no unknown marker standing at any boundary
+    #         , and no explicit true): 0 then
     #          (+1 if it blocks); the
-    #          only resets (round 38: a Stop whose field is merely ABSENT is NOT a new turn and keeps the
-    #          counter, and an allowed stop alone never resets it; round 39: a block on a user-message new
+    #          only resets (a Stop whose field is merely ABSENT is NOT a new turn and keeps the
+    #          counter, and an allowed stop alone never resets it; a block on a user-message new
     #          turn whose save FAILS becomes the unrecorded-block fail-open below, so an unmoved boundary
     #          never re-arms the signal into a second block).
-    #   fail-open allow ("open"): BLOCK_CAP (round 26), so the rest of that corrective loop stays capped.
-    #   capped allow ("cap"), or a PASS, on any other Stop: the loaded counter, unchanged (round 27: a clean
+    #   fail-open allow ("open"): BLOCK_CAP, so the rest of that corrective loop stays capped.
+    #   capped allow ("cap"), or a PASS, on any other Stop: the loaded counter, unchanged (a clean
     #          pass inside the loop used to reset it to 0, so alternating with another Stop hook that rejected
     #          the clean message let this hook block every other Stop without limit); an UNKNOWN counter (the
     #          state unreadable, so none was loaded) is recorded as BLOCK_CAP, capped, never as 0.
-    # CONCURRENCY (round 28). The argument below reads the file's successive values as a SEQUENCE of Stops, each
+    # CONCURRENCY. The argument below reads the file's successive values as a SEQUENCE of Stops, each
     # loading the counter and then saving what it computed from that load. That holds only if no two evaluations
-    # for one transcript interleave between one's load and its save: round 27 assumed serialized Stops, and two
+    # for one transcript interleave between one's load and its save: an earlier version assumed serialized Stops, and two
     # concurrent evaluations broke it (a clean Stop A loads 1 and pauses; a violating Stop B loads 1, saves 2,
     # and blocks; A saves 1; repeated, B blocked every time). The assumption is now DISCHARGED by the lock:
     # evaluate() runs this whole function (load, evaluate, save) under an exclusive flock, taken NON-BLOCKING.
-    # SYNCHRONIZATION IDENTITY (round 29), per transcript (round 30): the lock is held on the inode of the
+    # SYNCHRONIZATION IDENTITY, per transcript: the lock is held on the inode of the
     # transcript's OWN private state SUBDIRECTORY (state_subdir(tp), inside the private state root, created
     # 0700 and opened no-follow relative to the root), through the descriptor `dfd` opened once per evaluation,
     # and EVERY state-file read (the load, and save()'s re-read) and write (the temp file and the atomic
     # os.replace, both relative to dfd) of this evaluation goes through that same descriptor, so the lock and
     # the data it guards are bound to ONE directory inode, and the Stops that contend for it are exactly the
-    # Stops of that one transcript, the set this argument is about (round 29's per-USER directory made other
-    # sessions' Stops contend too). Round 28 locked a
+    # Stops of that one transcript, the set this argument is about (an earlier version's per-USER directory made other
+    # sessions' Stops contend too). an earlier version locked a
     # separate `.lock` file, and deleting only that file between A's final re-read and its save let B create and
-    # lock a new inode, record 2, and block, after which A saved 1 (codex round 28: eight blocks in one run, the
+    # lock a new inode, record 2, and block, after which A saved 1 (an earlier review: eight blocks in one run, the
     # counter going 1, 2, 1 each time, with no actor writing state or bypassing flock). A single-file unlink
     # cannot replace a directory: deleting the state file while A holds the lock leaves B finding the lock HELD;
     # removing the subdirectory or the root (rm -r) makes A's save fail (nothing can be created in a removed
@@ -2169,19 +2169,19 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     # explicit true an unknown count that fails open and records BLOCK_CAP and the unknown marker (round
     # 42); where the field is absent, an
     # ESTABLISHED 0 that can restart the count, and the recorded reset history with it, exactly as for any
-    # external deletion (the disclosed deletion residual, round 38; see the BOUND below).
-    # PRUNING (round 30): prune_state() removes a subdirectory only while IT holds that subdirectory's lock (a
+    # external deletion (the disclosed deletion residual; see the BOUND below).
+    # PRUNING: prune_state() removes a subdirectory only while IT holds that subdirectory's lock (a
     # non-blocking flock that fails whenever an evaluation holds it) and only when the subdirectory has gone
     # unwritten for PRUNE_AGE_NS, so a removal is an external deletion between Stops, the case the BOUND below covers
     # (the next load is ABSENT: under an explicit true an unknown count that fails open recording BLOCK_CAP
-    # and the unknown marker (round 42); where the field is absent, an established 0 that restarts the
+    # and the unknown marker; where the field is absent, an established 0 that restarts the
     # count, the disclosed deletion residual,
-    # round 38); a Stop that opened the subdirectory just before
+    # an earlier version); a Stop that opened the subdirectory just before
     # the pruner removed it locks the removed inode, finds the state ABSENT, and cannot save (the rm -r case).
     # A Stop that finds the lock held reads and writes
     # nothing and allows; a Stop that cannot lock for another reason runs with `persist` False and writes
     # nothing, so unless it is an observed new turn it cannot block (a block needs a recorded raise, below;
-    # round 38: an explicit-false Stop still blocks, starting a count it may fail to record). Neither can
+    # an explicit-false Stop still blocks, starting a count it may fail to record). Neither can
     # move the counter or block inside the loop. So the Stops that write the state file are serialized, and each
     # one's load and save are adjacent in the sequence the argument reads. As defence in
     # depth against a writer that ignores the (advisory) lock, save() below also re-reads the stored counter on
@@ -2191,27 +2191,27 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     # rewrites the state file directly while holding no lock (or that swaps a directory holding a LOWER valid
     # count back into place) is outside the threat model: it can set the counter to any value anyway, so the
     # lock gives no protection against it and claims none.
-    # BOUND (round 27). Take one continuous run of Stops for one transcript_path (so one state file) in which
+    # BOUND. Take one continuous run of Stops for one transcript_path (so one state file) in which
     # no Stop is an observed new turn: none carries an explicit stop_hook_active false, and none reads a new
     # genuine user message past a boundary that HELD as a persisting Stop with a readable counter and no
-    # explicit true (round 38: a Stop whose field is ABSENT is inside the run, so the bound holds on a host
-    # that omits the field; round 39: a Stop whose scan was RESET is inside the run too, whatever user message
-    # the re-read from the start meets; round 40: so is every LATER Stop while the recorded reset stands, an
+    # explicit true (a Stop whose field is ABSENT is inside the run, so the bound holds on a host
+    # that omits the field; a Stop whose scan was RESET is inside the run too, whatever user message
+    # the re-read from the start meets; so is every LATER Stop while the recorded reset stands, an
     # explicit false being the only signal that clears it, and so is a Stop whose scan was UNREADABLE, its
-    # size None, and (rounds 41 and 42) a Stop whose STATE was unreadable, its repair writing the UNKNOWN
+    # size None, and a Stop whose STATE was unreadable, its repair writing the UNKNOWN
     # marker at the boundary its own scan established, every later Stop staying inside the run while the
-    # marker stands, at any boundary (round 43: only the explicit false clears it, see CORRUPTION
+    # marker stands, at any boundary (only the explicit false clears it, see CORRUPTION
     # below); and a
     # user-message new-turn Stop whose boundary save FAILS separates
     # two runs without blocking, its block failing open as unrecorded below; a run of
-    # explicit trues is round 27's special case). The state file is written only by save_state(), called
+    # explicit trues is an earlier version's special case). The state file is written only by save_state(), called
     # through save() below with
-    # `new_blocks` (or, round 28, the higher stored value), and never deleted by this hook while in use (round
+    # `new_blocks` (or, an earlier version, the higher stored value), and never deleted by this hook while in use (round
     # 30: prune_state() deletes only a subdirectory it has locked and that has gone unwritten for PRUNE_AGE_NS,
     # which this argument treats exactly as an external deletion); every write is an
     # atomic rename of a complete v2 file. Let
     # c be the counter a Stop LOADS (None when unreadable, or when ABSENT under an explicit true; an ABSENT
-    # state where the field is absent loads an ESTABLISHED 0, round 38, the external-deletion case below)
+    # state where the field is absent loads an ESTABLISHED 0, an earlier version, the external-deletion case below)
     # and w what it writes. By the cases above,
     # within the run w >= c whenever c is an integer (block c + 1, cap or pass c, open BLOCK_CAP >= c since no
     # write ever exceeds BLOCK_CAP: a block writes c + 1 only when c < BLOCK_CAP), and w = BLOCK_CAP whenever
@@ -2221,27 +2221,27 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     # recorded counter by exactly 1; a non-decreasing integer in [0, BLOCK_CAP] can be raised by 1 at most
     # BLOCK_CAP times, so the run holds at most BLOCK_CAP blocks (at most BLOCK_CAP - 1 when the Stop that
     # started it was this hook's own block, which recorded 1). Nothing in this argument reads the transcript
-    # or another hook's output: other hooks' feedback records, a transcript rewrite or reset (round 39: a
-    # reset scan is never a new turn, and round 40: it is recorded, so no later re-read of the rewritten
+    # or another hook's output: other hooks' feedback records, a transcript rewrite or reset (a
+    # reset scan is never a new turn, and it is recorded, so no later re-read of the rewritten
     # content is one either; such Stops stay inside the run), and clean or violating messages
     # in any order change only the transcript count and the boundary, neither of which can lower the counter
     # or make a Stop block without the own counter below the cap; a user-role entry read as a NEW genuine
     # user message by a persisting Stop with a readable counter and no explicit true ENDS the run (where the
     # host omits the field, the disclosed synthetic-entry residual above), and when its boundary save fails
-    # it ends the run without blocking (round 39: that block is unrecorded and fails open). CORRUPTION of the
+    # it ends the run without blocking (that block is unrecorded and fails open). CORRUPTION of the
     # state file (unreadable or malformed) makes the next load UNAVAILABLE, an unknown count, which fails
     # open (a violation) or records BLOCK_CAP or nothing (a pass), never a lower integer, and any repair
-    # it writes records the UNKNOWN marker (round 42; round 41 wrote the reset flag itself). While the
-    # marker stands NO transcript-derived user message ends the run, at any boundary (round 43; round 42
+    # it writes records the UNKNOWN marker (an earlier version wrote the reset flag itself). While the
+    # marker stands NO transcript-derived user message ends the run, at any boundary (an earlier version
     # ended it past a held non-trivial boundary, but the repair cannot see a truncation that preceded the
     # state fault, so a staged restore of the old records, one per Stop, held every boundary the repairs
     # saved and replayed old content as new turns); only an explicit false ends it, so one state fault
     # keeps the rest of the run on a host that omits the field in capped-allow, the disclosed
     # residual. An external
-    # DELETION makes the next load ABSENT: under an explicit true that too is an unknown count (round 26), its
-    # repair recording the unknown marker (round 42), but where the field is absent it reads as an
+    # DELETION makes the next load ABSENT: under an explicit true that too is an unknown count, its
+    # repair recording the unknown marker, but where the field is absent it reads as an
     # established 0 and restarts the count, the disclosed
-    # deletion residual (round 38). The residual is a writer
+    # deletion residual. The residual is a writer
     # OTHER than this hook replacing the file (or the directory) with a valid lower count (the same uid,
     # deliberately), or writing it while ignoring the lock: outside the threat model (see CONCURRENCY).
     if will_block:
@@ -2251,12 +2251,12 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
     elif cap == "open" or blocks is None:
         new_blocks = BLOCK_CAP
     else:
-        new_blocks = blocks  # a capped allow or a pass that is no observed new turn: preserved (rounds 27, 38)
-    # round 40: the reset history this Stop records: a reset scan, this one or a recorded earlier one, stands
+        new_blocks = blocks  # a capped allow or a pass that is no observed new turn: preserved (38)
+    # the reset history this Stop records: a reset scan, this one or a recorded earlier one, stands
     # until an explicit-false Stop, the platform's own new-turn statement, clears it; transcript content
-    # never does (what follows a reset is exactly what cannot be trusted). Rounds 42 and 43: UNKNOWN
+    # never does (what follows a reset is exactly what cannot be trusted). UNKNOWN
     # history (the state unreadable at this Stop's load, or absent under an explicit true) is recorded as
-    # its own marker, carried exactly like the flag and cleared ONLY by the explicit false (round 42 also
+    # its own marker, carried exactly like the flag and cleared ONLY by the explicit false (an earlier version also
     # cleared it at a transcript-derived new turn past a held non-trivial boundary, which a staged restore
     # of old records satisfied, so restored content restarted the count with no new user input)
     new_reset = not new_turn and (reset_seen or bool(t.get("reset")))
@@ -2264,16 +2264,16 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
 
     def save(off, tl, pend, late=()):
         """Write the state with `new_blocks` and `new_reset`; True only when it was written and, for a block,
-        the write RAISED the stored counter. Round 28: on a Stop that is not an observed new turn (round 38;
+        the write RAISED the stored counter. on a Stop that is not an observed new turn (an earlier version;
         before, only under stop_hook_active) the stored counter is re-read first (the lock is held) and a
         lower value is never written over it (an observed new turn writes its reset, or its fresh count of 1,
         as loaded); a block whose write would not raise it (another writer got there first) returns False, so
         the block fails open as an unrecorded one, and its `late` pending entry is NOT written (that refusal
         is never delivered, so no arrival is owed; before, the entry was written and later excused the
-        arrival in silence); round 40: the same re-read keeps a stored reset flag, never
-        clearing it on a Stop that is not an observed new turn, and (round 42) the stored unknown marker
+        arrival in silence); the same re-read keeps a stored reset flag, never
+        clearing it on a Stop that is not an observed new turn, and the stored unknown marker
         the same way, defence in depth beside the loaded `unknown_seen` that new_unknown already
-        carries. Round 29: the re-read and the write are both
+        carries. the re-read and the write are both
         relative to the locked directory descriptor. With `owed` given, this write RESERVES the raised
         counter and stores no `late` entry: the entry is committed by commit_late() only after the block
         reason has been written (see evaluate())."""
@@ -2286,8 +2286,8 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
             stored = cur.get("blocks") if ok and not cur.get("absent") else None
             if stored is not None:
                 nb, raised = max(new_blocks, stored), stored < new_blocks
-                rs = new_reset or bool(cur.get("reset"))  # round 40: a recorded reset is never erased mid-run
-                un = new_unknown or bool(cur.get("unknown"))  # round 42: nor is the unknown marker
+                rs = new_reset or bool(cur.get("reset"))  # a recorded reset is never erased mid-run
+                un = new_unknown or bool(cur.get("unknown"))  # nor is the unknown marker
         recorded = raised or not will_block
         late = list(late) if recorded else []
         if owed is None:
@@ -2340,25 +2340,25 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
                 # earlier-message-only violation pass with no warning at all
                 kept, earlier_bad = earlier_bad, []
         elif had_state or not state_ok or absent_unknown:
-            # advance, or repair an unreadable state, or (round 43) persist the unknown marker a CLEAN Stop
-            # discovered in an absent state under an explicit true; round 27: the counter is written too
+            # advance, or repair an unreadable state, or persist the unknown marker a CLEAN Stop
+            # discovered in an absent state under an explicit true; the counter is written too
             # (preserved under stop_hook_active, BLOCK_CAP when it was unknown), never reset to 0 inside
             # the corrective loop
             save(*(held if held is not None else (t["end"], t["tail"], remaining)))
-    # round 42: `new_turn` joins the final save condition: on a clean explicit-false Stop with BOTH the
+    # `new_turn` joins the final save condition: on a clean explicit-false Stop with BOTH the
     # state and the transcript unreadable, none of will_block, had_state (the failed read hid the
     # recorded reset) or cap == "open" held, so the one signal that clears the flags wrote nothing and a
-    # recorded reset survived two transient faults, capping later genuine turns (found in round 41). Round
+    # recorded reset survived two transient faults, capping later genuine turns (found in an earlier version). Round
     # 43: unreadable-state discovery joins BOTH predicates, as reset_unknown (the unreadable read
     # itself, or the absent state met under an explicit true), so a CLEAN Stop that discovered either,
     # with the transcript unreadable and the field omitted or explicitly true, still persists the
     # unknown marker and the capped counter (before, only absent_unknown joined: a clean Stop whose
     # STATE read failed saved nothing, the fault was forgotten, and the next genuine user turn
-    # restarted the count, found in round 43)
+    # restarted the count, found in an earlier version)
     elif tp and (blocks is not None or cap == "open" or reset_unknown) and (will_block or had_state
                                                                             or cap == "open" or new_turn
                                                                             or reset_unknown):
-        # round 43: a Stop whose state read failed loaded 0, None and [] above (the explicit false, or
+        # a Stop whose state read failed loaded 0, None and [] above (the explicit false, or
         # the clean faulting Stop persisting its discovery); re-read
         # under the still-held lock and keep a stored boundary and pending list that read back, so a
         # transient fault does not overwrite them with 0 and an empty list (the reset-to-0 rescan
@@ -2371,8 +2371,8 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
                 offset, tail, pending = off2, tl2, pend2
         saved = save(offset, tail, pending)  # keep the boundary, record the counter
     if will_block and not new_turn and tp and not saved:
-        # this block could not be recorded in the own counter, so the next Stop could not cap (round 38: on
-        # any Stop that is not an observed new turn, an absent field included; round 39: on a user-message
+        # this block could not be recorded in the own counter, so the next Stop could not cap (on
+        # any Stop that is not an observed new turn, an absent field included; on a user-message
         # new turn too, since its unsaved boundary would re-arm the reset and let every Stop block; only an
         # explicit-false Stop, the platform's own new-turn statement, still blocks with an unrecorded count;
         # with no transcript_path no counter exists at all and the block stands, the disclosed residual above)
@@ -2400,7 +2400,7 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
                                   f"{el or 'unknown'}; first: {bad[0]}"))
 
     if cap == "open":
-        # round 24: the hook's own consecutive-block counter is unusable (no usable recovery state, or a block
+        # the hook's own consecutive-block counter is unusable (no usable recovery state, or a block
         # that could not be recorded in it), so a loop cannot be ruled out: fail OPEN, loudly, whatever the
         # transcript count says
         if notes is not None:
@@ -2416,13 +2416,13 @@ def _evaluate(payload, now, start, notes, dfd, persist, report=None, diag=None, 
         diagnose("capped allow")
         return None
     diagnose("block")
-    # round 35: ONE line; the never-shortened core (BLOCK_PREFIX, the first violation's literal whole in a code
+    # ONE line; the never-shortened core (BLOCK_PREFIX, the first violation's literal whole in a code
     # span, its compact offset, the unresolved count), then the remedy, the future-fact hint, the true elapsed
-    # (round 36) and UTC now, each only while the line stays within the soft cap
+    # and UTC now, each only while the line stays within the soft cap
     more = f"; +{total - 1} more" if total > 1 else ""
     ahead = over_ahead[0] or any(_is_ahead(v) for v in bad)
-    # round 36: a wrong footer that is not the claim shown would otherwise get no correction value until a
-    # later block; `date` gives the time, not the elapsed. Round 37: a footer past MAX_REPORTED counts too
+    # a wrong footer that is not the claim shown would otherwise get no correction value until a
+    # later block; `date` gives the time, not the elapsed. a footer past MAX_REPORTED counts too
     first = next((i for i, v in enumerate(bad) if _first_claim([v]) is not None), None)
     hidden_footer = el is not None and (over_footer[0] or any(_is_footer(v) for i, v in enumerate(bad)
                                                               if i != first))
@@ -2445,7 +2445,7 @@ def _first_claim(bad):
     """(literal, compact offset) of the FIRST violation in the violation strings `bad`, in report order (the
     final message first, in line order with its elapsed footer last, then earlier messages oldest first),
     whether it is a timestamp, a status stamp, or an elapsed footer; the literal is copied verbatim from `bad`
-    (a footer's was whitespace-collapsed by check_message, round 37). A footer's offset also names the true
+    (a footer's was whitespace-collapsed by check_message). A footer's offset also names the true
     elapsed (`+333m, true 03:27`). None when no string has a known shape."""
     for v in bad:
         for kind in ("timestamp ", "status stamp "):
@@ -2469,7 +2469,7 @@ def _short_off(text):
 
 
 def _claim_line(head, claim):
-    """`head`, then the claim as ": `literal` offset", the literal WHOLE and verbatim (round 35: never shortened,
+    """`head`, then the claim as ": `literal` offset", the literal WHOLE and verbatim (never shortened,
     whatever the length), on one line. No claim: `head` alone."""
     if claim is None:
         return _one_line(head)
@@ -2498,7 +2498,7 @@ def _fit(core, extras, cap):
 
 
 def _emit_line(text, *stream):
-    """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN (round 24): it is
+    """Write one line to `stream` (default stdout) and flush it. An output error fails OPEN: it is
     swallowed, and the stream's descriptor is pointed at /dev/null so the interpreter's exit flush cannot fail
     either, so the hook still exits 0. If that rescue fails too, the process ends at once with os._exit(0)
     (no flush is retried), since any later write or exit flush could fail the hook."""
@@ -2513,7 +2513,7 @@ def _emit_line(text, *stream):
         return True
     except Exception:
         try:
-            fd = os.open(os.devnull, os.O_WRONLY | os.O_NONBLOCK)  # round 32: no blocking open anywhere
+            fd = os.open(os.devnull, os.O_WRONLY | os.O_NONBLOCK)  # no blocking open anywhere
             try:
                 os.dup2(fd, s.fileno())
             finally:
@@ -2532,7 +2532,7 @@ def main(argv):
         return _self_test()
     try:
         if _is_worker():
-            # round 24: the skip is no longer silent (stderr only, so worker output is never distorted)
+            # the skip is no longer silent (stderr only, so worker output is never distorted)
             _emit_line("stamp-truth-stop: skipped, worker marker present (AIQT_HOOKS_WORKER=1 or a legacy spelling)",
                        sys.stderr)
             return 0
@@ -2550,7 +2550,7 @@ def main(argv):
                           emit=lambda r: _emit_line(json.dumps({"decision": "block", "reason": r})))
     except Exception:
         return 0  # fail-open silently
-    # round 33: ONE stdout line per Stop, then at most ONE different diagnostic line on stderr (see MESSAGES)
+    # ONE stdout line per Stop, then at most ONE different diagnostic line on stderr (see MESSAGES)
     if reason:
         pass  # already written by evaluate() above
     elif notes:
@@ -2580,7 +2580,7 @@ def _self_test():
     def ustamp(dt):
         return f"[{dt.strftime('%Y-%m-%dT%H:%M:%SZ')}]"
 
-    # round 34: a message names its claim as `literal` then the compact offset, +Nm AHEAD or -Nm BEHIND
+    # a message names its claim as `literal` then the compact offset, +Nm AHEAD or -Nm BEHIND
     AHEAD_IN, BEHIND_IN = "` +", "` -"
 
     def run_main(payload_text, env=None, argv=("stamp-truth-stop.py",), out=io.StringIO):
@@ -2625,12 +2625,12 @@ def _self_test():
     # 128 KiB and adapts only when an mmapped block is freed, so a child whose module import left it
     # unadapted (a bytecode-cache load allocates less than a source compile) serves every larger
     # assembly from freshly mmapped pages, and the zero-fill faults, charged to CPU time, read as a
-    # measured 2.3x large-size penalty on CORRECT code (QA round 3: ratio 2.2 to 2.4 with a stale
+    # measured 2.3x large-size penalty on CORRECT code (ratio 2.2 to 2.4 with a stale
     # __pycache__ present, 0.85 to 0.92 without one, same code); the warmup puts a child in the
     # adapted state, where repeated large blocks reuse heap pages, on either import path. That
     # adaptation, and so the warmup, holds under the DEFAULT allocator policy only: an ambient
     # MALLOC_* variable or GLIBC_TUNABLES entry pins glibc's thresholds and disables the dynamic
-    # adjustment the warmup relies on (QA round 4: healthy code with an inherited
+    # adjustment the warmup relies on (healthy code with an inherited
     # MALLOC_TOP_PAD_=131072 false-REDs at 2.0 to 3.1x on a loaded host), so every timed child
     # launches with child_env(), which neutralizes ambient allocator settings.
     HANG_TIMEOUT = 120  # seconds: a child's hang guard only, far above any child's own run (a few seconds)
@@ -2666,7 +2666,7 @@ def _self_test():
         An inherited allocator override (MALLOC_TOP_PAD_, MALLOC_MMAP_THRESHOLD_, MALLOC_TRIM_THRESHOLD_,
         MALLOC_MMAP_MAX_, a GLIBC_TUNABLES glibc.malloc.* entry) pins glibc's thresholds and disables the
         dynamic adaptation the GROWTH_SRC warmup relies on, so a timed verdict would rest on the operator's
-        ambient allocator policy (QA round 4: healthy code false-REDs at 2.0 to 3.1x under load); a timed
+        ambient allocator policy (healthy code false-REDs at 2.0 to 3.1x under load); a timed
         child runs under the default policy only."""
         return {k: v for k, v in os.environ.items() if not k.startswith("MALLOC_") and k != "GLIBC_TUNABLES"}
 
@@ -2718,7 +2718,7 @@ def _self_test():
         the counts: line counts are exact, and allocated-byte counts are approximately stable (about 1
         percent of jitter with the child's random hash seed, far inside LINEAR_LIMIT). Counting sees
         Python-frame steps and allocations only; work inside one C call that allocates nothing is invisible
-        to it (QA round 2), so every counted test keeps a CPU-clock growth check beside it. A child that
+        to it, so every counted test keeps a CPU-clock growth check beside it. A child that
         fails raises AssertionError with its stderr."""
         code = CHILD_HEAD + COUNTED_SRC + setup_src + \
             "print(json.dumps(counted(lambda: fn(%d)) + counted(lambda: fn(GROWTH * %d))))\n" % (n, n)
@@ -2811,18 +2811,18 @@ def _self_test():
                             report=self.report, diag=self.diag)
 
         def rep(self):
-            # round 33: the full violation list behind the last ev() or final() (the one-line reason keeps only
+            # the full violation list behind the last ev() or final() (the one-line reason keeps only
             # the first rejected timestamp)
             return "\n".join(self.report)
 
         def seed(self, blocks=0, sdir=None):
-            # the recovery state an earlier Stop of this hook leaves for the transcript (round 26: under
+            # the recovery state an earlier Stop of this hook leaves for the transcript (under
             # stop_hook_active an ABSENT state is an unknown count and fails open, so a test of the corrective
             # loop's other rules starts from the state the loop's own first block would have written)
             self.assertTrue(save_state(sdir or self.sdir, self.tr, 0, None, [], blocks))
 
         def key(self, tr=None, sdir=None, make=False):
-            # round 30: the state FILE of a transcript, inside its own private state subdirectory (made 0700 when
+            # the state FILE of a transcript, inside its own private state subdirectory (made 0700 when
             # `make`, with a private root)
             sub = os.path.join(sdir or self.sdir, state_subdir(tr or self.tr))
             if make:
@@ -2832,7 +2832,7 @@ def _self_test():
             return os.path.join(sub, STATE_FILE)
 
         def state_files(self, sdir):
-            # round 30: every existing per-transcript state file under the state root `sdir`
+            # every existing per-transcript state file under the state root `sdir`
             out = []
             for name in os.listdir(sdir) if os.path.isdir(sdir) else ():
                 p = os.path.join(sdir, name, STATE_FILE)
@@ -2853,26 +2853,26 @@ def _self_test():
             self.assertIn("+30m", r)
             self.assertTrue(r.startswith(BLOCK_PREFIX))
             self.assertIn(f"{BLOCK_PREFIX}: `{lstamp(self.now + 30 * MIN)[1:-1]}` +30m", r)
-            # round 33: the true values moved to the one stderr diagnostic line
+            # the true values moved to the one stderr diagnostic line
             self.assertIn("UTC now 2026-09-23T17:45:00Z", self.diag[0])
 
         def test_status_label_future_blocks(self):
-            # finding (codex r2): 'Status: [future]' passed because only a message-leading stamp was checked
+            # finding: 'Status: [future]' passed because only a message-leading stamp was checked
             self.assertIn("+280m", self.final("Status: [2026-09-23T22:25Z] done."))
 
         def test_unbracketed_local_ahead_blocks(self):
-            # finding (claude r2): an unbracketed console stamp was never checked
+            # finding: an unbracketed console stamp was never checked
             self.assertIn("+280m", self.final("2026-09-23 18:25 EDT starting phase 3"))
             self.assertIn("+280m", self.final("progress at 2026-09-23 18:25:00 EDT, fine"))
             self.assertIn("+280m", self.final("2026-09-23 18:25:02 EDT | 2026-09-23T22:25:02Z | x"))
 
         def test_stamp_after_other_text_blocks(self):
-            # finding (gemini r2): any text before the stamp evaded the leading-only check
+            # finding: any text before the stamp evaded the leading-only check
             self.assertIn("+300m", self.final("<thinking>checking clock</thinking>\n"
                                                       "[2026-09-23 22:45:00 UTC] Status update."))
 
         def test_long_emphasis_prefix_blocks(self):
-            # finding (codex r2): a 128-character window hid a stamp after a long permitted prefix
+            # finding: a 128-character window hid a stamp after a long permitted prefix
             self.assertIn(AHEAD_IN, self.final("***" + " " * 128 + "[2026-09-23T22:25Z]"))
 
         def test_numeric_and_spaced_offsets(self):
@@ -2893,7 +2893,7 @@ def _self_test():
             self.assertIsNone(self.final("their office shows 2026-09-23 22:25 PDT"))
 
         def test_status_foreign_abbreviation_fails_open(self):
-            # round 26 (finding 3): a status stamp whose abbreviation is not local was UNVERIFIABLE and blocked; a
+            # an earlier version (finding 3): a status stamp whose abbreviation is not local was UNVERIFIABLE and blocked; a
             # claim that cannot be converted cannot be evaluated, so it fails open (a disclosed MISS)
             self.assertIsNone(self.final("[2026-09-23 13:45:00 PDT] x"))
             self.assertIsNone(self.final("[2026-09-24 09:00 PDT] deploy scheduled"))
@@ -2938,7 +2938,7 @@ def _self_test():
             self.assertIn(AHEAD_IN, self.final("```x\n````\n2099-01-01T00:00Z after mismatched fence\n```\n"))
 
         def test_inline_code_span_exempt(self):
-            # round 3 remedy: a code span is the documented way to quote a future or rejected value
+            # an earlier version remedy: a code span is the documented way to quote a future or rejected value
             self.assertIsNone(self.final("example `2099-01-01T00:00Z` shape"))
             self.assertIsNone(self.final("example ``a ` 2099-01-01T00:00Z`` shape"))
             self.assertIn(AHEAD_IN, self.final("unclosed `2099-01-01T00:00Z shape"))
@@ -2952,7 +2952,7 @@ def _self_test():
                                                     self.asst("done")]))
 
         def test_bullet_history_line_behind_blocks(self):
-            # round 24 (item 2): this WAS a documented false positive (an unbracketed history stamp that is the
+            # an earlier version (item 2): this WAS a documented false positive (an unbracketed history stamp that is the
             # message's first line-leading stamp was read as its header and checked for BEHIND). Only a header in
             # the bracketed console form claims the current time now, so the history line passes; a BRACKETED
             # first line-leading history stamp is still read as the header (disclosed)
@@ -2980,7 +2980,7 @@ def _self_test():
                                                     self.asst("done")]))
 
         def test_final_message_behind_tolerance_30(self):
-            # finding (gemini r2): a long generation made a correct final status stamp read as BEHIND
+            # finding: a long generation made a correct final status stamp read as BEHIND
             self.assertIsNone(self.final(f"{ustamp(self.now - 12 * MIN)} started long"))
             self.assertIn("-35m", self.final(f"{ustamp(self.now - 35 * MIN)} stale"))
 
@@ -2993,7 +2993,7 @@ def _self_test():
             self.assertIsNone(self.final("x\n**Session elapsed:** 03:28"))
 
         def test_footer_quoted_mid_message_passes(self):
-            # findings (claude/gemini r2): a worker's footer, or the corrected wrong value, re-blocked
+            # findings (claude/an earlier review): a worker's footer, or the corrected wrong value, re-blocked
             txt = (f"{lstamp(self.now)} Worker done:\nSession elapsed 05:12\nCorrection: I wrote Session elapsed "
                    "08:07 earlier.\nSession elapsed 03:27")
             self.assertIsNone(self.final(txt))
@@ -3002,7 +3002,7 @@ def _self_test():
             self.assertIsNone(self.final("x `Session elapsed 05:12` quoted"))
 
         def test_footer_tolerance_asymmetric(self):
-            # finding (claude r4): a flat 2-minute footer tolerance false-blocked a long final wrap-up whose
+            # finding: a flat 2-minute footer tolerance false-blocked a long final wrap-up whose
             # status stamp (same provenance) was tolerated to 30 minutes
             txt = f"{ustamp(self.now)} done.\nSession elapsed 03:27"
             for gap in (3, 7, 25, 30):
@@ -3031,7 +3031,7 @@ def _self_test():
 
         # -- reference time --
         def test_final_message_ref_from_matching_entry(self):
-            # finding (codex r2): the final message was always compared against now
+            # finding: the final message was always compared against now
             t = self.now - 20 * MIN
             ok = f"{ustamp(t)} ok\nSession elapsed 03:07"
             self.assertIsNone(self.ev([self.user("go", t), self.asst(ok, t)], last_assistant_message=ok))
@@ -3056,7 +3056,7 @@ def _self_test():
 
         # -- isolation --
         def test_overflow_entry_does_not_hide_final(self):
-            # finding (codex r2): ref + AHEAD overflowed on a 9999 entry and discarded the final violation
+            # finding: ref + AHEAD overflowed on a 9999 entry and discarded the final violation
             e = self.asst("[2026-09-23T17:45Z] earlier", ts=None)
             e["timestamp"] = "9999-12-31T23:59:59Z"
             r = self.ev([self.user("go"), e], last_assistant_message="[2099-01-01T00:00Z] final")
@@ -3073,7 +3073,7 @@ def _self_test():
             self.assertIn("BEHIND", _check_claim(_CLAIM_RE.search(line), True, False, ref, BEHIND_US, "x"))
 
         def test_year_one_local_zone_no_crash(self):
-            # finding (codex r2): [0001-01-01 00:00 JST] under TZ=JST-9 raised in the conversion
+            # finding: [0001-01-01 00:00 JST] under TZ=JST-9 raised in the conversion
             os.environ["TZ"] = "JST-9"
             time.tzset()
             r = self.final("[0001-01-01 00:00 JST] x\n[2099-01-01T00:00Z] y")
@@ -3102,7 +3102,7 @@ def _self_test():
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_growth_refuses_sub_floor_samples(self):
-            # QA round 2 (codex 3): at the multiplier cap growth() returned sub-floor samples, voiding the
+            # an earlier review: at the multiplier cap growth() returned sub-floor samples, voiding the
             # every-sample floor; it now fails closed. The child's CPU clock is replaced by a counter that
             # barely advances, so the cap is reached the same way on any host
             with self.assertRaises(AssertionError) as ctx:
@@ -3117,7 +3117,7 @@ def _self_test():
             self.assertIn("cannot measure above the floor", str(ctx.exception))
 
         def test_timed_child_ignores_ambient_allocator_policy(self):
-            # QA round 4 (codex MAJOR): a timed child inherited the parent's environment, so an ambient
+            # an earlier review: a timed child inherited the parent's environment, so an ambient
             # MALLOC_* variable or GLIBC_TUNABLES entry pinned glibc's thresholds, disabled the adaptation
             # the GROWTH_SRC warmup relies on, and false-REDed healthy code under load (2.0 to 3.1x);
             # every timed child now launches with child_env(). Deterministic: the probe reports the
@@ -3166,7 +3166,7 @@ def _self_test():
             self.assertIsNotNone(self.ev(ents))
 
         def test_quoted_block_text_is_not_a_boundary(self):
-            # finding (codex r2): a notification quoting the block prefix was taken as this hook's block
+            # finding: a notification quoting the block prefix was taken as this hook's block
             ents = [self.user("go"), self.asst("[2026-09-23T22:25Z] bad"),
                     self.user(f"<task-notification>QA tested {BLOCK_PREFIX}</task-notification>", isMeta=True),
                     self.asst("Done.")]
@@ -3188,7 +3188,7 @@ def _self_test():
             bad_text = f"{lstamp(self.now + 40 * MIN)} wrong"
             ents = [self.user("go"), self.asst(bad_text)]
             self.assertTrue(self.ev(ents, last_assistant_message=bad_text).startswith(BLOCK_PREFIX))
-            # one state file (round 29: the evaluation lock is the directory itself, so no `.lock` file; round 30:
+            # one state file (the evaluation lock is the directory itself, so no `.lock` file; an earlier version:
             # in the transcript's own private subdirectory)
             self.assertEqual(os.listdir(self.sdir), [state_subdir(self.tr)])
             self.assertEqual(os.listdir(os.path.dirname(self.key())), [STATE_FILE])
@@ -3223,7 +3223,7 @@ def _self_test():
             self.write([self.block_entry(), self.asst("fixed")], "a")
             self.assertIsNone(self.ev(last_assistant_message="fixed"))
             self.assertIsNone(self.ev(stop_hook_active=True, last_assistant_message="fixed"))
-            # round 24 (A): with the own counter unusable, a bad final message under stop_hook_active FAILS OPEN
+            # an earlier version (A): with the own counter unusable, a bad final message under stop_hook_active FAILS OPEN
             # with a warning (it blocked before: the transcript count was the only brake)
             notes = []
             self.assertIsNone(evaluate({"transcript_path": self.tr, "stop_hook_active": True,
@@ -3247,9 +3247,9 @@ def _self_test():
                 self.write([self.user("go"), self.asst("[2026-09-23T22:25:00Z] early bad"), self.asst(good)])
                 for k, active in enumerate((False, True, True)):
                     self.assertIsNone(self.ev(sdir=sdir, stop_hook_active=active, last_assistant_message=good))
-                    # two feedback cycles only: a third would reach the round-8 block cap
+                    # two feedback cycles only: a third would reach the earlier block cap
                     self.write(([self.block_entry()] if k < 2 else []) + [self.asst(good)], "a")
-                # round 24 (A): the state is unusable, so under stop_hook_active this fails open (was a block);
+                # an earlier version (A): the state is unusable, so under stop_hook_active this fails open (was a block);
                 # outside the loop the bad final message still blocks
                 self.assertIsNone(self.ev(sdir=sdir, stop_hook_active=True,
                                           last_assistant_message="[2026-09-23T20:00Z] x"))
@@ -3258,11 +3258,11 @@ def _self_test():
             finally:
                 os.chmod(locked, 0o700)
 
-        # -- round 8: block cap (peer request, worker-harness) --
+        # -- block cap (a peer request) --
         def cap_ev(self, entries, active=True, final="[2026-09-23T20:00Z] still wrong"):
             self.write(entries)
             if active:
-                self.seed()  # an own counter of 0, so the transcript marker count decides (round 26)
+                self.seed()  # an own counter of 0, so the transcript marker count decides
             notes = []
             payload = {"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": active,
                        "last_assistant_message": final}
@@ -3311,7 +3311,7 @@ def _self_test():
 
         def test_r8_block_cap_main_output(self):
             self.write(self.cycles(3))
-            self.seed(sdir=default_state_dir())  # main() keys the state under XDG_RUNTIME_DIR (round 26)
+            self.seed(sdir=default_state_dir())  # main() keys the state under XDG_RUNTIME_DIR
             p = json.dumps({"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": True,
                             "last_assistant_message": "[2099-01-01T00:00Z] still wrong"})
             old_err, sys.stderr = sys.stderr, io.StringIO()
@@ -3324,11 +3324,11 @@ def _self_test():
             self.assertEqual(rc, 0)
             self.assertNotIn("decision", obj)
             self.assertIn("block cap hit", obj["systemMessage"])
-            # round 33: the systemMessage is one line within MSG_CAP; stderr gets ONE different diagnostic line
+            # the systemMessage is one line within MSG_CAP; stderr gets ONE different diagnostic line
             self.assertNotIn("\n", obj["systemMessage"])
             self.assertLessEqual(len(obj["systemMessage"]), MSG_CAP)
             self.assertEqual(len(err.splitlines()), 1, err)
-            self.assertNotIn("\r", err)  # round 35: one line, never cut: the first violation ends it whole
+            self.assertNotIn("\r", err)  # one line, never cut: the first violation ends it whole
             self.assertRegex(err, r"; first: timestamp \S+ in your final message: \d+ min AHEAD of when it was "
                                   r"written \(\S+Z\)\n$")
             self.assertIn("diag: capped allow", err)
@@ -3359,7 +3359,7 @@ def _self_test():
                 self.assertEqual(seen[0], seen[1], (want, at_cap))
 
         def test_r9_block_cap_needs_tight_cycles(self):
-            # round 9 finding 3 (MED): old blocks followed by a long successful stretch still counted, so the
+            # an earlier version finding 3 (MED): old blocks followed by a long successful stretch still counted, so the
             # first bad final message after it was allowed; cycles now count only when tight
             def tool_cycle():
                 return [{"type": "assistant", "message": {"role": "assistant", "content": [
@@ -3391,7 +3391,7 @@ def _self_test():
             self.assertIn("block cap hit", notes[0])
 
         def test_r10_block_cap_only_undercounts(self):
-            # codex round-8 [UNVERIFIABLE] overcounts: both now count lower and do NOT cap
+            # an earlier review [UNVERIFIABLE] overcounts: both now count lower and do NOT cap
             final = "[2099-01-01T00:00Z] complete"
             sysrec = {"type": "system", "content": BLOCK_PREFIX + ": x"}
             # case 1: two cycles, then an isMeta assistant entry and a duplicate feedback record: codex's exact
@@ -3430,12 +3430,12 @@ def _self_test():
                 self.assertIn(s, doc)
 
         def test_r10_stderr_is_not_a_visible_fallback(self):
-            # codex round-8 [L]: on exit 0 stderr reaches only the debug log; systemMessage is the visible channel
+            # an earlier review [L]: on exit 0 stderr reaches only the debug log; systemMessage is the visible channel
             doc = " ".join(__doc__.split())
             self.assertNotIn("stderr is the fallback", doc)
             self.assertIn("stderr is diagnostic logging", doc)
             self.assertIn("the stderr diagnostic line is logging only", doc)
-            # round 33: stderr no longer repeats the systemMessage
+            # stderr no longer repeats the systemMessage
             self.assertNotIn("the same text also goes to stderr", doc)
             self.assertNotIn("the same text on stderr", doc)
 
@@ -3609,7 +3609,7 @@ def _self_test():
             # moves the counts (line counts exact, allocated bytes about 1 percent of hash-seed jitter), and
             # a Python-frame re-scan or an allocating re-join of the growing tail leaves the linear band. The
             # counts CANNOT see a C-level, allocation-free quadratic (one C call re-scanning an accumulated
-            # buffer adds no line events and no net allocation, QA round 2), so a CPU-clock growth check runs
+            # buffer adds no line events and no net allocation), so a CPU-clock growth check runs
             # beside them below; both must hold
             n = 384 << 10
             lines_small, alloc_small, lines_large, alloc_large = counted_in_child(
@@ -3633,11 +3633,11 @@ def _self_test():
             self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
             self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
             # and the same assembly TIMED on the CPU clock (growth_in_child), which does see C-level work:
-            # QA round 2's mutant (bytearray += piece, then a C-level find over the accumulated buffer per
+            # an earlier version's mutant (bytearray += piece, then a C-level find over the accumulated buffer per
             # piece) is counted-invisible yet time-quadratic. Smaller sizes than the counted pair, and a
             # smaller CHUNK: cache misses are charged to CPU time, so when the 8x record's working set
             # outgrows a cache level the ratio absorbs the host's cache pressure, not just this code's
-            # work. The size is set by a MEASURED ladder (QA round 3), min-of-reps CPU time per point,
+            # work. The size is set by a MEASURED ladder, min-of-reps CPU time per point,
             # healthy code's MAX ratio under 24 CPU/cache-pressure workers against the mutant's MIN ratio
             # unloaded: 0.83 vs 1.89 at 32 KiB (the mutant ESCAPES the 2.0 limit), 1.14 vs 3.19 at
             # 64 KiB, 1.35 vs 4.32 at 128 KiB, 1.68 vs 5.68 at 256 KiB, 2.05 vs 6.95 at 384 KiB (healthy
@@ -3684,9 +3684,9 @@ def _self_test():
                 self.assertEqual(data[off:off + len(rec)], rec)
             self.assertEqual([r for _, r in tail], [ln for ln in reversed(lines[4:]) if ln])
 
-        # -- round 4 --
+        # -- an earlier version --
         def test_r4_blocked_text_already_in_transcript_creates_no_exception(self):
-            # finding (codex r3 M1): the blocked hash was a persistent exemption across a new user boundary
+            # finding: the blocked hash was a persistent exemption across a new user boundary
             bad_text = "[2026-09-23T22:25Z] done."
             self.assertIsNotNone(self.ev([self.user("go"), self.asst(bad_text)], last_assistant_message=bad_text))
             self.write([self.block_entry(), self.asst(f"{lstamp(self.now)} fixed"), self.user("next task"),
@@ -3712,7 +3712,7 @@ def _self_test():
             self.assertIn("+135m", self.ev(last_assistant_message="ok"))
 
         def test_r4_truncation_resets_boundary_and_pending(self):
-            # finding (codex r3 M1): a shrunk transcript kept the hash exemption
+            # finding: a shrunk transcript kept the hash exemption
             bad_text = "[2026-09-23T22:25Z] done."
             self.assertIsNotNone(self.ev([self.user("go"), self.asst("pad " * 300)], last_assistant_message=bad_text))
             with open(self.tr, "w") as f:
@@ -3728,7 +3728,7 @@ def _self_test():
             self.assertIn("+165m", self.ev(last_assistant_message="ok"))
 
         def test_r4_unfinished_trailing_record_rechecked(self):
-            # finding (codex r3 m4): the sampled size acknowledged a half-written record unchecked
+            # finding: the sampled size acknowledged a half-written record unchecked
             rec = json.dumps(self.asst("[2026-09-23T23:00Z] DIFFERENT"))
             self.write([self.user("go")])
             with open(self.tr, "a") as f:
@@ -3748,7 +3748,7 @@ def _self_test():
             self.assertIsNone(self.ev(last_assistant_message=f"{lstamp(self.now)} ok"))
 
         def test_r4_footer_last_occurrence_outside_code(self):
-            # findings (codex r3 M3, gemini r3 M1, claude r3 m1): a footer not on the last line was unchecked
+            # findings: a footer not on the last line was unchecked
             for txt in ("Status.\nSession elapsed 08:07\nWORKER_STATUS: COMPLETE",
                         f"{ustamp(self.now)} ok\nSession elapsed 08:07\n---", "Session elapsed 99:00\n> done",
                         "Session elapsed 08:07\n```\nlog\n```"):
@@ -3758,14 +3758,14 @@ def _self_test():
             self.assertIn("05:12", self.final("x\nSession elapsed 03:27\nWorker said: Session elapsed 05:12"))
 
         def test_r4_one_line_corrections_pass(self):
-            # finding (codex r3 m): truthful corrections re-blocked
+            # finding: truthful corrections re-blocked
             self.assertIsNone(self.final("Correction: I wrote Session elapsed 08:07. Correct is Session elapsed 03:27."))
             self.assertIsNone(self.final("Correction: I previously wrote `[2026-09-23T22:25Z]`, which was wrong. "
                                          "Correct: [2026-09-23T17:45Z]."))
             self.assertIn(AHEAD_IN, self.final("Correction: I previously wrote [2026-09-23T22:25Z], which was wrong."))
 
         def test_r4_keyword_must_immediately_precede(self):
-            # finding (claude r3 m2): an everyday or distant keyword exempted a composed future stamp
+            # finding: an everyday or distant keyword exempted a composed future stamp
             now = lstamp(self.now)
             for txt in (f"{now} pushed to target branch; ran at 2026-09-23 22:25 EDT",
                         f"{now} the next thing I did was finish the long build at 2026-09-23T22:25Z",
@@ -3779,13 +3779,13 @@ def _self_test():
                 self.assertIsNone(self.final(txt), txt)
 
         def test_r4_future_fact_false_positive_and_remedy(self):
-            # finding (claude r3 M): AHEAD on every zoned claim blocks a future fact; disclosed, with a remedy
-            # round 24 (item 2): "valid" and "through" are schedule/validity words now, so the original example
+            # finding: AHEAD on every zoned claim blocks a future fact; disclosed, with a remedy
+            # an earlier version (item 2): "valid" and "through" are schedule/validity words now, so the original example
             # passes; a future fact with no such word before it still blocks, with the same remedy text
             self.assertIsNone(self.final(f"{lstamp(self.now)} The TLS cert is valid through 2027-01-01T00:00:00Z."))
             r = self.final(f"{lstamp(self.now)} The eclipse occurs 2027-08-02T18:00:00Z.")
             self.assertIn(AHEAD_IN, r)
-            # round 33: the reason quotes the rejected literal in a code span; the remedy lives in the docstring
+            # the reason quotes the rejected literal in a code span; the remedy lives in the docstring
             self.assertIn("`2027-08-02T18:00:00Z`", r)
             self.assertIn("`code span`", __doc__)
             self.assertIn("immediately precedes", " ".join(__doc__.split()))
@@ -3793,13 +3793,13 @@ def _self_test():
             self.assertIsNone(self.final(f"{lstamp(self.now)} The TLS cert expires 2027-01-01T00:00:00Z."))
 
         def test_r4_repeated_stamps_linear(self):
-            # finding (codex r3 m5): each claim sliced the growing line prefix (quadratic)
+            # finding: each claim sliced the growing line prefix (quadratic)
             line = "2026-09-23T17:45Z " * 100000
             self.assertEqual(check_message(line, to_us(self.now), None, "x", BEHIND_US), [])
             r = check_message("next " + "2099-01-01T00:00Z x " * 50000, to_us(self.now), None, "x", BEHIND_US)
             self.assertEqual(len(r), 1)  # deduplicated
             # linear twice over: first the growth of COUNTED work (see counted_in_child) from n to
-            # GROWTH * n stamps; the round-3 defect sliced the growing line prefix per claim, which the
+            # GROWTH * n stamps; the earlier defect sliced the growing line prefix per claim, which the
             # allocated-bytes count sees
             lines_small, alloc_small, lines_large, alloc_large = counted_in_child(
                 "now = m.to_us(datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC))\n"
@@ -3810,7 +3810,7 @@ def _self_test():
             self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
             self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
             # and the same shape TIMED on the CPU clock (growth_in_child), which does see C-level work: QA
-            # round 2's mutant (line.count over the growing prefix, every 16th claim) allocates nothing and
+            # an earlier version's mutant (line.count over the growing prefix, every 16th claim) allocates nothing and
             # adds no line events, so only the timed frame catches it
             small, large = growth_in_child(
                 "now = m.to_us(datetime.datetime(2026, 9, 23, 17, 45, tzinfo=UTC))\n"
@@ -3821,7 +3821,7 @@ def _self_test():
             self.assertLess(large / max(small, 1e-3), LINEAR_LIMIT, (small, large))
 
         def test_r5_many_distinct_violations_linear_and_bounded(self):
-            # finding (codex r4): add() scanned the growing violation list (quadratic in distinct violations)
+            # finding: add() scanned the growing violation list (quadratic in distinct violations)
             lits = [f"2099-{1 + i % 12:02d}-{1 + (i // 12) % 28:02d}T{(i // 336) % 24:02d}:{(i // 8064) % 60:02d}Z"
                     for i in range(40000)]
             self.assertEqual(len(set(lits)), 40000)
@@ -3846,7 +3846,7 @@ def _self_test():
             self.assertLess(lines_large / (GROWTH * lines_small), LINEAR_LIMIT, (lines_small, lines_large))
             self.assertLess(alloc_large / (GROWTH * alloc_small), LINEAR_LIMIT, (alloc_small, alloc_large))
             # and the same shape TIMED on the CPU clock (growth_in_child), which does see C-level,
-            # allocation-free work the counts cannot (QA round 2)
+            # allocation-free work the counts cannot
             small, large = growth_in_child(
                 "lits = [f'2099-{1 + i %% 12:02d}-{1 + (i // 12) %% 28:02d}T{(i // 336) %% 24:02d}:"
                 "{(i // 8064) %% 60:02d}Z' for i in range(40000)]\n"
@@ -3862,7 +3862,7 @@ def _self_test():
         def test_r4_threat_model_stated(self):
             self.assertIn("THREAT MODEL", __doc__.split("\n\n")[1])
 
-        # -- round 13 (peer report): lease start sources and the (session: Xh Ym) footer --
+        # -- an earlier version (peer report): lease start sources and the (session: Xh Ym) footer --
         def lease(self, text):
             p = os.path.join(self.tmp, "lease.md")
             with open(p, "w") as f:
@@ -3886,7 +3886,7 @@ def _self_test():
         def test_r13_date_only_id_and_session_start(self):
             want = datetime.datetime(2026, 9, 23, 14, 18, 0, tzinfo=UTC)
             ids = "# Lease\n\n**Active-session:** sess-2026-09-23-opus55-r1\n\n**Status:** active\n"
-            self.assertIsNone(lease_start(self.lease(ids)))  # the round-12 symptom, with no other source
+            self.assertIsNone(lease_start(self.lease(ids)))  # the earlier symptom, with no other source
             for field in ("**Session-start-UTC:** 2026-09-23T14:18:00Z", "Session-start-UTC: 20260923T141800Z",
                           "- Session-start-UTC: 2026-09-23T14:18:00Z"):
                 self.assertEqual(lease_start(self.lease(ids + "\n" + field + "\n")), want, field)
@@ -4038,7 +4038,7 @@ def _self_test():
             self.assertEqual(mod.SCHED_STEMS, SCHED_STEMS)
             self.assertEqual((mod._TOKEN_RE.pattern, mod._WORDCH_RE.pattern), (_TOKEN_RE.pattern, _WORDCH_RE.pattern))
             self.assertEqual(inspect.getsource(mod.sched_exempter), inspect.getsource(sched_exempter))
-            # round 13: the code and quote exemption helpers are shared verbatim too
+            # the code and quote exemption helpers are shared verbatim too
             for name in ("_code_lines", "_code_spans", "_in_spans"):
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
             for name in ("_BTICK_RE", "_FENCE_RE"):
@@ -4050,12 +4050,12 @@ def _self_test():
                 self.assertEqual(inspect.getsource(getattr(mod, name)), inspect.getsource(globals()[name]), name)
 
 
-        # -- round 24 (field validation of round 12) --
+        # -- an earlier version (field validation of an earlier version) --
         def test_r24_item1_cap_from_own_counter_five_calls(self):
             # item 1 (BLOCKING): with stop_hook_active, an unreadable transcript_path, and a future-stamped final
             # message, five consecutive Stops each blocked (the transcript count was 0 and never capped). The
             # hook's own recovery-state counter now caps it: the first may block, blocking stops within the cap
-            # round 26: the loop starts, as in the host, with a Stop outside it (whose block writes the state); an
+            # the loop starts, as in the host, with a Stop outside it (whose block writes the state); an
             # absent state under stop_hook_active is now an unknown count and fails open
             missing = os.path.join(self.tmp, "missing-transcript.jsonl")
             lease = {"AIQT_LEASE_FILE": os.path.join(self.tmp, "no-lease.md")}  # never the host's real lease
@@ -4091,7 +4091,7 @@ def _self_test():
                 self.assertNotIn("\n", notes[0])
                 self.assertIn("block count unknown", notes[0])
                 self.assertIn("UNRESOLVED", notes[0])
-            # an explicit false is a new turn and still blocks; round 38: a Stop whose field is ABSENT is
+            # an explicit false is a new turn and still blocks; a Stop whose field is ABSENT is
             # not, so with the counter unusable it fails open too
             self.assertTrue(evaluate({"transcript_path": self.tr, "stop_hook_active": False,
                                       "last_assistant_message": "[2099-01-01T00:00Z] x"},
@@ -4145,7 +4145,7 @@ def _self_test():
             self.assertEqual((rc, out), (0, ""))
             self.assertEqual(err.count("\n"), 1)
             self.assertIn("skipped, worker marker present", err)
-            self.assertLessEqual(len(err.rstrip("\n")), MSG_CAP)  # round 33: one line within the cap
+            self.assertLessEqual(len(err.rstrip("\n")), MSG_CAP)  # one line within the cap
             if not os.path.exists("/dev/full"):
                 self.skipTest("/dev/full absent")
             env = {k: v for k, v in os.environ.items() if k not in ("AIQT_HOOKS_WORKER", "ORCH_WORKER",
@@ -4191,7 +4191,7 @@ def _self_test():
             # the capped allow's diagnostic line is for stderr only: with descriptor 2 closed (sys.stderr is None)
             # it is dropped, so stdout carries exactly the one systemMessage line and no stray diagnostic line
             self.write(self.cycles(3))
-            self.seed(sdir=default_state_dir())  # main() keys the state under XDG_RUNTIME_DIR (round 26)
+            self.seed(sdir=default_state_dir())  # main() keys the state under XDG_RUNTIME_DIR
             p = json.dumps({"transcript_path": self.tr, "hook_event_name": "Stop", "stop_hook_active": True,
                             "last_assistant_message": "[2099-01-01T00:00Z] still wrong"})
             old_err, sys.stderr = sys.stderr, None
@@ -4262,14 +4262,14 @@ def _self_test():
                       "could not establish", "own recovery-state counter"):
                 self.assertIn(s, doc)
 
-        # -- round 25 (claude-fable-5 expensive QA of round 24) --
+        # -- an earlier version (claude-fable-5 expensive QA of an earlier version) --
         def test_r25_item1_deletion_residual_closed(self):
-            # finding 1 (LOW, round 25) disclosed an externally deleted state file as leaving the cap unreachable;
-            # round 26 closes it (an absent state under stop_hook_active is an unknown count and fails open)
+            # finding 1 (LOW) disclosed an externally deleted state file as leaving the cap unreachable;
+            # an earlier version closes it (an absent state under stop_hook_active is an unknown count and fails open)
             doc = " ".join(__doc__.split())
             for s in ("the block cap may never be reached", "bounded only by the host's own stop_hook_active handling"):
                 self.assertNotIn(s, doc)
-            for s in ("never deletes it", "an UNKNOWN count (round 26)", "closes the round-25 residual"):
+            for s in ("never deletes it", "an UNKNOWN count", "closes the earlier residual"):
                 self.assertIn(s, doc)
             # with a `system`-record feedback shape (no transcript marker) and the state deleted, the loop fails open
             self.write([self.user("go"), self.asst("x"),
@@ -4284,7 +4284,7 @@ def _self_test():
                                        self.now, self.start, self.sdir, notes))
             self.assertIn("block count unknown", notes[0])
 
-        # -- round 26 (codex gpt-6-astra high QA of round 25) --
+        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
         def loop7(self, cond, sdir=None):
             """Seven violating Stops (one outside the corrective loop, then six under stop_hook_active) with
             `cond` applied before each corrective Stop; returns the outcome kinds. The hook never writes the
@@ -4301,13 +4301,13 @@ def _self_test():
                     elif cond == "hookfeedback":  # (b) a synthetic user-role entry read as a genuine user message
                         self.write([self.user("Hook feedback: " + BLOCK_PREFIX), self.asst(bad)], "a")
                     elif cond in ("delete", "delete-once") and (cond == "delete" or k == 2):  # (c)
-                        for p in self.state_files(sdir):  # round 30: in the per-transcript subdirectory
+                        for p in self.state_files(sdir):  # in the per-transcript subdirectory
                             os.unlink(p)
                     elif cond in ("dirrace",):  # (d) the dir removed after the evaluation opened (and locked) it
                         calls = []
 
                         def racing(*a, calls=calls, **kw):
-                            # round 29: the evaluation's first load_state reads through the locked descriptor;
+                            # the evaluation's first load_state reads through the locked descriptor;
                             # the directory is removed just before it, so the load and the save meet a removed
                             # directory (the save cannot create a file there) and the next Stop recreates it
                             calls.append(a)
@@ -4329,7 +4329,7 @@ def _self_test():
                     self.assertEqual(f.read(), before, (cond, k))  # no transcript write
                 kinds.append("block" if r else "cap" if notes and "block cap hit" in notes[0]
                              else "open" if notes and "block count unknown" in notes[0] else "other")
-            # at most one state file: no second counter, and (round 29) no `.lock` file; a directory the dirrace
+            # at most one state file: no second counter, and no `.lock` file; a directory the dirrace
             # removed during the last Stop is not recreated by that Stop's save
             names = os.listdir(sdir) if os.path.isdir(sdir) else []
             self.assertEqual(names, [] if cond == "dirrace" else [state_subdir(self.tr)], cond)
@@ -4367,7 +4367,7 @@ def _self_test():
                 self.assertNotIn(s, self.rep())
             self.assertNotIn("UNVERIFIABLE and blocks", " ".join(__doc__.split()))
 
-        # -- round 27 (codex gpt-6-astra high QA of round 26) --
+        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
         def other_hook_feedback(self):
             # ANOTHER Stop hook's block feedback: a user-role Stop-feedback record without this hook's prefix
             return self.user("Stop hook feedback:\nstatus-header hook: your final message lacks a status header")
@@ -4476,7 +4476,7 @@ def _self_test():
                                     f.write(json.dumps(self.user("go" + "!" * k)) + "\n")
                             elif ev in ("delete", "corrupt") and os.path.isdir(sdir):  # external state damage
                                 touched = True
-                                for p in self.state_files(sdir):  # round 30: in the per-transcript subdirectories
+                                for p in self.state_files(sdir):  # in the per-transcript subdirectories
                                     if ev == "delete":
                                         os.unlink(p)
                                     else:
@@ -4503,9 +4503,9 @@ def _self_test():
                 worst = max(worst, blocks)
             self.assertEqual(worst, BLOCK_CAP)  # the bound is reached, so the runs exercise it
 
-        # -- round 28 (codex gpt-6-astra high QA of round 27) --
+        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
         def test_r28_concurrent_stops_cannot_rearm_counter(self):
-            # finding (codex MED): the bound assumed serialized Stops; two concurrent evaluations for one transcript
+            # finding: the bound assumed serialized Stops; two concurrent evaluations for one transcript
             # (a clean Stop A loads 1 and pauses before saving; a violating Stop B loads 1, saves 2, and blocks; A
             # saves 1; repeated) gave eight blocks; the whole load, evaluate, and save now runs under a per-transcript
             # exclusive NON-BLOCKING lock, and a Stop that cannot take it fails open with the counter unchanged
@@ -4557,7 +4557,7 @@ def _self_test():
             for k in b_kinds:
                 self.assertIn("another evaluation holds the state lock", k)
                 self.assertIn("block counter unchanged", k)
-                self.assertLessEqual(len(k), MSG_CAP)  # round 33: one line within the cap
+                self.assertLessEqual(len(k), MSG_CAP)  # one line within the cap
                 self.assertNotIn("\n", k)
             self.assertEqual(counters, [1] * 8)
             # serialized Stops after the overlap still count up to the cap and stop blocking
@@ -4568,10 +4568,10 @@ def _self_test():
                              self.now, self.start, self.sdir, notes)
                 kinds.append("block" if r else "cap" if notes and "block cap hit" in notes[0] else "other")
             self.assertEqual(kinds, ["block", "block", "cap"])
-            # across PROCESSES too: while another process holds the lock (round 29: on the state DIRECTORY), a
+            # across PROCESSES too: while another process holds the lock (on the state DIRECTORY), a
             # Stop fails open and writes nothing
             key = self.key()
-            lockp = os.path.dirname(key)  # round 30: the transcript's own state subdirectory
+            lockp = os.path.dirname(key)  # the transcript's own state subdirectory
             with open(key, "rb") as f:
                 before = f.read()
             holder = subprocess.Popen([sys.executable, "-I", "-B", "-c",
@@ -4599,9 +4599,9 @@ def _self_test():
             self.assertTrue(self.ev(last_assistant_message=bad).startswith(BLOCK_PREFIX))  # the lock is released
 
         def test_r28_lock_unavailable_writes_no_state(self):
-            # locking unavailable (round 29: no fcntl, or a flock the filesystem refuses, on a usable private state
+            # locking unavailable (no fcntl, or a flock the filesystem refuses, on a usable private state
             # dir): the Stop writes no state, so unless it is an explicit new turn it cannot block (it fails
-            # open with a warning; round 38: a Stop whose field is ABSENT fails open too); an explicit false
+            # open with a warning; a Stop whose field is ABSENT fails open too); an explicit false
             # still blocks on its final message, as for an unpersistable state (test_r7_state_unpersistable_...)
             import errno
             bad = "[2026-09-23T20:00Z] heartbeat"
@@ -4647,7 +4647,7 @@ def _self_test():
                 self.assertEqual(os.listdir(self.sdir), [state_subdir(self.tr)], how)
             # with no usable private state dir (not private; a symlink to a private dir, which is not followed; a
             # regular file) there is nothing to serialize and no state can be read or written: on an explicit
-            # false a bad final message still blocks; under an explicit true, and (round 38) with the field
+            # false a bad final message still blocks; under an explicit true, and with the field
             # absent, the Stop fails open as before
             public = os.path.join(self.tmp, "public")
             os.mkdir(public, 0o755)
@@ -4711,21 +4711,21 @@ def _self_test():
 
         def test_r28_disclosures(self):
             doc = " ".join(__doc__.split())
-            for s in ("Round 28: that bound assumes the Stops for one transcript are SERIALIZED", "NON-BLOCKING lock",
+            for s in ("that bound assumes the Stops for one transcript are SERIALIZED", "NON-BLOCKING lock",
                       "Two OVERLAPPING Stops", "no state is ever written"):
                 self.assertIn(s, doc)
             src = inspect.getsource(_evaluate)
-            for s in ("CONCURRENCY (round 28)", "DISCHARGED by the lock", "never writes a value lower"):
+            for s in ("CONCURRENCY", "DISCHARGED by the lock", "never writes a value lower"):
                 self.assertIn(s, " ".join(src.split()))
 
-        # -- round 29 (codex gpt-6-astra high QA of round 28) --
+        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
         def overlap_disturbed(self, mode, n=8, serial=8):
-            """The codex round-28 regression: an initial block records 1; then `n` times a clean Stop A
+            """The an earlier review regression: an initial block records 1; then `n` times a clean Stop A
             (stop_hook_active) takes the lock, loads and RE-READS the counter, and parks at a barrier just before
             its save (inside save_state, which save() reaches only after its final re-read); `mode` disturbs the
-            synchronization or the state meanwhile ("unlink-lock": delete only the *.lock file(s), round 28's
+            synchronization or the state meanwhile ("unlink-lock": delete only the *.lock file(s), an earlier version's
             attack; "rename-dir": rename the state dir away and recreate it empty; "delete-state": delete the
-            state file; round 30, "rename-subdir": rename the transcript's state subdirectory away and recreate
+            state file; an earlier version, "rename-subdir": rename the transcript's state subdirectory away and recreate
             it empty; "rmtree-subdir": remove that subdirectory); a violating Stop B (stop_hook_active) runs to
             completion; A resumes and saves. Then
             `serial` more violating Stops. Returns (B kinds, serial kinds, the counter after each B, blocks in
@@ -4803,9 +4803,9 @@ def _self_test():
             return b_kinds, s_kinds, counters, active_blocks
 
         def test_r29_disturbed_overlap_stays_bounded(self):
-            # finding (codex HIGH): deleting ONLY round 28's `.lock` file while A was parked after its final
+            # finding: deleting ONLY an earlier version's `.lock` file while A was parked after its final
             # counter re-read let B lock a new inode, record 2, and block; A then saved 1; repeated, eight blocks in
-            # one run (counter 1, 2, 1, ...). Round 29 locks the state DIRECTORY and does every state read and
+            # one run (counter 1, 2, 1, ...). an earlier version locks the state DIRECTORY and does every state read and
             # write through that one locked descriptor, so no single-file unlink replaces the lock identity (round
             # 30: the locked directory is the transcript's own state subdirectory, disturbed here too)
             for mode in ("unlink-lock", "rename-dir", "delete-state", "rename-subdir", "rmtree-subdir"):
@@ -4878,7 +4878,7 @@ def _self_test():
             # every state read and write of an evaluation goes through the one locked directory descriptor: with
             # the lock held, the path is renamed away and a DIFFERENT private directory put in its place; the load
             # and the save still reach the locked (original) directory, and nothing is written to the new one
-            # (round 30: the locked directory is the transcript's own state subdirectory; both the subdirectory and
+            # (the locked directory is the transcript's own state subdirectory; both the subdirectory and
             # the whole root are moved and replaced)
             self.write([self.user("go"), self.asst("[2026-09-23T20:00Z] x")])
             for moved in ("subdir", "root"):
@@ -4918,17 +4918,17 @@ def _self_test():
             for s in ("fcntl.flock on the private state DIRECTORY itself", "no single-file unlink can replace",
                       "there is no `.lock` file now", "rewrites the state file directly while holding no lock"):
                 self.assertIn(s, doc)
-            # round 30: the per-user contention the round-29 lock introduced is gone (see test_r30_disclosures)
+            # the per-user contention the earlier lock introduced is gone (see test_r30_disclosures)
             self.assertNotIn("DIFFERENT sessions of the same user also contend", doc)
             src = " ".join(inspect.getsource(_evaluate).split())
-            for s in ("SYNCHRONIZATION IDENTITY (round 29)", "ORPHANED directory", "while holding no lock",
+            for s in ("SYNCHRONIZATION IDENTITY", "ORPHANED directory", "while holding no lock",
                       "outside the threat model"):
                 self.assertIn(s, src)
             self.assertNotIn('".lock"', inspect.getsource(lock_state))
 
-        # -- round 30 (claude-fable-5 QA of round 29) --
+        # -- an earlier version (claude-fable-5 QA of an earlier version) --
         def test_r30_other_transcripts_are_not_serialized(self):
-            # finding (claude LOW): round 29's lock was the per-USER state directory, held for a whole evaluation
+            # finding: an earlier version's lock was the per-USER state directory, held for a whole evaluation
             # (about 1.2 s on a 49 MiB transcript), so every OTHER session's Stop overlapping it was allowed
             # unchecked; the lock is now the transcript's own state subdirectory, so only the same transcript's
             # Stops contend
@@ -4969,7 +4969,7 @@ def _self_test():
                 globals()["save_state"] = real_save
             self.assertFalse(a.is_alive())
             self.assertTrue(out["r"].startswith(BLOCK_PREFIX))
-            # across processes: a holder of the state ROOT directory's flock (the round-29 lock identity) no longer
+            # across processes: a holder of the state ROOT directory's flock (the earlier lock identity) no longer
             # serializes anything, while a holder of a transcript's subdirectory serializes that transcript only
             for held, busy in ((self.sdir, ()), (os.path.dirname(self.key(tr1)), (tr1,))):
                 holder = subprocess.Popen([sys.executable, "-I", "-B", "-c",
@@ -5064,17 +5064,17 @@ def _self_test():
             doc = " ".join(__doc__.split())
             for s in ("only Stops of the SAME transcript contend", "about 1.2 s on a 49 MiB turn", "PRUNING",
                       "a NON-BLOCKING exclusive flock on it succeeds", "it has not been written for 7 days",
-                      "neither read nor removed by round 30", "named by the SHA-256 of transcript_path plus `.d`"):
+                      "neither read nor removed by an earlier version", "named by the SHA-256 of transcript_path plus `.d`"):
                 self.assertIn(s, doc)
             self.assertNotIn("the window is one evaluation, milliseconds", doc)
             src = " ".join(inspect.getsource(_evaluate).split())
-            for s in ("per transcript (round 30)", "PRUNING (round 30)", "treats exactly as an external deletion"):
+            for s in ("per transcript", "PRUNING", "treats exactly as an external deletion"):
                 self.assertIn(s, src)
             self.assertEqual((PRUNE_AGE_NS, PRUNE_SCAN, PRUNE_BATCH), (7 * 86400 * 10 ** 9, 4096, 32))
 
-        # -- round 31 (codex gpt-6-astra high QA of round 30) --
+        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
         def test_r31_prune_cursor_reaches_every_subdirectory(self):
-            # finding (codex LOW): every prune examined the same first PRUNE_SCAN entries in directory order, so an
+            # finding: every prune examined the same first PRUNE_SCAN entries in directory order, so an
             # eligible stale subdirectory listed beyond them was never removed; a persisted cursor over the sorted
             # names now advances each prune. The stale one is created between two runs of PRUNE_SCAN recent ones,
             # so it lies beyond the first PRUNE_SCAN entries whichever way the filesystem orders creation
@@ -5127,10 +5127,10 @@ def _self_test():
                 self.assertIn(s, doc)
             self.assertNotIn("which each later new transcript continues to remove", doc)
 
-        # -- round 32 (codex gpt-6-astra high QA of round 31) --
+        # -- an earlier version (codex gpt-6-astra high QA of an earlier version) --
         def test_r33_messages_one_line_within_cap(self):
-            # round 33: ONE stdout line per Stop; the reason keeps BLOCK_PREFIX and the first violation verbatim in
-            # a code span (round 35: whole, never shortened), then extras that fit; stderr gets ONE different line
+            # ONE stdout line per Stop; the reason keeps BLOCK_PREFIX and the first violation verbatim in
+            # a code span (whole, never shortened), then extras that fit; stderr gets ONE different line
             for lit in ("2099-01-01T00:00Z", "2099-01-01 00:00:00 UTC", "2099-01-01T00:00:00.123456789+05:30"):
                 old_err, sys.stderr = sys.stderr, io.StringIO()
                 try:
@@ -5146,7 +5146,7 @@ def _self_test():
                 self.assertNotIn("\n", r)
                 self.assertLessEqual(len(r), MSG_CAP)
                 self.assertEqual(len(err.splitlines()), 1, err)
-                self.assertIn(f"; first: timestamp {lit} in your final message: ", err)  # round 35: never cut
+                self.assertIn(f"; first: timestamp {lit} in your final message: ", err)  # never cut
                 self.assertRegex(err, r" min AHEAD of when it was written \(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\)\n$")
                 self.assertIn("diag: block, 2 claim(s)", err)
                 self.assertNotIn(r, err)
@@ -5169,15 +5169,15 @@ def _self_test():
             self.assertEqual((len(notes), len(diag)), (1, 1), (notes, diag))
             self.assertNotIn("\n", notes[0])
             self.assertLessEqual(len(notes[0]), MSG_CAP)
-            self.assertIn("1 UNRESOLVED: `2099-01-01T00:00Z` +", notes[0])  # round 34: names the claim
+            self.assertIn("1 UNRESOLVED: `2099-01-01T00:00Z` +", notes[0])  # names the claim
             self.assertIn("diag: fail-open allow", diag[0])
             self.assertIn("2099-01-01T00:00Z", diag[0])
             self.assertNotIn("\r", diag[0])
             self.assertNotIn(notes[0], diag[0])
 
-        # -- round 34 (codex gpt-6-astra and claude-opus-5-5 QA of round 33) --
+        # -- an earlier version (codex gpt-6-astra and claude-opus-5-5 QA of an earlier version) --
         def test_r34_final_message_violation_shown_first(self):
-            # codex major 1: an older message's timestamp was shown ahead of the final message's footer, so the
+            # an earlier review 1: an older message's timestamp was shown ahead of the final message's footer, so the
             # reason pointed at history and hid the error that blocks the next response, its true value included
             ents = [self.user("go"), self.asst("[2026-09-23T22:25:00Z] x")]
             r = self.ev(ents, last_assistant_message="Done.\nSession elapsed 09:00")
@@ -5190,7 +5190,7 @@ def _self_test():
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23T22:25:00Z` +280m; +1 more"), r)
 
         def test_r34_count_always_shown_one_correction_per_block(self):
-            # codex major 2: undisclosed violations used up the block cap. Each block now says how many remain;
+            # an earlier review 2: undisclosed violations used up the block cap. Each block now says how many remain;
             # four violations corrected one per block, the real reasons fed back as the host's feedback records
             lits = [f"2099-01-0{d}T00:00Z" for d in (1, 2, 3, 4)]
             msg = " ".join(lits)
@@ -5219,18 +5219,18 @@ def _self_test():
             # the count is reserved even beside the longest literal, and counts violations past MAX_REPORTED
             r = self.final(" ".join(f"2099-01-{d:02d}T00:00:00.123456789+05:30" for d in range(1, 26)))
             self.assertIn("; +24 more", r)
-            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2099-01-01T00:00:00.123456789+05:30` +"), r)  # round 35
+            self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2099-01-01T00:00:00.123456789+05:30` +"), r)  # an earlier version
             self.assertLessEqual(len(r), MSG_CAP)
 
         def test_r34_footer_block_keeps_true_elapsed(self):
-            # claude major: the offset and true elapsed of a footer were dropped together for common footer forms
+            # an earlier review: the offset and true elapsed of a footer were dropped together for common footer forms
             for txt in ("x\nSession elapsed: 08:07", "x\n**Session elapsed** 08:07", "x\n_Session elapsed_: 08:07",
                         "x\nSession elapsed \u2014 08:07"):
                 r = self.final(txt)
                 self.assertIn("` +280m, true 03:27", r, repr(txt))
                 self.assertLessEqual(len(r), MSG_CAP)
             self.assertIn("` -147m, true 03:27", self.final("x\nSession elapsed 01:00"))
-            # round 35: a long footer is echoed WHOLE in the code span, never shortened
+            # a long footer is echoed WHOLE in the code span, never shortened
             r = self.final("x\nSession -_-_-_-elapsed :_:_:_:9999:00")
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `Session -_-_-_-elapsed :_:_:_:9999:00` +599733m, true "
                                          "03:27"), r)
@@ -5241,11 +5241,11 @@ def _self_test():
             self.assertEqual(_claim_line("a\nb", ("c", "+5m")), "a b: `c` +5m")
 
         def test_r34_fit_reaches_shorter_later_extra(self):
-            # codex major 2 / claude minor 2: _fit stopped at the first extra that did not fit
+            # an earlier review 2 / an earlier review 2: _fit stopped at the first extra that did not fit
             self.assertEqual(_fit("ab", [" c", "y" * 200, " d"], 10), "ab c d")
             self.assertEqual(_fit("ab", [("y" * 20, " z"), " d"], 10), "ab z d")
             self.assertEqual(_fit("ab", [("y" * 20, "w" * 20)], 10), "ab")
-            # claude minor 4: a block with room names both clocks (`date` gives the local time); round 35: then the
+            # an earlier review 4: a block with room names both clocks (`date` gives the local time); then the
             # future-fact hint and UTC now, all within the soft cap
             self.assertEqual(self.final("[2026-09-23T20:00Z] x"), f"{BLOCK_PREFIX}: `2026-09-23T20:00Z` +135m; run "
                              f"`date`, `date -u`{HINT[0]}; UTC now 2026-09-23T17:45:00Z")
@@ -5262,19 +5262,19 @@ def _self_test():
                 self.assertTrue(r.startswith(BLOCK_PREFIX + ": `"), r)
                 self.assertLessEqual(len(r), MSG_CAP)
 
-        # -- round 35 (codex gpt-6-astra and claude-opus-5-5 QA round 2 of round 34) --
+        # -- an earlier version (codex gpt-6-astra and claude-opus-5-5 an earlier review of an earlier version) --
         def test_r35_long_timestamp_whole_with_count(self):
-            # codex major 1 / claude minor 3: a long, supported literal was cut in the middle to fit 100 characters
+            # an earlier review 1 / an earlier review 3: a long, supported literal was cut in the middle to fit 100 characters
             lit = "2099-01-01T00:00:00.123456789+05:30"
             r = self.final(f"[{lit}] x\n2099-02-01T00:00Z y")
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `{lit}` +38011725m; +1 more"), r)
             self.assertNotIn("\u2026", r)
-            self.assertEqual(self.diag[0].split("; first: ", 1)[1], self.report[0])  # claude minor 4: never cut
+            self.assertEqual(self.diag[0].split("; first: ", 1)[1], self.report[0])  # an earlier review 4: never cut
             # a core past the soft cap is still sent whole, with no extras
             self.assertEqual(_fit("x" * 250, [REMEDY, HINT], MSG_CAP), "x" * 250)
 
         def test_r35_extreme_elapsed_keeps_count_and_claim(self):
-            # codex minor 2 / claude minor 2: a year-0001 lease start pushed the count out of the reason and the
+            # an earlier review 2 / an earlier review 2: a year-0001 lease start pushed the count out of the reason and the
             # claim out of the fail-open note
             lease = os.path.join(self.tmp, "lease.md")
             with open(lease, "w") as f:
@@ -5292,7 +5292,7 @@ def _self_test():
             self.assertEqual(notes, [f"stamp-truth-stop: block count unknown; ALLOWED, 1 UNRESOLVED: {claim}"])
 
         def test_r35_two_violations_carry_remedy(self):
-            # claude major 1: with two violations even the remedy did not fit in 100 characters
+            # an earlier review 1: with two violations even the remedy did not fit in 100 characters
             r = self.final("2099-01-01T00:00Z 2099-01-02T00:00Z")
             self.assertIn("`2099-01-01T00:00Z` +38012055m; +1 more; run `date`, `date -u`", r)
             self.assertLessEqual(len(r), MSG_CAP)
@@ -5305,7 +5305,7 @@ def _self_test():
             self.assertIn("; +1 more; run `date`, `date -u`", json.loads(out)["reason"])
 
         def test_r35_future_time_carries_hint(self):
-            # claude major 1: the reason no longer said how a genuine future fact passes
+            # an earlier review 1: the reason no longer said how a genuine future fact passes
             r = self.final("The eclipse occurs 2027-08-02T18:00:00Z.")
             self.assertEqual(r, f"{BLOCK_PREFIX}: `2027-08-02T18:00:00Z` +450735m; run `date`, `date -u`; a genuine "
                                 "future time: put it in a `code span` or after 'due'; UTC now 2026-09-23T17:45:00Z")
@@ -5316,9 +5316,9 @@ def _self_test():
             self.assertEqual(_fit("x" * 150, [HINT], MSG_CAP), "x" * 150 + HINT[1])
             self.assertEqual(_fit("x" * 170, [HINT], MSG_CAP), "x" * 170)
 
-        # -- round 36 (claude-opus-5-5 QA round 3 of round 35) --
+        # -- an earlier version (claude-opus-5-5 an earlier review of an earlier version) --
         def test_r36_hidden_footer_gets_true_elapsed(self):
-            # claude minor F1: a timestamp shown first hid a wrong footer behind "+1 more" with no true elapsed, so
+            # an earlier review F1: a timestamp shown first hid a wrong footer behind "+1 more" with no true elapsed, so
             # the footer could be corrected only after a later block
             r = self.final("[2026-09-23T18:30:00Z] done\nSession elapsed 09:00")
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2026-09-23T18:30:00Z` +45m; +1 more; run `date`"), r)
@@ -5342,11 +5342,11 @@ def _self_test():
                                        'was 03:27 (333 min AHEAD)'))
             self.assertFalse(_is_footer("timestamp 2099-01-01T00:00Z in x: 5 min AHEAD of when it was written"))
             doc = " ".join(__doc__.split())
-            self.assertIn('"; elapsed now HH:MM" (round 36', doc)
+            self.assertIn('"; elapsed now HH:MM" (the true session', doc)
 
-        # -- round 37 (codex gpt-6-astra QA round 4 of round 36) --
+        # -- footer corrections past the truncation cap --
         def test_r37_footer_past_max_reported_gets_true_elapsed(self):
-            # codex minor 1: a wrong footer past the MAX_REPORTED truncation never added "; elapsed now"
+            # a wrong footer past the MAX_REPORTED truncation never added "; elapsed now"
             stamps = " ".join(f"2099-01-{d:02d}T00:00Z" for d in range(1, MAX_REPORTED + 1))
             r = self.final(stamps + "\nSession elapsed 09:00")
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `2099-01-01T00:00Z` +38012055m; +{MAX_REPORTED} more"), r)
@@ -5367,7 +5367,7 @@ def _self_test():
             self.assertIn(HINT[1][2:12], r)
 
         def test_r37_footer_literal_whitespace_collapsed(self):
-            # codex minor 2: the documented contract states the whitespace exception precisely
+            # an earlier review 2: the documented contract states the whitespace exception precisely
             r = self.final("(session:  9h)")
             self.assertTrue(r.startswith(f"{BLOCK_PREFIX}: `(session: 9h)` +"), r)
             self.assertIn('"(session: 9h)"', self.report[0])
@@ -5381,7 +5381,7 @@ def _self_test():
                 f"{BLOCK_PREFIX}: `2099-01-01T00:00:00.123456789+05:30` +"))
             doc = " ".join(__doc__.split())
             self.assertIn("a timestamp or status stamp VERBATIM; an elapsed-footer literal verbatim except that each "
-                          "internal whitespace run is collapsed to one space (round 37)", doc)
+                          "internal whitespace run is collapsed to one space", doc)
 
         def test_r35_every_message_one_line_never_cut(self):
             # the requirement: no multi-line hook text; the first rejected timestamp and the diagnostic whole
@@ -5420,7 +5420,7 @@ def _self_test():
                 self.assertEqual(len(json.loads(out)["reason"].splitlines()), 1)
 
         def test_r32_fifo_at_prune_cursor_never_hangs(self):
-            # finding (codex HIGH): a FIFO planted at prune-cursor blocked round 31's write-only open forever, so
+            # finding: a FIFO planted at prune-cursor blocked an earlier version's write-only open forever, so
             # a Stop that pruned past a whole window hung. The cursor is now written only through an exclusively
             # created regular temporary renamed over it. Run in a SUBPROCESS with a hard deadline, so a regression
             # fails the test instead of hanging the suite. A FIFO at the state file, and a directory at the
@@ -5468,7 +5468,7 @@ def _self_test():
             self.assertNotIn("O_TRUNC", src)
             self.assertIn("never by opening the existing entry", " ".join(__doc__.split()))
 
-        # -- round 38 (an absent stop_hook_active field is not a new turn) --
+        # -- an earlier version (an absent stop_hook_active field is not a new turn) --
         def r38_ev(self, sdir, final, append=None):
             """One Stop from a test payload that omits the stop_hook_active field; returns (outcome kind, notes)."""
             if append:
@@ -5532,7 +5532,7 @@ def _self_test():
         def test_r38_new_user_message_starts_a_new_count(self):
             # a NEW genuine user message past the boundary is the observable new-turn signal (this hook
             # registers only Stop, so the transcript is its UserPromptSubmit analogue): the count restarts;
-            # under an explicit true the same message never resets the counter (round 26)
+            # under an explicit true the same message never resets the counter
             bad = "[2026-09-23T20:00Z] still wrong"
             sdir = os.path.join(self.tmp, "state38u")
             self.write([self.user("go"), self.asst(bad)])
@@ -5568,7 +5568,7 @@ def _self_test():
             self.assertEqual(self.r38_ev(self.sdir, bad, append=[self.block_entry(), self.asst(bad)])[0], "cap")
 
         def test_r38_save_never_lowers_counter_without_the_field(self):
-            # the save's monotonic re-read (round 28) also covers a Stop whose field is absent: a concurrent
+            # the save's monotonic re-read also covers a Stop whose field is absent: a concurrent
             # writer's higher count is never overwritten with a lower one, and a block whose write would not
             # raise it fails open as unrecorded (test_r28_save_never_lowers_counter_inside_loop, field absent)
             bad = "[2026-09-23T20:00Z] heartbeat"
@@ -5592,8 +5592,8 @@ def _self_test():
                 self.assertTrue(load_state(self.sdir, self.tr, extra)[3])
                 self.assertEqual(extra["blocks"], 2, final)  # the other writer's higher value, never lowered
 
-        # -- round 39 (QA of round 38: an unsaved or rewritten boundary
-        # must not re-arm the new-turn reset) --
+        # -- an unsaved or rewritten boundary
+        # must not re-arm the new-turn reset --
         def test_r39_failed_save_user_message_fails_open_absent_state(self):
             # the defect: `fresh` required only `persist` (the lock taken), not a SAVED boundary, so with
             # every save failing (os.replace raising ENOSPC here; an unwritable subdirectory equally) the
@@ -5707,11 +5707,11 @@ def _self_test():
                                  else "open" if notes and "block count unknown" in notes[0] else "pass")
                 self.assertEqual(kinds, ["block"] * BLOCK_CAP + ["cap"] * (5 - BLOCK_CAP), repr(v))
 
-        # -- round 40 (QA of round 39: a boundary that moved BACKWARDS must
+        # -- a boundary that moved BACKWARDS must
         # never re-enable a transcript-derived new turn on a later Stop, and an unreadable scan is never a
         # new turn) --
         def test_r40_truncate_restore_never_restarts_the_count(self):
-            # the defect: the round-39 reset exclusion bound only the resetting Stop, which saved its
+            # the defect: the earlier reset exclusion bound only the resetting Stop, which saved its
             # re-scanned boundary of 0; the NEXT Stop verified that trivial boundary and read the RESTORED
             # old user message as a new turn, so a truncation of the transcript alternating with a restore
             # of its old content (state preserved, field absent) blocked at every Stop with the counter
@@ -5758,17 +5758,17 @@ def _self_test():
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual(extra["blocks"], BLOCK_CAP)  # each block was recorded on the unmoved boundary
 
-        # -- round 41 (QA of round 40: unreadable reset
+        # -- unreadable reset
         # history is UNKNOWN, never read as cleared, and an explicit-false clean Stop always clears a
         # recorded reset; the carry-forward and the commit's reset-field
         # claims get their own vectors) --
         def test_r41_unreadable_state_repair_records_unknown_history(self):
             # the defect (12 blocks in 19 Stops): an unreadable state read the reset history
             # as False, and the save-time repair wrote the counter at the cap with the flag CLEAR, so the
-            # restored OLD user record (104 bytes serialized here, not 63: round-40 wording corrected) was
+            # restored OLD user record (104 bytes serialized here, not 63: an earlier version's wording corrected) was
             # read as a new turn one Stop later and the count restarted without new user input. The history
-            # is UNKNOWN there: the repair records it (round 42: as the UNKNOWN marker; round 41 wrote
-            # the reset flag itself; round 43: the marker fails closed exactly like the flag, at any
+            # is UNKNOWN there: the repair records it (as the UNKNOWN marker; an earlier version wrote
+            # the reset flag itself; the marker fails closed exactly like the flag, at any
             # boundary) and the sequence stays bounded at the cap
             bad = "[2026-09-23T20:00Z] still wrong"
             sdir = os.path.join(self.tmp, "state41a")
@@ -5790,7 +5790,7 @@ def _self_test():
             extra = {}
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual(extra["blocks"], BLOCK_CAP)
-            # round 42: the repair records the unknown marker, never the reset flag and never cleared history
+            # the repair records the unknown marker, never the reset flag and never cleared history
             self.assertEqual((extra["reset"], extra["unknown"]), (False, True))
 
         def test_r41_explicit_false_clean_stop_clears_a_recorded_reset(self):
@@ -5823,12 +5823,12 @@ def _self_test():
                                  "block", k)
                 extra = {}
                 self.assertTrue(load_state(sdir, self.tr, extra)[3], k)
-                self.assertEqual(extra["blocks"], 1, k)  # round 42: EACH turn blocks with a fresh count of 1
+                self.assertEqual(extra["blocks"], 1, k)  # EACH turn blocks with a fresh count of 1
 
         def test_r41_reset_survives_a_stop_that_records_no_reset(self):
             # a review found that TWO pieces of code carry the recorded flag forward (reset_seen in new_reset,
             # and the save re-read), each alone sufficient under the lock, so a mutant removing BOTH
-            # passed every round-40 test while restore, truncate, truncate, restore blocked without limit
+            # passed every an earlier version's test while restore, truncate, truncate, restore blocked without limit
             # (the counter going 1, 2, 3, 1, ...). The Stop between the truncation and the restore scans
             # an UNCHANGED empty transcript and re-records nothing: the flag must be CARRIED, not
             # re-derived, so the restore meets it and the cap binds
@@ -5848,10 +5848,10 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"]), (BLOCK_CAP, True))
 
         def test_r41_non_bool_stored_reset_makes_the_state_unavailable(self):
-            # the round-40 commit claims non-boolean `reset` values make the state unavailable; no vector
+            # the earlier commit claims non-boolean `reset` values make the state unavailable; no vector
             # pinned it (the mutant dropping the type check survived). Each such state is UNAVAILABLE: an
-            # unknown count that fails open and is repaired at the cap with the unknown marker (round 42;
-            # round 41 repaired it with the flag SET), never a readable state that blocks. Round 42: a
+            # unknown count that fails open and is repaired at the cap with the unknown marker (an earlier version;
+            # an earlier version repaired it with the flag SET), never a readable state that blocks. a
             # non-boolean stored `unknown` value is held to the same type check
             bad = "[2026-09-23T20:00Z] still wrong"
             cases = [{"reset": v} for v in (None, "true", "false", 1, 0, "")]
@@ -5872,12 +5872,12 @@ def _self_test():
                                  (BLOCK_CAP, False, True), repr(fields))
 
         def test_r41_pre_round40_state_restarts_the_count_once_per_record(self):
-            # a v2 state written before round 40 carries no reset key, which reads as False, never True
-            # (the mutant defaulting it to True survived round 40 with no vector), so reset history lost
+            # a v2 state written before an earlier version carries no reset key, which reads as False, never True
+            # (the mutant defaulting it to True survived an earlier version with no vector), so reset history lost
             # before the upgrade can let restored OLD user messages restart the count, once PER RESTORED
-            # record under a staged restore (round 43: the round-42 wording claimed one restart in total;
+            # record under a staged restore (the earlier wording claimed one restart in total;
             # each restarting Stop records normally, so each restart is bounded at the cap), a disclosed
-            # residual (round 42: in deliberate tension with the unknown-history rule, a missing field
+            # residual (in deliberate tension with the unknown-history rule, a missing field
             # marks every pre-upgrade state, not a per-transcript fault, so it stays read as False rather
             # than putting each upgraded transcript into the suppressed mode; see the docstring)
             bad = "[2026-09-23T20:00Z] still wrong"
@@ -5888,7 +5888,7 @@ def _self_test():
             self.write([self.user("more"), self.asst(bad)], "a")
             with open(self.tr, "rb") as f:
                 both = f.read()
-            with open(self.key(sdir=sdir, make=True), "w") as f:  # the shape a round-39 truncation saved
+            with open(self.key(sdir=sdir, make=True), "w") as f:  # the shape an earlier version's truncation saved
                 f.write(json.dumps({"v": 2, "offset": 0, "tail": None, "pending": [], "blocks": 2}))
             with open(self.tr, "wb") as f:
                 f.write(first)  # restore the first old record: the count restarts (restart 1)
@@ -5938,9 +5938,9 @@ def _self_test():
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual((extra["blocks"], extra["reset"]), (1, False))
 
-        # -- round 42 (QA of round 41: a clean explicit-false
+        # -- a clean explicit-false
         # Stop clears the flags even with BOTH reads unavailable; unknown history is its own marker; an
-        # absent state under an explicit true is unknown history too; round 43 below makes the marker
+        # absent state under an explicit true is unknown history too; an earlier version below makes the marker
         # fail closed) --
         def test_r42_explicit_false_clears_with_both_reads_unavailable(self):
             # the defect: with the state read failing (EIO) AND the transcript unreadable, a
@@ -5977,7 +5977,7 @@ def _self_test():
                 self.assertEqual(extra["blocks"], 1, k)
 
         def test_r43_unknown_history_caps_new_turns_until_explicit_false(self):
-            # round 43 (the blocking round-42 finding, decided fail-closed): round 42 cleared the
+            # an earlier version (the blocking an earlier version's finding, decided fail-closed): an earlier version cleared the
             # unknown marker at a genuinely new user message past a held non-trivial boundary, but a
             # staged restore of old records satisfies that rule with no new user input (see the three
             # staged-restore vectors below), so the marker now fails CLOSED like the recorded reset:
@@ -6011,12 +6011,12 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
 
         def test_r42_absent_state_under_explicit_true_is_unknown_history(self):
-            # the defect (pre-existing since round 40): an absent state under an explicit
-            # true is an UNKNOWN count (round 26), but its reset history read as CLEARED, so an external
+            # the defect (pre-existing since an earlier version): an absent state under an explicit
+            # true is an UNKNOWN count, but its reset history read as CLEARED, so an external
             # deletion of the state file mid-loop erased a recorded reset and the restored old user record
             # restarted the count (block, block, block after the deletion, up to BLOCK_CAP more blocks per
             # deletion). The deletion is unknown history too (reset_unknown): the repair records the marker
-            # (round 43: at any boundary), the restored record is never a new turn while it stands, and
+            # (at any boundary), the restored record is never a new turn while it stands, and
             # only the explicit false releases
             bad = "[2026-09-23T20:00Z] still wrong"
             sdir = os.path.join(self.tmp, "state42c")
@@ -6031,7 +6031,7 @@ def _self_test():
             notes = []
             payload = {"transcript_path": self.tr, "stop_hook_active": True, "last_assistant_message": bad}
             self.assertIsNone(evaluate(payload, self.now, self.start, sdir, notes))
-            self.assertIn("block count unknown", notes[0])  # round 26: an unknown count, fail-open
+            self.assertIn("block count unknown", notes[0])  # an unknown count, fail-open
             extra = {}
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
@@ -6046,13 +6046,12 @@ def _self_test():
             self.assertTrue(load_state(sdir, self.tr, extra)[3])
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
 
-        # -- round 43 (round-42 QA: the blocking finding, unknown history fails closed; the medium
-        # findings; the once-per-explicit-false and carry minor findings) --
+        # -- unknown history fails closed; the staged-restore, once-per-explicit-false and carry findings --
         def test_r43_unknown_history_staged_restore_stays_capped(self):
-            # the blocking round-42 finding (staged restoration): truncate, make the state unreadable (the
+            # the blocking earlier finding (staged restoration): truncate, make the state unreadable (the
             # repair saves the marker at its trivial offset-0 boundary), then restore the old content in
             # TWO writes: first a non-user prefix (a system record), whose capped Stop advances the
-            # boundary past 0 and carries the marker, then the old user suffix, which round 42 read as a
+            # boundary past 0 and carries the marker, then the old user suffix, which an earlier version read as a
             # new user message past a held non-trivial boundary: the count restarted with no new user
             # input and no fabricated records. The marker now suppresses at ANY offset: every restore
             # Stop stays capped, and only the explicit false releases
@@ -6096,11 +6095,11 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
 
         def test_r43_unknown_history_two_write_restore_stays_capped(self):
-            # the blocking round-42 finding (two-write variant): the round-41 blocker vector with the restore done in
-            # TWO writes. The repair saved the marker at offset 0; round 42 suppressed only the FIRST
+            # the blocking an earlier version's finding (two-write variant): the earlier blocker vector with the restore done in
+            # TWO writes. The repair saved the marker at offset 0; an earlier version suppressed only the FIRST
             # restore Stop (trivial boundary), whose capped allow advanced the boundary, so the second
             # write was read as a new user message past a held boundary and the count restarted (five
-            # blocks over the sequence against two at the round-41 parent). Every restore stays capped
+            # blocks over the sequence against two at the earlier parent). Every restore stays capped
             bad = "[2026-09-23T20:00Z] still wrong"
             sdir = os.path.join(self.tmp, "state43b")
             self.write([self.user("go")])
@@ -6129,12 +6128,12 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
 
         def test_r43_unknown_history_nonzero_offset_repair_stays_capped(self):
-            # the blocking round-42 finding (nonzero-offset variant): truncation to a
+            # the blocking an earlier version's finding (nonzero-offset variant): truncation to a
             # NON-empty record prefix, then the state fault. The repair scanned the partial prefix, so
-            # it saved the marker at a NON-trivial boundary sitting on truncated content; round 42 read
+            # it saved the marker at a NON-trivial boundary sitting on truncated content; an earlier version read
             # the restored old suffix past that held boundary as a new user message and the count
             # restarted (and one corrupt read had erased the recorded reset: three extra blocks per
-            # corruption cycle, the round-41 shape again). The marker suppresses at any offset
+            # corruption cycle, the earlier shape again). The marker suppresses at any offset
             bad = "[2026-09-23T20:00Z] still wrong"
             sdir = os.path.join(self.tmp, "state43c")
             self.write([self.user("go")])
@@ -6165,7 +6164,7 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (BLOCK_CAP, False, True))
 
         def test_r43_absent_state_clean_explicit_true_persists_unknown(self):
-            # a round-42 finding: a CLEAN explicit-true Stop that discovered an
+            # an earlier version's finding: a CLEAN explicit-true Stop that discovered an
             # absent state computed the unknown history but persisted nothing (the readable branch needed
             # had_state or an unreadable state, the other branch a readable counter), so the deletion was
             # forgotten by the next Stop and a host that omits the field restarted the count on restored
@@ -6197,7 +6196,7 @@ def _self_test():
                 self.assertEqual(self.r38_ev(sdir, bad)[0], "cap", readable)
 
         def test_r43_save_state_short_write_fails_and_keeps_the_state(self):
-            # a round-42 finding (pre-existing): save_state ignored the os.write return value,
+            # an earlier version's finding (pre-existing): save_state ignored the os.write return value,
             # so a SHORT write renamed a truncated JSON prefix into place: the next load was unavailable
             # and neither the cleared state nor the previous stored flag survived, against the clear-
             # durability disclosure. The write now loops until every byte is written, zero progress is a
@@ -6256,12 +6255,12 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, True))
 
         def test_r43_explicit_false_unreadable_state_keeps_the_boundary(self):
-            # a round-42 finding: an explicit-false Stop whose state read failed loaded
-            # 0, None and [], and the round-42 new_turn save wrote THAT over the stored boundary and
+            # an earlier version's finding: an explicit-false Stop whose state read failed loaded
+            # 0, None and [], and the earlier new_turn save wrote THAT over the stored boundary and
             # pending list, so the next Stop re-scanned from 0 and re-blocked on an already-reported old
             # message. The Stop now re-reads the state under the lock: a boundary that reads back is kept
             # (no spurious block), and a state still unreadable at the re-read is cleared to boundary 0,
-            # whose ONE-time recheck is the disclosed residual. Round 43: the preserved
+            # whose ONE-time recheck is the disclosed residual. the preserved
             # pending list is seeded NON-empty (a block whose last_assistant_message is not yet in the
             # transcript), asserted to survive the re-read, and consumed at its late arrival, so a mutant
             # that keeps the boundary but drops the pending list fails here
@@ -6328,7 +6327,7 @@ def _self_test():
                     self.assertEqual(self.r38_ev(sdir, "Done.")[0], "pass")  # bounded: the boundary moved
 
         def test_r43_save_reread_carries_each_flag_on_its_own(self):
-            # a round-42 finding: the save-time re-read carries rs = new_reset or the stored flag
+            # an earlier version's finding: the save-time re-read carries rs = new_reset or the stored flag
             # and un = new_unknown or the stored marker, defence in depth under the advisory lock; no
             # vector discriminated either carry on its own (each alone failed no test). Between this
             # Stop's load and its save another writer records the flag: the re-read must carry it, for
@@ -6353,7 +6352,7 @@ def _self_test():
                 self.assertTrue(extra[field], field)  # the re-read carried the concurrent record
 
         def test_r43_explicit_false_staged_restore_restarts_per_record(self):
-            # a round-42 finding: the once-per-explicit-false wording was wrong. An explicit
+            # an earlier version's finding: the once-per-explicit-false wording was wrong. An explicit
             # false that read a TRUNCATED transcript clears the recorded reset (the field is the
             # platform's own new-turn statement), so a STAGED restore of the old content afterwards
             # restarts the count once PER restored old user record, each restart recorded normally and
@@ -6382,7 +6381,7 @@ def _self_test():
                 self.assertEqual((extra["blocks"], extra["reset"], extra["unknown"]), (1, False, False))
 
         def test_r43_unreadable_state_clean_stop_persists_unknown(self):
-            # a round-43 finding: a CLEAN Stop whose STATE read failed, with the transcript
+            # an earlier version's finding: a CLEAN Stop whose STATE read failed, with the transcript
             # unreadable and the field omitted (or explicitly true), satisfied neither predicate of the
             # unreadable-transcript save (blocks None, cap None, no absent state), so the one Stop that
             # observed the fault persisted nothing: the next genuine user turn read a clear history and
@@ -7632,7 +7631,7 @@ def _self_test():
                     self.assertIn("`2026-09-23T21:00Z`", notes[0])
 
         def test_r43_open_stop_both_reads_failing_rereads_the_state(self):
-            # the round-43 re-read runs on EVERY Stop of the
+            # the earlier re-read runs on EVERY Stop of the
             # both-unreadable branch whose state read failed, the fail-open VIOLATING Stop (cap
             # "open", not a new turn) included, but no vector exercised that leg on its own: a
             # revert of the widened re-read condition to the new-turn leg was caught only through
@@ -7670,13 +7669,13 @@ def _self_test():
                              (BLOCK_CAP, False, True))
 
         def test_r43_save_state_failed_unlink_is_best_effort_cleanup(self):
-            # a round-43 finding: temporary-file CLEANUP is best effort, apart from the outcome: a
+            # an earlier version's finding: temporary-file CLEANUP is best effort, apart from the outcome: a
             # zero-progress write followed by a failed unlink still returns False with the previous
             # state byte-identical, and the one temp file left behind never shadows the state file
-            # (only the atomic rename names it); the round-42 wording claimed every failure unlinked
+            # (only the atomic rename names it); the earlier wording claimed every failure unlinked
             # it. A CONTRACT test: the behaviour it locks in already held
             # at the parent, so it is green there by design; it documents the cleanup contract and
-            # guards no revert of the round-43 change
+            # guards no revert of the earlier change
             sdir = os.path.join(self.tmp, "state43j")
             self.write([self.user("go")])
             self.assertTrue(save_state(sdir, self.tr, 0, None, [], 2, reset=True))
@@ -7705,7 +7704,7 @@ def _self_test():
             self.assertEqual((extra["blocks"], extra["reset"]), (2, True))
 
         def test_r43_save_state_owned_close_never_raises_after_commit(self):
-            # a round-43 finding: the atomic rename is the COMMIT point. On a direct call without
+            # an earlier version's finding: the atomic rename is the COMMIT point. On a direct call without
             # `dfd` the state-directory descriptor is OWNED by save_state, and a close failure AFTER a
             # successful rename escaped as an OSError from a function documented never to raise, with
             # the state already replaced (no rollback is possible). The owned close is now handled

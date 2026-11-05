@@ -2317,7 +2317,7 @@ def _self_test():
         ("mv @O/X.md @S/link", "O", "allow", False, ""),
         ("cp @O/X.md @S/X.md/", "O", "allow", False, ""),
         ("cp -f @S/X.md", "O", "allow", False, ""),
-        # round 3
+        # an earlier version
         ("rm -r @O/d*/", "O", "deny", True, ""),
         ("rm -r @S/X*/", "O", "allow", False, ""),
         ("record=@S/X.md; printf record; rm \"$record\"", "O", "deny", True, ""),
@@ -2335,14 +2335,14 @@ def _self_test():
         ("flag=-a; tee \"$flag\" @S/X.md < /dev/null", "O", "allow", False, "out"),
         ("d=@S; cd \"$d\"; rm X.md", "O", "allow", True, "out"),
         ("cd ~; rm X.md", "O", "allow", True, "out"),
-        # round 4
+        # an earlier version
         (": >& \"@S/X.md\"", "O", "deny", True, ""),
         (": >& '@S/X.md'", "O", "deny", True, ""),
         (": >& @S/X*", "O", "allow", True, "out"),
         (": >& ~/X.md", "O", "allow", True, "out"),
         ("f=@S/X.md; printf -v 'f[0]' %s @O/X.md; rm \"$f\"", "O", "allow", False, ""),
         ("cd \"\"; rm X.md", "S", "deny", True, ""),
-        # round 5
+        # an earlier version
         # cd "" with && or || depends on the bash version: pinned in CD_EMPTY
         ("v=aaaa; v=$v$v; rm @S/X.md", "O", "deny", True, ""),
         ("f=@S/X.md; n=f; printf -v \"$n\" %s @O/X.md; rm \"$f\"", "O", "allow", False, ""),

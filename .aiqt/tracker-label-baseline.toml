@@ -32,50 +32,6 @@ review-round = 11
 reviewer-source = 11
 
 [[path]]
-path = ".preview/char-policy-write.py"
-review-round = 14
-
-[[path]]
-path = ".preview/clock-inject.py"
-review-round = 7
-
-[[path]]
-path = ".preview/constraint-reread.py"
-review-round = 24
-reviewer-source = 15
-
-[[path]]
-path = ".preview/future-stamp-write.py"
-review-round = 308
-reviewer-source = 41
-
-[[path]]
-path = ".preview/pattern-self-match.py"
-review-round = 45
-
-[[path]]
-path = ".preview/record-remove-check.py"
-review-round = 3
-
-[[path]]
-path = ".preview/rerun-pass-check.py"
-review-round = 65
-reviewer-source = 41
-
-[[path]]
-path = ".preview/stamp-truth-stop.py"
-review-round = 397
-reviewer-source = 27
-
-[[path]]
-path = ".preview/unbounded-wait.py"
-review-round = 9
-
-[[path]]
-path = ".preview/ungated-record.py"
-review-round = 5
-
-[[path]]
 path = "ENFORCEMENT.md"
 fix-id = 3
 
