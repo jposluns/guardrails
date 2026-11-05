@@ -1734,6 +1734,19 @@ def _run_checks():
                (1, 1, True, False, True), (1, 1, True, True, False)] * 2
               + [(1, 1, False, True, False)])
 
+        # A still-running advisory run keeps no --wait polling: beside a completed successful push
+        # run, an in-progress scheduled or manual run lets the wait settle green on five reads, the
+        # same as the push run alone. Judged as a merge-path run it would keep the wait going to its
+        # deadline (exit 1, TIMEOUT).
+        running = []
+        for event in ("schedule", "workflow_dispatch"):
+            advisory_running = workflow_run(928, "in_progress", None, "Quality", head_sha,
+                                            event=event, pull_requests=[])
+            rc, output, calls = fixture.invoke([[page([plain_push, advisory_running])]], wait=True,
+                                               timeout="90")
+            running.append((rc, calls, advisory_note in output, "TIMEOUT" in output))
+        check("ci/advisory-run-in-progress-keeps-no-wait", running, [(0, 5, True, False)] * 2)
+
         # A second positional rev is refused (exit 2) before any git or API
         # read, never read last-wins: a stray positional that resolves (a branch name, say)
         # would silently change which commit is checked.

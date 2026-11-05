@@ -513,9 +513,17 @@ SETTLE_OBSERVATIONS=5
 # one-shot and --wait mode alike), never skipped and never read as some other file, because whether
 # it is the required workflow file cannot be evaluated.
 #
-# THE ADVISORY RUNS. A run whose recorded event is exactly schedule or workflow_dispatch (the nightly
-# full Quality run on main, or a manual run) sits outside the merge path: its failure notifies the
-# maintainer and never blocks a merge, and its success never stands as merge evidence. Such a run is
+# THE ADVISORY RUNS. A run whose recorded event is exactly schedule or workflow_dispatch is advisory
+# here. The test reads the event alone, never the workflow, so it covers two workflows alike: a manual
+# run of quality.yml (that workflow carries no schedule: trigger yet; its job-level if: makes a future
+# scheduled run on main a full run, as a manual run on main is) and a scheduled or manual run of
+# currency.yml (the monthly standards staleness audit). What this script guarantees is limited to its
+# own reads: an advisory run is never merge evidence and never vetoes a commit or a tree. It does not
+# keep such a run from blocking a merge elsewhere. Branch protection requires the Quality gates check,
+# so a manual quality.yml run on a ref other than main, which skips the heavy jobs and fails Quality
+# gates, records a failing required check on that commit and can block that commit's merge until a new
+# head is pushed (whether a later passing run on the same commit clears it is not verified). Manual
+# full runs of quality.yml belong on main only. Such a run is
 # listed and named on a NOTE line, then left out of every rule below, in every mode: a failed,
 # cancelled or still-running advisory run is no veto and keeps no --wait polling, and a successful one
 # does not satisfy THE REQUIRED WORKFLOW, so a head whose only runs are advisory reads as missing

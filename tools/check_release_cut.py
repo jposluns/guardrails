@@ -848,6 +848,7 @@ def test_cases():
         add("tip-" + event + "-undeclared", 1, after=cut, tweak="tip-" + event)
         for name in ("base", "bare", "identity", "ref-tag"):
             add("tip-" + event + "-" + name, 2, after=cut, tweak="tip-" + event + "-" + name)
+        add("tip-" + event + "-target-mismatch", 2, tweak="tip-" + event + "-target-mismatch")
     add("push-noop-undeclared", 1, after=cut, tweak="push-noop")
     add("push-noop-declared", 0, after=cut, new=declaration, tweak="push-noop")
     add("push-two-cuts", 0, after=cut, new=declaration, tweak="push-two-cuts")
@@ -1010,7 +1011,8 @@ def fixture_repo(parent, name, case, env):
             command("tag", "-a", "before", base, "-m", "annotated before")
         elif tweak == "push-base-broken-history":
             (root / ".git" / "objects" / base[:2] / base[2:]).unlink()
-        if tweak != "push-target-mismatch":
+        if tweak not in ("push-target-mismatch", "tip-dispatch-target-mismatch",
+                         "tip-schedule-target-mismatch"):
             command("update-ref", "refs/remotes/origin/main", head)
         if tweak != "protected" and tweak not in ("push-origin-head", "push-origin-head-full"):
             command("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
@@ -2685,6 +2687,9 @@ def _self_test_isolated(red_on_revert):
                       in report["detail"])
             if case_id in ("tip-dispatch-identity", "tip-schedule-identity"):
                 check(case_id + "-identity", "--protected must equal" in report["detail"])
+            if case_id in ("tip-dispatch-target-mismatch", "tip-schedule-target-mismatch"):
+                check(case_id + "-binding",
+                      "HEAD does not match --protected target" in report["detail"])
             if case_id in ("push-noop-undeclared", "push-noop-declared", "push-two-cuts",
                            "push-repaired", "push-root"):
                 transitions = report["context"]["transitions"]
@@ -2806,6 +2811,14 @@ def _self_test_isolated(red_on_revert):
                  "require(True,", "event-merge-group", 0),
                 ("tip-event-base", "require(protected is not None and before is None,",
                  "require(True,", "tip-dispatch-base", 1),
+                ("tip-dispatch-target",
+                 'if actions and event in ("push",) + TIP_EVENTS:\n            require(head == target,',
+                 'if actions and event == "push":\n            require(head == target,',
+                 "tip-dispatch-target-mismatch", 0),
+                ("tip-schedule-target",
+                 'if actions and event in ("push",) + TIP_EVENTS:\n            require(head == target,',
+                 'if actions and event == "push":\n            require(head == target,',
+                 "tip-schedule-target-mismatch", 0),
                 ("pending-open-items", "if open_items:", "if False:", "pending-open", 0),
                 ("pending-binding", 'if head_pending["release"] != after[-1]:', "if False:",
                  "pending-bound-elsewhere", 0),

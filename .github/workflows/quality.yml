@@ -35,9 +35,12 @@ on:
   push:
     branches: [main]
   # A manual full run. Run on main it runs every heavy job (the job-level if: below); run on any other
-  # ref the heavy jobs are skipped, so Quality gates fails there. A manual or scheduled run is
-  # advisory: tools/ci-status.sh never counts it as merge evidence and never reads its failure as a
-  # veto, so it never blocks a merge.
+  # ref the heavy jobs are skipped, so Quality gates fails there. tools/ci-status.sh treats a manual or
+  # scheduled run as advisory: in its reads such a run is never merge evidence and never vetoes a
+  # commit or a tree. Branch protection does not read ci-status.sh: it requires the Quality gates check,
+  # so a manual run on a ref other than main records a failing required check on that commit and can
+  # block that commit's merge until a new head is pushed (whether a later passing run on the same commit
+  # clears it is not verified). Manual full runs belong on main only.
   workflow_dispatch:
 
 permissions:

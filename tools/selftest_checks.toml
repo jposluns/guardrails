@@ -1896,6 +1896,7 @@ expected-check-ids = [
   "ci/plain-quality-run-required",
   "ci/plain-quality-run-satisfied",
   "ci/advisory-run-neither-veto-nor-evidence",
+  "ci/advisory-run-in-progress-keeps-no-wait",
   "ci/rev-repeated-refused",
   "ci/git-argv-recorder-positive-control",
   "ci/rev-unresolvable-short-id-refused",
