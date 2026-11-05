@@ -9104,6 +9104,19 @@ def self_test():
                               _r2i_dup, "C-HANDOFF")
         check("r2-importer-clean-handoff-active-and-archive-reported-once",
               _r2i_dup.findings == [_ci_inactive("handoff", "HO-2")])
+        # The inactive arm fails closed over a type not read in full: a record not read could carry the
+        # importer kind, so C-HANDOFF is CANNOT-EVALUATE with the rule's own message even though every
+        # record read is clean (red if the rule passes over the unread type).
+        _r2i_unread = _Report()
+        _r2i_unread.ran("C-HANDOFF")
+        _check_clean_importer([_make_rec(ho(1), "handoff", "active")], _r2i_unread, "C-HANDOFF",
+                              frozenset({"finding"}))
+        check("r2-importer-clean-handoff-cannot-evaluate-while-inactive-and-type-unread",
+              _r2i_unread.checks.get("C-HANDOFF") == "CANNOT-EVALUATE" and not _r2i_unread.findings
+              and _r2i_unread.by_check.get("C-HANDOFF") == [
+                  "C-HANDOFF: the records of 'finding' could not all be read or confirmed (see C-RECORDS, "
+                  "C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the clean-importer rule (spec 8.6) is not "
+                  "evaluated over the records not read"])
         # Two clean non-importer current handoffs (a maintainer and an automation author) stay a C-HANDOFF
         # finding; this vector covers exactly the automation kind while the series is inactive (the
         # per-kind exclusion coverage, both kinds and both activation states, is the three-kind vectors
