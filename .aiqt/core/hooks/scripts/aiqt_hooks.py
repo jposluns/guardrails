@@ -22215,7 +22215,12 @@ def _orch_enumerate(reg, root):
     timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 600 else 60
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
-    except (OSError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # ValueError covers the UnicodeDecodeError that text-mode decoding raises on undecodable
+        # (non-UTF-8) enumerator output, on stdout or stderr: an enumerator whose answer cannot be
+        # read is an enumerator error (the same cannot-evaluate path an enumerator that cannot run
+        # takes, which the stop and schedule guards DENY on), never an uncaught crash that the
+        # dispatcher's Stop-family error posture would turn into a fail-open allow.
         return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(exc))
     if result.returncode != 0:
         return ("ENUMERATOR_ERROR",
@@ -31896,7 +31901,11 @@ def _orch_register_authority(root, path):
                 ref = base.stdout.strip()
                 old = subprocess.run(["git", "-C", root, "show", "{}:{}".format(ref, rel)],
                                      capture_output=True, text=True, timeout=10, env=env)
-            except (OSError, subprocess.SubprocessError) as exc:
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                # ValueError covers the UnicodeDecodeError that text-mode decoding raises when the
+                # merge-base content of the register is not UTF-8: a HOLD (cannot-evaluate), never
+                # an uncaught crash that the dispatcher's Stop-family error posture would turn into
+                # a fail-open allow at yield time.
                 return ("hold", "cannot read the register authority ({})".format(exc), None)
             if old.returncode != 0:
                 return ("hold", "cannot read the register at its merge-base authority", None)

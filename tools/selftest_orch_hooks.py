@@ -11939,6 +11939,28 @@ def _main_isolated(report_path=None):
         f.set_turn_state({})
         check("stop/enum-error-denies", _verdict(stop()), "block2")
 
+        # an enumerator writing undecodable (non-UTF-8) bytes, on stdout or on stderr, is an
+        # enumerator error that DENIES the stop, never an uncaught UnicodeDecodeError out of the
+        # handler (which the dispatcher's Stop-family error posture would turn into a fail-open
+        # allow: one invalid byte would convert every stop and schedule deny into an allow)
+        _utf8_stub = f.root / "enum-invalid-utf8-stub.py"
+        _utf8_stub.write_text(
+            "import sys\n"
+            "stream = sys.stdout if sys.argv[1] == 'stdout' else sys.stderr\n"
+            "stream.buffer.write(b'\\xff\\xfe')\n"
+            "stream.buffer.flush()\n", encoding="utf-8")
+        _utf8_regp = f.root / ".aiqt" / "orchestration.local.json"
+        _utf8_reg = json.loads(_utf8_regp.read_text(encoding="utf-8"))
+        _utf8_saved = _utf8_reg["enumerator"]
+        for _utf8_where in ("stdout", "stderr"):
+            _utf8_reg["enumerator"] = {
+                "argv": [sys.executable, "-I", "-B", str(_utf8_stub), _utf8_where], "timeout": 30}
+            _utf8_regp.write_text(json.dumps(_utf8_reg), encoding="utf-8")
+            f.set_turn_state({})
+            check("stop/enum-invalid-utf8-{}-denies".format(_utf8_where), _verdict(stop()), "block2")
+        _utf8_reg["enumerator"] = _utf8_saved
+        _utf8_regp.write_text(json.dumps(_utf8_reg), encoding="utf-8")
+
         # malformed enumeration is ENUMERATOR_ERROR, never an empty backlog
         f.enum_exit.write_text("0", encoding="utf-8")
         f.enum_payload.write_text("{not json", encoding="utf-8")

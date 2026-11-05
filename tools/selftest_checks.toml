@@ -569,6 +569,8 @@ expected-check-ids = [
   "stop/not-before-met-denies",
   "stop/loop-bound",
   "stop/enum-error-denies",
+  "stop/enum-invalid-utf8-stdout-denies",
+  "stop/enum-invalid-utf8-stderr-denies",
   "stop/bad-json-denies",
   "stop/dup-id-denies",
   "stop/unknown-version-denies",
