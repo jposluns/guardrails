@@ -16,11 +16,11 @@ description = "The evidence behind AIQT: the 1.0.5 release and its source, the k
     <p class="eyebrow">The release</p>
     <h2>AIQT 1.0.5</h2>
     <ul class="clean">
-      <li><b>Version:</b> 1.0.5, the chat-assistant Skill. The chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
+      <li><b>Version:</b> 1.0.5, the pack release. The chat-assistant Skill it ships is versioned on its own: the chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
       <li><b>The artefact:</b> the packaged skill zip, plus a
         portable instruction file, both on the <a href="/install">install page</a>.</li>
       <li><b>Built from:</b> <span class="evidence-label">the exact source tag or commit: pending</span></li>
-      <li><b>Checksum:</b> <span class="evidence-label">pending</span></li>
+      <li><b>Checksum:</b> the SHA-256 of <a href="/downloads/aiqt-skill-1.0.6.zip">the Skill zip</a> (site/downloads/aiqt-skill-1.0.6.zip) is <code>d185bf6caa96a139b2b7c21fc83a03a04d5f214e39c93d16525362e11ab83a7e</code>. 1.0.5 itself was not released through the RELEASING.md protocol, so it has no recorded artefact digests.</li>
     </ul>
   </div>
 </section>
@@ -49,6 +49,7 @@ description = "The evidence behind AIQT: the 1.0.5 release and its source, the k
         <tr><td>ChatGPT</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
         <tr><td>Gemini</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
         <tr><td>Copilot</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
+        <tr><td>Copilot Studio</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
       </tbody>
     </table></div>
     <p>An untested platform says so plainly. A tested one will carry its date and result here.</p>

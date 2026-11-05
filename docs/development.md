@@ -6,7 +6,7 @@ description = "The AIQT development assistant installs the AIQT governance core 
 <div class="wrap pagehead">
     <p class="eyebrow">The development assistant</p>
     <h1>Governance that installs into your project.</h1>
-    <p class="lead">Every coding agent in your project follows its own rules, drifts its own way, and you
+    <p class="lead">Every coding agent in your project follows its own rules and drifts its own way, and you
       find out in review. The AIQT development assistant puts one governance core where coding agents read
       their instructions, in the repository itself. One wizard sets it
       up, one doctor verifies it, and a write guard keeps every update inside a single directory
@@ -52,10 +52,10 @@ description = "The AIQT development assistant installs the AIQT governance core 
 
 <section id="rules">
   <div class="wrap">
-    <p class="eyebrow">The five rules</p>
-    <h2>How the five rules operate while you work</h2>
+    <p class="eyebrow">The 5 rules</p>
+    <h2>How the 5 rules operate while you work</h2>
     <p class="lead">A standard you cannot see being applied is a promise, not a standard. The
-      five rules are how the assistant applies the ordering, change by change, and most of them
+      5 rules are how the assistant applies the ordering, change by change, and most of them
       produce something you can see in the console, while the self-check stays an internal
       discipline that never enters the visible answer. They are scoped to
       issues the active work detects or causes, not to your whole backlog, so following them
@@ -80,7 +80,7 @@ description = "The AIQT development assistant installs the AIQT governance core 
           expanding scope on its own.</p></li>
       <li><b>Underlying gaps become guardrails, and the fix can be shared.</b>
         <p>When the assistant caused the issue through a guardrail gap, it also proposes (and, if asked, drafts)
-          a guardrail so it should not recur, additive to rules three and four: the instance
+          a guardrail so it should not recur, additive to rules 3 and 4: the instance
           itself is still handled under them. Then, if your configuration permits and with your
           permission, the new guardrail can go back to the AIQT project as a seed PR, so every
           developer's assistant improves. Sharing is opt-in; the details are on the
@@ -93,7 +93,7 @@ description = "The AIQT development assistant installs the AIQT governance core 
   <div class="wrap">
     <p class="eyebrow">What comes next</p>
     <h2>Where it goes next: self-learning guardrails</h2>
-    <p class="lead">The fifth rule is where AIQT is designed to get better on its own. When a gap
+    <p class="lead">Rule 5 is where AIQT is designed to get better on its own. When a gap
       lets an issue through, the assistant will fix it and write a new
       guardrail so that shape of issue is caught from then on. Your setup is designed to self-learn:
       every gap it hits becomes a guard it keeps. No model is retrained: a new guardrail is a local
@@ -111,14 +111,14 @@ description = "The AIQT development assistant installs the AIQT governance core 
     <p class="lead">Installing is a prompt, not a build. You give your coding assistant a
       short setup prompt; it fetches the pack from GitHub and walks you through the rest.
       The pack's tools and hooks require Python 3.14 or newer. On an older Python a hook
-      does not run its check: depending on the version, the tool call is either blocked or
+      does not run its check: depending on the version, the tool call either is blocked or
       goes ahead unchecked, so install a supported Python first.</p>
     <ol class="steps">
       <li><b>Give your assistant the setup prompt.</b> Paste the AIQT setup prompt into your
         coding assistant. It downloads the pack from the guardrails repository on GitHub, with
         no manual clone or install to run yourself.</li>
       <li><b>Follow the installation prompt.</b> A wizard walks you through setup, creating
-        <code>.aiqt/</code> and the file each coding agent expects, and asking the few
+        <code>.aiqt/</code> and the file each coding agent expects, and asking for the few
         choices that are yours to make.</li>
       <li><b>The doctor verifies it.</b> It confirms that the install is present and consistent.
         That is what the doctor proves: the files exist, agree with each other, and are current.
@@ -150,7 +150,7 @@ description = "The AIQT development assistant installs the AIQT governance core 
     <div class="card">
       <span class="pill now">Available now</span>
       <h3>The governance core, and the chat assistant</h3>
-      <p>The standard 1.1.0 will install already exists and is readable in full, the pack on GitHub: the ordering, the
+      <p>The standard 1.1.0 will install already exists and is readable in full in the pack on GitHub: the ordering, the
         disciplines, and the universal skill. The
         <a href="/">chat assistant (1.0.5)</a> runs this core today, so the standard
         your project will adopt is the one you can hold a chat assistant to right now, and
@@ -160,10 +160,10 @@ description = "The AIQT development assistant installs the AIQT governance core 
       <span class="pill next">In development</span>
       <h3>The development assistant (1.1.0)</h3>
       <p>The wizard, the doctor, the write guard, the generated agent files,
-        the CI integration, the findings loop, the five-rule workflow, the per-guardrail
+        the CI integration, the findings loop, the 5-rule workflow, the per-guardrail
         configuration, and seed PRs described here and on the technical details page are the 1.1.0
-        design, and we ship it when it does what these pages say it does. Until then, the
-        best way to evaluate AIQT is the way we would want you to: read the source.</p>
+        design, and the maintainer ships it when it does what these pages say it does. Until then, the
+        best way to evaluate AIQT is the way the project would want you to: read the source.</p>
     </div>
     <div class="cta">
       <a class="btn primary" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">Read the pack on GitHub<span class="vh"> (opens in a new tab)</span></a>

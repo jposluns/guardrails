@@ -260,22 +260,31 @@ def _origin(site):
     return "https://" + next(domain for key, _word, domain, _n in FAMILY if key == site["key"])
 
 
-def _social_metas(site, title, current):
+def _social_metas(site, title, current, description):
     """The Open Graph and Twitter card metas: the page's absolute URL (its root-relative URL `current` on
-    the site's origin) and full title, the site name, and the site's card image with its size and alt
-    text. Composed from the shell's own inputs, so every composed page carries them, not only the
-    generator's template pages."""
+    the site's origin) and full title, the site name, and the site's card image with its type, size and alt
+    text. The twitter metas repeat the og values: twitter:title the og:title value, twitter:description the
+    `description` (og:description's value, omitted like it when the page has none), twitter:image:alt the
+    og:image:alt value; og:image:type is image/png because the card image is a PNG. Composed from the
+    shell's own inputs, so every composed page carries them, not only the generator's template pages."""
     image = "{}/{}".format(_origin(site), CARD.format(site["key"]))
-    values = (("property", "og:type", "website"),
-              ("property", "og:title", "{} | {}.ai".format(title, site["name"])),
+    full_title = "{} | {}.ai".format(title, site["name"])
+    image_alt = "{}.ai: {}".format(site["name"], site["logo-alt"])
+    values = [("property", "og:type", "website"),
+              ("property", "og:title", full_title),
               ("property", "og:url", _origin(site) + current),
               ("property", "og:site_name", site["name"] + ".ai"),
               ("property", "og:image", image),
+              ("property", "og:image:type", "image/png"),
               ("property", "og:image:width", str(CARD_WIDTH)),
               ("property", "og:image:height", str(CARD_HEIGHT)),
-              ("property", "og:image:alt", "{}.ai: {}".format(site["name"], site["logo-alt"])),
+              ("property", "og:image:alt", image_alt),
               ("name", "twitter:card", "summary_large_image"),
-              ("name", "twitter:image", image))
+              ("name", "twitter:title", full_title)]
+    if description:
+        values.append(("name", "twitter:description", description))
+    values.extend((("name", "twitter:image", image),
+                   ("name", "twitter:image:alt", image_alt)))
     return ['<meta {}="{}" content="{}">'.format(kind, key, _attr(value)) for kind, key, value in values]
 
 
@@ -1344,7 +1353,7 @@ def compose_shell(site, title, description, current, main_html,
         head.append('<meta name="description" content="{}">'.format(_attr(description)))
         head.append('<meta property="og:description" content="{}">'.format(_attr(description)))
     # The link-preview card metas follow the description metas, on every composed page.
-    head.extend(_social_metas(site, title, current))
+    head.extend(_social_metas(site, title, current, description))
     head.append("<title>{} | {}.ai</title>".format(_t(title), site["name"]))
     head.append('<link rel="icon" href="{}" type="image/svg+xml">'.format(
         _asset(site, "logos/{}-favicon.svg".format(site["key"]))))
@@ -1738,26 +1747,36 @@ def _self_test():
             origin = {"aiqt": "https://aiqt.ai", "opfiles": "https://opfiles.ai"}[built_site["key"]]
             card = '{}/assets/{}-og.png'.format(origin, built_site["key"])
             title = re.search(r"<title>(.* \| [A-Za-z]+\.ai)</title>", built).group(1)
+            image_alt = "{}.ai: {}".format(built_site["name"], _attr(built_site["logo-alt"]))
             wanted = ['<meta property="og:type" content="website">',
                       '<meta property="og:title" content="{}">'.format(title),
                       '<meta property="og:url" content="{}{}">'.format(origin, _page_url(built_site, rel)),
                       '<meta property="og:site_name" content="{}.ai">'.format(built_site["name"]),
                       '<meta property="og:image" content="{}">'.format(card),
+                      '<meta property="og:image:type" content="image/png">',
                       '<meta property="og:image:width" content="1200">',
                       '<meta property="og:image:height" content="627">',
-                      '<meta property="og:image:alt" content="{}.ai: {}">'.format(
-                          built_site["name"], _attr(built_site["logo-alt"])),
+                      '<meta property="og:image:alt" content="{}">'.format(image_alt),
                       '<meta name="twitter:card" content="summary_large_image">',
-                      '<meta name="twitter:image" content="{}">'.format(card)]
+                      '<meta name="twitter:title" content="{}">'.format(title),
+                      '<meta name="twitter:image" content="{}">'.format(card),
+                      '<meta name="twitter:image:alt" content="{}">'.format(image_alt)]
+            # twitter:description repeats og:description's value, and is absent exactly when it is.
+            og_description = re.search(r'<meta property="og:description" content="([^"]*)">', built)
+            if og_description:
+                wanted.append('<meta name="twitter:description" content="{}">'.format(og_description.group(1)))
             head = built.split("</head>", 1)[0].split("\n")
-            expect("meta/card-metas " + target, all(head.count(meta) == 1 for meta in wanted), head)
+            expect("meta/card-metas " + target, all(head.count(meta) == 1 for meta in wanted)
+                   and (og_description is not None
+                        or not any('name="twitter:description"' in line for line in head)), head)
     expect("meta/card-url-home", '<meta property="og:url" content="https://opfiles.ai/">'
            in live_outputs["opf/site/index.html"], live_outputs["opf/site/index.html"][:2000])
     expect("meta/card-url-staged", '<meta property="og:url" content="https://aiqt.ai/draft/install/">'
            in outputs["site/draft/install/index.html"])
     mappings_head = outputs["site/draft/mappings/index.html"].split("</head>", 1)[0]
+    # Once per description meta: description, og:description and twitter:description.
     expect("meta/mappings-parenthetical", mappings_head.count(
-        "frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA)") == 2, mappings_head)
+        "frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA)") == 3, mappings_head)
     expect("shell/scheme-button-hidden", SCHEME_BUTTON.startswith(
         '<button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden>')
            and SCHEME_BUTTON.endswith('<span class="vh">Dark mode</span></button>'))
@@ -2460,7 +2479,7 @@ def _self_test():
     escaped_metas = ['<meta name="description" content="{}">'.format(content),
                      '<meta property="og:description" content="{}">'.format(content)]
     expect("meta/description-escaped", all(quoted_lines.count(meta) == 1 for meta in escaped_metas), quoted_lines)
-    card_metas = _social_metas(site, quoted["title"], _page_url(site, quoted["rel"]))
+    card_metas = _social_metas(site, quoted["title"], _page_url(site, quoted["rel"]), _description(site, quoted))
     positions = [quoted_lines.index(line) if line in quoted_lines else -1 for line in
                  ['<meta name="robots" content="noindex, nofollow">'] + escaped_metas + card_metas
                  + ["<title>T | AIQT.ai</title>"]]

@@ -416,8 +416,9 @@ COMPOSED_PAGES = {"site": frozenset(("development.html", "evidence.html", "tech-
 
 # The link-preview card metas every generated template page carries (tools/gen_draft_site.py), and the
 # smallest card image the large link previews take.
-CARD_METAS = ("og:type", "og:title", "og:description", "og:url", "og:site_name", "og:image", "og:image:width",
-              "og:image:height", "og:image:alt", "twitter:card", "twitter:image")
+CARD_METAS = ("og:type", "og:title", "og:description", "og:url", "og:site_name", "og:image", "og:image:type",
+              "og:image:width", "og:image:height", "og:image:alt", "twitter:card", "twitter:title",
+              "twitter:description", "twitter:image", "twitter:image:alt")
 CARD_MIN_SIZE = (1200, 627)
 CARD_MAX_READ = 8 << 20
 
@@ -1198,9 +1199,11 @@ def _card_head(host):
     values = (("property", "og:type", "website"), ("property", "og:title", "T"),
               ("property", "og:description", "D"), ("property", "og:url", "https://{}/".format(host)),
               ("property", "og:site_name", "S"), ("property", "og:image", image),
+              ("property", "og:image:type", "image/png"),
               ("property", "og:image:width", "1200"), ("property", "og:image:height", "627"),
               ("property", "og:image:alt", "A"), ("name", "twitter:card", "summary_large_image"),
-              ("name", "twitter:image", image))
+              ("name", "twitter:title", "T"), ("name", "twitter:description", "D"),
+              ("name", "twitter:image", image), ("name", "twitter:image:alt", "A"))
     return "".join('<meta {}="{}" content="{}">'.format(*value) for value in values)
 
 
@@ -1237,8 +1240,10 @@ def _card_self_test(quiet):
         def metas(changes=None):
             got = {"og:type": "website", "og:title": "T", "og:description": "D", "og:url": "https://aiqt.ai/",
                    "og:site_name": "AIQT.ai", "og:image": "https://aiqt.ai/assets/card.png",
+                   "og:image:type": "image/png",
                    "og:image:width": "1200", "og:image:height": "627", "og:image:alt": "A",
-                   "twitter:card": "summary_large_image", "twitter:image": "https://aiqt.ai/assets/card.png"}
+                   "twitter:card": "summary_large_image", "twitter:title": "T", "twitter:description": "D",
+                   "twitter:image": "https://aiqt.ai/assets/card.png", "twitter:image:alt": "A"}
             got.update(changes or {})
             return {key: value for key, value in got.items() if value is not None}
 
@@ -1254,11 +1259,15 @@ def _card_self_test(quiet):
                           ("og:url", "card/missing-og-url-fails"),
                           ("og:site_name", "card/missing-og-site_name-fails"),
                           ("og:image", "card/missing-og-image-fails"),
+                          ("og:image:type", "card/missing-og-image-type-fails"),
                           ("og:image:width", "card/missing-og-image-width-fails"),
                           ("og:image:height", "card/missing-og-image-height-fails"),
                           ("og:image:alt", "card/missing-og-image-alt-fails"),
                           ("twitter:card", "card/missing-twitter-card-fails"),
-                          ("twitter:image", "card/missing-twitter-image-fails")):
+                          ("twitter:title", "card/missing-twitter-title-fails"),
+                          ("twitter:description", "card/missing-twitter-description-fails"),
+                          ("twitter:image", "card/missing-twitter-image-fails"),
+                          ("twitter:image:alt", "card/missing-twitter-image-alt-fails")):
             covered.append(key)
             got = card_findings("a.html", metas({key: None}), site_root, hosts)
             check(name, len(got) == 1 and "missing or empty <meta> " + key in got[0], got)

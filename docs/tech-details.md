@@ -23,6 +23,11 @@ description = "The technical detail of the AIQT development assistant (1.1.0, in
       wizard asks which of these files you want, and the default is all of them, so your
       assistant follows good practice from the first day rather than from when you remember to
       ask.</p>
+    <p>This layout is the 1.1.0 design for an adoption that skips OPFiles. An AIQT adoption sets
+      up OPFiles (OPF) by default, and with OPF in place these project records live where the OPF
+      specification puts them (TODO.md and the registers in the store under
+      <code>.working/</code>, the curated change log at the repository root), not inside
+      <code>.aiqt/</code>.</p>
     <div class="tree">
       <pre>your-project/
 &#9500;&#9472;&#9472; <span class="dir">.aiqt/</span>
@@ -108,7 +113,7 @@ description = "The technical detail of the AIQT development assistant (1.1.0, in
   <div class="wrap">
     <p class="eyebrow">Sharing back</p>
     <h2>New-guardrail seed PRs</h2>
-    <p class="lead">When a guardrail gap lets an issue through, the fifth rule closes the gap
+    <p class="lead">When a guardrail gap lets an issue through, rule 5 closes the gap
       locally. The 1.1.0 design adds an optional last step: contributing the new guardrail
       back to the AIQT project as a seed PR, so a gap found once is closed for every
       developer who uses AIQT.</p>
@@ -169,8 +174,9 @@ description = "The technical detail of the AIQT development assistant (1.1.0, in
         <p>When a finding comes in, the loop validates it before it acts on it. A finding
           that survives validation is worth an action; a finding that fails validation is
           recorded as such. Acting on validated findings keeps the signal clean, and it is
-          the five rules of AIQT at work: say what was caught, fix in-scope issues in the
-          current change, and fix the rest in the next one. The five rules are on the
+          the 5 rules of AIQT at work: say what was caught, fix in-scope issues in the
+          current change, and report out-of-scope findings, proposing them for separately
+          authorized work. The 5 rules are on the
           <a href="/development#rules">overview page</a>.</p>
       </div>
     </div>
@@ -211,8 +217,8 @@ description = "The technical detail of the AIQT development assistant (1.1.0, in
   <div class="wrap">
     <p class="eyebrow">Where it runs</p>
     <h2>The same check, in your pipeline and on your machine</h2>
-    <p class="lead">A QA standard only standardizes anything if it holds in both places work
-      happens: at the gate, and at the desk. In the 1.1.0 design it runs in both.</p>
+    <p class="lead">A QA standard standardizes anything only if it holds in both places where
+      work happens: at the gate, and at the desk. In the 1.1.0 design it runs in both.</p>
     <div class="grid">
       <div class="card">
         <h3>In your GitHub CI</h3>
