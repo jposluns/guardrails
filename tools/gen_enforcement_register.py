@@ -620,8 +620,9 @@ def render_html(rows, roadmap, controls, enforced_union):
         # The block carries no marketing exemption: the residue is kept
         # marketing-clean at its manifest source, so the overclaim gate scans this page plainly like any
         # other. The generation-time verbatim check below asserts this exact block ships byte-for-byte.
-        # A multi-line residue keeps its newlines here verbatim; the .ledger-residual style is white-space:
-        # pre-wrap (site/styles.css), so a multi-paragraph residue renders with its line breaks intact.
+        # A multi-line residue keeps its newlines here verbatim in the page source; the template
+        # stylesheet styles it as a plain blockquote, so the byte checks below, not the styling,
+        # carry the fidelity guarantee.
         out.append('            <p class="ledger-residual-label">{}</p>'.format(_t(RESIDUAL_HEADING)))
         out.append('            <blockquote class="ledger-residual" data-mech="{mech}">{text}</blockquote>'
                    .format(mech=_a(ref), text=_t(residue)))
@@ -723,20 +724,20 @@ def _page_content(html_inner):
     return "\n".join([
         PAGE_GENERATED_COMMENT,
         "",
-        '<div class="wrap pagehead">',
-        '  <p class="eyebrow">Enforcement register</p>',
-        '  <h1>Guardrail Enforcement Register</h1>',
-        '  <p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
-        '    This page is generated from the enforceability ledger, so its linkage claims match the controls',
-        '    declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
-        '</div>',
+        '<div class="wrap"><div class="doc">',
+        '<p class="lbl first">Enforcement register</p>',
+        '<h1>Guardrail Enforcement Register</h1>',
+        '<div class="rail"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" '
+        'alt="A shield bearing a check mark, set on a guardrail"></div>',
+        '<p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
+        '  This page is generated from the enforceability ledger, so its linkage claims match the controls',
+        '  declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
         "",
         '<section id="register">',
-        '  <div class="wrap">',
         html_inner,
-        '    <nav aria-label="Project"><a href="/disclosure/">Disclosure</a></nav>',
-        "  </div>",
+        '<nav aria-label="Project"><a href="/disclosure/">Disclosure</a></nav>',
         "</section>",
+        "</div></div>",
     ])
 
 
@@ -1181,7 +1182,8 @@ def self_test_main():
             if token not in html_page:
                 failures.append("conformant tree: {!r} missing from the generated page".format(token))
         for chrome_token in ("<title>Guardrail Enforcement Register | AIQT.ai</title>",
-                             "<p class=\"eyebrow\">Enforcement register</p>"):
+                             "<p class=\"lbl first\">Enforcement register</p>",
+                             "<div class=\"wrap\"><div class=\"doc\">"):
             if chrome_token not in html_page:
                 failures.append("conformant tree: {!r} missing from the generated page".format(chrome_token))
 

@@ -388,6 +388,37 @@ SHELL_CLASS_KEYS = {"site": "aiqt", "opf/site": "opfiles"}
 SHELL_CLASS_EXCLUSIONS = {}  # {"<root>/<page path>": "why the page cannot carry the template shell yet"}
 
 
+class _RootElement(HTMLParser):
+    """The document's first start tag and its attributes. Only a real start tag counts: the doctype,
+    text, and comments are not start tags, so a shell marker that survives only inside an HTML comment
+    can never present itself as the page's root element."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tag = None
+        self.attrs = None
+
+    def handle_starttag(self, tag, attrs):
+        if self.tag is None:
+            self.tag = tag
+            self.attrs = dict(attrs)
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+
+def _root_element(text):
+    """(tag, attrs dict) of the page's first start tag, or (None, None) when the page has none or does
+    not parse."""
+    parser = _RootElement()
+    try:
+        parser.feed(text)
+        parser.close()
+    except (ValueError, AssertionError):
+        return None, None
+    return parser.tag, parser.attrs
+
+
 def shell_class_findings(subdir, page_rel, label, text, template, draft_folders):
     """Findings for one page against the shell-class rule. `page_rel` is the page's POSIX path under its
     coverage root `subdir`, `label` names it in a finding, `template` says whether it is a generated
@@ -400,10 +431,14 @@ def shell_class_findings(subdir, page_rel, label, text, template, draft_folders)
         if not SHELL_CLASS_EXCLUSIONS[record].strip():
             return ["{}: shell-class exclusion records no reason".format(label)]
         return []
+    # The rule reads the page's REAL root element, not a substring: a marker that appears only inside
+    # an HTML comment, or after some other first element, is not the document's root and does not pass.
     marker = '<html lang="en" class="site-{}">'.format(key)
-    if marker not in text:
-        return ["{}: not on the template shell (missing {}) and not a recorded exclusion".format(
-            label, marker)]
+    tag, attrs = _root_element(text)
+    if tag != "html" or (attrs or {}).get("lang") != "en" \
+            or (attrs or {}).get("class") != "site-{}".format(key):
+        return ["{}: not on the template shell (the root element is not {}) and not a recorded "
+                "exclusion".format(label, marker)]
     return []
 
 
@@ -1055,7 +1090,12 @@ def _self_test():
 
 def _shell_class_self_test():
     """The shell-class rule: a page on the template shell passes; an old-shell page flips the rule red; a
-    recorded exclusion with a reason passes; an exclusion whose reason is empty is itself a finding."""
+    recorded exclusion with a reason passes; an exclusion whose reason is empty is itself a finding; the
+    marker satisfies the rule only as the page's real root element, never inside a comment; and the root
+    scan itself reports an off-shell page, so the rule cannot silently drop out of the scan."""
+    import contextlib
+    import io
+    import tempfile
     draft = frozenset(("draft/",))
     on_shell = '<!doctype html><html lang="en" class="site-aiqt"><title>t</title>'
     off_shell = '<!doctype html><html lang="en"><title>t</title>'
@@ -1064,6 +1104,31 @@ def _shell_class_self_test():
     got = shell_class_findings("site", "a.html", "site/a.html", off_shell, False, draft)
     check("shell-class/old-shell-page-fails",
           len(got) == 1 and "not on the template shell" in got[0], got)
+    commented = ('<!doctype html><!-- <html lang="en" class="site-aiqt"> -->'
+                 '<html lang="en"><title>t</title>')
+    got = shell_class_findings("site", "a.html", "site/a.html", commented, False, draft)
+    check("shell-class/commented-marker-fails",
+          len(got) == 1 and "not on the template shell" in got[0], got)
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        root = base / "site"
+        (root / "assets").mkdir(parents=True)
+        (root / "assets" / "t.png").write_bytes(b"png")
+        icon = '<link rel="apple-touch-icon" href="/assets/t.png">'
+        (root / "index.html").write_text(on_shell + icon, encoding="utf-8")
+
+        def scan():
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = _scan_root(base, "site", frozenset())
+            return code, out.getvalue()
+
+        code, out = scan()
+        check("shell-class/scan-root-passes-on-shell", code == 0, (code, out))
+        (root / "a.html").write_text(off_shell + icon, encoding="utf-8")
+        code, out = scan()
+        check("shell-class/scan-root-reports-off-shell",
+              code == 1 and "not on the template shell" in out, (code, out))
     saved = dict(SHELL_CLASS_EXCLUSIONS)
     SHELL_CLASS_EXCLUSIONS.clear()
     try:

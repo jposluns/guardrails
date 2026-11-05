@@ -1335,7 +1335,8 @@ def compose_shell(site, title, description, current, main_html,
                   pages=None, noindex=False, page_scripts=(), label=None):
     """The whole page around `main_html`: the one shared shell (template specification section 5): the head
     (charset, viewport, the robots noindex meta where `noindex`, the description and og:description metas,
-    the title `<Page> | <Name>.ai`, the favicon, the touch icon, scheme.js, the stylesheets, then
+    the title `<Page> | <Name>.ai`, the canonical link carrying og:url's value (absent on a 404 page,
+    served at whatever URL missed), the favicon, the touch icon, scheme.js, the stylesheets, then
     `page_scripts` with defer), the skip link, the top bar with `current` marked, the scheme button,
     `main#main-content` holding `main_html`, the family footer and the `#copy-status` live region.
 
@@ -1355,6 +1356,10 @@ def compose_shell(site, title, description, current, main_html,
     # The link-preview card metas follow the description metas, on every composed page.
     head.extend(_social_metas(site, title, current, description))
     head.append("<title>{} | {}.ai</title>".format(_t(title), site["name"]))
+    # The canonical URL is the page's absolute URL on the site's https origin, the same value og:url
+    # carries. A 404 page is served at whatever URL missed, so it gets no canonical link.
+    if not current.endswith("404.html"):
+        head.append('<link rel="canonical" href="{}">'.format(_attr(_origin(site) + current)))
     head.append('<link rel="icon" href="{}" type="image/svg+xml">'.format(
         _asset(site, "logos/{}-favicon.svg".format(site["key"]))))
     head.append('<link rel="apple-touch-icon" href="{}">'.format(
@@ -1716,7 +1721,7 @@ def _self_test():
     # pages whose data carries a meta, with that meta's plain text.
     head_order = ('<meta charset="utf-8">', '<meta name="viewport" ', '<meta name="robots" ',
                   '<meta name="description" ', '<meta property="og:description" ', '<meta property="og:',
-                  '<meta name="twitter:', "<title>",
+                  '<meta name="twitter:', "<title>", '<link rel="canonical" ',
                   '<link rel="icon" ', '<link rel="apple-touch-icon" ', '<script data-cfasync="false" ',
                   '<link rel="stylesheet" ', '<script src="')
     described = {}
@@ -1761,6 +1766,12 @@ def _self_test():
                       '<meta name="twitter:title" content="{}">'.format(title),
                       '<meta name="twitter:image" content="{}">'.format(card),
                       '<meta name="twitter:image:alt" content="{}">'.format(image_alt)]
+            # The canonical link carries exactly og:url's value on every page except a 404 page,
+            # which is served at whatever URL missed and so carries none.
+            if rel.endswith("404.html"):
+                expect("meta/no-canonical-on-404 " + target, 'rel="canonical"' not in built)
+            else:
+                wanted.append('<link rel="canonical" href="{}{}">'.format(origin, _page_url(built_site, rel)))
             # twitter:description repeats og:description's value, and is absent exactly when it is.
             og_description = re.search(r'<meta property="og:description" content="([^"]*)">', built)
             if og_description:
@@ -2597,7 +2608,9 @@ def _self_test():
     adopt_page = outputs["opf/site/draft/adopt/index.html"]
     expect("opfiles/adopt-kept-links", '<a href="/llms.txt"><code>/llms.txt</code></a>' in adopt_page
            and '<a href="/adopt.md"><code>/adopt.md</code></a>' in adopt_page
-           and 'href="https://opfiles.ai/' not in adopt_page and '<ol class="steps">' in adopt_page
+           # The body carries no absolute self-link; the head's canonical link is the one allowed carrier.
+           and 'href="https://opfiles.ai/' not in adopt_page.split("</head>", 1)[1]
+           and '<ol class="steps">' in adopt_page
            and '<pre id="adopt-prompt" class="hascopy prompt-block" tabindex="0">' in adopt_page)
     core_page = outputs["opf/site/draft/core-files/index.html"]
     expect("opfiles/core-files-components", '<dl class="record">' in core_page and "<blockquote>" in core_page

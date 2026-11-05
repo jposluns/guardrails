@@ -1071,8 +1071,8 @@ def scan(text, site=True):
 
 
 # FIX 4 (GER-1) + FIX 2 (round 11) + FIX 1-4 (round 13): the register page's STATIC asset closure,
-# BEST-EFFORT defence-in-depth. The register page loads shared chrome CSS/JS via docs/_shell.html's <link
-# rel="stylesheet"> and <script src>, whose bodies the visible-text collector never sees (VisibleText drops
+# BEST-EFFORT defence-in-depth. The register page loads shared chrome CSS/JS through the template shell's
+# <link rel="stylesheet"> and <script src>, whose bodies the visible-text collector never sees (VisibleText drops
 # <style>/<script>, and the external assets are separate files collector 1 does not read). A CSS content:
 # string or a static marketing string in that closure would render or ship marketing no page scan catches,
 # so the closure is scanned here for the marketing patterns AND for CSS content: string injection. Round 13
@@ -2129,7 +2129,7 @@ def _scan_asset_closure(root):
     content-injection asset scan is anchored to the register page (HTML_REL,
     site/enforcement.html) ALONE; a CSS content-injection overclaim on the OTHER public pages (site/*.html,
     opf/site/*.html) is scanned for VISIBLE TEXT by Collector 1 but NOT for CSS content injection. Also out of
-    static reach: runtime-JS DOM construction of marketing text (theme.js building strings at run time); an
+    static reach: runtime-JS DOM construction of marketing text (a script building strings at run time); an
     ENCODED payload buried in an ARBITRARY JS string whose location and encoding are not statically declared
     (distinct from a data: URL, which IS decoded); and a genuinely off-site (cross-origin) asset a static
     gate does not fetch."""
@@ -3444,6 +3444,7 @@ def _asset_closure_self_test():
         (r / "site").mkdir(parents=True)
         (r / HTML_REL).write_text(page_html, encoding="utf-8")
         for rel, text in assets.items():
+            (r / "site" / rel).parent.mkdir(parents=True, exist_ok=True)
             (r / "site" / rel).write_text(text, encoding="utf-8")
         return r
 
@@ -3475,6 +3476,25 @@ def _asset_closure_self_test():
         f = _scan_asset_closure(build("clean", page, {"ok.css": okcss}))
         if f:
             failures.append("ASSET: a benign closure must stay clean, got {}".format(f))
+        # (d2) the pinned-baseline carve-out: the byte-pinned template chrome under draft/assets/baseline/
+        # keeps its layout vocabulary (a guarantee-flavoured SITE deny-list phrase in a CSS comment stays
+        # clean there), while the release-integrity patterns still run on it (a release-integrity phrase in
+        # the same place is flagged). MUTATION: dropping the carve-out flags the layout comment; widening it
+        # to the release-integrity set lets a stale signing claim ship from the pinned chrome.
+        page = ('<html><head><link rel="stylesheet" href="/draft/assets/baseline/baseline.css">'
+                '</head><body>ok</body></html>')
+        basecss = "/* the .only-* rules serve any element */ .x" + LB + "color:red" + RB
+        f = _scan_asset_closure(build("baseline-carveout-pass", page,
+                                      {"draft/assets/baseline/baseline.css": basecss}))
+        if f:
+            failures.append("ASSET: a marketing deny-list phrase in a pinned baseline comment must stay "
+                            "clean (carve-out), got {}".format(f))
+        basecss = "/* Releases are signed with minisign. */ .x" + LB + "color:red" + RB
+        f = _scan_asset_closure(build("baseline-carveout-fail", page,
+                                      {"draft/assets/baseline/baseline.css": basecss}))
+        if not any("draft/assets/baseline/baseline.css" in x and "signed" in x for x in f):
+            failures.append("ASSET: a release-integrity phrase in a pinned baseline comment must still be "
+                            "flagged (carve-out keeps the release patterns), got {}".format(f))
         # (e) a LINKED-but-ABSENT local asset fails closed (_FailClosed), never a silent skip.
         page = '<html><head><link rel="stylesheet" href="/missing.css"></head><body>ok</body></html>'
         try:

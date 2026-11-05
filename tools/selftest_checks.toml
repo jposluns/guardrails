@@ -5199,6 +5199,9 @@ expected-check-ids = [
   "declaration/full-entry-int-target-scan-exits-2",
   "shell-class/template-shell-page-passes",
   "shell-class/old-shell-page-fails",
+  "shell-class/commented-marker-fails",
+  "shell-class/scan-root-passes-on-shell",
+  "shell-class/scan-root-reports-off-shell",
   "shell-class/recorded-exclusion-passes",
   "shell-class/exclusion-without-reason-fails",
 ]

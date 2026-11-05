@@ -45,8 +45,8 @@ Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
     context from ordinary element text. So a future shell edit that moves a token into an UNQUOTED
     attribute, or a text-sink token into a `<script>`/`<style>` body, is NOT detected and would render
     under-escaped; `{{content}}` (the body fragment) is not sink-validated at all. There is no live
-    exposure at HEAD: the checked-in `_shell.html` places every token in a quoted attribute or element
-    text. This is a disclosed residual on FUTURE shell edits, consistent with the maintainer-authored-
+    exposure at HEAD: the retired `_shell.html` shell is no longer checked in, and the in-memory test
+    shells place every token in a quoted attribute or element text. This is a disclosed residual on FUTURE shell edits, consistent with the maintainer-authored-
     shell threat model, not a live defect; closing it fully would need a quoting/raw-text-aware
     collector (a future slice). The URL fields (canonical, og-url) are attribute-escaped, NOT
     URL-scheme-validated; a maintainer-authored `javascript:` value in the frontmatter would render
@@ -66,7 +66,7 @@ Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
     the body are rejected at the field/body boundary rather than passed through raw. That control
     rejection covers only LITERAL such characters at the field/body boundary; it does NOT decode
     numeric character references (e.g. `&#x01;`) inside pass-through HTML blocks, and does not scrub
-    the maintainer-authored `_shell.html` template. Both are within the trusted-shell threat model.
+    a maintainer-authored shell template. Both are within the trusted-shell threat model.
   - Discovery enumerates docs/ RECURSIVELY via an explicit `os.scandir` walk (NOT `rglob`, which
     silently skips a symlinked directory and swallows a permission error on an unreadable subtree);
     every discovered `docs/**/*.md` must be declared in GENSRC_OUTPUTS or `--check`/generation fails
@@ -821,7 +821,7 @@ def main(argv=None):
     # Discovery is RECURSIVE (an explicit os.scandir walk, which unlike rglob fails closed on an
     # unreadable subtree or a symlinked directory) and has NO filename-prefix exemption, so an
     # underscore-prefixed, nested-subdirectory, or symlinked stray .md fails loud rather than silently
-    # vanishing. The only shell template (_shell.html) is .html, never a .md discovery candidate. A .md
+    # vanishing. The retired shell template (_shell.html) was .html, never a .md discovery candidate. A .md
     # that is a symbolic link is refused outright (reading it would pull an out-of-tree file into the
     # pipeline).
     declared_sources = {src_rel for src_rel, _ in entries}
