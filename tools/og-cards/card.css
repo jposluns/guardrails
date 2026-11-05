@@ -1,0 +1,26 @@
+/* The 1200 by 627 link-preview card: the site's card artwork beside its name and tagline, on the site's
+   light palette (palettes.css), rendered by tools/render_og_cards.py. */
+html, body { margin: 0; padding: 0; }
+body {
+  width: 1200px;
+  height: 627px;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Public Sans", sans-serif;
+}
+.card {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 56px;
+  width: 1200px;
+  height: 627px;
+  padding: 0 88px 16px;
+  border-bottom: 16px solid var(--brand);
+}
+.card img { width: 420px; height: 420px; flex: none; }
+.name { margin: 0; font-size: 104px; font-weight: 800; letter-spacing: -0.02em; line-height: 1; }
+.tld { color: var(--accent); }
+.rule { display: block; width: 120px; height: 8px; margin: 32px 0; background: var(--brand); }
+.tagline { margin: 0; font-family: "Newsreader", serif; font-size: 46px; line-height: 1.2; }

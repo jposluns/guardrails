@@ -532,6 +532,7 @@ opf/site/_redirects text eol=lf
 opf/site/adopt.md text eol=lf
 opf/site/adopt/index.html text eol=lf
 opf/site/assets/baseline/logos/opfiles-touch.png binary
+opf/site/assets/opfiles-og.png binary
 opf/site/core-files/index.html text eol=lf
 opf/site/disclosure/index.html text eol=lf
 opf/site/draft-src/404.toml text eol=lf
@@ -707,6 +708,7 @@ site/.well-known/security.txt text eol=lf
 site/404.html text eol=lf
 site/_headers text eol=lf
 site/_redirects text eol=lf
+site/assets/aiqt-og.png binary
 site/assets/baseline/logos/aiqt-touch.png binary
 site/development.html text eol=lf
 site/disclosure/index.html text eol=lf
@@ -917,11 +919,15 @@ tools/internal-name-hashes.txt text eol=lf
 tools/leak-hashes.txt text eol=lf
 tools/measure_hook_latency.py text eol=lf
 tools/migrate.py text eol=lf
+tools/og-cards/aiqt-og.html text eol=lf
+tools/og-cards/card.css text eol=lf
+tools/og-cards/opfiles-og.html text eol=lf
 tools/opf_render.py text eol=lf
 tools/orch_doctor.py text eol=lf
 tools/orch_preflight.py text eol=lf
 tools/orch_register.py text eol=lf
 tools/pin.py text eol=lf
+tools/render_og_cards.py text eol=lf
 tools/run_all_checks.sh text eol=lf
 tools/selftest_aiqt_corpus.py text eol=lf
 tools/selftest_aiqt_hooks.py text eol=lf
