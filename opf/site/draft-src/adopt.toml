@@ -98,6 +98,16 @@ component = "prose"
 html = "<p>The <code>opf</code> reference CLI, its 10 command verbs, and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>.</p>"
 
 [[body]]
+component = "section"
+lbl = "Support"
+id = "support"
+heading = "Help, problem reports, and new releases"
+
+[[body]]
+component = "prose"
+html = '''<p>OPFiles is part of AIQT Guardrails and ships from the same repository. Questions and problem reports go through <a href="https://github.com/jposluns/guardrails/issues" target="_blank" rel="noopener noreferrer">the GitHub issues page of jposluns/guardrails<span class="vh"> (opens in a new tab)</span></a>. New releases and their notes appear on <a href="https://github.com/jposluns/guardrails/releases" target="_blank" rel="noopener noreferrer">the GitHub releases page<span class="vh"> (opens in a new tab)</span></a>. Those 2 pages are the existing channels; the project runs no separate support service.</p>'''
+
+[[body]]
 component = "next"
 html = "Back to the source, the view, and the gate."
 text = "See the model"

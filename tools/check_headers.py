@@ -7,10 +7,11 @@
   any other argument list is refused with exit 2
 
 Each site root (site/ for aiqt.ai, opf/site/ for opfiles.ai) must carry _headers as a regular file holding
-exactly 2 rule blocks, in order. `/*` sets Content-Security-Policy (the site's live policy),
+exactly 3 rule blocks, in order. `/*` sets Content-Security-Policy (the site's live policy),
 X-Frame-Options: DENY, Permissions-Policy and Cross-Origin-Opener-Policy: same-origin. `/draft/*` removes
 the live policy with `! Content-Security-Policy`, then sets Content-Security-Policy to the shared draft
-policy and X-Robots-Tag: noindex. Each header appears once per block; the Permissions-Policy and the draft
+policy and X-Robots-Tag: noindex. `/draft-src/*` sets X-Robots-Tag: noindex, so the served draft-src/
+page sources are never indexed. Each header appears once per block; the Permissions-Policy and the draft
 policy are byte-identical to the constants below; the live policy keeps every directive of the draft policy
 with every one of its sources and adds no directive and no source except the recorded widenings in
 LIVE_CSP_WIDENINGS (a quoted keyword source such as 'self' matches in any case, every other source only
@@ -83,6 +84,9 @@ EXPECTED_BLOCKS = (
     ("/draft/*", (
         ("remove", CSP, None),
         ("set", CSP, DRAFT_CSP),
+        ("set", "X-Robots-Tag", "noindex"),
+    )),
+    ("/draft-src/*", (
         ("set", "X-Robots-Tag", "noindex"),
     )),
 )
@@ -313,6 +317,9 @@ def _good_body(live_csp=GOOD_LIVE_CSP):
             "/draft/*\n"
             "  ! Content-Security-Policy\n"
             "  Content-Security-Policy: " + DRAFT_CSP + "\n"
+            "  X-Robots-Tag: noindex\n"
+            "\n"
+            "/draft-src/*\n"
             "  X-Robots-Tag: noindex\n")
 
 
@@ -360,14 +367,21 @@ def _self_test():
     check("refuse/not-regular-file", errors == [] and findings == ["site/_headers: not a regular file"],
           (findings, errors))
 
-    draft_block = good[good.index("/draft/*"):]
+    draft_src_block = good[good.index("/draft-src/*"):]
+    draft_block = good[good.index("/draft/*"):good.index("/draft-src/*")]
     for name, body, fragment in (
-        ("refuse/missing-rule-block", good[:good.index("\n/draft/*")] + "\n", "missing rule block /draft/*"),
+        ("refuse/missing-rule-block", good[:good.index("\n/draft-src/*")] + "\n",
+         "missing rule block /draft-src/*"),
         ("refuse/unknown-rule-block", good + "\n/downloads/*\n  X-Robots-Tag: noindex\n",
          "unknown rule block /downloads/*"),
         ("refuse/duplicate-rule-block", good + "\n" + draft_block, "rule block /draft/* appears 2 times"),
-        ("refuse/wrong-block-order", draft_block + "\n" + good[:good.index("\n/draft/*")] + "\n",
-         "not in the order /*, /draft/*"),
+        ("refuse/wrong-block-order", good[:good.index("/draft/*")] + draft_src_block + "\n" + draft_block,
+         "not in the order /*, /draft/*, /draft-src/*"),
+        ("refuse/draft-src-missing-x-robots-tag", good.replace(draft_src_block, "/draft-src/*\n"),
+         "/draft-src/*]: missing header X-Robots-Tag"),
+        ("refuse/draft-src-wrong-x-robots-tag",
+         good.replace(draft_src_block, "/draft-src/*\n  X-Robots-Tag: none\n"),
+         "/draft-src/*]: wrong value for X-Robots-Tag"),
         ("refuse/missing-header", good.replace("  Cross-Origin-Opener-Policy: same-origin\n", ""),
          "missing header Cross-Origin-Opener-Policy"),
         ("refuse/duplicate-header", good.replace("  X-Frame-Options: DENY\n",
@@ -377,13 +391,13 @@ def _self_test():
             "  X-Frame-Options: DENY\n", "  X-Frame-Options: DENY\n  x-frame-options: DENY\n"),
          "header X-Frame-Options appears 2 times"),
         ("refuse/unknown-header", good.replace("  X-Robots-Tag: noindex\n",
-                                               "  X-Robots-Tag: noindex\n  Cache-Control: no-store\n"),
+                                               "  X-Robots-Tag: noindex\n  Cache-Control: no-store\n", 1),
          "unknown header Cache-Control"),
         ("refuse/wrong-x-frame-options", good.replace("X-Frame-Options: DENY", "X-Frame-Options: SAMEORIGIN"),
          "wrong value for X-Frame-Options 'SAMEORIGIN'"),
         ("refuse/wrong-coop", good.replace("Opener-Policy: same-origin", "Opener-Policy: unsafe-none"),
          "wrong value for Cross-Origin-Opener-Policy"),
-        ("refuse/wrong-x-robots-tag", good.replace("X-Robots-Tag: noindex", "X-Robots-Tag: noindex, nofollow"),
+        ("refuse/wrong-x-robots-tag", good.replace("X-Robots-Tag: noindex", "X-Robots-Tag: noindex, nofollow", 1),
          "wrong value for X-Robots-Tag"),
         ("refuse/permissions-policy-feature-dropped", good.replace("serial=(), usb=()", "serial=()"),
          "wrong value for Permissions-Policy"),
@@ -413,6 +427,12 @@ def _self_test():
     ):
         ok, detail = _one_finding(body, fragment)
         check(name, ok, detail)
+
+    # A body truncated before /draft/* lacks both later blocks, and judge names each one.
+    findings, errors = _scan_case((good[:good.index("\n/draft/*")] + "\n", good))
+    check("refuse/missing-middle-rule-block", errors == []
+          and findings == ["site/_headers: missing rule block /draft/*",
+                           "site/_headers: missing rule block /draft-src/*"], (findings, errors))
 
     # The live policy may add only the recorded widenings: each added source below is refused, one finding
     # per source, and the recorded source is refused on any other directive.
@@ -463,7 +483,7 @@ def _self_test():
                                ("refuse/forbidden-referrer-policy-draft", draft_anchor, referrer),
                                ("refuse/forbidden-strict-transport-security-live", live_anchor, hsts),
                                ("refuse/forbidden-strict-transport-security-draft", draft_anchor, hsts)):
-        body = good.replace(anchor, anchor + "  " + line + "\n")
+        body = good.replace(anchor, anchor + "  " + line + "\n", 1)
         ok, detail = _one_finding(body, "forbidden header " + line.split(":")[0])
         check(name, ok, detail)
 
@@ -554,8 +574,9 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_headers {} checks (both exact files pass, and so does a live policy equal "
           "to the draft; a missing file, a directory in its place, a missing, unknown, duplicated or "
-          "reordered rule block, a missing, duplicated, unknown or reordered header, each forbidden header in "
-          "either block, a wrong X-Frame-Options, Cross-Origin-Opener-Policy or X-Robots-Tag, a "
+          "reordered rule block, a /draft-src/* block missing its noindex or carrying a wrong one, a "
+          "missing, duplicated, unknown or reordered header, each forbidden header in "
+          "either CSP block, a wrong X-Frame-Options, Cross-Origin-Opener-Policy or X-Robots-Tag, a "
           "Permissions-Policy or draft policy that is not byte-identical, a missing or misplaced removal, and "
           "a live policy that drops a directive or a source, adds a directive or an unrecorded source or "
           "repeats a directive each fail; a file that cannot be stat'ed or read, a non-UTF-8 body, CRLF "

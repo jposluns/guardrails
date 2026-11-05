@@ -10,7 +10,11 @@ Each site root (site/ for aiqt.ai, opf/site/ for opfiles.ai) must carry .well-kn
 regular file whose lines are exactly the owner's 6 fields, in order, each once, with the owner's values
 and the Canonical URL of that root's own domain. A missing file, a non-regular file (a directory, a
 symlink, a FIFO), a missing, duplicated, unknown or out-of-order field, a wrong value and a wrong
-Canonical are findings (exit 1). A file that cannot be stat'ed or read, one over MAX_BYTES, one that is
+Canonical are findings (exit 1). The Expires value is how the files are kept current: RFC 9116 keeps
+Expires at most a year ahead, so an Expires more than MAX_AHEAD (365 days) ahead of the run, one within
+REFRESH_WINDOW (30 days) of expiry or already past it, and one that is not a %Y-%m-%dT%H:%M:%SZ UTC
+timestamp are findings too; the gate turns red 30 days before the published files expire, which forces a
+fresh EXPIRES_VALUE here and in both files before the published ones lapse. A file that cannot be stat'ed or read, one over MAX_BYTES, one that is
 not UTF-8 (decoded strictly), or one carrying a line that is not a `Name: value` field, a CR anywhere
 (a lone CR included) or a NUL is cannot-evaluate (exit 2), never a pass. The gate reads only the
 repository; it never fetches the live files.
@@ -29,6 +33,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import datetime
 import os
 import re
 import stat
@@ -39,10 +44,19 @@ ROOT = Path(__file__).resolve().parents[1]
 REL = ".well-known/security.txt"
 MAX_BYTES = 4096
 
+# The published Expires value and the rule that keeps it current: RFC 9116 section 2.5.5 keeps Expires
+# under a year in the future, so judge_expires() refuses a value more than MAX_AHEAD ahead, and it
+# refuses one with REFRESH_WINDOW or less remaining, so this constant and both published files are
+# refreshed while the published ones are still valid.
+EXPIRES_VALUE = "2027-11-01T00:00:00Z"
+EXPIRES_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+REFRESH_WINDOW = datetime.timedelta(days=30)
+MAX_AHEAD = datetime.timedelta(days=365)
+
 # The fields every site publishes, in this order; Canonical is per root (SITE_ROOTS).
 COMMON_FIELDS = (
     ("Contact", "mailto:jeff@posluns.ca"),
-    ("Expires", "2030-10-31T00:00:00Z"),
+    ("Expires", EXPIRES_VALUE),
     ("Encryption", "https://posluns.ca/security/pgp-key.txt"),
     ("Policy", "https://posluns.ca/security/"),
     ("Preferred-Languages", "en, fr"),
@@ -89,6 +103,29 @@ def parse(data, where):
     return pairs
 
 
+def _now():
+    """The current UTC time; the self-test patches this to pin the freshness boundaries."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def judge_expires(value, where, now=None):
+    """The findings for one Expires value: a %Y-%m-%dT%H:%M:%SZ UTC timestamp, more than REFRESH_WINDOW
+    from expiry, and at most MAX_AHEAD ahead (RFC 9116 keeps Expires under a year in the future)."""
+    try:
+        expiry = datetime.datetime.strptime(value, EXPIRES_FORMAT).replace(tzinfo=datetime.timezone.utc)
+    except ValueError:
+        return ["{}: Expires {!r} is not a {} UTC timestamp".format(where, value, EXPIRES_FORMAT)]
+    now = _now() if now is None else now
+    findings = []
+    if expiry - now <= REFRESH_WINDOW:
+        findings.append("{}: Expires {} is within {} days of expiry, or past it; publish a fresh "
+                        "date".format(where, value, REFRESH_WINDOW.days))
+    if expiry - now > MAX_AHEAD:
+        findings.append("{}: Expires {} is more than {} days ahead; RFC 9116 keeps it at most a year "
+                        "out".format(where, value, MAX_AHEAD.days))
+    return findings
+
+
 def judge(pairs, canonical, where):
     """The findings for one parsed file against the expected fields for its root."""
     findings = []
@@ -109,6 +146,9 @@ def judge(pairs, canonical, where):
     for name in names:
         if name not in known:
             findings.append("{}: unknown field {}".format(where, name))
+    for got_name, got_value in pairs:
+        if got_name == "Expires":
+            findings.extend(judge_expires(got_value, where))
     if not findings and pairs != list(expected):
         findings.append("{}: fields are not in the order {}".format(
             where, ", ".join(name for name, _value in expected)))
@@ -226,7 +266,8 @@ def _self_test():
     check("refuse/wrong-value", errors == [] and len(findings) == 1
           and "wrong value for Preferred-Languages 'en'" in findings[0], (findings, errors))
 
-    body = good[0].replace("Expires: 2030-10-31T00:00:00Z", "Expires: 2030-10-31T00:00:01Z")
+    body = good[0].replace("Expires: " + EXPIRES_VALUE,
+                           "Expires: " + EXPIRES_VALUE.replace("T00:00:00Z", "T00:00:01Z"))
     findings, errors = _scan_case((body, good[1]))
     check("refuse/wrong-value-one-second-late", errors == [] and len(findings) == 1
           and "wrong value for Expires" in findings[0], (findings, errors))
@@ -313,6 +354,36 @@ def _self_test():
             got = True
         check(name, got == refused, (len(body), got))
 
+    # The freshness rule at each end (judge_expires, the gate's keep-current mechanism): 30 days or less
+    # remaining is a finding, more than MAX_AHEAD ahead is a finding, and each boundary is tested one
+    # second inside, exactly at, and one second outside it.
+    expiry = datetime.datetime.strptime(EXPIRES_VALUE, EXPIRES_FORMAT).replace(tzinfo=datetime.timezone.utc)
+    second = datetime.timedelta(seconds=1)
+    for name, now, fragments in (
+            ("bound/refresh-under", expiry - REFRESH_WINDOW + second, ["within 30 days of expiry"]),
+            ("bound/refresh-at", expiry - REFRESH_WINDOW, ["within 30 days of expiry"]),
+            ("bound/refresh-over", expiry - REFRESH_WINDOW - second, []),
+            ("bound/ahead-under", expiry - MAX_AHEAD + second, []),
+            ("bound/ahead-at", expiry - MAX_AHEAD, []),
+            ("bound/ahead-over", expiry - MAX_AHEAD - second, ["more than 365 days ahead"])):
+        got = judge_expires(EXPIRES_VALUE, "fixture", now)
+        check(name, len(got) == len(fragments)
+              and all(fragment in line for fragment, line in zip(fragments, got)), (now, got))
+
+    for name, value in (("refuse/expires-not-a-timestamp", "sometime in 2027"),
+                        ("refuse/expires-impossible-date", "2027-02-30T00:00:00Z")):
+        got = judge_expires(value, "fixture")
+        check(name, len(got) == 1 and "is not a" in got[0], got)
+
+    original_now = _now
+    globals()["_now"] = lambda: expiry - datetime.timedelta(days=10)
+    try:
+        findings, errors = _scan_case(good)
+    finally:
+        globals()["_now"] = original_now
+    check("refuse/expires-within-refresh-window", errors == [] and len(findings) == 2
+          and all("within 30 days of expiry" in line for line in findings), (findings, errors))
+
     got = run_gate(ROOT)
     check("live/real-tree-passes", got == 0, got)
 
@@ -326,7 +397,9 @@ def _self_test():
           "an unknown field and a reordered pair each fail; a file that cannot be stat'ed or read, a "
           "non-UTF-8 body, a line without the field separator, CRLF line ends, a lone CR, a NUL and a "
           "missing final line feed are cannot-evaluate; an unrecognized argument exits 2; the size bound "
-          "holds one byte under, at and over; the live tree passes)".format(len(EXECUTED)))
+          "holds one byte under, at and over; the refresh window and the year bound each hold one second "
+          "inside, at and outside, an unparseable Expires fails, and a tree within the refresh window "
+          "fails on both roots; the live tree passes)".format(len(EXECUTED)))
     return 0
 
 

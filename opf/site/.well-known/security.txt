@@ -1,5 +1,5 @@
 Contact: mailto:jeff@posluns.ca
-Expires: 2030-10-31T00:00:00Z
+Expires: 2027-11-01T00:00:00Z
 Encryption: https://posluns.ca/security/pgp-key.txt
 Policy: https://posluns.ca/security/
 Preferred-Languages: en, fr
