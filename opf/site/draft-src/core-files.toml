@@ -60,7 +60,7 @@ rows = [
   ["<code>[profiles.*]</code>", "additive requirement bundles; may only add requirements"],
   ["<code>[types.*]</code>", "1 table per enabled type, carrying its normative namespace"],
   ["<code>[providers.*]</code>", "handler and roles (create, auth, sync); local-directory and generic-git-remote ship as universal fallbacks"],
-  ["<code>[views.*]</code>", "kind (deterministic, composed or projection), sources, target"],
+  ["<code>[views.*]</code>", "kind (deterministic, composed, or projection), sources, target"],
   ["<code>[deliverables.*]</code>", "the curated CHANGELOG.md declaration"],
   ["<code>[archive]</code>", "period (\"year\")"],
   ["<code>[unmanaged]</code>", "pre-existing files kept in place, enumerated"],
@@ -261,7 +261,7 @@ component = "section"
 lbl = "Around the records"
 id = "pointer"
 heading = "The store pointer"
-rail = "Pointer, archive and projection"
+rail = "Pointer, archive, and projection"
 
 [[body]]
 component = "prose"

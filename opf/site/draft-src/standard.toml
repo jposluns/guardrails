@@ -34,7 +34,7 @@ items = [
     "Views and the closed transform vocabulary",
     "Enforcement posture",
     "Rotation, archive, and retention",
-    "History, frozen digests, and archive enumeration",
+    "History, frozen digests, index reconciliation, and archive enumeration",
     "Adoption and post-adoption import",
     "The genericization boundary",
     "The conformance vocabulary",

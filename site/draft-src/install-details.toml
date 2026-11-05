@@ -1,10 +1,10 @@
 # The aiqt.ai draft install page (template specification sections 7.7, 7.11, 7.12 and 7.14). The
 # downloads and the evidence page link to the live site, which the draft has no copy of.
 path = "install/details/index.html"
-title = "Install the skill"
+title = "Install the Skill"
 kind = "document"
 label = "You and your chat assistant"
-heading = "Install the AIQT skill, step by step"
+heading = "Install the AIQT Skill, step by step"
 meta = '''Your assistant sounds just as confident when it is guessing as when it knows. AIQT 1.0.5 guides it toward a stated standard. Pick the AI you use, get the file it needs, and follow a short guide; choosing one hides the other assistants' steps.'''
 
 [[body]]

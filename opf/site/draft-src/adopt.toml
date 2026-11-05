@@ -5,7 +5,7 @@ title = "Adopt"
 kind = "document"
 label = "Adopt"
 heading = "Ask your assistant for a plan. Review it, then authorize."
-meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes, then inspect the scaffolded store and validation results. In this build the reference tooling stops after approval."
+meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes. In this build the reference tooling stops after approval: it prints the approval without recording it, your assistant reports the stages still pending, and no store is scaffolded."
 
 [[body]]
 component = "label"
@@ -27,7 +27,7 @@ component = "steps"
 items = [
   '''Give your assistant this site's machine-readable entry point, <a href="/llms.txt"><code>/llms.txt</code></a>, and the adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>, as the starting material.''',
   "Review the plan it proposes: what it would create, import, or retire.",
-  "Authorize, then inspect the scaffolded store and the validation results. The reference tooling cannot apply a plan yet: an assistant following the pack stops at approval and reports, and a project with no prior records can use the interim <code>opf init</code> route instead.",
+  "Authorize, then read the approval the reference tooling prints, which it does not record, and your assistant's report of the stages still pending. The reference tooling cannot apply a plan yet, so this path scaffolds no store: an assistant following the pack stops at approval and reports, and a project with no prior records can use the interim <code>opf init</code> route instead.",
 ]
 
 [[body]]
@@ -95,7 +95,7 @@ html = '''<p>The reference tooling's <code>opf init</code> does not scaffold a 2
 
 [[body]]
 component = "prose"
-html = "<p>The <code>opf</code> reference CLI, its 10 command verbs, and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>. Changes land in the pack's <a href=\"https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md\" target=\"_blank\" rel=\"noopener noreferrer\">change log<span class=\"vh\"> (opens in a new tab)</span></a>, which covers OPFiles with the rest of the AIQT Guardrails release.</p>"
+html = "<p>The <code>opf</code> reference CLI, its 10 command verbs, and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>. The pack's <a href=\"https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md\" target=\"_blank\" rel=\"noopener noreferrer\">change log<span class=\"vh\"> (opens in a new tab)</span></a> has no OPFiles entry yet: no pack release so far includes OPFiles.</p>"
 
 [[body]]
 component = "next"

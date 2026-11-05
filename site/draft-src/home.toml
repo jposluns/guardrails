@@ -33,17 +33,17 @@ d = "The 4 facets and the 1 ordering that decides every close call."
 href = "rules/"
 title = "The 5 rules"
 n = "5 rules"
-d = "How an assistant applies the standard, change by change, quoted from the standard text that ships in the skill."
+d = "How an assistant applies the standard, change by change, quoted from the standard text that ships in the Skill."
 
 [[body.items]]
 href = "mappings/"
 title = "Framework mappings"
 n = "17 frameworks"
-d = "How the pack's 133 rules relate to ISO/IEC, NIST, OWASP, MITRE ATLAS, and CSA frameworks, and the enforcement register."
+d = "How 105 of the pack's 133 rules relate to ISO/IEC, NIST, OWASP, MITRE ATLAS, MITRE CWE, and CSA frameworks, and the enforcement register."
 
 [[body]]
 component = "value"
-html = "You cannot tell from the tone whether an assistant knows or is guessing. AIQT gives it 1 written standard: every claim is checked or marked as unchecked, shortcuts are reported, and done means the bar you set was met. You can then ask it to show its evidence and hold it to the answer. It installs in Claude, ChatGPT, Gemini, Copilot, Copilot Studio, and any other assistant that accepts standing instructions, <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. Results depend on the assistant and the model you use. Its 30 Claude Code hooks ship as an opt-in plugin; a guided install and setup doctor arrive with 1.1.0."
+html = "You cannot tell from the tone whether an assistant knows or is guessing. AIQT gives it 1 written standard: every claim is checked or marked as unchecked, shortcuts are reported, and done means the bar you set was met. You can then ask it to show its evidence and hold it to the answer. It is intended for Claude, ChatGPT, Gemini, Copilot, Copilot Studio, and any other assistant that accepts standing instructions; no platform test result is published yet. It is <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. Results depend on the assistant and the model you use. Its 30 Claude Code hooks ship as an opt-in plugin; a guided install and setup doctor arrive with 1.1.0."
 
 [[body]]
 component = "about"

@@ -46,7 +46,7 @@ id = "code"
 
 [[body]]
 component = "prose"
-html = '''<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat skill needs no Python.</p>'''
+html = '''<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat Skill needs no Python.</p>'''
 
 [[body]]
 component = "prose"
