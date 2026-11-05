@@ -63,7 +63,7 @@ evidence = [
 id = "standards-mappings"
 topic = "Standards mappings"
 claim = "AIQT publishes a navigational crosswalk from the pack's rules to identifiers in security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA), each pinned to a stated edition, with every mapped identifier validated against that edition before it can ship."
-limitation = "A mapping asserts a relationship of ideas, not certification, attestation, audit evidence, or proof that you meet a standard. No framework publisher endorses, sponsors, or is affiliated with the pack. The absence of a mapping means none has been asserted yet, and a pinned edition may lag the newest release."
+limitation = "A mapping asserts a relationship of ideas, not certification, attestation, audit evidence, or proof that you meet a standard. No framework publisher endorses, sponsors, or is affiliated with the pack. The absence of a mapping means none is currently asserted (the pair may be unassessed, judged not to fit, or removed after review), and a pinned edition may lag the newest release."
 evidence = [
   { text = "How the crosswalk is built", href = "/mappings#methodology" },
   { text = "The framework registry", href = "/mappings#registry" },

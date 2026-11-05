@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "38072651775ed084a245272142e055be3c40701e10dd0a17b605f8814b676c02"
+tree-sha256 = "bb8bdf673dbe90dd74a1d8b23738bb28099518895544be4370bb0db7b84c592d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -536,8 +536,8 @@ sha256 = "c3fd2aa547848e9c053b82b77beffbb1d6d69c3e3282b38539bea908b01f13f5"
 
 [[sources]]
 path = ".aiqt/core/rules/security-seci-dependency-provenance.md"
-bytes = 1833
-sha256 = "9a4ba64a41ec7200f5bc2bda9e770d45e146bc3cf09aba84dcfa161e08ef7497"
+bytes = 1813
+sha256 = "eb58c906acc1e6979a41db957327386d00ec3ad516ec651996e5df0827def145"
 
 [[sources]]
 path = ".aiqt/core/rules/security-seci-fail-closed.md"
@@ -1456,8 +1456,8 @@ sha256 = "c3fd2aa547848e9c053b82b77beffbb1d6d69c3e3282b38539bea908b01f13f5"
 
 [[sources]]
 path = ".claude/rules/security/SECI-dependency-provenance.md"
-bytes = 1833
-sha256 = "9a4ba64a41ec7200f5bc2bda9e770d45e146bc3cf09aba84dcfa161e08ef7497"
+bytes = 1813
+sha256 = "eb58c906acc1e6979a41db957327386d00ec3ad516ec651996e5df0827def145"
 
 [[sources]]
 path = ".claude/rules/security/SECI-fail-closed.md"
@@ -2386,8 +2386,8 @@ sha256 = "e9bbf7da0e25d113ca0f33db652fd131283a00e234f29bb0dfde29ef1d2da965"
 
 [[sources]]
 path = "DISCLOSURE.md"
-bytes = 10237
-sha256 = "9d9dc82bc15b51253c963859c4096be63b6400008847621074eb5de59a30efd9"
+bytes = 10310
+sha256 = "f9060ac5c60fa060aaee252ea8d5dd236bef73001e0dcbb51d85070ef4f19ac8"
 
 [[sources]]
 path = "ENFORCEMENT.md"
@@ -2461,8 +2461,8 @@ sha256 = "63d8e3c586b876cf601fbde6bbb5158aa3aae4a5ff492538d01c8c952e5966a3"
 
 [[sources]]
 path = "disclosure.toml"
-bytes = 14550
-sha256 = "023a1aa4048dfc10639560b8077d30be17bac123cf78b4ec929d56184b1d231a"
+bytes = 14623
+sha256 = "837676d8f2245d8e36cef5ddf2d97a9a542076b8cd8e10cae5dbe0796143d643"
 
 [[sources]]
 path = "docs/_shell.html"
@@ -3546,8 +3546,8 @@ sha256 = "d854908193c51cd9bbaa1bcc21791b951ed077b20f387c8f82c5d0e973d614bb"
 
 [[sources]]
 path = "site/disclosure/index.html"
-bytes = 19927
-sha256 = "a22337628cccebd2e6eb6e2469a8806078964f1215f9400636996478a536c0e8"
+bytes = 20000
+sha256 = "2a49d184b72a179bf3893ce4462e585aa546ff40764a08b3d737455cc3664ed8"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3597,12 +3597,12 @@ sha256 = "bac47d1a3f4543cb63b8d74d99823cf93caaf303e17648c67810189d4c884702"
 [[sources]]
 path = "site/downloads/mappings.csv"
 bytes = 239654
-sha256 = "a9be641f9110f95665329c34b5e3cdc7e6758f9c28b0b9c0306012778b904bfc"
+sha256 = "8fb1860bc0e41c2f0e48ac34368285a030cba9ab679d2118f4395396beff0f87"
 
 [[sources]]
 path = "site/downloads/mappings.json"
 bytes = 379393
-sha256 = "32fd99f2d37cb39123a6ac99b96b4cd01f3916d6fe8a705f3cd6ef28e1043df1"
+sha256 = "4e0ab89b78465c3825b2aa311ae97a63b1cb378b103e3e11a3d3ebb1c517fde2"
 
 [[sources]]
 path = "site/draft-src/404.toml"
@@ -3611,8 +3611,8 @@ sha256 = "856bc0a179a007b2e133273b49451104157c187351acae1edb5b68c35a9e97cf"
 
 [[sources]]
 path = "site/draft-src/disclosure.toml"
-bytes = 13205
-sha256 = "c5696a9007cc3882d31f2504c485459f88bfa6cfd81a812ec8ddb4f86c34caa3"
+bytes = 13278
+sha256 = "e1b3ee56fa502cbab06edca6c091480a18ddcff1cb8c54b9e6b07f0834a7bcc0"
 
 [[sources]]
 path = "site/draft-src/draft.toml"
@@ -3646,8 +3646,8 @@ sha256 = "3b9d623ff00cae2717f6b78c71ffe84435326789ace4ba0af7a36581caa967c1"
 
 [[sources]]
 path = "site/draft-src/mappings.toml"
-bytes = 7879
-sha256 = "eb451fa24502af7ca33ba9ed4ddef2723f3a23645bdbb2ba94a2c4d8eda1626b"
+bytes = 7884
+sha256 = "38f36dd409ea657bebc886f954199aeff6ce70006ab733e846944f4a6f138461"
 
 [[sources]]
 path = "site/draft-src/rules.toml"
@@ -3991,8 +3991,8 @@ sha256 = "1bb5926f7002841c2ab1b6ba63515ef002cec4f82d981d6ba7082b157b57e51d"
 
 [[sources]]
 path = "site/mappings/index.html"
-bytes = 409904
-sha256 = "e70bfb6b00ce3c3f4a9e05706ca6facd2ddaba0d36e615214ac97d7774089021"
+bytes = 409909
+sha256 = "b343852d41a649575ddeb50db6d9e38a37c3a9c438a96ad56fac63280a05930e"
 
 [[sources]]
 path = "site/robots.txt"
@@ -5291,7 +5291,7 @@ sha256 = "c3fd2aa547848e9c053b82b77beffbb1d6d69c3e3282b38539bea908b01f13f5"
 artifact-id = "rules:.claude/rules/security/SECI-dependency-provenance.md"
 path = ".claude/rules/security/SECI-dependency-provenance.md"
 kind = "file"
-sha256 = "9a4ba64a41ec7200f5bc2bda9e770d45e146bc3cf09aba84dcfa161e08ef7497"
+sha256 = "eb58c906acc1e6979a41db957327386d00ec3ad516ec651996e5df0827def145"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/security/SECI-fail-closed.md"

@@ -1617,6 +1617,16 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
+      "identifier": "STA-09",
+      "identifier_title": "Service Bill of Material (BOM)"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "STA-10",
       "identifier_title": "Supply Chain Risk Management"
     },
@@ -1629,16 +1639,6 @@
       "fit": "broad",
       "identifier": "UEM-02",
       "identifier_title": "Application and Service Approval"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-09",
-      "identifier_title": "Service Bill of Material (BOM)"
     },
     {
       "rule_id": "secfid",
