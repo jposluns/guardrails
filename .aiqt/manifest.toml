@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "373675e958cddb15d9f20ad932e5cc7edd851f92d62bca46bef39909eb478a4a"
+tree-sha256 = "a4856c5cc06c57ff2465b6deed535a5a61b6f9e0b1ede9ada24f4b5fe698d55f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4146,8 +4146,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 218944
-sha256 = "fc5ad18d98b7cbfa51272aa4f5566f13526f6b2728b83ca07a91974679df9675"
+bytes = 219010
+sha256 = "001fee4d31d04dadaadef8ec61e026c634ce3be25189195693b0f19ad200d8b7"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4626,8 +4626,8 @@ sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
 
 [[sources]]
 path = "tools/render_og_cards.py"
-bytes = 3580
-sha256 = "8f44c7e733dfb40a9cb2e4381823edb1293bc9ec4d42196a3f3e0f971f78c9a2"
+bytes = 6125
+sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
