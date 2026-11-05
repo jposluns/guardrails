@@ -13808,6 +13808,11 @@ def _commit_issue(syntax, index, step, target, post, deadline):
     if _is_protected_ref(branch):
         # D is a policy exemption, not a proof of a non-protected destination. It is judged
         # for the repository this commit targets; only admitted cd/pushd segments may accompany it.
+        # The denial names the D condition that failed. A disqualifying shape is decided before any
+        # remote read, and a read added there could only add a failure or spend the commit deadline,
+        # so that reason names the shape alone and makes no claim about the remote.
+        failed = ("the command has segments other than one commit and cd/pushd,"
+                  " so remote state was not read")
         if (len(syntax.commit_indexes) == 1 and post is None
                 and all(other is step or other.kind == "cd" for other in syntax.steps)):
             remote = _repo_has_remote(target.directory, deadline)
@@ -13817,7 +13822,10 @@ def _commit_issue(syntax, index, step, target, post, deadline):
                 return _CommitEvidence("proved", certificate, "D: lone commit; target has no remote")
             if remote is None:
                 return _CommitEvidence("unverifiable", None, "remote absence could not be proved")
-        return _CommitEvidence("protected", None, "would commit on protected branch " + repr(branch))
+            failed = ("the target repository has a configured remote"
+                      " or a legacy remotes/ or branches/ entry")
+        return _CommitEvidence("protected", None, "would commit on protected branch " + repr(branch)
+                               + "; no-remote exemption not applied: " + failed)
     shape = "C" if post is not None else ("B" if step.target is not None else "A")
     certificate = _CommitCertificate(shape, index, target.identity, branch,
                                      None if post is None else post.switch_index)
