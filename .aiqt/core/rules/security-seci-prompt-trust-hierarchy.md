@@ -7,7 +7,8 @@ secondary: [TRUST]
 slug: prompt-trust-hierarchy
 map-cwe-broad: [CWE-1427]
 map-nist-airmf-broad: [MAP 4.2]
-map-atlas-broad: [AML.T0051, AML.T0054]
+map-atlas-tight: [AML.T0054]
+map-atlas-broad: [AML.T0051]
 map-owasp-llm-broad: [LLM01]
 ---
 

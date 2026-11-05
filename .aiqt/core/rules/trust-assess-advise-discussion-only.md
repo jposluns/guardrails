@@ -7,7 +7,7 @@ facet: TRUST
 slug: assess-advise-discussion-only
 map-nist-airmf-broad: [GOVERN 3.2, MAP 3.5]
 map-iso-42001-broad: [A.9.2]
-map-iso-23894-broad: [A.2, B.4]
+map-iso-23894-broad: [B.4]
 ---
 
 # Assess and advise are discussion only
