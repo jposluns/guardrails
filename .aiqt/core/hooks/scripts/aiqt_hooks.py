@@ -22214,7 +22214,11 @@ def _orch_enumerate(reg, root):
     timeout = spec.get("timeout")
     timeout = timeout if isinstance(timeout, (int, float)) and 0 < timeout <= 600 else 60
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
+        # encoding="utf-8" (strict) so the enumerator's answer decodes the same under every locale:
+        # a valid UTF-8 title never denies under LC_ALL=C, and an undecodable byte always raises
+        # into the except below rather than only where the locale happens to be UTF-8.
+        result = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                timeout=timeout, cwd=root)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         # ValueError covers the UnicodeDecodeError that text-mode decoding raises on undecodable
         # (non-UTF-8) enumerator output, on stdout or stderr: an enumerator whose answer cannot be
@@ -31727,8 +31731,10 @@ def _orch_resume_probes(reg, root):
         if m:
             try:
                 env = _isolate_git_env(dict(os.environ))
+                # encoding="utf-8" (strict): the HEAD probe decodes the same under every locale
                 head = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
-                                      capture_output=True, text=True, timeout=5, env=env)
+                                      capture_output=True, text=True, encoding="utf-8",
+                                      timeout=5, env=env)
                 sha = head.stdout.strip() if head.returncode == 0 else ""
             except Exception:
                 sha = ""
@@ -31800,8 +31806,11 @@ def _orch_merge_pending_findings(reg, root):
         return []
     try:
         env = _isolate_git_env(dict(os.environ))
+        # encoding="utf-8" (strict): a valid UTF-8 subject line reads the same under every locale,
+        # and an undecodable one lands in the except below (cannot-evaluate), never a crash
         log = subprocess.run(["git", "-C", root, "log", "--first-parent", "-n", "500",
-                              "--format=%s"], capture_output=True, text=True, timeout=10, env=env)
+                              "--format=%s"], capture_output=True, text=True, encoding="utf-8",
+                             timeout=10, env=env)
         subjects = log.stdout if log.returncode == 0 else None
     except Exception:
         subjects = None
@@ -31826,7 +31835,11 @@ def _orch_chained_rows(path, prefix):
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers the UnicodeDecodeError a strict UTF-8 read raises on an undecodable
+        # register byte: an unreadable register (rows None), which every caller holds, never an
+        # uncaught crash that the dispatcher's Stop-family error posture would turn into a
+        # fail-open allow.
         return (None, "unreadable ({})".format(exc))
     sha = __import__("hashlib").sha256
     rows, prev = [], None
@@ -31871,7 +31884,11 @@ def _orch_register_authority(root, path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
             lines = fh.read().splitlines()
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers the UnicodeDecodeError a strict UTF-8 read raises on an undecodable
+        # register byte: a HOLD (cannot-evaluate), never an uncaught crash that the dispatcher's
+        # Stop-family error posture would turn into a fail-open allow at yield time, and never an
+        # audit crash that leaves an earlier ok snapshot usable.
         return ("hold", "register unreadable ({})".format(exc), None)
     env = _isolate_git_env(dict(os.environ))
     rel = None
@@ -31894,13 +31911,18 @@ def _orch_register_authority(root, path):
                     "{})".format(probe.returncode), None)
         if probe.returncode == 0:
             try:
+                # encoding="utf-8" (strict) on both git reads, so a valid UTF-8 register decodes
+                # the same under every locale and an undecodable committed state always raises
+                # into the except below (a HOLD), never only where the locale happens to be UTF-8.
                 base = subprocess.run(["git", "-C", root, "merge-base", "HEAD", "origin/HEAD"],
-                                      capture_output=True, text=True, timeout=10, env=env)
+                                      capture_output=True, text=True, encoding="utf-8",
+                                      timeout=10, env=env)
                 if base.returncode != 0 or not base.stdout.strip():
                     return ("hold", "no computable merge-base with origin/HEAD", None)
                 ref = base.stdout.strip()
                 old = subprocess.run(["git", "-C", root, "show", "{}:{}".format(ref, rel)],
-                                     capture_output=True, text=True, timeout=10, env=env)
+                                     capture_output=True, text=True, encoding="utf-8",
+                                     timeout=10, env=env)
             except (OSError, ValueError, subprocess.SubprocessError) as exc:
                 # ValueError covers the UnicodeDecodeError that text-mode decoding raises when the
                 # merge-base content of the register is not UTF-8: a HOLD (cannot-evaluate), never

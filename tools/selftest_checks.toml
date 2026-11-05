@@ -1372,6 +1372,17 @@ expected-check-ids = [
   "attest/anchor-fifo-holds-without-blocking",
   "attest/anchor-regular-after-type-vectors-ok",
   "attest/git-failure-tracked-decision-holds",
+  # ---------- the register reads fail safe on undecodable bytes, under any locale ----------
+  "attest/register-invalid-utf8-authority-holds",
+  "attest/register-invalid-utf8-rows-held",
+  "attest/register-invalid-utf8-ok-snapshot-first",
+  "attest/register-invalid-utf8-validate-holds",
+  "attest/register-invalid-utf8-stop-holds",
+  "attest/merge-base-invalid-utf8-holds",
+  "attest/merge-base-utf8-authority-ok",
+  "attest/merge-base-utf8-c-locale-ok",
+  "stop/utf8-title-utf8-locale-allows",
+  "stop/utf8-title-c-locale-same-decision",
   # ---------- the systemic-lapse lifecycle (verdict-preservation legs) ----------
   "lapse/klass-recorded",
   "lapse/no-bypass-still-denies",

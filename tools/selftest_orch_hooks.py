@@ -11942,7 +11942,8 @@ def _main_isolated(report_path=None):
         # an enumerator writing undecodable (non-UTF-8) bytes, on stdout or on stderr, is an
         # enumerator error that DENIES the stop, never an uncaught UnicodeDecodeError out of the
         # handler (which the dispatcher's Stop-family error posture would turn into a fail-open
-        # allow: one invalid byte would convert every stop and schedule deny into an allow)
+        # allow: one invalid byte would convert every Stop and TeammateIdle deny into an allow;
+        # the schedule guard is a PreToolUse handler, so its crash already failed closed)
         _utf8_stub = f.root / "enum-invalid-utf8-stub.py"
         _utf8_stub.write_text(
             "import sys\n"
@@ -11952,12 +11953,16 @@ def _main_isolated(report_path=None):
         _utf8_regp = f.root / ".aiqt" / "orchestration.local.json"
         _utf8_reg = json.loads(_utf8_regp.read_text(encoding="utf-8"))
         _utf8_saved = _utf8_reg["enumerator"]
-        for _utf8_where in ("stdout", "stderr"):
+        # the check id is a for-loop literal, the one computed-id shape the execution gate's static
+        # scan resolves (a .format id is unresolvable there and refuses the whole suite launch)
+        for _utf8_check, _utf8_where in (
+                ("stop/enum-invalid-utf8-stdout-denies", "stdout"),
+                ("stop/enum-invalid-utf8-stderr-denies", "stderr")):
             _utf8_reg["enumerator"] = {
                 "argv": [sys.executable, "-I", "-B", str(_utf8_stub), _utf8_where], "timeout": 30}
             _utf8_regp.write_text(json.dumps(_utf8_reg), encoding="utf-8")
             f.set_turn_state({})
-            check("stop/enum-invalid-utf8-{}-denies".format(_utf8_where), _verdict(stop()), "block2")
+            check(_utf8_check, _verdict(stop()), "block2")
         _utf8_reg["enumerator"] = _utf8_saved
         _utf8_regp.write_text(json.dumps(_utf8_reg), encoding="utf-8")
 
@@ -16818,6 +16823,143 @@ def _main_isolated(report_path=None):
                 nr_lines[-1].encode("utf-8")).hexdigest()}), encoding="utf-8")
         check("attest/git-failure-tracked-decision-holds",
               aiqt_hooks._orch_register_authority(str(nonrepo), str(nr_reg))[0], "hold")
+
+        # ---------- the register reads fail safe on undecodable bytes, under any locale ----------
+        # One non-UTF-8 byte in the attestation register made the register open raise
+        # UnicodeDecodeError out of _orch_register_authority and _orch_chained_rows; a Stop-family
+        # handler crash is dispatcher fail-open (warn, exit 0), so a hold that was due became an
+        # allow, and the audit crashed before writing its hold snapshot, so an earlier ok snapshot
+        # stayed usable. These vectors demand the hold value, never an exception, and demand that a
+        # VALID UTF-8 register or enumerator answer decides the same under LC_ALL=C as under a
+        # UTF-8 locale (no decision for valid input changes).
+        u = Fixture(tmp, "attest-utf8")
+        u_reg = u.root / "attestations.jsonl"
+        _uregp = u.root / ".aiqt" / "orchestration.local.json"
+        _ureg_raw = json.loads(_uregp.read_text(encoding="utf-8"))
+        _ureg_raw["attestations"] = str(u_reg)
+        _uregp.write_text(json.dumps(_ureg_raw), encoding="utf-8")
+        ureg = aiqt_hooks._orch_registry(str(u.root))[1]
+        usd = Path(aiqt_hooks._orch_state_dir_for_root(str(u.root)))
+        usnap = usd / "attestations-validated.json"
+        ustop = lambda: aiqt_hooks.orch_stop_guard(u.payload("Stop"))
+
+        def u_anchor(text):
+            lines = text.splitlines()
+            payload = ({"seq": len(lines), "digest": _hashlib.sha256(
+                lines[-1].encode("utf-8")).hexdigest()} if lines else {"seq": 0, "digest": "0" * 64})
+            Path(str(u_reg) + ".anchor").write_text(json.dumps(payload), encoding="utf-8")
+
+        def u_called(fn, *args):
+            # these vectors demand the fail-safe VALUE: a raise here would ride the dispatcher's
+            # Stop-family error posture into a fail-open allow, so it reads as a distinct failure
+            try:
+                return fn(*args)
+            except Exception as exc:
+                return ("crash", type(exc).__name__)
+
+        u_good = chained(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "accepted",
+             "mistake": "attests ci", "evidence": "run pending", "rule": "corexc",
+             "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt"})
+        u_reg.write_bytes(b'\xff\n')
+        u_anchor("")
+        check("attest/register-invalid-utf8-authority-holds",
+              u_called(aiqt_hooks._orch_register_authority, str(u.root), str(u_reg))[0], "hold")
+        check("attest/register-invalid-utf8-rows-held",
+              u_called(aiqt_hooks._orch_chained_rows, str(u_reg), "AT-")[0], None)
+        # the audit replaces a prior ok snapshot with the hold snapshot, never crashes past it
+        u_reg.write_text(u_good, encoding="utf-8")
+        u_anchor(u_good)
+        aiqt_hooks._orch_validate_attestations(ureg, str(u.root))
+        check("attest/register-invalid-utf8-ok-snapshot-first",
+              json.loads(usnap.read_text(encoding="utf-8")).get("status"), "ok")
+        u_reg.write_bytes(b'\xff\n')
+        vfind = u_called(aiqt_hooks._orch_validate_attestations, ureg, str(u.root))
+        check("attest/register-invalid-utf8-validate-holds",
+              (isinstance(vfind, list) and bool(vfind),
+               json.loads(usnap.read_text(encoding="utf-8")).get("status") if usnap.exists()
+               else "absent"),
+              (True, "unreadable"))
+        u.set_items([ext("AT-I1", "ci")])
+        u.set_turn_state({})
+        u_got = u_called(ustop)
+        check("attest/register-invalid-utf8-stop-holds",
+              "crash" if u_got[:1] == ("crash",) else _verdict(u_got), "block2")
+        # the tracked (git merge-base) authority leg: an undecodable committed register state is a
+        # hold, never a crash
+        u._git("add", "attestations.jsonl")
+        u._git("-c", "user.name=T", "-c", "user.email=t@example.invalid",
+               "-c", "commit.gpgsign=false", "commit", "-q", "-m", "register v1")
+        u._git("remote", "add", "origin", str(u.root))
+        u._git("fetch", "-q", "origin")
+        u._git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        u_reg.write_text(u_good, encoding="utf-8")
+        check("attest/merge-base-invalid-utf8-holds",
+              u_called(aiqt_hooks._orch_register_authority, str(u.root), str(u_reg))[0], "hold")
+        # a VALID register whose rows carry non-ASCII UTF-8 answers ok under the suite's locale AND
+        # under LC_ALL=C (the authority's git reads name their encoding, never the locale)
+        u_good2_line = json.dumps(
+            {"seq": 1, "id": "AT-1", "ts": now_iso(0), "status": "accepted",
+             "mistake": "attests café résumé", "evidence": "run pending",
+             "rule": "corexc", "guardrail": "n/a", "ref": "ci", "check_ref": "seed.txt",
+             "prev": "0" * 64}, sort_keys=True, ensure_ascii=False)
+        u_reg.write_text(u_good2_line + "\n", encoding="utf-8")
+        u._git("add", "attestations.jsonl")
+        u._git("-c", "user.name=T", "-c", "user.email=t@example.invalid",
+               "-c", "commit.gpgsign=false", "commit", "-q", "-m", "register v2")
+        u._git("fetch", "-q", "origin")
+        check("attest/merge-base-utf8-authority-ok",
+              u_called(aiqt_hooks._orch_register_authority, str(u.root), str(u_reg))[0], "ok")
+        u_driver = u.root / "c-locale-driver.py"
+        u_driver.write_text(
+            "import json\n"
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import aiqt_hooks\n"
+            "if sys.argv[2] == 'authority':\n"
+            "    print(json.dumps(aiqt_hooks._orch_register_authority(sys.argv[3], sys.argv[4])[0]))\n"
+            "else:\n"
+            "    code, _obj, _err = aiqt_hooks.orch_stop_guard(\n"
+            "        {'hook_event_name': 'Stop', 'cwd': sys.argv[3], 'session_id': 's1'})\n"
+            "    print(json.dumps(code))\n", encoding="utf-8")
+        c_env = {k: v for k, v in os.environ.items()
+                 if not k.startswith(("LC_", "PYTHON")) and k != "LANG"}
+        c_env["LC_ALL"] = "C"  # with -X utf8=0 below, locale-dependent decoding really is ASCII
+
+        def c_locale(*args):
+            r = subprocess.run(
+                [sys.executable, "-I", "-B", "-X", "utf8=0", str(u_driver),
+                 os.path.dirname(aiqt_hooks.__file__), *args],
+                capture_output=True, text=True, timeout=120, env=c_env)
+            return (json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip()
+                    else ("child-failed", r.returncode, (r.stderr or "")[-200:]))
+
+        check("attest/merge-base-utf8-c-locale-ok",
+              c_locale("authority", str(u.root), str(u_reg)), "ok")
+        # a valid UTF-8 non-ASCII enumerator TITLE decides the stop the same under LC_ALL=C as
+        # under a UTF-8 locale: here the only item is closed, so the decision is allow (exit 0),
+        # never a locale-dependent cannot-evaluate deny
+        u_bytes_stub = u.root / "enum-bytes-stub.py"
+        u_bytes_stub.write_text(
+            "import sys\n"
+            "with open(sys.argv[1], 'rb') as fh:\n"
+            "    sys.stdout.buffer.write(fh.read())\n"
+            "sys.stdout.buffer.flush()\n", encoding="utf-8")
+        _u_now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        u.enum_payload.write_text(json.dumps(
+            {"version": 1, "generated_at_utc": _u_now,
+             "source": {"locator": "fixture", "revision": "r1", "observed_at_utc": _u_now},
+             "items": [item("U-1", state="closed", title="café über title")]},
+            ensure_ascii=False), encoding="utf-8")
+        (usd / "backlog-checkpoint.json").unlink(missing_ok=True)
+        (usd / "checkpoint-init.marker").unlink(missing_ok=True)
+        _ureg_raw["enumerator"] = {"argv": [sys.executable, "-I", "-B", str(u_bytes_stub),
+                                            str(u.enum_payload)], "timeout": 30}
+        _uregp.write_text(json.dumps(_ureg_raw), encoding="utf-8")
+        u.set_turn_state({})
+        check("stop/utf8-title-utf8-locale-allows", _verdict(ustop()), "allow")
+        u.set_turn_state({})
+        check("stop/utf8-title-c-locale-same-decision", c_locale("stop", str(u.root)), 0)
 
         # ---------- GD-127: the systemic-lapse lifecycle (verdict-preservation legs) ----------
         # The appender validates in the register gate's own root, resolved from the gate's
