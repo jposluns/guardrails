@@ -23,7 +23,7 @@ rail = "The ordering"
 [[body]]
 component = "callout"
 rule = true
-html = "<p class=\"ordering\"><span class=\"tier\">(Accuracy = Integrity = Quality = Trust)</span> &gt; <span class=\"p\">Progress</span> &gt; <span class=\"s\">Speed</span> &gt; <span class=\"c\">Cost</span></p><p>The 4 facets are the top tier, co-equal, with no ranking among them. Below them, in order, come three more: Progress (decide and act when the answer is already clear), Speed (do it with fewer wasted steps), and Cost (do it cheaply). When two of these pull against each other, the higher one wins, every time. That settles a conflict between tiers; when a constraint forces a compromise within the top tier itself, the assistant halts and escalates the tradeoff explicitly rather than resolving it silently. Verification is never the thing that gets cut.</p>"
+html = "<p class=\"ordering\"><span class=\"tier\">(Accuracy = Integrity = Quality = Trust)</span> &gt; <span class=\"p\">Progress</span> &gt; <span class=\"s\">Speed</span> &gt; <span class=\"c\">Cost</span></p><p>The 4 facets are the top tier, co-equal, with no ranking among them. Below them, in order, come three more: Progress (decide and act when the answer is already clear), Speed (do it with fewer wasted steps), and Cost (do it cheaply). When two of these pull against each other, the higher one wins, every time. When a constraint forces a compromise on the top tier, the assistant halts and escalates the tradeoff explicitly rather than resolving it silently. Verification is never the thing that gets cut.</p>"
 
 [[body]]
 component = "clause"

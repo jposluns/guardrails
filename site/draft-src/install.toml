@@ -5,7 +5,7 @@ title = "Install"
 kind = "document"
 label = "Install"
 heading = "Add AIQT to your AI development assistant"
-meta = "Give your development assistant 1 prompt and it installs AIQT and prepares an adoption plan for your approval, with OPFiles for your project's records. Using a chat assistant? Download the Skill."
+meta = "Give your development assistant 1 prompt and it prepares an adoption plan and, once you approve it, installs AIQT, with OPFiles for your project's records. Using a chat assistant? Download the Skill."
 
 [[body]]
 component = "label"
