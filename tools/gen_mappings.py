@@ -13,10 +13,14 @@ true freshness), so --check is a stable drift gate. A defensive `cid in manifest
 fabricated id can never be rendered even if this runs before check_mappings; an emitted title carrying an
 en/em dash fails closed here rather than as a red site-integrity gate later.
 
-  gen_mappings.py           regenerate site/mappings.html and the two exports under site/downloads/
-  gen_mappings.py --check   exit 1 if any of the three is out of date; exit 2 on malformed input
+  gen_mappings.py           regenerate the two exports under site/downloads/
+  gen_mappings.py --check   exit 1 if either is out of date; exit 2 on malformed input
   gen_mappings.py --self-test  build synthetic trees and assert drift is caught (exit 1) and a site/ symlinked
-                               outside the root fails closed (exit 2) without its page being read
+                               outside the root fails closed (exit 2) without an export being written there
+
+The site's mappings page (site/mappings/index.html) is a template page tools/gen_draft_site.py renders
+from build_rows, registry_rows and the wording helpers here; the page block renderers below are kept
+for that shared wording and are not called by run().
 """
 import sys
 
@@ -39,7 +43,7 @@ import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _gen_common import linked_dir_failures, repo_root, replace_block, reconcile, target_dir_present  # noqa: E402
+from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present  # noqa: E402
 from _standards import load_manifests, ManifestError, natkey  # noqa: E402
 import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus validation)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
@@ -70,12 +74,8 @@ NOTICE_URL = "https://github.com/jposluns/guardrails/blob/main/NOTICE"
 EN, EM = "–", "—"
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata
-# only, it does not affect what this generator produces. site/mappings.html is a generated block inside
-# a hand-authored page (the mappings markers), so it is recorded as kind block.
+# only, it does not affect what this generator produces.
 GENSRC_OUTPUTS = (
-    {"target": "site/mappings.html", "kind": "block",
-     "sources": (".aiqt/standards/", ".aiqt/core/rules/"),
-     "regenerate": "python3 tools/gen_mappings.py"},
     {"target": "site/downloads/mappings.csv", "kind": "file",
      "sources": (".aiqt/standards/", ".aiqt/core/rules/"),
      "regenerate": "python3 tools/gen_mappings.py"},
@@ -454,16 +454,14 @@ def render_json(reg, rows):
 
 
 def run(root, check):
-    """Reconcile site/mappings.html and the two exports under site/downloads/ under root. Exit 0 in sync, 1 on
-    drift (check mode), 2 on malformed input, a missing page or missing markers, or a target directory that is
-    there but cannot be read as one inside the repository. Parameterized on root so the self-test drives it
+    """Reconcile the two exports under site/downloads/ under root. Exit 0 in sync, 1 on drift (check mode), 2
+    on malformed input or a target directory that is there but cannot be read as one inside the repository. Parameterized on root so the self-test drives it
     against synthetic trees, never the real repo."""
-    page = root / "site" / "mappings.html"
     exports = (root / "site" / "downloads" / "mappings.csv", root / "site" / "downloads" / "mappings.json")
     # The directory probe reconcile runs (target_dir_present), for every target before anything is read or
     # written: a site/ or site/downloads/ that is there but cannot be read as a directory inside the repository
-    # exits 2 here, so the page is never read through it and nothing is written before the refusal.
-    for target in (page,) + exports:
+    # exits 2 here, so nothing is written before the refusal.
+    for target in exports:
         target_dir_present(target, root)
     try:
         manifests = load_manifests(root / ".aiqt" / "standards", root=root)
@@ -480,27 +478,7 @@ def run(root, check):
         return 2
     reg = registry_rows(manifests, rows)
 
-    if not page.exists():
-        print("error: site/mappings.html not found (expected generated target)", file=sys.stderr)
-        return 2
-    try:
-        text = page.read_text(encoding="utf-8")
-        text = replace_block(text, "COVERAGE", render_coverage(reg, rows))
-        text = replace_block(text, "RELKINDS", render_relkinds(manifests))
-        text = replace_block(text, "IDKINDS", render_idkinds(manifests))
-        text = replace_block(text, "ISOENTRIES", render_isoentries(manifests))
-        text = replace_block(text, "REGISTRYINTRO", render_registry_intro(reg))
-        text = replace_block(text, "REGISTRY", render_registry(reg))
-        text = replace_block(text, "FORWARD", render_forward(rows))
-        text = replace_block(text, "REVERSE", render_reverse(export_rows, reg))
-    except (ValueError, OSError) as exc:
-        print("error: {}".format(exc), file=sys.stderr)
-        return 2
-
     drift = False
-    if reconcile(page, text, check, root):
-        print("drift: site/mappings.html")
-        drift = True
     if reconcile(exports[0], render_csv(export_rows), check, root):
         print("drift: site/downloads/mappings.csv")
         drift = True
@@ -522,11 +500,10 @@ def main():
 
 # --- self-test ------------------------------------------------------------------------------------
 # Synthetic temp trees only, never the real tree: one pinned manifest, a one-rule corpus (the apex, which
-# carries no mapping key) and a page carrying every generated block. Vectors:
-#   1. the tree generates (exit 0) and re-checks clean (exit 0), and a hand-edited page is drift (exit 1);
-#   2. a site/ symlinked outside the root fails closed (exit 2) in --check and write mode with the page there
-#      untouched and never read: the page there has no markers, and each run prints the link refusal, not the
-#      marker error; symlinked inside the root, it is read and the page rewritten.
+# carries no mapping key) and site/downloads/. Vectors:
+#   1. the tree generates (exit 0) and re-checks clean (exit 0), and a hand-edited export is drift (exit 1);
+#   2. a site/ symlinked outside the root fails closed (exit 2) in --check and write mode with the export
+#      there untouched; symlinked inside the root, it is followed and the export rewritten.
 
 _SELFTEST_MANIFEST = (
     'map-key = "map-alpha"\nname = "Alpha Framework"\npublisher = "AIQT self-test"\nedition = "1.0"\n'
@@ -536,12 +513,8 @@ _SELFTEST_MANIFEST = (
 )
 _SELFTEST_APEX = ("---\ncorpus-id: prjint1\norigin: pack\nfamily: aiqt\napex: true\nslug: project-integrity\n"
                   "---\n\n# Project integrity\n\nA fixture rule.\n")
-_SELFTEST_BLOCKS = ("COVERAGE", "RELKINDS", "IDKINDS", "ISOENTRIES", "REGISTRYINTRO", "REGISTRY", "FORWARD",
-                    "REVERSE")
-
-
 def _write_tree(root):
-    """A synthetic tree with the manifest, the corpus, the page and site/downloads/, for run(root, check)."""
+    """A synthetic tree with the manifest, the corpus and site/downloads/, for run(root, check)."""
     std = root / ".aiqt" / "standards"
     std.mkdir(parents=True)
     (std / "alpha.toml").write_text(_SELFTEST_MANIFEST, encoding="utf-8")
@@ -549,9 +522,6 @@ def _write_tree(root):
     rules.mkdir(parents=True)
     (rules / "prjint1.md").write_text(_SELFTEST_APEX, encoding="utf-8")
     (root / "site" / "downloads").mkdir(parents=True)
-    (root / "site" / "mappings.html").write_text("<main>\n" + "".join(
-        "      <!-- {0}:BEGIN (generated) -->\n      <!-- {0}:END -->\n".format(name)
-        for name in _SELFTEST_BLOCKS) + "</main>\n", encoding="utf-8")
 
 
 def self_test_main():
@@ -579,16 +549,15 @@ def self_test_main():
         got = (quiet(good, False), quiet(good, True))
         if got != (0, 0):
             failures.append("well-formed tree expected generate and --check exit (0, 0), got {}".format(got))
-        page = good / "site" / "mappings.html"
-        page.write_text(page.read_text(encoding="utf-8").replace("Alpha Framework", "Hand-edited"),
-                        encoding="utf-8")
+        export = good / "site" / "downloads" / "mappings.csv"
+        export.write_text(export.read_text(encoding="utf-8") + "hand,edited\n", encoding="utf-8")
         code = quiet(good, True)
         if code != 1:
-            failures.append("a hand-edited page expected --check exit 1 (drift), got {}".format(code))
+            failures.append("a hand-edited export expected --check exit 1 (drift), got {}".format(code))
 
-        # 2. site/ symlinked outside the root (page never read) and inside it (followed).
-        failures.extend(linked_dir_failures(tmp, "site", _write_tree, run, "site", "site/mappings.html",
-                                            unread=lambda p: p.write_text("no markers\n", encoding="utf-8")))
+        # 2. site/ symlinked outside the root (export never written there) and inside it (followed).
+        failures.extend(linked_dir_failures(tmp, "site", _write_tree, run, "site", "site/downloads/mappings.csv",
+                                            drift=lambda p: p.write_text("stale\n", encoding="utf-8")))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -597,9 +566,9 @@ def self_test_main():
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: a well-formed tree generates the page and both exports and re-checks clean; a "
-          "hand-edited page is drift (exit 1); a site/ symlinked outside the root fails closed (exit 2) with "
-          "the page there untouched and never read, and one symlinked inside the root is read and rewritten.")
+    print("SELF-TEST PASS: a well-formed tree generates both exports and re-checks clean; a hand-edited "
+          "export is drift (exit 1); a site/ symlinked outside the root fails closed (exit 2) with the export "
+          "there untouched, and one symlinked inside the root is followed and rewritten.")
     return 0
 
 

@@ -190,6 +190,9 @@
 .aiqt/standards/owasp-proactive.toml text eol=lf
 .aiqt/standards/owasp-web.toml text eol=lf
 .aiqt/tracker-label-baseline.toml text eol=lf
+.baseline/check_palette.py text eol=lf
+.baseline/opfiles-pin.toml text eol=lf
+.baseline/pin.toml text eol=lf
 .claude/RULES-INDEX.md text eol=lf
 .claude/rules/README.md text eol=lf
 .claude/rules/aiqt/00-project-integrity.md text eol=lf
@@ -493,14 +496,8 @@ aiqt-barebones.md text eol=lf
 changelog.toml text eol=lf
 disclosure.toml text eol=lf
 docs/_shell.html text eol=lf
-docs/about.md text eol=lf
 docs/development.md text eol=lf
 docs/evidence.md text eol=lf
-docs/examples.md text eol=lf
-docs/learn.md text eol=lf
-docs/rules.md text eol=lf
-docs/standard.md text eol=lf
-docs/teams.md text eol=lf
 opf/enforcement/ci/github-actions.yml text eol=lf
 opf/enforcement/ci/opf-ci.sh text eol=lf
 opf/enforcement/claude/pretooluse_deny.py text eol=lf
@@ -528,24 +525,89 @@ opf/prompt-pack/import/examples/preference_pattern.batch.toml text eol=lf
 opf/prompt-pack/import/examples/reference.batch.toml text eol=lf
 opf/prompt-pack/import/examples/worklog.batch.toml text eol=lf
 opf/prompt-pack/pack.toml text eol=lf
+opf/site/.well-known/security.txt text eol=lf
+opf/site/404.html text eol=lf
+opf/site/_headers text eol=lf
 opf/site/_redirects text eol=lf
-opf/site/about.html text eol=lf
-opf/site/adopt.html text eol=lf
 opf/site/adopt.md text eol=lf
-opf/site/aiqt.html text eol=lf
-opf/site/core-files.html text eol=lf
-opf/site/disclosure.html text eol=lf
-opf/site/favicon.svg text eol=lf
+opf/site/adopt/index.html text eol=lf
+opf/site/assets/baseline/logos/opfiles-touch.png binary
+opf/site/assets/opfiles-og.png binary
+opf/site/core-files/index.html text eol=lf
+opf/site/disclosure/index.html text eol=lf
+opf/site/draft-src/404.toml text eol=lf
+opf/site/draft-src/adopt.toml text eol=lf
+opf/site/draft-src/core-files.toml text eol=lf
+opf/site/draft-src/disclosure.toml text eol=lf
+opf/site/draft-src/draft.toml text eol=lf
+opf/site/draft-src/home.toml text eol=lf
+opf/site/draft-src/license.toml text eol=lf
+opf/site/draft-src/model.toml text eol=lf
+opf/site/draft-src/standard.toml text eol=lf
+opf/site/draft/assets/baseline/LICENSE text eol=lf
+opf/site/draft/assets/baseline/NOTICE.md text eol=lf
+opf/site/draft/assets/baseline/baseline.css text eol=lf
+opf/site/draft/assets/baseline/copy.js text eol=lf
+opf/site/draft/assets/baseline/fonts.css text eol=lf
+opf/site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt text eol=lf
+opf/site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2 binary
+opf/site/draft/assets/baseline/fonts/jetbrains-mono-LICENSE.txt text eol=lf
+opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2 binary
+opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2 binary
+opf/site/draft/assets/baseline/fonts/newsreader-LICENSE.txt text eol=lf
+opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2 binary
+opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2 binary
+opf/site/draft/assets/baseline/fonts/public-sans-LICENSE.txt text eol=lf
+opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2 binary
+opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2 binary
+opf/site/draft/assets/baseline/logos/aiqt-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/aiqt-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/aiqt-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/aiqt-touch.png binary
+opf/site/draft/assets/baseline/logos/aiqt.svg text eol=lf
+opf/site/draft/assets/baseline/logos/auditthis-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/auditthis-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/auditthis-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/auditthis-touch.png binary
+opf/site/draft/assets/baseline/logos/auditthis.svg text eol=lf
+opf/site/draft/assets/baseline/logos/cleanlanguage-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/cleanlanguage-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/cleanlanguage-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/cleanlanguage-touch.png binary
+opf/site/draft/assets/baseline/logos/cleanlanguage.svg text eol=lf
+opf/site/draft/assets/baseline/logos/grclibrary-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/grclibrary-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/grclibrary-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/grclibrary-touch.png binary
+opf/site/draft/assets/baseline/logos/grclibrary.svg text eol=lf
+opf/site/draft/assets/baseline/logos/opfiles-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/opfiles-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/opfiles-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/opfiles-touch.png binary
+opf/site/draft/assets/baseline/logos/opfiles.svg text eol=lf
+opf/site/draft/assets/baseline/logos/secureconfig-card.svg text eol=lf
+opf/site/draft/assets/baseline/logos/secureconfig-favicon.svg text eol=lf
+opf/site/draft/assets/baseline/logos/secureconfig-mono.svg text eol=lf
+opf/site/draft/assets/baseline/logos/secureconfig-touch.png binary
+opf/site/draft/assets/baseline/logos/secureconfig.svg text eol=lf
+opf/site/draft/assets/baseline/marks/NOTICE.md text eol=lf
+opf/site/draft/assets/baseline/marks/github-invertocat-black.svg text eol=lf
+opf/site/draft/assets/baseline/marks/github-invertocat-white.svg text eol=lf
+opf/site/draft/assets/baseline/marks/linkedin-in-bug.png binary
+opf/site/draft/assets/baseline/marks/orcid-id.svg binary
+opf/site/draft/assets/baseline/palettes.css binary
+opf/site/draft/assets/baseline/rail.js text eol=lf
+opf/site/draft/assets/baseline/scheme.js text eol=lf
+opf/site/draft/assets/baseline/search.js text eol=lf
+opf/site/draft/assets/baseline/select.js text eol=lf
+opf/site/draft/index.html text eol=lf
 opf/site/index.html text eol=lf
+opf/site/license/index.html text eol=lf
 opf/site/llms.txt text eol=lf
-opf/site/record-indexes.html text eol=lf
-opf/site/roadmap.html text eol=lf
+opf/site/model/index.html text eol=lf
 opf/site/robots.txt text eol=lf
-opf/site/standard.html text eol=lf
-opf/site/store-meta.html text eol=lf
-opf/site/styles.css text eol=lf
-opf/site/theme.js text eol=lf
-opf/site/tooling.html text eol=lf
+opf/site/sitemap.xml text eol=lf
+opf/site/standard/index.html text eol=lf
 opf/spec/OPF-IMPLEMENTATION-PROMPT.md text eol=lf
 opf/spec/OPF-INIT-D2B-REVIEW.md text eol=lf
 opf/spec/OPF-INIT-D2B.md text eol=lf
@@ -642,11 +704,14 @@ plugin/aiqt-guardrails-hooks/.claude-plugin/plugin.json text eol=lf
 plugin/aiqt-guardrails-hooks/hooks/hooks.json text eol=lf
 plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py text eol=lf
 roadmap.toml text eol=lf
+site/.well-known/security.txt text eol=lf
 site/404.html text eol=lf
+site/_headers text eol=lf
 site/_redirects text eol=lf
-site/about.html text eol=lf
+site/assets/aiqt-og.png binary
+site/assets/baseline/logos/aiqt-touch.png binary
 site/development.html text eol=lf
-site/disclosure.html text eol=lf
+site/disclosure/index.html text eol=lf
 site/downloads/aiqt-instructions-1_5k.txt text eol=lf
 site/downloads/aiqt-instructions-5k.txt text eol=lf
 site/downloads/aiqt-instructions-8k.txt text eol=lf
@@ -658,21 +723,89 @@ site/downloads/aiqt/manifest.json text eol=lf
 site/downloads/aiqt/provenance.md text eol=lf
 site/downloads/mappings.csv text eol=lf
 site/downloads/mappings.json text eol=lf
+site/draft-src/404.toml text eol=lf
+site/draft-src/disclosure.toml text eol=lf
+site/draft-src/draft.toml text eol=lf
+site/draft-src/future.toml text eol=lf
+site/draft-src/home.toml text eol=lf
+site/draft-src/install-details.toml text eol=lf
+site/draft-src/install.toml text eol=lf
+site/draft-src/license.toml text eol=lf
+site/draft-src/mappings.toml text eol=lf
+site/draft-src/rules.toml text eol=lf
+site/draft-src/standard.toml text eol=lf
+site/draft/assets/baseline/LICENSE text eol=lf
+site/draft/assets/baseline/NOTICE.md text eol=lf
+site/draft/assets/baseline/baseline.css text eol=lf
+site/draft/assets/baseline/copy.js text eol=lf
+site/draft/assets/baseline/fonts.css text eol=lf
+site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt text eol=lf
+site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2 binary
+site/draft/assets/baseline/fonts/jetbrains-mono-LICENSE.txt text eol=lf
+site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2 binary
+site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2 binary
+site/draft/assets/baseline/fonts/newsreader-LICENSE.txt text eol=lf
+site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2 binary
+site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2 binary
+site/draft/assets/baseline/fonts/public-sans-LICENSE.txt text eol=lf
+site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2 binary
+site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2 binary
+site/draft/assets/baseline/logos/aiqt-card.svg text eol=lf
+site/draft/assets/baseline/logos/aiqt-favicon.svg text eol=lf
+site/draft/assets/baseline/logos/aiqt-mono.svg text eol=lf
+site/draft/assets/baseline/logos/aiqt-touch.png binary
+site/draft/assets/baseline/logos/aiqt.svg text eol=lf
+site/draft/assets/baseline/logos/auditthis-card.svg text eol=lf
+site/draft/assets/baseline/logos/auditthis-favicon.svg text eol=lf
+site/draft/assets/baseline/logos/auditthis-mono.svg text eol=lf
+site/draft/assets/baseline/logos/auditthis-touch.png binary
+site/draft/assets/baseline/logos/auditthis.svg text eol=lf
+site/draft/assets/baseline/logos/cleanlanguage-card.svg text eol=lf
+site/draft/assets/baseline/logos/cleanlanguage-favicon.svg text eol=lf
+site/draft/assets/baseline/logos/cleanlanguage-mono.svg text eol=lf
+site/draft/assets/baseline/logos/cleanlanguage-touch.png binary
+site/draft/assets/baseline/logos/cleanlanguage.svg text eol=lf
+site/draft/assets/baseline/logos/grclibrary-card.svg text eol=lf
+site/draft/assets/baseline/logos/grclibrary-favicon.svg text eol=lf
+site/draft/assets/baseline/logos/grclibrary-mono.svg text eol=lf
+site/draft/assets/baseline/logos/grclibrary-touch.png binary
+site/draft/assets/baseline/logos/grclibrary.svg text eol=lf
+site/draft/assets/baseline/logos/opfiles-card.svg text eol=lf
+site/draft/assets/baseline/logos/opfiles-favicon.svg text eol=lf
+site/draft/assets/baseline/logos/opfiles-mono.svg text eol=lf
+site/draft/assets/baseline/logos/opfiles-touch.png binary
+site/draft/assets/baseline/logos/opfiles.svg text eol=lf
+site/draft/assets/baseline/logos/secureconfig-card.svg text eol=lf
+site/draft/assets/baseline/logos/secureconfig-favicon.svg text eol=lf
+site/draft/assets/baseline/logos/secureconfig-mono.svg text eol=lf
+site/draft/assets/baseline/logos/secureconfig-touch.png binary
+site/draft/assets/baseline/logos/secureconfig.svg text eol=lf
+site/draft/assets/baseline/marks/NOTICE.md text eol=lf
+site/draft/assets/baseline/marks/github-invertocat-black.svg text eol=lf
+site/draft/assets/baseline/marks/github-invertocat-white.svg text eol=lf
+site/draft/assets/baseline/marks/linkedin-in-bug.png binary
+site/draft/assets/baseline/marks/orcid-id.svg binary
+site/draft/assets/baseline/palettes.css binary
+site/draft/assets/baseline/rail.js text eol=lf
+site/draft/assets/baseline/scheme.js text eol=lf
+site/draft/assets/baseline/search.js text eol=lf
+site/draft/assets/baseline/select.js text eol=lf
+site/draft/index.html text eol=lf
 site/enforcement.html text eol=lf
 site/evidence.html text eol=lf
-site/examples.html text eol=lf
 site/favicon.svg text eol=lf
+site/future/index.html text eol=lf
 site/index.html text eol=lf
-site/install.html text eol=lf
-site/js/install.js text eol=lf
-site/learn.html text eol=lf
-site/mappings.html text eol=lf
-site/roadmap.html text eol=lf
+site/install/details/index.html text eol=lf
+site/install/index.html text eol=lf
+site/license/index.html text eol=lf
+site/llms.txt text eol=lf
+site/mappings/index.html text eol=lf
 site/robots.txt text eol=lf
-site/rules.html text eol=lf
-site/standard.html text eol=lf
+site/rules/index.html text eol=lf
+site/sitemap.xml text eol=lf
+site/standard/index.html text eol=lf
 site/styles.css text eol=lf
-site/teams.html text eol=lf
 site/tech-details.html text eol=lf
 site/theme.js text eol=lf
 tools/_adapter_compose.py text eol=lf
@@ -680,17 +813,21 @@ tools/_close_selftest.py text eol=lf
 tools/_entry_restore_selftest.py text eol=lf
 tools/_gen_common.py text eol=lf
 tools/_git_fixture_env.py text eol=lf
+tools/_input_declarations.py text eol=lf
+tools/_input_declarations_child.py text eol=lf
 tools/_load_bound.py text eol=lf
 tools/_qa_adapter.py text eol=lf
 tools/_release_schema.py text eol=lf
 tools/_selftest_exit_report.py text eol=lf
 tools/_standards.py text eol=lf
+tools/_template_pages.py text eol=lf
 tools/_walk.py text eol=lf
 tools/aei_backlog_md.py text eol=lf
 tools/aiqt_corpus.py text eol=lf
 tools/audit_reference.py text eol=lf
 tools/check_applies.py text eol=lf
 tools/check_artifact_checksums.py text eol=lf
+tools/check_baseline_pin.py text eol=lf
 tools/check_branch_root.py text eol=lf
 tools/check_brief_capability.py text eol=lf
 tools/check_byte_canon.py text eol=lf
@@ -706,8 +843,8 @@ tools/check_footer.py text eol=lf
 tools/check_gensrc_failclose.py text eol=lf
 tools/check_git_option_table.py text eol=lf
 tools/check_gitleaks_pin.py text eol=lf
+tools/check_headers.py text eol=lf
 tools/check_hooks_preview.py text eol=lf
-tools/check_install_page.py text eol=lf
 tools/check_instruction_budget.py text eol=lf
 tools/check_internal_names.py text eol=lf
 tools/check_leaks.py text eol=lf
@@ -737,9 +874,11 @@ tools/check_release_delta.py text eol=lf
 tools/check_relied_exit_pipes.py text eol=lf
 tools/check_rule_placement.py text eol=lf
 tools/check_secrets.py text eol=lf
+tools/check_security_txt.py text eol=lf
 tools/check_selftest_execution.py text eol=lf
 tools/check_site.py text eol=lf
 tools/check_site_versions.py text eol=lf
+tools/check_sitemap.py text eol=lf
 tools/check_sized_instructions.py text eol=lf
 tools/check_standards_currency.py text eol=lf
 tools/check_standards_urls_live.py text eol=lf
@@ -747,6 +886,7 @@ tools/check_verifier_delivery.py text eol=lf
 tools/check_version_monotonicity.py text eol=lf
 tools/check_versions.py text eol=lf
 tools/ci-status.sh text eol=lf
+tools/ci_site_scope.py text eol=lf
 tools/conformance.py text eol=lf
 tools/doctor.py text eol=lf
 tools/gen_adapters.py text eol=lf
@@ -757,12 +897,12 @@ tools/gen_claude.py text eol=lf
 tools/gen_crosswalk.py text eol=lf
 tools/gen_cursor.py text eol=lf
 tools/gen_disclosure.py text eol=lf
+tools/gen_draft_site.py text eol=lf
 tools/gen_enforceability.py text eol=lf
 tools/gen_enforcement_register.py text eol=lf
 tools/gen_first_pin_demo.py text eol=lf
 tools/gen_gensrc.py text eol=lf
 tools/gen_hooks.py text eol=lf
-tools/gen_install.py text eol=lf
 tools/gen_manifest.py text eol=lf
 tools/gen_mappings.py text eol=lf
 tools/gen_notice.py text eol=lf
@@ -779,11 +919,15 @@ tools/internal-name-hashes.txt text eol=lf
 tools/leak-hashes.txt text eol=lf
 tools/measure_hook_latency.py text eol=lf
 tools/migrate.py text eol=lf
+tools/og-cards/aiqt-og.html text eol=lf
+tools/og-cards/card.css text eol=lf
+tools/og-cards/opfiles-og.html text eol=lf
 tools/opf_render.py text eol=lf
 tools/orch_doctor.py text eol=lf
 tools/orch_preflight.py text eol=lf
 tools/orch_register.py text eol=lf
 tools/pin.py text eol=lf
+tools/render_og_cards.py text eol=lf
 tools/run_all_checks.sh text eol=lf
 tools/selftest_aiqt_corpus.py text eol=lf
 tools/selftest_aiqt_hooks.py text eol=lf

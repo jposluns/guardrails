@@ -1,6 +1,6 @@
 # CLAUDE.md: AIQT Guardrails
 
-**Version 0.2.20** (this file carries its own version, independent of the pack's SemVer release
+**Version 0.2.25** (this file carries its own version, independent of the pack's SemVer release
 version; bump it on every substantive change to this file).
 
 This repository AUTHORS the portable AIQT Guardrails pack and the aiqt.ai site, and it dogfoods the
@@ -100,10 +100,78 @@ the five host jobs and `byte-canon-matrix`) carry one pinned job-level `if:` and
 request whose head is a `merge-train-*` branch of this repository; every other job runs in every run. A
 label added to any other pull request into main starts a run whose heavy jobs are skipped, so its
 `Quality gates` fails by design, and a change merges only by riding a train: a squash merge of an
-up-to-date, labelled `merge-train-*` pull request, whose run is the full suite, and the push to `main`
-runs it again. A newer run of the same pull request cancels its superseded run; a push run has a
+up-to-date, labelled `merge-train-*` pull request, whose run is the full suite (or the site fast
+lane below for a site-only train, the one skip `Quality gates` accepts), and the push to `main`
+runs the full suite again. A newer run of the same pull request cancels its superseded run; a push run has a
 concurrency group of its own and is never cancelled. `tools/check_ci_parity.py` and
 `tools/check_python_host_pin.py` accept exactly the pinned `concurrency` block and `if:` line.
+
+The site fast lane (maintainer's recorded decision, 2026-11-03). Eligibility: the heavy jobs wait
+for a `scope` job (every other job runs in parallel with it), whose first step after checkout and
+Python setup, before any step that runs the pull request's own code, extracts and runs the base
+tree's copy of `tools/ci_site_scope.py` (`git --no-replace-objects show HEAD^1:...` into the
+runner's temporary directory; a base with no readable copy decides false). The decision is true
+only when the run is a pull request whose head is a `merge-train-*` branch of this repository,
+the checked-out HEAD is the documented two-parent test merge (HEAD's raw commit object, read
+with `git --no-replace-objects cat-file commit HEAD`, must record exactly two parents, the second
+equal to the event's head SHA; GitHub-documented behaviour, not verified live here), and every
+path it changes, read with replacement objects disabled against `HEAD^1` (the first parent that
+object records), is in the site allowlist: under `site/` or `opf/site/`, or exactly one of the
+three files a site-only change regenerates (`.aiqt/manifest.toml`, `.aiqt/release/root.txt`,
+`.aiqt/release/announce-snippet.txt`), except seven excluded site-tree files: the four OPF homes
+contract files `opf/site/adopt/index.html`, `opf/site/adopt.md`, `opf/site/core-files/index.html`
+and `opf/site/disclosure/index.html`, and the three `opf/site/draft-src/` sources of those pages.
+A HEAD with any other parent count, a git failure, or an unparseable commit header decides
+false. The decision reads HEAD's raw parents and ignores both `info/grafts` and replace refs;
+the extraction (`git --no-replace-objects show HEAD^1:...`) disables replace refs only, and git
+resolves its `HEAD^1` through a grafts file, so under one the extracted revision and the
+revision the diff is read against can differ; a fresh CI checkout has no grafts file. Running
+the base tree's copy first means an ordinary train cannot repoint the decision by editing the tool or by acting in an earlier step of that job; a
+same-repository train can still edit the workflow itself, which no pull_request workflow covers,
+so this ordering is merge-lane discipline, not isolation from a hostile train.
+
+Checks kept for a site-only train: every always-run job still runs. The four OPF homes contract
+files are excluded from the allowlist because `opf/tools/check_opf_homes.py`, which reads them,
+runs only in skippable jobs; `tools/check_opf_declaration.py`, which decodes every `.md` and
+`.html` file in the tree, also runs (live gate and self-test) in the always-run `site` job; and
+`tools/check_python_floor.py` (which reads `site/development.html`, `site/install/index.html`,
+`opf/site/adopt.md` and `opf/site/adopt/index.html`) runs live in the always-run registry job in
+every run. What the fast lane deliberately gives up for a site-only train is every check in the eleven
+heavy jobs named above: every step of those jobs is skipped. Of their commands, only the
+child-status probe (`opf/tools/_child_status.py`), the opf-declaration live gate and its
+`selftest-execution` suite, and `tools/check_byte_canon.py` (live gate and self-test) also run,
+as the same command, in an always-run job. Every other command in those jobs runs nowhere else
+in CI on such a train, among them the OPF tooling live gates and self-tests of the three
+`opf-tooling-*` jobs (for example `check_opf_homes.py`, `check_opf_doctor.py`,
+`check_opf_drift.py` and `check_opf_record.py`), the `opf.py` self-test,
+`tools/check_selftest_execution.py --self-test` and the other `selftest-execution` suites,
+`tools/check_entry_guard.py`, `tools/check_child_status_coverage.py`, every git-fixture-env
+suite, and `tools/check_python_host_pin.py` beyond the registry job's `--jobs-only` run. It also
+gives up the skipped jobs' host, configuration and platform repetitions: the host-patch jobs'
+exact host Python, the config lanes' hostile git configurations, and `byte-canon-matrix`'s
+platforms.
+
+Failure behaviour: `Quality gates` accepts a skipped heavy job only with an eligible true
+decision: the scope job wrote `site_only=true` and the run is such a merge-train pull request
+(the gates step re-checks the event, head ref and head repository before accepting a skip). On a
+true decision the heavy jobs skip (their pinned `if:` reads the scope output). The decision
+classifies the train's aggregate change, every path changed over the base, not the pull requests
+it carries; nothing routes pull requests to trains, so a train that mixes a site-only pull
+request with any other change takes the full lane. Everything else is
+fail-closed: an empty changed-path list, any path outside the allowlist, a rename out of those
+trees, a HEAD that is not the two-parent test merge, or any error reading the diff decides false.
+On a non-train or fork head the decision is also false, and there the heavy jobs are skipped by
+their own `if:` and `Quality gates` FAILS: such a run is red, never a fast pass, and it does not
+run the full suite. A heavy job that is skipped, fails, is cancelled, or reports no result
+outside a true decision still fails `Quality gates`. Adding a NEW site file regenerates
+`.gitattributes`, which is outside the allowlist, so such a change takes the full suite. A push
+to `main` NEVER takes the fast lane: on a push the scope job writes `site_only=false` without
+reading any diff, so a push runs everything, also after a site-only train merges; that holds only
+while the scope job itself succeeds, and a failed scope job turns the run red through `Quality
+gates` (never into a pass). `tools/check_ci_parity.py` pins the scope job's whole body
+(`SCOPE_JOB`, the step order included), the heavy jobs' `if:` line and the gates step, so none of
+this wiring can drift unreviewed; that pin is a consistency check within this reviewed
+repository, not an authorization (the maintainer's recorded decision is the authorization).
 Every `actions/checkout` step in `.github/workflows` sets `persist-credentials: false`, so the job token
 stays out of the checkout's git config (no job pushes or fetches after its checkout);
 `tools/check_ci_parity.py` reads each workflow file there as parsed YAML and refuses a checkout step

@@ -3254,14 +3254,50 @@ def flip_t89_first_current():
     return patch.object(record, "_current_handoffs", first_only)
 
 
+CLEAN_IMPORTER = ("C-HANDOFF: clean record {!r} (type {!r}) carries actor.kind 'importer'; a clean-series record "
+                  "MUST NOT carry it (spec 8.6)")
+RENDER_REFUSED = "the view render after publication did not complete"
+
+
+def _other_handoff_findings(out, finding):
+    """The doctor's C-HANDOFF findings in `out` other than `finding`. Only the report's finding lines
+    (`  FINDING: <message>`, opf._doctor_report) are read: its per-check verdict line (`  C-HANDOFF: FINDING`)
+    states the check's verdict, which `finding` alone already sets, and is never a second finding."""
+    lines = [line[len("  FINDING: "):] for line in out.splitlines() if line.startswith("  FINDING: ")]
+    return [line for line in lines if line.startswith("C-HANDOFF:") and line != finding]
+
+
+def clean_importer_at_rest(env, root, rid, rtype):
+    """The doctor's refusal at rest of a clean record carrying the importer kind (spec 8.6: a clean-series
+    record MUST NOT carry it), on this store with no active imported series graded under C-HANDOFF, and
+    no other C-HANDOFF finding line beside it (_other_handoff_findings), so the at-most-one-current rule
+    still holds."""
+    rc, out, err = cli(env, ["doctor", "--root", str(root)])
+    finding = CLEAN_IMPORTER.format(rid, rtype)
+    assert rc == 1 and finding in out, ("the clean importer record is a doctor finding at rest", rc,
+                                        out[-1600:], err[-800:])
+    others = _other_handoff_findings(out, finding)
+    assert not others, ("no other C-HANDOFF finding", others)
+
+
+def published_unrendered(env, root, args):
+    """A clean operation over a store holding a clean importer record: the writer publishes, then the view
+    render refuses the store the doctor finds INVALID, so the run ends exit 2 with the published bytes left
+    uncommitted for the caller to inspect."""
+    rc, out, err = record_cli(env, root, args)
+    assert rc == 2 and RENDER_REFUSED in err, ("published, then the render refuses", args, rc, out[-800:],
+                                               err[-1600:])
+
+
 def t89_importer_history_posts(fx):
-    """A legacy importer-authored current handoff in the clean index is history outside every current-state
-    join (spec 8.6: the section 8.5 at-most-one-current rule evaluates only clean records authored by
-    non-importer actors, and such a record keeps its bytes, its recorded state and its place in the clean
-    series): a clean posting proceeds, supersedes nothing, and leaves the importer bytes untouched; the
-    committed store is doctor VALID and HANDOFF.md keeps the history out of Current. A second clean
-    posting then supersedes the clean current handoff only (the mixed historical-importer/clean-current
-    case), the history again untouched."""
+    """An importer-authored current handoff seated in the clean index is a doctor finding at rest (spec 8.6:
+    a clean-series record MUST NOT carry `actor.kind = "importer"`), and it stays outside every current-state
+    join (spec 8.6: every current-state join, including the section 8.5 at-most-one-current handoff rule,
+    MUST evaluate only clean records authored by non-importer actors): a clean posting publishes HO-2
+    current, supersedes nothing and leaves the importer bytes untouched, then the view render refuses the
+    INVALID store. A second clean posting then supersedes the clean current handoff only (the mixed
+    importer/clean-current case), the importer record again untouched, and once that posting is committed
+    the doctor reports only the importer record's C-HANDOFF finding, never a second current handoff."""
     env = fx.env
     root = fx.case("t89-importer-history")
     legacy = {
@@ -3274,24 +3310,22 @@ def t89_importer_history_posts(fx):
     counters = model(root, COUNTERS)
     counters["counters"]["HO"] += 1
     write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
+    clean_importer_at_rest(env, root, "HO-1", "handoff")
     with ticking():
-        out = step(fx, root, HO_CREATE + ASSISTANT, "HO-2 over importer history")
-        assert '"change": null' in out, ("T89 importer history discharges no supersession", out[-800:])
+        published_unrendered(env, root, HO_CREATE + ASSISTANT)
         assert row(root, "HO-1", HO_INDEX) == legacy, ("T89 the importer bytes stay untouched",
                                                        row(root, "HO-1", HO_INDEX))
         posted = row(root, "HO-2", HO_INDEX)
         assert posted["status"] == "current" and "links" not in posted, posted
-        doctor_valid(env, root)
-        assert _handoff_section(root, "Current") == ["- HO-2 resume here"], read(root, HANDOFF_VIEW)
-        assert _handoff_section(root, "Imported history") == [
-            "- HO-1 (current) migrated"], read(root, HANDOFF_VIEW)
-        out = step(fx, root, HO_CREATE + ASSISTANT, "HO-3 supersedes HO-2, the history untouched")
-        assert '"change": "HO-2 current -> superseded/proposed"' in out, out[-800:]
+        clean_importer_at_rest(env, root, "HO-1", "handoff")
+        fx.commit_all(root, "HO-2 over the importer record")
+        published_unrendered(env, root, HO_CREATE + ASSISTANT)
         assert row(root, "HO-1", HO_INDEX) == legacy, row(root, "HO-1", HO_INDEX)
+        assert row(root, "HO-2", HO_INDEX)["status"] == "superseded/proposed", row(root, "HO-2", HO_INDEX)
         assert row(root, "HO-3", HO_INDEX)["links"] == [{"rel": "supersedes", "id": "HO-2"}], (
             row(root, "HO-3", HO_INDEX))
-        doctor_valid(env, root)
-        assert _handoff_section(root, "Current") == ["- HO-3 resume here"], read(root, HANDOFF_VIEW)
+        fx.commit_all(root, "HO-3 supersedes HO-2")
+        clean_importer_at_rest(env, root, "HO-1", "handoff")
 
 
 def flip_t89_importer():
@@ -3310,6 +3344,48 @@ def flip_t89_importer():
         return [rec for rec in recs
                 if rec.rtype == record.HANDOFF and rec.state == "current" and rec.qual is None]
     return patch.object(record, "_current_handoffs", counted)
+
+
+def t89_importer_finding_lines(fx):
+    """The at-rest oracle of the importer vectors (_other_handoff_findings) over reports the doctor's own
+    printer writes (opf._doctor_report): the clean importer finding alone sets the `  C-HANDOFF: FINDING`
+    verdict line and leaves no other C-HANDOFF finding; a second C-HANDOFF finding line beside it is named;
+    a finding of another check is not."""
+    finding = CLEAN_IMPORTER.format("HO-1", "handoff")
+    second = "C-HANDOFF: 2 clean current handoffs ('HO-2', 'HO-3'); at most one is current (spec 8.5)"
+    receipt = "C-RECEIPTS: backlog item 'BI-1' is done with no receipt (spec 8.6)"
+
+    def printed(findings):
+        checks = {"C-RECEIPTS": "FINDING" if receipt in findings else "PASS", "C-HANDOFF": "FINDING"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            opf._doctor_report(opf_check.StoreValidation(opf_check.INVALID, findings=list(findings),
+                                                         checks=checks))
+        return buf.getvalue()
+    alone = printed([finding])
+    assert "  C-HANDOFF: FINDING" in alone.splitlines(), ("the doctor prints the verdict line", alone)
+    wrong = []
+    for label, findings, want in (("finding-alone", [finding], []),
+                                  ("second-handoff-finding", [finding, second], [second]),
+                                  ("other-check-finding", [finding, receipt], [])):
+        got = _other_handoff_findings(printed(findings), finding)
+        if got != want:
+            wrong.append((label, got, want))
+    assert not wrong, ("T89 the other C-HANDOFF findings of each (report, got, want) below are wrong", wrong)
+
+
+def flip_t89_verdict_line():
+    """Any line naming C-HANDOFF that is not the expected finding counts as another finding, the doctor's
+    per-check verdict line included, so the report holding the clean importer finding alone is red."""
+    def any_line(out, finding):
+        return [line for line in out.splitlines() if "C-HANDOFF:" in line and finding not in line]
+    return patch.object(sys.modules[__name__], "_other_handoff_findings", any_line)
+
+
+def flip_t89_no_findings():
+    """A reader that finds no other C-HANDOFF finding in any report, so a second current handoff beside the
+    clean importer finding passes."""
+    return patch.object(sys.modules[__name__], "_other_handoff_findings", lambda out, finding: [])
 
 
 def t89_archived_current_refused(fx):
@@ -9870,8 +9946,9 @@ def flip_t90_no_cap():
 # --- T95: importer-authored history is never a clean-series operand (spec 8.6, 8.8) -------------------------
 
 def _importer_item(fx, name, status):
-    """A legacy importer-authored backlog item seated in the clean index with its counter (the T89 seeding),
-    then the views rendered and committed, so the store is doctor VALID before the operation runs."""
+    """An importer-authored backlog item seated in the clean index with its counter (the T89 seeding), each
+    committed: the doctor refuses the store at rest (spec 8.6: a clean-series record MUST NOT carry the
+    importer kind), and the operation runs over that store."""
     env = fx.env
     root = fx.case(name)
     legacy = {"id": "BI-1", "type": "backlog_item", "status": status, "title": "migrated",
@@ -9883,26 +9960,24 @@ def _importer_item(fx, name, status):
     counters = model(root, COUNTERS)
     counters["counters"]["BI"] += 1
     write_commit(env, root, COUNTERS, emit.emit_checked(counters).encode("utf-8"), "its counter")
-    rc, out, err = cli(env, ["render", "--root", str(root), "--write"])
-    assert rc == 0, ("T95 the views render over the history", rc, err[-800:])
-    fx.commit_all(root, "views")
-    doctor_valid(env, root)
+    clean_importer_at_rest(env, root, "BI-1", "backlog_item")
     return root, legacy
 
 
 def t95_importer_operand_transition(fx):
-    """A transition on a legacy importer-authored item refuses whoever acts, with every byte untouched; acting
-    on that history is a new clean record linking back, which records and leaves the history's bytes alone."""
+    """A transition on an importer-authored item refuses whoever acts, with every byte untouched; acting on
+    it is a new clean record linking back, which publishes and leaves the importer record's bytes alone,
+    the store still refused at rest for that record alone."""
     env = fx.env
     with ticking():
         root, legacy = _importer_item(fx, "t95-importer-operand-transition", "open")
         refused_untouched(env, root, ["transition", "BI-1", "active"] + MAINTAINER, "importer-authored-operand")
         refused_untouched(env, root, ["transition", "BI-1", "dropped"] + ASSISTANT, "importer-authored-operand")
-        step(fx, root, ["create", "--type", "backlog_item", "--title", "act on it", "--link", "derives_from=BI-1"]
-             + MAINTAINER, "BI-2 acting on history")
+        published_unrendered(env, root, ["create", "--type", "backlog_item", "--title", "act on it", "--link",
+                                         "derives_from=BI-1"] + MAINTAINER)
         assert row(root, "BI-1") == legacy, ("T95 the history keeps its bytes", row(root, "BI-1"))
         assert row(root, "BI-2")["links"] == [{"rel": "derives_from", "id": "BI-1"}], row(root, "BI-2")
-        doctor_valid(env, root)
+        clean_importer_at_rest(env, root, "BI-1", "backlog_item")
 
 
 def t95_importer_operand_receipt(fx):
@@ -9914,8 +9989,9 @@ def t95_importer_operand_receipt(fx):
 
 def t95_importer_resolution_superseded(fx):
     """A --supersedes target is read and linked, never the operand: a clean decide superseding a legacy
-    importer-authored resolution (a doctor finding at rest, spec 8.6) records with the target's bytes
-    unchanged and leaves the store doctor VALID."""
+    importer-authored resolution (a doctor finding at rest, spec 8.6, as is the clean record carrying the
+    importer kind) publishes with the target's bytes unchanged, and once committed the store is refused at
+    rest with no C-HANDOFF finding but the clean importer record's."""
     env = fx.env
     root = fx.case("t95-importer-resolution-superseded")
     ts = "2026-08-01T00:00:00Z"
@@ -9933,13 +10009,15 @@ def t95_importer_resolution_superseded(fx):
     rc, out, err = cli(env, ["doctor", "--root", str(root)])
     assert rc != 0 and "importer-authored pending_decision 'PD-1'" in out, (
         "T95 the importer resolution is a doctor finding at rest", rc, out[-1600:])
+    clean_importer_at_rest(env, root, "PD-1", "pending_decision")
     with ticking():
-        step(fx, root, ["transition", "PD-2", "decided", "--decision", "use Y", "--decided-by", "the board",
-                        "--supersedes", "PD-1"] + MAINTAINER, "PD-2 supersedes the importer resolution")
+        published_unrendered(env, root, ["transition", "PD-2", "decided", "--decision", "use Y", "--decided-by",
+                                         "the board", "--supersedes", "PD-1"] + MAINTAINER)
     assert row(root, "PD-1", PD_INDEX) == held, ("T95 the target keeps its bytes", row(root, "PD-1", PD_INDEX))
     assert row(root, "PD-2", PD_INDEX)["links"] == [{"rel": "supersedes", "id": "PD-1"}], (
         row(root, "PD-2", PD_INDEX))
-    doctor_valid(env, root)
+    fx.commit_all(root, "PD-2 supersedes the importer resolution")
+    clean_importer_at_rest(env, root, "PD-1", "pending_decision")
 
 
 def flip_t95_author():
@@ -10551,10 +10629,11 @@ def flip_t110_homes1_late():
 
 
 def t110_importer_arm(fx):
-    """A clean BI-1 at done whose only receipt is a legacy importer-authored DN-1 (the spec 8.6 receipt arm's
-    finding at rest) takes the clean receipt beside it: DN-2 records exit 0, the importer's row keeps its
-    bytes, and the store is doctor VALID (flip: the writer's receipt join counts importer-authored
-    receipts, so the item is refused, never repaired)."""
+    """A clean BI-1 at done whose only receipt is an importer-authored DN-1 seated in the clean index (the
+    spec 8.6 receipt arm's finding at rest, beside the clean importer record's own) takes the clean receipt
+    beside it: DN-2 publishes, the importer's row keeps its bytes, the view render refuses the store, and
+    the doctor then reports the clean importer record alone (flip: the writer's receipt join counts
+    importer-authored receipts, so the item is refused, never repaired)."""
     env = fx.env
     base = _repair_store(fx, "t110-importer-base")
     legacy = {"id": "DN-1", "type": "done", "status": "recorded", "title": "migrated receipt",
@@ -10569,13 +10648,14 @@ def t110_importer_arm(fx):
     rc, out, err = cli(env, ["doctor", "--root", str(base)])
     assert rc == 1 and "its only receipt(s) 'DN-1' are importer-authored" in out + err, (
         "T110 the importer-only receipt is the receipt arm's finding at rest", rc, out[-1600:], err[-800:])
+    clean_importer_at_rest(env, base, "DN-1", "done")
     with _self_test_homes2_active(base):
         root = fx.case("t110-importer-arm", base)
         with ticking():
-            recorded(record_cli(env, root, REPAIR))
+            published_unrendered(env, root, REPAIR)
         assert [r["id"] for r in receipts_of(root, "BI-1")] == ["DN-1", "DN-2"], receipts_of(root, "BI-1")
         assert model(root, DN_INDEX)["record"][0] == legacy, "T110 the importer's receipt keeps its bytes"
-        doctor_valid(env, root)
+        clean_importer_at_rest(env, root, "DN-1", "done")
 
 
 def flip_t110_importer():
@@ -11111,6 +11191,7 @@ TESTS = (
                                                                   flip_t89_unqualified)),
     ("T89-two-current-handoffs-refused", t89_two_current_refused, flip_t89_first_current),
     ("T89-importer-history-clean-posting", t89_importer_history_posts, flip_t89_importer),
+    ("T89-importer-finding-lines", t89_importer_finding_lines, (flip_t89_verdict_line, flip_t89_no_findings)),
     ("T89-archived-current-handoff-refused", t89_archived_current_refused, flip_t89_archived),
     ("T89-reject-supersession-sole-current", t89_reject_supersession, flip_t89_reject_guard),
     ("T89-prior-separator-spelling-respelled", t89_prior_separator_spelling, (flip_t89_no_escape,

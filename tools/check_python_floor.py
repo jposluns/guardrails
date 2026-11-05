@@ -189,8 +189,8 @@ Legs, in order:
                  statement runs and is scanned, as are a def's decorators and a def's or lambda's
                  default values; a function or lambda body (a method's included) runs only when
                  called and is not scanned.
-  tomllib        always ON: every tomllib.load and tomllib.loads call in every .py file of the tree (.github
-                 and the vendored tree included; a directory in SKIPPED_DIR_NAMES is not walked), under
+  tomllib        always ON: every tomllib.load and tomllib.loads call in every .py file of the tree (.github,
+                 the vendored tree and .baseline included; a directory in SKIPPED_DIR_NAMES is not walked), under
                  every spelling the scan resolves (import tomllib, import tomllib as X, from tomllib import
                  load or loads [as Y], the tomllib._parser submodule, and a module re-export such as
                  _opf_store.tomllib or from M import tomllib), is HANDLED or is classified by one row of
@@ -228,15 +228,24 @@ Legs, in order:
                  re-exported under an attribute name other than tomllib, as in helper.toml.loads) is not
                  seen; a CALLER row is checked only against its named caller, and a call replaced by
                  another call with the same spelling in the same caller is not detected; like the
-                 completeness leg, it walks the working tree, so an untracked .py file is scanned too; and
+                 fallback leg, it walks the working tree, so an untracked .py file is scanned too; and
                  at handler sites with no per-site runtime MemoryError vector (listed in the residue of
                  the commits that added them) this static probe is the only MemoryError guard.
   completeness   ON when the source sets completeness-check = true, as it does since the unit that
                  guarded tools/check_entry_guard.py, the last shipped entrypoint, switched it on (off,
                  an unlisted entrypoint is not a finding). The core-hook, preview-hook, adopter-tool
                  and OPF enforcement deny-hook units and tools/check_entry_guard.py are listed. On,
-                 every shipped entrypoint, a .py file outside EXCLUDED_TREES with a module-level
-                 `if __name__ == "__main__":`, must be listed in guarded-surfaces.
+                 every shipped entrypoint, a .py file git tracks (git ls-files -s -z) outside
+                 EXCLUDED_TREES with a module-level `if __name__ == "__main__":`, must be listed in
+                 guarded-surfaces. An ignored or untracked file is not shipped and is not counted; a
+                 listing git cannot give (no repository, an unreadable index) is cannot-evaluate, and
+                 so is a gitlink (a submodule) outside EXCLUDED_TREES and SKIPPED_DIR_NAMES, named,
+                 since the listing holds its path and never the files inside it. git runs from
+                 CHILD_ENV's pinned PATH with the caller's GIT_* variables dropped and the parent of
+                 the tree as a ceiling. A tracked path under a directory named in SKIPPED_DIR_NAMES
+                 is not counted, as the fallback and tomllib walks do not enter one: such a directory
+                 holds a committed environment, package cache or bytecode, not this repository's
+                 own entrypoints.
   documentation  ON (documentation-check = true, held by the switch leg): each DECLARATION_FILES entry
                  must contain "Python <floor> or newer" as many times as DECLARATION_COPIES says
                  (once by default), and each "Python <floor> or|and <word>" in it must be that phrase,
@@ -261,9 +270,13 @@ DISCLOSED RESIDUAL. The dynamic leg patches sys.version_info inside a child of T
 proxy for a real older interpreter, faithful only for a guard that reads sys.version_info, which is why
 the guard leg pins the one canonical form. Each file is compiled whole before its guard runs, so an
 interpreter too old to parse a later statement stops with a SyntaxError instead of the refusal; the
-dynamic leg sees a compile failure only on the interpreter running it. The completeness scan walks the
-working tree, not the git index: an untracked stray entrypoint is counted, and a directory named in
-SKIPPED_DIR_NAMES is not walked. The pins leg is a conservative line model, not a YAML parser: it reads
+dynamic leg sees a compile failure only on the interpreter running it. The completeness scan reads the
+git index, not the working tree, and a tracked path under a directory named in SKIPPED_DIR_NAMES is not
+counted, so an entrypoint committed under such a directory goes uncounted; the fallback and tomllib
+scans still walk the working tree, so an untracked or ignored .py file is judged by them too. The
+listing comes from the index but each listed file's content is read from the working tree, so an
+unstaged edit (a main block added to or removed from a tracked file) can change the local verdict;
+CI reads the committed content. The pins leg is a conservative line model, not a YAML parser: it reads
 a workflow or action file only through the enumerated grammar, so a YAML form outside it (an escaped,
 quoted or explicit key, an anchor, alias, tag or merge key, a multi-line quoted or flow value) stops
 the leg (exit 2), never passes. A block scalar's body is skipped by the YAML indentation rule; a reader
@@ -436,16 +449,22 @@ FLOW_ENTRY_RE = re.compile(
 PLAIN_INDICATORS = "-?:,[]{}#&*!|>'\"%@`"
 # The action file names of a local action, in the order the runner looks for them.
 ACTION_FILES = ("action.yml", "action.yaml")
-# Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest.
-EXCLUDED_TREES = (".github/", "opf/tools/_vendor/")
+# Not shipped (repo-only CI) or byte-exact vendored third-party code under a provenance manifest; .baseline/
+# is the shared site template's vendored tooling, pinned by SHA-256 and kept byte-identical to the template
+# package, so it cannot carry this repository's guard (the tree holds only its two pins and that tool).
+EXCLUDED_TREES = (".github/", "opf/tools/_vendor/", ".baseline/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
-DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
-                     "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
+# The git index mode of a gitlink (a submodule's commit), as git ls-files -s prints it.
+GITLINK_MODE = b"160000"
+# The install and adopt pages are generated (tools/gen_draft_site.py), each an index.html under its
+# page directory.
+DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install/index.html",
+                     "opf/site/adopt.md", "opf/site/adopt/index.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
 # How many times a declaration file states the floor phrase, where that is more than once: each copy is
 # counted, so changing or removing one of them is a finding.
 # .preview/README.md states it once and quotes it once in the hooks' refusal line.
-DECLARATION_COPIES = {".preview/README.md": 2, "opf/site/adopt.html": 2}
+DECLARATION_COPIES = {".preview/README.md": 2}
 # A separator the claims leg reads between words: whitespace, or a no-break space and its HTML forms.
 CLAIM_SEP = r"(?:\s|&nbsp;|&#160;)"
 # A version operator: >=, =>, ~=, ==, >, the sign U+2265, and their HTML forms.
@@ -1506,8 +1525,72 @@ def _python_files(root, every=False):
                 yield rel
 
 
+def _counted(rel, directory=False):
+    """Whether a tracked path is in the completeness leg's scope: outside EXCLUDED_TREES and under no
+    directory named in SKIPPED_DIR_NAMES (a directory path is judged by its own name too)."""
+    parts = rel.split("/")
+    return not _excluded(rel) and not SKIPPED_DIR_NAMES.intersection(parts if directory else parts[:-1])
+
+
+def _listing_env(root):
+    """The environment of the git ls-files child: the caller's, without its GIT_* variables (an ambient
+    GIT_DIR or GIT_INDEX_FILE would list another index), with CHILD_ENV's pinned PATH (a git earlier on
+    the caller's PATH is never the one run) and the parent of root as a ceiling (a tree that is not a
+    repository is never read through an enclosing one)."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(CHILD_ENV, GIT_CEILING_DIRECTORIES=str(Path(root).parent), GIT_NO_LAZY_FETCH="1")
+    return env
+
+
+def _refuse_gitlinks(modes):
+    """A gitlink (mode 160000, a submodule) in scope is cannot-evaluate: the listing holds only its
+    path, never the files inside it, so an entrypoint there would go uncounted."""
+    links = sorted(rel for rel, mode in modes.items() if mode == GITLINK_MODE and _counted(rel, True))
+    if links:
+        raise CannotEvaluate("cannot list the tracked files: {} is a gitlink (submodule, mode 160000); "
+                             "the files inside it are not in the listing".format(", ".join(links)))
+
+
+def _tracked_files(root):
+    """The sorted repo-relative paths git tracks under root (git ls-files -s -z), the completeness
+    leg's file set: an ignored or untracked file is never shipped. The child runs under _listing_env, so
+    the read is of root's own repository by the git on the pinned PATH; core.fsmonitor=false keeps a
+    configured hook from running. No git, a nonzero exit, a timeout, an empty listing, a record that is
+    not mode, object, stage and path, an undecodable path or an in-scope gitlink is cannot-evaluate,
+    never an empty set that would read as clean. A gitlink outside scope is left out."""
+    try:
+        proc = subprocess.run(["git", "-C", str(root), "-c", "core.fsmonitor=false", "-c",
+                               "protocol.allow=never", "--no-optional-locks", "ls-files", "-s", "-z"],
+                              env=_listing_env(root), stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=CHILD_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("cannot list the tracked files: {}".format(exc))
+    if proc.returncode != 0:
+        raise CannotEvaluate("cannot list the tracked files: git ls-files exit {}: {}".format(
+            proc.returncode, proc.stderr.decode("utf-8", "backslashreplace").strip()))
+    modes = {}
+    for record in proc.stdout.split(b"\0"):
+        if not record:
+            continue
+        meta, tab, path = record.partition(b"\t")
+        if not tab or not path or len(meta.split(b" ")) != 3:
+            raise CannotEvaluate("cannot list the tracked files: a record is not mode, object, stage "
+                                 "and path: {!r}".format(record))
+        try:
+            modes[path.decode("utf-8")] = meta.split(b" ")[0]
+        except UnicodeDecodeError as exc:
+            raise CannotEvaluate("cannot list the tracked files: a path is not UTF-8: {}".format(exc))
+    if not modes:
+        raise CannotEvaluate("cannot list the tracked files: git ls-files listed none")
+    _refuse_gitlinks(modes)
+    return sorted(rel for rel, mode in modes.items() if mode != GITLINK_MODE)
+
+
 def shipped_entrypoints(root):
-    return [rel for rel in _python_files(root) if _has_main_block(_parse(root, rel))]
+    """Every tracked .py path outside EXCLUDED_TREES and SKIPPED_DIR_NAMES with a module-level main
+    block."""
+    return [rel for rel in _tracked_files(root) if rel.endswith(".py") and _counted(rel)
+            and _has_main_block(_parse(root, rel))]
 
 
 def completeness_findings(root, surfaces):
@@ -2266,11 +2349,32 @@ def _declared(floor_text="3.14"):
             for rel in DECLARATION_FILES}
 
 
+def _track(root):
+    """Make root a git repository whose index holds what git add -A takes (an ignored file stays out),
+    under a private configuration."""
+    _fixture_git(root, "init", "-q")
+    _fixture_git(root, "add", "-A")
+    return root
+
+
+def _fixture_git(root, *args):
+    """Run git with args in the fixture root under a private configuration; a failure stops the
+    self-test as cannot-evaluate."""
+    env = dict(CHILD_ENV, HOME=str(root), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    try:
+        subprocess.run(["git", "-C", str(root), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                        "maintenance.auto=false"] + list(args), env=env, stdin=subprocess.DEVNULL,
+                       capture_output=True, check=True, timeout=CHILD_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise CannotEvaluate("fixture git launch failed: {}".format(exc))
+
+
 def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=None, pin_quote="'",
-             declarations=True, job="q"):
+             declarations=True, job="q", track=False):
     """A clean tree; workflow_pin is the version on quality.yml line 6, in the job named job, or with
     pin_quote="" the whole text after that line's indentation. Every declaration file states the floor
-    unless declarations is false; files are written after them."""
+    unless declarations is false; files are written after them. With track, the tree is a git
+    repository with every file but an ignored one tracked (the completeness leg reads the index)."""
     root = Path(tempfile.mkdtemp(prefix="tree-", dir=base))
     for rel, text in (_declared() if declarations else {}).items():
         _write(root, rel, text)
@@ -2285,7 +2389,7 @@ def _fixture(base, source=None, workflow_pin="3.14", template_pin="3.14", files=
         template_pin))
     for rel, text in (files or {}).items():
         _write(root, rel, text)
-    return root
+    return _track(root) if track else root
 
 
 def _entry(guard, before="", after="open(\"RAN\", \"w\").close()\n"):
@@ -3527,17 +3631,30 @@ def _self_test_cases(base):
 
     unguarded = {"tools/demo.py": _entry("import sys\n")}
     check("completeness/off-ignores-unguarded", evaluate(_fixture(base, files=unguarded))[0], 0)
-    code, lines = evaluate(_fixture(base, source=_source_text(completeness=True), files=unguarded))
+    code, lines = evaluate(_fixture(base, source=_source_text(completeness=True), files=unguarded,
+                                    track=True))
     check("completeness/on-unguarded-finding",
           (code, _has(lines, "tools/demo.py: a shipped entrypoint")), (1, True))
     check("completeness/on-all-listed-passes", evaluate(_fixture(
-        base, source=_source_text(surfaces=["tools/demo.py"], completeness=True), files=demo))[0], 0)
+        base, source=_source_text(surfaces=["tools/demo.py"], completeness=True), files=demo,
+        track=True))[0], 0)
     check("completeness/excluded-trees-ignored", evaluate(_fixture(
         base, source=_source_text(completeness=True), files={
             ".github/repo_only.py": _entry("import sys\n"),
             "opf/tools/_vendor/lib/__main__.py": _entry("import sys\n"),
             ".venv/lib/tool.py": _entry("import sys\n"),
-            "tools/helper.py": "VALUE = 1\n"}))[0], 0)
+            "tools/helper.py": "VALUE = 1\n"}, track=True))[0], 0)
+    # .baseline/ is excluded by its exact name only: a near-miss tree is still counted.
+    baseline = {".baseline/check_tool.py": _entry("import sys\n")}
+    near = dict(baseline, **{"baseline/check_tool.py": _entry("import sys\n"),
+                             ".baselines/check_tool.py": _entry("import sys\n")})
+    code, lines = evaluate(_fixture(base, source=_source_text(completeness=True), files=near, track=True))
+    check("completeness/baseline-tree-ignored-near-miss-counted",
+          (evaluate(_fixture(base, source=_source_text(completeness=True), files=baseline, track=True))[0],
+           code, _has(lines, "FAIL: .baseline/check_tool.py: a shipped entrypoint"),
+           _has(lines, "FAIL: baseline/check_tool.py: a shipped entrypoint"),
+           _has(lines, "FAIL: .baselines/check_tool.py: a shipped entrypoint")), (0, 1, False, True, True))
+    _tracked_cases(base, demo, unguarded)
 
     # The fallback leg: a module-level import fallback is the canonical write-flush-exit refusal or a
     # plain fallback, nothing else; the fixture file is no entrypoint and is not listed, so only this
@@ -3811,7 +3928,7 @@ def _self_test_cases(base):
         "<!-- Python 3.14 or newer -->\n<p>The hooks require Python 3.11 or newer.</p>\n")}))
     check("claims/older-beside-phrase-finding",
           (code, [line for line in lines if "names Python" in line]),
-          (1, ["FAIL: site/install.html:2: names Python 3.11, below the floor 3.14; a declaration may "
+          (1, ["FAIL: site/install/index.html:2: names Python 3.11, below the floor 3.14; a declaration may "
                "not state an older version"]))
     forms = ("Requires Python 3.14 or newer.\nCPython 3.13\npython3.12\nPython\n3.10\nPython&nbsp;3.9\n"
              "Python versions 3.12\nruns on 3.11+\nor 3.13 or later\nPython 2.7\nPython\u00a03.8\n")
@@ -3829,17 +3946,17 @@ def _self_test_cases(base):
     check("claims/oversized-version-cannot-evaluate", evaluate(_fixture(base, files={
         DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3." + "1" * 5000 + "\n"}))[0], 2)
     # A file holding two copies of the phrase: one copy changed, or removed, is a finding.
-    adopt = "opf/site/adopt.html"
+    twice = ".preview/README.md"
     code, lines = evaluate(_fixture(base, files={
-        adopt: "<p>Requires Python 3.14 or newer.</p>\n<p>Requires Python 3.14 or later.</p>\n"}))
+        twice: "<p>Requires Python 3.14 or newer.</p>\n<p>Requires Python 3.14 or later.</p>\n"}))
     check("documentation/copies-one-changed-finding", (code, lines),
           (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
-               .format(adopt), "FAIL: {}:2: states the floor as 'Python 3.14 or later', not as "
-               "'Python 3.14 or newer'".format(adopt)]))
-    code, lines = evaluate(_fixture(base, files={adopt: "<p>Requires Python 3.14 or newer.</p>\n"}))
+               .format(twice), "FAIL: {}:2: states the floor as 'Python 3.14 or later', not as "
+               "'Python 3.14 or newer'".format(twice)]))
+    code, lines = evaluate(_fixture(base, files={twice: "<p>Requires Python 3.14 or newer.</p>\n"}))
     check("documentation/copies-one-removed-finding", (code, lines),
           (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
-               .format(adopt)]))
+               .format(twice)]))
     code, lines = evaluate(_fixture(base, files={
         DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nThe hooks need python 3.14 and later.\n"}))
     check("documentation/variant-wording-finding", (code, lines),
@@ -3863,6 +3980,133 @@ def _self_test_cases(base):
     _red_on_revert(base, good)
     _rule_reverts(base)
 
+
+def _tracked_cases(base, demo, unguarded):
+    """The completeness leg's file set is git's tracked files, read fail-closed. Each case is judged by
+    evaluate() of this gate, then again with one function patched to a flip that undoes it, restored
+    after the call: walk (the working-tree walk the leg used before), swallow (a failed listing read as
+    empty), drop (the listing discarded), caller-path (git found on the caller's PATH), git-env-kept
+    (the caller's GIT_* variables passed on), no-ceiling (no GIT_CEILING_DIRECTORIES), gitlink-blind (a
+    gitlink dropped like any other path) or nothing-excluded (EXCLUDED_TREES not applied). Ambient
+    variables a case names are set in os.environ around both runs and restored."""
+    real_listing, real_env = _tracked_files, _listing_env
+
+    def swallow(tree):
+        try:
+            return real_listing(tree)
+        except CannotEvaluate:
+            return []
+
+    flips = {
+        "walk": dict(listing=lambda tree: sorted(_python_files(tree, every=True))),
+        "swallow": dict(listing=swallow),
+        "drop": dict(listing=lambda tree: []),
+        "caller-path": dict(env=lambda tree: dict(real_env(tree), PATH=os.environ.get("PATH", ""))),
+        "git-env-kept": dict(env=lambda tree: dict(
+            {key: value for key, value in os.environ.items() if key.startswith("GIT_")}, **real_env(tree))),
+        "no-ceiling": dict(env=lambda tree: {key: value for key, value in real_env(tree).items()
+                                             if key != "GIT_CEILING_DIRECTORIES"}),
+        "gitlink-blind": dict(refuse=lambda modes: None),
+        "nothing-excluded": dict(excluded=lambda rel: False)}
+
+    def install(listing, env, refuse, excluded):
+        global _tracked_files, _listing_env, _refuse_gitlinks, _excluded
+        previous = dict(listing=_tracked_files, env=_listing_env, refuse=_refuse_gitlinks, excluded=_excluded)
+        _tracked_files, _listing_env, _refuse_gitlinks, _excluded = listing, env, refuse, excluded
+        return previous
+
+    def ambient(root, flip=None, **names):
+        saved = {name: os.environ.get(name) for name in names}
+        os.environ.update(names)
+        previous = install(**dict(dict(listing=_tracked_files, env=_listing_env, refuse=_refuse_gitlinks,
+                                       excluded=_excluded), **flips[flip])) if flip else None
+        try:
+            return evaluate(root)[0]
+        finally:
+            if flip:
+                install(**previous)
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    def flipped(root, flip):
+        return ambient(root, flip)
+
+    listed = _source_text(surfaces=["tools/demo.py"], completeness=True)
+    stray = _entry("import sys\n")
+    root = _fixture(base, source=listed, track=True, files=dict(
+        demo, **{".gitignore": "build/\n", "build/stray.py": stray}))
+    check("completeness/ignored-beside-tracked-passes",
+          (evaluate(root)[0], "build/stray.py" in _tracked_files(root), flipped(root, "walk")),
+          (0, False, 1))
+    root = _fixture(base, source=listed, files=demo, track=True)
+    _write(root, "tools/stray.py", stray)
+    check("completeness/untracked-not-counted",
+          (evaluate(root)[0], "tools/stray.py" in _tracked_files(root), flipped(root, "walk")),
+          (0, False, 1))
+    root = _fixture(base, source=_source_text(completeness=True), files=unguarded, track=True)
+    code, lines = evaluate(root)
+    check("completeness/tracked-unguarded-finding",
+          (code, _has(lines, "tools/demo.py: a shipped entrypoint"), flipped(root, "drop")), (1, True, 0))
+    root = _fixture(base, source=listed, files=demo)
+    code, lines = evaluate(root)
+    check("completeness/not-a-repository-cannot-evaluate",
+          (code, _has(lines, "cannot list the tracked files: git ls-files exit"), flipped(root, "swallow")),
+          (2, True, 0))
+    root = _fixture(base, source=listed, files=demo, track=True)
+    (root / ".git" / "index").write_bytes(b"not an index\n")
+    code, lines = evaluate(root)
+    check("completeness/unreadable-index-cannot-evaluate",
+          (code, _has(lines, "cannot list the tracked files: git ls-files exit"), flipped(root, "swallow")),
+          (2, True, 0))
+    root = _fixture(base, source=listed, files=dict(demo, **{".gitignore": "*\n"}), track=True)
+    code, lines = evaluate(root)
+    check("completeness/empty-listing-cannot-evaluate",
+          (code, _has(lines, "git ls-files listed none"), flipped(root, "drop")), (2, True, 0))
+
+    # A gitlink holds a submodule's files outside the listing: in scope it is cannot-evaluate, named;
+    # under EXCLUDED_TREES it is left out.
+    gitlink = "160000,{},{{}}".format("1" * 40)
+    root = _fixture(base, source=listed, files=demo, track=True)
+    _write(root, "vendor/sub/inner.py", stray)
+    _fixture_git(root, "update-index", "--add", "--cacheinfo", gitlink.format("vendor/sub"))
+    code, lines = evaluate(root)
+    check("completeness/gitlink-cannot-evaluate",
+          (code, _has(lines, "vendor/sub is a gitlink"), flipped(root, "gitlink-blind")), (2, True, 0))
+    root = _fixture(base, source=listed, files=demo, track=True)
+    _fixture_git(root, "update-index", "--add", "--cacheinfo", gitlink.format(".github/sub"))
+    check("completeness/excluded-gitlink-ignored",
+          (evaluate(root)[0], flipped(root, "nothing-excluded")), (0, 2))
+
+    # The listing child's environment: a git first on the caller's PATH that lists only a README, an
+    # ambient GIT_INDEX_FILE or GIT_DIR naming another repository's index without tools/demo.py, and a
+    # tree that is no repository inside one that tracks it change nothing; each flip changes the exit.
+    shim = Path(tempfile.mkdtemp(prefix="shim-", dir=base))
+    _write(shim, "git", "#!{} -I\nimport sys\nsys.stdout.buffer.write(b'100644 {} 0\\tREADME\\0')\n".format(
+        sys.executable, "0" * 40))
+    (shim / "git").chmod(0o755)
+    root = _fixture(base, source=_source_text(completeness=True), files=unguarded, track=True)
+    caller_path = str(shim) + os.pathsep + os.environ.get("PATH", "")
+    check("completeness/shim-git-on-path-ignored",
+          (ambient(root, PATH=caller_path), ambient(root, "caller-path", PATH=caller_path)), (1, 0))
+    other = Path(tempfile.mkdtemp(prefix="other-", dir=base))
+    _write(other, "README", "another repository\n")
+    _track(other)
+    check("completeness/ambient-git-index-file-ignored",
+          (ambient(root, GIT_INDEX_FILE=str(other / ".git" / "index")),
+           ambient(root, "git-env-kept", GIT_INDEX_FILE=str(other / ".git" / "index"))), (1, 0))
+    check("completeness/ambient-git-dir-ignored",
+          (ambient(root, GIT_DIR=str(other / ".git")),
+           ambient(root, "git-env-kept", GIT_DIR=str(other / ".git"))), (1, 0))
+    outer = Path(tempfile.mkdtemp(prefix="outer-", dir=base))
+    root = _fixture(outer, source=_source_text(completeness=True), files=unguarded)
+    _track(outer)
+    code, lines = evaluate(root)
+    check("completeness/nested-in-outer-repository-cannot-evaluate",
+          (code, _has(lines, "cannot list the tracked files: git ls-files exit"),
+           flipped(root, "no-ceiling")), (2, True, 1))
 
 def _gate_run(root, gate_source):
     _write(root, "tools/check_python_floor.py", gate_source)
@@ -3917,7 +4161,7 @@ def _red_on_revert(base, good):
                                                                           call="tomllib.loads")}),
          "tools/site.py:4: tomllib.loads in read is not HANDLED"),
         ("completeness", dict(source=_source_text(completeness=True),
-                              files={"tools/demo.py": _entry("import sys\n")}),
+                              files={"tools/demo.py": _entry("import sys\n")}, track=True),
          "tools/demo.py: a shipped entrypoint"),
         ("documentation", dict(files={DECLARATION_FILES[-1]: "Requires Python.\n"}),
          DECLARATION_FILES[-1] + ": does not state"),

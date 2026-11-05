@@ -2500,20 +2500,56 @@ def _recorded_operation(active_bytes):
 
 def _require_same_operation(active_bytes, operation):
     """Refuse (fail-closed) a recovery whose confirmed-dead holder recorded an operation other than
-    the acquiring `operation`, BEFORE any delete, so both of its records are kept. A leftover is
-    released only through the reconciliation of the operation that left it (spec section 5.7, and
-    section 8.8 item 1: a confirmed-dead leftover of another verb is refused, never released), and
-    this acquisition cannot reconcile another operation's journal work. Only the active record is
-    compared: the liveness gate has already refused a lone lease and a lease whose operation differs
-    from the active record's (_validate_recovery_lease), so a lease kept here names the same
-    operation. Returns the recorded operation."""
+    the acquiring `operation`, BEFORE any delete, so both of its records are kept. Both recoveries
+    call it, after the liveness gate and before any delete: acquire_operation's (_acquire_body) and
+    the init acquisition's (_acquire_init_body), so neither releases a leftover of another operation
+    (spec section 5.7, and section 8.8 item 1: a confirmed-dead leftover of another verb is
+    refused), since an acquisition cannot reconcile another operation's journal work. Only the
+    active record is compared: the liveness gate has already refused a lone lease and a lease whose
+    operation differs from the active record's (_validate_recovery_lease), so a lease kept here
+    names the same operation. The refusal names the operator's next step
+    (_other_operation_next_step), then a retry of this one. Returns the recorded operation."""
     recorded = _recorded_operation(active_bytes)
     if recorded != operation:
         raise OpLockError("the stale operation record(s) were left by a confirmed-dead holder of the "
                           "{!r} operation, not this {!r} operation; recovery releases only a leftover "
-                          "of the same operation, so they are kept for that operation's own "
-                          "reconciliation; refusing recovery (fail-closed)".format(recorded, operation))
+                          "of the acquiring operation, so both records are kept; refusing recovery "
+                          "(fail-closed). Next step: {}, then retry this {!r} operation".format(
+                              recorded, operation, _other_operation_next_step(recorded), operation))
     return recorded
+
+
+# The manual fallback each next step ends in: which holder to confirm dead, and the two records to
+# move aside together.
+_MANUAL_STEP = ("the records need manual intervention: confirm dead the holder the active record "
+                "names (its [owner] pid on its nodename), then move that active record "
+                "(.git/opf-oplock/active.toml for a store at the repository root) and its lease "
+                "(.working/toml/lease.toml under the store root) aside together")
+
+
+def _other_operation_next_step(recorded):
+    """The next step _require_same_operation names for a confirmed-dead leftover of the `recorded`
+    operation. Both recoveries compare operations, so only a recovery acquiring as `recorded` itself
+    releases it. Of the opf commands, `opf init --recover` recovers as "opf-init-plain", and releases
+    that leftover only as the first step of a plain init that goes on to create the store; opf
+    record recovers as "record"; opf adopt apply and opf adopt reconcile pass no explicit recovery to
+    the adoption's "opf-init" acquisition, so no opf init, opf adopt or opf record command releases
+    that one. Any other operation is named as recorded. Every step ends in the manual fallback
+    (_MANUAL_STEP)."""
+    if recorded == "opf-init-plain":
+        return ("opf init --recover releases this leftover, but only as the first step of a plain "
+                "opf init that then creates the store; where that store is not wanted, "
+                + _MANUAL_STEP)
+    if recorded == "opf-init":
+        return ("no opf init, opf adopt or opf record command releases this leftover (opf init "
+                "--recover recovers only as 'opf-init-plain' and opf record only as 'record', and "
+                "opf adopt apply and opf adopt reconcile pass no explicit recovery to the adoption's "
+                "init acquisition), so " + _MANUAL_STEP)
+    if recorded == "record":
+        return ("a later opf record run on that store recovers its own confirmed-dead 'record' "
+                "leftover; where that cannot run, " + _MANUAL_STEP)
+    return ("a recovery acquiring as the {!r} operation itself can release this leftover; where no "
+            "opf command offers one, ".format(recorded) + _MANUAL_STEP)
 
 
 def _tag_removals(exc, recovered, recovered_operation, staging_removed, created_removed):
@@ -3720,8 +3756,11 @@ def acquire_init_operation(product_root, operation, holder=None, recover=False):
     repository answers for, never a fallback; the anchor, flock, post-lock check, and
     staging-garbage sweep are acquire_operation's own. A stale active record (and, when the machine store already
     exists from an interrupted bootstrap, a stale lease) refuses without recover=True; with it, the
-    confirmed-dead liveness gate and the lease-first delete order are reused verbatim. `product_root`
-    must be absolute: it is the explicit binding, never an ambient working directory. The holder
+    confirmed-dead liveness gate and the lease-first delete order are reused verbatim, and a
+    confirmed-dead holder that recorded an operation other than `operation` (another init kind
+    included: the journaled "opf-init" and the plain "opf-init-plain" never release each other's
+    leftover) is refused before any delete, keeping both its records (_require_same_operation).
+    `product_root` must be absolute: it is the explicit binding, never an ambient working directory. The holder
     reports what the acquisition removed (`staging_removed`, then `recovered` in delete order), and
     an OpLockError raised once the body has begun carries the same two reports of what it had
     removed before it failed."""
@@ -3839,6 +3878,10 @@ def _acquire_init_body(root, operation, holder, recover, acquirer_pid, recovered
             rec_active_ident, rec_active_bytes, rec_lease_ident, rec_lease_bytes = \
                 _require_holder_confirmed_dead(ctl_fd, machine_fd, stale_active, stale_lease,
                                                machine_st, machine_path)
+            # A confirmed-dead leftover of ANOTHER operation (another init kind included) is
+            # refused here, under the held anchor and before any delete, and both its records are
+            # kept; only this `operation`'s leftover is released below.
+            _require_same_operation(rec_active_bytes, operation)
             if stale_lease:
                 _gated_step(acquirer_pid, "remove the stale lease", _recover_stale, machine_fd,
                             _opf_check.LEASE_NAME, rec_lease_ident, rec_lease_bytes, "lease",
@@ -9826,6 +9869,253 @@ def _t_i5_holder_identity_bound(d, env):
     release_init_holder(holder)
 
 
+def _st_init_fixture(d, name, env):
+    """An unadopted repository at d/name with its control directory and anchor made by a released
+    init holder, and its machine store, ready for a planted leftover."""
+    root = _st_unadopted_repo(d, name, env)
+    release_init_holder(acquire_init_operation(root, "opf-init"))
+    _st_make_machine_dir(root)
+    return root
+
+
+def _st_plant_init_leftover(root, operation_line, lease=True):
+    """Plant a CONFIRMED-DEAD holder's leftover at `root`: an owner-bearing active record whose
+    operation line is `operation_line` (written verbatim, so a malformed value can be planted),
+    paired with root's machine store, and, when `lease`, its lease naming the same holder, operation
+    and acquired_at."""
+    pid, start = _st_reaped_child()
+    node = os.uname().nodename
+    holder = "opf:{}:{}".format(node, pid)
+    op_id = "i6-dead-op-id"
+    lines = ('schema = {}'.format(_ACTIVE_SCHEMA), 'op_id = "{}"'.format(op_id),
+             'holder = "{}"'.format(holder), operation_line, 'acquired_at = "2026-01-01T00:00:00Z"',
+             '', '[owner]', 'pid = {}'.format(pid), 'uid = {}'.format(os.getuid()),
+             'nodename = "{}"'.format(node), 'session = "{}"'.format(op_id),
+             'utc = "2026-01-01T00:00:00Z"', 'pid-start = "{}"'.format(start),
+             '') + _st_machine_store_lines(root)
+    with open(os.path.join(_st_ctl_dir(root), ACTIVE_NAME), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    if lease:
+        with open(_st_lease_path(root), "w", encoding="utf-8") as fh:
+            fh.write('schema = {}\nholder = "{}"\n{}\nacquired_at = "2026-01-01T00:00:00Z"\n'.format(
+                _SCHEMA, holder, operation_line))
+
+
+def _st_init_store_state(root):
+    """What an init recovery could change at `root`: the root listing, and every entry beneath the
+    control directory and .working/ with its mode and, for a file, its exact bytes."""
+    state = {"": tuple(sorted(os.listdir(root)))}
+    for top in (_st_ctl_dir(root), os.path.join(root, ".working")):
+        for dirpath, dirnames, filenames in os.walk(top):
+            for name in sorted(dirnames + filenames):
+                path = os.path.join(dirpath, name)
+                st = os.lstat(path)
+                data = None
+                if stat.S_ISREG(st.st_mode):
+                    with open(path, "rb") as fh:
+                        data = fh.read()
+                state[path] = (st.st_mode, data)
+    return state
+
+
+def _st_i6_refused(root, operation, needles, reached, absent=()):
+    """Init recovery as `operation` must REFUSE the planted leftover with an OpLockError naming
+    each of `needles` and none of `absent`, under the held anchor and before any delete, removing
+    nothing and leaving the store byte-identical; any release, or any other outcome, raises
+    AssertionError (the vector's red). With `reached`, the operation check must have run at least
+    once (an empty observation list fails, rather than passing vacuously); without it, the liveness
+    gate may refuse first."""
+    mod = sys.modules[__name__]
+    current = mod._require_same_operation
+    active = os.path.join(_st_ctl_dir(root), ACTIVE_NAME)
+    seen = []
+
+    def _observed(active_bytes, op):
+        seen.append((_st_anchor_free(root), os.path.exists(active)))
+        return current(active_bytes, op)
+
+    before = _st_init_store_state(root)
+    mod._require_same_operation = _observed
+    try:
+        h = acquire_init_operation(root, operation, recover=True)
+    except OpLockError as exc:
+        refused = exc
+    else:
+        release_init_holder(h)
+        raise AssertionError("init recovery as {!r} released the leftover (recovered {})".format(
+            operation, h.recovered))
+    finally:
+        mod._require_same_operation = current
+    for retired in absent:
+        assert retired not in str(refused), "refusal {!r} carries the retired wording {!r}".format(
+            str(refused), retired)
+    for needle in needles:
+        assert needle in str(refused), "refusal {!r} lacks {!r}".format(str(refused), needle)
+    assert (getattr(refused, "recovered", None), getattr(refused, "staging_removed", None)) \
+        == ((), ()), "the refusal reports no removal: {!r}".format(refused)
+    assert _st_init_store_state(root) == before, "the refused store must stay byte-identical"
+    assert seen or not reached, "the operation check was never reached"
+    assert all(seen_at == (False, True) for seen_at in seen), \
+        "the operation check runs under the held anchor, before any delete: {}".format(seen)
+    assert _st_anchor_free(root), "the refusal frees the anchor"
+
+
+def _st_i6_other_operation(d, env):
+    """Vector: a confirmed-dead leftover of ANOTHER operation is refused, naming that operation,
+    and kept byte for byte; the two init kinds never release each other's leftover. The next step
+    is pinned per recorded operation: the plain init's leftover names opf init --recover and the
+    store it creates, the adoption's names no releasing command, a record leftover names opf
+    record, and any other names a recovery as that operation itself. Every step must end in the
+    manual fallback, naming the holder to confirm dead and both record paths, and no refusal may
+    carry the retired wording that called one recovery the only route or promised the records to
+    another operation's reconciliation."""
+    steps = {"opf-adopt": "Next step: a recovery acquiring as the 'opf-adopt' operation itself can "
+                          "release this leftover; where no opf command offers one, the records",
+             "record": "Next step: a later opf record run on that store recovers its own "
+                       "confirmed-dead 'record' leftover; where that cannot run, the records",
+             "opf-init-plain": "Next step: opf init --recover releases this leftover, but only as the "
+                               "first step of a plain opf init that then creates the store",
+             "opf-init": "Next step: no opf init, opf adopt or opf record command releases this "
+                         "leftover"}
+    manual = ("the records need manual intervention: confirm dead the holder the active record "
+              "names (its [owner] pid on its nodename), then move that active record "
+              "(.git/opf-oplock/active.toml for a store at the repository root) and its lease "
+              "(.working/toml/lease.toml under the store root) aside together, then retry")
+    retired = ("the only route that releases them", "kept for that operation's own reconciliation")
+    for index, (recorded, acquiring) in enumerate((("opf-adopt", "opf-init"),
+                                                   ("opf-adopt", "opf-init-plain"),
+                                                   ("record", "opf-init-plain"),
+                                                   ("opf-init-plain", "opf-init"),
+                                                   ("opf-init", "opf-init-plain"))):
+        root = _st_init_fixture(d, "other{}".format(index), env)
+        _st_plant_init_leftover(root, 'operation = "{}"'.format(recorded))
+        _st_i6_refused(root, acquiring,
+                       ("holder of the {!r} operation, not this {!r} operation".format(
+                           recorded, acquiring),
+                        steps[recorded], manual,
+                        "then retry this {!r} operation".format(acquiring)),
+                       reached=True, absent=retired)
+
+
+def _st_i6_own_operation(d, env):
+    """Vector: init's OWN confirmed-dead leftover (each init kind, as that same kind) is still
+    released, the lease first."""
+    for operation in ("opf-init", "opf-init-plain"):
+        root = _st_init_fixture(d, "own-" + operation, env)
+        _st_plant_init_leftover(root, 'operation = "{}"'.format(operation))
+        try:
+            h = acquire_init_operation(root, operation, recover=True)
+        except OpLockError as exc:
+            raise AssertionError("init recovery as {!r} refused its own leftover: {}".format(
+                operation, exc))
+        release_init_holder(h)
+        assert h.recovered == ("lease", "active record"), h.recovered
+        assert sorted(os.listdir(_st_ctl_dir(root))) == [ANCHOR_NAME], "the active record is released"
+        assert not os.path.exists(_st_lease_path(root)), "the lease is released"
+
+
+def _st_i6_malformed(d, env):
+    """Vector: an active record whose operation is malformed (a number, an empty string, an array)
+    is refused under recover=True, removing nothing and leaving the store byte-identical."""
+    for index, line in enumerate(('operation = 7', 'operation = ""', 'operation = ["opf-init"]')):
+        root = _st_init_fixture(d, "malformed{}".format(index), env)
+        _st_plant_init_leftover(root, line, lease=False)
+        _st_i6_refused(root, "opf-init", ("refusing recovery",), reached=False)
+
+
+def _st_i6_flip(no_check=False, fixed_kind=False, lax_gate=False, no_manual=False,
+                only_route=False):
+    """A flip for T-i6, restoring every patched attribute on exit: `no_check` is the pre-fix init
+    recovery (no operation comparison: any confirmed-dead leftover is released); `fixed_kind` an
+    allow-list of the one "opf-init" kind instead of the acquiring operation; `lax_gate` a liveness
+    gate that no longer validates the active record's operation; `no_manual` a manual fallback that
+    names neither the holder to confirm dead nor either record path; `only_route` a next step that
+    again calls one recovery the only route that releases the records."""
+    mod = sys.modules[__name__]
+    saved = (mod._require_same_operation, mod._validate_recovery_active, mod._MANUAL_STEP,
+             mod._other_operation_next_step)
+
+    def _no_check(active_bytes, operation):
+        return None
+
+    def _fixed_kind(active_bytes, operation):
+        recorded = _recorded_operation(active_bytes)
+        if recorded != "opf-init":
+            raise OpLockError("fixed-kind flip refuses the {!r} leftover".format(recorded))
+        return recorded
+
+    def _lax(doc):
+        return saved[1](dict(doc, operation="lax-gate-placeholder"))
+
+    def _only_route(recorded):
+        return saved[3](recorded) + "; this is the only route that releases them"
+
+    class _Flip:
+        def __enter__(self):
+            if no_check:
+                mod._require_same_operation = _no_check
+            if fixed_kind:
+                mod._require_same_operation = _fixed_kind
+            if lax_gate:
+                mod._validate_recovery_active = _lax
+            if no_manual:
+                mod._MANUAL_STEP = "the records need manual intervention"
+            if only_route:
+                mod._other_operation_next_step = _only_route
+
+        def __exit__(self, *exc):
+            (mod._require_same_operation, mod._validate_recovery_active, mod._MANUAL_STEP,
+             mod._other_operation_next_step) = saved
+            return False
+
+    return _Flip()
+
+
+def _t_i6_init_recovery_same_operation(d, env):
+    """T-i6 (spec 5.7 and 8.8 item 1): init recovery releases a confirmed-dead leftover only of
+    the operation it acquires as. Each vector runs green, then under each of its flips, which must
+    turn it red through the vector's own assertion (an OpLockError or any other exception escaping
+    the vector is a wrong red and fails), and where a flip names the assertion it targets, through
+    that one: another operation's leftover (another init kind included) is refused naming it, with
+    the store byte-identical (red under the pre-fix no-check flip), its next step ending in the
+    manual fallback that names the holder and both record paths (red under a bare fallback) and
+    never calling one recovery the only route (red under a next step that does); init's own
+    leftover is still released, for both init kinds (red under a fixed "opf-init" allow-list); a
+    malformed active record is refused (red under a lax gate with no operation check, and still
+    green under the lax gate alone, the operation check then refusing it by itself)."""
+    vectors = (
+        ("other-operation", _st_i6_other_operation,
+         (("no-check", dict(no_check=True), True, None),
+          ("no-manual", dict(no_manual=True), True, "lacks 'the records need manual intervention: "),
+          ("only-route", dict(only_route=True), True,
+           "carries the retired wording 'the only route that releases them'"))),
+        ("own-operation", _st_i6_own_operation,
+         (("fixed-kind", dict(fixed_kind=True), True, None),)),
+        ("malformed", _st_i6_malformed,
+         (("lax-gate", dict(lax_gate=True), False, None),
+          ("lax-gate-no-check", dict(lax_gate=True, no_check=True), True, None))),
+    )
+    for label, vector, flips in vectors:
+        green = os.path.join(d, label)
+        os.mkdir(green)
+        vector(green, env)
+        for flip_label, flip, expect_red, why in flips:
+            where = os.path.join(d, "{}-{}".format(label, flip_label))
+            os.mkdir(where)
+            red = None
+            with _st_i6_flip(**flip):
+                try:
+                    vector(where, env)
+                except AssertionError as exc:
+                    red = exc
+            if expect_red:
+                assert red is not None, "{} stayed green under flip {}".format(label, flip_label)
+                assert why is None or why in str(red), \
+                    "{} went red under flip {} for another reason: {}".format(label, flip_label, red)
+            else:
+                assert red is None, "{} went red under flip {}: {}".format(label, flip_label, red)
+
+
 def self_test():
     # The tests judge with assert statements, which -O and -OO strip: refuse (exit 2), never a vacuous pass.
     refusal = _optlevel.assert_verdict_refusal("_opf_oplock.py --self-test")
@@ -9881,7 +10171,8 @@ def self_test_isolated():
     path spelled unlike its directory listing refuses; and a failing close anywhere in a nested
     store's acquisition leaks nothing; literal core.bare=true and a core.worktree redirect to a
     sibling refuse for an own-repository store, with the same fixtures acquiring once the settings
-    are removed), each a witness against a named defect. A
+    are removed), and T-i6 (init recovery releases a confirmed-dead leftover only of its own
+    operation, each vector red under its flip), each a witness against a named defect. A
     missing containment primitive or git binary, or a fixture base inside a git repository, is a
     REFUSAL (non-zero), never a clean skip. The git fixtures are pinned
     hermetically. The restrictive-umask witnesses (T-f5-4, T-f6-1, T-f7-3) run under a
@@ -10056,6 +10347,8 @@ def self_test_isolated():
          _t_i4_crash_and_recovery),
         ("T-i5 the init holder is bound to its acquirer; a foreign lease is never adopted",
          _t_i5_holder_identity_bound),
+        ("T-i6 init recovery releases only its own operation's dead leftover; each flip red",
+         _t_i6_init_recovery_same_operation),
         ("T-fd-census the leak census sees a reused number and fails closed on a read error",
          _t_fd_census_pairs),
     )
