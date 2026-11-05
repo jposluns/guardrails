@@ -5,7 +5,7 @@ title = "Install"
 kind = "document"
 label = "Install"
 heading = "Add AIQT to your AI development assistant"
-meta = "Give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project's records. Using a chat assistant? Download the Skill."
+meta = "Give your development assistant 1 prompt and it installs AIQT and prepares an adoption plan for your approval, with OPFiles for your project's records. Using a chat assistant? Download the Skill."
 
 [[body]]
 component = "label"
@@ -36,7 +36,7 @@ id = "opf"
 
 [[body]]
 component = "prose"
-html = '''<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions, and handoffs in one machine-written source, generates the readable versions from it, and fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open.</p><p>An AIQT adoption sets up OPF by default. It is optional: say so in your plan review and the adoption skips it, and you can add it later.</p>'''
+html = '''<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions, and handoffs in one machine-written source, generates the readable versions from it, and, where the drift check is configured as a required commit or CI check, fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open.</p><p>An AIQT adoption plan includes OPF by default. It is optional: say so in your plan review and the plan skips it, and you can add it later. The reference OPF tooling cannot apply or complete an adoption yet: its apply and complete stages refuse to run, so your assistant prepares the plan and stops at the approval step rather than doing the missing stages by hand.</p>'''
 
 [[body]]
 component = "section"

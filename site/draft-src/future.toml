@@ -2,13 +2,13 @@
 path = "future/index.html"
 title = "Future plans"
 kind = "document"
-label = "Planned"
+label = "Under consideration"
 heading = "What is coming for teams and enterprises"
-meta = "Planned, not yet available: management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise."
+meta = "Ideas under consideration, with no dates and no commitments: management and monitoring across projects, performance metrics, and guardrail bundles per project or purpose, managed by the team or enterprise."
 
 [[body]]
 component = "prose"
-html = "<p>Everything on this page is planned. None of it ships today; AIQT today is the standard, the Skill, and the pack you add to each project yourself.</p>"
+html = "<p>Everything on this page is an idea under consideration, with no dates and no commitments. None of it ships today; AIQT today is the standard, the Skill, and the pack you add to each project yourself.</p>"
 
 [[body]]
 component = "clauses"

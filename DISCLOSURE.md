@@ -30,7 +30,7 @@ Evidence: [What AIQT does not do](https://aiqt.ai/evidence#limits)
 
 Claim: AIQT's source corpus carries a universal, language-neutral security baseline: behavioural rules covering secrets, authentication, authorization, input validation, untrusted content, logging, and data minimization. The 1.0.5 chat skill ships the subset a chat assistant can act on directly: keeping secrets out of the transcript, treating pasted or fetched content as data, resisting social pressure, and sending only the data a task needs. The fuller per-language and development-time delivery is a 1.1.0 design, not yet shipped.
 
-Limitation: It is not a static analyzer, a vulnerability scanner, a penetration test, or an audit, and it does not guarantee that generated code is secure. Deeper per-language depth is a 1.1.0 design, composed at install from third-party sources you choose, which AIQT lists and credits but does not author or vouch for.
+Limitation: It is not a static analyser, a vulnerability scanner, a penetration test, or an audit, and it does not guarantee that generated code is secure. Fuller per-language coverage is a 1.1.0 design, composed at install from third-party sources you choose, which AIQT lists and credits but does not author or vouch for.
 
 Evidence: [Per-language depth, composed at install](https://aiqt.ai/tech-details#composed) [The frameworks the rules map to](https://aiqt.ai/mappings#by-framework)
 
@@ -54,7 +54,7 @@ Evidence: [One QA standard, whichever model checks](https://aiqt.ai/tech-details
 
 Claim: The 1.0.5 chat artefacts send nothing anywhere: they are instructions your assistant reads, with no code and no network calls. The 1.0.5 release is wider than those artefacts: its repository ships code, each file listed in the release manifest and named under What the product is made of, and on your machine none of it runs on its own. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model.
 
-Limitation: The shipped repository code is not network-free when run: some of the checks and tools make network requests when run. Among them: the link-liveness check that verifies published framework URLs, the CWE importer (tools/import_cwe.py), which fetches the catalogue it vendors, and tools/ci-status.sh, which reads CI results through the GitHub CLI. The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends.
+Limitation: The shipped repository code is not network-free: some of the checks and tools make network requests when run. Among them: the link-liveness check that verifies published framework URLs, the CWE importer (tools/import_cwe.py), which fetches the catalogue it vendors, and tools/ci-status.sh, which reads CI results through the GitHub CLI. The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends.
 
 Evidence: [What the 1.0.5 files are](https://aiqt.ai/install#pick) [The data flow, by tier](https://aiqt.ai/tech-details#qa-where)
 
