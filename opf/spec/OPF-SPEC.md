@@ -1123,7 +1123,7 @@ Baseline types:
 | pending_decision | `open` > `decided` or `withdrawn` | All-or-none resolution bundle: an open decision MUST carry none of `decision`, `decided_at`, `decided_by`; a decided one MUST carry all. A decided record MAY be superseded by a new decision linking `supersedes`; exactly one current effective resolution MUST exist per chain. |
 | autonomous_decision | `recorded` | Immutable ACT record: the classification basis, the action, links. Overturning MUST be a new record (or maintainer decision) linking it. |
 | block | `active` > `released` or `expired` | Scopes an enumerated list of record IDs. A block created by an assistant or automation actor is `active/proposed` and is a proposal, not a grant: it MUST NOT count toward blocked-ness or justify a stop until a maintainer ratifies it. |
-| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act; at most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). |
+| handoff | `current` > `superseded` | Posting a new handoff MUST supersede the previous in the same act; at most one `current` handoff MAY exist among clean records authored by non-importer actors (section 8.6). The previous handoff is the one clean `current` handoff authored by a non-importer actor; a first handoff, posted while none stands, supersedes nothing. The superseded handoff lands the status the posting actor's transition takes (section 8.4): unqualified `superseded` for a maintainer, `superseded/proposed` for an assistant or automation. An importer-authored `current` handoff is history: it neither blocks a posting nor is superseded by one. A handoff MUST NOT return to `current` while another such `current` handoff stands (section 8.8). |
 | reference | `recorded` | Immutable captured reference. |
 | contribution | `proposed` > `sent` > `acknowledged` or `superseded`; `proposed` > `withdrawn` | Records what this project proposes or sends to a peer, with a delivery bundle `{channel, ref, sent_at, receipt_ref?, receipted_at?}`: `channel`/`ref`/`sent_at` MUST be present once sent, `sent_at` MUST NOT be present before, and the receipt fields MAY appear only at `acknowledged`. `sent` is gated (an assistant lands `sent/proposed`; a maintainer, or a valid standing authorization for the recipient, lands the bare grant). `acknowledged` is the single positive terminal (responded, adopted, reshaped, or declined); the outcome MUST live in `summary`/`x-<vendor>`, never as a state. A re-send MUST be a new record linking `supersedes`; the superseded record records `superseded`. |
 | maintainer_decision | `recorded` | Created-terminal, immutable maintainer ruling carrying its `decision` (answer plus rationale). `actor.kind` MUST be `maintainer` or `importer` only (a maintainer ruling with assistant attribution is a contradiction; `importer` covers migrated history). Overturning MUST be a new record linking the old. It MAY `exemplifies` the preference_pattern it instantiates. |
@@ -1220,7 +1220,22 @@ linking back (section 8.6). Its subcommands:
 - `create`: one new record of an enabled baseline type, in the type's initial state. An assistant
   or automation author entering a gated initial state lands `/proposed`; a created-terminal factual
   or ACT type (`reference`, `autonomous_decision`, `maintainer_decision`) carries no qualifier
-  (section 8.4). `done` receipts and worklog entries are not created this way.
+  (section 8.4). `done` receipts and worklog entries are not created this way. A handoff `create`
+  lands unqualified `current` whatever the actor and supersedes the previous handoff (section 8.5)
+  in the same act: the one `current` handoff authored by a non-importer actor in the active index
+  moves to unqualified `superseded` when the actor is a maintainer, or to `superseded/proposed` with
+  `proposed_from` set to `current` when the actor is an assistant or automation, and its
+  `updated_at` takes the operation's clock value; the new record appends one `supersedes` link to
+  it after its requested links; and the worklog entry adds a `supersedes: <ID>` line to its
+  `detail` and a `relates` link to the superseded record. With no such handoff standing, a store
+  holding only superseded handoffs included, the create supersedes nothing and writes no
+  `supersedes` link. An importer-authored `current` handoff is outside this selection (section
+  8.6): it neither blocks the posting nor is superseded, and its record is left unchanged. Before
+  anything is written, a handoff `create` MUST refuse a requested `supersedes` link that names the
+  handoff it supersedes, more than one such `current` handoff, such a `current` handoff found in
+  the archive (section 12), an archive input that the doctor's archive walk finds defective, and a
+  previous handoff that is not schema-valid or whose `updated_at` is not earlier than the
+  operation's clock value.
 - `transition`: a status change checked against the type's grammar (section 8.5). An assistant or
   automation author landing a terminal or gated state takes `/proposed`, and the verb MUST record
   the state the record held at that moment in the record's own `proposed_from` field (section 8.3)
@@ -1281,7 +1296,12 @@ linking back (section 8.6). Its subcommands:
   receipt reference MAY be given only on `sent` > `acknowledged`, landing bare or `/proposed`:
   `transition` then adds `receipt_ref` and `receipted_at`, the operation's clock value, to
   `delivery`, and MUST refuse the value on every other transition. A rejection of
-  `acknowledged/proposed` back to `sent` MUST remove those two keys. A backlog item MUST reach
+  `acknowledged/proposed` back to `sent` MUST remove those two keys. A transition that lands a
+  handoff at `current`, the maintainer rejection of `superseded/proposed`, MUST refuse with nothing
+  written while another `current` handoff authored by a non-importer actor stands in the active
+  index or the archive, since a rejection restores only the one named record; the maintainer MAY
+  instead ratify the proposal to `superseded`. An importer-authored `current` handoff does not
+  block that rejection (section 8.6). A backlog item MUST reach
   unqualified `done` only through `done-with-receipt`.
 - `done-with-receipt`: maintainer-only. It moves a backlog item to unqualified `done`, from
   `active` or by ratifying `done/proposed`, and in the same act creates its one-to-one `done`
@@ -1350,7 +1370,10 @@ guarantees:
    and type for type (a boolean or float is never equal to an integer), before anything is
    written. The expected
    delta MUST be derived from the request, the prior bytes of each rewritten file, the claimed IDs,
-   the clock value, and the schema rules, never from the planned rows themselves.
+   the clock value, and the schema rules, never from the planned rows themselves. For a
+   handoff `create` that supersedes (section 8.5), the allowed delta also holds the superseded
+   handoff's `status` and `updated_at` change and, for an assistant or automation post, its
+   `proposed_from` write; it holds no change to any other existing record.
 5. The in-repo store contract (section 5.7): the planned destinations MUST be clean, including
    ignored files, and the single-writer lease MUST be held across publication, render, and the final
    doctor.
