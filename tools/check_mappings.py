@@ -13,7 +13,10 @@ gate checks the VALUES.
   any other argument list is refused with exit 2
 
 An id its manifest marks withdrawn (status = "withdrawn" on its [[id]]) stays a recognized id, but a
-rule mapping to it is a finding; a status value other than "withdrawn" fails closed.
+rule mapping to it is a finding; a status value other than "withdrawn", and an [[id]] key outside the
+closed set _standards.ID_KEYS, fail closed. The self-test also drives every generator that renders a
+mapping id (gen_mappings, gen_draft_site's mappings data and gen_rules), each of which must refuse a
+withdrawn id through the same _standards.withdrawn_finding test.
 """
 import sys
 
@@ -101,9 +104,10 @@ _FIXTURE_TAIL = '[[id]]\ncode = "ST03"\ntitle = "three"\n'
 _WITHDRAWN = 'status = "withdrawn"\nincorporated-into = "ST03"\n'
 
 
-def _case(st02_fields, mapped):
+def _case(st02_fields, mapped, st03_fields=""):
     """(exit code, stdout) of the gate over a tempdir root whose one manifest gives ST02 the fields
-    st02_fields and whose one synthetic rule maps the ids in mapped under map-fx-tight."""
+    st02_fields (and ST03 st03_fields) and whose one synthetic rule maps the ids in mapped under
+    map-fx-tight."""
     import contextlib
     import io
     with tempfile.TemporaryDirectory(prefix="mappings-selftest-") as tmp:
@@ -111,7 +115,7 @@ def _case(st02_fields, mapped):
         os.makedirs(root / ".aiqt" / "standards")
         os.makedirs(root / ".aiqt" / "core" / "rules")
         with open(root / ".aiqt" / "standards" / "fx.toml", "w", encoding="utf-8") as handle:
-            handle.write(_FIXTURE_HEAD + st02_fields + _FIXTURE_TAIL)
+            handle.write(_FIXTURE_HEAD + st02_fields + _FIXTURE_TAIL + st03_fields)
         corpus = [(Path("fixture-rule.md"), {"map-fx-tight": list(mapped)}, "fixture-rule.md")]
         saved_root, saved_load = globals()["repo_root"], gen_rules.load_corpus
         globals()["repo_root"] = lambda: root
@@ -123,6 +127,64 @@ def _case(st02_fields, mapped):
         finally:
             globals()["repo_root"], gen_rules.load_corpus = saved_root, saved_load
     return code, out.getvalue()
+
+
+# The one synthetic rule the generator vectors render: a security rule mapping ST02 under map-fx-tight.
+_RULE_NAME = "fixture-rule.md"
+_RULE_SOURCE = ("---\ncorpus-id: selfmp1\norigin: pack\nfamily: security\nfacet: SECI\n"
+                "slug: mappings-selftest-rule\nmap-fx-tight: [ST02]\n---\n\n# Mappings self-test rule\n\n"
+                "A fixture rule.\n")
+_RULE_OUT = Path(".claude") / "rules" / "security" / "SECI-mappings-selftest-rule.md"
+
+
+def _generators(st02_fields):
+    """{name: (exit code, output, what the generator left at its output)} for each generator that renders
+    a mapping id, over a tempdir root whose manifest gives ST02 the fields st02_fields and whose one rule
+    (on disk) maps ST02: gen_mappings.run (exit, stderr, the CSV export or None), gen_rules.run (exit,
+    stdout, the generated rule or None) and gen_draft_site's mappings data (0 or 2 for a refused page, the
+    refusal or the rendered identifiers, None)."""
+    import contextlib
+    import io
+    import gen_draft_site
+    import gen_mappings
+    from _standards import map_keys
+    results = {}
+    with tempfile.TemporaryDirectory(prefix="mappings-selftest-gen-") as tmp:
+        root = Path(tmp)
+        for parts in ((".aiqt", "standards"), (".aiqt", "core", "rules"), ("site", "downloads")):
+            os.makedirs(root.joinpath(*parts))
+        with open(root / ".aiqt" / "standards" / "fx.toml", "w", encoding="utf-8") as handle:
+            handle.write(_FIXTURE_HEAD + st02_fields + _FIXTURE_TAIL)
+        with open(root / ".aiqt" / "core" / "rules" / _RULE_NAME, "w", encoding="utf-8") as handle:
+            handle.write(_RULE_SOURCE)
+        # gen_rules binds MAP_KEYS at import from the real repository; the fixture's key comes from its own
+        # manifest, as conformance.py rebinds it for an install.
+        saved = (gen_rules.MAP_KEYS, gen_rules.SEQ_KEYS, gen_draft_site.ROOT, gen_draft_site._MAPPINGS_DATA)
+        gen_rules.MAP_KEYS = map_keys(root)
+        gen_rules.SEQ_KEYS = {"secondary"} | gen_rules.MAP_KEYS
+        try:
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = gen_mappings.run(root, False)
+            csv_path = root / "site" / "downloads" / "mappings.csv"
+            results["gen_mappings"] = (code, err.getvalue(),
+                                       csv_path.read_text(encoding="utf-8") if csv_path.exists() else None)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                code = gen_rules.run(root, False)
+            rule_path = root / _RULE_OUT
+            results["gen_rules"] = (code, out.getvalue(),
+                                    rule_path.read_text(encoding="utf-8") if rule_path.exists() else None)
+            gen_draft_site.ROOT, gen_draft_site._MAPPINGS_DATA = root, None
+            try:
+                rows, _reg = gen_draft_site._mappings_data()
+                results["gen_draft_site"] = (0, " ".join(row["identifier"] for row in rows), None)
+            except gen_draft_site.RefusedPage as exc:
+                results["gen_draft_site"] = (2, str(exc), None)
+        finally:
+            (gen_rules.MAP_KEYS, gen_rules.SEQ_KEYS, gen_draft_site.ROOT,
+             gen_draft_site._MAPPINGS_DATA) = saved
+    return results
 
 
 def _self_test():
@@ -146,6 +208,52 @@ def _self_test():
         code, out = _case(fields, ["ST01"])
         check(name, code == 2 and out.startswith("error: fx.toml:"), (code, out))
 
+    # The successor must be an active id: neither the withdrawn id itself nor another withdrawn id.
+    code, out = _case('status = "withdrawn"\nincorporated-into = "ST02"\n', ["ST01"])
+    check("refuse/incorporated-into-self", code == 2 and "error: fx.toml: incorporated-into for 'ST02' "
+          "names 'ST02', which is not an active id" in out, (code, out))
+    code, out = _case('status = "withdrawn"\nincorporated-into = "ST03"\n', ["ST01"], 'status = "withdrawn"\n')
+    check("refuse/incorporated-into-withdrawn", code == 2 and "error: fx.toml: incorporated-into for 'ST02' "
+          "names 'ST03', which is not an active id" in out, (code, out))
+
+    # The status value is compared exactly: no case or whitespace folding.
+    got = [_case(fields, ["ST01"]) for fields in ('status = "Withdrawn"\n', 'status = "WITHDRAWN"\n')]
+    check("refuse/status-case-variant", all(code == 2 and "status for 'ST02' must be one of withdrawn" in out
+                                            for code, out in got), got)
+    got = [_case(fields, ["ST01"]) for fields in ('status = " withdrawn"\n', 'status = "withdrawn "\n',
+                                                 'status = "withdrawn\\n"\n')]
+    check("refuse/status-whitespace-variant", all(code == 2 and "status for 'ST02' must be one of withdrawn"
+                                                  in out for code, out in got), got)
+
+    # An [[id]] key outside the closed set fails closed naming the file, the id and the key, so a
+    # misspelt or recased field never loads as an active id and is never dropped silently.
+    for name, fields, key in (("refuse/unknown-id-key-recased-status", 'Status = "withdrawn"\n', "Status"),
+                              ("refuse/unknown-id-key-withdrawn-flag", 'withdrawn = true\n', "withdrawn"),
+                              ("refuse/unknown-id-key-state", 'state = "withdrawn"\n', "state"),
+                              ("refuse/unknown-id-key-underscore-successor",
+                               'status = "withdrawn"\nincorporated_into = "ST03"\n', "incorporated_into")):
+        code, out = _case(fields, ["ST02"])
+        check(name, code == 2 and "error: fx.toml: [[id]] 'ST02' has unknown key(s) '{}'".format(key) in out,
+              (code, out))
+
+    # Every generator that renders a mapping id refuses a withdrawn one (exit 2, naming the rule, the key
+    # and the id) with nothing written, and renders the same id when it is not withdrawn.
+    refusal = ("fixture-rule.md: map-fx-tight: id 'ST02' is withdrawn in Self-test fx 2026 (incorporated "
+               "into ST03)")
+    refused = _generators(_WITHDRAWN)
+    code, err, written = refused["gen_mappings"]
+    check("refuse/gen-mappings-withdrawn-id", code == 2 and refusal in err and written is None,
+          (code, err, written))
+    code, out, written = refused["gen_rules"]
+    check("refuse/gen-rules-withdrawn-id", code == 2 and refusal in out and written is None, (code, out, written))
+    code, out, _none = refused["gen_draft_site"]
+    check("refuse/gen-draft-site-withdrawn-id", code == 2 and refusal in out, (code, out))
+    rendered = _generators("")
+    check("pass/generators-render-same-id-not-withdrawn",
+          rendered["gen_mappings"][0] == 0 and ",ST02," in (rendered["gen_mappings"][2] or "")
+          and rendered["gen_rules"][0] == 0 and "map-fx-tight: [ST02]" in (rendered["gen_rules"][2] or "")
+          and rendered["gen_draft_site"][:2] == (0, "ST02"), rendered)
+
     got = [_main_exit(argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
                                          ["--execution-report", "relative/report"])]
     check("refuse/unrecognized-argument", got == [2, 2, 2], got)
@@ -157,8 +265,10 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_mappings {} checks (a mapping to a withdrawn id fails naming the rule, key "
           "and id; the same id not withdrawn passes; a withdrawn id no rule maps passes; a status other than "
-          "\"withdrawn\", and an incorporated-into without it, naming no active id or not a string, fail "
-          "closed; an unrecognized argument exits 2)".format(len(EXECUTED)))
+          "\"withdrawn\" (a case or whitespace variant included), an [[id]] key outside the closed set, and an "
+          "incorporated-into without it, naming no active id (itself or another withdrawn id) or not a string, "
+          "fail closed; gen_mappings, gen_draft_site and gen_rules refuse a withdrawn id with nothing written "
+          "and render it when active; an unrecognized argument exits 2)".format(len(EXECUTED)))
     return 0
 
 

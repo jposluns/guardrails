@@ -41,9 +41,9 @@ residual are in the docstring of `tools/check_cited_standards.py`.
   suffix, a bad suffix, or a `map-*` key with no manifest is rejected as an unknown frontmatter key.
 - `tools/check_mappings.py` (a CI gate, and part of `run_all_checks.sh`) validates every mapped id in
   the corpus against its manifest: the id must match the manifest `id-pattern` and appear verbatim in
-  the manifest's id set, and must not be marked withdrawn there. It also enforces per-list hygiene (no duplicates, natural-sorted order) and
-  mutual exclusivity (an id is not asserted both tight and broad for one rule+framework). A malformed
-  manifest fails closed (exit 2). Both are stdlib-only and offline: CI never reaches the network or the
+  the manifest's id set, and must not be marked withdrawn there. It also enforces per-list hygiene (no
+  duplicates, natural-sorted order) and mutual exclusivity (an id is not asserted both tight and broad
+  for one rule+framework). A malformed manifest fails closed (exit 2). Both are stdlib-only and offline: CI never reaches the network or the
   private source catalogues.
 - `tools/check_cited_standards.py` (a CI gate, and part of `run_all_checks.sh`) scans the rule corpus for
   numbered standard designators in its grammar's spellings and fails on one that no manifest's `name` or
@@ -80,13 +80,21 @@ Top-level fields (all required):
 | `retrieved` | ISO date the ids were extracted |
 
 Then one `[[id]]` table per id, each with a `code` (required, must match `id-pattern`) and an optional
-`title`. Ids must be unique and in natural-sorted order.
+`title`. Ids must be unique and in natural-sorted order. An `[[id]]` table carries only the keys `code`,
+`title`, `status` and `incorporated-into`; any other key (a recased `Status`, a `withdrawn = true`, an
+`incorporated_into`) is refused as a malformed manifest (exit 2, naming the file, the id and the key),
+never ignored.
 
 An id the pinned edition lists as withdrawn keeps its `[[id]]` table and adds `status = "withdrawn"`, and,
 where the source names a successor, `incorporated-into = "<id>"` naming an active id in the same manifest.
 A rule mapping to a withdrawn id fails `tools/check_mappings.py` (exit 1, naming the rule, the key and the
-id); a `status` other than `"withdrawn"`, or an `incorporated-into` without it, naming no active id or not
-a string, is a malformed manifest (exit 2). Without `status` the id is active.
+id), and `tools/gen_rules.py`, `tools/gen_mappings.py` and `tools/gen_draft_site.py` refuse to render it
+(exit non-zero, naming the same). A `status` other than exactly `"withdrawn"` (no case or whitespace
+variant), or an `incorporated-into` without it, that is empty, not a string, or naming no active id (the
+withdrawn id itself or another withdrawn id included), is a malformed manifest (exit 2). Without `status`
+the id is active. Every published id total (the `ids_total` of a full catalogue in the mappings exports,
+the coverage denominators on the mappings page and the NOTICE's "all N entries") counts active ids only,
+excluding withdrawn ids.
 
 Attribution (licence, source URL) is intentionally NOT carried here; it is added, per-source verified,
 with the public NOTICE, because this file's job is to make an id verifiable, not to assert a licence.

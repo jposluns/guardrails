@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "da5bae835e3dda4160c59e2ae7fb5c4c9bcdaf06d12b2b46b3e566c7d48af09f"
+tree-sha256 = "80cb68c799cb8589c2ef2e703436aac61bc89cd9706179e93926a015ab0f76df"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3068
-sha256 = "1be62c94d72f6af3c06c3838ee741a9deae70fdf37444b89eff4e81a118a5b59"
+sha256 = "ffce4533f1a2ce4e670e19f0dd2d410985dbe96f4437b307dafead95b77ba3a0"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -851,8 +851,8 @@ sha256 = "142b4ac57f326c4d30a677e45e6c4daddf3661259b0714f1747db59c3f8ff7dd"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
-bytes = 10251
-sha256 = "1e47a41f166c010404ba2c66554acf3917ed1e6aeae4d0811079a6b5955a8e07"
+bytes = 10986
+sha256 = "b8cf8c7af089d896ea5111c8de9f230d9133f902706968f289454701cf1bc5e2"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"
@@ -4086,8 +4086,8 @@ sha256 = "50ba7641dfc3dcdae1618dbfc7398ce8402f57574ed7279081d5e041be28abbd"
 
 [[sources]]
 path = "tools/_standards.py"
-bytes = 58052
-sha256 = "a5a2e266930158ef07da14ae0b9dba207b78b8127a92f367a29b44e2501e41ec"
+bytes = 60229
+sha256 = "5fa4bce489182df280ade8466a1c0d3818132543e51ba9b9349b548d60bdc97a"
 
 [[sources]]
 path = "tools/_template_pages.py"
@@ -4246,8 +4246,8 @@ sha256 = "f71af857e298779f7134566dfb5411b25ffa5c84222569bea667358eda53df71"
 
 [[sources]]
 path = "tools/check_mappings.py"
-bytes = 9355
-sha256 = "eeb916958b98771379dc3a9d63da990d629c0b2de2d5082e269c2aacd2598b12"
+bytes = 16816
+sha256 = "8a872483eb1da337dab06968bd9fdbafa5f5809f933af725d440d3e3126f967e"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
@@ -4511,13 +4511,13 @@ sha256 = "4f507211e5fa3e31f25e012072f6a834d433137bf66a164a5963d5f071b901c2"
 
 [[sources]]
 path = "tools/gen_mappings.py"
-bytes = 29399
-sha256 = "8b8d3d77b5269703cb578bd72aa60ef75464dce5f4cdc6fac17709eaafe8fec0"
+bytes = 29796
+sha256 = "b7193e15eeb1a71a06eeb7ea8694b1d4048730f1aa624c891df240d4d2711340"
 
 [[sources]]
 path = "tools/gen_notice.py"
-bytes = 12579
-sha256 = "efbd98a683c19129f4c6001a707fc11c457923441ddf52249d700a43ecd2f781"
+bytes = 12635
+sha256 = "444cd84ced9881500577bc35cd3e9e44219a69767d6e79a57fec61733894a864"
 
 [[sources]]
 path = "tools/gen_reference_facts.py"
@@ -4536,8 +4536,8 @@ sha256 = "ae2ed51a4df01f32279b8742a630036ad795e5694baeec217ee93eb84a943b47"
 
 [[sources]]
 path = "tools/gen_rules.py"
-bytes = 29547
-sha256 = "aa03540b37380025d8a05213f315c8ad3e768be18d82aa7885cf39b6e88ef1e6"
+bytes = 30165
+sha256 = "ded3b20b45aba682e874373f24c4f5515bb0b30af67c476d5e40be9a7c73774f"
 
 [[sources]]
 path = "tools/gen_secret_patterns.py"
@@ -4646,8 +4646,8 @@ sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 216626
-sha256 = "79d00bb75f837c63ce81f7143cba947404c01b4803cb6e54c3bb42f47a5d4102"
+bytes = 217099
+sha256 = "4e62e6fe53d75573ffefb62cf705684f4f53d8c2b8b6edab65e3b50be336159d"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

@@ -54,6 +54,10 @@ CATALOGUES = {"full", "subset"}   # is the id set the complete pinned-edition ca
 # The optional per-id status: an id the pinned edition still lists but marks withdrawn stays in the id
 # set (so it is still a recognized id) and no rule may map to it.
 ID_STATUSES = {"withdrawn"}
+# The closed set of keys an [[id]] table may carry (every key the vendored manifests use). Any other key
+# fails closed, so a misspelt or recased field (Status, withdrawn = true, state) never loads as an active
+# id and an incorporated_into is never dropped silently.
+ID_KEYS = {"code", "title", "status", "incorporated-into"}
 
 
 class ManifestError(ValueError):
@@ -155,6 +159,10 @@ class Manifest:
             code = row.get("code")
             if not isinstance(code, str) or not code:
                 raise ManifestError("{}: every [[id]] needs a non-empty string 'code'".format(path.name))
+            unknown = sorted(set(row) - ID_KEYS)
+            if unknown:
+                raise ManifestError("{}: [[id]] '{}' has unknown key(s) {}; allowed keys are {}".format(
+                    path.name, code, ", ".join(repr(key) for key in unknown), "/".join(sorted(ID_KEYS))))
             if not self.id_pattern.fullmatch(code):
                 raise ManifestError("{}: id '{}' does not match id-pattern {!r}".format(
                     path.name, code, self.id_pattern.pattern))
@@ -191,6 +199,40 @@ class Manifest:
             if into is not None and (into not in self.id_set or into in self.withdrawn):
                 raise ManifestError("{}: incorporated-into for '{}' names '{}', which is not an active "
                                     "id in this manifest".format(path.name, code, into))
+
+    def active_ids(self):
+        """The ids not marked withdrawn, in manifest order: what a published id total counts."""
+        return [code for code in self.ids if code not in self.withdrawn]
+
+
+def withdrawn_finding(rule, key, cid, manifest):
+    """The finding for rule `rule` mapping id cid under key when manifest marks cid withdrawn, else None.
+    The one withdrawn-id test: validate_mappings (check_mappings, conformance C4) reports it, and every
+    generator that renders a mapping id (gen_mappings.build_rows, which gen_draft_site reuses, and
+    gen_rules through withdrawn_mappings) refuses on it, so no output can carry an id the gate refuses."""
+    if cid not in manifest.withdrawn:
+        return None
+    into = manifest.withdrawn[cid]
+    return "{}: {}: id '{}' is withdrawn in {} {}{}".format(
+        rule, key, cid, manifest.name, manifest.edition,
+        "" if into is None else " (incorporated into {})".format(into))
+
+
+def withdrawn_mappings(corpus, manifests):
+    """withdrawn_finding for every mapped id of every rule in corpus ([(path, frontmatter, rel)]), in
+    corpus then key order. A key with no manifest, or a value that is not a list, is left to
+    validate_mappings, which reports both."""
+    findings = []
+    for src, fm, _rel in corpus:
+        for key in sorted(k for k in fm if k.startswith("map-")):
+            manifest = manifests.get(key[:-6])
+            if manifest is None or not isinstance(fm[key], list):
+                continue
+            for cid in fm[key]:
+                finding = withdrawn_finding(src.name, key, cid, manifest)
+                if finding is not None:
+                    findings.append(finding)
+    return findings
 
 
 # The probe primitive, named so a self-test can refuse it without filesystem permissions (a
@@ -908,8 +950,8 @@ def validate_mappings(corpus, manifests):
 
     Each rule's `map-<fw>-tight` / `map-<fw>-broad` frontmatter list is validated against its
     fit-stripped BASE manifest (`map-<fw>`): id-pattern match, membership in the pinned id set, not
-    withdrawn in it (an [[id]] with status = "withdrawn"), per-list duplicate, and per-list natural-sort. Two fit-notation checks sit on top of the bare-key
-    loop this replaces:
+    withdrawn in it (an [[id]] with status = "withdrawn"; withdrawn_finding), per-list duplicate, and
+    per-list natural-sort. Two fit-notation checks sit on top of the bare-key loop this replaces:
       - a map key must carry a `-tight`/`-broad` fit suffix (a bare or bad-suffix key is a finding,
         defence in depth for a hand-edited tree, mirroring the no-manifest guard);
       - MUTUAL EXCLUSIVITY: per rule+framework, an id may not be asserted both tight and broad.
@@ -958,11 +1000,10 @@ def validate_mappings(corpus, manifests):
                 elif cid not in manifest.id_set:
                     findings.append("{}: {}: id '{}' is not in {} {}".format(
                         src.name, key, cid, manifest.name, manifest.edition))
-                elif cid in manifest.withdrawn:
-                    into = manifest.withdrawn[cid]
-                    findings.append("{}: {}: id '{}' is withdrawn in {} {}{}".format(
-                        src.name, key, cid, manifest.name, manifest.edition,
-                        "" if into is None else " (incorporated into {})".format(into)))
+                else:
+                    withdrawn = withdrawn_finding(src.name, key, cid, manifest)
+                    if withdrawn is not None:
+                        findings.append(withdrawn)
         for base, lists in per_base.items():
             both = set(lists["tight"]) & set(lists["broad"])
             if both:
