@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5c1e8a49bcb31fd3c334b3ef8864a8a07bb788e24980e5ebf2358cd0d7e532b5"
+tree-sha256 = "afa41c88c89cae1be8f84ee591fad1f773faf31be7f0280da78659379897d662"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3976,8 +3976,8 @@ sha256 = "e6f41331aba2336edc12ba404c0a693f2c85ef7bd54a8c8cb166b87cf9049a20"
 
 [[sources]]
 path = "site/llms.txt"
-bytes = 2778
-sha256 = "9a4d4862d69486576da66557d01cd9ee713d111c70246b64bbda0389edd3b472"
+bytes = 2789
+sha256 = "e2c0ad81cb930b1905771b95eb0d8d1bd63b4e5098bab4472e555ac62c18d6b0"
 
 [[sources]]
 path = "site/mappings/index.html"
