@@ -13010,6 +13010,44 @@ def _main_isolated(monitor):
                 "true && git -C {} commit -m x".format(nr_q), "deny", cwd=str(nr_remote),
                 detail="would commit on protected branch")
 
+        # A protected-branch denial names which D condition failed, so a no-remote repository denied
+        # for its command shape is not read as one treated like a remote-backed repository. Each
+        # detail runs to the ". Commit denied" the denial appends, so a reason with any other tail
+        # fails. The shape and remote rows fail when the reason names no failed condition.
+        _nr_main = "would commit on protected branch 'refs/heads/main'; no-remote exemption not applied: "
+        _nr_shape = (_nr_main + "the command has segments other than one commit and cd/pushd, so remote "
+                     "state was not read. Commit denied")
+        _nr_has_remote = (_nr_main + "the target repository has a configured remote or a legacy remotes/ "
+                          "or branches/ entry. Commit denied")
+        pexpect("(pl-nrx-two-commits) two commits joined by && on a no-remote main name the shape",
+                "git commit -m x && git commit -m y", "deny", cwd=str(nr_ctl), detail=_nr_shape)
+        pexpect("(pl-nrx-inert-companion) 'true && git commit' on a no-remote main names the shape",
+                "true && git commit -m x", "deny", cwd=str(nr_ctl), detail=_nr_shape)
+        for _case, _repo in (("config", nr_remote), ("legacy-remotes", nr_legr),
+                             ("legacy-branches", nr_legb)):
+            pexpect("(pl-nrx-remote-{}) lone commit on a remote-backed main names the remote".format(_case),
+                    "git commit -m x", "deny", cwd=str(_repo), detail=_nr_has_remote)
+        # A failed remote read keeps its own reason, with nothing appended. This row passes before and
+        # after the reason change: it guards that the probe-failure reason stays as it was.
+        _nr_common_reads = []
+
+        def _nr_common_failure(repo, deadline, *args):
+            if args == ("rev-parse", "--git-common-dir"):
+                _nr_common_reads.append(repo)
+                return subprocess.CompletedProcess(args, 1, "", "injected common-dir read failure")
+            return _orig_commit_git(repo, deadline, *args)
+
+        aiqt_hooks._commit_git = _nr_common_failure
+        try:
+            pexpect("(pl-nrx-probe-failure) a failed common-dir read keeps 'remote absence could not be "
+                    "proved'", "git commit -m x", "deny", cwd=str(nr_ctl),
+                    detail="remote absence could not be proved. Commit denied")
+            if _nr_common_reads != [str(nr_ctl)]:
+                failures.append("(pl-nrx-probe-failure-read) expected one common-dir read of the no-remote "
+                                "fixture, got {!r}".format(_nr_common_reads))
+        finally:
+            aiqt_hooks._commit_git = _orig_commit_git
+
         # A-D positive registry. The consumer spy in pexpect observes the certificate the
         # public handler actually uses; an informational allow-note cannot satisfy these cases.
         _pl239_allows = (
