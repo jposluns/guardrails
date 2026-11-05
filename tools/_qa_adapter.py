@@ -31,6 +31,9 @@ distinct from an OPTIONAL-disabled SKIP.
 
 stdlib only (Python 3.14 or newer). `--self-test` proves the discriminating property: the adapter
 returns UNVERIFIABLE (never PASS) on a missing REQUIRED surface, so deleting that guard fails the test.
+`--self-test --self-test-child` is the internal child mode the self-test's own launches pass: it omits
+the cases that launch this tool again, names them on a SELF-TEST NOT RUN line and exits 1, never
+printing the PASS line. `--self-test-child` without `--self-test` is a loud exit 2.
 """
 import sys
 
@@ -845,7 +848,48 @@ def render_digest(surfaces, extra_lines=None):
 
 
 # --- self-test --------------------------------------------------------------------------------------
-def _self_test():
+# The internal option a self-test passes on its own child launches. The mode is an argument, never an
+# environment variable: any caller can set a variable, and a variable that skipped cases would let a run
+# print the full PASS line for cases that did not run. Shared with tools/audit_reference.py.
+SELFTEST_CHILD_OPTION = "--self-test-child"
+
+# The self-test cases that launch this tool again. A child-mode run omits exactly these, so a regressed
+# build whose child re-enters the self-test cannot spawn nested children.
+_SELF_TEST_LAUNCH_CASES = (
+    "23 --config validated before the --self-test dispatch",
+    "43 pinned config resolved before the --self-test dispatch",
+    "46 unknown option refused",
+    "52 FIFO --config fails closed",
+    "53 module-level _GIT absolutized",
+    "54 child mode omits exactly these cases",
+    "55 executed failure beside omitted cases fails",
+)
+
+
+def selftest_not_run_line(omitted):
+    """The one line a child-mode self-test prints in place of the PASS line, naming the cases it omitted."""
+    return ("SELF-TEST NOT RUN: child mode ({}) omitted {} case(s) that launch this tool again: {}. "
+            "This is not a full run.".format(SELFTEST_CHILD_OPTION, len(omitted), "; ".join(omitted)))
+
+
+def selftest_report(failures, omitted, pass_line):
+    """Print a self-test's result and return its exit status. Failures print SELF-TEST FAIL and each
+    failure; omitted cases print the NOT RUN line after them, so an omission never hides an executed
+    failure. Either one exits 1; only a run with no failure and no omitted case prints pass_line and
+    exits 0."""
+    if failures:
+        print("SELF-TEST FAIL:")
+        for f in failures:
+            print("  - " + f)
+    if omitted:
+        print(selftest_not_run_line(omitted))
+    if failures or omitted:
+        return 1
+    print(pass_line)
+    return 0
+
+
+def _self_test(child=False):
     sys.path.append(str(Path(__file__).resolve().parent))
     from _git_fixture_env import fixture_git_lifecycle
     global _GIT
@@ -853,16 +897,24 @@ def _self_test():
     try:
         with fixture_git_lifecycle() as fixture_git:
             _GIT = fixture_git
-            return _self_test_isolated()
+            return _self_test_isolated(child)
     finally:
         _GIT = saved_git
 
 
-def _self_test_isolated():
+def _self_test_isolated(child):
     import shutil
     import tempfile
 
     failures = []
+    # A case that launches this tool again runs only in a full run (child false); a child-mode run
+    # records it as omitted instead.
+    ran, omitted = [], []
+
+    def launches(case):
+        (omitted if child else ran).append(case)
+        return not child
+
     tmp = Path(tempfile.mkdtemp(prefix="aiqt-qa-adapter-selftest-"))
     try:
         # A minimal root: a present gate roster, an absent backlog.
@@ -1161,12 +1213,12 @@ def _self_test_isolated():
             failures.append("config_arg did not parse the separate --config x.toml form")
 
         # 23. DISCRIMINATING (arg validation precedes --self-test dispatch in main): a subprocess given
-        #     `--config --self-test` exits 2 (a loud argument error), never 0. A recursion sentinel keeps a
-        #     regressed build (which would re-enter the self-test) from spawning nested children.
-        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+        #     `--config --self-test` exits 2 (a loud argument error), never 0. The child carries the child-
+        #     mode option, so a regressed build (which would re-enter the self-test) spawns no nested children.
+        if launches("23 --config validated before the --self-test dispatch"):
             proc = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()),
-                                   "--config", "--self-test"], capture_output=True, text=True,
-                                  env=dict(os.environ, AIQT_QA_SELFTEST_CHILD="1"))
+                                   "--config", "--self-test", SELFTEST_CHILD_OPTION], capture_output=True,
+                                  text=True)
             if proc.returncode != 2:
                 failures.append("main did not validate --config before dispatching --self-test "
                                 "(expected loud exit 2, got {})".format(proc.returncode))
@@ -1738,19 +1790,18 @@ def _self_test_isolated():
         #     given `--config <absent> --self-test`, or `AIQT_ASSURANCE_CONFIG="" --self-test`, exits 2 (the
         #     loud pinned-source resolution), never 0. Moving the resolve_config call back AFTER the
         #     --self-test dispatch lets the self-test run and exit 0 on a config the caller pinned, failing
-        #     these. Guarded by the recursion sentinel so a regressed build cannot spawn nested children.
-        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+        #     these. Each child carries the child-mode option so a regressed build cannot spawn nested children.
+        if launches("43 pinned config resolved before the --self-test dispatch"):
             selfpath = str(Path(__file__).resolve())
-            childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1")
             proc = subprocess.run([sys.executable, "-I", "-B", selfpath,
-                                   "--config", str(tmp / "no-such-config.toml"), "--self-test"],
-                                  capture_output=True, text=True, env=childenv)
+                                   "--config", str(tmp / "no-such-config.toml"), "--self-test",
+                                   SELFTEST_CHILD_OPTION], capture_output=True, text=True)
             if proc.returncode != 2:
                 failures.append("pinned absent --config did not exit 2 under --self-test (pinned resolution "
                                 "must precede the self-test dispatch), got {}".format(proc.returncode))
-            proc = subprocess.run([sys.executable, "-I", "-B", selfpath, "--self-test"],
+            proc = subprocess.run([sys.executable, "-I", "-B", selfpath, "--self-test", SELFTEST_CHILD_OPTION],
                                   capture_output=True, text=True,
-                                  env=dict(childenv, AIQT_ASSURANCE_CONFIG=""))
+                                  env=dict(os.environ, AIQT_ASSURANCE_CONFIG=""))
             if proc.returncode != 2:
                 failures.append("present-but-empty AIQT_ASSURANCE_CONFIG did not exit 2 under --self-test, "
                                 "got {}".format(proc.returncode))
@@ -1847,12 +1898,14 @@ def _self_test_isolated():
         #     subprocess given a misspelled --self-testx or a stray --bogus exits 2, never 0 by silently
         #     running the default digest path (which would let --self-testx masquerade as --self-test in CI
         #     parity). Removing reject_unknown_options lets the unknown option fall through, failing this.
-        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+        #     The child-mode option is matched exactly: a near miss of it is unknown, and the option itself
+        #     without --self-test is a loud exit 2, never the default digest.
+        if launches("46 unknown option refused"):
             selfpath = str(Path(__file__).resolve())
-            childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1")
-            for badarg in ("--self-testx", "--bogus"):
+            for badarg in ("--self-testx", "--bogus", SELFTEST_CHILD_OPTION + "x", SELFTEST_CHILD_OPTION + "=1",
+                           SELFTEST_CHILD_OPTION):
                 proc = subprocess.run([sys.executable, "-I", "-B", selfpath, badarg],
-                                      capture_output=True, text=True, env=childenv)
+                                      capture_output=True, text=True)
                 if proc.returncode != 2:
                     failures.append("unknown option {!r} expected a loud exit 2, got {}".format(
                         badarg, proc.returncode))
@@ -1981,8 +2034,8 @@ def _self_test_isolated():
         #     FIFO passed via --config is classified non-regular BEFORE any open, so a subprocess exits 2
         #     promptly rather than BLOCKING on open(FIFO) (which would time out). Reverting load_config to a
         #     bare read_bytes() (no _classify_presence guard) blocks on the FIFO and the subprocess times out,
-        #     failing this. Needs os.mkfifo (POSIX); asserted where it is available and the sentinel is unset.
-        if hasattr(os, "mkfifo") and os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+        #     failing this. Needs os.mkfifo (POSIX); asserted where it is available, in a full run.
+        if launches("52 FIFO --config fails closed") and hasattr(os, "mkfifo"):
             fifo = tmp / "config.fifo"
             made_fifo = False
             try:
@@ -1992,10 +2045,9 @@ def _self_test_isolated():
                 made_fifo = False
             if made_fifo:
                 selfpath = str(Path(__file__).resolve())
-                childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1")
                 try:
                     proc = subprocess.run([sys.executable, "-I", "-B", selfpath, "--config", str(fifo)],
-                                          capture_output=True, text=True, env=childenv, timeout=20)
+                                          capture_output=True, text=True, timeout=20)
                     if proc.returncode != 2:
                         failures.append("a FIFO passed via --config expected a loud exit 2 (fail closed), "
                                         "got {}".format(proc.returncode))
@@ -2011,8 +2063,8 @@ def _self_test_isolated():
         #     case that separates them: a `git` reachable ONLY through a RELATIVE PATH component. In a child
         #     with PATH set to a relative dir holding a `git`, the module-level _GIT is absolute ONLY if the
         #     assignment routed through _resolve_git; the reverted form leaves it relative. Needs a writable,
-        #     executable git-like stub; asserted where one can be created and the sentinel is unset.
-        if os.environ.get("AIQT_QA_SELFTEST_CHILD") != "1":
+        #     executable git-like stub; asserted where one can be created, in a full run.
+        if launches("53 module-level _GIT absolutized"):
             relroot = tmp / "relgitroot"
             (relroot / "relbin").mkdir(parents=True)
             gitstub = relroot / "relbin" / "git"
@@ -2027,9 +2079,8 @@ def _self_test_isolated():
                 toolsdir = str(Path(__file__).resolve().parent)
                 probe = ("import sys; sys.path.append({tools!r}); import _qa_adapter as qa; "
                          "print(qa._GIT)").format(tools=toolsdir)
-                childenv = dict(os.environ, AIQT_QA_SELFTEST_CHILD="1", PATH="relbin")
                 proc = subprocess.run([sys.executable, "-I", "-B", "-c", probe], cwd=str(relroot),
-                                      capture_output=True, text=True, env=childenv)
+                                      capture_output=True, text=True, env=dict(os.environ, PATH="relbin"))
                 out = proc.stdout.strip()
                 if proc.returncode != 0:
                     failures.append("_GIT probe subprocess failed: rc={} err={!r}".format(
@@ -2038,21 +2089,72 @@ def _self_test_isolated():
                     failures.append("module-level _GIT did not route through _resolve_git: a git reachable "
                                     "via a RELATIVE PATH left _GIT relative ({!r}); the global must "
                                     "absolutize".format(out))
+
+        # 54. DISCRIMINATING (child mode is an argument, never the environment): a child given
+        #     `--self-test --self-test-child` omits exactly the cases that launch this tool again, prints
+        #     the NOT RUN line naming them and exits 1, never the PASS line, with AIQT_QA_SELFTEST_CHILD
+        #     absent, empty, "0" or "1" in its environment alike. A gate that read the variable again, or a
+        #     child mode that printed PASS or exited 0, fails this.
+        if launches("54 child mode omits exactly these cases"):
+            selfpath = str(Path(__file__).resolve())
+            want = selftest_not_run_line(list(_SELF_TEST_LAUNCH_CASES))
+            for inherited in (None, "", "0", "1"):
+                childenv = {k: v for k, v in os.environ.items() if k != "AIQT_QA_SELFTEST_CHILD"}
+                if inherited is not None:
+                    childenv["AIQT_QA_SELFTEST_CHILD"] = inherited
+                try:
+                    proc = subprocess.run([sys.executable, "-I", "-B", selfpath, "--self-test",
+                                           SELFTEST_CHILD_OPTION], capture_output=True, text=True,
+                                          env=childenv, timeout=300)
+                except subprocess.TimeoutExpired:
+                    failures.append("a child-mode self-test (AIQT_QA_SELFTEST_CHILD={!r}) timed out".format(
+                        inherited))
+                    continue
+                lines = proc.stdout.splitlines()
+                if (proc.returncode != 1 or [ln for ln in lines if ln.startswith("SELF-TEST")] != [want]):
+                    failures.append("a child-mode self-test (AIQT_QA_SELFTEST_CHILD={!r}) must exit 1 with "
+                                    "only the NOT RUN line {!r}, got rc={} out={!r} err={!r}".format(
+                                        inherited, want, proc.returncode, proc.stdout[-600:],
+                                        proc.stderr[-600:]))
+
+        # 55. DISCRIMINATING (an executed failure beside omitted cases is a failure): a child-mode run in
+        #     which an executed case fails (config_arg replaced by one that accepts every argv, so case 22
+        #     fails) exits 1 and prints SELF-TEST FAIL with that failure as well as the NOT RUN line, never
+        #     the PASS line. A report that let the omission stand in for the failure fails this.
+        if launches("55 executed failure beside omitted cases fails"):
+            toolsdir = str(Path(__file__).resolve().parent)
+            probe = ("import sys; sys.path.append({tools!r}); import _qa_adapter as qa; "
+                     "qa.config_arg = lambda argv: None; sys.exit(qa._self_test(True))").format(tools=toolsdir)
+            want = selftest_not_run_line(list(_SELF_TEST_LAUNCH_CASES))
+            try:
+                proc = subprocess.run([sys.executable, "-I", "-B", "-c", probe], capture_output=True,
+                                      text=True, timeout=300)
+                lines = proc.stdout.splitlines()
+                if (proc.returncode != 1 or "SELF-TEST FAIL:" not in lines or want not in lines
+                        or any(ln.startswith("SELF-TEST PASS") for ln in lines)
+                        or not any(ln.startswith("  - config_arg accepted a malformed --config argv")
+                                   for ln in lines)):
+                    failures.append("a child-mode self-test with an executed failure must exit 1 with SELF-TEST "
+                                    "FAIL naming it and the NOT RUN line, got rc={} out={!r} err={!r}".format(
+                                        proc.returncode, proc.stdout[-600:], proc.stderr[-600:]))
+            except subprocess.TimeoutExpired:
+                failures.append("the child-mode self-test with an executed failure timed out")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+    # Every case that launches this tool again is accounted for: run in a full run, omitted in child mode.
+    if (omitted if child else ran) != list(_SELF_TEST_LAUNCH_CASES):
+        failures.append("the {} run accounted for the launch cases {!r}, expected {!r}".format(
+            "child-mode" if child else "full", omitted if child else ran, list(_SELF_TEST_LAUNCH_CASES)))
 
     # An in-process call of _self_test() hands the caller's environment back exactly (HOME,
     # XDG_CONFIG_HOME, the GIT_CONFIG_* pins and the caller's own GIT_* variables), with the git
     # fixture scrub in effect inside: the entry point is run in a child around a stand-in main.
     from _entry_restore_selftest import entry_restore_failures
-    failures.extend(entry_restore_failures(__file__, "_self_test", "_self_test_isolated"))
+    failures.extend(entry_restore_failures(__file__, "_self_test", "_self_test_isolated", args=(True,)))
 
-    if failures:
-        print("SELF-TEST FAIL:")
-        for f in failures:
-            print("  - " + f)
-        return 1
-    print("SELF-TEST PASS: a present required surface is PASS; a MISSING required surface is UNVERIFIABLE "
+    return selftest_report(failures, omitted, (
+          "SELF-TEST PASS: a present required surface is PASS; a MISSING required surface is UNVERIFIABLE "
           "(never PASS); a DIRECTORY, a non-regular file, or a present-but-UNREADABLE (chmod 000, off-root) "
           "file at a file-backed surface is UNVERIFIABLE (regularity and existence are not readability), and "
           "the gate roster counts only readable regular files (an unreadable-only roster is UNVERIFIABLE, and "
@@ -2109,8 +2211,9 @@ def _self_test_isolated():
           "--self-test; the config root is derived consistently so an explicit "
           ".aiqt config "
           "resolves surfaces at the tree root; and discover_all enumerates the full expected set so a "
-          "required surface omitted from config resolves UNVERIFIABLE.")
-    return 0
+          "required surface omitted from config resolves UNVERIFIABLE; and a child-mode run (--self-test-child, "
+          "an argument, never an environment variable) omits exactly the cases that launch this tool again, "
+          "names them on a NOT RUN line and exits 1, beside an executed failure too, never printing this line."))
 
 
 def main():
@@ -2126,9 +2229,14 @@ def main():
     # UNKNOWN-OPTION REJECTION also precedes the --self-test dispatch: an unrecognized option (a misspelled
     # --self-testx, a stray --bogus) is a LOUD exit 2, never a silent fall-through to the default digest path
     # that would exit 0 without running the self-test the caller asked for.
-    unknown = reject_unknown_options(argv, {"--self-test"})
+    unknown = reject_unknown_options(argv, {"--self-test", SELFTEST_CHILD_OPTION})
     if unknown is not None:
         print("error: unrecognized option {!r}".format(unknown), file=sys.stderr)
+        return 2
+    # The internal child-mode option only qualifies --self-test; alone it is a loud error, never the digest.
+    child = SELFTEST_CHILD_OPTION in argv
+    if child and "--self-test" not in argv:
+        print("error: {} is only valid with --self-test".format(SELFTEST_CHILD_OPTION), file=sys.stderr)
         return 2
     # The loud PINNED-source resolution runs BEFORE the --self-test dispatch, so a pinned-but-absent or
     # pinned-but-empty config (an explicit --config PATH that does not exist, or AIQT_ASSURANCE_CONFIG set
@@ -2141,7 +2249,7 @@ def main():
         print("error: {}".format(exc), file=sys.stderr)
         return 2
     if "--self-test" in argv:
-        return _self_test()
+        return _self_test(child)
     # Default: print the surface digest for the resolved config (a read-only view).
     surfaces = discover_all(cfg, root)
     print("config: {}".format(prov))
