@@ -11904,7 +11904,14 @@ def _named_text_cases(hooks):
         finally:
             hooks.subprocess = saved
         rows.append((name, (status, _one_line(d), len(d) <= detail_max), ("ENUMERATOR_ERROR", True, True)))
-    return rows
+    # keyed by check id so the call site can name every id literally; a repeated id would let one
+    # row silently replace another, so it is a failure here
+    table = {}
+    for name, got, want in rows:
+        if name in table:
+            FAILURES.append("named-text case id {!r} built twice".format(name))
+        table[name] = (got, want)
+    return table
 
 
 def main(report_path=None):
@@ -16701,8 +16708,53 @@ def _main_isolated(report_path=None):
         check("core/ask-enum-error-with-actionable-cap-still-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed, actionable=[]))
         check("core/ask-cannot-evaluate-only-cap-relieves", v, "ALLOW_WITH_FINDINGS")
-        for name, got, want in _named_text_cases(aiqt_hooks):
-            check(name, got, want)
+        # every id is a literal row so check_selftest_execution.py can resolve it statically; the
+        # listed ids must equal the ids _named_text_cases builds, so a case added, renamed or
+        # dropped on one side only fails the suite
+        _named_text = _named_text_cases(aiqt_hooks)
+        _named_text_listed = []
+        for (name,) in (("core/named-text-one-line-actionable-stop",),
+                        ("core/named-text-2kb-title-cut-stop",),
+                        ("core/named-text-id-limit-stop",),
+                        ("core/named-text-title-limit-stop",),
+                        ("core/named-text-reason-limit-stop",),
+                        ("core/named-text-256-items-bounded-stop",),
+                        ("core/named-text-one-line-cannot-evaluate-stop",),
+                        ("core/named-text-cannot-evaluate-id-limit-stop",),
+                        ("core/named-text-256-cannot-evaluate-bounded-stop",),
+                        ("core/named-text-one-line-actionable-schedule_idle",),
+                        ("core/named-text-2kb-title-cut-schedule_idle",),
+                        ("core/named-text-id-limit-schedule_idle",),
+                        ("core/named-text-title-limit-schedule_idle",),
+                        ("core/named-text-reason-limit-schedule_idle",),
+                        ("core/named-text-256-items-bounded-schedule_idle",),
+                        ("core/named-text-one-line-cannot-evaluate-schedule_idle",),
+                        ("core/named-text-cannot-evaluate-id-limit-schedule_idle",),
+                        ("core/named-text-256-cannot-evaluate-bounded-schedule_idle",),
+                        ("core/named-text-one-line-actionable-ask",),
+                        ("core/named-text-2kb-title-cut-ask",),
+                        ("core/named-text-id-limit-ask",),
+                        ("core/named-text-title-limit-ask",),
+                        ("core/named-text-reason-limit-ask",),
+                        ("core/named-text-256-items-bounded-ask",),
+                        ("core/named-text-one-line-cannot-evaluate-ask",),
+                        ("core/named-text-cannot-evaluate-id-limit-ask",),
+                        ("core/named-text-256-cannot-evaluate-bounded-ask",),
+                        ("core/named-text-one-line-held-ask",),
+                        ("core/named-text-held-id-limit-ask",),
+                        ("core/named-text-one-line-pending-schedule_idle",),
+                        ("core/named-text-pending-id-limit-schedule_idle",),
+                        ("core/enum-detail-invalid-state-one-line-bounded",),
+                        ("core/enum-detail-raw-id-formats-one-line-bounded",),
+                        ("core/enum-detail-failed-to-run-one-line-bounded",),
+                        ("core/enum-detail-exit-stderr-one-line-bounded",)):
+            _named_text_listed.append(name)
+            if name in _named_text:
+                check(name, *_named_text[name])
+        if set(_named_text_listed) != set(_named_text):
+            FAILURES.append("named-text ids drift: listed but not built {}; built but not listed {}".format(
+                sorted(set(_named_text_listed) - set(_named_text)),
+                sorted(set(_named_text) - set(_named_text_listed))))
 
         # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
         # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued
