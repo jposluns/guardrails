@@ -5761,8 +5761,18 @@ _DEADLINE_STUB_SECONDS = 0.8
 # load average of 32 to 36 spanned 0.1001 to 0.1009 s, and 575 more (25 sweeps) with 8 busy loops added
 # (load average rising to 38) spanned 0.0998 to 0.1015 s. The 1.0-second bound leaves about 0.9 s over the
 # worst span measured, and a run that stalls 1.5 s between the deadline's cut and its refusal reaching the
-# caller overshoots it by about half the stall.
+# caller overshoots it by about half the stall. One run on a shared host can still overshoot the bound with
+# no stall in the run: a full self-test run at a one-minute load average of about 20 (2026-11-05) saw one
+# clean tail of 1.08 s. The bound therefore judges no single run: a row whose only fault is an over-bound
+# span is re-run fresh, up to _DEADLINE_TAIL_RUNS runs in all, and fails only when every run's span is over
+# the bound, that is on the minimum span (_deadline_row_problems). The minimum discounts contention while
+# keeping a stall red: a stall between the cut and the refusal reaching the caller lives in the code path,
+# so it holds every run's span at or above itself, while contention that inflates a span measured at about
+# 0.1 s past 1.0 s on every one of three fresh runs is far outside everything measured above.
 _DEADLINE_TAIL_SECONDS = 1.0
+# How many fresh runs a row gets when its only fault is a tail span over _DEADLINE_TAIL_SECONDS; a cut
+# fault, or any fault of the deadline's behaviour, fails the row on the run that shows it, with no re-run.
+_DEADLINE_TAIL_RUNS = 3
 
 
 def _clocked_sleep(seconds, reads):
@@ -5785,42 +5795,76 @@ def _clocked_sleeper(seconds, reads, result=(0, None, None)):
     return handler
 
 
-def _deadline_cut_problems(label, what, code, err, want, seconds, reads, returned):
-    """What one deadline-path run got wrong, as a list of phrases ([] for none): code and err its exit and
-    stderr, want the text its stderr must hold, seconds its wall-clock time (reported only), reads the
-    clock reads of the _clocked_sleep the deadline must cut short, and returned a clock read taken right
-    after main() returned. Whether the deadline fired is judged by the stub's reads, not by the run's
-    wall-clock time: the window's timer is armed before the stub starts its sleep and its expiry, due
-    first, interrupts the sleep however late the host then schedules the run, while a deadline that does
-    not fire lets the sleep reach its end. Measured on an 80-CPU host at a one-minute load average of 50 to
-    53: 198 firing runs (22 modes) took 0.109 to 0.131 s of wall-clock time, and 66 more with 8 busy loops
-    sharing their one CPU took 0.175 to 0.347 s, each cutting the stub short; with the deadline disabled
-    and the stub returning the refusal itself, 88 runs took 0.810 to 0.916 s, each sleep run to its end.
-    A full self-test run at a load average of about 38 saw a firing run take 2.06 s, past every disabled
-    run measured, so a fixed wall-clock bound, on one run or on the median of three, does not separate the
-    two under such load, and the stub's reads do. The run's time after the cut is bounded too: from its
-    last clock read (its sleep's start, recovered as end minus the sleep length, when the cut came before
-    its first loop read) to returned it may take at most _DEADLINE_TAIL_SECONDS, so a run whose deadline
-    cut the sleep and that then stalled before its refusal reached the caller still fails. A run the
-    deadline ended before the stub logged any read leaves nothing to measure that span from, so only the
-    cut judgement applies to it."""
+def _deadline_cut_problems(label, what, code, err, want, seconds, reads):
+    """What one deadline-path run got wrong with its cut, as a list of phrases ([] for none): code and err
+    its exit and stderr, want the text its stderr must hold, seconds its wall-clock time (reported only),
+    and reads the clock reads of the _clocked_sleep the deadline must cut short. Whether the deadline fired
+    is judged by the stub's reads, not by the run's wall-clock time: the window's timer is armed before the
+    stub starts its sleep and its expiry, due first, interrupts the sleep however late the host then
+    schedules the run, while a deadline that does not fire lets the sleep reach its end. Measured on an
+    80-CPU host at a one-minute load average of 50 to 53: 198 firing runs (22 modes) took 0.109 to 0.131 s
+    of wall-clock time, and 66 more with 8 busy loops sharing their one CPU took 0.175 to 0.347 s, each
+    cutting the stub short; with the deadline disabled and the stub returning the refusal itself, 88 runs
+    took 0.810 to 0.916 s, each sleep run to its end. A full self-test run at a load average of about 38
+    saw a firing run take 2.06 s, past every disabled run measured, so a fixed wall-clock bound, on one run
+    or on the median of three, does not separate the two under such load, and the stub's reads do. The
+    run's time after the cut is judged separately, over a row's runs (_deadline_row_problems)."""
     finished = "end" in reads and reads.get("reached", float("-inf")) >= reads["end"]
-    out = []
     if not (code == 2 and want in err and not finished):
-        out.append("({}) expected exit 2 with {} before the stub's {:g}-second sleep ended, got exit {} after "
-                   "{:.2f}s with the stub's sleep {} and {!r}".format(
-                       label, what, _DEADLINE_STUB_SECONDS, code, seconds,
-                       "run to its end" if finished else "cut short", err))
+        return ["({}) expected exit 2 with {} before the stub's {:g}-second sleep ended, got exit {} after "
+                "{:.2f}s with the stub's sleep {} and {!r}".format(
+                    label, what, _DEADLINE_STUB_SECONDS, code, seconds,
+                    "run to its end" if finished else "cut short", err)]
+    return []
+
+
+def _deadline_tail_span(reads, returned):
+    """Seconds from the stub's last clock read to `returned`, a clock read taken right after main()
+    returned: from reads["reached"] when the stub's loop read the clock, else from the sleep's start,
+    recovered as reads["end"] minus the sleep length, when the cut came before the first loop read. None
+    when the deadline ended the run before the stub logged any read, which leaves nothing to measure the
+    span from, so only the cut judgement applies to such a run."""
     if "reached" in reads:
-        last_read = reads["reached"]
-    elif "end" in reads:
-        last_read = reads["end"] - _DEADLINE_STUB_SECONDS
-    else:
-        last_read = None
-    if last_read is not None and returned - last_read > _DEADLINE_TAIL_SECONDS:
-        out.append("({}) took {:.2f}s from the stub's last clock read to main()'s return, over the {:g}s tail "
-                   "bound".format(label, returned - last_read, _DEADLINE_TAIL_SECONDS))
-    return out
+        return returned - reads["reached"]
+    if "end" in reads:
+        return returned - (reads["end"] - _DEADLINE_STUB_SECONDS)
+    return None
+
+
+def _deadline_tail_problems(label, spans):
+    """What a row's tail got wrong, as a list of phrases ([] for none), judged over spans, the
+    _deadline_tail_span of each of its runs in run order: the row fails only when it has had
+    _DEADLINE_TAIL_RUNS runs and every span is over _DEADLINE_TAIL_SECONDS, that is on the minimum span,
+    which a stall in the run's own code holds over the bound while contention inflates single runs (see
+    the bound's comment for the measurements)."""
+    if len(spans) < _DEADLINE_TAIL_RUNS or min(spans) <= _DEADLINE_TAIL_SECONDS:
+        return []
+    return ["({}) took {} seconds from the stub's last clock read to main()'s return over {} fresh runs, "
+            "every span over the {:g}s tail bound".format(
+                label, ", ".join("{:.2f}".format(span) for span in spans), len(spans),
+                _DEADLINE_TAIL_SECONDS)]
+
+
+def _deadline_row_problems(label, what, want, run_once):
+    """Problems for one deadline-firing row ([] for none), run_once one fresh run of it (a new stub with
+    new clock reads) returning (code, err, seconds, reads, returned). The cut judgement is behavioural and
+    single-run: the first run with a cut problem fails the row at once, with no re-run. The tail judgement
+    is a wall-clock bound, the only evidence there is for a stall between the deadline's cut and its
+    refusal reaching the caller, so no single over-bound span fails the row: the row is re-run, up to
+    _DEADLINE_TAIL_RUNS runs in all, and fails only when every run's span is over the bound
+    (_deadline_tail_problems). A run with no span (_deadline_tail_span None) ends the row on its cut
+    judgement alone."""
+    spans = []
+    for _ in range(_DEADLINE_TAIL_RUNS):
+        code, err, seconds, reads, returned = run_once()
+        problems = _deadline_cut_problems(label, what, code, err, want, seconds, reads)
+        if problems:
+            return problems
+        span = _deadline_tail_span(reads, returned)
+        if span is None or span <= _DEADLINE_TAIL_SECONDS:
+            return []
+        spans.append(span)
+    return _deadline_tail_problems(label, spans)
 
 
 def _deadline_path_failures():
@@ -5828,9 +5872,12 @@ def _deadline_path_failures():
     past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler, the budget
     and the input size; a deadline during the payload read exits 2 too; a fail-open mode keeps its result
     (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
-    decision is written. A firing deadline is judged by whether it cut the stub's sleep short and by the
-    time from the stub's last clock read to main()'s return (_deadline_cut_problems), and (dl-cut-judged)
-    recorded runs pin those judgements at the sleep's end and at the tail bound's ends."""
+    decision is written. A firing deadline is judged by whether it cut the stub's sleep short, single-run
+    and behavioural, and by the time from the stub's last clock read to main()'s return, over up to
+    _DEADLINE_TAIL_RUNS fresh runs of the row (_deadline_row_problems); (dl-cut-judged) recorded runs pin
+    the cut judgement at the sleep's end, (dl-tail-span) recorded reads pin the span's two measurements,
+    (dl-tail-min) recorded spans pin the judgement over a row's runs at the bound's ends, and
+    (dl-tail-rerun) recorded rows pin the re-run rule and the per-run bound's ends."""
     out = []
     size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
     for mode, event in sorted(aiqt_hooks.HANDLER_EVENT.items()):
@@ -5841,54 +5888,110 @@ def _deadline_path_failures():
                 out.append("(dl-fail-open-{}) a fail-open mode must keep its result with no deadline, got "
                            "exit {} and {!r}".format(mode, code, err))
             continue
-        reads = {}
-        with _stub_handler(mode, _clocked_sleeper(_DEADLINE_STUB_SECONDS, reads)):
-            code, err, seconds = _main_run(mode, budget=0.1)
-            returned = time.monotonic()
+
+        def fires_run(mode=mode):
+            reads = {}
+            with _stub_handler(mode, _clocked_sleeper(_DEADLINE_STUB_SECONDS, reads)):
+                code, err, seconds = _main_run(mode, budget=0.1)
+                returned = time.monotonic()
+            return code, err, seconds, reads, returned
         want = ("AIQT guardrail: the {} check could not reach a decision within its 0.1-second budget on an "
                 "input of {} bytes; failing closed. Split the command into smaller calls, or move long content "
                 "into a file and pass its path.".format(mode, size))
-        out.extend(_deadline_cut_problems("dl-fires-" + mode, "the deadline refusal", code, err, want, seconds,
-                                          reads, returned))
+        out.extend(_deadline_row_problems("dl-fires-" + mode, "the deadline refusal", want, fires_run))
 
-    read_reads = {}
+    def read_run():
+        read_reads = {}
 
-    class SlowStdin:
-        def read(self):
-            _clocked_sleep(_DEADLINE_STUB_SECONDS, read_reads)
-            return _DEADLINE_PAYLOAD
-    with _stub_handler("diff_source_pretool", _sleeper(0)):
-        code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
-        returned = time.monotonic()
-    out.extend(_deadline_cut_problems("dl-read", "the refusal naming the unread input", code, err,
-                                      "on an input it had not finished reading", seconds, read_reads, returned))
+        class SlowStdin:
+            def read(self):
+                _clocked_sleep(_DEADLINE_STUB_SECONDS, read_reads)
+                return _DEADLINE_PAYLOAD
+        with _stub_handler("diff_source_pretool", _sleeper(0)):
+            code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
+            returned = time.monotonic()
+        return code, err, seconds, read_reads, returned
+    out.extend(_deadline_row_problems("dl-read", "the refusal naming the unread input",
+                                      "on an input it had not finished reading", read_run))
 
     refusal = "AIQT guardrail: recorded refusal"
-    for edge, code, err, seconds, reads, returned, want_lines in (
-            ("cut just inside its end, after 2.06 s of wall-clock time", 2, refusal, 2.06,
-             {"end": 10.0, "reached": 10.0 - 1e-6}, 10.0, 0),
-            ("run exactly to its end, after 0.15 s of wall-clock time", 2, refusal, 0.15,
-             {"end": 10.0, "reached": 10.0}, 10.05, 1),
-            ("run just past its end, after 0.15 s of wall-clock time", 2, refusal, 0.15,
-             {"end": 10.0, "reached": 10.0 + 1e-6}, 10.05, 1),
-            ("never started", 2, refusal, 0.15, {}, 0.2, 0),
-            ("cut before its first loop read of the clock", 2, refusal, 0.15, {"end": 10.0}, 9.3, 0),
-            ("cut short, the run exiting 0", 0, refusal, 0.15, {"end": 10.0, "reached": 9.0}, 9.05, 1),
-            ("cut short, the run without the refusal", 2, "", 0.15, {"end": 10.0, "reached": 9.0}, 9.05, 1),
-            ("cut short, main() returning just inside the tail bound", 2, refusal, 0.15,
-             {"end": 10.0, "reached": 9.0}, 9.0 + _DEADLINE_TAIL_SECONDS - 1e-6, 0),
-            ("cut short, main() returning exactly at the tail bound", 2, refusal, 0.15,
-             {"end": 10.0, "reached": 9.0}, 9.0 + _DEADLINE_TAIL_SECONDS, 0),
-            ("cut short, main() returning just past the tail bound", 2, refusal, 0.15,
-             {"end": 10.0, "reached": 9.0}, 9.0 + _DEADLINE_TAIL_SECONDS + 1e-6, 1),
-            ("cut before its first loop read, main() returning just past the tail bound measured from the "
-             "sleep's start", 2, refusal, 0.15, {"end": 10.0},
-             10.0 - _DEADLINE_STUB_SECONDS + _DEADLINE_TAIL_SECONDS + 1e-6, 1)):
-        lines = _deadline_cut_problems("recorded", "the refusal", code, err, "recorded refusal", seconds,
-                                       reads, returned)
+    for edge, code, err, reads, want_lines in (
+            ("cut just inside its end, after 2.06 s of wall-clock time", 2, refusal,
+             {"end": 10.0, "reached": 10.0 - 1e-6}, 0),
+            ("run exactly to its end", 2, refusal, {"end": 10.0, "reached": 10.0}, 1),
+            ("run just past its end", 2, refusal, {"end": 10.0, "reached": 10.0 + 1e-6}, 1),
+            ("never started", 2, refusal, {}, 0),
+            ("cut before its first loop read of the clock", 2, refusal, {"end": 10.0}, 0),
+            ("cut short, the run exiting 0", 0, refusal, {"end": 10.0, "reached": 9.0}, 1),
+            ("cut short, the run without the refusal", 2, "", {"end": 10.0, "reached": 9.0}, 1)):
+        lines = _deadline_cut_problems("recorded", "the refusal", code, err, "recorded refusal", 0.15, reads)
         if len(lines) != want_lines:
             out.append("(dl-cut-judged) a recorded run whose stub sleep was {} must give {} line(s), got {!r}"
                        .format(edge, want_lines, lines))
+
+    tail = _DEADLINE_TAIL_SECONDS
+    for edge, reads, returned, want_span in (
+            ("from the stub's last loop read", {"end": 10.0, "reached": 9.0}, 9.25, 0.25),
+            ("from the sleep's start when the cut came before its first loop read", {"end": 10.0},
+             10.0 - _DEADLINE_STUB_SECONDS + 0.25, 0.25),
+            ("as None when the run logged no read", {}, 0.2, None)):
+        span = _deadline_tail_span(reads, returned)
+        ok = span is None if want_span is None else span is not None and abs(span - want_span) < 1e-9
+        if not ok:
+            out.append("(dl-tail-span) the span measured {} must be {!r}, got {!r}".format(
+                edge, want_span, span))
+    for edge, spans, want_lines in (
+            ("every span just over the bound", [tail + 1e-6] * _DEADLINE_TAIL_RUNS, 1),
+            ("its minimum exactly at the bound", [tail + 1e-6, tail, tail + 1e-6], 0),
+            ("its minimum just inside the bound", [tail + 1e-6, tail + 1e-6, tail - 1e-6], 0),
+            ("one run short of the full count, every span over the bound",
+             [tail + 1e-6] * (_DEADLINE_TAIL_RUNS - 1), 0)):
+        lines = _deadline_tail_problems("recorded", spans)
+        if len(lines) != want_lines:
+            out.append("(dl-tail-min) a row with {} must give {} line(s), got {!r}".format(
+                edge, want_lines, lines))
+
+    ran = []
+
+    def scripted(runs):
+        queue = list(runs)
+
+        def run_once():
+            ran.append(queue[0])
+            return queue.pop(0)
+        return run_once
+
+    inside = (2, refusal, 0.15, {"end": 10.0, "reached": 9.0}, 9.0 + tail - 1e-6)
+    at_bound = (2, refusal, 0.15, {"end": 10.0, "reached": 9.0}, 9.0 + tail)
+    over = (2, refusal, 0.15, {"end": 10.0, "reached": 9.0}, 9.0 + tail + 1e-6)
+    over_recovered = (2, refusal, 0.15, {"end": 10.0}, 10.0 - _DEADLINE_STUB_SECONDS + tail + 1e-6)
+    unlogged = (2, refusal, 0.15, {}, 0.2)
+    ran_out = (2, refusal, 0.15, {"end": 10.0, "reached": 10.0}, 10.05)
+    bare = (2, "", 0.15, {"end": 10.0, "reached": 9.0}, 9.05)
+    for edge, runs, want_runs, want_lines, want_text in (
+            ("one run just inside the tail bound", [inside], 1, 0, ""),
+            ("one run exactly at the tail bound", [at_bound], 1, 0, ""),
+            ("a run just over the bound then one just inside it", [over, inside], 2, 0, ""),
+            ("a run just over the bound then one exactly at it", [over, at_bound], 2, 0, ""),
+            ("every run just over the bound", [over] * _DEADLINE_TAIL_RUNS, _DEADLINE_TAIL_RUNS, 1,
+             "tail bound"),
+            ("every run just over the bound measured from the sleep's start",
+             [over_recovered] * _DEADLINE_TAIL_RUNS, _DEADLINE_TAIL_RUNS, 1, "tail bound"),
+            ("a run over the bound then one whose sleep ran to its end", [over, ran_out], 2, 1,
+             "run to its end"),
+            ("a run over the bound then one without the refusal", [over, bare], 2, 1, "expected exit 2"),
+            ("a run over the bound then one that logged no read", [over, unlogged], 2, 0, ""),
+            ("a run whose sleep ran to its end, never re-run", [ran_out, inside, inside], 1, 1,
+             "run to its end")):
+        ran.clear()
+        lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
+        bad = len(ran) != want_runs or len(lines) != want_lines
+        if not bad and want_lines and want_text not in lines[0]:
+            bad = True
+        if bad:
+            out.append("(dl-tail-rerun) a recorded row with {} must take {} run(s) and give {} line(s) "
+                       "holding {!r}, got {} run(s) and {!r}".format(
+                           edge, want_runs, want_lines, want_text, len(ran), lines))
 
     seen = []
 
