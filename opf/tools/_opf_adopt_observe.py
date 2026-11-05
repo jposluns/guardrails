@@ -3504,30 +3504,50 @@ def self_test(vectors_only=False):
     add("TG-11/oversize-compressed", CANNOT_EVALUATE, "archive-cap",
         archive_cap=len(baseline_archive) + 64,
         archive=baseline_archive + b"x" * 65, absent="archive")
-    # Each timing row names the deadline guard its mutation removes. The name
-    # is printed beside the diagnostic guard lists for triage only and never
-    # decides a status. The resolver wait and the TLS handshake are armed
-    # from the connection deadline, so those rows name "connect". Unmutated,
-    # stalled-resolver's second fetch meets the slot the stalled worker still
-    # holds, so its record is [connect, ObserveError] by design.
+    # Each timing row names, in guarded_causes, the exact per-fetch cause
+    # record its unmutated run must produce, and the verdict rests on that
+    # record, never on elapsed wall time: an expired deadline is attributed
+    # by exception identity to the deadline object that raised it
+    # ("deadline:<guard>"), a socket timeout to the guard whose value last
+    # armed a socket's timeout ("timeout:<guard>", written at the settimeout
+    # call itself), the resolver wait's own refusal detail to the resolver
+    # deadline ("resolver-deadline"), and any other refusal to its recorded
+    # detail. A mutant run is detected because the mutation removes the very
+    # mechanism that writes the guarded cause, so its record cannot match,
+    # under any host load. fetch_safety is only the generous per-fetch
+    # safety stop on a wedged run (see within_safety), never the verdict.
+    # Unmutated, stalled-resolver's second fetch meets the slot the stalled
+    # worker still holds, so its second cause is that refusal by design.
     #
-    # Residual (TG-11 load flake): a host stall can let a different deadline
-    # guard stop a timing row's mutant inside the row's bound. Main's checks
-    # then miss the mutant and the row is INVALID, exit 1. That fails closed:
-    # no status separates a load flake from a deadline regression, because
-    # the attribution records the last deadline queried, not the timeout
-    # that fired. guards_fired and mutant_guards_fired exist to triage it.
+    # Residual (TG-11 load flake): a host stall can still let a DIFFERENT
+    # mechanism end an UNMUTATED fetch (for example inactivity during the
+    # slow drip). The row is then INVALID, exit 1, with the recorded cause
+    # naming what fired: it fails closed and the mismatch is printed, but no
+    # status separates that load flake from a genuine regression of the
+    # guarded mechanism. A mutant run has no such flake: whichever mechanism
+    # stops it, the guarded cause is absent and the mutant stays detected.
+    # A guarded_causes slot that is itself a tuple accepts any of its tokens:
+    # the request deadline ends the slow drip either as the socket timeout it
+    # armed ("timeout:request", the common path) or by raising at a left()
+    # call when a byte lands right at the boundary ("deadline:request").
+    # Both tokens are written only by the request deadline, which the row's
+    # mutation removes, so the mutant can produce neither.
     add("TG-11/slow-drip", CANNOT_EVALUATE, "request-deadline",
-        mode="slow", response=reply(b"x" * 200), fetch_bound=1.00,
-        guarded="request")
+        mode="slow", response=reply(b"x" * 200), fetch_safety=8.0,
+        guarded_causes=(("timeout:request", "deadline:request"),))
     add("TG-11/read-inactivity", CANNOT_EVALUATE, "inactivity",
-        mode="stall", fetch_bound=0.50, guarded="inactivity")
+        mode="stall", fetch_safety=8.0,
+        guarded_causes=("timeout:inactivity",))
     add("TG-11/stalled-resolver", CANNOT_EVALUATE, "resolver-deadline",
-        stalled_resolver=True, fetch_bound=0.50, guarded="connect")
+        stalled_resolver=True, fetch_safety=8.0,
+        guarded_causes=("resolver-deadline",
+                        "refused:a prior resolver call is still outstanding"))
     add("TG-11/connect-timeout", CANNOT_EVALUATE, "connect-deadline",
-        connect_stall=True, fetch_bound=0.50, guarded="connect")
+        connect_stall=True, fetch_safety=8.0,
+        guarded_causes=("timeout:connect", "timeout:connect"))
     add("TG-11/tls-timeout", CANNOT_EVALUATE, "tls-deadline",
-        mode="tls-stall", fetch_bound=0.50, guarded="connect")
+        mode="tls-stall", fetch_safety=8.0,
+        guarded_causes=("timeout:connect", "timeout:connect"))
     add("TG-12/observer-backstop", CANNOT_EVALUATE, "backstop", exception=True)
     add("TG-12/public-wrapper-backstop", CANNOT_EVALUATE, "wrapper",
         wrapper_exception=True)
@@ -3792,22 +3812,42 @@ def self_test(vectors_only=False):
             Queue = HoldingQueue
             Empty = queue.Empty
 
+        def track_armed(value):
+            # The arming record behind "timeout:<guard>": written at the
+            # settimeout call itself (the connect stub below and the
+            # SSLSocket.settimeout wrapper installed for timing runs), from
+            # the guard name the tracked left() value carries, so it records
+            # the timeout actually put in force on the socket, not merely
+            # the last deadline queried.
+            guard = getattr(value, "guard", None)
+            if guard is not None:
+                armed[:] = [guard]
+
         def connect(sock, endpoint, timeout):
             connect_calls.append(endpoint)
             environments.append(set(os.environ))
+            track_armed(timeout)
             sock.settimeout(timeout)
             port = backlog.getsockname()[1] if backlog is not None else server.port
             sock.connect(("127.0.0.1", port))
 
+        class TrackedValue(float):
+            # A left() value that still names the deadline it came from when
+            # the code under test passes it to a timeout: numerically it is
+            # the plain float left() would have returned.
+            guard = None
+
         class TrackedDeadline(original_deadline):
             # Replaces _Deadline in both runs of the five timing rows, and in
             # the resolver-vector/blocked-timing run, whose config also sets
-            # fetch_bound and so takes the timing path too. Its bookkeeping
+            # fetch_safety and so takes the timing path too. Its bookkeeping
             # names the deadline each left() queries: a deadline
             # clamped to its parent inherits the parent's name, and a left()
             # whose INACTIVITY_SECONDS cap binds is named "inactivity". It
-            # never changes a deadline's end, nor what left() returns or
-            # raises. An exception raised by the bookkeeping itself would
+            # never changes a deadline's end, what left() raises, or the
+            # numeric value left() returns (only the value's type, a float
+            # subclass carrying the name). An exception raised by the
+            # bookkeeping itself would
             # change the run: gather records it as an unexpected observer
             # failure, CANNOT-EVALUATE, which is the status these rows
             # expect, so the row then turns on whether its mutant run is
@@ -3825,22 +3865,28 @@ def self_test(vectors_only=False):
                     raise
                 capped = (maximum is not None and maximum == module.INACTIVITY_SECONDS
                           and remaining == maximum)
-                armed[:] = ["inactivity" if capped else self.guard]
-                return remaining
+                value = TrackedValue(remaining)
+                value.guard = "inactivity" if capped else self.guard
+                return value
 
-        def attribute(exc):
-            # Diagnostic: the last deadline queried before each refusal, not
-            # proof of which timeout fired. A socket timeout or an expired
-            # resolver wait is credited to the last left() in this fetch,
-            # which need not be the timeout in force. Anything else is
-            # recorded by exception class.
+        def cause(exc):
+            # The recorded cause a timing row's verdict rests on. An expired
+            # deadline is proven by exception identity (the TrackedDeadline
+            # that raised it names itself); the resolver wait's refusal is
+            # the code under test's own recorded detail; a socket timeout is
+            # credited to the guard whose value was last put in force by a
+            # tracked settimeout (track_armed), which in this straight-line
+            # fetch is the timeout the failing call ran under. Anything else
+            # is recorded by its refusal detail or exception class.
             if expired and expired[0] is exc:
-                return expired[1]
-            if armed and (isinstance(exc, socket.timeout) or (
-                    isinstance(exc, ObserveError)
-                    and exc.detail == "resolver deadline expired")):
-                return armed[0]
-            return type(exc).__name__
+                return "deadline:" + expired[1]
+            if isinstance(exc, ObserveError):
+                if exc.detail == "resolver deadline expired":
+                    return "resolver-deadline"
+                return "refused:" + exc.detail
+            if isinstance(exc, socket.timeout):
+                return "timeout:" + (armed[0] if armed else "untracked")
+            return "error:" + type(exc).__name__
 
         def timed_fetch(fetch, url, cap, deadline, context):
             del armed[:], expired[:]
@@ -3848,7 +3894,7 @@ def self_test(vectors_only=False):
             try:
                 return fetch(url, cap, deadline, context)
             except BaseException as exc:
-                fetch_guards.append(attribute(exc))
+                fetch_guards.append(cause(exc))
                 raise
             finally:
                 fetch_durations.append(time.monotonic() - started)
@@ -3947,10 +3993,10 @@ def self_test(vectors_only=False):
                     mock.patch.object(obj, name, value)
                 )
                 # The five TG-11 timing rows, and the resolver-vector/blocked-
-                # timing run (its config sets fetch_bound too, so timing is
+                # timing run (its config sets fetch_safety too, so timing is
                 # True here as well), use short deadlines. Other rows and
                 # their mutants need headroom under host load.
-                timing = "fetch_bound" in config
+                timing = "fetch_safety" in config
                 scale = 1.0 if timing else 10.0
                 patch(module, "CONNECT_SECONDS", 0.20 * scale)
                 patch(module, "INACTIVITY_SECONDS", 0.15 * scale)
@@ -3964,6 +4010,18 @@ def self_test(vectors_only=False):
                     if len(deadline_names) != 3:
                         raise AssertionError("timing deadlines must be distinct")
                     patch(module, "_Deadline", TrackedDeadline)
+                    # Record the guard whose value arms each TLS-socket
+                    # timeout (the handshake and every receive) at the
+                    # settimeout call itself. Only tracked left() values are
+                    # recorded, so the fixture server's own plain-float
+                    # timeouts on other threads never touch the record.
+                    original_settimeout = socket.socket.settimeout
+
+                    def tracked_settimeout(sock, value):
+                        track_armed(value)
+                        return original_settimeout(sock, value)
+
+                    patch(ssl.SSLSocket, "settimeout", tracked_settimeout)
                 patch(module, "_lookup", lookup)
                 if "hold_after_publish" in config:
                     patch(module, "queue", holding_queue)
@@ -4268,19 +4326,38 @@ def self_test(vectors_only=False):
                     for request in server.requests
                 )
 
-            def bounded():
-                # Request 0.80 < slow-drip bound 1.00 < gather 1.60.
-                # Connect 0.20 / inactivity 0.15 < other bounds 0.50
-                # < request 0.80; _Deadline reserves at most 0.05 seconds.
-                return (elapsed < 1.60 and bool(fetch_durations)
-                        and all(duration < config["fetch_bound"]
+            def causes_ok():
+                # The timing verdict: each refused fetch's recorded cause,
+                # compared slot by slot against the row's guarded_causes (a
+                # tuple-valued slot accepts any of its tokens; all name the
+                # same mechanism). The guarded mechanism must be what ended
+                # each refusal; a mutant run cannot reproduce the guarded
+                # cause because its mutation removed the mechanism that
+                # writes it, so this detects every timing mutant whatever
+                # other guard stops it and however the host is loaded.
+                expected = config["guarded_causes"]
+                if len(fetch_guards) != len(expected):
+                    return False
+                return all(
+                    recorded in (slot if type(slot) is tuple else (slot,))
+                    for recorded, slot in zip(fetch_guards, expected))
+
+            def within_safety():
+                # A generous safety stop on a wedged run, never the verdict:
+                # the short deadlines above keep every honest fetch, mutated
+                # or not, far inside it. The blocked-timing resolver vector
+                # tightens it to show a blocked run's failed check is named.
+                return (bool(fetch_durations)
+                        and all(duration < config["fetch_safety"]
                                 for duration in fetch_durations))
 
             if config.get("ambient"):
                 passed = passed and scrubbed()
                 passed = passed and uncredentialed()
-            if "fetch_bound" in config:
-                passed = passed and bounded()
+            if "guarded_causes" in config:
+                passed = passed and causes_ok()
+            if "fetch_safety" in config:
+                passed = passed and within_safety()
             if identifier.startswith("TG-05/"):
                 passed = passed and fetch_calls == order
             if blocked:
@@ -4298,8 +4375,11 @@ def self_test(vectors_only=False):
                      lambda: not config.get("ambient") or scrubbed()),
                     ("credentials sent",
                      lambda: not config.get("ambient") or uncredentialed()),
-                    ("timing bound",
-                     lambda: "fetch_bound" not in config or bounded()),
+                    # A blocked run never reached the guarded mechanism, so
+                    # its cause record cannot be judged; only the safety
+                    # stop applies to it.
+                    ("timing safety",
+                     lambda: "fetch_safety" not in config or within_safety()),
                 ) if not check()]
                 passed = not unmet
         finally:
@@ -4357,17 +4437,20 @@ def self_test(vectors_only=False):
             "elapsed_seconds": elapsed,
             "mutant_elapsed_seconds": mutant_elapsed,
         }
-        if "guarded" in case[3]:
-            # Diagnostic only, written after the status and never
-            # read back: the last deadline queried before each
-            # refusal, not proof of which timeout fired. It triages a
-            # TG-11 load flake and cannot excuse one.
-            row["guarded_deadline"] = case[3]["guarded"]
-            row["guards_fired"] = guards
-            row["mutant_guards_fired"] = mutant_guards
-            row["guards_fired_note"] = (
-                "diagnostic: the last deadline queried before each"
-                " refusal, not proof of which timeout fired")
+        if "guarded_causes" in case[3]:
+            # The evidence the timing verdict rests on: each refused fetch's
+            # recorded cause. An expired deadline is attributed by exception
+            # identity to the deadline that raised it, and a socket timeout
+            # to the guard whose value was last put in force by a tracked
+            # settimeout, so the record states which mechanism ended each
+            # fetch, not merely the last deadline queried.
+            row["guarded_causes"] = list(case[3]["guarded_causes"])
+            row["causes"] = guards
+            row["mutant_causes"] = mutant_guards
+            row["causes_note"] = (
+                "verdict evidence: the recorded cause that ended each"
+                " refused fetch; the run passes only when it matches"
+                " guarded_causes slot by slot")
         if blocked or mutant_blocked:
             # A blocked run was not evaluated: the row is
             # CANNOT-EVALUATE unless a run that was evaluated failed
@@ -4507,8 +4590,8 @@ def self_test(vectors_only=False):
                     # redirect applies main's fetch-order check to this run.
                     (VECTOR_NAMES[5], dict(redirect=True, anchor_first=True),
                      ["fetch order"]),
-                    (VECTOR_NAMES[6], dict(fetch_bound=0.50, delay_before_resolve=0.60),
-                     ["timing bound"])):
+                    (VECTOR_NAMES[6], dict(fetch_safety=0.50, delay_before_resolve=0.60),
+                     ["timing safety"])):
                 failures = []
                 case = (name.replace("resolver-vector/", "vector/"), VALID, "archive", config)
                 run = run_case(base, contexts, case, False)
