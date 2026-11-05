@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0d317960fa21365b4f0a4fb9ae7eb27425c723448d5f1385b0a8f412162d1450"
+tree-sha256 = "b95d45cfa11a554f28a1f273b2f7eb6b4ab66e6cab43360b81f94d19074d9e1d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2386,8 +2386,8 @@ sha256 = "e9bbf7da0e25d113ca0f33db652fd131283a00e234f29bb0dfde29ef1d2da965"
 
 [[sources]]
 path = "DISCLOSURE.md"
-bytes = 10310
-sha256 = "f9060ac5c60fa060aaee252ea8d5dd236bef73001e0dcbb51d85070ef4f19ac8"
+bytes = 10330
+sha256 = "854403d7fd810507f024d0ff23a6db4c8bcf8978ea92210d7536a247d5c0fd28"
 
 [[sources]]
 path = "ENFORCEMENT.md"
@@ -2461,8 +2461,8 @@ sha256 = "63d8e3c586b876cf601fbde6bbb5158aa3aae4a5ff492538d01c8c952e5966a3"
 
 [[sources]]
 path = "disclosure.toml"
-bytes = 14623
-sha256 = "837676d8f2245d8e36cef5ddf2d97a9a542076b8cd8e10cae5dbe0796143d643"
+bytes = 14643
+sha256 = "332876063d46b656ce9fd1b7d9aff5823b056b40a5d394de89a4e91c04286952"
 
 [[sources]]
 path = "docs/_shell.html"
@@ -3546,8 +3546,8 @@ sha256 = "d854908193c51cd9bbaa1bcc21791b951ed077b20f387c8f82c5d0e973d614bb"
 
 [[sources]]
 path = "site/disclosure/index.html"
-bytes = 20000
-sha256 = "2a49d184b72a179bf3893ce4462e585aa546ff40764a08b3d737455cc3664ed8"
+bytes = 20020
+sha256 = "d2395c94e9f17326e673de2dc27bd5caacdf7b139c16a86e39a6e67ed9186937"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3611,8 +3611,8 @@ sha256 = "856bc0a179a007b2e133273b49451104157c187351acae1edb5b68c35a9e97cf"
 
 [[sources]]
 path = "site/draft-src/disclosure.toml"
-bytes = 13278
-sha256 = "e1b3ee56fa502cbab06edca6c091480a18ddcff1cb8c54b9e6b07f0834a7bcc0"
+bytes = 13298
+sha256 = "41d7825fca58f7a7b2dd3b378957e02d8d9a6b3605a55dfdf54f9f35c592596b"
 
 [[sources]]
 path = "site/draft-src/draft.toml"
@@ -3646,8 +3646,8 @@ sha256 = "3b9d623ff00cae2717f6b78c71ffe84435326789ace4ba0af7a36581caa967c1"
 
 [[sources]]
 path = "site/draft-src/mappings.toml"
-bytes = 7884
-sha256 = "38f36dd409ea657bebc886f954199aeff6ce70006ab733e846944f4a6f138461"
+bytes = 7904
+sha256 = "05c7510d59fc8c96856d22bad73bc6089fdedc3dab3244d5caa47d882f67769b"
 
 [[sources]]
 path = "site/draft-src/rules.toml"
@@ -3991,8 +3991,8 @@ sha256 = "1bb5926f7002841c2ab1b6ba63515ef002cec4f82d981d6ba7082b157b57e51d"
 
 [[sources]]
 path = "site/mappings/index.html"
-bytes = 409909
-sha256 = "b343852d41a649575ddeb50db6d9e38a37c3a9c438a96ad56fac63280a05930e"
+bytes = 409929
+sha256 = "6619334e93c06d51c8e2a10d336c7141460612114e05e44d1caefa01311d5c3f"
 
 [[sources]]
 path = "site/robots.txt"

@@ -38,7 +38,7 @@ Evidence: [Per-language depth, composed at install](https://aiqt.ai/tech-details
 
 Claim: AIQT publishes a navigational crosswalk from the pack's rules to identifiers in security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA), each pinned to a stated edition, with every mapped identifier validated against that edition before it can ship.
 
-Limitation: A mapping asserts a relationship of ideas, not certification, attestation, audit evidence, or proof that you meet a standard. No framework publisher endorses, sponsors, or is affiliated with the pack. The absence of a mapping means none is currently asserted (the pair may be unassessed, judged not to fit, or removed after review), and a pinned edition may lag the newest release.
+Limitation: A mapping asserts a relationship of ideas, not certification, attestation, audit evidence, or proof that you meet a standard. No framework publisher endorses, sponsors, or is affiliated with the pack. The absence of a mapping means none is currently asserted (the rule and identifier pair may be unassessed, judged not to fit, or removed after review), and a pinned edition may lag the newest release.
 
 Evidence: [How the crosswalk is built](https://aiqt.ai/mappings#methodology) [The framework registry](https://aiqt.ai/mappings#registry)
 
