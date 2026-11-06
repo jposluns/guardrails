@@ -24251,10 +24251,22 @@ _VERB_RECORD_ARGS = {
 
 # The read-only gates a running subcommand's handler calls before its engine entry, each of which reaches an
 # engine entry itself: (helper module name, attribute). The reconcile-first gate opens the product root
-# through the entry status uses. While a running subcommand is probed each is a stand-in that passes, as the
-# real gate does over the empty scratch root, so every entry call the probe sees comes from the handler.
+# through the entry status uses. While any running subcommand of the verb is probed each is a stand-in that
+# passes, as the real gate does over the empty scratch root, so every entry call the probe sees comes from
+# the handler: for adopt that is every running subcommand (plan, approve, reconcile and status), of which
+# plan and approve call the gate. A subcommand named as exiting 2 runs the real gate: adopt apply does, and
+# reaches the product root entry through it (_VERB_REFUSAL_ENTRIES).
 _VERB_SUB_GATES = {
     "adopt": (("_opf_adopt_apply", "require_clean_journal"),),
+}
+# The engine entries ("module.attribute") the real dispatch of each subcommand named as exiting 2 may call
+# while its refusal is in place, keyed by (verb, subcommand): its own entry, and any entry the real gate
+# before it reaches. A guarded entry called during the refusal run of a subcommand it is not listed for is
+# refused and is a fault (_verb_engine_guard); a subcommand with no row may call none.
+_VERB_REFUSAL_ENTRIES = {
+    ("adopt", "apply"): ("_opf_adopt_apply._open_product_root", "_opf_adopt_apply.run_apply"),
+    ("adopt", "complete"): (),
+    ("record", "receipt-repair"): ("_opf_record._run_operation",),
 }
 
 
@@ -24279,13 +24291,17 @@ def _verb_entry_standin(sub, reached):
 
 
 def _verb_engine_guard(original, name, phase, calls):
-    """A guard over the real engine entry `original` (named `name`) for a whole status run: it records
-    (name, phase[0]) in `calls`, and calls `original` only while phase[0] names a subcommand the run executes
-    for real on purpose because its refusal is in place; at any other time it raises _VerbEngineBlocked, so
+    """A guard over the real engine entry `original` (named `name`) for a whole status run. phase[0] is None,
+    or (the subcommand the run executes for real on purpose because its refusal is in place, the entries
+    that run may call). The guard records (name, that subcommand or None, whether the call is permitted) in
+    `calls`, and calls `original` only while phase[0] names a subcommand whose own entries include `name`;
+    at any other time, during another subcommand's refusal run included, it raises _VerbEngineBlocked, so
     the engine never runs there."""
     def guard(*args, **kwargs):
-        calls.append((name, phase[0]))
-        if phase[0] is None:
+        during, permitted = phase[0] if phase[0] is not None else (None, ())
+        allowed = name in permitted
+        calls.append((name, during, allowed))
+        if not allowed:
             raise _VerbEngineBlocked(name)
         return original(*args, **kwargs)
     return guard
@@ -24387,12 +24403,14 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, en
     partial scope must read as _verb_scope_parts reads it and name the verb's subcommands
     (_verb_subcommands) exactly once: each named as running must reach its engine entry (_VERB_SUB_ENTRIES,
     a stand-in that never calls the engine) straight from the real handler, with the handler's gates
-    (_VERB_SUB_GATES) passing; each named as exiting 2 must have its refusal in place (_verb_refusal_holds)
-    and exit 2 from the real dispatch. An available verb with a subcommand whose refusal is in place is a
-    fault: it is partial. Each engine entry is guarded for the whole run (_verb_engine_guard): it runs only
-    in the real dispatch of a subcommand named as exiting 2, and a call anywhere else is refused and is a
-    fault. Every guarded call, (entry, the subcommand run for real or None), is appended to
-    `engine_calls` when it is a list."""
+    (_VERB_SUB_GATES, a stand-in for every running subcommand of the verb) passing; each named as exiting 2
+    must have its refusal in place (_verb_refusal_holds) and exit 2 from the real dispatch, which runs the
+    real gates. An available verb with a subcommand whose refusal is in place is a fault: it is partial.
+    Each engine entry is guarded for the whole run (_verb_engine_guard): it runs only in the real dispatch of
+    a subcommand named as exiting 2 that _VERB_REFUSAL_ENTRIES lists it for, and a call anywhere else,
+    during another subcommand's refusal run included, is refused and is a fault. Every guarded call,
+    (entry, the subcommand run for real or None, whether it was permitted), is appended to `engine_calls`
+    when it is a list."""
     import contextlib
     import io
     import shutil
@@ -24420,7 +24438,8 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, en
     inputs = os.path.join(base, "in")
     cwd = os.getcwd()
     # Every engine entry is guarded for the whole run: it runs only during the real dispatch of a
-    # subcommand whose refusal is in place (phase[0] names it), and any other call is recorded and refused.
+    # subcommand whose refusal is in place (phase[0] names it and the entries listed for it), and only when
+    # it is one of those entries; any other call is recorded and refused.
     phase = [None]
     calls = [] if engine_calls is None else engine_calls
     guards = contextlib.ExitStack()
@@ -24448,6 +24467,8 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, en
                 what, sorted(set(after) ^ set(before))))
             shutil.rmtree(root)
             os.mkdir(root)
+            # the probes run inside root, so step into the new one rather than stay in the removed one
+            os.chdir(root)
             return False
 
         def real(argv):
@@ -24523,7 +24544,7 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, en
                         faults.append("{} {} is named as exiting 2 but no refusal of every argument list is in "
                                       "place for it".format(verb, sub))
                         continue
-                    phase[0] = "{} {}".format(verb, sub)
+                    phase[0] = ("{} {}".format(verb, sub), _VERB_REFUSAL_ENTRIES.get((verb, sub), ()))
                     try:
                         code, err = real(sub_argv(verb, sub))
                     finally:
@@ -24561,10 +24582,15 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, en
         guards.close()
     if os.path.lexists(base):
         faults.append("the scratch directory {} could not be removed".format(base))
-    for name, during in calls:
+    for name, during, allowed in calls:
+        if allowed:
+            continue
         if during is None:
             faults.append("the real engine entry {} was called outside the real dispatch of a subcommand "
                           "whose refusal is in place; it was refused and did not run".format(name))
+        else:
+            faults.append("the real engine entry {} was called during the real dispatch of {}, which it is "
+                          "not listed for; it was refused and did not run".format(name, during))
     return faults
 
 
@@ -24581,8 +24607,13 @@ def _verb_status_self_test():
     with that verb marked in progress), an in progress verb that runs a handler only with arguments, a scope
     that does not read as a list, a refused subcommand named as running, a running subcommand named as
     exiting 2, record marked available, main() dispatching an in progress verb straight to a helper module's
-    entry, an in progress verb whose dispatch raises, and an engine entry reached through a lambda. No flip runs a handler other than a refusing one,
-    and no flip makes a real engine call outside a subcommand whose refusal is in place."""
+    entry, an in progress verb whose dispatch raises, an engine entry reached through a lambda, a helper
+    module imported in the intercepted dispatch (held by the import gate), a same-size rewrite of a scratch
+    file (held by content hashing), an engine entry called outside any refusal run (held by the engine
+    guard), and an engine entry called during the refusal run of a subcommand it is not listed for. No flip
+    runs a handler other than a refusing one, and no flip makes a real engine call outside the refusal run
+    of a subcommand the entry is listed for; the two flips that call an entry where it is not permitted call
+    it with no arguments, so a guard that let it through raises TypeError before the engine runs."""
     here = sys.modules[__name__]
     faults = _verb_status_faults()
     real_main = main
@@ -24618,6 +24649,48 @@ def _verb_status_self_test():
             return getattr(here, "_cmd_sync")(list(argv[1:]))
         return real_main(argv)
 
+    def imports_helper(argv):
+        # main() importing a helper module that is not loaded while it dispatches migrate; the name exists
+        # nowhere, so with the import gate gone the import fails with ModuleNotFoundError and nothing runs
+        if list(argv[:1]) == ["migrate"]:
+            import importlib
+            importlib.import_module("_opf_verb_status_absent")
+        return real_main(argv)
+
+    rewritten = []
+
+    def rewrites_same_size(argv):
+        # main() rewriting a scratch input file with content of the same size and type the first time it
+        # dispatches migrate, then restoring it the first time it dispatches migrate --help, so only the
+        # content hash sees the change; the path is taken from the probe's working directory (the scratch
+        # root) on the first call
+        content = {("migrate",): "probe = 2\n", ("migrate", "--help"): "probe = 1\n"}.get(tuple(argv))
+        if content is None or tuple(argv) in rewritten[1:]:
+            return real_main(argv)
+        if not rewritten:
+            parent = os.path.dirname(os.getcwd())
+            if not os.path.basename(parent).startswith("opf-verb-status-"):
+                return real_main(argv)
+            rewritten.append(os.path.join(parent, "in", "plan.toml"))
+        rewritten.append(tuple(argv))
+        with open(rewritten[0], "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return real_main(argv)
+
+    def engine_outside_refusal(argv):
+        # main() calling adopt plan's engine entry while it dispatches record create, outside any refusal
+        # run; no arguments, so a guard that let it through raises TypeError before the engine runs
+        if list(argv[:2]) == ["record", "create"]:
+            here._opf_adopt_plan.plan()
+        return real_main(argv)
+
+    def engine_in_other_refusal(argv):
+        # main() calling adopt reconcile's engine entry during the refusal run of record receipt-repair,
+        # which that entry is not listed for; no arguments, as above
+        if list(argv[:2]) == ["record", "receipt-repair"]:
+            here._opf_adopt_apply.reconcile_report()
+        return real_main(argv)
+
     def marked(verb, status, scope=""):
         return tuple((v, status, scope) if v == verb else (v, s, c) for v, s, c in VERB_STATUS)
 
@@ -24648,7 +24721,23 @@ def _verb_status_self_test():
          "the intercepted dispatch of ['sync'] raised"),
         ("engine-through-lambda", dict(dispatch=reconcile_through_lambda),
          "adopt reconcile reaches its engine entry from <lambda>, not straight from _cmd_adopt"),
+        ("helper-import-refused", dict(dispatch=imports_helper),
+         "the intercepted dispatch of ['migrate'] raised _VerbHelperImportBlocked('_opf_verb_status_absent')"),
+        ("same-size-rewrite-seen", dict(dispatch=rewrites_same_size),
+         "the intercepted dispatch of ['migrate'] changed the scratch directory: [('in/plan.toml', "),
+        ("engine-outside-refusal-refused", dict(dispatch=engine_outside_refusal),
+         "record create is named as running but does not reach its engine entry (reached [], exit "
+         "_VerbEngineBlocked('_opf_adopt_plan.plan')"),
+        ("engine-in-other-refusal-refused", dict(dispatch=engine_in_other_refusal),
+         "the real engine entry _opf_adopt_apply.reconcile_report was called during the real dispatch of "
+         "record receipt-repair, which it is not listed for"),
     )
+    # The engine calls a flip makes on purpose where no entry is permitted, each refused by the guard (every
+    # other flip must make none), and the one scratch change a flip makes on purpose (no other flip may
+    # change the scratch directory): the fault that change raises must start with that flip's needle.
+    refused_on_purpose = {"engine-outside-refusal-refused": ["_opf_adopt_plan.plan"],
+                          "engine-in-other-refusal-refused": ["_opf_adopt_apply.reconcile_report"]}
+    writes_on_purpose = ("same-size-rewrite-seen",)
     target = getattr(here, "_cmd_init", None)
     if target is None:
         faults.append("_cmd_init is not defined, so main() cannot route init to it")
@@ -24660,15 +24749,18 @@ def _verb_status_self_test():
             got = _verb_status_faults(engine_calls=calls, **kwargs)
             if not any(needle in fault for fault in got):
                 faults.append("flip {} was not caught: {!r}".format(label, got))
-            leaked = [fault for fault in got if "changed the scratch directory" in fault]
+            leaked = [fault for fault in got if "changed the scratch directory" in fault
+                      and not (label in writes_on_purpose and fault.startswith(needle))]
             if leaked:
                 faults.append("flip {} ran a handler that wrote: {!r}".format(label, leaked))
             # The only real engine calls a flip may make are in the real dispatch of a subcommand whose
-            # refusal is in place; every other call, refused by the guard, counts here and must be 0.
-            stray = [name for name, during in calls if during is None]
-            if stray:
-                faults.append("flip {} made {} real engine call(s) outside a refusing subcommand: {!r}".format(
-                    label, len(stray), stray))
+            # refusal is in place, to an entry listed for it; every other call, refused by the guard, counts
+            # here and must be exactly the calls the flip makes on purpose.
+            stray = [name for name, _during, allowed in calls if not allowed]
+            if stray != refused_on_purpose.get(label, []):
+                faults.append("flip {} made {} real engine call(s) outside a refusal run the entry is listed "
+                              "for: {!r}, not {!r}".format(label, len(stray), stray,
+                                                           refused_on_purpose.get(label, [])))
     finally:
         del here._verb_status_renamed_init
     if faults:
