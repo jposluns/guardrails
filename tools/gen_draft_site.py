@@ -85,8 +85,8 @@ ASSETS = "assets/baseline/"
 DRAFT_DIR = "draft/"
 MAX_PAGE_BYTES = 1 << 20
 # The link-preview card each site's pages name as og:image and twitter:image: a PNG under the site's live root
-# (rendered by tools/render_og_cards.py from tools/og-cards/), at the path and size the whole site family
-# publishes (/images/<site>-card.png, 1200 by 630).
+# (built by .baseline/build_card.js from the site's data file, .baseline/<site>-card.toml), at the path and size
+# the whole site family publishes (/images/<site>-card.png, 1200 by 630).
 CARD = "images/{}-card.png"
 CARD_WIDTH, CARD_HEIGHT = 1200, 630
 # The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,

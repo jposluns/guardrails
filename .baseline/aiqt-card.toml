@@ -1,7 +1,7 @@
 # The link-preview card data of aiqt.ai for .baseline/build_card.js (baseline 1.10.0), in the shape of
-# the template's tools/site-card.example.toml. Not served. The copy is the approved card text of
-# tools/og-cards/aiqt-og.html; the colours are those of tools/og-cards/card.css with the site's dark --brand (#4495ea).
-# Change the copy, colours or illustration only on the owner's instruction.
+# the template's tools/site-card.example.toml. Not served. It is the source of the served card,
+# site/images/aiqt-card.png: the copy is the owner's approved card text, and the colours are the family card
+# colours with the site's dark --brand (#4495ea). Change the copy, colours or illustration only on the owner's instruction.
 
 site = "aiqt"
 name = "AIQT"

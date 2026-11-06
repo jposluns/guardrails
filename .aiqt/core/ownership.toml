@@ -413,7 +413,8 @@ class = "pack-immutable"
 path = "site/assets/baseline/logos/aiqt-touch.png"
 class = "pack-immutable"
 
-# The aiqt.ai link-preview card, rendered by tools/render_og_cards.py and named as og:image on every page.
+# The aiqt.ai link-preview card, built by .baseline/build_card.js from .baseline/aiqt-card.toml and named as
+# og:image on every page.
 [[release-class]]
 path = "site/images/aiqt-card.png"
 class = "pack-immutable"
