@@ -58,6 +58,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import fnmatch
+import hashlib
 import html as _html
 import os
 import re
@@ -85,8 +87,13 @@ ASSETS = "assets/baseline/"
 DRAFT_DIR = "draft/"
 MAX_PAGE_BYTES = 1 << 20
 # The link-preview card each site's pages name as og:image and twitter:image: a PNG under the site's live root
-# (rendered by tools/render_og_cards.py from tools/og-cards/), at the size the link previews ask for.
-CARD = "assets/{}-og.png"
+# (rendered by tools/render_og_cards.py from tools/og-cards/), at the size the link previews ask for. Its
+# name, assets/<key>-og-<h>.png, carries the first CARD_HASH_DIGITS lowercase hex digits of the file's own
+# SHA-256, so the card's URL changes whenever its bytes do: a link preview caches the image by its URL, and
+# an unchanged URL keeps the old card. A query string cannot do this (tools/check_site.py refuses one on
+# og:image). The name is read from the one card file present (card_path), never typed here.
+CARD_DIR = "assets"
+CARD_HASH_DIGITS = 8
 CARD_WIDTH, CARD_HEIGHT = 1200, 627
 # The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,
 # before the stylesheets, with data-cfasync="false" before src and no defer or async, so a stored scheme
@@ -260,10 +267,40 @@ def _origin(site):
     return "https://" + next(domain for key, _word, domain, _n in FAMILY if key == site["key"])
 
 
+def card_path(site, tree=None):
+    """The site's card path under its live root, assets/<key>-og-<h>.png, read from the one card file in
+    the live root's assets folder under `tree` (default ROOT). RefusedPage, naming the site, when that folder
+    cannot be listed or holds no <key>-og*.png, more than one, or one whose name is not that form or whose
+    <h> is not the first CARD_HASH_DIGITS hex digits of the SHA-256 of its bytes."""
+    where = "{}.ai".format(site["name"])
+    folder = Path(ROOT if tree is None else tree) / site["live"] / CARD_DIR
+    shown = "{}/{}/".format(site["live"], CARD_DIR)
+    try:
+        names = sorted(name for name in os.listdir(folder)
+                       if fnmatch.fnmatchcase(name, "{}-og*.png".format(site["key"])))
+    except OSError as exc:
+        raise RefusedPage("{}: cannot list {} for the link-preview card ({})".format(where, shown, exc))
+    if not names:
+        raise RefusedPage("{}: no link-preview card {}-og-<hash>.png under {}".format(where, site["key"], shown))
+    if len(names) > 1:
+        raise RefusedPage("{}: more than 1 link-preview card under {}: {}".format(where, shown, ", ".join(names)))
+    name = names[0]
+    match = re.fullmatch(r"{}-og-([0-9a-f]{{{}}})\.png".format(re.escape(site["key"]), CARD_HASH_DIGITS), name)
+    try:
+        data = _existing(folder / name)
+    except OSError as exc:
+        raise RefusedPage("{}: cannot read the link-preview card {}{} ({})".format(where, shown, name, exc))
+    digest = hashlib.sha256(data or b"").hexdigest()[:CARD_HASH_DIGITS]
+    if data is None or match is None or match.group(1) != digest:
+        raise RefusedPage("{}: the link-preview card {}{} does not carry the hash of its bytes; its name must be "
+                          "{}-og-{}.png".format(where, shown, name, site["key"], digest))
+    return "{}/{}".format(CARD_DIR, name)
+
+
 def _social_metas(site, page):
     """The Open Graph and Twitter card metas: the page's absolute URL and full title, the site name, and the
-    site's card image with its size and alt text."""
-    image = "{}/{}".format(_origin(site), CARD.format(site["key"]))
+    site's card image (card_path) with its size and alt text."""
+    image = "{}/{}".format(_origin(site), card_path(site))
     values = (("property", "og:type", "website"),
               ("property", "og:title", "{} | {}.ai".format(page["title"], site["name"])),
               ("property", "og:url", _origin(site) + _page_url(site, page["rel"])),
@@ -1713,7 +1750,11 @@ def _self_test():
             built_site = next(s for s in built_sites if target.startswith(s["root"] + "/"))
             rel = target[len(built_site["root"]) + 1:]
             origin = {"aiqt": "https://aiqt.ai", "opfiles": "https://opfiles.ai"}[built_site["key"]]
-            card = '{}/assets/{}-og.png'.format(origin, built_site["key"])
+            # The expected card name, from the bytes of the one card file in the site's live assets folder.
+            card_files = sorted((ROOT / built_site["live"] / "assets").glob(built_site["key"] + "-og*.png"))
+            expect("meta/card-file-one " + target, len(card_files) == 1, card_files)
+            card_hash = hashlib.sha256(card_files[0].read_bytes()).hexdigest()[:8] if card_files else "none"
+            card = '{}/assets/{}-og-{}.png'.format(origin, built_site["key"], card_hash)
             title = re.search(r"<title>(.* \| [A-Za-z]+\.ai)</title>", built).group(1)
             wanted = ['<meta property="og:type" content="website">',
                       '<meta property="og:title" content="{}">'.format(title),
@@ -1732,6 +1773,67 @@ def _self_test():
            in live_outputs["opf/site/index.html"], live_outputs["opf/site/index.html"][:2000])
     expect("meta/card-url-staged", '<meta property="og:url" content="https://aiqt.ai/draft/install/">'
            in outputs["site/draft/install/index.html"])
+    # The card name is read from the one card file in a fixture tree's live assets folder and refused,
+    # naming the site, when there is none, more than 1, or a name whose hash is not its bytes' own (wrong,
+    # stale, absent, 7 or 9 digits, upper case), or a card that is not a regular file.
+    card_bytes = b"\x89PNG\r\n\x1a\nfixture card"
+    card_hash = hashlib.sha256(card_bytes).hexdigest()
+    good_card = "aiqt-og-{}.png".format(card_hash[:8])
+    other_bytes = card_bytes + b", rendered again"
+
+    def card_case(files, case_site=site, folder=True, link=None):
+        with tempfile.TemporaryDirectory(prefix="card-") as card_tree:
+            card_dir = Path(card_tree) / case_site["live"] / "assets"
+            if folder:
+                os.makedirs(card_dir)
+            for name, data in files:
+                (card_dir / name).write_bytes(data)
+            if link:
+                (Path(card_tree) / "elsewhere.png").write_bytes(card_bytes)
+                os.symlink(Path(card_tree) / "elsewhere.png", card_dir / link)
+            try:
+                return card_path(case_site, card_tree)
+            except RefusedPage as exc:
+                return "refused: " + str(exc)
+            except Exception as exc:  # a removed check that crashes instead of refusing still fails its case
+                return "error: {!r}".format(exc)
+
+    expect("card/fixture-hash-has-letters", card_hash[:8] != card_hash[:8].upper(), card_hash)
+    got = card_case([(good_card, card_bytes)])
+    expect("card/one-card-passes", got == "assets/" + good_card, got)
+    got = card_case([(good_card, card_bytes), ("aiqt-touch.png", b"x"), ("opfiles-og-00000000.png", b"x"),
+                     ("aiqt-og-00000000.svg", b"x"), ("aiqt-ogee.txt", b"x")])
+    expect("card/other-files-ignored", got == "assets/" + good_card, got)
+    got = card_case([(good_card, card_bytes)], case_site=staged_[0])
+    expect("card/staged-site-reads-live-root", got == "assets/" + good_card, got)
+    for name, files, words in (
+            ("card/none-refused", [], "AIQT.ai: no link-preview card aiqt-og-<hash>.png under site/assets/"),
+            ("card/other-site-card-only-refused", [("opfiles-og-{}.png".format(card_hash[:8]), card_bytes)],
+             "AIQT.ai: no link-preview card"),
+            ("card/second-unhashed-refused", [(good_card, card_bytes), ("aiqt-og.png", card_bytes)],
+             "AIQT.ai: more than 1 link-preview card under site/assets/: " + good_card + ", aiqt-og.png"),
+            ("card/second-hashed-refused", [(good_card, card_bytes), ("aiqt-og-00000000.png", other_bytes)],
+             "AIQT.ai: more than 1 link-preview card"),
+            ("card/wrong-hash-refused", [("aiqt-og-00000000.png", card_bytes)],
+             "AIQT.ai: the link-preview card site/assets/aiqt-og-00000000.png does not carry the hash"),
+            ("card/stale-bytes-refused", [(good_card, other_bytes)], "does not carry the hash of its bytes"),
+            ("card/unhashed-name-refused", [("aiqt-og.png", card_bytes)],
+             "its name must be " + good_card),
+            ("card/seven-digits-refused", [("aiqt-og-{}.png".format(card_hash[:7]), card_bytes)],
+             "does not carry the hash"),
+            ("card/nine-digits-refused", [("aiqt-og-{}.png".format(card_hash[:9]), card_bytes)],
+             "does not carry the hash"),
+            ("card/upper-case-hash-refused", [("aiqt-og-{}.png".format(card_hash[:8].upper()), card_bytes)],
+             "does not carry the hash")):
+        got = card_case(files)
+        expect(name, got.startswith("refused: ") and words in got, got)
+    got = card_case([], link=good_card)
+    expect("card/symlink-refused", got.startswith("refused: AIQT.ai: cannot read the link-preview card"), got)
+    got = card_case([], folder=False)
+    expect("card/missing-folder-refused", got.startswith("refused: AIQT.ai: cannot list site/assets/"), got)
+    got = card_case([], case_site=SITES[1])
+    expect("card/refusal-names-opfiles", got.startswith("refused: OPFiles.ai: no link-preview card opfiles-og-"
+                                                        "<hash>.png under opf/site/assets/"), got)
     mappings_head = outputs["site/draft/mappings/index.html"].split("</head>", 1)[0]
     expect("meta/mappings-parenthetical", mappings_head.count(
         "frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA)") == 2, mappings_head)
