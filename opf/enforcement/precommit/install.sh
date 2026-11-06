@@ -87,7 +87,10 @@
 # --no-verify skip them; git runs no pre-commit hook for cherry-pick, revert, rebase or am, nor for a
 # fast-forward git merge or git pull, which brings in commits with no hook run; a merge
 # concluded with git commit is compared with every parent (HEAD and each MERGE_HEAD commit) for dropped
-# records, lowered counters and terminal-status resurrection, but the survival comparison covers each
+# records, lowered counters, changed immutable bodies (a created-terminal record the result keeps active
+# at the status that parent holds), rewritten or dropped release rows, changed or dropped imported
+# records (where the imported series is active) and terminal-status resurrection, so parents whose
+# release ledgers or imported records diverged refuse every result, but the survival comparison covers each
 # parent's typed record indexes (a worklog entry is not an indexed record, so a dropped worklog entry is
 # caught only as a lowered counter, and tied counters do not expose it), a record a parent holds at an
 # unqualified terminal state is held to that state only while it stays active in the result (one the

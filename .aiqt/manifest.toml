@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6cf7455c021acffc0852015db901cb2785dbc6772fe7ce6d0b21aee4e21df4f7"
+tree-sha256 = "ab50ca251e8db1b92256a04220b5cb51fbf38ff442818b9256795cedc92c814c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 548631
-sha256 = "a9fea4b07607cfcb5c602cbd0cb66b0ff6e8abf82279ce5644e8dcfe01f79d02"
+bytes = 549457
+sha256 = "b67d3ecbc615ee75bba0dcc46cdb13267f79509fe67aafe357c7472287c7b40e"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2521,13 +2521,13 @@ sha256 = "d073f5e3e09a55c716ad6f71b24a68eb9ec1c7f5c36bae68f7d8f3dc0f21d4c5"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
-bytes = 32591
-sha256 = "e85c7297fadd31910b90a6619552a625224eca058a4e97244d4a89b84f6f41d1"
+bytes = 32900
+sha256 = "d99e9a516d6be1c2ecc9b8eec8ba96e77bbdfafdb7dd8eb3f59d90bd85416fff"
 
 [[sources]]
 path = "opf/enforcement/precommit/pre-commit"
-bytes = 17557
-sha256 = "b976f1bfef91e98e280395cb76425a5fdb0e04a5ce1f1ebc32ce8c89906c12b2"
+bytes = 19362
+sha256 = "a62c7522cdf14d9bd57e2d83d8a91191dcf8e63978f940c02b9cfc19dcfc246e"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
@@ -2806,8 +2806,8 @@ sha256 = "46fc281172a82ade8fe5915f6b3a4db47e3929f05efef1ea4964bb97553b0e7d"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 865222
-sha256 = "0e4e8b99c03a68c722f9d9c80069e60a05999c82d9d08bcb6fc7c387bdeed172"
+bytes = 870138
+sha256 = "ddccaa23e5a505e62fa7db28630aefb7fcfb49730964384349aaa83feb343b29"
 
 [[sources]]
 path = "opf/tools/_opf_declaration.py"
@@ -3091,8 +3091,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 405210
-sha256 = "c715ad8ba6dca6ef84e38f1fe20c9ae100a1916e947da67dfd4b8075f1b17ee7"
+bytes = 415297
+sha256 = "89529d3b00c8d0c90d940506323c499e104ebfc186b8f476fc50bbf907bf3e9d"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"

@@ -3072,20 +3072,25 @@ def _check_imported_no_deletion(rows, unread, high, floor, namespaces, reserved,
             expected += 1
 
 
-def _check_imported_append_only(prior_imported, rows, unread, rep):
+def _check_imported_append_only(prior_imported, rows, unread, rep, merge_parent=None):
     """C-HISTORY-APPEND-ONLY over the imported leaves (spec 8.3: imported records and their worklog entries
     MUST be immutable after publication; a correction is a fresh import run). Every imported id in the prior
     committed snapshot must still be present with an unchanged canonical body digest (_record_digest, the
     digest the prior carries). A prior that carries no imported baseline is a named CANNOT-EVALUATE, never a
     silent pass; an unread leaf makes its series a named CANNOT-EVALUATE for this check too (its prior ids
-    are skipped rather than read as deleted, and the skip is disclosed, never a silent per-series pass)."""
+    are skipped rather than read as deleted, and the skip is disclosed, never a silent per-series pass).
+    With `merge_parent` (a merged commit's id) the baseline is that parent's committed snapshot's, and
+    every message names the parent."""
+    snapshot = ("the prior committed snapshot" if merge_parent is None
+                else "merge parent {}".format(merge_parent))
     if prior_imported is None:
-        rep.cant("C-HISTORY-APPEND-ONLY: the prior committed snapshot carries no imported-series baseline; "
-                 "imported immutability across time (spec 8.3) is not evaluated")
+        rep.cant("C-HISTORY-APPEND-ONLY: {} carries no imported-series baseline; imported immutability "
+                 "across time (spec 8.3) is not evaluated".format(snapshot))
         return
     for key in sorted(unread):
         rep.cant("C-HISTORY-APPEND-ONLY: the {} imported leaf could not be read; imported immutability "
-                 "across time (spec 8.3) is not evaluated for that series".format(key))
+                 "across time (spec 8.3) is not evaluated for that series{}".format(
+                     key, "" if merge_parent is None else " against " + snapshot))
     current = {}
     for _key, rid, row in rows:
         current.setdefault(rid, row)
@@ -3094,19 +3099,22 @@ def _check_imported_append_only(prior_imported, rows, unread, rep):
             continue
         row = current.get(rid)
         if row is None:
-            rep.finding("C-HISTORY-APPEND-ONLY: prior imported record {!r} is absent from the imported leaves "
-                        "(imported records are immutable after publication; spec 8.3)".format(rid))
+            held = ("prior imported record {!r}".format(rid) if merge_parent is None
+                    else "imported record {!r}, held by {},".format(rid, snapshot))
+            rep.finding("C-HISTORY-APPEND-ONLY: {} is absent from the imported leaves (imported records are "
+                        "immutable after publication; spec 8.3)".format(held))
             continue
         try:
             digest = _record_digest(row)
         except _opf_emit.EmitError as exc:
-            rep.cant("C-HISTORY-APPEND-ONLY: cannot canonicalize imported record {!r} to compare against the "
-                     "prior digest ({})".format(rid, exc))
+            rep.cant("C-HISTORY-APPEND-ONLY: cannot canonicalize imported record {!r} to compare against {} "
+                     "({})".format(rid, "the prior digest" if merge_parent is None
+                                   else "the digest of " + snapshot, exc))
             continue
         if digest != prior_imported[rid]:
-            rep.finding("C-HISTORY-APPEND-ONLY: imported record {!r} changed since the prior committed snapshot "
-                        "(imported records and their worklog entries are immutable after publication; a "
-                        "correction is a fresh import run, spec 8.3)".format(rid))
+            rep.finding("C-HISTORY-APPEND-ONLY: imported record {!r} changed since {} (imported records and "
+                        "their worklog entries are immutable after publication; a correction is a fresh "
+                        "import run, spec 8.3)".format(rid, snapshot))
 
 
 def _check_imported_ids(emitted, counters_data, cst, namespaces, rep):
@@ -3417,32 +3425,38 @@ def _check_importer_chains(recs, by_id, rep, cid, unread=frozenset(), unevaluate
                             "linking back (spec 8.6)".format(cid, pid))
 
 
-def _verify_immutable_body(rid, cur, prior_digests, rep):
+def _verify_immutable_body(rid, cur, prior_digests, rep, merge_parent=None):
     """C-HISTORY-RESURRECTION: a created-terminal record (done / worklog / autonomous_decision / reference)
     is immutable in BODY too (OPF-SPEC 8.5). The prior snapshot carries only (type, status), so body
     preservation is verifiable only when the prior supplies a body digest for the record: a changed body is
     then a finding, and an ABSENT digest is a named CANNOT-EVALUATE (a disclosed boundary), never a silent
-    VALID on a rewritten immutable body (codex-3)."""
+    VALID on a rewritten immutable body (codex-3). With `merge_parent` (a merged commit's id) the digests
+    are that parent's committed snapshot's, and every message names the parent."""
+    if merge_parent is None:
+        snapshot, digest_of = "the prior committed snapshot", "the prior digest"
+    else:
+        snapshot = "merge parent {}".format(merge_parent)
+        digest_of = "the digest of merge parent {}".format(merge_parent)
     pdig = prior_digests.get(rid) if isinstance(prior_digests, dict) else None
     if not isinstance(pdig, str):
         rep.cant("C-HISTORY-RESURRECTION: immutable record {!r} body preservation (spec 8.5) cannot be "
-                 "verified; the prior snapshot carries no body digest for it (a disclosed boundary)".format(
-                     rid))
+                 "verified; {} carries no body digest for it (a disclosed boundary)".format(
+                     rid, "the prior snapshot" if merge_parent is None else snapshot))
         return
     body = getattr(cur, "body", None)
     if not isinstance(body, dict):
-        rep.cant("C-HISTORY-RESURRECTION: immutable record {!r} body is unavailable to compare against the "
-                 "prior digest".format(rid))
+        rep.cant("C-HISTORY-RESURRECTION: immutable record {!r} body is unavailable to compare against "
+                 "{}".format(rid, digest_of))
         return
     try:
         preserved = _record_digest_matches(body, pdig)
     except _opf_emit.EmitError as exc:
         rep.cant("C-HISTORY-RESURRECTION: cannot canonicalize the current body of immutable record {!r} to "
-                 "compare against the prior digest ({})".format(rid, exc))
+                 "compare against {} ({})".format(rid, digest_of, exc))
         return
     if not preserved:
-        rep.finding("C-HISTORY-RESURRECTION: immutable record {!r} body changed since the prior committed "
-                    "snapshot (a created-terminal record does not change; spec 8.5)".format(rid))
+        rep.finding("C-HISTORY-RESURRECTION: immutable record {!r} body changed since {} (a created-terminal "
+                    "record does not change; spec 8.5)".format(rid, snapshot))
 
 
 def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, source_unread=frozenset(),
@@ -3537,7 +3551,10 @@ def _check_merge_parent_survival(commit, prior, by_id, all_ids, rep, source_unre
     as `git merge -s ours` concludes without a conflict and would drop every record the merged branch added
     (spec 12/13), and a record that parent holds at an UNQUALIFIED TERMINAL state must keep that state in
     the result (terminal states are absorbing, so this misgrades no branch's own committed transition;
-    spec 8.4). Non-terminal status changes are not graded for a merge commit (the disclosed residual), the
+    spec 8.4), and a created-terminal record that parent holds, its status unchanged in the result, must
+    keep the body that parent's digest records (spec 8.5), verified exactly as the HEAD prior's bodies are
+    (_verify_immutable_body, the finding naming the parent). Non-terminal status changes are not graded for
+    a merge commit (the disclosed residual), the
     per-parent counter comparison runs under C-HISTORY-COUNTERS, and a worklog ENTRY is not in any parent's
     record set (the worklog is a ledger, not a type index), so a dropped entry is bounded by that counter
     comparison alone. A prior id absent from a type whose record source could not be read is a named
@@ -3567,14 +3584,19 @@ def _check_merge_parent_survival(commit, prior, by_id, all_ids, rep, source_unre
                      "({})".format(commit, rid, pstatus, perr))
             continue
         p_state, p_qual = pparsed
-        if p_state not in spec.terminal or p_qual is not None:
-            continue     # only the absorbing unqualified-terminal state is graded against a merged parent
         cur_status = _status_string(cur.state, cur.qual)
-        if cur_status is None or cur_status == pstatus:
-            continue     # an unparseable current status is the schema check's; an unchanged status is clean
-        rep.finding("C-HISTORY-RESURRECTION: record {!r} was at unqualified terminal {!r} in merge parent "
-                    "{} but is now {!r}; a terminal record does not change (no resurrection; spec "
-                    "8.4)".format(rid, pstatus, commit, cur_status))
+        status_changed = cur_status is not None and cur_status != pstatus
+        if p_state in spec.terminal and p_qual is None and status_changed:
+            rep.finding("C-HISTORY-RESURRECTION: record {!r} was at unqualified terminal {!r} in merge parent "
+                        "{} but is now {!r}; a terminal record does not change (no resurrection; spec "
+                        "8.4)".format(rid, pstatus, commit, cur_status))
+            continue
+        if status_changed or spec.transitions:
+            continue     # a merge commit's status change is not graded; a type with transitions is mutable
+        # A created-terminal record keeps its body as well as its status (spec 8.5), so its body is verified
+        # against THIS parent's digest exactly as the HEAD prior's is, or the absent digest is the named
+        # cannot-evaluate: a record only a merged parent holds is otherwise compared with no digest at all.
+        _verify_immutable_body(rid, cur, prior.get("digests") or {}, rep, merge_parent=commit)
     if unknown:
         rep.cant("C-HISTORY-RESURRECTION: the records of {} could not all be read (see C-RECORDS and "
                  "C-ARCHIVE-ENUM); record survival from merge parent {} is not evaluated over a partial "
@@ -5605,7 +5627,9 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # Concluding a merge (MERGE_HEAD present), the result is compared with EVERY parent: each record a
     # parent's type indexes hold must survive (a worklog entry is not an indexed record, so a dropped
     # entry is bounded by the counter comparison alone), no counter may fall below its value in any
-    # parent, and a record any parent holds at an unqualified terminal state must keep that state, while
+    # parent, a created-terminal record any parent holds must keep the body that parent's digest records,
+    # the release ledger and the imported leaves must extend each parent's append-only, and a record any
+    # parent holds at an unqualified terminal state must keep that state, while
     # a merge commit's non-terminal status changes are not graded (transition legality is skipped above,
     # so either branch's committed changes are not misgraded as this commit's and the mid-change
     # pending cannot-evaluate does not arise). A merge whose parents were observed but could not be
@@ -5638,6 +5662,30 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         # Append-only over the imported leaves (spec 8.3), independent of the version ledger: every prior
         # imported record stays present and byte-identical in its canonical form.
         _check_imported_append_only(prior["imported"], imported_rows, imported_unread, rep)
+    # Concluding a merge, both append-only comparisons also run against EVERY merged parent, exactly as
+    # against the HEAD prior: a release row or an imported record only a merged parent holds is otherwise
+    # compared with nothing, so a merge resolution could rewrite it unrefused.
+    if merge_malformed:
+        rep.cant("C-HISTORY-APPEND-ONLY: a merge is in progress but its merged parents could not be "
+                 "observed (the merge-parents observation is malformed or missing a usable snapshot); "
+                 "append-only against the merged commit(s) is not evaluated (spec 6.1/8.3)")
+    elif merge_parents is not None:
+        if version_data is None:
+            rep.cant("C-HISTORY-APPEND-ONLY: the current version ledger did not evaluate; append-only "
+                     "against the merged commit(s) is not checkable")
+        else:
+            cur_releases = version_data.get("release")
+            cur_releases = cur_releases if isinstance(cur_releases, list) else []
+            for parent in merge_parents:
+                ap = []
+                _verify_append_only(parent["prior"]["releases"], cur_releases, ap)
+                for f in ap:
+                    rep.finding("C-HISTORY-APPEND-ONLY: against merge parent {}: {}".format(
+                        parent["commit"], f))
+        if imported:
+            for parent in merge_parents:
+                _check_imported_append_only(parent["prior"]["imported"], imported_rows, imported_unread, rep,
+                                            merge_parent=parent["commit"])
 
     rep.ran("C-HISTORY-COUNTERS")
     if prior is None:
@@ -8506,6 +8554,27 @@ def self_test():
                   _i3_hed is not None and _i3_hed.checks.get("C-HISTORY-APPEND-ONLY") == "FINDING"
                   and any("imported:BI-1" in f and "changed since the prior committed snapshot" in f
                           for f in _i3_msgs(_i3_hed, "C-HISTORY-APPEND-ONLY")))
+            # Concluding a merge, the imported leaves are compared with each merged parent's imported
+            # baseline as with the HEAD prior's: an imported record only the merged parent holds (the HEAD
+            # prior's baseline is empty) and that the result edits is a finding naming the parent, and the
+            # same record kept unchanged passes (red when the per-parent imported comparison is removed).
+            _i3_mpc = "c" * 40
+
+            def _i3_merge_obs():
+                o = _i3_obs({})
+                o["merge_parents"] = [{"commit": _i3_mpc,
+                                       "prior": _i3_obs({"imported:BI-1": _i3_dig}, {"imported:BI": 1})["prior"]}]
+                return o
+
+            _i3_mok = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_one), obs=_i3_merge_obs())
+            check("imported-merge-parent-unchanged-passes", _i3_clean_active(_i3_mok))
+            _i3_med = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves={
+                "backlog_item.imported.index.toml": idx([_i3_row("imported:BI-1", title="edited")])}),
+                obs=_i3_merge_obs())
+            check("imported-merge-parent-record-edited-finding",
+                  _i3_med is not None and _i3_med.checks.get("C-HISTORY-APPEND-ONLY") == "FINDING"
+                  and any("imported:BI-1" in f and "changed since merge parent " + _i3_mpc in f
+                          for f in _i3_msgs(_i3_med, "C-HISTORY-APPEND-ONLY")))
             _i3_hgo = _i3_run(_i3_machine(imp={"imported:BI": 1}, leaves=_i3_one),
                               obs=_i3_obs({"imported:BI-1": _i3_dig, "imported:BI-2": _i3_dig}))
             check("imported-record-vanished-after-commit-finding",

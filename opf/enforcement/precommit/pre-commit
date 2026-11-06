@@ -58,12 +58,17 @@
 # commit id into the snapshot as its MERGE_HEAD, and the doctor then compares the staged result with
 # EVERY parent: each record a parent's type indexes hold must survive (a worklog entry is not an indexed
 # record, so a dropped entry is caught only as a lowered counter, and tied counters do not expose it),
-# no counter may fall below its value in any parent, and a record any parent holds at an unqualified
-# terminal state must keep that state while it stays an active record in the result (see Residuals),
-# refusing on any dropped record, lowered counter or terminal-status resurrection, while a merge
-# commit's non-terminal status changes are not graded (see Residuals). A MERGE_HEAD that cannot be read,
-# is empty, or holds anything but lowercase-hex ids that git resolves to commits of this
-# repository exits 2 before any check. One that passes those tests but that the doctor cannot read back
+# no counter may fall below its value in any parent, a created-terminal record a parent holds (done,
+# reference or autonomous_decision, say) must keep the body that parent's digest records while it stays
+# an active record with its status unchanged, each parent's release rows must stay in the result
+# byte-identical as its first rows, and on a store whose imported series is active each imported record
+# a parent holds must stay present and byte-identical, the same comparisons made with HEAD, and a record
+# any parent holds at an unqualified terminal state must keep that state while it stays an active record
+# in the result (see Residuals), refusing on any dropped record, lowered counter, changed immutable body,
+# rewritten or dropped release row, changed or dropped imported record or terminal-status resurrection,
+# while a merge commit's non-terminal status changes are not graded (see Residuals). A MERGE_HEAD that
+# cannot be read, is empty or whitespace alone, or holds anything but lowercase-hex ids that git
+# resolves to commits of this repository exits 2 before any check. One that passes those tests but that the doctor cannot read back
 # to the merged commits' snapshots (an abbreviated id, which git resolves, is one) is the doctor's named
 # cannot-evaluate, also exit 2: never an unchecked merge.
 #
@@ -85,8 +90,18 @@
 #     with git merge --abort. A pipeline that assumes git pull always exits 0 breaks at the first
 #     non-fast-forward merge.
 #   - Merge commits: concluding one (MERGE_HEAD present), the staged result is compared with every
-#     parent for dropped records, lowered counters and terminal-status resurrection (see Merge commits
-#     above), but a merge commit's non-terminal status changes are not graded: transition legality is
+#     parent for dropped records, lowered counters, changed immutable bodies, rewritten or dropped release
+#     rows, changed or dropped imported records and terminal-status resurrection (see Merge commits
+#     above). Exactly what that covers: record survival over each parent's typed record indexes; counter
+#     non-regression; the body digest of each created-terminal record a parent holds, while the result
+#     keeps it active at the status that parent holds (one the result archives, or holds at another
+#     status, is not body-compared against that parent); release-ledger append-only against each
+#     parent's release rows; imported append-only against each parent's imported records, on a store
+#     whose imported series is active; and the unqualified-terminal state. So two parents whose release
+#     ledgers each gained a different row after the fork, or that hold one imported record with different
+#     bodies, refuse every merge result, and two parents that hold one created-terminal record with
+#     different bodies refuse every result that keeps it active at that status. But a merge commit's
+#     non-terminal status changes are not graded: transition legality is
 #     skipped for a merge commit, so a non-terminal status a parent holds may change in the result
 #     unchecked (each branch's own transitions were graded when that branch committed them through this
 #     hook; one committed past it is not re-graded here), and a dropped worklog entry is caught only as
@@ -189,8 +204,8 @@ remotes=$(git remote) || fail "git remote could not list the remotes"
 # octopus merge). Its ids are validated and carried into the snapshot as its MERGE_HEAD, so the doctor
 # compares the staged result with every parent (see Merge commits above). Reading MERGE_HEAD as a file
 # (git rev-parse MERGE_HEAD resolves only its first line) keeps every merged commit; one that cannot be
-# read, is empty, or holds anything but lowercase-hex ids git resolves to commits of this
-# repository exits 2 before any check. git rev-parse --verify also resolves an abbreviated id, so one
+# read, is empty or whitespace alone, or holds anything but lowercase-hex ids git resolves to commits of
+# this repository exits 2 before any check. git rev-parse --verify also resolves an abbreviated id, so one
 # passes here and the doctor refuses it later as a named cannot-evaluate (the doctor's merge observation
 # holds the full-length id test; this hook does not).
 mh_lines=
@@ -198,14 +213,18 @@ mh_path=$(git rev-parse --path-format=absolute --git-path MERGE_HEAD) || fail "c
 if [ -e "$mh_path" ] || [ -L "$mh_path" ]; then
     [ -n "$head" ] || fail "MERGE_HEAD is present but HEAD names no commit"
     mh_lines=$(cat -- "$mh_path") || fail "could not read $mh_path"
-    [ -n "$mh_lines" ] || fail "$mh_path names no commit"
+    # The ids are counted as the loop splits them, so a MERGE_HEAD of whitespace alone (a space and a
+    # newline, say), which a non-empty test would pass, names no commit too.
+    mh_count=0
     for mh in $mh_lines; do
         case "$mh" in
             *[!0-9a-f]*|'') fail "$mh_path holds $mh, which is not a commit id" ;;
         esac
         git rev-parse -q --verify "$mh^{commit}" > /dev/null || \
             fail "$mh_path names $mh, which is not a commit of this repository"
+        mh_count=$((mh_count + 1))
     done
+    [ "$mh_count" -gt 0 ] || fail "$mh_path names no commit"
 fi
 
 snap=$(mktemp -d "${TMPDIR:-/tmp}/opf-pre-commit.XXXXXX") || fail "could not create a temporary directory"
