@@ -163,19 +163,19 @@ _ROSTER_NAMESPACES.update(IMPORTER_TYPES)
 _ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
 
 # A record whose schema has not shipped in the baseline validator is a named CANNOT-EVALUATE deferral,
-# never graded INVALID (F4; round-5 F-2). This covers the module tier (schemas land in U2M) AND the
-# importer-only legacy_fragment type (deprecated for new stores, spec 8.1: no record schema ships in the
-# baseline validator, so records in an existing store stay readable as a named deferral).
+# never graded INVALID. This covers the module tier (schemas land in U2M) AND the legacy_fragment type,
+# which the standard does not define (it reserves LF unassigned, spec 8.1): no record schema ships in the
+# baseline validator, so records in an existing store stay readable as a named deferral.
 _SCHEMA_DEFERRAL = ("record schema not available to the baseline validator; deferred (module-tier schemas "
-                    "land in U2M; legacy_fragment is deprecated for new stores and has no baseline "
-                    "record schema)")
+                    "land in U2M; the standard reserves LF unassigned and no record type uses it, so "
+                    "legacy_fragment has no baseline record schema)")
 
 
 def _schema_deferred(tname):
     """True when `tname` is an enabled module-tier OR importer type whose record schema has not shipped
     (it is in MODULE_TYPES or IMPORTER_TYPES but has no BASELINE_SPECS entry). Its records are a named
-    CANNOT-EVALUATE deferral, not graded INVALID by the baseline-only validator (F4; round-5 F-2 extends
-    this from the module tier to the importer legacy_fragment type)."""
+    CANNOT-EVALUATE deferral, not graded INVALID by the baseline-only validator; this covers the module
+    tier and the legacy_fragment name in IMPORTER_TYPES."""
     return tname not in BASELINE_SPECS and (tname in MODULE_TYPES or tname in IMPORTER_TYPES)
 
 # The closed spec-11 integrity roster. Every required check calls rep.ran(<id>) once; result() reconciles
@@ -4108,7 +4108,7 @@ def classify_containment(manifest_data, machine_rel):
     # above IMPORTED_SPEC_VERSION, so even the reserved 2.0.0 / homes = 2 declaration C-MANIFEST accepts
     # stays inactive until activation), and admitted ONLY directly in the machine store. The names derive
     # from the enabled-type roster in _opf_store, so the leaf set cannot drift from the imported
-    # id/counter namespace set; the importer-only legacy_fragment contributes no leaf.
+    # id/counter namespace set; legacy_fragment, on the unassigned LF, contributes no leaf.
     imported = imported_series_active(manifest_data)
     imported_leaves = _opf_store.imported_leaf_names(enabled_types) if imported else frozenset()
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
@@ -5139,8 +5139,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-COUNTERS: {} is absent (one monotonic high-water per namespace is required; spec "
                     "8.2)".format(_rel(machine_rel, COUNTERS_NAME)))
     elif cst == "ok":
-        # Importer/quarantine namespaces (IMPORTER_TYPES, i.e. LF) are ACCEPTED-if-present but NOT
-        # REQUIRED: a store scaffolded before LF's deprecation (spec 8.1) carries an LF counter from
+        # IMPORTER_TYPES namespaces (i.e. LF) are ACCEPTED-if-present but NOT REQUIRED: a store
+        # scaffolded before the standard reserved LF unassigned (spec 8.1) carries an LF counter from
         # opf init while legacy_fragment stays out of the manifest [types] (schema-deferred), so LF is
         # absent from known_ns; passing it as optional keeps such a store clean without requiring LF on
         # a store that lacks it, as a new store does (spec 8.2).
@@ -5819,8 +5819,8 @@ def _enabled_modules(manifest_data):
 
 def _authoritative_types(enabled_modules, declared_types):
     """The type -> NORMATIVE-namespace roster the store must carry: the twelve baseline types, each
-    module-tier type whose module is enabled, and any importer-only type (legacy_fragment) the manifest
-    actually declares (present only after an import). Namespaces are U1's normative ones, never the
+    module-tier type whose module is enabled, and legacy_fragment (on LF, which the standard reserves
+    unassigned) when the manifest actually declares it (present only after an import). Namespaces are U1's normative ones, never the
     manifest's declared values (validate_manifest already graded those; guard-input-soundness)."""
     roster = dict(BASELINE_TYPES)
     for tname, (ns, module) in MODULE_TYPES.items():
@@ -6207,8 +6207,8 @@ def self_test():
         check("b1-nonwl-gap-below-max-invalid", _b1gr is not None and _b1gr.status == INVALID)
         check("b1-nonwl-gap-below-max-named",
               _b1gr is not None and any("C-NO-DELETION" in f and "FN-2" in f for f in _b1gr.findings))
-        # F-2: a declared importer legacy_fragment type defers to a named CANNOT-EVALUATE (it is deprecated for
-        # new stores and has no baseline record schema), never a false INVALID.
+        # A declared legacy_fragment type defers to a named CANNOT-EVALUATE (the standard defines no such
+        # type and reserves LF unassigned, so it has no baseline record schema), never a false INVALID.
         _lff = clean_machine()
         _lff["manifest.toml"] = base_manifest()
         _lff["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
@@ -7036,8 +7036,8 @@ def self_test():
         # OPF-IMPORTED-SERIES IS-2: the imported-series managed leaves (spec 8.2/4.2), behind the
         # DERIVED activation. ACTIVE (the activated 2.0.0 / homes = 2 store, both tooling gates patched
         # inside the vector): worklog.imported.toml and each enabled non-ledger type
-        # <type>.imported.index.toml are managed leaves DIRECTLY in the machine store; the importer-only
-        # legacy_fragment contributes none (its LF namespace is outside the imported series), and a
+        # <type>.imported.index.toml are managed leaves DIRECTLY in the machine store; legacy_fragment
+        # contributes none (the standard reserves LF unassigned, outside the imported series), and a
         # deeper path of a leaf name stays a stray. The pure legs drive classify_containment directly,
         # each as the bare two-argument call (the classification derives the activation from the
         # manifest itself; a caller-supplied flag with an inactive default let an omitting consumer
@@ -7739,7 +7739,7 @@ def self_test():
                           _xs_run is not None and _xs_run.checks.get("C-LINKS") == "PASS"
                           and len(_xs_run.findings) == 1
                           and "an imported-to-clean link MUST be refused" in _xs_run.findings[0])
-            # A clean link into an imported namespace the series refuses (the importer-only LF) is the
+            # A clean link into an imported namespace the series refuses (the unassigned LF) is the
             # per-record validator's finding, and the target, resolving in neither series, is a C-LINKS
             # dangling finding beside it; the doctor reports both (red when the namespace refusal is
             # dropped from the link validator, which leaves only the dangling finding).
