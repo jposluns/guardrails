@@ -16,7 +16,11 @@ component = "code"
 id = "install-prompt"
 variant = "prompt-block"
 text = "Install AIQT Guardrails in this project and walk me through adopting it. Read https://aiqt.ai/llms.txt and the repository https://github.com/jposluns/guardrails first. Propose an adoption plan: the AIQT rules, hooks, and checks that fit this project's languages and tools, and OPFiles (https://opfiles.ai/llms.txt) for the project's operational records unless I opt out. Before building any new guardrail, check whether jposluns/guardrails already has one that fits. Name every file you would create or change, and why. Change nothing until I approve the plan."
-note = "Paste it into Claude Code, Codex, Gemini CLI, Cursor, Copilot, or any other development assistant."
+note = "Paste it into Claude Code, Codex, Antigravity CLI, Gemini CLI, Cursor, Copilot, or any other development assistant."
+
+[[body]]
+component = "prose"
+html = '''<p>On 18 June 2026, Gemini CLI stopped serving Google AI Pro and Ultra subscribers and free use, which are directed to Antigravity CLI (command <code>agy</code>). Gemini CLI remains for Gemini Code Assist Standard and Enterprise licences, Google Cloud, and paid Gemini API keys, so paste the prompt into whichever of the 2 you have (<a href="https://github.com/google-gemini/gemini-cli/discussions/27274" target="_blank" rel="noopener noreferrer">Gemini CLI notice<span class="vh"> (opens in a new tab)</span></a>).</p>'''
 
 [[body]]
 component = "section"
