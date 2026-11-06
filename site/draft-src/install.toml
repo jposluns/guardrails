@@ -20,7 +20,7 @@ note = "Paste it into Claude Code, Codex, Antigravity CLI, Gemini CLI, Cursor, C
 
 [[body]]
 component = "prose"
-html = '''<p>On 18 June 2026, Gemini CLI stopped serving Google AI Pro and Ultra subscribers and free use, which are directed to Antigravity CLI (command <code>agy</code>). Gemini CLI remains for Gemini Code Assist Standard and Enterprise licences, Google Cloud, and paid Gemini API keys, so paste the prompt into whichever of the 2 you have (<a href="https://github.com/google-gemini/gemini-cli/discussions/27274" target="_blank" rel="noopener noreferrer">Gemini CLI notice<span class="vh"> (opens in a new tab)</span></a>).</p>'''
+html = '''<p>Google announced that from 18 June 2026 Gemini CLI would stop serving Google AI Pro and Ultra subscribers and free users, who are directed to Antigravity CLI, whose command is <code>agy</code>. Gemini CLI remains available with Gemini Code Assist Standard or Enterprise, with Google Cloud, and with paid Gemini or Gemini Enterprise Agent Platform API keys. Paste the prompt into whichever of the 2 CLIs your Google plan or key supports (sources: <a href="https://github.com/google-gemini/gemini-cli/discussions/27274" target="_blank" rel="noopener noreferrer">Gemini CLI notice<span class="vh"> (opens in a new tab)</span></a> and <a href="https://antigravity.google/docs/skills" target="_blank" rel="noopener noreferrer">Antigravity skills<span class="vh"> (opens in a new tab)</span></a>).</p>'''
 
 [[body]]
 component = "section"
