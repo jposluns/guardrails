@@ -65,8 +65,11 @@ render of its own entries is refused, so no TOML comment, alternate integer spel
 text the parser would drop can ride in the one file this layer skips by name. This layer honours no
 internal-allow marker and no other skip-by-name (the gate's own
 source is scanned like any other shipped file; its self-test vectors are assembled at run time); the
-path-only allowlists TRACKER_LABEL_FROZEN (relpath plus sha256 pairs, exempt only while the file's RAW
-BYTES still hash to the record) and TRACKER_LABEL_HISTORY both ship EMPTY. FAIL CLOSED (exit 2): a
+path-only allowlists are TRACKER_LABEL_FROZEN (relpath plus sha256 pairs, exempt only while the file's RAW
+BYTES still hash to the record), which holds one pinned vendored file, the template's card builder
+(.baseline/build_card.js, bound to its sha256 in .baseline/pin.toml at baseline 1.10.0, kept
+byte-identical to the template package), and TRACKER_LABEL_HISTORY, which ships EMPTY; a changed byte in
+the frozen file re-enters the ratchet at its baseline entry (none, so zero). FAIL CLOSED (exit 2): a
 missing or unparseable manifest, a manifest with no [[sources]] array, a listed path that is absent or
 not a regular file (checked before any suffix or decode decision, so an excluded suffix never hides a
 missing path; the baseline file itself is the one exception, skipped by name BEFORE that presence
@@ -122,7 +125,10 @@ classify, are scanned as binary (no internal-allow exemption, a byte above 0x7F 
 the pixel data, PLTE and the standard non-text ancillary chunks are unread. Every tracked file whose suffix
 is TRACKED_WOFF2_SUFFIX (.woff2, in lower case only) goes through the WOFF2 rule, verify_woff2 (stated
 beside TRACKED_WOFF2_SUFFIX): a .woff2 over its size bound or without the wOF2 signature CANNOT BE EVALUATED
-and fails closed at exit 2; one it accepts is scanned whole as binary, as a binary PNG chunk is.
+and fails closed at exit 2; one it accepts is scanned whole as binary, as a binary PNG chunk is. A tracked
+path listed in PINNED_VENDOR_BINARIES (stated beside it: the three OpenType fonts of the vendored card
+builder) whose raw bytes hash to its recorded sha256 is likewise scanned whole as binary; a listed path whose
+bytes differ, and the same bytes at any other path, get no such treatment and fall to the rule below.
 Any other non-UTF-8 tracked file whatever its suffix (a
 malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
 tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
@@ -291,6 +297,20 @@ _PNG_REPEATABLE = frozenset((b"IDAT", b"fcTL", b"fdAT"))
 TRACKED_WOFF2_SUFFIX = ".woff2"
 WOFF2_SIGNATURE = b"wOF2"
 MAX_WOFF2_FILE_SIZE = 8 * 1024 * 1024  # a latin-subset web font is well under 1 MiB
+# PINNED VENDOR BINARIES: tracked binary files the role rule could not otherwise evaluate, each keyed to its
+# exact path AND the sha256 of its raw bytes. Every entry is a file copied unchanged from the shared site
+# template and pinned in .baseline/pin.toml (the hash here is the one recorded there at baseline 1.10.0, and
+# tools/check_baseline_pin.py holds the copy to that record). A listed path whose raw bytes hash to its
+# record is scanned whole as binary, as an accepted .woff2 is (each byte above 0x7F read as a character that
+# is not part of a word, no internal-allow exemption), so a hit is still a finding (exit 1). This is not a
+# suffix or binary-format skip: another path holding the same bytes, and the listed path after any byte
+# changes, are handled exactly as an unlisted file is (a non-UTF-8 one cannot be evaluated, exit 2). A pin
+# move to new font bytes therefore fails here until this list is updated in the same reviewed change.
+PINNED_VENDOR_BINARIES = (
+    (".baseline/card-fonts/Inter-Bold.otf", "00fd6f4691ee8884a33b46bf45851b341927c37c30064f558e1befb242971c49"),
+    (".baseline/card-fonts/Inter-ExtraBold.otf", "2012ceaf1470372c415f95c00495a1ad1ebdcd1cd6a6225808f011d459a9b12a"),
+    (".baseline/card-fonts/Inter-Regular.otf", "be6d709dcb730ddaf050cbdae6fe89bd56d5d14dc66885639bbf6f06bd03521b"),
+)
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
@@ -375,11 +395,17 @@ TRACKER_LABELS = (
 )
 # The baseline's per-shape count keys, positionally parallel to TRACKER_LABELS.
 TRACKER_SHAPE_KEYS = ("fix-id", "review-round", "qa-round", "reviewer-source")
-# Path-only exemptions, both EMPTY at this release. A frozen pair exempts its path only while the file's
-# bytes still hash to the recorded sha256 (a changed byte is scanned like any other file); a history
-# relpath exempts a history record that has to quote a label. There is no exemption by pattern and no
-# per-line marker for this layer.
-TRACKER_LABEL_FROZEN = ()   # (relpath, sha256) pairs
+# Path-only exemptions. A frozen pair exempts its path only while the file's bytes still hash to the
+# recorded sha256 (a changed byte is scanned like any other file, against its baseline entry, none here, so
+# zero); a history relpath exempts a history record that has to quote a label. There is no exemption by
+# pattern and no per-line marker for this layer. The one frozen pair is the template's card builder, a
+# pinned vendored copy kept byte-identical to the template package, whose own wording matches the
+# review-round shape; its hash is the one .baseline/pin.toml records at baseline 1.10.0, so a pin move to
+# new bytes re-enters the ratchet until this pair is updated in the same reviewed change. The history list
+# ships EMPTY.
+TRACKER_LABEL_FROZEN = (    # (relpath, sha256) pairs
+    (".baseline/build_card.js", "3d0cecc8851ff6a2e1cab8c3c7dfdbcebc35c8f02260581cbfcf47ad70d990df"),
+)
 TRACKER_LABEL_HISTORY = ()  # relpaths
 TRACKER_MANIFEST_RELPATH = ".aiqt/manifest.toml"
 TRACKER_BASELINE_RELPATH = ".aiqt/tracker-label-baseline.toml"
@@ -991,7 +1017,7 @@ def scan_role_text(text, honour_marker=True):
     return found
 
 
-def scan_tracked_roles(root, relpaths):
+def scan_tracked_roles(root, relpaths, pinned=None):
     """Return (findings, unevaluable) for the role rule (the role name and the review-round labels) over the
     tracked `relpaths`, independent of SCOPE_RELPATHS and SKIP_NAMES. A file whose suffix is
     TRACKED_ARCHIVE_SUFFIX goes through check_leaks.verify_archive, the leak gate's archive rule, whether or
@@ -1006,11 +1032,22 @@ def scan_tracked_roles(root, relpaths):
     and the line within its text. Any other file that is not valid UTF-8,
     whatever its suffix, and a tracked path absent from the working tree are unevaluable too. A tracked path
     that is present but not a regular file raises OSError (exit 2) through _present, before any open, and so
-    does a read error."""
+    does a read error. A relpath listed in `pinned` (PINNED_VENDOR_BINARIES by default; a parameter so the
+    self-test can bind fixture pairs) whose raw bytes hash to its recorded sha256 is scanned whole as binary
+    with no internal-allow exemption; a listed path with other bytes, and an unlisted path with the same
+    bytes, go through the rules above unchanged."""
+    import hashlib
+    pinned_map = dict(PINNED_VENDOR_BINARIES if pinned is None else pinned)
     findings, unevaluable = [], []
     cannot = "; the role-name and review-round label rule cannot evaluate it"
     for rel in relpaths:
         path = root / rel
+        if rel in pinned_map:
+            data = _read_present_bytes(path)
+            if data is not None and hashlib.sha256(data).hexdigest() == pinned_map[rel]:
+                for number, label in scan_role_text(data.decode("ascii", "replace"), honour_marker=False):
+                    findings.append("{}:pinned bytes:{}: {}".format(rel, number, label))
+                continue
         if path.suffix == TRACKED_WOFF2_SUFFIX:
             try:
                 sections = verify_woff2(path) if _present(path) else None
@@ -3232,6 +3269,94 @@ def _self_test(caller_env=None):
                 len(clean_woff2) - 1, len(clean_woff2))
             check("woff2/file-size-bound-ends",
                   seen[:2] == ["clean", "clean"] and "font.woff2" + woff2_rule + reason in seen[2], seen)
+
+            # The two pinned-vendor exemptions, each keyed to a path AND the sha256 of its raw bytes, over
+            # fixture pairs passed as parameters. For each: the pinned bytes at the pinned path pass, the same
+            # path with one byte changed fails, and the same bytes at another path fail. Each vector is paired
+            # with a flip, a scratch copy of this gate with that binding removed (anchors concatenated so
+            # they do not match themselves), which must give the vector another verdict.
+            pinned_font = b"OTTO\x00\x01\xff\xfe" + plain_text
+            font_changed = pinned_font[:-1] + bytes([pinned_font[-1] ^ 1])
+            font_pins = (("font.otf", hashlib.sha256(pinned_font).hexdigest()),)
+
+            def pinned_verdict(module, name, data):
+                (pngdir / name).write_bytes(data)
+                try:
+                    found, unevaluable = module.scan_tracked_roles(pngdir, [name], pinned=font_pins)
+                except Exception as exc:  # a mutant may fail another way; that is a verdict too
+                    return "error: {}: {}".format(type(exc).__name__, exc)
+                finally:
+                    (pngdir / name).unlink()
+                return "\n".join(unevaluable + found) or "clean"
+
+            frozen_dir = tmp / "frozen-vendor"
+            (frozen_dir / ".aiqt").mkdir(parents=True)
+            (frozen_dir / "vendor").mkdir()
+            builder = ("// template wording: rou" + "nd 2 of the layout\n").encode("utf-8")
+            builder_changed = builder[:3] + b"X" + builder[4:]
+            builder_pins = (("vendor/builder.js", hashlib.sha256(builder).hexdigest()),)
+
+            def frozen_verdict(module, name, data):
+                (frozen_dir / ".aiqt" / "manifest.toml").write_text(
+                    'format-version = 1\n\n[[sources]]\npath = "{}"\n'.format(name), encoding="utf-8")
+                (frozen_dir / name).write_bytes(data)
+                try:
+                    found = module.scan_shipped_tracker_labels(frozen_dir, [], frozen=builder_pins, history=())
+                except Exception as exc:  # a mutant may fail another way; that is a verdict too
+                    return "error: {}: {}".format(type(exc).__name__, exc)
+                finally:
+                    (frozen_dir / name).unlink()
+                return "\n".join(found) or "clean"
+
+            ratchet_zero = ": review-round count 1 exceeds its ratchet baseline 0"
+            pinned_role = "font.otf:pinned bytes:1: " + role
+            pin_role = "if rel in " + "pinned_map:"
+            pin_digest = "hashlib.sha256(data).hexdigest() == " + "pinned_map[rel]:"
+            frozen_both = "if rel in frozen_map and " + "hashlib.sha256(raw).hexdigest() == frozen_map[rel]:"
+            pdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-pinned-mutant-"))
+            try:
+                for check_id, verdict, relname, data, expect, mutations in (
+                        ("pinned-binary/pinned-bytes-pass", pinned_verdict, "font.otf", pinned_font, "clean",
+                         ((pin_role, "if False:"),)),
+                        ("pinned-binary/byte-changed-unevaluable", pinned_verdict, "font.otf", font_changed,
+                         "font.otf" + not_utf8, (("if data is not None and " + pin_digest, "if data is not None:"),)),
+                        ("pinned-binary/other-path-unevaluable", pinned_verdict, "copy.otf", pinned_font,
+                         "copy.otf" + not_utf8,
+                         ((pin_role, "if True:"),
+                          (pin_digest, "hashlib.sha256(data).hexdigest() in pinned_map.values():"))),
+                        ("pinned-binary/pinned-bytes-scanned", pinned_verdict, "font.otf",
+                         pinned_font + b"\xc0" + role_word + b"\xff", None,
+                         (('scan_role_text(data.' + 'decode("ascii", "replace"), honour_marker=False)',
+                           'scan_role_text("")'),)),
+                        ("tracker/frozen-pinned-vendor-passes", frozen_verdict, "vendor/builder.js", builder,
+                         "clean", ((frozen_both, "if False:"),)),
+                        ("tracker/frozen-pinned-vendor-byte-changed", frozen_verdict, "vendor/builder.js",
+                         builder_changed, "vendor/builder.js" + ratchet_zero, ((frozen_both, "if rel in frozen_map:"),)),
+                        ("tracker/frozen-pinned-vendor-other-path", frozen_verdict, "vendor/copy.js", builder,
+                         "vendor/copy.js" + ratchet_zero,
+                         ((frozen_both, "if hashlib.sha256(raw).hexdigest() in frozen_map.values():"),))):
+                    if expect is None:
+                        # The pinned bytes are scanned as binary, not skipped: the role name in them is a
+                        # finding, and the vector's own digest is the pin.
+                        font_pins = ((relname, hashlib.sha256(data).hexdigest()),)
+                        expect = pinned_role
+                    got = verdict(this, relname, data)
+                    check(check_id, png_holds(expect, got), (expect, got))
+                    source, faults = gate_source, []
+                    for anchor, replacement in mutations:
+                        if source.count(anchor) != 1:
+                            faults.append("anchor {!r} occurs {} times".format(anchor, source.count(anchor)))
+                        source = source.replace(anchor, replacement)
+                    flipped = None
+                    if not faults:
+                        module = _load_ratchet_mutant(source, pdir, check_id.replace("/", "_").replace("-", "_"))
+                        flipped = verdict(module, relname, data)
+                        if (flipped == expect) if expect == "clean" else (expect in flipped):
+                            faults.append("the vector still holds with its binding removed")
+                    check(check_id + "-flip", not faults, (faults, flipped))
+                    font_pins = (("font.otf", hashlib.sha256(pinned_font).hexdigest()),)
+            finally:
+                shutil.rmtree(pdir, ignore_errors=True)
         finally:
             shutil.rmtree(pngdir, ignore_errors=True)
     finally:
@@ -3390,7 +3515,11 @@ def _self_test(caller_env=None):
           "rule passes a clean tracked .woff2, refuses (exit 2) another signature (UTF-8 text included), "
           "finds the role name next to a byte above 0x7F and past an internal-allow marker, still cannot "
           "evaluate a .WOFF2 or a .woff, holds the file-size bound one unit inside, at and outside, and each "
-          "of its five paired checks, removed in a copy of the gate, turns its vector red.")
+          "of its five paired checks, removed in a copy of the gate, turns its vector red; and each "
+          "pinned-vendor exemption (a non-UTF-8 binary in the role rule, a frozen file in the tracker-label "
+          "layer) passes its pinned bytes at its pinned path, fails the same path with one byte changed and "
+          "the same bytes at another path, the role rule still finds the name inside pinned bytes, and each "
+          "of those seven vectors turns red in a copy of the gate with its path or hash binding removed.")
     return 0
 
 

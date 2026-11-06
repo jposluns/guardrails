@@ -1,0 +1,14 @@
+# The link-preview card data of opfiles.ai for .baseline/build_card.js (baseline 1.10.0), in the shape of
+# the template's tools/site-card.example.toml. Not served. The copy is the approved card text of
+# tools/og-cards/opfiles-og.html; the colours are those of tools/og-cards/card.css with the site's dark --brand (#f68622).
+# Change the copy, colours or illustration only on the owner's instruction.
+
+site = "opfiles"
+name = "OPFiles"
+tld = ".ai"
+line1 = "Operational records,"
+line2 = "governed like code."
+sub = "OPFiles keeps each record in a fixed, machine-written form and generates the readable version from it; a check, set as a required step, fails the moment the 2 disagree."
+art = "../opf/site/draft/assets/baseline/logos/opfiles-card.svg"
+word_colour = "#f68622"
+background = "radial-gradient(900px 620px at 1040px 560px,rgba(246,134,34,.4),rgba(246,134,34,0) 60%),radial-gradient(700px 500px at 120px 60px,rgba(41,64,102,.7),rgba(41,64,102,0) 60%),#0b1730"

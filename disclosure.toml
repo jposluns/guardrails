@@ -163,6 +163,19 @@ label = "the generated Claude Code hooks plugin under plugin/ and its source und
 prefix = ".baseline/check_palette.py"
 label = ".baseline/check_palette.py, the palette contrast gate vendored from the site template"
 
+[[code]]
+prefix = ".baseline/build_card.js"
+label = ".baseline/build_card.js, the link-preview card builder vendored from the site template"
+
+[[noncode]]
+prefix = ".baseline/aiqt-card.toml"
+
+[[noncode]]
+prefix = ".baseline/card-fonts/"
+
+[[noncode]]
+prefix = ".baseline/opfiles-card.toml"
+
 [[noncode]]
 prefix = ".aiqt/"
 

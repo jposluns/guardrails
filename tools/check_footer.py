@@ -96,7 +96,7 @@ def required_href(name, href):
 
 
 # The template pages (the targets tools/gen_draft_site.py lists in GENSRC_OUTPUTS, read through
-# tools/_template_pages.py, never a folder name) follow the shared site template (baseline 1.7.0), whose top
+# tools/_template_pages.py, never a folder name) follow the shared site template (baseline 1.10.0), whose top
 # bar has no Disclosure item: the template landing page links the disclosure page from its "About this
 # project" region (p.about), and the inner template pages carry no disclosure link. So the live rule above
 # covers every other page of the root, and the draft rule covers the template pages: exactly one link to the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the template sites (shared site template, baseline 1.7.0) at each site's root, plus the /draft/
+"""Generate the template sites (shared site template, baseline 1.10.0) at each site's root, plus the /draft/
 placeholder page each keeps (noindex, linking the root).
 
   gen_draft_site.py              write every registered page

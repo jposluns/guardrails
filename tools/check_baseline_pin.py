@@ -17,8 +17,9 @@ pinned file that is missing, a file under a copy root that the pin does not list
 symbolic link or other non-regular entry anywhere in a copy root, including the root itself (exit 1).
 
 The one exception to the copy-root rule is BUILD_TOOLS: the template's build tools that a site copies outside
-its served tree and pins in the same [files] table (only .baseline/check_palette.py, the palette gate). A
-pin may list such a path at its own repository path, beside its copy-root files; the gate hashes it as 1
+its served tree and pins in the same [files] table (.baseline/check_palette.py, the palette gate, and
+.baseline/build_card.js, the link-preview card builder, with its fonts and their licence file under
+.baseline/card-fonts/). A pin may list such a path at its own repository path, beside its copy-root files; the gate hashes it as 1
 regular file (only its last component is checked for a symbolic link; a linked parent directory is
 followed), and reports it missing, a symbolic link, not a regular file
 or differing (exit 1), or unreadable (exit 2). Its directory gets no stray scan, since .baseline/ also holds
@@ -81,8 +82,17 @@ COPY_DIR = "assets/baseline"
 # The build tools a pin may list outside any copy root, each at exactly this repository path: the template's
 # palette gate, copied from the package's tools/, never served, and run by tools/run_all_checks.sh and the
 # Quality workflow (template specification section 4 item 3 also requires it in the Pages build command,
-# which is set outside this repository).
-BUILD_TOOLS = (".baseline/check_palette.py",)
+# which is set outside this repository); and the template's link-preview card builder with its Inter fonts and
+# their licence file, copied from the package's tools/build_card.js and tools/card-fonts/, never served, and run
+# by hand to build a card for the owner's review, never in a deploy build.
+BUILD_TOOLS = (
+    ".baseline/check_palette.py",
+    ".baseline/build_card.js",
+    ".baseline/card-fonts/Inter-Bold.otf",
+    ".baseline/card-fonts/Inter-ExtraBold.otf",
+    ".baseline/card-fonts/Inter-Regular.otf",
+    ".baseline/card-fonts/inter-LICENSE.txt",
+)
 # The in-tree record of the template version every pin must name: the [vendored."site-template"] table of
 # the attribution file tools/gen_notice.py renders the root NOTICE from, read under the scanned root.
 ATTRIBUTION_REL = ".aiqt/attribution.toml"
@@ -695,7 +705,11 @@ def _self_test():
 
     # A build tool pinned outside the copy root: hashed as 1 regular file at its own path, with no stray scan
     # of its directory (the pin itself sits beside it); only a BUILD_TOOLS path may sit outside a copy root.
-    check("tool/registered-path", BUILD_TOOLS == (".baseline/check_palette.py",), BUILD_TOOLS)
+    check("tool/registered-path", BUILD_TOOLS == (".baseline/check_palette.py", ".baseline/build_card.js",
+                                                  ".baseline/card-fonts/Inter-Bold.otf",
+                                                  ".baseline/card-fonts/Inter-ExtraBold.otf",
+                                                  ".baseline/card-fonts/Inter-Regular.otf",
+                                                  ".baseline/card-fonts/inter-LICENSE.txt"), BUILD_TOOLS)
     tool_pin = _pin_text(FIXTURE_FILES, tools=FIXTURE_TOOLS)
     findings, errors = _scan_case(pin=tool_pin, tools=FIXTURE_TOOLS)
     check("tool/pinned-passes", findings == [] and errors == [], (findings, errors))
