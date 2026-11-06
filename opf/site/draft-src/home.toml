@@ -30,19 +30,19 @@ d = "What the specification defines, its conformance language, and its draft sta
 
 [[body.items]]
 href = "core-files/"
-title = "Know the core store files"
+title = "See the technical details"
 n = "5 files"
 d = "The manifest, the ID counters, the version ledger, the worklog, and the lease."
 
 [[body.items]]
 href = "adopt/"
 title = "Adopt it"
-n = "10 verbs"
-d = "Ask your assistant for a plan, review it, then authorize; the 10 command verbs and their status."
+n = "3 steps"
+d = "Ask your assistant for a plan, review it, then authorize; the page links the 10 command verbs and their status."
 
 [[body]]
 component = "value"
-html = "OPFiles keeps each record in a fixed, machine-written form and generates the readable version from it; a check, set as a required step, fails the moment the 2 disagree. The standard forbids reusing a record's number or deleting a record. OPFiles is part of <a href=\"https://aiqt.ai\" target=\"_blank\" rel=\"noopener noreferrer\">AIQT Guardrails<span class=\"vh\"> (opens in a new tab)</span></a>, and both live in 1 repository: an AIQT adoption sets OPFiles up by default, and you can adopt OPFiles on its own. It is <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. The specification is a working draft; 2 of its 10 commands are not yet implemented, and adoption cannot finish yet."
+html = "OPFiles keeps each record in a fixed, machine-written form and generates the readable version from it; a check, set as a required step, fails the moment the 2 disagree. The standard forbids reusing a record's number or deleting a record. OPFiles is part of <a href=\"https://aiqt.ai\" target=\"_blank\" rel=\"noopener noreferrer\">AIQT Guardrails<span class=\"vh\"> (opens in a new tab)</span></a>, and both live in 1 repository: an AIQT adoption sets OPFiles up by default, and you can adopt OPFiles on its own. It is <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. The specification is a working draft; 2 of its 10 commands are not yet implemented, 2 more refuse by design, and adoption cannot finish yet."
 
 [[body]]
 component = "about"

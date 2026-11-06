@@ -1,6 +1,6 @@
 # The opfiles.ai draft core files page (template reference/reference.html): the 5 core store files in
 # full, then the record indexes and the files around them, 1 line each. The section and heading ids are
-# the 20 short-link anchors of opf/site/_redirects, so every kept anchor resolves on this page.
+# the short-link anchors of opf/site/_redirects, so every kept anchor resolves on this page.
 path = "core-files/index.html"
 title = "Technical details"
 kind = "document"
@@ -60,7 +60,7 @@ rows = [
   ["<code>[profiles.*]</code>", "additive requirement bundles; may only add requirements"],
   ["<code>[types.*]</code>", "1 table per enabled type, carrying its normative namespace"],
   ["<code>[providers.*]</code>", "handler and roles (create, auth, sync); local-directory and generic-git-remote ship as universal fallbacks"],
-  ["<code>[views.*]</code>", "kind (deterministic, composed or projection), sources, target"],
+  ["<code>[views.*]</code>", "kind (deterministic, composed, or projection), sources, target"],
   ["<code>[deliverables.*]</code>", "the curated CHANGELOG.md declaration"],
   ["<code>[archive]</code>", "period (\"year\")"],
   ["<code>[unmanaged]</code>", "pre-existing files kept in place, enumerated"],
@@ -103,7 +103,7 @@ rail = "The ID counters"
 
 [[body]]
 component = "prose"
-html = "<p>The ID authority: 1 monotonic high-water value per record namespace.</p>"
+html = "<p>The ID authority: 1 monotonic high-water value per record namespace and series, a clean row and an imported row per enabled type (spec section 8.2).</p>"
 
 [[body]]
 component = "section"
@@ -246,7 +246,7 @@ heading = "Optional modules and importer types"
 
 [[body]]
 component = "prose"
-html = "<p>4 optional modules, default-off.</p>"
+html = "<p>4 optional modules, default-off: governance, delivery_assurance, operational_policy, and concurrent_operation, each enabling its module-tier record types (spec section 8.1).</p>"
 
 [[body]]
 component = "prose"
@@ -261,7 +261,7 @@ component = "section"
 lbl = "Around the records"
 id = "pointer"
 heading = "The store pointer"
-rail = "Pointer, archive and projection"
+rail = "Pointer, archive, and projection"
 
 [[body]]
 component = "prose"

@@ -1,16 +1,18 @@
 # AIQT Guardrails
 
-AIQT Guardrails holds your AI assistant to one standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Open source.
+AIQT Guardrails holds your AI assistant to 1 standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Open source.
 
 ## Key pages
 
-- [Add AIQT to your assistant](/install/): add AIQT to your chat assistant on one page: pick the AI you use, Claude, ChatGPT, Gemini, Copilot, or another, get the file it needs, and follow a short guide.
-- [The standard](/standard/): the AIQT standard in plain terms: the four things it holds your assistant to (Accuracy, Integrity, Quality, Trust) and the one priority ordering that decides every close call.
-- [The five rules](/rules/): the five working rules of AIQT: surface what a guardrail catches, re-anchor the standard with a self-check, fix in-scope issues before shipping, surface out-of-scope issues, and propose an underlying guardrail.
-- [The development assistant](/development): the AIQT development assistant installs the AIQT governance core into a project: one priority ordering, the disciplines, and the file each coding agent expects.
+- [Install](/install/): give your development assistant 1 prompt and it prepares an adoption plan, with OPFiles for your project's records, and installs AIQT once you approve it; a chat assistant uses the Skill download instead.
+- [Install the Skill, step by step](/install/details/): add AIQT to your chat assistant: pick the AI you use, Claude, ChatGPT, Gemini, Copilot, Copilot Studio, or any other, get the file it needs, and follow a short guide.
+- [Ideas for teams and enterprises](/future/): ideas under consideration, with no dates and no commitments; none of it ships today.
+- [The standard](/standard/): the AIQT standard in plain terms: the 4 things it holds your assistant to (Accuracy, Integrity, Quality, Trust) and the 1 priority ordering that decides every close call.
+- [The 5 rules](/rules/): the 5 working rules of AIQT: surface what a guardrail catches, re-anchor the standard with a self-check, fix in-scope issues before shipping, surface out-of-scope issues, and propose an underlying guardrail.
+- [The development assistant](/development): the AIQT development assistant, which is in development, installs the AIQT governance core into a project: 1 priority ordering, the disciplines, and the file each coding agent expects.
 - [Technical details](/tech-details): the technical detail of the AIQT development assistant, which is in development: the project-practice files it sets up, the config file you own, how new-guardrail seed PRs work, CI integration, and per-language depth composed at install.
 - [Enforcement register](/enforcement): every rule and the shipped mechanical controls linked to it; a link records that a control exists, not complete coverage.
 - [Evidence](/evidence): the evidence behind AIQT: the release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history.
 - [Disclosure](/disclosure/): the AIQT disclosure matrix: for each thing AIQT does, the claim and its limitation side by side, each pointing to the evidence.
-- [Mappings](/mappings/): a navigational crosswalk from the pack's mapped rules to security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA); no framework publisher endorses or is affiliated with this pack.
+- [Mappings](/mappings/): a navigational crosswalk from the pack's mapped rules to security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, MITRE CWE, ISO/IEC, CSA); no framework publisher endorses or is affiliated with this pack.
 - [Licence](/license/): AIQT Guardrails is published under the Apache License 2.0, except vendored third-party material, which remains under its own terms; the licence text is the authority.

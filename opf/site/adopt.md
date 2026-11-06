@@ -21,14 +21,14 @@ The prompt pack ships the instructions an assistant follows: `adopt/SKILL.md`, t
 What the reference CLI runs today:
 
 - Investigation, through the planner's read-only library entry; no `opf adopt` subcommand prints the inventory yet. It records a digest-stamped inventory, tells first adoption from re-adoption, and lists each file in its scope that needs a disposition: keep, migrate, move, or retire.
-- `opf adopt plan --inputs FILE`, which freezes and prints the plan from a planning worksheet and writes nothing. Its output is an inert, digest-bound proposal, never permission to apply. The planner checks the shape of the release, prompt-pack, enforcement and postimage digests the worksheet supplies, not the bytes they name, with one exception: when a kept file registers into a store the plan creates, the digest planned for its manifest must be the default manifest's real digest.
+- `opf adopt plan --inputs FILE`, which freezes and prints the plan from a planning worksheet and writes nothing. Its output is an inert, digest-bound proposal, never permission to apply. The planner checks the shape of the release, prompt-pack, enforcement, and postimage digests the worksheet supplies, not the bytes they name, with one exception: when a kept file registers into a store the plan creates, the digest planned for its manifest must be the default manifest's real digest.
 - `opf adopt status`, which reports adoption runs and the adoption journal and writes nothing.
 
 What it does not complete yet: `opf adopt apply` and `complete` refuse with exit 2, so nothing is applied and nothing is retired. `approve` checks a plan and prints its approval but writes nothing, so no approval is recorded; `reconcile` recovers an interrupted adoption transaction, or reports that there is nothing to reconcile. Installing the enforcement pack through adoption, and post-adoption import, are not available either. An assistant following the pack stops at the approval step and reports, rather than doing the missing stages by hand.
 
 Recovery after a refused or reversed run: when an adoption transaction is refused after its intent opens, or is reversed, the engine retains `.working/` holding only the adoption journal (`.working/journals/adoption/`). That journal is recovery state: the transaction record and its preimages, and the durable record that the refused run id can never rerun. In that posture the store does not resolve, and plain `opf init` refuses over the retained `.working/` exactly as over any other existing one. Recovery needs no cleanup: investigation reads a `.working/` holding only the journal as a first adoption, so a fresh `opf adopt` plan with its own run id re-admits the tree. Do not delete `.working/` to unblock `opf init`; that discards the journal, and with it the record that the refused run id is burnt.
 
-For a project with no prior records, the clean-start guidance describes one interim route: `opf init`, review and commit, `opf render --write`, commit, then `opf doctor --require-store` and `opf render --check`. That route initializes a store; it is not an adoption. It records no plan, approval, receipt or completion check, and installs no enforcement. The reference tooling's `opf init` does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). If you are adopting AIQT, include OPFiles in the plan.
+For a project with no prior records, the clean-start guidance describes one interim route: `opf init`, review and commit, `opf render --write`, commit, then `opf doctor --require-store` and `opf render --check`. That route initializes a store; it is not an adoption. It records no plan, approval, receipt, or completion check, and installs no enforcement. The reference tooling's `opf init` does not scaffold a 2.0.0 store yet: its scaffold still writes a 1.2.0 store, a format the standard's validation refuses (specification section 9.2). If you are adopting AIQT, include OPFiles in the plan.
 
 ## Adopting by hand
 
@@ -44,6 +44,6 @@ Conformance you assert by hand is self-asserted until the reference validator ha
 ## More
 
 - The standard: /standard
-- Reference tooling: /tooling
+- Reference tooling: /core-files/#tooling
 - The prompt pack: `opf/prompt-pack/` in the reference repository
 - The disclosure of current limits: /disclosure
