@@ -985,6 +985,7 @@ _ENTRY_FLOOR_EXEMPT = {
                                   "_close_exc_safe_vectors_self_test)",
     "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
     "opf-declaration-cli": "the dispatcher's spec 16.1 declaration suite (_declaration_cli_self_test)",
+    "opf-verb-status": "the dispatcher's verb status table suite (_verb_status_self_test)",
 }
 
 
@@ -24076,6 +24077,7 @@ def _self_tests():
     ("opf-cli", _cli_self_test),
     ("opf-declaration", _opf_declaration.self_test),
     ("opf-declaration-cli", _declaration_cli_self_test),
+    ("opf-verb-status", _verb_status_self_test),
 )
 
 
@@ -24090,7 +24092,7 @@ SELF_TEST_GROUPS = (
     ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
               "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
               "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli",
-              "opf-declaration", "opf-declaration-cli")),
+              "opf-declaration", "opf-declaration-cli", "opf-verb-status")),
     ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
     ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
 )
@@ -24141,6 +24143,124 @@ def run_self_test_group(name, groups=None, tests=None):
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
 KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb",
                "record")
+
+# The status of each KNOWN_VERBS verb in this build, the one source of the published status note
+# (tools/gen_draft_site.py renders it on opfiles.ai, in opf/README.md and in opf/site/llms.txt). Each row is
+# (verb, status, scope): "available" runs through its own handler; "partial" runs through its own handler for
+# the subcommands its scope names; "in progress" exits 2 in this build, through the fail-closed stub or
+# through a handler that refuses every argument list. A literal, so the generator reads it without importing
+# this module. _verb_status_self_test holds it to main()'s dispatch.
+VERB_STATUS = (
+    ("init", "available", ""),
+    ("render", "available", ""),
+    ("doctor", "available", ""),
+    ("absorb", "available", ""),
+    ("record", "available", ""),
+    ("adopt", "partial", "plan, approve, reconcile and status; apply and complete exit 2"),
+    ("upgrade", "in progress", ""),
+    ("import", "in progress", ""),
+    ("migrate", "in progress", ""),
+    ("sync", "in progress", ""),
+)
+VERB_STATUSES = ("available", "partial", "in progress")
+# The line main() prints for a KNOWN_VERBS verb with no handler, as the status self-test expects it.
+_VERB_STUB_LINE = "opf {}: not yet implemented in this build (fail-closed)\n"
+
+
+def _verb_status_faults(table=None, verbs=None):
+    """Return the faults of `table` (default VERB_STATUS) against main()'s dispatch over `verbs` (default
+    KNOWN_VERBS). Every verb appears exactly once and no other name does; each status is one of
+    VERB_STATUSES, with a scope exactly when it is partial. An available or partial verb must reach its own
+    handler `_cmd_<verb>`: main() runs with every `_cmd_*` handler replaced by a recorder and the
+    declaration gate emptied, so no handler runs and no store or declaration is read. An in progress verb
+    must exit 2 from the real dispatch: with no handler it prints exactly the fail-closed stub line, and with
+    a handler (one that refuses every argument list) it reaches that handler and prints its own refusal."""
+    import contextlib
+    import io
+    from unittest.mock import patch
+    table = VERB_STATUS if table is None else table
+    verbs = KNOWN_VERBS if verbs is None else verbs
+    here = sys.modules[__name__]
+    faults = []
+    names = [row[0] for row in table]
+    for verb in verbs:
+        if names.count(verb) != 1:
+            faults.append("{} appears {} times in the status table".format(verb, names.count(verb)))
+    for name in sorted(set(names) - set(verbs)):
+        faults.append("{} is in the status table but not a known verb".format(name))
+    handlers = sorted(name for name in vars(here) if name.startswith("_cmd_") and callable(getattr(here, name)))
+    for verb, status, scope in table:
+        if status not in VERB_STATUSES:
+            faults.append("{} has unknown status {!r}".format(verb, status))
+            continue
+        if (status == "partial") != bool(scope):
+            faults.append("{} is {} with scope {!r}; a scope goes with partial and only partial".format(
+                verb, status, scope))
+        called = []
+
+        def recorder(_rest, _name=None):
+            called.append(_name)
+            return EXIT_OK
+
+        err = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            for name in handlers:
+                stack.enter_context(patch.object(here, name, lambda rest, _n=name: recorder(rest, _n)))
+            stack.enter_context(patch.object(here, "_DECLARATION_GATED", ()))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(err))
+            routed = main([verb])
+        if status in ("available", "partial"):
+            if called != ["_cmd_" + verb] or routed != EXIT_OK:
+                faults.append("{} is marked {} but main() does not route it to _cmd_{} (handlers reached {}, "
+                              "exit {!r}, stderr {!r})".format(verb, status, verb, called, routed, err.getvalue()))
+            continue
+        if called and (called != ["_cmd_" + verb] or verb not in _VERB_REFUSALS):
+            # Never run such a handler for real: it is not one known to read and write nothing.
+            faults.append("{} is marked in progress, but main() routes it to {} and it is not a handler that "
+                          "refuses every argument list".format(verb, called))
+            continue
+        err = io.StringIO()
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            real = main([verb])
+        want = (_VERB_STUB_LINE.format(verb) if not called
+                else "opf {}: {}\n".format(verb, getattr(here, _VERB_REFUSALS[verb])))
+        if real != EXIT_MALFORMED or err.getvalue() != want:
+            faults.append("{} is marked in progress but exits {!r} with stderr {!r}, not 2 with {!r}".format(
+                verb, real, err.getvalue(), want))
+    return faults
+
+
+# The in progress verbs whose handler refuses every argument list with exit 2 and reads and writes nothing,
+# each with the name of the refusal it prints. Only these handlers does the status self-test run for real.
+_VERB_REFUSALS = {"upgrade": "UPGRADE_NONE", "import": "IMPORT_RETIRED"}
+
+
+def _verb_status_self_test():
+    """Hold VERB_STATUS to the dispatch (_verb_status_faults), then show that a flipped table fails: an
+    in progress stub marked available, an available verb marked in progress, a verb dropped and a verb
+    doubled must each be named."""
+    faults = _verb_status_faults()
+    flips = (
+        ("stub-marked-available", tuple((v, "available", "") if v == "migrate" else (v, s, c)
+                                         for v, s, c in VERB_STATUS), "migrate is marked available"),
+        ("available-marked-in-progress", tuple((v, "in progress", "") if v == "init" else (v, s, c)
+                                                for v, s, c in VERB_STATUS), "init is marked in progress"),
+        ("verb-dropped", tuple(row for row in VERB_STATUS if row[0] != "sync"),
+         "sync appears 0 times"),
+        ("verb-doubled", VERB_STATUS + (("render", "available", ""),), "render appears 2 times"),
+    )
+    for label, table, needle in flips:
+        got = _verb_status_faults(table)
+        if not any(needle in fault for fault in got):
+            faults.append("flip {} was not caught: {!r}".format(label, got))
+    if faults:
+        print("opf verb status self-test: FAIL", file=sys.stderr)
+        for fault in faults:
+            print("  " + fault, file=sys.stderr)
+        return EXIT_FINDING
+    print("opf verb status self-test: PASS ({} verbs, {} flips)".format(len(VERB_STATUS), len(flips)))
+    return EXIT_OK
 
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
