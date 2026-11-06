@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "24d37b1cfd0251b190164c81bfa8e98c83113c9a7d5d7e1a942f8846ab233901"
+tree-sha256 = "7b78fede726a53c7c9053d84e0eb03649cd11ea884f4b2a334fadcfa7c34dd8b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2651,8 +2651,8 @@ sha256 = "f55098b6da69f606b347f53553f59fdc8d3275ade45793a562a6bff767b1b2f3"
 
 [[sources]]
 path = "opf/site/assets/opfiles-og.png"
-bytes = 46465
-sha256 = "00b112e2e4c4e827f3423c91ff985f3ff12ce522e350cbd3820dc99f9caa6724"
+bytes = 149172
+sha256 = "2c831447dc1a2ec7fb7e69cb6025ff00dd27a7710e74076270153da0f75cb32e"
 
 [[sources]]
 path = "opf/site/core-files/index.html"
@@ -3531,8 +3531,8 @@ sha256 = "6f3ce37fbb23b4f465c73c8e68e850272ec07c020266b22dfe1b6aca5e6f5e4a"
 
 [[sources]]
 path = "site/assets/aiqt-og.png"
-bytes = 48974
-sha256 = "78042ff58dc67dbae5b10c7232796861c4264fa95bb7a9ea82939b1fcc940422"
+bytes = 142036
+sha256 = "bba2c756ac30e26a3695f81b313aac0c717b3b8a6bcc5e2b6c22edefd3220e2d"
 
 [[sources]]
 path = "site/assets/baseline/logos/aiqt-touch.png"
