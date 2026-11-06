@@ -156,6 +156,7 @@ class Page(HTMLParser):
         self.suspend_tag = None   # SUSPEND_ROOT we are inside (subtree not checked), or None
         self.suspend_count = 0    # nesting of that same root, so the matching close ends suspension
         self.touch_icons = []     # (href, line) of each <link rel="apple-touch-icon">
+        self.metas = {}           # the content of the first <meta> per property or name
 
     def handle_starttag(self, tag, attrs):
         if self.suspend_tag is not None:
@@ -168,6 +169,8 @@ class Page(HTMLParser):
                 self.links.append((d[key], self.getpos()[0]))
         if tag == "link" and TOUCH_ICON_REL in (d.get("rel") or "").lower().split():
             self.touch_icons.append(((d.get("href") or "").strip(), self.getpos()[0]))
+        if tag == "meta" and (d.get("property") or d.get("name")):
+            self.metas.setdefault(d.get("property") or d.get("name"), (d.get("content") or "").strip())
         if d.get("id"):
             self.ids.add(d["id"])
             self.id_list.append((d["id"], self.getpos()[0]))
@@ -372,6 +375,83 @@ def touch_icon_findings(label, page_rel, icons, page_dir, site_root, template=Fa
         elif _touch_icon_file(href, page_dir, site_root) is None:
             out.append("{}:{}: {} names a file that does not exist under the root -> {!r}".format(
                 label, line, TOUCH_ICON_REL, href))
+    return out
+
+
+# The link-preview card metas every generated template page carries (tools/gen_draft_site.py), and the
+# smallest card image the large link previews take.
+CARD_METAS = ("og:type", "og:title", "og:description", "og:url", "og:site_name", "og:image", "og:image:width",
+              "og:image:height", "og:image:alt", "twitter:card", "twitter:image")
+CARD_MIN_SIZE = (1200, 627)
+CARD_MAX_READ = 8 << 20
+
+
+def image_size(data):
+    """(width, height) of PNG or baseline/progressive JPEG bytes, or None for any other or a malformed file."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24 and data[12:16] == b"IHDR":
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if data[:2] != b"\xff\xd8":
+        return None
+    at = 2
+    while at + 4 <= len(data):
+        if data[at] != 0xFF:
+            return None
+        marker = data[at + 1]
+        if marker == 0xFF:
+            at += 1
+            continue
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            at += 2
+            continue
+        length = int.from_bytes(data[at + 2:at + 4], "big")
+        if length < 2:
+            return None
+        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+            if at + 9 > len(data) or length < 7:
+                return None
+            return int.from_bytes(data[at + 7:at + 9], "big"), int.from_bytes(data[at + 5:at + 7], "big")
+        at += 2 + length
+    return None
+
+
+def card_findings(label, metas, site_root, hosts):
+    """Findings for one generated page's link-preview card metas: each of CARD_METAS present and non-empty,
+    twitter:card summary_large_image, og:url an https URL on the root's own host, and og:image (and
+    twitter:image, the same URL) an https URL on that host naming an existing PNG or JPEG file inside the
+    root, at least CARD_MIN_SIZE, whose size og:image:width and og:image:height state."""
+    out = ["{}: missing or empty <meta> {}".format(label, key) for key in CARD_METAS if not metas.get(key)]
+    if out:
+        return out
+    if metas["twitter:card"] != "summary_large_image":
+        out.append("{}: twitter:card is {!r}, not 'summary_large_image'".format(label, metas["twitter:card"]))
+    if metas["twitter:image"] != metas["og:image"]:
+        out.append("{}: twitter:image differs from og:image".format(label))
+    url = urlsplit(metas["og:url"])
+    if url.scheme != "https" or url.hostname not in hosts:
+        out.append("{}: og:url is not an https URL on this site -> {!r}".format(label, metas["og:url"]))
+    image = urlsplit(metas["og:image"])
+    if image.scheme != "https" or image.hostname not in hosts or image.query or image.fragment:
+        out.append("{}: og:image is not an https URL on this site -> {!r}".format(label, metas["og:image"]))
+        return out
+    path = unquote(image.path).lstrip("/")
+    resolved = (site_root / path).resolve()
+    if not path or any(part in ("", ".", "..") for part in path.split("/")) \
+            or not _under(site_root, resolved) or not resolved.is_file():
+        out.append("{}: og:image names no file inside the site -> {!r}".format(label, metas["og:image"]))
+        return out
+    try:
+        with open(resolved, "rb") as handle:
+            size = image_size(handle.read(CARD_MAX_READ))
+    except OSError as exc:
+        out.append("{}: og:image cannot be read ({})".format(label, exc))
+        return out
+    if size is None:
+        out.append("{}: og:image is not a PNG or JPEG file -> {!r}".format(label, metas["og:image"]))
+    elif size[0] < CARD_MIN_SIZE[0] or size[1] < CARD_MIN_SIZE[1]:
+        out.append("{}: og:image is {}x{}, below {}x{}".format(label, size[0], size[1], *CARD_MIN_SIZE))
+    elif (metas["og:image:width"], metas["og:image:height"]) != (str(size[0]), str(size[1])):
+        out.append("{}: og:image:width and og:image:height state {}x{}, the file is {}x{}".format(
+            label, metas["og:image:width"], metas["og:image:height"], size[0], size[1]))
     return out
 
 
@@ -766,9 +846,11 @@ def _self_test():
         (draft / "assets" / "baseline").mkdir(parents=True)
         (draft / "assets" / "baseline" / "baseline.css").write_text("p{}", encoding="utf-8")
         (draft / "model" / "index.html").write_text(
-            '<!doctype html><title>t</title><h2 id="box">B</h2>', encoding="utf-8")
+            '<!doctype html><title>t</title>' + _card_head("opfiles.ai") + '<h2 id="box">B</h2>', encoding="utf-8")
+        (r / "opf" / "site" / "card.png").write_bytes(_png(1200, 627))
         (draft / "index.html").write_text(
-            '<!doctype html><title>t</title><link rel="stylesheet" href="/draft/assets/baseline/baseline.css">'
+            '<!doctype html><title>t</title>' + _card_head("opfiles.ai") +
+            '<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">'
             '<a href="/draft/model/">M</a><a href="/draft/model/#box">B</a>'
             '<a href="https://opfiles.ai/draft/model/">O</a><a href="https://aiqt.ai/no-such-page">A</a>',
             encoding="utf-8")
@@ -836,11 +918,14 @@ def _self_test():
         (r / "site" / "draft" / "x" / "y").mkdir(parents=True)
         (r / "opf" / "site" / "sub" / "draft").mkdir(parents=True)
         (r / "opf" / "site" / "draft" / "x" / "y").mkdir(parents=True)
+        card_host = {"site": "aiqt.ai", "opf/site": "opfiles.ai"}
         for subdir in COVERAGE_ROOTS:
             (r / subdir / "t.png").write_bytes(b"png")
+            (r / subdir / "card.png").write_bytes(_png(1200, 627))
             (r / subdir / "index.html").write_text(
-                '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png">', encoding="utf-8")
-        draft_page = '<!doctype html><title>t</title><img src="/t.png" alt="">'
+                '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png">'
+                + _card_head(card_host[subdir]), encoding="utf-8")
+        draft_page = '<!doctype html><title>t</title>' + _card_head("CARD-HOST") + '<img src="/t.png" alt="">'
         scan_cases = (
             ("draft-404/scan-top-level-draft-passes", "site", "draft/404.html", draft_page, 0, ""),
             ("draft-404/scan-nested-draft-keeps-live-list", "site", "sub/draft/404.html", draft_page, 1,
@@ -886,7 +971,7 @@ def _self_test():
         scan_cases = scan_cases + staged_scan_cases
         for label, subdir, page_rel, markup, want, message, targets in (
                 [case + (None,) for case in scan_cases] + [case + (promoted,) for case in promoted_scan_cases]):
-            (r / subdir / page_rel).write_text(markup, encoding="utf-8")
+            (r / subdir / page_rel).write_text(markup.replace("CARD-HOST", card_host[subdir]), encoding="utf-8")
             out = io.StringIO()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
                 got = _scan_root(r, subdir, targets)
@@ -899,6 +984,7 @@ def _self_test():
             failures.append("coverage: neither root present did not pass clean")
 
     _touch_icon_self_test(quiet)
+    _card_self_test(quiet)
     _not_found_links_self_test()
     _declaration_self_test()
     _use_staged_declaration(False)
@@ -1039,6 +1125,129 @@ def check(name, ok, detail=""):
     EXECUTED.append(name)
     if not ok:
         FAILURES.append("{}: {!r}".format(name, detail))
+
+
+def _card_head(host):
+    """Card metas a fixture's generated page carries: they name /card.png on host as og:image."""
+    image = "https://{}/card.png".format(host)
+    values = (("property", "og:type", "website"), ("property", "og:title", "T"),
+              ("property", "og:description", "D"), ("property", "og:url", "https://{}/".format(host)),
+              ("property", "og:site_name", "S"), ("property", "og:image", image),
+              ("property", "og:image:width", "1200"), ("property", "og:image:height", "627"),
+              ("property", "og:image:alt", "A"), ("name", "twitter:card", "summary_large_image"),
+              ("name", "twitter:image", image))
+    return "".join('<meta {}="{}" content="{}">'.format(*value) for value in values)
+
+
+def _png(width, height):
+    """The signature and IHDR chunk of a PNG of the given size: all image_size reads."""
+    return (b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR" + width.to_bytes(4, "big")
+            + height.to_bytes(4, "big") + b"\x08\x02\x00\x00\x00" + b"\x00" * 4)
+
+
+def _jpeg(width, height):
+    """A JPEG start, an APP0 segment and a baseline SOF0 frame header of the given size."""
+    return (b"\xff\xd8" + b"\xff\xe0\x00\x04\x00\x00" + b"\xff\xc0\x00\x11\x08" + height.to_bytes(2, "big")
+            + width.to_bytes(2, "big") + b"\x03" + b"\x00" * 9)
+
+
+def _card_self_test(quiet):
+    """The link-preview card check: a generated page passes only with every card meta and an og:image naming
+    a PNG or JPEG inside the root of at least 1200x627, whose stated size matches; a live page is not held to
+    it; the scan and the real tree agree."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        base = Path(d)
+        root = base / "site"
+        (root / "assets").mkdir(parents=True)
+        for name, data in (("card.png", _png(1200, 627)), ("wide.png", _png(1201, 628)),
+                           ("narrow.png", _png(1199, 627)), ("short.png", _png(1200, 626)),
+                           ("card.jpg", _jpeg(1200, 627)), ("small.jpg", _jpeg(600, 315)),
+                           ("card.gif", b"GIF89a" + b"\x00" * 20), ("card.svg", b"<svg/>")):
+            (root / "assets" / name).write_bytes(data)
+        (base / "outside.png").write_bytes(_png(1200, 627))
+        site_root = root.resolve()
+        hosts = {"aiqt.ai", "www.aiqt.ai"}
+
+        def metas(changes=None):
+            got = {"og:type": "website", "og:title": "T", "og:description": "D", "og:url": "https://aiqt.ai/",
+                   "og:site_name": "AIQT.ai", "og:image": "https://aiqt.ai/assets/card.png",
+                   "og:image:width": "1200", "og:image:height": "627", "og:image:alt": "A",
+                   "twitter:card": "summary_large_image", "twitter:image": "https://aiqt.ai/assets/card.png"}
+            got.update(changes or {})
+            return {key: value for key, value in got.items() if value is not None}
+
+        def image(url, width="1200", height="627"):
+            return card_findings("a.html", metas({"og:image": url, "twitter:image": url,
+                                                  "og:image:width": width, "og:image:height": height}),
+                                 site_root, hosts)
+
+        check("card/complete-passes", card_findings("a.html", metas(), site_root, hosts) == [], None)
+        covered = []
+        for key, name in (("og:type", "card/missing-og-type-fails"), ("og:title", "card/missing-og-title-fails"),
+                          ("og:description", "card/missing-og-description-fails"),
+                          ("og:url", "card/missing-og-url-fails"),
+                          ("og:site_name", "card/missing-og-site_name-fails"),
+                          ("og:image", "card/missing-og-image-fails"),
+                          ("og:image:width", "card/missing-og-image-width-fails"),
+                          ("og:image:height", "card/missing-og-image-height-fails"),
+                          ("og:image:alt", "card/missing-og-image-alt-fails"),
+                          ("twitter:card", "card/missing-twitter-card-fails"),
+                          ("twitter:image", "card/missing-twitter-image-fails")):
+            covered.append(key)
+            got = card_findings("a.html", metas({key: None}), site_root, hosts)
+            check(name, len(got) == 1 and "missing or empty <meta> " + key in got[0], got)
+        if tuple(covered) != CARD_METAS:
+            raise AssertionError("card/missing-* vectors do not cover CARD_METAS exactly")
+        got = card_findings("a.html", metas({"og:title": ""}), site_root, hosts)
+        check("card/empty-og-title-fails", len(got) == 1 and "og:title" in got[0], got)
+        got = card_findings("a.html", metas({"twitter:card": "summary"}), site_root, hosts)
+        check("card/summary-card-fails", len(got) == 1 and "summary_large_image" in got[0], got)
+        got = card_findings("a.html", metas({"twitter:image": "https://aiqt.ai/assets/wide.png"}), site_root, hosts)
+        check("card/twitter-image-differs-fails", len(got) == 1 and "differs" in got[0], got)
+        for name, url in (("card/og-url-other-host-fails", "https://opfiles.ai/"),
+                          ("card/og-url-http-fails", "http://aiqt.ai/")):
+            got = card_findings("a.html", metas({"og:url": url}), site_root, hosts)
+            check(name, len(got) == 1 and "og:url" in got[0], got)
+        check("card/exact-minimum-passes", image("https://aiqt.ai/assets/card.png") == [], None)
+        check("card/above-minimum-passes", image("https://aiqt.ai/assets/wide.png", "1201", "628") == [], None)
+        check("card/jpeg-passes", image("https://aiqt.ai/assets/card.jpg") == [], None)
+        for name, url, width, height in (("card/one-pixel-narrow-fails", "narrow.png", "1199", "627"),
+                                         ("card/one-pixel-short-fails", "short.png", "1200", "626"),
+                                         ("card/small-jpeg-fails", "small.jpg", "600", "315")):
+            got = image("https://aiqt.ai/assets/" + url, width, height)
+            check(name, len(got) == 1 and "below 1200x627" in got[0], got)
+        got = image("https://aiqt.ai/assets/wide.png")
+        check("card/stated-size-mismatch-fails", len(got) == 1 and "the file is 1201x628" in got[0], got)
+        for name, url in (("card/gif-fails", "card.gif"), ("card/svg-fails", "card.svg")):
+            got = image("https://aiqt.ai/assets/" + url)
+            check(name, len(got) == 1 and "not a PNG or JPEG" in got[0], got)
+        for name, url, words in (("card/missing-file-fails", "https://aiqt.ai/assets/gone.png", "names no file"),
+                                 ("card/directory-fails", "https://aiqt.ai/assets/", "names no file"),
+                                 ("card/escaping-path-fails", "https://aiqt.ai/../outside.png", "names no file"),
+                                 ("card/other-host-image-fails", "https://example.test/assets/card.png",
+                                  "not an https URL"),
+                                 ("card/relative-image-fails", "/assets/card.png", "not an https URL"),
+                                 ("card/http-image-fails", "http://aiqt.ai/assets/card.png", "not an https URL")):
+            got = image(url)
+            check(name, len(got) == 1 and words in got[0], got)
+
+        head = "".join('<meta property="{}" content="{}">'.format(key, value) for key, value in metas().items())
+        page = Page()
+        page.feed("<head>" + head + '<meta name="description" content="x"></head>')
+        check("card/parser-reads-metas", page.metas.get("og:image") == "https://aiqt.ai/assets/card.png"
+              and page.metas.get("description") == "x", page.metas)
+
+        # A generated page is held to the card; a live page is not.
+        (root / "assets" / "t.png").write_bytes(b"png")
+        template = '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/assets/t.png">'
+        (root / "index.html").write_text(template + head.replace(
+            '<meta property="twitter:', '<meta name="twitter:'), encoding="utf-8")
+        targets = frozenset({"site/index.html"})
+        check("card/scan-passes-with-card", quiet(_scan_root, base, "site", targets) == 0, None)
+        (root / "index.html").write_text(template, encoding="utf-8")
+        check("card/scan-reports-missing-card", quiet(_scan_root, base, "site", targets) == 1, None)
+        check("card/live-page-not-held", quiet(_scan_root, base, "site", frozenset()) == 0, None)
 
 
 def _touch_icon_self_test(quiet):
@@ -1513,6 +1722,8 @@ def _scan_root(root, subdir, targets=None):
                     findings.append("{}:{}: broken anchor -> {} (#{} not found)".format(rel, line, v, frag))
         findings.extend(touch_icon_findings(rel, f.relative_to(site), page.touch_icons, f.parent, site_root,
                                             template))
+        if template:
+            findings.extend(card_findings(rel, page.metas, site_root, hosts))
     # Logo consistency: the header logo block is duplicated per page (no page generator yet), so it
     # must stay byte-identical on every page that carries it; an outlier is drift.
     findings.extend(logo_findings([(str(rel), text) for _f, rel, text, _p in docs]))
@@ -1521,8 +1732,8 @@ def _scan_root(root, subdir, targets=None):
         for finding in sorted(set(findings)):
             print("  " + finding)
         return 1
-    print("PASS: {}/ dashes, links, anchors, titles, unique ids, tag structure and touch icons all check out"
-          .format(subdir))
+    print("PASS: {}/ dashes, links, anchors, titles, unique ids, tag structure, touch icons and link-preview "
+          "cards all check out".format(subdir))
     return 0
 
 

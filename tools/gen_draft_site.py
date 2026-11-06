@@ -84,6 +84,10 @@ ASSETS = "assets/baseline/"
 # meta that every page carried while staging.
 DRAFT_DIR = "draft/"
 MAX_PAGE_BYTES = 1 << 20
+# The link-preview card each site's pages name as og:image and twitter:image: a PNG under the site's live root
+# (rendered by tools/render_og_cards.py from tools/og-cards/), at the size the link previews ask for.
+CARD = "assets/{}-og.png"
+CARD_WIDTH, CARD_HEIGHT = 1200, 627
 # The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,
 # before the stylesheets, with data-cfasync="false" before src and no defer or async, so a stored scheme
 # applies before the first paint; the button is the last child of header.mast, after nav.nav, and stays
@@ -249,6 +253,28 @@ def _page_url(site, rel):
     if rel.endswith("/index.html"):
         return _url(site, rel[:-len("index.html")])
     return _url(site, rel)
+
+
+def _origin(site):
+    """The site's https origin, from its FAMILY domain."""
+    return "https://" + next(domain for key, _word, domain, _n in FAMILY if key == site["key"])
+
+
+def _social_metas(site, page):
+    """The Open Graph and Twitter card metas: the page's absolute URL and full title, the site name, and the
+    site's card image with its size and alt text."""
+    image = "{}/{}".format(_origin(site), CARD.format(site["key"]))
+    values = (("property", "og:type", "website"),
+              ("property", "og:title", "{} | {}.ai".format(page["title"], site["name"])),
+              ("property", "og:url", _origin(site) + _page_url(site, page["rel"])),
+              ("property", "og:site_name", site["name"] + ".ai"),
+              ("property", "og:image", image),
+              ("property", "og:image:width", str(CARD_WIDTH)),
+              ("property", "og:image:height", str(CARD_HEIGHT)),
+              ("property", "og:image:alt", "{}.ai: {}".format(site["name"], site["logo-alt"])),
+              ("name", "twitter:card", "summary_large_image"),
+              ("name", "twitter:image", image))
+    return ['<meta {}="{}" content="{}">'.format(kind, key, _attr(value)) for kind, key, value in values]
 
 
 def _t(value):
@@ -1304,6 +1330,8 @@ def render_page(site, pages, page):
     if description:
         head.append('<meta name="description" content="{}">'.format(_attr(description)))
         head.append('<meta property="og:description" content="{}">'.format(_attr(description)))
+    # The link-preview card metas follow the description metas, on every page.
+    head.extend(_social_metas(site, page))
     head.append("<title>{} | {}.ai</title>".format(_t(title), site["name"]))
     head.append('<link rel="icon" href="{}" type="image/svg+xml">'.format(
         _asset(site, "logos/{}-favicon.svg".format(site["key"]))))
@@ -1655,7 +1683,8 @@ def _self_test():
     # robots meta and before the title), and the 2 description metas, each on its own line, exactly on the
     # pages whose data carries a meta, with that meta's plain text.
     head_order = ('<meta charset="utf-8">', '<meta name="viewport" ', '<meta name="robots" ',
-                  '<meta name="description" ', '<meta property="og:description" ', "<title>",
+                  '<meta name="description" ', '<meta property="og:description" ', '<meta property="og:',
+                  '<meta name="twitter:', "<title>",
                   '<link rel="icon" ', '<link rel="apple-touch-icon" ', '<script data-cfasync="false" ',
                   '<link rel="stylesheet" ', '<script src="')
     described = {}
@@ -1677,6 +1706,32 @@ def _self_test():
                    all(lines.count(meta) == 1 and built.count(meta) == 1 for meta in metas), lines)
         else:
             expect("meta/description-absent " + target, "description" not in built.split("</head>", 1)[0])
+    # Every page of both sites, staged and promoted: each card meta once, naming the page's absolute URL on
+    # its own site's domain, the page title and the site's card image.
+    for built_outputs, built_sites in ((outputs, staged_), (live_outputs, SITES)):
+        for target, built in sorted(built_outputs.items()):
+            built_site = next(s for s in built_sites if target.startswith(s["root"] + "/"))
+            rel = target[len(built_site["root"]) + 1:]
+            origin = {"aiqt": "https://aiqt.ai", "opfiles": "https://opfiles.ai"}[built_site["key"]]
+            card = '{}/assets/{}-og.png'.format(origin, built_site["key"])
+            title = re.search(r"<title>(.* \| [A-Za-z]+\.ai)</title>", built).group(1)
+            wanted = ['<meta property="og:type" content="website">',
+                      '<meta property="og:title" content="{}">'.format(title),
+                      '<meta property="og:url" content="{}{}">'.format(origin, _page_url(built_site, rel)),
+                      '<meta property="og:site_name" content="{}.ai">'.format(built_site["name"]),
+                      '<meta property="og:image" content="{}">'.format(card),
+                      '<meta property="og:image:width" content="1200">',
+                      '<meta property="og:image:height" content="627">',
+                      '<meta property="og:image:alt" content="{}.ai: {}">'.format(
+                          built_site["name"], _attr(built_site["logo-alt"])),
+                      '<meta name="twitter:card" content="summary_large_image">',
+                      '<meta name="twitter:image" content="{}">'.format(card)]
+            head = built.split("</head>", 1)[0].split("\n")
+            expect("meta/card-metas " + target, all(head.count(meta) == 1 for meta in wanted), head)
+    expect("meta/card-url-home", '<meta property="og:url" content="https://opfiles.ai/">'
+           in live_outputs["opf/site/index.html"], live_outputs["opf/site/index.html"][:2000])
+    expect("meta/card-url-staged", '<meta property="og:url" content="https://aiqt.ai/draft/install/">'
+           in outputs["site/draft/install/index.html"])
     mappings_head = outputs["site/draft/mappings/index.html"].split("</head>", 1)[0]
     expect("meta/mappings-parenthetical", mappings_head.count(
         "frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA)") == 2, mappings_head)
@@ -2382,10 +2437,15 @@ def _self_test():
     escaped_metas = ['<meta name="description" content="{}">'.format(content),
                      '<meta property="og:description" content="{}">'.format(content)]
     expect("meta/description-escaped", all(quoted_lines.count(meta) == 1 for meta in escaped_metas), quoted_lines)
+    card_metas = _social_metas(site, quoted)
     positions = [quoted_lines.index(line) if line in quoted_lines else -1 for line in
-                 ['<meta name="robots" content="noindex, nofollow">'] + escaped_metas + ["<title>T | AIQT.ai</title>"]]
-    expect("meta/description-order", -1 not in positions and positions == list(range(positions[0], positions[0] + 4)),
-           positions)
+                 ['<meta name="robots" content="noindex, nofollow">'] + escaped_metas + card_metas
+                 + ["<title>T | AIQT.ai</title>"]]
+    expect("meta/description-order", -1 not in positions
+           and positions == list(range(positions[0], positions[0] + len(positions))), positions)
+    titled = model(page_head + 'title = "Say \\"a\\" & <b>"\n' + page_body)
+    expect("meta/card-title-escaped", '<meta property="og:title" content="Say &quot;a&quot; &amp; &lt;b&gt; | AIQT.ai">'
+           in render_page(site, [titled], titled))
     plain = model(page_head + 'title = "T"\n' + page_body)
     expect("meta/description-none-without-meta", "description" not in render_page(site, [plain], plain))
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
@@ -2644,7 +2704,7 @@ def _self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: gen_draft_site (shell and head order, the scheme script and switch, robots meta, "
-          "the description metas (presence, escaping and order), footer "
+          "the description metas (presence, escaping and order), the link-preview card metas, footer "
           "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "

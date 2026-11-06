@@ -7,7 +7,6 @@ slug: purpose-limitation
 map-nist-airmf-broad: [GOVERN 1.1]
 map-nist-80053-tight: [PT-2, PT-3]
 map-iso-23894-broad: [A.8]
-map-owasp-asvs-broad: [V14]
 map-csa-ccm-tight: [DSP-12]
 map-csa-aicm-tight: [DSP-12]
 ---
