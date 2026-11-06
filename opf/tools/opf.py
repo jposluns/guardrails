@@ -24249,64 +24249,129 @@ _VERB_RECORD_ARGS = {
 }
 
 
+# The read-only gates a running subcommand's handler calls before its engine entry, each of which reaches an
+# engine entry itself: (helper module name, attribute). The reconcile-first gate opens the product root
+# through the entry status uses. While a running subcommand is probed each is a stand-in that passes, as the
+# real gate does over the empty scratch root, so every entry call the probe sees comes from the handler.
+_VERB_SUB_GATES = {
+    "adopt": (("_opf_adopt_apply", "require_clean_journal"),),
+}
+
+
 class _VerbProbeReached(Exception):
     """Raised by the stand-in for a subcommand's engine entry once it has recorded the call."""
 
 
-def _verb_entry_standin(original, caller, sub, reached):
-    """A stand-in for an engine entry: called straight from the code object `caller` (the verb's own
-    handler), it records the subcommand (`sub`, or the parsed request's when `sub` is None) in `reached`
-    and raises _VerbProbeReached, so the engine never runs; called from anywhere else, it calls
-    `original`, so a read-only check the handler runs first (one that opens the root) is unchanged."""
+class _VerbEngineBlocked(Exception):
+    """Raised in place of a real engine entry the status self-test does not mean to run."""
+
+
+def _verb_entry_standin(sub, reached):
+    """A stand-in for an engine entry that never calls the engine, from any caller: it records the
+    subcommand (`sub`, or the parsed request's when `sub` is None) and the code object of its immediate
+    caller in `reached`, then raises _VerbProbeReached. The caller judges whether that code is the verb's
+    own handler; a call through a lambda or any other wrapper is recorded with the wrapper's code."""
     def standin(*args, **kwargs):
-        if sys._getframe(1).f_code is not caller:
-            return original(*args, **kwargs)
-        reached.append(sub if sub is not None else getattr(args[0] if args else None, "subcommand", None))
+        reached.append((sub if sub is not None else getattr(args[0] if args else None, "subcommand", None),
+                        sys._getframe(1).f_code))
         raise _VerbProbeReached()
     return standin
 
 
+def _verb_engine_guard(original, name, phase, calls):
+    """A guard over the real engine entry `original` (named `name`) for a whole status run: it records
+    (name, phase[0]) in `calls`, and calls `original` only while phase[0] names a subcommand the run executes
+    for real on purpose because its refusal is in place; at any other time it raises _VerbEngineBlocked, so
+    the engine never runs there."""
+    def guard(*args, **kwargs):
+        calls.append((name, phase[0]))
+        if phase[0] is None:
+            raise _VerbEngineBlocked(name)
+        return original(*args, **kwargs)
+    return guard
+
+
 def _verb_tree(base):
-    """Every path under `base`, relative, with its file type and size, in a fixed order."""
+    """Every path under `base`, relative, with its file type, size, and, for a regular file, the SHA-256 of
+    its content, in a fixed order, so a path that appeared, changed (a same-size rewrite included) or
+    vanished changes the result."""
+    import hashlib
     seen = []
     for top, dirs, files in os.walk(base):
         dirs.sort()
         for name in sorted(dirs + files):
             path = os.path.join(top, name)
             st = os.lstat(path)
-            seen.append((os.path.relpath(path, base), stat.S_IFMT(st.st_mode), st.st_size))
+            digest = None
+            if stat.S_ISREG(st.st_mode):
+                with open(path, "rb") as handle:
+                    digest = hashlib.sha256(handle.read()).hexdigest()
+            elif stat.S_ISLNK(st.st_mode):
+                digest = os.readlink(path)
+            seen.append((os.path.relpath(path, base), stat.S_IFMT(st.st_mode), st.st_size, digest))
     return seen
 
 
+class _VerbHelperImportBlocked(ImportError):
+    """Raised for an import of a helper module that is not loaded yet while the dispatch is intercepted."""
+
+
+class _VerbHelperImportGate:
+    """A sys.meta_path finder that records, then refuses, the import of any _opf_ helper module not loaded
+    yet, so the intercepted dispatch cannot load and run a helper that was not intercepted."""
+
+    def __init__(self, called):
+        self.called = called
+
+    def find_spec(self, name, path=None, target=None):
+        if name.startswith("_opf_"):
+            self.called.append("import " + name)
+            raise _VerbHelperImportBlocked(name)
+        return None
+
+
 def _verb_intercepted(here, dispatch, argv):
-    """Run dispatch(argv) with EVERY function this module defines, other than `dispatch` itself, replaced
-    by a recorder that returns 0, and the declaration gate emptied, so no handler under any name runs and
-    no store or declaration is read. Returns (the names called, in order, the leading _bootstrap dropped;
-    the exit; stderr). Nothing defined in this module is called between the replacement and the restore."""
+    """Run dispatch(argv) with EVERY function this module defines, other than `dispatch` itself, and every
+    callable attribute of every loaded _opf_ helper module replaced by a recorder that returns 0, the import
+    of any _opf_ helper not loaded yet refused, and the declaration gate emptied, so no handler or helper
+    under any name runs and no store or declaration is read. Returns (the names called, in order, a helper's
+    as "module.attribute" and a refused import as "import module", the leading _bootstrap dropped; the exit,
+    or the exception the dispatch raised; stderr). Between the replacement and the restore, nothing defined
+    in this module or a helper is called other than the import gate (_VerbHelperImportGate)."""
     import contextlib
     import io
     import types
     called = []
-    saved = [(name, value) for name, value in vars(here).items()
+    saved = [(here, name, value) for name, value in vars(here).items()
              if isinstance(value, types.FunctionType) and value.__module__ == here.__name__
              and value is not dispatch]
-    saved.append(("_DECLARATION_GATED", here._DECLARATION_GATED))
+    for module_name, module in sorted(sys.modules.items()):
+        if module_name.startswith("_opf_") and isinstance(module, types.ModuleType) and module is not here:
+            saved.extend((module, name, value) for name, value in vars(module).items()
+                         if callable(value) and value is not dispatch)
+    replaced = len(saved)
+    saved.append((here, "_DECLARATION_GATED", here._DECLARATION_GATED))
+    gate = _VerbHelperImportGate(called)
     err = io.StringIO()
     try:
-        for name, _value in saved[:-1]:
-            setattr(here, name, lambda *args, _n=name, **kwargs: called.append(_n) or EXIT_OK)
+        for owner, name, _value in saved[:replaced]:
+            label = name if owner is here else owner.__name__ + "." + name
+            setattr(owner, name, lambda *args, _n=label, **kwargs: called.append(_n) or EXIT_OK)
         here._DECLARATION_GATED = ()
+        sys.meta_path.insert(0, gate)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             routed = dispatch(list(argv))
     except Exception as exc:  # noqa: BLE001  reported as a fault by the caller, never a pass
         routed = exc
     finally:
-        for name, value in saved:
-            setattr(here, name, value)
+        while gate in sys.meta_path:
+            sys.meta_path.remove(gate)
+        for owner, name, value in saved:
+            setattr(owner, name, value)
     return called[1:] if called[:1] == ["_bootstrap"] else called, routed, err.getvalue()
 
 
-def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None):
+def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, engine_calls=None):
     """Return the faults of `table` (default VERB_STATUS) against `dispatch` (default main()) over `verbs`
     (default KNOWN_VERBS), with `refusals` (default _VERB_REFUSALS). Every verb appears exactly once and no
     other name does; each status is one of VERB_STATUSES, with a scope exactly when it is partial; a
@@ -24314,15 +24379,20 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None):
 
     Every probe runs with its working directory and --root in a scratch directory this function creates
     and removes, and a probe after which a path under that directory appeared, changed or vanished is a
-    fault. Routing is judged with every function of this module intercepted (_verb_intercepted), so no
-    handler under any name runs: an available or partial verb must reach exactly its own `_cmd_<verb>`.
-    An in progress verb is probed with no arguments, with --help and with --root: each must reach no
-    handler or exactly its own refusing handler, and only then does the real dispatch run it, which must
-    exit 2 with exactly the stub line or its refusal. A partial scope must read as _verb_scope_parts reads
-    it and name the verb's subcommands (_verb_subcommands) exactly once: each named as running must reach
-    its engine entry (_VERB_SUB_ENTRIES, intercepted) through the real handler; each named as exiting 2
-    must have its refusal in place (_verb_refusal_holds) and exit 2 from the real dispatch. An available
-    verb with a subcommand whose refusal is in place is a fault: it is partial."""
+    fault. Routing is judged with every function of this module and of every loaded helper intercepted
+    (_verb_intercepted), so no handler or helper under any name runs: an available or partial verb must
+    reach exactly its own `_cmd_<verb>`. An in progress verb is probed with no arguments, with --help and
+    with --root: each must reach no handler or exactly its own refusing handler, and must not raise, and
+    only then does the real dispatch run it, which must exit 2 with exactly the stub line or its refusal. A
+    partial scope must read as _verb_scope_parts reads it and name the verb's subcommands
+    (_verb_subcommands) exactly once: each named as running must reach its engine entry (_VERB_SUB_ENTRIES,
+    a stand-in that never calls the engine) straight from the real handler, with the handler's gates
+    (_VERB_SUB_GATES) passing; each named as exiting 2 must have its refusal in place (_verb_refusal_holds)
+    and exit 2 from the real dispatch. An available verb with a subcommand whose refusal is in place is a
+    fault: it is partial. Each engine entry is guarded for the whole run (_verb_engine_guard): it runs only
+    in the real dispatch of a subcommand named as exiting 2, and a call anywhere else is refused and is a
+    fault. Every guarded call, (entry, the subcommand run for real or None), is appended to
+    `engine_calls` when it is a list."""
     import contextlib
     import io
     import shutil
@@ -24349,7 +24419,17 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None):
     root = os.path.join(base, "root")
     inputs = os.path.join(base, "in")
     cwd = os.getcwd()
+    # Every engine entry is guarded for the whole run: it runs only during the real dispatch of a
+    # subcommand whose refusal is in place (phase[0] names it), and any other call is recorded and refused.
+    phase = [None]
+    calls = [] if engine_calls is None else engine_calls
+    guards = contextlib.ExitStack()
     try:
+        for module, attr in sorted(set((module, attr) for entries in _VERB_SUB_ENTRIES.values()
+                                       for module, attr, _sub in entries)):
+            owner = getattr(here, module)
+            guards.enter_context(patch.object(owner, attr, _verb_engine_guard(
+                getattr(owner, attr), module + "." + attr, phase, calls)))
         os.mkdir(root)
         os.mkdir(inputs)
         files = dict((name, os.path.join(inputs, name + ".toml")) for name in ("inputs", "plan", "approval"))
@@ -24424,26 +24504,41 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None):
                     reached = []
                     with contextlib.ExitStack() as stack:
                         for module, attr, entry_sub in _VERB_SUB_ENTRIES.get(verb, ()):
-                            owner = getattr(here, module)
-                            stack.enter_context(patch.object(owner, attr, _verb_entry_standin(
-                                getattr(owner, attr), caller, entry_sub, reached)))
+                            stack.enter_context(patch.object(getattr(here, module), attr,
+                                                             _verb_entry_standin(entry_sub, reached)))
+                        for module, attr in _VERB_SUB_GATES.get(verb, ()):
+                            stack.enter_context(patch.object(getattr(here, module), attr,
+                                                             lambda *args, **kwargs: None))
                         code, err = real(sub_argv(verb, sub))
-                    if reached != [sub]:
+                    if [name for name, _code in reached] != [sub]:
                         faults.append("{} {} is named as running but does not reach its engine entry (reached "
-                                      "{}, exit {!r}, stderr {!r})".format(verb, sub, reached, code, err))
+                                      "{}, exit {!r}, stderr {!r})".format(
+                                          verb, sub, [name for name, _code in reached], code, err))
+                    elif reached[0][1] is not caller:
+                        faults.append("{} {} reaches its engine entry from {}, not straight from {}; the "
+                                      "entry did not run".format(verb, sub, reached[0][1].co_name, caller.co_name))
                     unchanged("{} {} (running)".format(verb, sub))
                 for sub in parts[1]:
                     if not _verb_refusal_holds(verb, sub):
                         faults.append("{} {} is named as exiting 2 but no refusal of every argument list is in "
                                       "place for it".format(verb, sub))
                         continue
-                    code, err = real(sub_argv(verb, sub))
+                    phase[0] = "{} {}".format(verb, sub)
+                    try:
+                        code, err = real(sub_argv(verb, sub))
+                    finally:
+                        phase[0] = None
                     if code != EXIT_MALFORMED:
                         faults.append("{} {} is named as exiting 2 but exits {!r} (stderr {!r})".format(
                             verb, sub, code, err))
                     unchanged("{} {} (exiting 2)".format(verb, sub))
                 continue
             for argv, called, routed, err in routes:
+                if isinstance(routed, Exception):
+                    # An intercepted dispatch that raised is a fault, and the real dispatch is not run.
+                    faults.append("{} is marked in progress, but the intercepted dispatch of {} raised {!r} "
+                                  "(handlers reached {}); it is not run".format(verb, argv, routed, called))
+                    continue
                 if called and (called != ["_cmd_" + verb] or verb not in refusals):
                     faults.append("{} is marked in progress, but main() routes {} to {} and it is not a handler "
                                   "that refuses every argument list".format(verb, argv, called))
@@ -24463,8 +24558,13 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None):
     finally:
         os.chdir(cwd)
         shutil.rmtree(base, ignore_errors=True)
+        guards.close()
     if os.path.lexists(base):
         faults.append("the scratch directory {} could not be removed".format(base))
+    for name, during in calls:
+        if during is None:
+            faults.append("the real engine entry {} was called outside the real dispatch of a subcommand "
+                          "whose refusal is in place; it was refused and did not run".format(name))
     return faults
 
 
@@ -24480,7 +24580,9 @@ def _verb_status_self_test():
     handler renamed (main() routing init to another name), a refusal listed for an available verb (alone and
     with that verb marked in progress), an in progress verb that runs a handler only with arguments, a scope
     that does not read as a list, a refused subcommand named as running, a running subcommand named as
-    exiting 2, and record marked available. No flip runs a handler other than a refusing one."""
+    exiting 2, record marked available, main() dispatching an in progress verb straight to a helper module's
+    entry, an in progress verb whose dispatch raises, and an engine entry reached through a lambda. No flip runs a handler other than a refusing one,
+    and no flip makes a real engine call outside a subcommand whose refusal is in place."""
     here = sys.modules[__name__]
     faults = _verb_status_faults()
     real_main = main
@@ -24495,6 +24597,25 @@ def _verb_status_self_test():
         # main() routing migrate to a real handler once it has any argument
         if list(argv[:1]) == ["migrate"] and len(argv) > 1:
             return getattr(here, "_cmd_init")(list(argv[1:]))
+        return real_main(argv)
+
+    def to_helper(argv):
+        # main() dispatching upgrade straight to a helper module's entry, not to its own handler
+        if list(argv[:1]) == ["upgrade"]:
+            return here._opf_record.cli(list(argv[1:]))
+        return real_main(argv)
+
+    def reconcile_through_lambda(argv):
+        # main() reaching adopt reconcile's engine entry through a lambda, not straight from _cmd_adopt
+        if list(argv[:2]) == ["adopt", "reconcile"]:
+            call = lambda: here._opf_adopt_apply.reconcile_report(os.getcwd(), [])  # noqa: E731
+            return call()
+        return real_main(argv)
+
+    def raises_when_routed(argv):
+        # main() routing sync to a handler name this module does not define, so the dispatch raises
+        if list(argv[:1]) == ["sync"]:
+            return getattr(here, "_cmd_sync")(list(argv[1:]))
         return real_main(argv)
 
     def marked(verb, status, scope=""):
@@ -24522,6 +24643,11 @@ def _verb_status_self_test():
          "record create is named as exiting 2"),
         ("record-marked-available", dict(table=marked("record", "available")),
          "record is marked available but record receipt-repair exits 2"),
+        ("dispatch-to-helper", dict(dispatch=to_helper), "main() routes ['upgrade'] to ['_opf_record.cli']"),
+        ("intercepted-dispatch-raises", dict(dispatch=raises_when_routed),
+         "the intercepted dispatch of ['sync'] raised"),
+        ("engine-through-lambda", dict(dispatch=reconcile_through_lambda),
+         "adopt reconcile reaches its engine entry from <lambda>, not straight from _cmd_adopt"),
     )
     target = getattr(here, "_cmd_init", None)
     if target is None:
@@ -24530,12 +24656,19 @@ def _verb_status_self_test():
     here._verb_status_renamed_init = target
     try:
         for label, kwargs, needle in flips:
-            got = _verb_status_faults(**kwargs)
+            calls = []
+            got = _verb_status_faults(engine_calls=calls, **kwargs)
             if not any(needle in fault for fault in got):
                 faults.append("flip {} was not caught: {!r}".format(label, got))
             leaked = [fault for fault in got if "changed the scratch directory" in fault]
             if leaked:
                 faults.append("flip {} ran a handler that wrote: {!r}".format(label, leaked))
+            # The only real engine calls a flip may make are in the real dispatch of a subcommand whose
+            # refusal is in place; every other call, refused by the guard, counts here and must be 0.
+            stray = [name for name, during in calls if during is None]
+            if stray:
+                faults.append("flip {} made {} real engine call(s) outside a refusing subcommand: {!r}".format(
+                    label, len(stray), stray))
     finally:
         del here._verb_status_renamed_init
     if faults:
