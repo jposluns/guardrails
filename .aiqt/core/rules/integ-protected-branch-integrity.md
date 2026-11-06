@@ -7,9 +7,9 @@ facet: INTEG
 secondary: [TRUST]
 slug: protected-branch-integrity
 map-nist-airmf-broad: [MANAGE 4.1]
-map-nist-80053-tight: [CM-3, CM-5]
-map-nist-ssdf-tight: [PS.1.1]
-map-nist-ssdf-broad: [PW.7.1]
+map-nist-80053-tight: [CM-5]
+map-nist-80053-broad: [CM-3]
+map-nist-ssdf-broad: [PS.1.1, PW.7.1]
 map-iso-42001-broad: [A.6.1.3]
 map-iso-23894-broad: [A.7, B.7]
 ---

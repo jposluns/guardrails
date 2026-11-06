@@ -6,8 +6,7 @@ tier: 10
 facet: QUALI
 secondary: [TRUST]
 slug: surface-counterproductive-instructions
-map-nist-airmf-tight: [GOVERN 4.1]
-map-nist-airmf-broad: [GOVERN 3.2]
+map-nist-airmf-broad: [GOVERN 3.2, GOVERN 4.1]
 map-iso-42001-tight: [A.3.3]
 map-iso-23894-broad: [6.2, A.2]
 ---
