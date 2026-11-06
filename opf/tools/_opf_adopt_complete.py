@@ -20,8 +20,8 @@ through the prober the caller supplies, as check 4's doctor run does. The one wr
 exercise, which copies archived bytes into a private TemporaryDirectory scratch and digest-verifies the copy
 there; it never restores over the live tree.
 
-Inputs: the product root, the adoption run id, and a doctor callable (product_root to the
-_opf_check StoreValidation shape: status, findings, cannot_evaluate). The doctor's git observations are a
+Inputs: the product root, the adoption run id, and a doctor callable (product_root to the whole-store
+validator's own result, an _opf_check.StoreValidation by exact type). The doctor's git observations are a
 process-spawning gather, so the caller supplies the run (store_doctor builds one from caller-supplied inert
 observations); with no doctor, check 4 is CANNOT-EVALUATE, never a pass. Check 5 takes a prober callable
 (product_root, surface, probe) answering "denied" or "allowed" for one probe against one installed surface,
@@ -49,11 +49,13 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     refuses by), it records the approval itself, each receipt file row names a plan source with its
     disposition and before_digest, the live preimages of the sources the plan leaves live and no other
     check owns (keep, and non-occupying migrate) still equal their plan digests, and every planned
-    destination apply has already written and no other check owns (init-store members, non-CI create-file
-    and plant-governance paths, enable-hook registrations, and the registration
+    destination apply has already written and no other check owns (init-store members, create-file and
+    plant-governance paths other than the CI-only members, enable-hook registrations, and the registration
     chain's final manifest) holds exactly its planned bytes. The retire-disposed live files are check 6's,
     so an edited retire source flips check 6 only; the non-occupying move sources are check 3's; the
-    rendered views, CI members and consumer repointings are check 4's; a move-file destination is written
+    rendered views, the CI-only members (those no non-CI row also names) and consumer repointings are
+    check 4's, while a CI member a non-CI row also names (the tool tree both launcher rows bind) stays a
+    planned destination here too; a move-file destination is written
     only by the post-green relocation, so before green it is no live destination; and the receipt is
     compared by content in the receipt leg, because outcome events append to its file.
   2 discovery-accounting: the planning inventory (`opf.adoption.planning-inventory/v1`, the bytes the
@@ -73,7 +75,8 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     source is an observed file whose digest equals its plan digest.
   3 preservation-restore: the run's evidence bundle verifies from disk (_opf_adopt_apply.verify_bundle, the
     homes-1 evidence digest verification: every inventory and every payload it lists), and the bundle
-    inventory this check re-reads must again pass the apply shell's own inventory validator
+    inventory this check grades is the exact bytes that verification read (its inventory_bytes keyword),
+    never a second read, and must again pass the apply shell's own inventory validator
     (_opf_adopt_apply.validate_inventory), else CANNOT-EVALUATE; every
     archive-preserved source (retire, migrate and occupying, spec 14.2) sits at its run archive path,
     digest-matched and claimed by the bundle inventory, and the restore exercise reproduces each preserved
@@ -98,8 +101,10 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     destination holds exactly its planned bytes, a formerly occupied destination included (spec 14.1: once
     apply commits, restoring an archived file to the live tree takes a fresh plan, so old occupant bytes
     there are drift the plan does not account for); every consumer repointing holds its planned new bytes;
-    and every doctor finding fails the check, none set aside (doctor evidence whose findings or
-    cannot_evaluate is missing or not a list is CANNOT-EVALUATE, never read as empty). Check 4 is NEVER
+    and every doctor finding fails the check, none set aside (a doctor result that is not the whole-store
+    validator's own StoreValidation by exact type, doctor evidence whose findings or cannot_evaluate is
+    missing or not a list, and a VALID result whose per-check map is not exactly the strict roster graded
+    PASS are CANNOT-EVALUATE, never read as empty or green). Check 4 is NEVER
     VALID in this release: the shipped floor asserts store presence, not identity (the CI identity
     assertion is the deferred U25), so with every other condition met the check is CANNOT-EVALUATE naming
     U25; an earlier failure keeps its own reason. U25_CI_IDENTITY_ASSERTED is the one switch that lets
@@ -137,7 +142,7 @@ identity with the shipped template and recipe, not what GitHub runs: it does not
 repository that cancels or shadows this one (for example a concurrency group with cancel-in-progress),
 branch-protection or ruleset settings that do not require this workflow's check, or GitHub-side settings
 that disable Actions or this workflow; it does not read the opf/tools/opf.py the recipe launches, the
-remote actions the template names by tag (actions/checkout, actions/setup-python) or the runner image; it
+remote actions the template pins by commit SHA (actions/checkout, actions/setup-python) or the runner image; it
 compares against the template beside this evaluator, so a later pack release that changes the template
 leaves a plan whose recorded workflow digest pins the earlier template CANNOT-EVALUATE until it is planned
 again; and it is not a run of CI. Check 5 is CANNOT-EVALUATE until PR6 ships the pack's deny programs and
@@ -244,16 +249,26 @@ def _sources(ev):
 
 # --- check 1: authority and freshness -----------------------------------------------------------------
 
+def _ci_only(plan):
+    """The CI members check 1's destination sweep leaves to check 4: each path a CI row names that no non-CI
+    row also names. A member a non-CI row names too (the tool entry point and tool tree, which both the CI and
+    the pre-commit launcher rows bind) is that row's installed surface as well, so it stays a check 1 planned
+    destination and its drift moves check 1 with checks 4 and 5."""
+    rows = plan["enforcement"]
+    shared = {m["path"] for row in rows if row["platform"] != "ci" for m in row["members"]}
+    return {m["path"] for row in rows if row["platform"] == "ci" for m in row["members"]} - shared
+
+
 def _planned_destinations(ev):
     """Check 1's destination sweep: the {path: digest} of every planned destination apply has already
-    written and no other roster check owns. Render-views members, CI enforcement members and consumer
-    repointings are check 4's; the record-adoption receipt is compared by content in the receipt leg
+    written and no other roster check owns. Render-views members, CI-only enforcement members (_ci_only) and
+    consumer repointings are check 4's; the record-adoption receipt is compared by content in the receipt leg
     (outcome events append to its file); a move-file destination is written only by the post-green
     relocation (spec 14.2), so before green it is not a live destination. A register-unmanaged chain
     rewrites the frozen store manifest, so the chain's last new_digest replaces any scaffolded member
     digest there (_opf_adopt's registration-chain validation pins the chain to program order)."""
     plan = ev.plan
-    ci = {m["path"] for row in plan["enforcement"] if row["platform"] == "ci" for m in row["members"]}
+    ci = _ci_only(plan)
     wanted = {}
     for op in plan["ops"]:
         if op["op"] in ("create-file", "plant-governance"):
@@ -485,6 +500,20 @@ def _restore_exercise(items):
     return failed
 
 
+def _verified_inventory(ev):
+    """(verification, bundle inventory bytes or None) of the run's evidence bundle: verify_bundle hands back
+    the exact inventory bytes it read (its inventory_bytes keyword), and those are the bytes check 3 grades,
+    never a second read, so the claim test cannot rest on bytes the verification never saw. None when the
+    verification read no inventory.toml (an absent bundle or inventory, or a verification that stopped
+    before it: each already a bundle finding)."""
+    read = {}
+    try:
+        bundle = apply.verify_bundle(ev.product_root, ev.run_id, inventory_bytes=read)
+    except apply.AdoptApplyError as exc:
+        raise Unevaluable(str(exc))
+    return bundle, read.get(apply.inventory_rel(ev.run_id))
+
+
 def _check_preservation(ev, rep):
     """Spec 14.1 check 3: 'Preservation and restore: each retirement preimage, preserved at apply for a
     retire-disposed file and for a non-occupying migrate-disposed source alike, and each archived occupying
@@ -493,19 +522,15 @@ def _check_preservation(ev, rep):
     spec 14.2 relocates it only after the plan-bound green completion check, with digest-verified
     preservation, so this check accepts its move-destination preservation and verifies its frozen LIVE
     bytes against the plan digest instead."""
-    try:
-        bundle = apply.verify_bundle(ev.product_root, ev.run_id)
-    except apply.AdoptApplyError as exc:
-        raise Unevaluable(str(exc))
+    bundle, inventory = _verified_inventory(ev)
     if bundle.status == CANNOT_EVALUATE:
         raise Unevaluable("evidence bundle: " + "; ".join(bundle.findings))
     for f in bundle.findings:
         rep.finding("evidence bundle: " + f)
     listed = set()
-    inventory = _read(ev, apply.inventory_rel(ev.run_id))
     if inventory is not None:
         doc = _canonical(inventory, "the bundle inventory")
-        # The re-read inventory is held to the apply shell's own validator, as verify_bundle's read was.
+        # The verified bytes are held to the apply shell's own validator here as well.
         checked = apply.validate_inventory(doc, ev.run_id)
         if checked.status == CANNOT_EVALUATE:
             raise Unevaluable("the bundle inventory: " + "; ".join(checked.findings))
@@ -575,8 +600,8 @@ _SHIPPED_RECIPE = "enforcement/ci/opf-ci.sh"
 # The released digests of those two files (bare-hex sha256), generated and drift-gated: editing either file
 # without regenerating fails tools/gen_secret_patterns.py --check in CI. Never hand-edit this region.
 # BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with tools/gen_secret_patterns.py)
-_SHIPPED_TEMPLATE_SHA256 = '3048d80af20e7c6699aa54d908c6bddb905fe1f4b056b85c30559e5e94be5262'
-_SHIPPED_RECIPE_SHA256 = '0036e97e68163c6c6df6f3b3260cf5c38e19a0d3d8a3bb713afef2355a2f8104'
+_SHIPPED_TEMPLATE_SHA256 = '06e3aee534c802b45779b151fc0a04ca862c45fdffb6f298e8be04a80cfd35b6'
+_SHIPPED_RECIPE_SHA256 = 'f630855b4c96918e3e4e7e87cf8f4811c186e8ab59b6890be042b9631a70020c'
 # END generated OPF CI floor digests
 # Spec 14.1 check 4 requires that "CI asserts store presence and identity". The shipped recipe asserts
 # presence only (doctor --require-store, then render --check); the CI identity assertion is the deferred
@@ -682,6 +707,58 @@ def _ci_template_identity(ev, row):
     return why
 
 
+def _doctor_roster():
+    """The per-check roster a VALID doctor result must grade: exactly what the whole-store validator
+    requires of the store a clean-start adoption initializes in this release, a homes-1 store with no
+    active imported series (SUPPORTED_HOMES is 1, and import runs only after adoption completes), so
+    required_checks(1): the strict checks, every id read from the validator's own constants."""
+    import _opf_check
+    return tuple(_opf_check.required_checks(1))
+
+
+def _doctor_findings(result):
+    """The findings of one doctor run's `result`, which must be the whole-store validator's own result
+    (_opf_check.StoreValidation, by exact type, what validate_store and so store_doctor return), so a
+    callable's self-reported verdict of another shape is never read. Missing or non-list doctor evidence is
+    never read as empty. An INVALID result yields every finding, none set aside; a VALID one's per-check map
+    must hold exactly the strict roster (_doctor_roster) with every entry PASS. Anything else is Unevaluable
+    naming it. The run itself is the caller's and is trusted: this bars its result's shape, it does not
+    authenticate the run."""
+    import _opf_check
+    if type(result) is not _opf_check.StoreValidation:
+        raise Unevaluable("the doctor run returned a {}, not the whole-store validator's own result "
+                          "(_opf_check.StoreValidation): a verdict of another type is never read".format(
+                              type(result).__name__))
+    status, cannot, findings = result.status, result.cannot_evaluate, result.findings
+    if not isinstance(cannot, list) or not isinstance(findings, list):
+        raise Unevaluable("doctor evidence is not list-shaped (cannot_evaluate {}, findings {})".format(
+            type(cannot).__name__, type(findings).__name__))
+    if cannot or status not in (VALID, INVALID):
+        raise Unevaluable("doctor: {} {}".format(status, "; ".join(map(str, cannot))))
+    if status == INVALID and not findings:
+        raise Unevaluable("doctor reports INVALID with no finding")
+    if status == INVALID:
+        return list(findings)
+    checks = result.checks
+    if not isinstance(checks, dict):
+        raise Unevaluable("doctor evidence carries no per-check verdict map, so its roster is not shown "
+                          "graded")
+    roster = _doctor_roster()
+    missing = [cid for cid in roster if cid not in checks]
+    if missing:
+        raise Unevaluable("the doctor did not grade its full roster: {} absent from its roster (the "
+                          "whole-store validator's own strict roster)".format(", ".join(missing)))
+    unknown = sorted(set(checks) - set(roster))
+    if unknown:
+        raise Unevaluable("the doctor graded {} outside its required roster: the whole-store validator "
+                          "routes a check id it does not require to CANNOT-EVALUATE, never to VALID".format(
+                              ", ".join(unknown)))
+    ungraded = ["{} {}".format(cid, verdict) for cid, verdict in checks.items() if verdict != "PASS"]
+    if ungraded:
+        raise Unevaluable("doctor reports VALID while grading {}".format(", ".join(ungraded)))
+    return list(findings)
+
+
 def _check_operational(ev, rep):
     """Spec 14.1 check 4: 'Operational readiness: the store resolves to the planned identity, and CI
     asserts store presence and identity so absence cannot pass as NOT-APPLICABLE. Doctor validity and
@@ -744,19 +821,7 @@ def _check_operational(ev, rep):
                 rep.finding("consumer {!r} does not hold its planned repointing".format(op["path"]))
     if ev.doctor is None:
         raise Unevaluable("no doctor run was supplied; doctor validity is never assumed")
-    result = ev.doctor(ev.product_root)
-    status = getattr(result, "status", None)
-    cannot = getattr(result, "cannot_evaluate", None)
-    findings = getattr(result, "findings", None)
-    # Missing or non-list doctor evidence is never read as empty: it is CANNOT-EVALUATE.
-    if not isinstance(cannot, list) or not isinstance(findings, list):
-        raise Unevaluable("doctor evidence is not list-shaped (cannot_evaluate {}, findings {})".format(
-            type(cannot).__name__, type(findings).__name__))
-    if cannot or status not in (VALID, INVALID):
-        raise Unevaluable("doctor: {} {}".format(status, "; ".join(map(str, cannot))))
-    if status == INVALID and not findings:
-        raise Unevaluable("doctor reports INVALID with no finding")
-    for f in findings:
+    for f in _doctor_findings(ev.doctor(ev.product_root)):
         # Spec 14.1 check 4: any drift the plan does not account for fails the check, and the plan accounts
         # only by binding digests, so every doctor finding is reported; none is set aside.
         rep.finding("doctor: {}".format(f))
@@ -979,7 +1044,8 @@ _CONSUMER_OLD, _CONSUMER_NEW = b"old consumer\n", b"new consumer\n"
 # The enforcement members the plant rows plant beside the CI floor: the pre-commit launchers and the tool entry
 # point with the rest of its tool tree, which both launcher rows bind under the opf/ mirror
 # (_opf_adopt.canonical_plan_bindings), the registration file and the deny hook it runs, and the instruction
-# files. Check 1's destination sweep owns each but the tool tree, whose files are CI members too.
+# files. Check 1's destination sweep owns each, the tool tree included: its files are CI members too, but the
+# pre-commit row names them as well, so they are not CI-only (_ci_only).
 _PACK = {"opf/enforcement/precommit/pre-commit": b"#!/bin/sh\nexit 0\n",
          "opf/enforcement/precommit/install.sh": b"#!/bin/sh\nexit 0\n",
          "opf/tools/opf.py": b"tool entry point\n", ".claude/settings.json": b"{}\n",
@@ -1004,13 +1070,18 @@ def _ci_floor():
 
 
 class _Doctor:
-    """A doctor stub returning one fixed StoreValidation-shaped verdict."""
+    """A doctor stub returning one fixed result built by the test as the whole-store validator's own type
+    (_opf_check.StoreValidation), not a doctor run; by default VALID with the strict roster (_doctor_roster)
+    graded PASS. `result` is that object, so a vector can edit it after it is built."""
 
-    def __init__(self, status=VALID, findings=(), cannot=()):
-        self.status, self.findings, self.cannot_evaluate = status, list(findings), list(cannot)
+    def __init__(self, status=VALID, findings=(), cannot=(), checks=None):
+        import _opf_check
+        full = dict((cid, "PASS") for cid in _doctor_roster())
+        self.result = _opf_check.StoreValidation(status, list(findings), list(cannot),
+                                                 checks=full if checks is None else checks)
 
     def __call__(self, product_root):
-        return self
+        return self.result
 
 
 class _Surface:
@@ -1765,6 +1836,30 @@ def self_test():
                       and _says(got, WIRING, "member {!r} is absent".format(member) if label.endswith("absent")
                                 else "member {!r} does not hold its planned bytes".format(member))
                       and sorted(set(p for p, _probe in watched.calls)) == ["claude-code"])
+            # A member both the CI row and the pre-commit row name (the tool entry point both launcher rows
+            # bind) is not CI-only, so it stays a check 1 planned destination: absent or drifted, it reds check
+            # 1 beside check 4's CI leg and check 5's pre-commit surface. Dropping every CI member from the
+            # sweep, the plain CI set difference, leaves check 1 VALID here, which the flip shows.
+            shared = schema.TOOL_ENTRY
+            shared_rows = sorted(row["platform"] for row in schema.canonical_plan_bindings()["enforcement"]
+                                 if shared in [m["path"] for m in row["members"]])
+            trio = dict([(AUTHORITY, INVALID), (OPERATIONAL, CANNOT_EVALUATE), (WIRING, INVALID)])
+            for label, mutate, text in (
+                    ("absent", lambda r: _remove(r, shared), "planned destination {!r} is absent"),
+                    ("drifted", lambda r: _put(r, shared, b"tampered bytes\n"),
+                     "planned destination {!r} no longer holds its planned bytes")):
+                got = _case(lambda r, i, m=mutate: m(r))
+                check("check-1-shared-ci-member-" + label + "-red", shared_rows == ["ci", "pre-commit"]
+                      and _only(got, trio) and _says(got, AUTHORITY, text.format(shared))
+                      and _says(got, WIRING, "member {!r}".format(shared)))
+
+            def _ci_set_difference(plan):
+                return {m["path"] for row in plan["enforcement"] if row["platform"] == "ci" for m in row["members"]}
+
+            with mock.patch.object(here, "_ci_only", _ci_set_difference):
+                flipped = _case(lambda r, i: _remove(r, shared))
+            check("flip-1-shared-ci-member-set-difference-misses", flipped[AUTHORITY].status == VALID
+                  and not _only(flipped, trio))
             # Instruction members are not the probed surface: their drift moves check 1 only, never check 5.
             check("check-5-instructions-member-not-probed", _only(_case(lambda r, i: _put(
                 r, "AGENTS.md", b"tampered\n")), _red(AUTHORITY)))
@@ -2131,7 +2226,7 @@ def self_test():
         check("check-4-doctor-invalid-no-findings", _only(_case(lambda r, i: dict(doctor=_Doctor(INVALID))),
                                                           _red(OPERATIONAL, CANNOT_EVALUATE)))
         broken = _Doctor(VALID)
-        broken.findings = ("C-X: y",)  # iterable, but not the list the doctor contract promises
+        broken.result.findings = ("C-X: y",)  # iterable, but not the list the doctor contract promises
         check("check-4-doctor-findings-not-list", _only(_case(lambda r, i: dict(doctor=broken)),
                                                         _red(OPERATIONAL, CANNOT_EVALUATE)))
 
@@ -2141,9 +2236,9 @@ def self_test():
             for field in ("cannot_evaluate", "findings"):
                 shaped = _Doctor(VALID)
                 if label == "absent":
-                    delattr(shaped, field)
+                    delattr(shaped.result, field)
                 else:
-                    setattr(shaped, field, value)
+                    setattr(shaped.result, field, value)
                 check("check-4-doctor-{}-{}-cannot".format(field, label), _only(
                     _case(lambda r, i, d=shaped: dict(doctor=d)), _red(OPERATIONAL, CANNOT_EVALUATE)))
 
@@ -2156,6 +2251,65 @@ def self_test():
                                                 _red(OPERATIONAL, CANNOT_EVALUATE)))
         check("check-4-store-doctor-unobserved-not-green",
               _case(lambda r, i: dict(doctor=store_doctor()))[OPERATIONAL].status != VALID)
+        # Only the whole-store validator's own result type is read: a duck-typed stub carrying every one of
+        # its attributes, green, and a subclass of it are CANNOT-EVALUATE.
+        import types
+        import _opf_check
+        green = _Doctor().result
+        duck = types.SimpleNamespace(**dict((slot, getattr(green, slot))
+                                            for slot in _opf_check.StoreValidation.__slots__))
+        ducked = _case(lambda r, i: dict(doctor=lambda product_root: duck))
+        check("check-4-doctor-duck-typed-result-cannot", _only(ducked, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(ducked, OPERATIONAL, "the doctor run returned a SimpleNamespace, not the whole-store "
+                                             "validator's own result"))
+
+        def _legacy_doctor_findings(result):
+            # The attribute read this module used before the exact-type bar: any shape is accepted.
+            status = getattr(result, "status", None)
+            cannot = getattr(result, "cannot_evaluate", None)
+            findings = getattr(result, "findings", None)
+            if not isinstance(cannot, list) or not isinstance(findings, list):
+                raise Unevaluable("doctor evidence is not list-shaped")
+            if cannot or status not in (VALID, INVALID):
+                raise Unevaluable("doctor: {}".format(status))
+            if status == INVALID and not findings:
+                raise Unevaluable("doctor reports INVALID with no finding")
+            return list(findings)
+
+        # The mutant restoring the attribute read lets the duck-typed stub grade check 4 VALID (the switch is
+        # on here), so the vector above is load-bearing on the exact-type bar.
+        with mock.patch.object(here, "_doctor_findings", _legacy_doctor_findings):
+            check("check-4-doctor-duck-typed-mutant-passes",
+                  _only(_case(lambda r, i: dict(doctor=lambda product_root: duck)), {}))
+
+        class _Derived(_opf_check.StoreValidation):
+            __slots__ = ()
+        derived = _Derived(VALID, checks=dict(green.checks))
+        subclassed = _case(lambda r, i: dict(doctor=lambda product_root: derived))
+        check("check-4-doctor-result-subclass-cannot", _only(subclassed, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(subclassed, OPERATIONAL, "the doctor run returned a _Derived, not"))
+        # The full strict roster graded PASS: a check absent, a check graded other than PASS, or a check id
+        # outside the roster (the homes-2 evidence enumeration a homes-1 store never runs), under VALID.
+        check("check-4-doctor-roster-is-strict-roster", _doctor_roster() == tuple(_opf_check.REQUIRED_CHECKS))
+        first = _doctor_roster()[0]
+        lacking = dict((cid, verdict) for cid, verdict in green.checks.items() if cid != first)
+        gap = _case(lambda r, i: dict(doctor=_Doctor(checks=lacking)))
+        check("check-4-doctor-roster-check-absent-cannot", _only(gap, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(gap, OPERATIONAL, "the doctor did not grade its full roster: {} absent".format(first)))
+        failing = dict(green.checks, **dict([(first, "FINDING")]))
+        unpassed = _case(lambda r, i: dict(doctor=_Doctor(checks=failing)))
+        check("check-4-doctor-roster-check-not-pass-cannot", _only(unpassed, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(unpassed, OPERATIONAL, "doctor reports VALID while grading {} FINDING".format(first)))
+        padded = dict(green.checks, **dict([("C-EVIDENCE-ENUM", "PASS")]))
+        offroster = _case(lambda r, i: dict(doctor=_Doctor(checks=padded)))
+        check("check-4-doctor-roster-unknown-id-cannot", _only(offroster, _red(OPERATIONAL, CANNOT_EVALUATE))
+              and _says(offroster, OPERATIONAL, "the doctor graded C-EVIDENCE-ENUM outside its required roster"))
+        check("check-4-doctor-roster-empty-cannot", _only(_case(lambda r, i: dict(doctor=_Doctor(checks={}))),
+                                                          _red(OPERATIONAL, CANNOT_EVALUATE)))
+        # An INVALID result keeps its own findings whatever its per-check map holds.
+        kept = _case(lambda r, i: dict(doctor=_Doctor(INVALID, [_DRIFT], checks={})))
+        check("check-4-doctor-invalid-findings-kept", _only(kept, _red(OPERATIONAL))
+              and _says(kept, OPERATIONAL, "doctor: C-VIEW-DRIFT") and not _says(kept, OPERATIONAL, "roster"))
         check("check-4-manifest-removed-not-green", _only(_case(lambda r, i: _remove(
             r, ".working/toml/manifest.toml")),
             dict([(OPERATIONAL, CANNOT_EVALUATE), (AUTHORITY, INVALID)])))
@@ -2216,8 +2370,9 @@ def self_test():
                 ("r9-canonical-job-masks-schema-error", template + (
                     b"  bad:\n    runs-on: ubuntu-latest\n    permissions: {contents: banana}\n"
                     b"    steps:\n      - run: opf doctor --require-store\n")),
-                ("r9-step-without-run", template.replace(b"uses: actions/checkout@v4",
-                                                         b"uses: actions/checkout@v4\n        with: [broken]")),
+                ("r9-step-without-run", template.replace(
+                    b"uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4",
+                    b"uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4\n        with: [broken]")),
                 ("r9-job-id-dotted", template.replace(b"  opf:", b"  opf.bad:")),
                 ("r9-job-id-digit", template.replace(b"  opf:", b'  "1opf":')),
                 ("r9-strip-chomping", template.replace(b"run: " + command + b"\n",
@@ -2308,6 +2463,41 @@ def self_test():
         unclaimed = _case(lambda r, i: _unclaim(r, apply.archive_rel(_RUN, "legacy/RULES.md")))
         check("check-3-unclaimed-preimage-red", _only(unclaimed, _red(PRESERVATION))
               and _says(unclaimed, PRESERVATION, "not claimed by the run's bundle inventory"))
+        # The claim test grades the inventory bytes the verification read: an inventory that does not claim
+        # the preimage, swapped on disk for one that does once the verification has read it, still claims
+        # nothing, so the changed bytes cannot reach a pass.
+        preimage = apply.archive_rel(_RUN, "legacy/RULES.md")
+        genuine_verify = apply.verify_bundle
+        claiming = {}
+
+        def _drop_claim(r, i):
+            with open(os.path.join(r, *apply.inventory_rel(_RUN).split("/")), "rb") as fh:
+                claiming["bytes"] = fh.read()
+            _unclaim(r, preimage)
+
+        def _swapped(product_root, run_id, *, inventory_bytes=None):
+            checked = genuine_verify(product_root, run_id, inventory_bytes=inventory_bytes)
+            _put(product_root, apply.inventory_rel(_RUN), claiming["bytes"])
+            return checked
+        with mock.patch.object(apply, "verify_bundle", _swapped):
+            late = _case(_drop_claim)
+        check("check-3-claim-reads-verified-inventory-bytes", _only(late, _red(PRESERVATION))
+              and late[PRESERVATION].findings == [
+                  "preimage {!r} is not claimed by the run's bundle inventory".format(preimage)])
+
+        def _legacy_verified_inventory(ev):
+            # The second read this module made before sharing the verified bytes.
+            try:
+                bundle = apply.verify_bundle(ev.product_root, ev.run_id)
+            except apply.AdoptApplyError as exc:
+                raise Unevaluable(str(exc))
+            return bundle, _read(ev, apply.inventory_rel(ev.run_id))
+
+        # The mutant restoring the second read lets the swapped inventory carry check 3 to VALID, so the
+        # vector above is load-bearing on the shared bytes.
+        with mock.patch.object(apply, "verify_bundle", _swapped), \
+                mock.patch.object(here, "_verified_inventory", _legacy_verified_inventory):
+            check("check-3-second-read-mutant-passes", _only(_case(_drop_claim), {}))
         moved = _case(lambda r, i: _put(r, "adopter/MOVE.md", b"EDITED\n"))
         check("check-3-move-source-drifted-red", _only(moved, _red(PRESERVATION))
               and _says(moved, PRESERVATION, "MUST NOT be moved"))
@@ -2344,7 +2534,7 @@ def self_test():
         check("closed-bundle-inventory-garbage", _case(lambda r, i: _put(
             r, apply.inventory_rel(_RUN), b"x = ["))[PRESERVATION].status == CANNOT_EVALUATE)
         check("closed-symlink-retire-source", _case(_symlinked)[RETIREMENT].status == CANNOT_EVALUATE)
-        with mock.patch.object(apply, "verify_bundle", lambda *a: schema._cannot("bundle unreadable")):
+        with mock.patch.object(apply, "verify_bundle", lambda *a, **k: schema._cannot("bundle unreadable")):
             check("closed-bundle-cannot-load-bearing", _only(_case(), _red(PRESERVATION, CANNOT_EVALUATE)))
         check("closed-bad-run-id", all(r.status == CANNOT_EVALUATE for r in evaluate("/", "../x").values()))
         other_run = "adopt-20260917T120000Z-aaaaaaaaaaaaaaaa"
@@ -2584,14 +2774,19 @@ def self_test():
                     ("archive-write", ".working/archive/adoption/" + other_run + "/" + _ARCHIVE_PROBE),
                     ("sanctioned-writer", "nested/.working/machine/manifest.toml"),
                     ("render", "nested/views/.working/TODO.md")])
-                # Check 3 re-reads the bundle inventory after verify_bundle: that read is held to the apply
-                # shell's own inventory validator too (here verify_bundle is stubbed VALID, so only it grades).
+                # The inventory bytes verify_bundle hands back are held to the apply shell's own inventory
+                # validator too (here verify_bundle is stubbed VALID, handing back bytes the real one would
+                # refuse, so only that validator grades).
                 ev.plan = plan
                 bundled = _toml_file(root, apply.inventory_rel(_RUN))
                 bundled["file"].append(apply.inventory_row("../escape.md", b"x"))
-                _put(root, apply.inventory_rel(_RUN), _emit(bundled))
+                escaping = _emit(bundled)
+
+                def _lenient(product_root, run_id, *, inventory_bytes=None):
+                    inventory_bytes[apply.inventory_rel(_RUN)] = escaping
+                    return schema._ok()
                 direct = _Report()
-                with mock.patch.object(apply, "verify_bundle", lambda *a: schema._ok()):
+                with mock.patch.object(apply, "verify_bundle", _lenient):
                     try:
                         _check_preservation(ev, direct)
                     except Unevaluable as exc:

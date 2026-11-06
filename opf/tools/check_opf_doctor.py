@@ -42,7 +42,16 @@ and launch-failure normalization for BOTH steps (a missing or non-executable OPF
 step to 2, and an interpreter that VANISHES after a passing doctor fails the render step's own launch to 2);
 the usage guard (a surplus operand) exits 2 with NO step launched; the recipe run by a RELATIVE
 path under a hostile CDPATH naming a decoy pack still resolves its own directory and returns the true
-verdict; a committed clean store with ONE declared, planner-populated view red-flags end to end once the
+verdict; the recipe run from inside a decoy pack's ci directory with a dirname that is missing, fails
+(printing .) or prints nothing exits 2 with no step launched and the refusing guard's own message, with
+dash or bash as sh, the shells these vectors are run under (the failing one is held by the status check
+alone, the empty one by the non-empty check alone; busybox sh resolves dirname with its own built-in, so
+the PATH stubs do not reach it and these vectors do not apply there); a full recipe run with seven trace
+variables (GIT_TRACE, GIT_TRACE_SETUP, GIT_TRACE_PERFORMANCE, GIT_TRACE_PACKET, GIT_TRACE2,
+GIT_TRACE2_EVENT and GIT_TRACE2_PERF) naming a file outside the fixtures leaves that file unchanged (a
+regression guard over those seven alone, the vector setting no other trace variable such as
+GIT_TRACE_REFS: the recipe runs no git itself and opf.py's git reads drop every inherited GIT_ variable);
+a committed clean store with ONE declared, planner-populated view red-flags end to end once the
 view is edited (render --check 1, doctor 1, recipe 1) while both recipe runs leave the read-only snapshot
 unchanged, covering EXACTLY: every entry under the root with only the TOP-LEVEL .git directory pruned (a
 nested .git directory below the root is walked like any other entry), by lstat kind, mode, content digest
@@ -207,10 +216,11 @@ jobs:
     name: OPF store integrity
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.14'
       - name: OPF CI floor (doctor --require-store, then render --check)
@@ -474,7 +484,7 @@ def _self_test_isolated():
         _git(root, home, "commit", "-m", "seed store")
 
     def _run_ci_recipe(root, tool=None, extra_env=None, extra_args=(), cwd=None, recipe=None,
-                       preexec=None):
+                       preexec=None, stderr_sink=None):
         """Run the shipped CI recipe (opf/enforcement/ci/opf-ci.sh) over `root` with this interpreter as
         OPF_PYTHON, returning its exit status unmasked. A `root` of None omits the ROOT operand entirely
         (the recipe's documented no-operand invocation: ROOT defaults to the child's current directory,
@@ -486,7 +496,8 @@ def _self_test_isolated():
         working directory, and `recipe` substitutes a recipe path passed VERBATIM (the CDPATH vector runs
         a COPY by a RELATIVE path; the default stays the shipped recipe, absolute). `preexec` is
         forwarded to subprocess.run as preexec_fn (the SIGTERM-inherited-as-SIG_IGN vectors ignore
-        SIGTERM in the child before exec). A missing `sh`, a
+        SIGTERM in the child before exec). A `stderr_sink` list receives the recipe's stderr text (the
+        dirname vectors name the guard that refused). A missing `sh`, a
         missing shipped recipe, or a launch failure raises OSError (a harness error, exit 2 via
         _classify)."""
         sh = shutil.which("sh")
@@ -506,9 +517,21 @@ def _self_test_isolated():
             argv.append(str(root))
         argv += [str(a) for a in extra_args]
         proc = subprocess.run(argv, env=env, cwd=None if cwd is None else str(cwd),
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL if stderr_sink is None else subprocess.PIPE,
                               preexec_fn=preexec)
+        if stderr_sink is not None:
+            stderr_sink.append(proc.stderr.decode("utf-8", "replace"))
         return proc.returncode
+
+    def _absent(path):
+        """True when nothing is at `path`, False when something is. Any other error (an unreadable
+        parent, say) propagates as a harness error, so an unreadable log never reads as absent."""
+        try:
+            os.lstat(str(path))
+        except FileNotFoundError:
+            return True
+        return False
 
     def _run_render_check(root):
         """Run `opf.py render --check --root <root>` isolated (-I -B) with output discarded, returning its
@@ -817,7 +840,7 @@ def _self_test_isolated():
             rc = _run_ci_recipe(clean, tool=stub, extra_env=dict(OPF_STUB_LOG=str(usage_log)),
                                 extra_args=("surplus",))
             expect("ci-recipe-usage-surplus-operand",
-                   (rc, usage_log.exists()), (EXIT_ERROR, False))
+                   (rc, _absent(usage_log)), (EXIT_ERROR, True))
             # The CDPATH regression vector: the recipe resolves its own directory with `CDPATH= cd`; a
             # plain `cd` under a hostile CDPATH PRINTS the resolved directory (corrupting `here` with a
             # second output line) and can resolve into the CDPATH entry instead of the script's real
@@ -844,6 +867,52 @@ def _self_test_isolated():
                             cd_log.read_text(encoding="utf-8").splitlines()]
             expect("ci-recipe-relative-path-hostile-cdpath",
                    (rc, [c[0] for c in cd_calls]), (EXIT_OK, ["doctor", "render"]))
+            # The dirname vectors: the recipe resolves its own directory with a checked dirname, its
+            # status first, then a non-empty name, each refusing with its own message before any step.
+            # Each runs the shipped recipe by its absolute path from inside a decoy pack whose
+            # opf/tools/opf.py is the recording stub (sh and OPF_PYTHON are absolute), and asserts exit 2,
+            # no stub run and the refusing guard's own message, so the verdict holds under any `sh`: a
+            # shell whose `cd ""` stays put (dash) would run the decoy, one that refuses it (bash) would
+            # fail at `cd` with a different message, and both red the vector. A dirname that prints `.`
+            # and exits 7 is held by the status check alone (without it `.` is the decoy's ci directory);
+            # one that prints nothing and exits 0 is held by the non-empty check alone.
+            nodir_decoy = base / "no-dirname-decoy"
+            (nodir_decoy / "opf" / "enforcement" / "ci").mkdir(parents=True)
+            (nodir_decoy / "opf" / "tools").mkdir(parents=True)
+            shutil.copyfile(str(stub), str(nodir_decoy / "opf" / "tools" / "opf.py"))
+            status_refusal = "could not resolve the directory of {} (dirname failed)".format(
+                Path(__file__).resolve().parent.parent / "enforcement" / "ci" / "opf-ci.sh")
+            empty_refusal = status_refusal[:-len(" (dirname failed)")] + "\n"
+            for label, dirname_body, refusal in (
+                    ("missing", None, status_refusal),
+                    ("failed", "printf '.\\n'\nexit 7\n", status_refusal),
+                    ("empty", "exit 0\n", empty_refusal)):
+                nodir_bin = base / ("bin-dirname-" + label)
+                nodir_bin.mkdir()
+                if dirname_body is not None:
+                    (nodir_bin / "dirname").write_text("#!/bin/sh\n" + dirname_body, encoding="utf-8")
+                    (nodir_bin / "dirname").chmod(0o755)
+                nodir_log = base / ("stub-log-dirname-" + label)
+                nodir_err = []
+                rc = _run_ci_recipe(clean, extra_env=dict(OPF_STUB_LOG=str(nodir_log), PATH=str(nodir_bin)),
+                                    cwd=nodir_decoy / "opf" / "enforcement" / "ci", stderr_sink=nodir_err)
+                expect("ci-recipe-dirname-{}-refused".format(label),
+                       (rc, _absent(nodir_log), refusal in nodir_err[0]), (EXIT_ERROR, True, True))
+            # Inherited git trace destinations: a CI environment can carry GIT_TRACE* or GIT_TRACE2* naming
+            # any file, and no git process the recipe starts (its own or opf.py's observation gather) may
+            # write there. A file outside every fixture, named by each of the seven trace variables below
+            # (no other, GIT_TRACE_REFS for one), keeps its exact text through a full recipe run over the
+            # clean store, and the verdict stays 0.
+            trace_target = base / "trace-target"
+            trace_target.mkdir()
+            traced = trace_target / "TRACED.md"
+            traced.write_text("traced\n", encoding="utf-8")
+            trace_env = dict((name, str(traced)) for name in (
+                "GIT_TRACE", "GIT_TRACE_SETUP", "GIT_TRACE_PERFORMANCE", "GIT_TRACE_PACKET",
+                "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF"))
+            expect("ci-recipe-git-trace-scrubbed",
+                   (_run_ci_recipe(clean, extra_env=trace_env), traced.read_text(encoding="utf-8")),
+                   (EXIT_OK, "traced\n"))
             # The GitHub Actions template is held to its own stated discipline (a template nothing runs
             # in this repository would otherwise drift as prose) by EXACT TEXT over a BYTE GATE, not a
             # line pattern: the file is read as RAW BYTES and any byte outside printable ASCII
@@ -990,6 +1059,115 @@ def _self_test_isolated():
                    ["0x" + format(b, "02x") for b in range(256)
                     if b != 0x0A and not 0x20 <= b <= 0x7E
                     and not _wf_refused(wf_plant + bytes([b]) + b"# || true")], [])
+
+            # The checkout step must not leave the job token in the checkout's git config, where every
+            # later step can read it. Held as its own property, not only through the exact text, so an
+            # edit that changes the template and _WORKFLOW_CANONICAL together still reds while the
+            # checkout drops persist-credentials: false. The property reads the effective text as steps:
+            # a step opens at an item line ("      - ") and runs while its lines stay indented under it,
+            # and its item line is read with the "- " as spaces, so every key of the step sits at indent
+            # 8 whichever key comes first. Exactly one step has the key uses: actions/checkout@, and no
+            # other line names actions/checkout in any case (a flow mapping, a quoted key or a deeper
+            # uses: fails closed); that step has exactly one with: key, and the persist-credentials
+            # mentions inside that with: block are exactly the one line persist-credentials: false (the
+            # line under env:, beside a later true, or in another step does not count).
+            def _wf_checkout_drops_token(text):
+                lines = text.split("\n")
+                steps, step = [], None
+                for ln in lines:
+                    if ln.startswith("      - "):
+                        step = ["        " + ln[len("      - "):]]
+                        steps.append(step)
+                    elif step is not None and ln.startswith("        "):
+                        step.append(ln)
+                    else:
+                        step = None
+                checkouts = [s for s in steps if any(ln.startswith("        uses: actions/checkout@") for ln in s)]
+                if len(checkouts) != 1 or sum("actions/checkout" in ln.lower() for ln in lines) != 1:
+                    return False
+                body = checkouts[0]
+                keys = [i for i, ln in enumerate(body) if not ln.startswith("         ")]
+                withs = [i for i in keys if body[i] == "        with:"]
+                if len(withs) != 1:
+                    return False
+                end = next((i for i in keys if i > withs[0]), len(body))
+                return ([ln for ln in body[withs[0] + 1:end] if "persist-credentials" in ln]
+                        == ["          persist-credentials: false"])
+
+            expect("workflow-checkout-persist-credentials-false",
+                   (_wf_checkout_drops_token(_wf_effective(workflow.read_bytes())),
+                    _wf_checkout_drops_token(_WORKFLOW_CANONICAL)), (True, True))
+            wf_persist = "\n          persist-credentials: false"
+            for wf_label, wf_mutant in (
+                    ("absent", _WORKFLOW_CANONICAL.replace(wf_persist, "")),
+                    ("true", _WORKFLOW_CANONICAL.replace(wf_persist, wf_persist[:-5] + "true")),
+                    ("on-interpreter-step", _WORKFLOW_CANONICAL.replace(wf_persist, "").replace(
+                        "\n" + wf_step, wf_persist + "\n" + wf_step)),
+                    ("second-checkout-step", _WORKFLOW_CANONICAL.replace(
+                        wf_step, "      - uses: actions/checkout@v4\n" + wf_step)),
+                    ("second-checkout-step-name-first", _WORKFLOW_CANONICAL.replace(
+                        wf_step, "      - name: Check out again\n        uses: actions/checkout@v4\n" + wf_step)),
+                    ("under-env", _WORKFLOW_CANONICAL.replace(wf_persist, "\n        env:" + wf_persist)),
+                    ("false-then-true", _WORKFLOW_CANONICAL.replace(
+                        wf_persist, wf_persist + wf_persist[:-5] + "true")),
+                    ("second-checkout-flow-mapping", _WORKFLOW_CANONICAL.replace(
+                        wf_step, "      - {uses: actions/checkout@v4}\n" + wf_step))):
+                expect("workflow-checkout-persist-credentials-mutant-reds-{}".format(wf_label),
+                       (wf_mutant != _WORKFLOW_CANONICAL, _wf_checkout_drops_token(wf_mutant)), (True, False))
+            # The property holds whichever key the checkout step lists first: a sole checkout step spelled
+            # name: first, or with: first, that still carries the line in its with: block passes.
+            wf_checkout_uses = "uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4"
+            wf_checkout_with = "\n        with:\n          fetch-depth: 0" + wf_persist
+            for wf_label, wf_variant in (
+                    ("name-first", _WORKFLOW_CANONICAL.replace(
+                        "      - " + wf_checkout_uses, "      - name: Check out\n        " + wf_checkout_uses)),
+                    ("with-first", _WORKFLOW_CANONICAL.replace(
+                        "      - " + wf_checkout_uses + wf_checkout_with,
+                        "      - with:\n          fetch-depth: 0" + wf_persist + "\n        " + wf_checkout_uses))):
+                expect("workflow-checkout-persist-credentials-spelling-holds-{}".format(wf_label),
+                       (wf_variant != _WORKFLOW_CANONICAL, _wf_checkout_drops_token(wf_variant)), (True, True))
+
+            # Every action the template runs is pinned to a full commit SHA: a tag or a branch is a label
+            # its owner can move, and a short SHA is a prefix that can become ambiguous. Every effective
+            # line that mentions uses must be a uses: key whose value is owner/repo@ followed by 40
+            # lowercase hex digits, optionally trailed by " # " and the tag it was resolved from; a uses
+            # in any other spelling (a flow mapping, a quoted key) fails closed, and a text with no uses:
+            # at all proves nothing.
+            def _wf_actions_pinned(text):
+                found = 0
+                for ln in text.split("\n"):
+                    if "uses" not in ln:
+                        continue
+                    body = ln.lstrip(" ")
+                    if body.startswith("- "):
+                        body = body[2:]
+                    if not body.startswith("uses: "):
+                        return False
+                    value = body[len("uses: "):].partition(" # ")[0]
+                    action, at, ref = value.partition("@")
+                    if not (action and at and len(ref) == 40 and all(c in "0123456789abcdef" for c in ref)):
+                        return False
+                    found += 1
+                return found > 0
+
+            expect("workflow-actions-pinned-to-commit-sha",
+                   (_wf_actions_pinned(_wf_effective(workflow.read_bytes())),
+                    _wf_actions_pinned(_WORKFLOW_CANONICAL)), (True, True))
+            # Each uses: value of the canonical in turn (owner/repo@SHA # tag) is rewritten to the tag it
+            # was resolved from, to a branch name and to a seven-digit short SHA; every rewrite must red.
+            wf_uses = [ln.split("uses: ", 1)[1] for ln in _WORKFLOW_CANONICAL.split("\n") if "uses: " in ln]
+            expect("workflow-actions-pinned-mutant-uses-count", len(wf_uses), 2)
+            for wf_pinned in wf_uses:
+                wf_action, _wf_at, wf_sha = wf_pinned.partition(" # ")[0].partition("@")
+                wf_tag = wf_pinned.partition(" # ")[2]
+                for wf_label, wf_ref in (("tag", wf_tag), ("branch", "main"), ("short-sha", wf_sha[:7])):
+                    wf_mutant = _WORKFLOW_CANONICAL.replace(wf_pinned, wf_action + "@" + wf_ref)
+                    expect("workflow-actions-pinned-mutant-reds-{}-{}".format(wf_action.rpartition("/")[2], wf_label),
+                           (wf_mutant != _WORKFLOW_CANONICAL, _wf_actions_pinned(wf_mutant)), (True, False))
+            wf_mutant = _WORKFLOW_CANONICAL.replace(
+                wf_step, "      - {uses: actions/github-script@" + "0" * 40 + "}\n" + wf_step)
+            expect("workflow-actions-pinned-mutant-reds-flow-mapping",
+                   (wf_mutant != _WORKFLOW_CANONICAL, _wf_actions_pinned(wf_mutant)), (True, False))
 
             # --- The recipe end to end over a REAL drifted view (U16): a committed clean store
             # with ONE declared view, populated through the U4 engine's own public planner
@@ -1217,7 +1395,7 @@ def _self_test_isolated():
                 env.update(extra)
             return env
 
-        def _run(args, cwd, extra=None, stdout=subprocess.DEVNULL):
+        def _run(args, cwd, extra=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
             # Run a pack script under sh and return its exit status. A missing sh is a harness error.
             sh = shutil.which("sh")
             if sh is None:
@@ -1225,7 +1403,7 @@ def _self_test_isolated():
             argv = [os.path.abspath(sh)] + list(args)
             try:
                 proc = subprocess.run(argv, cwd=str(cwd), env=_env(extra),
-                                      stdout=stdout, stderr=subprocess.DEVNULL, timeout=300)
+                                      stdout=stdout, stderr=stderr, timeout=300)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise OSError("could not run {} in {} ({})".format(args, cwd, exc))
             return proc.returncode
@@ -2256,13 +2434,13 @@ def _self_test_isolated():
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]
 
-            def _stubbed(root, rc_doctor=0, rc_render=0, args=(), extra=None):
+            def _stubbed(root, rc_doctor=0, rc_render=0, args=(), extra=None, stderr=subprocess.DEVNULL):
                 serial[0] += 1
                 log = base / "stub-log-{}".format(serial[0])
                 env = dict(OPF_TOOL=str(stub), OPF_STUB_LOG=str(log),
                            OPF_STUB_RC_DOCTOR=str(rc_doctor), OPF_STUB_RC_RENDER=str(rc_render))
                 env.update(extra or dict())
-                rc = _run([rel + "/pre-commit"] + list(args), root, env)
+                rc = _run([rel + "/pre-commit"] + list(args), root, env, stderr=stderr)
                 calls = []
                 if log.is_file():
                     calls = [line.split(chr(31)) for line in log.read_text(encoding="utf-8").splitlines()]
@@ -2294,6 +2472,26 @@ def _self_test_isolated():
             expect("hook-abnormal-status-normalized", (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
             rc, calls, _f = _stubbed(stubbed, args=("x",))
             expect("hook-usage", (rc, calls), (EXIT_ERROR, []))
+
+            # The snapshot's remote list holds one value per line, so a push URL that still holds a line
+            # break once git's own line ending is removed exits 2 naming it, before any step: a trailing
+            # newline, a double newline and an inner newline alike. A plain push URL runs both steps.
+            def _pushurl_hook(tag, pushurl):
+                root = _fixture("pushurl-" + tag, remote="https://example.invalid/org/store.git")
+                _git(root, home, "config", "remote.origin.pushurl", pushurl)
+                err = base / ("pushurl-" + tag + ".err")
+                with open(str(err), "wb") as fh:
+                    rc, calls, _f = _stubbed(root, stderr=fh)
+                return rc, [c[0] for c in calls], err.read_text(encoding="utf-8")
+
+            line_break = ("opf-pre-commit: cannot evaluate: the push URL of remote origin holds a line break, "
+                          "which the snapshot cannot carry\n")
+            for tag, pushurl in (("trailing-newline", "/srv/store\n"), ("double-newline", "/srv/store\n\n"),
+                                 ("inner-newline", "/srv/a\nb")):
+                expect("hook-pushurl-line-break-refused-" + tag, _pushurl_hook(tag, pushurl),
+                       (EXIT_ERROR, [], line_break))
+            expect("hook-pushurl-plain-passes", _pushurl_hook("plain", "/srv/store"),
+                   (EXIT_OK, ["doctor", "render"], ""))
             # Every snapshot is removed on exit.
             expect("hook-snapshots-removed", sorted(os.listdir(str(snaps))), [])
             # Fail closed, each before any step: a git older than the 2.32 floor, and an environment whose
@@ -2356,7 +2554,9 @@ def _self_test_isolated():
               "stopping before render, launch failures -> 2 for BOTH steps (a missing or non-executable "
               "interpreter before doctor, an interpreter vanishing before render), a surplus operand a "
               "usage 2 with no step run, a relative invocation under a hostile CDPATH -> the true "
-              "verdict, a committed drifted view -> 1 end to end (render --check, doctor, "
+              "verdict, a missing, failing or empty dirname -> 2 with no step run and the refusing "
+              "guard named, seven inherited GIT_TRACE*/GIT_TRACE2* destinations left unchanged, a "
+              "committed drifted view -> 1 end to end (render --check, doctor, "
               "recipe), both recipe runs read-only over EXACTLY this snapshot (every entry under the "
               "root with only the top-level .git pruned, nested .git dirs walked, by lstat "
               "kind/mode/content/target; the directory set; the root and .git/hooks directory "

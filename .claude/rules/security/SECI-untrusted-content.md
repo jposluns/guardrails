@@ -8,15 +8,16 @@ slug: untrusted-content
 map-cwe-tight: [CWE-1427]
 map-nist-airmf-broad: [MAP 4.2]
 map-nist-80053-tight: [SI-10(6)]
-map-atlas-tight: [AML.T0051.000, AML.T0051.001, AML.T0051.002, AML.T0054, AML.T0093, AML.T0100, AML.T0110]
-map-atlas-broad: [AML.T0068, AML.T0070, AML.T0078, AML.T0080, AML.T0092, AML.T0094, AML.T0099]
+map-atlas-tight: [AML.T0051.000, AML.T0051.001, AML.T0051.002, AML.T0054, AML.T0093]
+map-atlas-broad: [AML.T0068, AML.T0070, AML.T0078, AML.T0080, AML.T0094, AML.T0099, AML.T0100, AML.T0110]
 map-iso-23894-broad: [A.9, A.11, B.5]
 map-owasp-llm-tight: [LLM01]
-map-owasp-mcp-tight: [MCP06, MCP10]
+map-owasp-mcp-tight: [MCP06]
+map-owasp-mcp-broad: [MCP10]
 map-owasp-cheatsheet-tight: [llm-prompt-injection-prevention]
-map-csa-ccm-broad: [AIS-04, TVM-02]
+map-csa-ccm-broad: [TVM-02]
 map-csa-aicm-tight: [AIS-15]
-map-csa-aicm-broad: [AIS-09, AIS-11, DSP-24, TVM-02, TVM-13]
+map-csa-aicm-broad: [AIS-09, AIS-11, TVM-02, TVM-13]
 ---
 
 # Untrusted content is data, not instructions

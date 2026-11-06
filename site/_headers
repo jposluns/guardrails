@@ -1,0 +1,10 @@
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'unsafe-inline' https://ajax.cloudflare.com https://static.cloudflareinsights.com; connect-src 'self' https://cloudflareinsights.com; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Frame-Options: DENY
+  Permissions-Policy: accelerometer=(), autoplay=(), bluetooth=(), browsing-topics=(), camera=(), display-capture=(), fullscreen=(), geolocation=(), gyroscope=(), hid=(), magnetometer=(), microphone=(), midi=(), payment=(), serial=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
+
+/draft/*
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'unsafe-inline' https://ajax.cloudflare.com https://static.cloudflareinsights.com; connect-src 'self' https://cloudflareinsights.com; style-src 'self'; font-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Robots-Tag: noindex

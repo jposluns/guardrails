@@ -11,7 +11,7 @@
       "source_artefact": "CSA AI Controls Matrix v1.1.0",
       "retrieved": "2026-07-07",
       "catalogue": "subset",
-      "ids_cited": 79,
+      "ids_cited": 73,
       "ids_total": null
     },
     "csa-ccm": {
@@ -25,7 +25,7 @@
       "source_artefact": "CSA Cloud Controls Matrix v4.1.0",
       "retrieved": "2026-07-07",
       "catalogue": "subset",
-      "ids_cited": 57,
+      "ids_cited": 50,
       "ids_total": null
     },
     "iso-23894": {
@@ -53,7 +53,7 @@
       "source_artefact": "ISO/IEC 42001:2023, Annex A and clauses 4-10 (headings only)",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 18,
+      "ids_cited": 17,
       "ids_total": null
     },
     "atlas": {
@@ -67,7 +67,7 @@
       "source_artefact": "MITRE ATLAS content version 2026.06, techniques.csv",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 67,
+      "ids_cited": 63,
       "ids_total": null
     },
     "cwe": {
@@ -95,7 +95,7 @@
       "source_artefact": "NIST SP 800-53 Rev 5, OSCAL catalog",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 67,
+      "ids_cited": 66,
       "ids_total": null
     },
     "nist-airmf": {
@@ -109,7 +109,7 @@
       "source_artefact": "NIST AI 100-1, AI Risk Management Framework 1.0",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 24,
+      "ids_cited": 21,
       "ids_total": null
     },
     "nist-ssdf": {
@@ -123,7 +123,7 @@
       "source_artefact": "NIST SP 800-218 v1.1 SSDF, OSCAL catalog",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 20,
+      "ids_cited": 18,
       "ids_total": null
     },
     "owasp-api": {
@@ -179,7 +179,7 @@
       "source_artefact": "OWASP Cheat Sheet Series (OWASP/CheatSheetSeries repo, commit f54d8de, 2026-07-04)",
       "retrieved": "2026-08-16",
       "catalogue": "subset",
-      "ids_cited": 27,
+      "ids_cited": 26,
       "ids_total": null
     },
     "owasp-llm": {
@@ -267,16 +267,6 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "DSP-24",
-      "identifier_title": "Data Differentiation and Relevance"
-    },
-    {
-      "rule_id": "datbnd",
-      "rule_title": "Classify content by sensitivity tier",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-data-boundary.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
       "identifier": "IAM-16",
       "identifier_title": "Knowledge Access Control - Need to Know"
     },
@@ -289,6 +279,16 @@
       "fit": "tight",
       "identifier": "DSP-04",
       "identifier_title": "Data Classification"
+    },
+    {
+      "rule_id": "secsec",
+      "rule_title": "Keep secrets out",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "AIS-12",
+      "identifier_title": "Source Code Management"
     },
     {
       "rule_id": "secsec",
@@ -317,16 +317,6 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "AIS-12",
-      "identifier_title": "Source Code Management"
-    },
-    {
-      "rule_id": "secsec",
-      "rule_title": "Keep secrets out",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "IAM-14",
       "identifier_title": "Credentials Management"
     },
@@ -337,8 +327,8 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "IAM-18",
-      "identifier_title": "Agent Access Restriction"
+      "identifier": "IAM-05",
+      "identifier_title": "Least Privilege"
     },
     {
       "rule_id": "seclpr",
@@ -346,9 +336,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "IAM-05",
-      "identifier_title": "Least Privilege"
+      "fit": "broad",
+      "identifier": "IAM-18",
+      "identifier_title": "Agent Access Restriction"
     },
     {
       "rule_id": "seclpr",
@@ -377,6 +367,16 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
+      "identifier": "AIS-11",
+      "identifier_title": "Agents Security Boundaries"
+    },
+    {
+      "rule_id": "secncb",
+      "rule_title": "No cross-context bleed",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "AIS-14",
       "identifier_title": "AI Cache Protection"
     },
@@ -397,28 +397,8 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "AIS-11",
-      "identifier_title": "Agents Security Boundaries"
-    },
-    {
-      "rule_id": "secncb",
-      "rule_title": "No cross-context bleed",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-cross-context-bleed.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "I&S-06",
       "identifier_title": "Segmentation and Segregation"
-    },
-    {
-      "rule_id": "secndc",
-      "rule_title": "No disclosure of secrets or hidden context",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-no-hidden-context-disclosure.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "AIS-15",
-      "identifier_title": "Prompt Differentiation"
     },
     {
       "rule_id": "secndc",
@@ -457,16 +437,6 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "SEF-07",
-      "identifier_title": "Incident Management and Response"
-    },
-    {
-      "rule_id": "secrot",
-      "rule_title": "Rotate a leaked secret",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "CEK-12",
       "identifier_title": "Key Rotation"
     },
@@ -476,9 +446,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-19",
-      "identifier_title": "Key Compromise"
+      "fit": "broad",
+      "identifier": "CEK-13",
+      "identifier_title": "Key Revocation"
     },
     {
       "rule_id": "secrot",
@@ -486,7 +456,27 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
+      "identifier": "IAM-14",
+      "identifier_title": "Credentials Management"
+    },
+    {
+      "rule_id": "secrot",
+      "rule_title": "Rotate a leaked secret",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SEF-07",
+      "identifier_title": "Incident Management and Response"
+    },
+    {
+      "rule_id": "secau1",
+      "rule_title": "Strong authentication",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "IAM-14",
       "identifier_title": "Credentials Management"
     },
@@ -499,16 +489,6 @@
       "fit": "tight",
       "identifier": "IAM-13",
       "identifier_title": "Strong Authentication"
-    },
-    {
-      "rule_id": "secau1",
-      "rule_title": "Strong authentication",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "IAM-14",
-      "identifier_title": "Credentials Management"
     },
     {
       "rule_id": "secazn",
@@ -587,6 +567,26 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
+      "identifier": "MDS-02",
+      "identifier_title": "Model Artifact Scanning"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "MDS-09",
+      "identifier_title": "Model Signing/Ownership Verification"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "MDS-12",
       "identifier_title": "Open Model Risk Assessment"
     },
@@ -597,8 +597,38 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "TVM-06",
-      "identifier_title": "External Library Vulnerabilities"
+      "identifier": "STA-01",
+      "identifier_title": "Supply Chain Risk Management Policies and Procedures"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "STA-08",
+      "identifier_title": "Supply Chain Inventory"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "STA-09",
+      "identifier_title": "Service Bill of Material (BOM)"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "STA-10",
+      "identifier_title": "Supply Chain Risk Management"
     },
     {
       "rule_id": "secsup",
@@ -611,66 +641,6 @@
       "identifier_title": "Application and Service Approval"
     },
     {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "MDS-02",
-      "identifier_title": "Model Artifact Scanning"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "MDS-09",
-      "identifier_title": "Model Signing/Ownership Verification"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-01",
-      "identifier_title": "Supply Chain Risk Management Policies and Procedures"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-08",
-      "identifier_title": "Supply Chain Inventory"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-09",
-      "identifier_title": "Service Bill of Material (BOM)"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-10",
-      "identifier_title": "Supply Chain Risk Management"
-    },
-    {
       "rule_id": "secfid",
       "rule_title": "Validate federated identity and token flows",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
@@ -679,16 +649,6 @@
       "fit": "broad",
       "identifier": "IAM-13",
       "identifier_title": "Strong Authentication"
-    },
-    {
-      "rule_id": "secfid",
-      "rule_title": "Validate federated identity and token flows",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "IAM-14",
-      "identifier_title": "Credentials Management"
     },
     {
       "rule_id": "secfid",
@@ -716,9 +676,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CCC-04",
-      "identifier_title": "Unauthorized Change Protection"
+      "fit": "broad",
+      "identifier": "GRC-15",
+      "identifier_title": "Human supervision"
     },
     {
       "rule_id": "sechau",
@@ -727,8 +687,8 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "GRC-15",
-      "identifier_title": "Human supervision"
+      "identifier": "CCC-04",
+      "identifier_title": "Unauthorized Change Protection"
     },
     {
       "rule_id": "secinp",
@@ -816,7 +776,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CEK-10",
       "identifier_title": "Key Generation"
     },
@@ -826,17 +786,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-11",
-      "identifier_title": "Key Purpose"
-    },
-    {
-      "rule_id": "seckey",
-      "rule_title": "Key management",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CEK-12",
       "identifier_title": "Key Rotation"
     },
@@ -846,7 +796,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CEK-13",
       "identifier_title": "Key Revocation"
     },
@@ -856,7 +806,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CEK-14",
       "identifier_title": "Key Destruction"
     },
@@ -867,8 +817,8 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "CEK-21",
-      "identifier_title": "Key Inventory Management"
+      "identifier": "CEK-11",
+      "identifier_title": "Key Purpose"
     },
     {
       "rule_id": "seclpt",
@@ -889,16 +839,6 @@
       "fit": "broad",
       "identifier": "IAM-10",
       "identifier_title": "Management of Privileged Access Roles"
-    },
-    {
-      "rule_id": "seclpt",
-      "rule_title": "Least-privilege tool and file access",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "UEM-02",
-      "identifier_title": "Application and Service Approval"
     },
     {
       "rule_id": "seclpt",
@@ -941,16 +881,6 @@
       "identifier_title": "Audit Logs Sanitization"
     },
     {
-      "rule_id": "secred",
-      "rule_title": "Redact sensitive content from logs",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "LOG-09",
-      "identifier_title": "Log Records"
-    },
-    {
       "rule_id": "secenc",
       "rule_title": "Encode output for its sink",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md",
@@ -987,16 +917,6 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "AIS-13",
-      "identifier_title": "AI Sandboxing"
-    },
-    {
-      "rule_id": "secout",
-      "rule_title": "Generated output is untrusted input",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
       "identifier": "TVM-13",
       "identifier_title": "Guardrails"
     },
@@ -1009,6 +929,26 @@
       "fit": "tight",
       "identifier": "AIS-10",
       "identifier_title": "Output Validation"
+    },
+    {
+      "rule_id": "secpsn",
+      "rule_title": "Resist data, model, and memory poisoning",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "DSP-23",
+      "identifier_title": "Data Integrity Check"
+    },
+    {
+      "rule_id": "secpsn",
+      "rule_title": "Resist data, model, and memory poisoning",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "MDS-01",
+      "identifier_title": "Training Pipeline Security"
     },
     {
       "rule_id": "secpsn",
@@ -1039,26 +979,6 @@
       "fit": "tight",
       "identifier": "DSP-21",
       "identifier_title": "Data Poisoning Prevention & Detection"
-    },
-    {
-      "rule_id": "secpsn",
-      "rule_title": "Resist data, model, and memory poisoning",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "DSP-23",
-      "identifier_title": "Data Integrity Check"
-    },
-    {
-      "rule_id": "secpsn",
-      "rule_title": "Resist data, model, and memory poisoning",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "MDS-01",
-      "identifier_title": "Training Pipeline Security"
     },
     {
       "rule_id": "secpsn",
@@ -1147,16 +1067,6 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "MDS-02",
-      "identifier_title": "Model Artifact Scanning"
-    },
-    {
-      "rule_id": "secdsz",
-      "rule_title": "Deserialize untrusted data only as data",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-safe-deserialization.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
       "identifier": "MDS-13",
       "identifier_title": "Secure Model Format"
     },
@@ -1169,16 +1079,6 @@
       "fit": "broad",
       "identifier": "CCC-06",
       "identifier_title": "Change Management Baseline"
-    },
-    {
-      "rule_id": "seccfg",
-      "rule_title": "Secure by default configuration",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "CCC-07",
-      "identifier_title": "Detection of Baseline Deviation"
     },
     {
       "rule_id": "seccfg",
@@ -1229,26 +1129,6 @@
       "fit": "tight",
       "identifier": "LOG-09",
       "identifier_title": "Log Records"
-    },
-    {
-      "rule_id": "seclog",
-      "rule_title": "Security logging with traceable context",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "LOG-12",
-      "identifier_title": "Transaction/Activity Logging"
-    },
-    {
-      "rule_id": "seclog",
-      "rule_title": "Security logging with traceable context",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "LOG-13",
-      "identifier_title": "Access Control Logs"
     },
     {
       "rule_id": "sectok",
@@ -1316,9 +1196,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "AIS-09",
-      "identifier_title": "Input Validation"
+      "fit": "broad",
+      "identifier": "AIS-10",
+      "identifier_title": "Output Validation"
     },
     {
       "rule_id": "sectvl",
@@ -1326,7 +1206,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "AIS-11",
       "identifier_title": "Agents Security Boundaries"
     },
@@ -1337,18 +1217,8 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "AIS-13",
-      "identifier_title": "AI Sandboxing"
-    },
-    {
-      "rule_id": "sectvl",
-      "rule_title": "Validate tool arguments before use",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "IAM-18",
-      "identifier_title": "Agent Access Restriction"
+      "identifier": "AIS-09",
+      "identifier_title": "Input Validation"
     },
     {
       "rule_id": "secunt",
@@ -1369,16 +1239,6 @@
       "fit": "broad",
       "identifier": "AIS-11",
       "identifier_title": "Agents Security Boundaries"
-    },
-    {
-      "rule_id": "secunt",
-      "rule_title": "Untrusted content is data, not instructions",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "DSP-24",
-      "identifier_title": "Data Differentiation and Relevance"
     },
     {
       "rule_id": "secunt",
@@ -1417,78 +1277,8 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "AIS-12",
-      "identifier_title": "Source Code Management"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "MDS-02",
-      "identifier_title": "Model Artifact Scanning"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "MDS-12",
-      "identifier_title": "Open Model Risk Assessment"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "STA-09",
-      "identifier_title": "Service Bill of Material (BOM)"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "TVM-06",
-      "identifier_title": "External Library Vulnerabilities"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
       "identifier": "UEM-02",
       "identifier_title": "Application and Service Approval"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-08",
-      "identifier_title": "Supply Chain Inventory"
-    },
-    {
-      "rule_id": "secres",
-      "rule_title": "Bounded consumption and safe failure",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-resource-bounds.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "AIS-13",
-      "identifier_title": "AI Sandboxing"
     },
     {
       "rule_id": "secres",
@@ -1517,16 +1307,6 @@
       "framework": "csa-aicm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "DSP-17",
-      "identifier_title": "Sensitive Data Protection"
-    },
-    {
-      "rule_id": "secmin",
-      "rule_title": "Minimize personal data sent to AI services",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "DSP-08",
       "identifier_title": "Data Privacy by Design and Default"
     },
@@ -1536,7 +1316,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "DSP-12",
       "identifier_title": "Limitation of Purpose in Personal Data Processing"
     },
@@ -1546,7 +1326,17 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
+      "identifier": "DSP-17",
+      "identifier_title": "Sensitive Data Protection"
+    },
+    {
+      "rule_id": "secmin",
+      "rule_title": "Minimize personal data sent to AI services",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "DSP-22",
       "identifier_title": "Privacy Enhancing Technologies"
     },
@@ -1556,9 +1346,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
       "framework": "csa-aicm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "DSP-11",
       "identifier_title": "Personal Data Access, Reversal, Rectification and Deletion"
+    },
+    {
+      "rule_id": "secdrr",
+      "rule_title": "Honour residency, retention, and deletion",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
+      "framework": "csa-aicm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "DSP-19",
+      "identifier_title": "Data Location"
     },
     {
       "rule_id": "secdrr",
@@ -1569,16 +1369,6 @@
       "fit": "tight",
       "identifier": "DSP-16",
       "identifier_title": "Data Retention and Deletion"
-    },
-    {
-      "rule_id": "secdrr",
-      "rule_title": "Honour residency, retention, and deletion",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
-      "framework": "csa-aicm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "DSP-19",
-      "identifier_title": "Data Location"
     },
     {
       "rule_id": "secpur",
@@ -1666,7 +1456,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "IAM-05",
       "identifier_title": "Least Privilege"
     },
@@ -1707,16 +1497,6 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "SEF-07",
-      "identifier_title": "Incident Management and Response"
-    },
-    {
-      "rule_id": "secrot",
-      "rule_title": "Rotate a leaked secret",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "CEK-12",
       "identifier_title": "Key Rotation"
     },
@@ -1726,9 +1506,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-19",
-      "identifier_title": "Key Compromise"
+      "fit": "broad",
+      "identifier": "CEK-13",
+      "identifier_title": "Key Revocation"
     },
     {
       "rule_id": "secrot",
@@ -1736,7 +1516,27 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
+      "identifier": "IAM-14",
+      "identifier_title": "Credentials Management"
+    },
+    {
+      "rule_id": "secrot",
+      "rule_title": "Rotate a leaked secret",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SEF-07",
+      "identifier_title": "Incident Management and Response"
+    },
+    {
+      "rule_id": "secau1",
+      "rule_title": "Strong authentication",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "IAM-14",
       "identifier_title": "Credentials Management"
     },
@@ -1749,16 +1549,6 @@
       "fit": "tight",
       "identifier": "IAM-13",
       "identifier_title": "Strong Authentication"
-    },
-    {
-      "rule_id": "secau1",
-      "rule_title": "Strong authentication",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "IAM-14",
-      "identifier_title": "Credentials Management"
     },
     {
       "rule_id": "secazn",
@@ -1807,8 +1597,38 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "TVM-06",
-      "identifier_title": "External Library Vulnerabilities"
+      "identifier": "STA-01",
+      "identifier_title": "Supply Chain Risk Management Policies and Procedures"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "STA-08",
+      "identifier_title": "Supply Chain Inventory"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "STA-09",
+      "identifier_title": "Service Bill of Material (BOM)"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "STA-10",
+      "identifier_title": "Supply Chain Risk Management"
     },
     {
       "rule_id": "secsup",
@@ -1821,46 +1641,6 @@
       "identifier_title": "Application and Service Approval"
     },
     {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-01",
-      "identifier_title": "Supply Chain Risk Management Policies and Procedures"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-08",
-      "identifier_title": "Supply Chain Inventory"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-09",
-      "identifier_title": "Service Bill of Material (BOM)"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-10",
-      "identifier_title": "Supply Chain Risk Management"
-    },
-    {
       "rule_id": "secfid",
       "rule_title": "Validate federated identity and token flows",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
@@ -1869,16 +1649,6 @@
       "fit": "broad",
       "identifier": "IAM-13",
       "identifier_title": "Strong Authentication"
-    },
-    {
-      "rule_id": "secfid",
-      "rule_title": "Validate federated identity and token flows",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-federated-identity-flow.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "IAM-14",
-      "identifier_title": "Credentials Management"
     },
     {
       "rule_id": "secfid",
@@ -1937,16 +1707,6 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "IAM-12",
-      "identifier_title": "Unique Identities"
-    },
-    {
-      "rule_id": "secagt",
-      "rule_title": "Trust between agents is earned, not inherited",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "broad",
       "identifier": "IAM-13",
       "identifier_title": "Strong Authentication"
     },
@@ -1976,9 +1736,39 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CEK-10",
       "identifier_title": "Key Generation"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "CEK-12",
+      "identifier_title": "Key Rotation"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "CEK-13",
+      "identifier_title": "Key Revocation"
+    },
+    {
+      "rule_id": "seckey",
+      "rule_title": "Key management",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "CEK-14",
+      "identifier_title": "Key Destruction"
     },
     {
       "rule_id": "seckey",
@@ -1991,46 +1781,6 @@
       "identifier_title": "Key Purpose"
     },
     {
-      "rule_id": "seckey",
-      "rule_title": "Key management",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-12",
-      "identifier_title": "Key Rotation"
-    },
-    {
-      "rule_id": "seckey",
-      "rule_title": "Key management",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-13",
-      "identifier_title": "Key Revocation"
-    },
-    {
-      "rule_id": "seckey",
-      "rule_title": "Key management",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-14",
-      "identifier_title": "Key Destruction"
-    },
-    {
-      "rule_id": "seckey",
-      "rule_title": "Key management",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-key-management.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CEK-21",
-      "identifier_title": "Key Inventory Management"
-    },
-    {
       "rule_id": "seclpt",
       "rule_title": "Least-privilege tool and file access",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md",
@@ -2039,16 +1789,6 @@
       "fit": "broad",
       "identifier": "IAM-10",
       "identifier_title": "Management of Privileged Access Roles"
-    },
-    {
-      "rule_id": "seclpt",
-      "rule_title": "Least-privilege tool and file access",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "UEM-02",
-      "identifier_title": "Application and Service Approval"
     },
     {
       "rule_id": "seclpt",
@@ -2089,16 +1829,6 @@
       "fit": "tight",
       "identifier": "LOG-08",
       "identifier_title": "Audit Logs Sanitization"
-    },
-    {
-      "rule_id": "secred",
-      "rule_title": "Redact sensitive content from logs",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-log-redaction.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "LOG-09",
-      "identifier_title": "Log Records"
     },
     {
       "rule_id": "secenc",
@@ -2206,16 +1936,6 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "broad",
-      "identifier": "CCC-07",
-      "identifier_title": "Detection of Baseline Deviation"
-    },
-    {
-      "rule_id": "seccfg",
-      "rule_title": "Secure by default configuration",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
       "fit": "tight",
       "identifier": "AIS-02",
       "identifier_title": "Application Security Baseline Requirements"
@@ -2259,26 +1979,6 @@
       "fit": "tight",
       "identifier": "LOG-09",
       "identifier_title": "Log Records"
-    },
-    {
-      "rule_id": "seclog",
-      "rule_title": "Security logging with traceable context",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "LOG-12",
-      "identifier_title": "Transaction/Activity Logging"
-    },
-    {
-      "rule_id": "seclog",
-      "rule_title": "Security logging with traceable context",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "LOG-13",
-      "identifier_title": "Access Control Logs"
     },
     {
       "rule_id": "sectok",
@@ -2341,26 +2041,6 @@
       "identifier_title": "Threat Analysis and Modelling"
     },
     {
-      "rule_id": "sectvl",
-      "rule_title": "Validate tool arguments before use",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "AIS-04",
-      "identifier_title": "Secure Application Development Lifecycle"
-    },
-    {
-      "rule_id": "secunt",
-      "rule_title": "Untrusted content is data, not instructions",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "AIS-04",
-      "identifier_title": "Secure Application Development Lifecycle"
-    },
-    {
       "rule_id": "secunt",
       "rule_title": "Untrusted content is data, not instructions",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
@@ -2387,48 +2067,8 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "STA-03",
-      "identifier_title": "SSRM Supply Chain"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "STA-09",
-      "identifier_title": "Service Bill of Material (BOM)"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "TVM-06",
-      "identifier_title": "External Library Vulnerabilities"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "broad",
       "identifier": "UEM-02",
       "identifier_title": "Application and Service Approval"
-    },
-    {
-      "rule_id": "secvde",
-      "rule_title": "Verify a dependency exists before adding it",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "STA-08",
-      "identifier_title": "Supply Chain Inventory"
     },
     {
       "rule_id": "secres",
@@ -2457,16 +2097,6 @@
       "framework": "csa-ccm",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "DSP-17",
-      "identifier_title": "Sensitive Data Protection"
-    },
-    {
-      "rule_id": "secmin",
-      "rule_title": "Minimize personal data sent to AI services",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "DSP-08",
       "identifier_title": "Data Privacy by Design and Default"
     },
@@ -2476,9 +2106,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "DSP-12",
       "identifier_title": "Limitation of Purpose in Personal Data Processing"
+    },
+    {
+      "rule_id": "secmin",
+      "rule_title": "Minimize personal data sent to AI services",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "DSP-17",
+      "identifier_title": "Sensitive Data Protection"
     },
     {
       "rule_id": "secdrr",
@@ -2486,9 +2126,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
       "framework": "csa-ccm",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "DSP-11",
       "identifier_title": "Personal Data Access, Reversal, Rectification and Deletion"
+    },
+    {
+      "rule_id": "secdrr",
+      "rule_title": "Honour residency, retention, and deletion",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
+      "framework": "csa-ccm",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "DSP-19",
+      "identifier_title": "Data Location"
     },
     {
       "rule_id": "secdrr",
@@ -2499,16 +2149,6 @@
       "fit": "tight",
       "identifier": "DSP-16",
       "identifier_title": "Data Retention and Deletion"
-    },
-    {
-      "rule_id": "secdrr",
-      "rule_title": "Honour residency, retention, and deletion",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
-      "framework": "csa-ccm",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "DSP-19",
-      "identifier_title": "Data Location"
     },
     {
       "rule_id": "secpur",
@@ -2627,8 +2267,8 @@
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
-      "identifier": "A.12",
-      "identifier_title": "Transparency and explainability"
+      "identifier": "6.7",
+      "identifier_title": "Recording and reporting"
     },
     {
       "rule_id": "nocncl",
@@ -2636,9 +2276,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "6.7",
-      "identifier_title": "Recording and reporting"
+      "fit": "broad",
+      "identifier": "A.12",
+      "identifier_title": "Transparency and explainability"
     },
     {
       "rule_id": "prtbrn",
@@ -2659,16 +2299,6 @@
       "fit": "broad",
       "identifier": "B.7",
       "identifier_title": "System life cycle issues"
-    },
-    {
-      "rule_id": "trkasy",
-      "rule_title": "A launched task stays observable",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-track-launched-work.md",
-      "framework": "iso-23894",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "6.7",
-      "identifier_title": "Recording and reporting"
     },
     {
       "rule_id": "wowo01",
@@ -2711,16 +2341,6 @@
       "identifier_title": "Maintainability"
     },
     {
-      "rule_id": "smlcng",
-      "rule_title": "Prefer the smallest correct change",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-smallest-correct-change.md",
-      "framework": "iso-23894",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "A.7",
-      "identifier_title": "Maintainability"
-    },
-    {
       "rule_id": "srfcp1",
       "rule_title": "Surface a counterproductive instruction before executing it",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md",
@@ -2734,16 +2354,6 @@
       "rule_id": "srfcp1",
       "rule_title": "Surface a counterproductive instruction before executing it",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md",
-      "framework": "iso-23894",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "A.2",
-      "identifier_title": "Accountability"
-    },
-    {
-      "rule_id": "asadv1",
-      "rule_title": "Assess and advise are discussion only",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-assess-advise-discussion-only.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
@@ -2766,19 +2376,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "6.7",
       "identifier_title": "Recording and reporting"
-    },
-    {
-      "rule_id": "clrfy1",
-      "rule_title": "Clarify before acting",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-clarify-before-acting.md",
-      "framework": "iso-23894",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "6.2",
-      "identifier_title": "Communication and consultation"
     },
     {
       "rule_id": "cntdef",
@@ -2846,7 +2446,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "6.7",
       "identifier_title": "Recording and reporting"
     },
@@ -2877,6 +2477,16 @@
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
+      "identifier": "B.4",
+      "identifier_title": "Level of automation"
+    },
+    {
+      "rule_id": "deccls",
+      "rule_title": "Decision classification before enacting",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md",
+      "framework": "iso-23894",
+      "relation": "aligns with guidance",
+      "fit": "broad",
       "identifier": "A.2",
       "identifier_title": "Accountability"
     },
@@ -2886,17 +2496,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md",
       "framework": "iso-23894",
       "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "A.2",
-      "identifier_title": "Accountability"
-    },
-    {
-      "rule_id": "deccls",
-      "rule_title": "Decision classification before enacting",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/20-PROGR-decision-classification-before-enacting.md",
-      "framework": "iso-23894",
-      "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "B.4",
       "identifier_title": "Level of automation"
     },
@@ -3177,6 +2777,16 @@
       "framework": "iso-23894",
       "relation": "aligns with guidance",
       "fit": "broad",
+      "identifier": "A.4",
+      "identifier_title": "Availability and quality of training and test data"
+    },
+    {
+      "rule_id": "secpsn",
+      "rule_title": "Resist data, model, and memory poisoning",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
+      "framework": "iso-23894",
+      "relation": "aligns with guidance",
+      "fit": "broad",
       "identifier": "A.11",
       "identifier_title": "Security"
     },
@@ -3189,16 +2799,6 @@
       "fit": "broad",
       "identifier": "B.5",
       "identifier_title": "Risk sources related to machine learning"
-    },
-    {
-      "rule_id": "secpsn",
-      "rule_title": "Resist data, model, and memory poisoning",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
-      "framework": "iso-23894",
-      "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "A.4",
-      "identifier_title": "Availability and quality of training and test data"
     },
     {
       "rule_id": "seccfg",
@@ -3376,7 +2976,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-reference-capture.md",
       "framework": "iso-42001",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "A.7.5",
       "identifier_title": "Data provenance"
     },
@@ -3536,7 +3136,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md",
       "framework": "iso-42001",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "10.2",
       "identifier_title": "Nonconformity and corrective action"
     },
@@ -3766,7 +3366,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
       "framework": "iso-42001",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "A.6.2.8",
       "identifier_title": "AI system recording of event logs"
     },
@@ -3781,22 +3381,12 @@
       "identifier_title": "AI system operation and monitoring"
     },
     {
-      "rule_id": "secmin",
-      "rule_title": "Minimize personal data sent to AI services",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
-      "framework": "iso-42001",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "A.7.6",
-      "identifier_title": "Data preparation"
-    },
-    {
       "rule_id": "corrob",
       "rule_title": "Corroborate external claims",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-corroborate-external-claims.md",
       "framework": "atlas",
       "relation": "mitigates technique",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "AML.T0067.000",
       "identifier_title": "Citations"
     },
@@ -3877,8 +3467,8 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "broad",
-      "identifier": "AML.T0083",
-      "identifier_title": "Credentials from AI Agent Configuration"
+      "identifier": "AML.T0095.000",
+      "identifier_title": "Code Repositories"
     },
     {
       "rule_id": "secsec",
@@ -3907,8 +3497,8 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "tight",
-      "identifier": "AML.T0095.000",
-      "identifier_title": "Code Repositories"
+      "identifier": "AML.T0083",
+      "identifier_title": "Credentials from AI Agent Configuration"
     },
     {
       "rule_id": "seclpr",
@@ -4107,28 +3697,8 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "broad",
-      "identifier": "AML.T0018.002",
-      "identifier_title": "Embed Malware"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "broad",
       "identifier": "AML.T0111",
       "identifier_title": "AI Supply Chain Reputation Inflation"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "broad",
-      "identifier": "AML.T0112.001",
-      "identifier_title": "AI Artifacts"
     },
     {
       "rule_id": "secsup",
@@ -4197,6 +3767,16 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "tight",
+      "identifier": "AML.T0018.002",
+      "identifier_title": "Embed Malware"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "tight",
       "identifier": "AML.T0104",
       "identifier_title": "Publish Poisoned AI Agent Tool"
     },
@@ -4209,6 +3789,16 @@
       "fit": "tight",
       "identifier": "AML.T0109",
       "identifier_title": "AI Supply Chain Rug Pull"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "tight",
+      "identifier": "AML.T0112.001",
+      "identifier_title": "AI Artifacts"
     },
     {
       "rule_id": "sechau",
@@ -4227,8 +3817,8 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "broad",
-      "identifier": "AML.T0086",
-      "identifier_title": "Exfiltration via AI Agent Tool Invocation"
+      "identifier": "AML.T0081",
+      "identifier_title": "Modify AI Agent Configuration"
     },
     {
       "rule_id": "sechau",
@@ -4236,9 +3826,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md",
       "framework": "atlas",
       "relation": "mitigates technique",
-      "fit": "tight",
-      "identifier": "AML.T0081",
-      "identifier_title": "Modify AI Agent Configuration"
+      "fit": "broad",
+      "identifier": "AML.T0086",
+      "identifier_title": "Exfiltration via AI Agent Tool Invocation"
     },
     {
       "rule_id": "sechau",
@@ -4296,7 +3886,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md",
       "framework": "atlas",
       "relation": "mitigates technique",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "AML.T0073",
       "identifier_title": "Impersonation"
     },
@@ -4441,16 +4031,6 @@
       "identifier_title": "LLM Response Rendering"
     },
     {
-      "rule_id": "secout",
-      "rule_title": "Generated output is untrusted input",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "tight",
-      "identifier": "AML.T0102",
-      "identifier_title": "Generate Malicious Commands"
-    },
-    {
       "rule_id": "secpin",
       "rule_title": "Referenced instructions are pinned and re-verified",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-pin-referenced-instructions.md",
@@ -4477,8 +4057,8 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "broad",
-      "identifier": "AML.T0010.002",
-      "identifier_title": "Data"
+      "identifier": "AML.T0066",
+      "identifier_title": "Retrieval Content Crafting"
     },
     {
       "rule_id": "secpsn",
@@ -4486,9 +4066,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
       "framework": "atlas",
       "relation": "mitigates technique",
-      "fit": "broad",
-      "identifier": "AML.T0066",
-      "identifier_title": "Retrieval Content Crafting"
+      "fit": "tight",
+      "identifier": "AML.T0010.002",
+      "identifier_title": "Data"
     },
     {
       "rule_id": "secpsn",
@@ -4576,7 +4156,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-prompt-trust-hierarchy.md",
       "framework": "atlas",
       "relation": "mitigates technique",
-      "fit": "broad",
+      "fit": "tight",
       "identifier": "AML.T0054",
       "identifier_title": "LLM Jailbreak"
     },
@@ -4651,16 +4231,6 @@
       "identifier_title": "Command and Scripting Interpreter"
     },
     {
-      "rule_id": "sectvl",
-      "rule_title": "Validate tool arguments before use",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "broad",
-      "identifier": "AML.T0102",
-      "identifier_title": "Generate Malicious Commands"
-    },
-    {
       "rule_id": "secunt",
       "rule_title": "Untrusted content is data, not instructions",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
@@ -4707,16 +4277,6 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "broad",
-      "identifier": "AML.T0092",
-      "identifier_title": "Manipulate User LLM Chat History"
-    },
-    {
-      "rule_id": "secunt",
-      "rule_title": "Untrusted content is data, not instructions",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "broad",
       "identifier": "AML.T0094",
       "identifier_title": "Delay Execution of LLM Instructions"
     },
@@ -4729,6 +4289,26 @@
       "fit": "broad",
       "identifier": "AML.T0099",
       "identifier_title": "AI Agent Tool Data Poisoning"
+    },
+    {
+      "rule_id": "secunt",
+      "rule_title": "Untrusted content is data, not instructions",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
+      "identifier": "AML.T0100",
+      "identifier_title": "AI Agent Clickbait"
+    },
+    {
+      "rule_id": "secunt",
+      "rule_title": "Untrusted content is data, not instructions",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
+      "framework": "atlas",
+      "relation": "mitigates technique",
+      "fit": "broad",
+      "identifier": "AML.T0110",
+      "identifier_title": "AI Agent Tool Poisoning"
     },
     {
       "rule_id": "secunt",
@@ -4781,32 +4361,12 @@
       "identifier_title": "Prompt Infiltration via Public-Facing Application"
     },
     {
-      "rule_id": "secunt",
-      "rule_title": "Untrusted content is data, not instructions",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "tight",
-      "identifier": "AML.T0100",
-      "identifier_title": "AI Agent Clickbait"
-    },
-    {
-      "rule_id": "secunt",
-      "rule_title": "Untrusted content is data, not instructions",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "tight",
-      "identifier": "AML.T0110",
-      "identifier_title": "AI Agent Tool Poisoning"
-    },
-    {
       "rule_id": "secvde",
       "rule_title": "Verify a dependency exists before adding it",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
       "framework": "atlas",
       "relation": "mitigates technique",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "AML.T0011.001",
       "identifier_title": "Malicious Package"
     },
@@ -4867,26 +4427,6 @@
       "framework": "atlas",
       "relation": "mitigates technique",
       "fit": "broad",
-      "identifier": "AML.T0024.000",
-      "identifier_title": "Infer Training Data Membership"
-    },
-    {
-      "rule_id": "secmin",
-      "rule_title": "Minimize personal data sent to AI services",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "broad",
-      "identifier": "AML.T0024.001",
-      "identifier_title": "Invert AI Model"
-    },
-    {
-      "rule_id": "secmin",
-      "rule_title": "Minimize personal data sent to AI services",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
-      "framework": "atlas",
-      "relation": "mitigates technique",
-      "fit": "tight",
       "identifier": "AML.T0057",
       "identifier_title": "LLM Data Leakage"
     },
@@ -5826,7 +5366,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "SI-2",
       "identifier_title": "Flaw Remediation"
     },
@@ -5837,16 +5377,6 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "SA-10",
-      "identifier_title": "Developer Configuration Management"
-    },
-    {
-      "rule_id": "artbr1",
-      "rule_title": "Branch and merge only on green",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "CM-3",
       "identifier_title": "Configuration Change Control"
     },
@@ -5856,14 +5386,14 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CM-3(2)",
       "identifier_title": "Testing, Validation, and Documentation of Changes"
     },
     {
-      "rule_id": "brnrot",
-      "rule_title": "Cut branches from the live protected line and re-home after a rewrite",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md",
+      "rule_id": "artbr1",
+      "rule_title": "Branch and merge only on green",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-and-merge-on-green.md",
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
@@ -5876,19 +5406,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CM-3",
-      "identifier_title": "Configuration Change Control"
-    },
-    {
-      "rule_id": "brnrot",
-      "rule_title": "Cut branches from the live protected line and re-home after a rewrite",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CM-3(2)",
-      "identifier_title": "Testing, Validation, and Documentation of Changes"
+      "fit": "broad",
+      "identifier": "SA-10",
+      "identifier_title": "Developer Configuration Management"
     },
     {
       "rule_id": "chkfcl",
@@ -5896,7 +5416,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "SI-17",
       "identifier_title": "Fail-safe Procedures"
     },
@@ -5936,7 +5456,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CM-3",
       "identifier_title": "Configuration Change Control"
     },
@@ -5957,8 +5477,8 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "SI-2",
-      "identifier_title": "Flaw Remediation"
+      "identifier": "SA-11",
+      "identifier_title": "Developer Testing and Evaluation"
     },
     {
       "rule_id": "septsk",
@@ -5977,8 +5497,8 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "SA-11",
-      "identifier_title": "Developer Testing and Evaluation"
+      "identifier": "CM-3(2)",
+      "identifier_title": "Testing, Validation, and Documentation of Changes"
     },
     {
       "rule_id": "valgat",
@@ -5986,9 +5506,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-validation-gates-apply.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CM-3(2)",
-      "identifier_title": "Testing, Validation, and Documentation of Changes"
+      "fit": "broad",
+      "identifier": "SA-11",
+      "identifier_title": "Developer Testing and Evaluation"
     },
     {
       "rule_id": "wowo01",
@@ -5996,7 +5516,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "AC-6",
       "identifier_title": "Least Privilege"
     },
@@ -6056,7 +5576,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-findings-are-fixed-not-argued.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "SI-2",
       "identifier_title": "Flaw Remediation"
     },
@@ -6076,7 +5596,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-high-assurance-verification.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "SA-11(3)",
       "identifier_title": "Independent Verification of Assessment Plans and Evidence"
     },
@@ -6089,16 +5609,6 @@
       "fit": "broad",
       "identifier": "SA-11(3)",
       "identifier_title": "Independent Verification of Assessment Plans and Evidence"
-    },
-    {
-      "rule_id": "mindep",
-      "rule_title": "Minimize external dependencies in favour of standard libraries",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-minimize-dependencies.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "SA-8",
-      "identifier_title": "Security and Privacy Engineering Principles"
     },
     {
       "rule_id": "tsthrm",
@@ -6116,7 +5626,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-test-hermeticity.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "SA-11",
       "identifier_title": "Developer Testing and Evaluation"
     },
@@ -6146,7 +5656,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-change-record.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CM-3",
       "identifier_title": "Configuration Change Control"
     },
@@ -6226,9 +5736,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "AC-3",
-      "identifier_title": "Access Enforcement"
+      "fit": "broad",
+      "identifier": "AC-6",
+      "identifier_title": "Least Privilege"
     },
     {
       "rule_id": "seclpr",
@@ -6237,8 +5747,8 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "AC-6",
-      "identifier_title": "Least Privilege"
+      "identifier": "AC-3",
+      "identifier_title": "Access Enforcement"
     },
     {
       "rule_id": "secncb",
@@ -6277,8 +5787,8 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "IR-4",
-      "identifier_title": "Incident Handling"
+      "identifier": "IA-5",
+      "identifier_title": "Authenticator Management"
     },
     {
       "rule_id": "secrot",
@@ -6286,9 +5796,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "IA-5",
-      "identifier_title": "Authenticator Management"
+      "fit": "broad",
+      "identifier": "IR-4",
+      "identifier_title": "Incident Handling"
     },
     {
       "rule_id": "secau1",
@@ -6306,9 +5816,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "broad",
-      "identifier": "IA-5(7)",
-      "identifier_title": "No Embedded Unencrypted Static Authenticators"
+      "fit": "tight",
+      "identifier": "IA-2",
+      "identifier_title": "Identification and Authentication (Organizational Users)"
     },
     {
       "rule_id": "secau1",
@@ -6317,8 +5827,8 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "IA-2",
-      "identifier_title": "Identification and Authentication (Organizational Users)"
+      "identifier": "IA-5(7)",
+      "identifier_title": "No Embedded Unencrypted Static Authenticators"
     },
     {
       "rule_id": "secazn",
@@ -6386,9 +5896,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "SR-3",
       "identifier_title": "Supply Chain Controls and Processes"
+    },
+    {
+      "rule_id": "secsup",
+      "rule_title": "Trusted, pinned dependency provenance",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SR-11",
+      "identifier_title": "Component Authenticity"
     },
     {
       "rule_id": "secsup",
@@ -6399,16 +5919,6 @@
       "fit": "tight",
       "identifier": "SR-4",
       "identifier_title": "Provenance"
-    },
-    {
-      "rule_id": "secsup",
-      "rule_title": "Trusted, pinned dependency provenance",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "SR-11",
-      "identifier_title": "Component Authenticity"
     },
     {
       "rule_id": "secgci",
@@ -6427,6 +5937,16 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
+      "identifier": "CM-3",
+      "identifier_title": "Configuration Change Control"
+    },
+    {
+      "rule_id": "secgci",
+      "rule_title": "Guardrail configuration is integrity-protected",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "SI-7",
       "identifier_title": "Software, Firmware, and Information Integrity"
     },
@@ -6437,16 +5957,6 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "CM-3",
-      "identifier_title": "Configuration Change Control"
-    },
-    {
-      "rule_id": "secgci",
-      "rule_title": "Guardrail configuration is integrity-protected",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-guardrail-config-integrity.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
       "identifier": "CM-5",
       "identifier_title": "Access Restrictions for Change"
     },
@@ -6456,7 +5966,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CM-3",
       "identifier_title": "Configuration Change Control"
     },
@@ -6466,9 +5976,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "CM-5",
       "identifier_title": "Access Restrictions for Change"
+    },
+    {
+      "rule_id": "secinp",
+      "rule_title": "Validate external input at the boundary",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SI-10(5)",
+      "identifier_title": "Restrict Inputs to Trusted Sources and Approved Formats"
     },
     {
       "rule_id": "secinp",
@@ -6479,16 +5999,6 @@
       "fit": "tight",
       "identifier": "SI-10",
       "identifier_title": "Information Input Validation"
-    },
-    {
-      "rule_id": "secinp",
-      "rule_title": "Validate external input at the boundary",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "SI-10(5)",
-      "identifier_title": "Restrict Inputs to Trusted Sources and Approved Formats"
     },
     {
       "rule_id": "secinp",
@@ -6526,9 +6036,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-inter-agent-trust.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "IA-9",
-      "identifier_title": "Service Identification and Authentication"
+      "fit": "broad",
+      "identifier": "SI-10",
+      "identifier_title": "Information Input Validation"
     },
     {
       "rule_id": "secagt",
@@ -6537,8 +6047,8 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "SI-10",
-      "identifier_title": "Information Input Validation"
+      "identifier": "IA-9",
+      "identifier_title": "Service Identification and Authentication"
     },
     {
       "rule_id": "seckey",
@@ -6567,6 +6077,16 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
+      "identifier": "CM-7",
+      "identifier_title": "Least Functionality"
+    },
+    {
+      "rule_id": "seclpt",
+      "rule_title": "Least-privilege tool and file access",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
+      "fit": "broad",
       "identifier": "SC-39",
       "identifier_title": "Process Isolation"
     },
@@ -6579,16 +6099,6 @@
       "fit": "tight",
       "identifier": "AC-6",
       "identifier_title": "Least Privilege"
-    },
-    {
-      "rule_id": "seclpt",
-      "rule_title": "Least-privilege tool and file access",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-least-privilege-tools.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CM-7",
-      "identifier_title": "Least Functionality"
     },
     {
       "rule_id": "secred",
@@ -6736,6 +6246,16 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
       "framework": "nist-80053",
       "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SI-11",
+      "identifier_title": "Error Handling"
+    },
+    {
+      "rule_id": "seccfg",
+      "rule_title": "Secure by default configuration",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
       "fit": "tight",
       "identifier": "CM-6",
       "identifier_title": "Configuration Settings"
@@ -6749,16 +6269,6 @@
       "fit": "tight",
       "identifier": "CM-7",
       "identifier_title": "Least Functionality"
-    },
-    {
-      "rule_id": "seccfg",
-      "rule_title": "Secure by default configuration",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "SI-11",
-      "identifier_title": "Error Handling"
     },
     {
       "rule_id": "seclog",
@@ -6836,7 +6346,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-threat-model-boundaries.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "SA-11(2)",
       "identifier_title": "Threat Modeling and Vulnerability Analyses"
     },
@@ -6917,8 +6427,8 @@
       "framework": "nist-80053",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "CP-10",
-      "identifier_title": "System Recovery and Reconstitution"
+      "identifier": "CP-9(2)",
+      "identifier_title": "Test Restoration Using Sampling"
     },
     {
       "rule_id": "secrst",
@@ -6926,9 +6436,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECA-verified-restore-path.md",
       "framework": "nist-80053",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "CP-9(2)",
-      "identifier_title": "Test Restoration Using Sampling"
+      "fit": "broad",
+      "identifier": "CP-10",
+      "identifier_title": "System Recovery and Reconstitution"
     },
     {
       "rule_id": "secmin",
@@ -6956,6 +6466,16 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
       "framework": "nist-80053",
       "relation": "supports control",
+      "fit": "broad",
+      "identifier": "SI-12(3)",
+      "identifier_title": "Information Disposal"
+    },
+    {
+      "rule_id": "secdrr",
+      "rule_title": "Honour residency, retention, and deletion",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
+      "framework": "nist-80053",
+      "relation": "supports control",
       "fit": "tight",
       "identifier": "SA-9(5)",
       "identifier_title": "Processing, Storage, and Service Location"
@@ -6969,16 +6489,6 @@
       "fit": "tight",
       "identifier": "SI-12",
       "identifier_title": "Information Management and Retention"
-    },
-    {
-      "rule_id": "secdrr",
-      "rule_title": "Honour residency, retention, and deletion",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-residency-retention.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "SI-12(3)",
-      "identifier_title": "Information Disposal"
     },
     {
       "rule_id": "secpur",
@@ -7009,16 +6519,6 @@
       "fit": "tight",
       "identifier": "SA-3(2)",
       "identifier_title": "Use of Live or Operational Data"
-    },
-    {
-      "rule_id": "secsyn",
-      "rule_title": "Fixtures and examples use synthetic data",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-synthetic-fixture-data.md",
-      "framework": "nist-80053",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "SA-15(9)",
-      "identifier_title": "Use of Live Data"
     },
     {
       "rule_id": "clmobs",
@@ -7077,8 +6577,8 @@
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
       "fit": "broad",
-      "identifier": "MEASURE 2.13",
-      "identifier_title": "Effectiveness of the employed TEVV metrics and processes in the MEASURE function are evaluated and documented."
+      "identifier": "MAP 2.3",
+      "identifier_title": "Scientific integrity and TEVV considerations are identified and documented, including those related to experimental design, data collection and selection, and construct validation."
     },
     {
       "rule_id": "grdinp",
@@ -7086,9 +6586,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-ACCUR-guard-input-soundness.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "MAP 2.3",
-      "identifier_title": "Scientific integrity and TEVV considerations are identified and documented, including those related to experimental design, data collection and selection, and construct validation."
+      "fit": "broad",
+      "identifier": "MEASURE 2.13",
+      "identifier_title": "Effectiveness of the employed TEVV metrics and processes in the MEASURE function are evaluated and documented."
     },
     {
       "rule_id": "estsep",
@@ -7171,24 +6671,14 @@
       "identifier_title": "Post-deployment AI system monitoring plans are implemented, including mechanisms for capturing and evaluating input from users and other relevant AI actors, appeal and override, decommissioning, incident response, recovery, and change management."
     },
     {
-      "rule_id": "brnrot",
-      "rule_title": "Cut branches from the live protected line and re-home after a rewrite",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md",
-      "framework": "nist-airmf",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "MANAGE 4.1",
-      "identifier_title": "Post-deployment AI system monitoring plans are implemented, including mechanisms for capturing and evaluating input from users and other relevant AI actors, appeal and override, decommissioning, incident response, recovery, and change management."
-    },
-    {
       "rule_id": "cmtidn",
       "rule_title": "Commit identity",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-commit-identity.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
       "fit": "broad",
-      "identifier": "GOVERN 2.1",
-      "identifier_title": "Roles and responsibilities and lines of communication related to mapping, measuring, and managing AI risks are documented."
+      "identifier": "GOVERN 3.2",
+      "identifier_title": "Policies and procedures are in place to define and differentiate roles and responsibilities for human-AI configurations and oversight."
     },
     {
       "rule_id": "gatdis",
@@ -7216,7 +6706,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "GOVERN 4.3",
       "identifier_title": "Organizational practices are in place to enable AI testing, identification of incidents, and information sharing."
     },
@@ -7226,7 +6716,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-no-concealed-failure.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MANAGE 4.3",
       "identifier_title": "Incidents and errors are communicated to relevant AI actors, including affected communities. Processes for tracking, responding to, and recovering from incidents and errors are followed and documented."
     },
@@ -7336,7 +6826,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-self-guardrail-from-error.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MANAGE 2.3",
       "identifier_title": "Procedures are followed to respond to and recover from a previously unknown risk when it is identified."
     },
@@ -7356,7 +6846,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "GOVERN 4.1",
       "identifier_title": "Organizational policies and practices are in place to foster a critical thinking and safety-first mindset."
     },
@@ -7431,16 +6921,6 @@
       "identifier_title": "Organizational policies and practices are in place to foster a critical thinking and safety-first mindset."
     },
     {
-      "rule_id": "clrfy1",
-      "rule_title": "Clarify before acting",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-clarify-before-acting.md",
-      "framework": "nist-airmf",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "MAP 1.6",
-      "identifier_title": "System requirements (e.g., \"the system shall respect the privacy of its users\") are elicited from and understood by relevant AI actors."
-    },
-    {
       "rule_id": "exauth",
       "rule_title": "Express authorization before execution",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-express-authorization-before-execution.md",
@@ -7506,7 +6986,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-escalation.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MANAGE 4.3",
       "identifier_title": "Incidents and errors are communicated to relevant AI actors, including affected communities. Processes for tracking, responding to, and recovering from incidents and errors are followed and documented."
     },
@@ -7526,7 +7006,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-trust-recovery-ext.md",
       "framework": "nist-airmf",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MANAGE 4.3",
       "identifier_title": "Incidents and errors are communicated to relevant AI actors, including affected communities. Processes for tracking, responding to, and recovering from incidents and errors are followed and documented."
     },
@@ -7549,16 +7029,6 @@
       "fit": "tight",
       "identifier": "MAP 3.5",
       "identifier_title": "Processes for human oversight are defined, assessed, and documented in accordance with organizational policies."
-    },
-    {
-      "rule_id": "csttir",
-      "rule_title": "Cost tier",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/40-COST-cost-tier.md",
-      "framework": "nist-airmf",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "GOVERN 1.3",
-      "identifier_title": "Processes, procedures, and practices are in place to determine the needed level of risk management activities."
     },
     {
       "rule_id": "csttir",
@@ -7921,16 +7391,6 @@
       "identifier_title": "Decide on code review and analysis"
     },
     {
-      "rule_id": "brnrot",
-      "rule_title": "Cut branches from the live protected line and re-home after a rewrite",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-branch-rooted-on-live-main.md",
-      "framework": "nist-ssdf",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "PW.7.1",
-      "identifier_title": "Decide on code review and analysis"
-    },
-    {
       "rule_id": "cmtidn",
       "rule_title": "Commit identity",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-commit-identity.md",
@@ -7956,7 +7416,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-gate-discipline.md",
       "framework": "nist-ssdf",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "PW.8.2",
       "identifier_title": "Perform and document code testing"
     },
@@ -7967,8 +7427,8 @@
       "framework": "nist-ssdf",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "PW.7.1",
-      "identifier_title": "Decide on code review and analysis"
+      "identifier": "PS.1.1",
+      "identifier_title": "Protect stored code with least privilege"
     },
     {
       "rule_id": "prtbrn",
@@ -7976,9 +7436,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-protected-branch-integrity.md",
       "framework": "nist-ssdf",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "PS.1.1",
-      "identifier_title": "Protect stored code with least privilege"
+      "fit": "broad",
+      "identifier": "PW.7.1",
+      "identifier_title": "Decide on code review and analysis"
     },
     {
       "rule_id": "valgat",
@@ -8007,8 +7467,8 @@
       "framework": "nist-ssdf",
       "relation": "supports control",
       "fit": "broad",
-      "identifier": "PW.7.2",
-      "identifier_title": "Perform code review and analysis"
+      "identifier": "PS.1.1",
+      "identifier_title": "Protect stored code with least privilege"
     },
     {
       "rule_id": "wowo01",
@@ -8016,9 +7476,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-workers-produce-inert-data.md",
       "framework": "nist-ssdf",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "PS.1.1",
-      "identifier_title": "Protect stored code with least privilege"
+      "fit": "broad",
+      "identifier": "PW.7.2",
+      "identifier_title": "Perform code review and analysis"
     },
     {
       "rule_id": "chgchk",
@@ -8049,16 +7509,6 @@
       "fit": "broad",
       "identifier": "PW.7.2",
       "identifier_title": "Perform code review and analysis"
-    },
-    {
-      "rule_id": "hiasrv",
-      "rule_title": "High-assurance verification",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-QUALI-high-assurance-verification.md",
-      "framework": "nist-ssdf",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "PW.2.1",
-      "identifier_title": "Review software design against security requirements"
     },
     {
       "rule_id": "hiasrv",
@@ -8116,7 +7566,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-TRUST-records-first.md",
       "framework": "nist-ssdf",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "PW.1.2",
       "identifier_title": "Track security requirements and design decisions"
     },
@@ -8186,9 +7636,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
       "framework": "nist-ssdf",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "PW.4.1",
-      "identifier_title": "Acquire well-secured third-party components"
+      "fit": "broad",
+      "identifier": "PW.4.4",
+      "identifier_title": "Verify third-party components meet requirements"
     },
     {
       "rule_id": "secsup",
@@ -8197,8 +7647,8 @@
       "framework": "nist-ssdf",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "PW.4.4",
-      "identifier_title": "Verify third-party components meet requirements"
+      "identifier": "PW.4.1",
+      "identifier_title": "Acquire well-secured third-party components"
     },
     {
       "rule_id": "secinp",
@@ -8276,19 +7726,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-reject-vulnerable-versions.md",
       "framework": "nist-ssdf",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "PW.4.4",
       "identifier_title": "Verify third-party components meet requirements"
-    },
-    {
-      "rule_id": "secpub",
-      "rule_title": "Publish artefacts with verifiable integrity",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-release-integrity.md",
-      "framework": "nist-ssdf",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "PS.3.2",
-      "identifier_title": "Maintain provenance data (SBOM) per release"
     },
     {
       "rule_id": "secpub",
@@ -8306,9 +7746,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-secure-configuration.md",
       "framework": "nist-ssdf",
       "relation": "supports control",
-      "fit": "tight",
-      "identifier": "PW.9.1",
-      "identifier_title": "Define a secure default configuration baseline"
+      "fit": "broad",
+      "identifier": "PW.9.2",
+      "identifier_title": "Implement and document secure default settings"
     },
     {
       "rule_id": "seccfg",
@@ -8317,8 +7757,8 @@
       "framework": "nist-ssdf",
       "relation": "supports control",
       "fit": "tight",
-      "identifier": "PW.9.2",
-      "identifier_title": "Implement and document secure default settings"
+      "identifier": "PW.9.1",
+      "identifier_title": "Define a secure default configuration baseline"
     },
     {
       "rule_id": "seclog",
@@ -8356,7 +7796,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
       "framework": "nist-ssdf",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "PW.4.1",
       "identifier_title": "Acquire well-secured third-party components"
     },
@@ -8466,7 +7906,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-config-is-executable-trust-gate.md",
       "framework": "owasp-asi",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "ASI05",
       "identifier_title": "Unexpected Code Execution (RCE)"
     },
@@ -8521,16 +7961,6 @@
       "identifier_title": "Tool Misuse and Exploitation"
     },
     {
-      "rule_id": "secopd",
-      "rule_title": "Social pressure is not authorization",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-operator-deception.md",
-      "framework": "owasp-asi",
-      "relation": "addresses risk",
-      "fit": "tight",
-      "identifier": "ASI09",
-      "identifier_title": "Human-Agent Trust Exploitation"
-    },
-    {
       "rule_id": "secpsn",
       "rule_title": "Resist data, model, and memory poisoning",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
@@ -8546,7 +7976,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-preview-has-no-side-effects.md",
       "framework": "owasp-asi",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "ASI09",
       "identifier_title": "Human-Agent Trust Exploitation"
     },
@@ -8686,7 +8116,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-input-validation.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V2",
       "identifier_title": "Validation and Business Logic"
     },
@@ -8716,7 +8146,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-encoding.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V1",
       "identifier_title": "Encoding and Sanitization"
     },
@@ -8726,7 +8156,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V1",
       "identifier_title": "Encoding and Sanitization"
     },
@@ -8736,7 +8166,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V2",
       "identifier_title": "Validation and Business Logic"
     },
@@ -8766,9 +8196,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V16",
       "identifier_title": "Security Logging and Error Handling"
+    },
+    {
+      "rule_id": "sectok",
+      "rule_title": "Secure session and token handling",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
+      "framework": "owasp-asvs",
+      "relation": "supports control",
+      "fit": "broad",
+      "identifier": "V9",
+      "identifier_title": "Self-contained Tokens"
     },
     {
       "rule_id": "sectok",
@@ -8779,16 +8219,6 @@
       "fit": "tight",
       "identifier": "V7",
       "identifier_title": "Session Management"
-    },
-    {
-      "rule_id": "sectok",
-      "rule_title": "Secure session and token handling",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
-      "framework": "owasp-asvs",
-      "relation": "supports control",
-      "fit": "tight",
-      "identifier": "V9",
-      "identifier_title": "Self-contained Tokens"
     },
     {
       "rule_id": "secspr",
@@ -8806,7 +8236,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
       "framework": "owasp-asvs",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "V2",
       "identifier_title": "Validation and Business Logic"
     },
@@ -8831,36 +8261,6 @@
       "identifier_title": "Data Protection"
     },
     {
-      "rule_id": "secpur",
-      "rule_title": "Bind personal-data use to its authorized purpose",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-purpose-limitation.md",
-      "framework": "owasp-asvs",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "V14",
-      "identifier_title": "Data Protection"
-    },
-    {
-      "rule_id": "secsyn",
-      "rule_title": "Fixtures and examples use synthetic data",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-synthetic-fixture-data.md",
-      "framework": "owasp-asvs",
-      "relation": "supports control",
-      "fit": "broad",
-      "identifier": "V14",
-      "identifier_title": "Data Protection"
-    },
-    {
-      "rule_id": "chkfcl",
-      "rule_title": "A check fails closed on input it cannot read",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/aiqt/10-INTEG-check-fails-closed-on-unreadable.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "error-handling",
-      "identifier_title": "Error Handling Cheat Sheet"
-    },
-    {
       "rule_id": "secsec",
       "rule_title": "Keep secrets out",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-keep-secrets-out.md",
@@ -8876,9 +8276,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "secrets-management",
       "identifier_title": "Secrets Management Cheat Sheet"
+    },
+    {
+      "rule_id": "secau1",
+      "rule_title": "Strong authentication",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
+      "framework": "owasp-cheatsheet",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "multifactor-authentication",
+      "identifier_title": "Multifactor Authentication Cheat Sheet"
     },
     {
       "rule_id": "secau1",
@@ -8891,26 +8301,6 @@
       "identifier_title": "Authentication Cheat Sheet"
     },
     {
-      "rule_id": "secau1",
-      "rule_title": "Strong authentication",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authentication.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "multifactor-authentication",
-      "identifier_title": "Multifactor Authentication Cheat Sheet"
-    },
-    {
-      "rule_id": "secazn",
-      "rule_title": "Least-privilege authorization",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "mass-assignment",
-      "identifier_title": "Mass Assignment Cheat Sheet"
-    },
-    {
       "rule_id": "secazn",
       "rule_title": "Least-privilege authorization",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
@@ -8919,6 +8309,26 @@
       "fit": "tight",
       "identifier": "authorization",
       "identifier_title": "Authorization Cheat Sheet"
+    },
+    {
+      "rule_id": "secazn",
+      "rule_title": "Least-privilege authorization",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-authorization.md",
+      "framework": "owasp-cheatsheet",
+      "relation": "aligns with guidance",
+      "fit": "tight",
+      "identifier": "mass-assignment",
+      "identifier_title": "Mass Assignment Cheat Sheet"
+    },
+    {
+      "rule_id": "seccry",
+      "rule_title": "Sound cryptography",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md",
+      "framework": "owasp-cheatsheet",
+      "relation": "aligns with guidance",
+      "fit": "broad",
+      "identifier": "transport-layer-security",
+      "identifier_title": "Transport Layer Security Cheat Sheet"
     },
     {
       "rule_id": "seccry",
@@ -8931,16 +8341,6 @@
       "identifier_title": "Cryptographic Storage Cheat Sheet"
     },
     {
-      "rule_id": "seccry",
-      "rule_title": "Sound cryptography",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-cryptography.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "tight",
-      "identifier": "transport-layer-security",
-      "identifier_title": "Transport Layer Security Cheat Sheet"
-    },
-    {
       "rule_id": "secsup",
       "rule_title": "Trusted, pinned dependency provenance",
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
@@ -8949,16 +8349,6 @@
       "fit": "tight",
       "identifier": "software-supply-chain-security",
       "identifier_title": "Software Supply Chain Security Cheat Sheet"
-    },
-    {
-      "rule_id": "secfcl",
-      "rule_title": "Fail closed in security-relevant paths",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md",
-      "framework": "owasp-cheatsheet",
-      "relation": "aligns with guidance",
-      "fit": "broad",
-      "identifier": "error-handling",
-      "identifier_title": "Error Handling Cheat Sheet"
     },
     {
       "rule_id": "secfid",
@@ -9046,7 +8436,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "cross-site-scripting-prevention",
       "identifier_title": "Cross Site Scripting Prevention Cheat Sheet"
     },
@@ -9056,7 +8446,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "injection-prevention",
       "identifier_title": "Injection Prevention Cheat Sheet"
     },
@@ -9116,7 +8506,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-session-token-management.md",
       "framework": "owasp-cheatsheet",
       "relation": "aligns with guidance",
-      "fit": "broad",
+      "fit": "tight",
       "identifier": "cross-site-request-forgery-prevention",
       "identifier_title": "Cross-Site Request Forgery Prevention Cheat Sheet"
     },
@@ -9256,7 +8646,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-human-authorization.md",
       "framework": "owasp-llm",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "LLM03",
       "identifier_title": "Excessive Agency"
     },
@@ -9287,8 +8677,18 @@
       "framework": "owasp-llm",
       "relation": "addresses risk",
       "fit": "broad",
-      "identifier": "LLM03",
-      "identifier_title": "Excessive Agency"
+      "identifier": "LLM04",
+      "identifier_title": "Supply Chain"
+    },
+    {
+      "rule_id": "secpsn",
+      "rule_title": "Resist data, model, and memory poisoning",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
+      "framework": "owasp-llm",
+      "relation": "addresses risk",
+      "fit": "broad",
+      "identifier": "LLM09",
+      "identifier_title": "Vector and Embedding Weaknesses"
     },
     {
       "rule_id": "secpsn",
@@ -9299,16 +8699,6 @@
       "fit": "tight",
       "identifier": "LLM05",
       "identifier_title": "Data and Model Poisoning"
-    },
-    {
-      "rule_id": "secpsn",
-      "rule_title": "Resist data, model, and memory poisoning",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
-      "framework": "owasp-llm",
-      "relation": "addresses risk",
-      "fit": "tight",
-      "identifier": "LLM09",
-      "identifier_title": "Vector and Embedding Weaknesses"
     },
     {
       "rule_id": "secpth",
@@ -9346,7 +8736,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-verify-dependency-exists.md",
       "framework": "owasp-llm",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "LLM04",
       "identifier_title": "Supply Chain"
     },
@@ -9366,7 +8756,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECP-data-minimization.md",
       "framework": "owasp-llm",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "LLM02",
       "identifier_title": "Sensitive Information Disclosure"
     },
@@ -9396,7 +8786,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-least-privilege-retrieval.md",
       "framework": "owasp-mcp",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MCP07",
       "identifier_title": "Insufficient Authentication & Authorization"
     },
@@ -9416,7 +8806,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECC-rotate-leaked-secret.md",
       "framework": "owasp-mcp",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MCP01",
       "identifier_title": "Token Mismanagement & Secret Exposure"
     },
@@ -9476,7 +8866,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-poisoning-resistance.md",
       "framework": "owasp-mcp",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "MCP03",
       "identifier_title": "Tool Poisoning"
     },
@@ -9516,9 +8906,19 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-tool-argument-validation.md",
       "framework": "owasp-mcp",
       "relation": "addresses risk",
-      "fit": "broad",
+      "fit": "tight",
       "identifier": "MCP05",
       "identifier_title": "Command Injection & Execution"
+    },
+    {
+      "rule_id": "secunt",
+      "rule_title": "Untrusted content is data, not instructions",
+      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
+      "framework": "owasp-mcp",
+      "relation": "addresses risk",
+      "fit": "broad",
+      "identifier": "MCP10",
+      "identifier_title": "Context Injection & Over-Sharing"
     },
     {
       "rule_id": "secunt",
@@ -9529,16 +8929,6 @@
       "fit": "tight",
       "identifier": "MCP06",
       "identifier_title": "Intent Flow Subversion"
-    },
-    {
-      "rule_id": "secunt",
-      "rule_title": "Untrusted content is data, not instructions",
-      "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-untrusted-content.md",
-      "framework": "owasp-mcp",
-      "relation": "addresses risk",
-      "fit": "tight",
-      "identifier": "MCP10",
-      "identifier_title": "Context Injection & Over-Sharing"
     },
     {
       "rule_id": "secazn",
@@ -9586,7 +8976,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-output-handling.md",
       "framework": "owasp-proactive",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "C3",
       "identifier_title": "Validate all Input & Handle Exceptions"
     },
@@ -9616,7 +9006,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
       "framework": "owasp-proactive",
       "relation": "supports control",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "C9",
       "identifier_title": "Implement Security Logging and Monitoring"
     },
@@ -9676,9 +9066,9 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-dependency-provenance.md",
       "framework": "owasp-web",
       "relation": "addresses risk",
-      "fit": "tight",
-      "identifier": "A03",
-      "identifier_title": "Software Supply Chain Failures"
+      "fit": "broad",
+      "identifier": "A08",
+      "identifier_title": "Software or Data Integrity Failures"
     },
     {
       "rule_id": "secsup",
@@ -9687,8 +9077,8 @@
       "framework": "owasp-web",
       "relation": "addresses risk",
       "fit": "tight",
-      "identifier": "A08",
-      "identifier_title": "Software or Data Integrity Failures"
+      "identifier": "A03",
+      "identifier_title": "Software Supply Chain Failures"
     },
     {
       "rule_id": "secfcl",
@@ -9696,7 +9086,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-fail-closed.md",
       "framework": "owasp-web",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "A10",
       "identifier_title": "Mishandling of Exceptional Conditions"
     },
@@ -9786,7 +9176,7 @@
       "rule_source": "https://github.com/jposluns/guardrails/blob/main/.claude/rules/security/SECI-security-logging.md",
       "framework": "owasp-web",
       "relation": "addresses risk",
-      "fit": "tight",
+      "fit": "broad",
       "identifier": "A09",
       "identifier_title": "Security Logging & Alerting Failures"
     },

@@ -1225,12 +1225,58 @@ def _canonical_remote(url):
     return (host.lower(), p)
 
 
-def _target_remote_canon(target):
+def _fs_path_form(value):
+    """How a remote spelling (a `git:` payload, or an observed actual remote) names a filesystem repository
+    rather than a URL. Both C-SYNC-AGREE legs classify through this one function, so a spelling classifies
+    the same whichever leg reads it. A filesystem sync target is accepted only as git:<absolute path> (spec
+    5.6), so this returns "blank" for an empty or whitespace-only value (it names no repository, and is
+    never a URL); "file-url" for a file:// URL; None for any other spelling containing '://', tested before
+    the absolute-path test because git reads any '://' as a scheme separator (it refuses /srv/a://repo as an
+    unsupported protocol '/srv/a', never opening it as a directory), so such a spelling is a URL form on
+    both legs and never a filesystem path; "absolute" for a POSIX-absolute path; "padded" for an absolute
+    path with leading or trailing whitespace (whitespace is significant in a path, so such a spelling is
+    ambiguous: refused, never trimmed); "relative" for any other path-shaped payload (no scheme and no
+    scp-style host colon before the first slash, the forms _canonical_remote cannot split into a host and a
+    path); and None for an scp-style host:path form, which _canonical_remote handles unchanged."""
+    s = value.strip() if isinstance(value, str) else ""
+    if not s:
+        return "blank"
+    if s[:len("file://")].lower() == "file://":
+        return "file-url"
+    if "://" in s:
+        return None
+    if s.startswith("/"):
+        return "absolute" if s == value else "padded"
+    slash, colon = s.find("/"), s.find(":")
+    if colon == -1 or (slash != -1 and slash < colon):
+        return "relative"
+    return None
+
+
+def _local_path_canon(value):
+    """The comparable local form of an absolute filesystem repository path: ("", path) with repeated
+    slashes, '.' segments and a trailing slash dropped. _canonical_remote never returns an empty host, so a
+    local form cannot collide with a URL endpoint. The path is otherwise kept exactly, whitespace included
+    (no trimming, and no '.git' fold: /srv/a and /srv/a.git are different directories). A '..' segment is
+    unresolvable (None), since folding it lexically can name a different directory than the one git opens
+    through a symlink."""
+    s = value if isinstance(value, str) else ""
+    if not s.startswith("/"):
+        return None
+    segs = [seg for seg in s.split("/") if seg not in ("", ".")]
+    if not segs or ".." in segs:
+        return None
+    return ("", "/" + "/".join(segs))
+
+
+def _target_remote_canon(target, local_paths=True):
     """The canonical (host, path) forms a REMOTE target (spec 5.5) names, for host+path agreement against
     an observed remote. Returns (canon_set, unresolved): `canon_set` is the set of canonical forms (empty
     when a remote target names no canonicalizable form), and `unresolved` lists the raw target forms the
     equivalence could not canonicalize (disclosed, never silently matched; F8). Returns (None, []) for a
-    LOCAL (dir:/path) target that names no git remote."""
+    LOCAL (dir:/path) target that names no git remote. A git:<absolute path> target canonicalizes to its
+    local form (_local_path_canon) when `local_paths` is true; with it false that form stays unresolved,
+    exactly as a URL-only canonicalizer leaves it."""
     if target.kind in ("github", "gitlab"):
         host = "github.com" if target.kind == "github" else "gitlab.com"
         val = target.value.strip().lstrip("/")
@@ -1240,6 +1286,11 @@ def _target_remote_canon(target):
             return set(), [target.value]
         return {(host, val)}, []
     if target.kind == "git":
+        if local_paths and _fs_path_form(target.value) == "absolute":
+            lc = _local_path_canon(target.value)
+            if lc is None:
+                return set(), [target.value]
+            return {lc}, []
         c = _canonical_remote(target.value)
         if c is None:
             return set(), [target.value]
@@ -2442,11 +2493,14 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
 def _check_handoff(recs, rep, unread=frozenset()):
     """C-HANDOFF (R2): at most one `current` handoff among clean records authored by non-importer actors
     (OPF-SPEC 8.5). Section 8.6 keys the importer firewall "on provenance rather than on series alone": it
-    "covers every record whose `actor.kind` is `importer`, in the imported series or written into the
-    clean series by the pre-1.3.0 legacy importer", and "every current-state join, including the section
-    8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
-    actors". OPF has never been released, so no store predates that firewall, and it applies on every
-    store: this check applies the exemption keyed on provenance alone, in agreement with the record
+    "covers every record whose `actor.kind` is `importer`", and "every current-state join, including the
+    section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
+    actors". A clean record carrying that kind is itself a C-IMPORTED-SEGREGATION finding
+    (_check_clean_importer: "A clean-series record MUST NOT carry `actor.kind = "importer"`"), never exempt
+    history; this join still leaves it out, so it is reported once, by _check_clean_importer, and never
+    also counted here. That finding is C-IMPORTED-SEGREGATION's with the imported series active; otherwise
+    that check is off the roster (spec 4.2) and the driver reports it under C-HANDOFF, after this count.
+    This check applies the exclusion keyed on provenance alone, in agreement with the record
     writer's current-handoff join (_opf_record._current_handoffs) and the HANDOFF view
     (_opf_views.render_handoff), which apply it the same way. An imported-series row never counts either
     (_validate_opened_store builds the graded record list from the active, archive and worklog records and
@@ -3225,6 +3279,11 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
         outside the permitted set, so it is refused here too ("A clean `done` record's `receipt_of` MUST
         target a clean backlog item"). The targets of these links exist only in the imported leaves, so
         this arm runs only with the imported series active;
+      - clean importer authorship (_check_clean_importer): each clean record whose actor kind is exactly
+        `importer` is a finding ("A clean-series record MUST NOT carry `actor.kind = "importer"`"). It is
+        that record's own, so it is graded over every record read whatever else is unread, and an unread
+        type is named in the link rule's CANNOT-EVALUATE as not evaluated for this rule either. Keyed on
+        provenance, it runs on an inactive store too, where the driver reports it under C-HANDOFF;
       - the receipt firewall (_check_importer_receipts) and the decision-chain arm
         (_check_importer_chains), keyed on provenance. The firewall covers every importer-authored record,
         whether or not the imported series is active (spec 8.6), so on a store whose series is inactive,
@@ -3267,7 +3326,9 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
     if unread or links_uninterpreted:
         rep.cant("C-IMPORTED-SEGREGATION: {} (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the "
                  "clean-to-imported link rule (spec 8.6) is not evaluated over the records not read or not "
-                 "interpreted".format(_partial_causes(unread, links_uninterpreted, "links")))
+                 "interpreted{}".format(_partial_causes(unread, links_uninterpreted, "links"),
+                                        ", and the clean-importer rule (spec 8.6) is not evaluated over the "
+                                        "records not read" if unread else ""))
     for r in clean:
         own_ns = _ROSTER_NAMESPACES.get(r.rtype)
         for rel, tid in r.links:
@@ -3282,8 +3343,39 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
                 rep.finding("C-IMPORTED-SEGREGATION: clean record {} (type {!r}) supersedes -> {!r} of "
                             "another type; a clean-to-imported supersedes is same-type only (spec "
                             "8.6)".format(_safe_display(r.id), r.rtype, tid))
+    _check_clean_importer(recs, rep, "C-IMPORTED-SEGREGATION")
     _check_importer_receipts(recs, rep, "C-IMPORTED-SEGREGATION", unread)
     _check_importer_chains(recs, by_id, rep, "C-IMPORTED-SEGREGATION", unread)
+
+
+def _check_clean_importer(recs, rep, cid, unread=frozenset()):
+    # Spec 8.6: "A clean-series record MUST NOT carry `actor.kind = "importer"`", and C-IMPORTED-SEGREGATION
+    # reports each one. Base 2.0.0 with homes 2 always carries the imported series, so no store the spec
+    # defines holds such a record as exempt history: one finding per record. Only the exact kind counts;
+    # an absent, unreadable or lookalike kind reads as None, which validate_record already names, so it is
+    # never taken for an importer here. The record is still left out of every current-state join (C-HANDOFF,
+    # the receipt and decision-chain arms), which spec 8.5 and 8.6 also require.
+    # The rule is keyed on provenance, never on activation, so it runs on every store and reports under
+    # `cid`: C-IMPORTED-SEGREGATION with the imported series active, C-HANDOFF otherwise (that check is off
+    # an inactive roster, spec 4.2). A record read from both an active and an archive leaf is one record and
+    # one finding. On the active path _check_imported_segregation names the unread types in its own
+    # CANNOT-EVALUATE, so no `unread` is passed; on the inactive path a type not read in full is this rule's
+    # CANNOT-EVALUATE, since a record not read could carry the kind, and the records read are still graded.
+    seen = set()
+    for r in recs:
+        if r.location == "imported" or r.actor_kind != "importer":
+            continue
+        key = (r.rtype, r.id) if isinstance(r.id, str) else None
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        rep.finding("{}: clean record {} (type {!r}) carries actor.kind 'importer'; a clean-series record "
+                    "MUST NOT carry it (spec 8.6)".format(cid, _safe_display(r.id), r.rtype))
+    if unread:
+        rep.cant("{}: {} (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the clean-importer rule "
+                 "(spec 8.6) is not evaluated over the records not read".format(
+                     cid, _partial_causes(unread, (), "")))
 
 
 def _partial_causes(unread, uninterpreted, fields, no_kind=frozenset()):
@@ -3327,7 +3419,10 @@ def _check_importer_receipts(recs, rep, cid, unread=frozenset(), unevaluated=())
     backlog item reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor". A
     non-importer item at unqualified `done` whose every receipt is importer-authored is a finding; one with
     no receipt at all is the C-RECEIPTS finding and is not repeated. An importer-authored item is not
-    graded here, since spec 8.6 lets its legacy receipt satisfy it as recorded history. The one exception
+    graded here: the obligation binds items authored by a non-importer actor, and a clean record that
+    carries the importer kind is itself a finding, reported once by _check_clean_importer (under
+    C-IMPORTED-SEGREGATION with the imported series active, under C-HANDOFF otherwise), never history this
+    arm accepts. The one exception
     spec 8.6 defines is accepted: "a maintainer-authored clean `maintainer_decision` that links `corrects`
     to that item and records that its completion stands MUST satisfy the item's receipt obligation in
     place of the withdrawn receipt ... doctor and the upgrade MUST accept it". Its machine-checkable shape
@@ -5049,9 +5144,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # --- the cross-record checks ----------------------------------------------------------------------
     # The section 8.6 firewall is keyed on provenance, never on activation (spec 8.6: it covers every
     # importer-authored record). With the imported series active C-IMPORTED-SEGREGATION grades its receipt
-    # and decision-chain arms below; otherwise that check is off the roster (spec 4.2), so the two arms
-    # report under C-RECEIPTS and C-DECISION-CHAINS, the joins they guard, with the same `unread` set, so
-    # each arm is CANNOT-EVALUATE over a partial set on either path. A store holding an importer-authored
+    # and decision-chain arms and the clean-importer rule below; otherwise that check is off the roster
+    # (spec 4.2), so the two arms report under C-RECEIPTS and C-DECISION-CHAINS, the joins they guard, and
+    # the clean-importer rule under C-HANDOFF, the current-state join spec 8.6 names, with the same `unread`
+    # set, so each is CANNOT-EVALUATE over a partial set on either path. A store holding an importer-authored
     # clean record discloses the firewall residuals either way. Either way the two arms also fail closed on
     # a clean-record reader that did not evaluate (spec 8.3/8.6): `unseated` names those readers, and here
     # an arm whose own record types are unread is then CANNOT-EVALUATE naming them, never a pass.
@@ -5065,6 +5161,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         _check_importer_receipts(recs, rep, "C-RECEIPTS", unread, unseated)
     rep.ran("C-HANDOFF")
     _check_handoff(recs, rep, unread)
+    if not imported:
+        _check_clean_importer(recs, rep, "C-HANDOFF", unread)
     rep.ran("C-DECISION-CHAINS")
     _check_decision_chains(recs, by_id, rep, unread)
     if not imported:
@@ -5309,13 +5407,48 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.finding("C-SYNC-AGREE: [store].sync_target {!r} does not classify as a target (spec "
                         "5.5): {}".format(sync_target, exc))
         else:
-            tcanon, tunresolved = _target_remote_canon(tgt)   # canonical (host, path) forms, None (local)
+            # A filesystem sync target is accepted only as git:<absolute path> (spec 5.6). A dir:, bare-path,
+            # relative git:, file:// URL or whitespace-padded git: path dedicated target (tcanon None) names
+            # nothing either leg can agree with, so BOTH legs refuse it, each naming the remedy, whatever the
+            # committed pointer and the actual remote observation hold. Only a git:<absolute path> target
+            # compares the committed pointer and the actual remote by their local form; a URL target
+            # compares exactly as a URL. classify_target trims the whole value, which would drop whitespace
+            # ending a git: path or a bare URL, so the payload is classified from the untrimmed value.
+            # Whitespace is significant to git in a URL as in a path (git sends a padded ssh:// path to the
+            # server as written), so a URL target with leading or trailing whitespace is refused too, as is
+            # a blank git: payload, which names no remote at all.
+            tpayload = tgt.value
+            if tgt.kind == "git":
+                tpayload = (sync_target.lstrip()[len("git:"):] if sync_target.lstrip().startswith("git:")
+                            else sync_target)
+            tform = _fs_path_form(tpayload) if tgt.kind == "git" else None
+            tform_word = {"dir": "dir:", "path": "bare-path"}.get(tgt.kind) or {
+                "file-url": "file:// URL",
+                "padded": "git: path with leading or trailing whitespace, an ambiguous"}.get(tform, "relative git:")
+            tnot_fs = None
+            if tform == "blank":
+                tnot_fs = "has a blank git: payload, which names no remote"
+            elif tgt.kind == "git" and tform is None and tpayload != tpayload.strip():
+                tnot_fs = ("is a URL with leading or trailing whitespace, which is ambiguous (git does not "
+                           "trim it)")
+            if tform in ("relative", "file-url", "padded") or tnot_fs is not None:
+                tcanon, tunresolved = None, []
+            else:
+                tcanon, tunresolved = _target_remote_canon(tgt)   # canonical (host, path) forms, None (local)
             for raw in tunresolved:
                 rep.cant("C-SYNC-AGREE: the sync_target remote form {!r} cannot be canonicalized for "
                          "host+path agreement (a disclosed residual; spec 5.5)".format(raw))
             # Leg 2: a committed pointer that names a REMOTE disagreeing with the sync_target (B3).
-            if pointer_target is not None and not pointer_target.local:
-                pcanon, pun = _target_remote_canon(pointer_target)
+            if tnot_fs is not None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} {}, so no committed pointer can agree "
+                            "with it as a dedicated sync target (spec 5.5/5.6)".format(sync_target, tnot_fs))
+            elif tcanon is None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a {} filesystem target, which no "
+                            "committed pointer can agree with as a dedicated sync target; a filesystem sync "
+                            "target is accepted only as git:<absolute path> (use git:<absolute path>; spec "
+                            "5.5/5.6)".format(sync_target, tform_word))
+            elif pointer_target is not None and not pointer_target.local:
+                pcanon, pun = _target_remote_canon(pointer_target, local_paths=tform == "absolute")
                 for raw in pun:
                     # Symmetric with the sync_target unresolved-forms cant (F7): a committed pointer naming a
                     # REMOTE the equivalence cannot canonicalize is a disclosed CANNOT-EVALUATE, never a
@@ -5326,33 +5459,67 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 if tcanon and pcanon and not _canon_sets_agree(pcanon, tcanon, tgt.kind):
                     rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
                                 "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
-                elif pcanon and tcanon is None:
-                    # A dedicated LOCAL sync_target (dir:/path -> tcanon is None) names NO remote, so a
-                    # committed pointer that names a canonicalizable REMOTE contradicts it. Symmetric with
-                    # the actual-remote leg's local-target-with-a-remote finding (leg 3) and the
-                    # relocated-local committed-pointer-remote finding, so leg 2 does not silently pass a
-                    # remote pointer against a local sync_target (Fable F2).
-                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a local target but the "
-                                "committed pointer names a remote {} target {!r} (spec 5.6)".format(
-                                    sync_target, pointer_target.kind, pointer_target.value))
             # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. Equivalent
             # URL forms (https / ssh scp-style git@host:path, with or without a trailing .git) compare by
             # canonical host+path, so a valid shorthand is not rejected by a naive strip-compare (F8).
-            if actual is None:
+            # A remote whose URL is empty is absent; one whose URL is only whitespace is present but blank.
+            aform = _fs_path_form(actual) if isinstance(actual, str) and actual != "" else None
+            alabel = (repr(actual) if actual_present else "present but blank: {!r}".format(actual)
+                      if aform == "blank" else "none" if isinstance(actual, str) else actual_reason)
+            if tnot_fs is not None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} {}, so the store repository's actual "
+                            "remote ({}) cannot agree with it as a dedicated sync target (spec 5.5/5.6)".format(
+                                sync_target, tnot_fs, alabel))
+            elif tcanon is None:
+                # Refused on this leg too, and before the observation is consulted: with no remote, or no
+                # observation, a filesystem target outside the git: form still names nothing to agree with.
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a {} filesystem target, which the "
+                            "store repository's actual remote ({}) cannot agree with as a dedicated sync "
+                            "target; a filesystem sync target is accepted only as git:<absolute path> (use "
+                            "git:<absolute path>; spec 5.5/5.6)".format(sync_target, tform_word, alabel))
+            elif actual is None:
                 rep.cant("C-SYNC-AGREE: {}; the sync-target / remote agreement (spec 5.6) is required "
                          "for a dedicated sync target and is not evaluable by a parse-only engine".format(
                              actual_reason))
-            elif tcanon is None:
-                # a local dir:/path sync target with an observed remote cannot be canonicalized to compare
-                if actual_present:
-                    rep.finding("C-SYNC-AGREE: [store].sync_target {!r} is a local target but the store "
-                                "repository has an actual remote {!r} (spec 5.6)".format(sync_target, actual))
+            elif aform == "blank":
+                rep.finding("C-SYNC-AGREE: the manifest declares a dedicated sync_target {!r} but the store "
+                            "repository's actual remote {!r} is present but blank or whitespace-only, which "
+                            "names no remote (spec 5.6)".format(sync_target, actual))
             elif not actual_present:
                 rep.finding("C-SYNC-AGREE: the manifest declares a dedicated sync_target {!r} but the "
                             "store repository has no actual remote (spec 5.6)".format(sync_target))
+            elif tform == "absolute" and aform == "padded":
+                # whitespace is significant in a path, so an actual remote path with leading or trailing
+                # whitespace is ambiguous: refused, never trimmed into agreement with the target
+                rep.finding("C-SYNC-AGREE: the store repository's actual remote {!r} is a filesystem path with "
+                            "leading or trailing whitespace, which is ambiguous and cannot agree with the "
+                            "manifest sync_target {!r} (spec 5.6)".format(actual, sync_target))
+            elif aform is None and actual != actual.strip():
+                # whitespace is significant to git in a URL too, and _canonical_remote trims, so a URL actual
+                # remote with leading or trailing whitespace is refused here, never trimmed into agreement
+                rep.finding("C-SYNC-AGREE: the store repository's actual remote {!r} is a URL with leading or "
+                            "trailing whitespace, which is ambiguous and cannot agree with the manifest "
+                            "sync_target {!r} (spec 5.6)".format(actual, sync_target))
             else:
                 acanon = _canonical_remote(actual)
-                if acanon is None:
+                if acanon is None and tform == "absolute" and aform == "absolute":
+                    # a git:<absolute path> target is reached through a local-path remote: compare that
+                    # path's local form, classified exactly as the target was (a remote containing '://' is
+                    # a URL form, never this branch); a URL target never takes this branch, so it compares
+                    # as before, and a file:// remote stays the disclosed residual
+                    acanon = _local_path_canon(actual)
+                # A path-shaped remote holding '://' (/srv/a://repo) is read by git as an unsupported
+                # protocol, or as a bundle file at the path the OS resolves, which takes no push. Against a
+                # git:<absolute path> target whose local form differs from that path it is a sure mismatch;
+                # where the two paths are the same it stays the disclosed residual below.
+                afold = (_local_path_canon(actual) if acanon is None and tform == "absolute" and aform is None
+                         and actual.startswith("/") else None)
+                if afold is not None and tcanon and afold not in tcanon:
+                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
+                                "repository's actual remote {!r}: git reads its '://' as an unsupported "
+                                "protocol, and the path it otherwise names, {!r}, is a different path (spec "
+                                "5.6)".format(sync_target, actual, afold[1]))
+                elif acanon is None:
                     # a form the equivalence cannot canonicalize is disclosed, never a silent mismatch (F8)
                     rep.cant("C-SYNC-AGREE: the actual remote {!r} cannot be canonicalized for "
                              "host+path agreement against the sync_target (a disclosed residual; spec "
@@ -6311,7 +6478,15 @@ def self_test():
         # reads importer-authored blocks), an importer-authored open BI-2 is listed in TODO as actionable
         # (red when is_actionable drops its provenance predicate), and an importer-authored PD-2 that
         # supersedes the maintainer PD-1 is listed in DECISIONS as the effective resolution (red when
-        # render_decisions and join_resolution admit importer-authored decisions).
+        # render_decisions and join_resolution admit importer-authored decisions). Each importer-authored
+        # clean record is also its own clean-importer finding (spec 8.6), on this inactive store under
+        # C-HANDOFF, so the planner's text leaves exactly that finding and the stale text adds the drift.
+        def _ci_inactive(rtype, rid):
+            # The full finding _check_clean_importer reports under C-HANDOFF on an inactive store for one
+            # clean record that carries the importer kind.
+            return ("C-HANDOFF: clean record {!r} (type {!r}) carries actor.kind 'importer'; a clean-series "
+                    "record MUST NOT carry it (spec 8.6)".format(rid, rtype))
+
         def _vd_plan(root, name):
             vres = resolve_store(root)
             vfd = _open_store_root_fd(vres.store_root, vres.pointer_source != "default")
@@ -6330,7 +6505,7 @@ def self_test():
             finally:
                 _opf_views._FILTER_PREDICATES = vsaved
 
-        def _vd_drift(machine, name, sources):
+        def _vd_drift(machine, name, sources, ci):
             vm = copy.deepcopy(machine)
             vm["manifest.toml"] = base_manifest(views={name: {
                 "kind": "composed", "sources": list(sources), "target": ".working/" + name}})
@@ -6340,10 +6515,12 @@ def self_test():
             vgood = validate_store(resolve_store(vroot), observations=clean_prior())
             (vroot / ".working" / name).write_text(vstale, encoding="utf-8")
             vbad = validate_store(resolve_store(vroot), observations=clean_prior())
-            return (vgood is not None and vgood.status == VALID
+            return (vgood is not None and vgood.findings == [ci] and not vgood.cannot_evaluate
+                    and {c for c, v in vgood.checks.items() if v != "PASS"} == {"C-HANDOFF"}
                     and all(x in vgood.residuals for x in _FIREWALL_RESIDUALS)
                     and vbad is not None and vbad.status == INVALID
-                    and {c for c, v in vbad.checks.items() if v != "PASS"} == {"C-VIEW-DRIFT"}
+                    and {c for c, v in vbad.checks.items() if v != "PASS"} == {"C-VIEW-DRIFT", "C-HANDOFF"}
+                    and vbad.by_check.get("C-HANDOFF") == [ci]
                     and vbad.by_check.get("C-VIEW-DRIFT")
                     == ["C-VIEW-DRIFT: view {!r} target {!r} has drifted from its generated source (spec "
                         "5.8/10)".format(name, ".working/" + name)])
@@ -6352,16 +6529,18 @@ def self_test():
         vm["block.index.toml"] = idx([envelope("BL-1", "block", "active", scopes=["BI-2"],
                                                actor={"kind": "importer"})])
         vm["counters.toml"] = counters(BL=1)
-        check("view-drift-importer-block-grants-no-stop", _vd_drift(vm, "TODO.md", ("backlog_item", "block")))
+        check("view-drift-importer-block-grants-no-stop", _vd_drift(vm, "TODO.md", ("backlog_item", "block"),
+                                                                   _ci_inactive("block", "BL-1")))
         vm = clean_machine()
         vm["backlog_item.index.toml"] = idx([bi(1, "done"), dict(bi(2, "open"), actor={"kind": "importer"})])
-        check("view-drift-importer-item-not-actionable", _vd_drift(vm, "TODO.md", ("backlog_item", "block")))
+        check("view-drift-importer-item-not-actionable", _vd_drift(vm, "TODO.md", ("backlog_item", "block"),
+                                                                   _ci_inactive("backlog_item", "BI-2")))
         vm = clean_machine()
         vm["pending_decision.index.toml"] = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
         vm["counters.toml"] = counters(PD=2)
         check("view-drift-importer-decision-not-effective",
               _vd_drift(vm, "DECISIONS.md", ("pending_decision", "autonomous_decision", "maintainer_decision",
-                                             "preference_pattern")))
+                                             "preference_pattern"), _ci_inactive("pending_decision", "PD-2")))
 
         # --- topology (tracked / sync / containment) ------------------------------------------------
         check("untracked-invalid",
@@ -8590,6 +8769,25 @@ def self_test():
             def _i3_off(r, cid):
                 return r is not None and r.checks.get(cid) == "PASS" and not _i3_msgs(r, cid)
 
+            def _i3_ci(rtype, rid):
+                # The full finding _check_clean_importer reports for one clean record that carries the
+                # importer kind (spec 8.6: a clean-series record MUST NOT carry it).
+                return ("C-IMPORTED-SEGREGATION: clean record {!r} (type {!r}) carries actor.kind 'importer'; a "
+                        "clean-series record MUST NOT carry it (spec 8.6)".format(rid, rtype))
+
+            def _i3_seg_only(r, *msgs):
+                # The store's C-IMPORTED-SEGREGATION findings are exactly `msgs`, in order.
+                return (r is not None
+                        and [m for m in r.findings if m.startswith("C-IMPORTED-SEGREGATION")] == list(msgs))
+
+            def _i3_ci_active(r, *msgs):
+                # The clean active store but for the clean-importer findings `msgs`: they are the store's
+                # only findings, and C-IMPORTED-SEGREGATION is the only check beside any pending imported
+                # check that does not pass.
+                return (r is not None and r.findings == list(msgs)
+                        and r.checks.get("C-IMPORTED-SCHEMA") == "PASS" and pending_only(r)
+                        and _i3_bad(r) == {"C-IMPORTED-SEGREGATION"} | set(_imp_pending))
+
             check("imported-checks-clean-leaf-control-valid",
                   _i3_ok is not None and _i3_ok.status == VALID
                   and all(_i3_ok.checks.get(cid) == "PASS" for cid in IMPORTED_CHECKS))
@@ -8705,8 +8903,9 @@ def self_test():
                       if "backlog_item.imported.index.toml record[1]" in m and "0" * 64 in m])
             # C-IMPORTED-SEGREGATION, the receipt firewall: a maintainer-authored backlog item ratified at
             # done whose only receipt is importer-authored is the firewall finding alone (C-RECEIPTS
-            # leaves that item to this arm and passes); with the check disabled the SAME store certifies VALID. An
-            # importer-authored item with that receipt is history the firewall does not grade.
+            # leaves that item to this arm and passes), beside the clean-importer finding for the receipt
+            # itself; with the check disabled the SAME store certifies VALID. An importer-authored item with
+            # that receipt draws no receipt-firewall finding, only one clean-importer finding per record.
             _i3_idn = dn(1, "BI-1")
             _i3_idn["actor"] = {"kind": "importer"}
             _i3_sg = _i3_machine()
@@ -8716,9 +8915,10 @@ def self_test():
             _i3_sgr = _i3_run(copy.deepcopy(_i3_sg), obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-importer-receipt-finding",
                   _i3_sgr is not None and _i3_sgr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
-                  and len(_i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")) == 1
-                  and "'BI-1'" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[0]
-                  and "importer-authored" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[0]
+                  and len(_i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")) == 2
+                  and _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[0] == _i3_ci("done", "DN-1")
+                  and "'BI-1'" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[1]
+                  and "importer-authored" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[1]
                   and _i3_sgr.checks.get("C-RECEIPTS") == "PASS"
                   and _i3_bad(_i3_sgr) == {"C-IMPORTED-SEGREGATION"} | set(_imp_pending))
             _i3_sgf = _i3_flip("_check_imported_segregation", copy.deepcopy(_i3_sg), obs=copy.deepcopy(_i3_sg_obs))
@@ -8729,7 +8929,9 @@ def self_test():
                                                        bi(2, "open")])
             _i3_sglr = _i3_run(_i3_sgl, obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-importer-item-not-graded",
-                  _i3_sglr is not None and _i3_sglr.checks.get("C-IMPORTED-SEGREGATION") == "PASS")
+                  _i3_sglr is not None and _i3_sglr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and sorted(_i3_msgs(_i3_sglr, "C-IMPORTED-SEGREGATION"))
+                  == sorted([_i3_ci("backlog_item", "BI-1"), _i3_ci("done", "DN-1")]))
             # Clean-to-imported links (spec 8.6): relates, derives_from, follows and same-type supersedes
             # pass this check; any other relation, and supersedes to another type, is its finding (red
             # when the relation set widens or the same-type arm is dropped). C-RECORDS and C-LINKS also
@@ -8812,7 +9014,8 @@ def self_test():
             # The spec 8.6 receipt remedy: a maintainer-authored clean maintainer_decision linking
             # `corrects` to the ratified done item satisfies the receipt obligation in place of the
             # withdrawn importer-authored receipt, so the finding store above with the remedy added
-            # draws no segregation finding and certifies VALID (red when the remedy is not accepted).
+            # draws no receipt-firewall finding, its one finding the clean-importer finding for the
+            # receipt itself (red when the remedy is not accepted).
             # Whether its text records that the completion stands is prose no validator grades, so any
             # maintainer-authored corrects decision is accepted (a disclosed residual). A remedy
             # authored by an importer, or correcting another id, confers nothing: the finding stays.
@@ -8826,9 +9029,10 @@ def self_test():
 
             _i3_rmr = _i3_run(_i3_remedy(), obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-corrects-remedy-accepted",
-                  _i3_rmr is not None and _i3_rmr.status == VALID
-                  and _i3_rmr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
-                  and not _i3_msgs(_i3_rmr, "C-IMPORTED-SEGREGATION"))
+                  _i3_rmr is not None and _i3_rmr.findings == [_i3_ci("done", "DN-1")]
+                  and not _i3_rmr.cannot_evaluate
+                  and _i3_bad(_i3_rmr) == {"C-IMPORTED-SEGREGATION"}
+                  and _i3_msgs(_i3_rmr, "C-IMPORTED-SEGREGATION") == [_i3_ci("done", "DN-1")])
             _i3_rmi = _i3_run(_i3_remedy(actor_kind="importer"), obs=copy.deepcopy(_i3_sg_obs))
             _i3_rmo = _i3_run(_i3_remedy(target="BI-2"), obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-importer-remedy-confers-nothing",
@@ -8847,8 +9051,8 @@ def self_test():
             _i3_mx["counters.toml"]["counters"]["DN"] = 2
             _i3_mxr = _i3_run(_i3_mx, obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-mixed-receipts-pass",
-                  _i3_mxr is not None and _i3_mxr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
-                  and not _i3_msgs(_i3_mxr, "C-IMPORTED-SEGREGATION")
+                  _i3_mxr is not None and _i3_mxr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and _i3_msgs(_i3_mxr, "C-IMPORTED-SEGREGATION") == [_i3_ci("done", "DN-1")]
                   and _i3_mxr.checks.get("C-RECEIPTS") == "PASS"
                   and not _i3_msgs(_i3_mxr, "C-RECEIPTS"))
             _i3_ql = _i3_machine()
@@ -8861,8 +9065,8 @@ def self_test():
             _i3_ql["counters.toml"]["counters"].update({"BI": 3, "DN": 2})
             _i3_qlr = _i3_run(_i3_ql)
             check("imported-segregation-proposed-done-not-graded",
-                  _i3_qlr is not None and _i3_qlr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
-                  and not _i3_msgs(_i3_qlr, "C-IMPORTED-SEGREGATION"))
+                  _i3_qlr is not None and _i3_qlr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and _i3_msgs(_i3_qlr, "C-IMPORTED-SEGREGATION") == [_i3_ci("done", "DN-2")])
             # The decision-chain firewall (spec 8.6): "An importer-authored decision MUST NOT be
             # treated as the current effective resolution of a clean pending_decision chain". An
             # importer-authored PD-1 decided alone is a chain no non-importer decision resolves, which
@@ -8870,14 +9074,16 @@ def self_test():
             # and the store must not certify (red when the chain arm is dropped or skips every chain).
             # An importer-authored decision's `supersedes` links remove no current authority, over the
             # chain section 8.8 defines with those links included: a maintainer PD-1 decided plus an
-            # importer-authored PD-2 that supersedes it keeps PD-1 the chain's one resolution and
-            # certifies (red when an importer-authored link counts toward supersession again, which
+            # importer-authored PD-2 that supersedes it keeps PD-1 the chain's one resolution, the only
+            # finding PD-2's own clean-importer one (red when an importer-authored link counts toward
+            # supersession again, which
             # leaves the importer decision the chain's resolution), while a maintainer PD-3 that then
             # supersedes PD-2 is a second current resolution of the same chain, a C-DECISION-CHAINS
             # finding with this check passing (red when the chain derivation drops importer-authored
             # decisions again, which splits PD-1 and PD-3 into two chains that each pass). The same
-            # chain resolved by a maintainer PD-2, and an importer-authored PD-1 a maintainer PD-2
-            # supersedes (history below a clean resolution), each certify.
+            # chain resolved by a maintainer PD-2 certifies, and an importer-authored PD-1 a maintainer PD-2
+            # supersedes draws only PD-1's own clean-importer finding. Every importer-authored clean
+            # record here is that one finding under spec 8.6, pinned in full beside the chain findings.
             def _i3_chain(cur_actor=None, old_actor=None, head_actor=None):
                 m = _i3_machine()
                 p1, p2 = pd(1), pd(2, supersedes="PD-1")
@@ -8904,23 +9110,26 @@ def self_test():
                   and _i3_dcr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
                   and _i3_dcr.checks.get("C-DECISION-CHAINS") == "PASS"
                   and _i3_msgs(_i3_dcr, "C-IMPORTED-SEGREGATION")
-                  == ["C-IMPORTED-SEGREGATION: importer-authored pending_decision 'PD-1' is the current "
+                  == [_i3_ci("pending_decision", "PD-1"),
+                      "C-IMPORTED-SEGREGATION: importer-authored pending_decision 'PD-1' is the current "
                       "effective resolution of a clean pending_decision chain; resolving it now takes "
                       "a new clean decision linking back (spec 8.6)"]
                   and _i3_bad(_i3_dcr) == {"C-IMPORTED-SEGREGATION"})
             check("imported-segregation-importer-link-keeps-clean-resolution",
-                  _i3_clean_active(_i3_run(_i3_chain(cur_actor="importer"))))
+                  _i3_ci_active(_i3_run(_i3_chain(cur_actor="importer")), _i3_ci("pending_decision", "PD-2")))
             _i3_jtr = _i3_run(_i3_chain(cur_actor="importer", head_actor="maintainer"))
             check("imported-segregation-importer-joined-two-heads-finding",
                   _i3_jtr is not None and _i3_jtr.status != VALID
-                  and _i3_jtr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
+                  and _i3_jtr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and _i3_msgs(_i3_jtr, "C-IMPORTED-SEGREGATION") == [_i3_ci("pending_decision", "PD-2")]
                   and _i3_msgs(_i3_jtr, "C-DECISION-CHAINS")
                   == ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution "
                       "has 2 current effective resolutions; exactly one exists per chain (spec 8.5)"]
-                  and _i3_bad(_i3_jtr) == {"C-DECISION-CHAINS"})
+                  and _i3_bad(_i3_jtr) == {"C-DECISION-CHAINS", "C-IMPORTED-SEGREGATION"})
             check("imported-segregation-clean-resolution-passes",
                   _i3_clean_active(_i3_run(_i3_chain()))
-                  and _i3_clean_active(_i3_run(_i3_chain(old_actor="importer"))))
+                  and _i3_ci_active(_i3_run(_i3_chain(old_actor="importer")),
+                                    _i3_ci("pending_decision", "PD-1")))
             check("imported-segregation-chain-flip-disabled-passes",
                   _i3_off(_i3_flip("_check_imported_segregation", _i3_lone()), "C-IMPORTED-SEGREGATION"))
             # The chain arm grades importer authorship only: a chain whose current resolution an assistant
@@ -8960,7 +9169,8 @@ def self_test():
             _i3_ulkr = _i3_run(_i3_ulk, obs=_i3_ulk_obs)
             check("imported-segregation-uninterpreted-receipt-cannot-evaluate",
                   _i3_ulkr is not None and _i3_ulkr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_ulkr.checks.get("C-ARCHIVE-ENUM") == "PASS" and _i3_seg_quiet(_i3_ulkr)
+                  and _i3_ulkr.checks.get("C-ARCHIVE-ENUM") == "PASS"
+                  and _i3_seg_only(_i3_ulkr, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_ulkr, "the status or links of 'done' records could not be interpreted",
                                    "the receipt firewall"))
             _i3_umv = copy.deepcopy(_i3_sg)
@@ -8978,7 +9188,8 @@ def self_test():
             _i3_ustr = _i3_run(_i3_ust)
             check("imported-segregation-uninterpreted-chain-member-cannot-evaluate",
                   _i3_ustr is not None and _i3_ustr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_ustr.checks.get("C-ARCHIVE-ENUM") == "PASS" and _i3_seg_quiet(_i3_ustr)
+                  and _i3_ustr.checks.get("C-ARCHIVE-ENUM") == "PASS"
+                  and _i3_seg_only(_i3_ustr, _i3_ci("pending_decision", "PD-2"))
                   and _i3_seg_cant(_i3_ustr,
                                    "the status or links of 'pending_decision' records could not be interpreted",
                                    "the decision-chain firewall"))
@@ -9043,7 +9254,8 @@ def self_test():
             _i3_cmvr = _i3_run(_i3_cmv)
             check("imported-segregation-unconfirmed-moved-chain-member-cannot-evaluate",
                   _i3_cmvr is not None and _i3_cmvr.checks.get("C-RECORDS") == "PASS"
-                  and _i3_cmvr.checks.get("C-ARCHIVE-ENUM") == "FINDING" and _i3_seg_quiet(_i3_cmvr)
+                  and _i3_cmvr.checks.get("C-ARCHIVE-ENUM") == "FINDING"
+                  and _i3_seg_only(_i3_cmvr, _i3_ci("pending_decision", "PD-1"))
                   and _i3_seg_cant(_i3_cmvr, "the records of 'pending_decision' could not all be read",
                                    "the decision-chain firewall"))
             # An actor kind that is absent or unreadable (a C-RECORDS finding) is unknown provenance, never a
@@ -9072,8 +9284,8 @@ def self_test():
                   all(r is not None and r.checks.get("C-RECORDS") == "FINDING"
                       and r.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
                       and any(_i3_dn_kind in m and "the receipt join" in m for m in _i3_msgs(r, "C-RECEIPTS"))
-                      and _i3_seg_quiet(r) and _i3_seg_cant(r, _i3_dn_kind, "the receipt firewall")
-                      for r in _i3_kr))
+                      and _i3_seg_only(r, *ci) and _i3_seg_cant(r, _i3_dn_kind, "the receipt firewall")
+                      for r, ci in zip(_i3_kr, ([_i3_ci("done", "DN-1")], [_i3_ci("done", "DN-1")], []))))
             # The same on the chain store: the resolution's actor kind a number, or its actor absent, leaves
             # C-DECISION-CHAINS and the decision-chain firewall CANNOT-EVALUATE naming it, never the pass
             # each read as over a non-importer resolution (red when _make_rec, the chain join or the
@@ -9100,11 +9312,11 @@ def self_test():
             _i3_kmdr = _i3_run(_i3_kmd, obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-unreadable-item-and-remedy-kind-cannot-evaluate",
                   _i3_kbir is not None and _i3_kbir.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_seg_quiet(_i3_kbir)
+                  and _i3_seg_only(_i3_kbir, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_kbir, "the actor kind of 'backlog_item' records is absent or unreadable",
                                    "the receipt firewall")
                   and _i3_kmdr is not None and _i3_kmdr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_seg_quiet(_i3_kmdr)
+                  and _i3_seg_only(_i3_kmdr, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_kmdr,
                                    "the actor kind of 'maintainer_decision' records is absent or unreadable",
                                    "the receipt firewall"))
@@ -9122,7 +9334,8 @@ def self_test():
                       and r.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
                       and not any(m.startswith("C-RECEIPTS:") for m in r.findings)
                       and any(_i3_lk_dn in m and "the receipt join" in m for m in _i3_msgs(r, "C-RECEIPTS"))
-                      and _i3_seg_quiet(r) and _i3_seg_cant(r, _i3_lk_dn, "the receipt firewall")
+                      and _i3_seg_only(r, _i3_ci("done", "DN-1"))
+                      and _i3_seg_cant(r, _i3_lk_dn, "the receipt firewall")
                       for r in [_i3_kind_receipts([copy.deepcopy(_i3_idn),
                                                    dict(dn(2, "BI-1"), actor={"kind": k})])
                                 for k in _i3_lk_kinds]))
@@ -9152,11 +9365,11 @@ def self_test():
             _i3_lkmr = _i3_run(_i3_remedy(actor_kind="Maintainer"), obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-lookalike-item-and-remedy-kind-cannot-evaluate",
                   _i3_lkbr is not None and _i3_lkbr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_seg_quiet(_i3_lkbr)
+                  and _i3_seg_only(_i3_lkbr, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_lkbr, "the actor kind of 'backlog_item' records is absent or "
                                    "unreadable, or not a kind the schema admits", "the receipt firewall")
                   and _i3_lkmr is not None and _i3_lkmr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_seg_quiet(_i3_lkmr)
+                  and _i3_seg_only(_i3_lkmr, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_lkmr, "the actor kind of 'maintainer_decision' records is absent or "
                                    "unreadable, or not a kind the schema admits", "the receipt firewall"))
             # The section 8.6 residuals: an active store discloses the firewall entries and the
@@ -9424,18 +9637,43 @@ def self_test():
         def handoff_msgs(res):
             return res.by_check.get("C-HANDOFF", []) if res is not None else []
 
-        # C-HANDOFF with the imported series INACTIVE: the section 8.6 firewall is keyed on provenance,
-        # never on activation (it names the clean series written by the pre-1.3.0 legacy importer, a
-        # store whose imported series is inactive), so an importer-authored clean current handoff beside
-        # the maintainer's is exempt history and the store stays VALID (red if the exemption is ever
-        # gated on the activation flag).
+        # C-HANDOFF with the imported series INACTIVE, as every store is at the shipped SUPPORTED_HOMES = 1:
+        # the clean-importer rule is keyed on provenance, never on activation, so an importer-authored clean
+        # current handoff beside the maintainer's is its one clean-importer finding, reported under
+        # C-HANDOFF while C-IMPORTED-SEGREGATION is off the roster, and never counted by the
+        # at-most-one-current join. The flip removes the inactive-store arm (the rule then runs only with
+        # the series active), which leaves the store VALID, so the finding vector reads red on it. The
+        # same importer-authored handoff read from both an active and an archive leaf is one record and
+        # one finding.
         f = clean_machine()
         f["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
                                                        actor={"kind": "importer", "id": "import-assistant"})])
         f["counters.toml"] = counters(HO=2)
-        r2imp = run(f)
-        check("r2-importer-current-handoff-exempt-while-inactive",
-              r2imp.status == VALID and not handoff_msgs(r2imp))
+        r2imp = run(copy.deepcopy(f))
+        _r2i_g = globals()
+        _r2i_prev = _r2i_g["_check_clean_importer"]
+        _r2i_g["_check_clean_importer"] = (
+            lambda recs, rep, cid, *a, **k: None if cid == "C-HANDOFF" else _r2i_prev(recs, rep, cid, *a, **k))
+        try:
+            r2imp_flip = run(copy.deepcopy(f))
+        finally:
+            _r2i_g["_check_clean_importer"] = _r2i_prev
+
+        def _r2i_finding(res):
+            return (res is not None and res.status == INVALID and not res.cannot_evaluate
+                    and res.findings == [_ci_inactive("handoff", "HO-2")]
+                    and handoff_msgs(res) == [_ci_inactive("handoff", "HO-2")])
+        check("r2-importer-clean-handoff-finding-while-inactive", _r2i_finding(r2imp))
+        check("r2-importer-clean-handoff-inactive-flip-red",
+              r2imp_flip is not None and r2imp_flip.status == VALID and not r2imp_flip.findings
+              and not _r2i_finding(r2imp_flip))
+        f["archive/2026/handoff.index.toml"] = idx([envelope("HO-2", "handoff", "current",
+                                                             actor={"kind": "importer", "id": "import-assistant"})])
+        r2imp_dup = run(f)
+        check("r2-importer-clean-handoff-active-and-archive-reported-once",
+              r2imp_dup is not None
+              and [m for m in r2imp_dup.findings if "carries actor.kind 'importer'" in m]
+              == [_ci_inactive("handoff", "HO-2")])
         # Two clean non-importer current handoffs (a maintainer and an automation author) stay a C-HANDOFF
         # finding; this vector covers exactly the automation kind while the series is inactive (the
         # per-kind exclusion coverage, both kinds and both activation states, is the three-kind vectors
@@ -9521,18 +9759,29 @@ def self_test():
         try:
             _opf_store.SUPPORTED_HOMES = 2
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-            # The same maintainer + importer pair as the inactive vector: the importer-authored record is
-            # exempt history here too (spec 8.6), so no finding at all, C-HANDOFF evaluates to an explicit
-            # PASS and the only cants are the pending imported checks (red if the exemption is removed or
-            # if C-HANDOFF, or anything else, goes unevaluated). The clean HO high-water is raised in
-            # place so the imported counter high-waters act_machine() sets survive, and the run takes
-            # the empty imported baseline the across-time checks need on an active store.
+            # A maintainer's current handoff beside an importer-authored clean one. Base 2.0.0 with homes 2
+            # always carries the imported series, so the importer-authored record is never exempt history:
+            # it is the one C-IMPORTED-SEGREGATION finding (spec 8.6: a clean-series record MUST NOT carry
+            # the importer kind), while C-HANDOFF still leaves it out of the at-most-one-current join (spec
+            # 8.5/8.6) and evaluates to an explicit PASS, and the only cants are the pending imported
+            # checks. The flip runs the same store with _check_clean_importer disabled, which restores the
+            # exemption: the store then draws no finding at all, so the finding vector reads red on it.
+            # The clean HO high-water is raised in place so the imported counter high-waters act_machine()
+            # sets survive, and each run takes the empty imported baseline the across-time checks need on
+            # an active store.
             _r2_act = act_machine()
             _r2_act["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
                                                                  actor={"kind": "importer",
                                                                         "id": "import-assistant"})])
             _r2_act["counters.toml"]["counters"]["HO"] = 2
-            _r2_act_run = run(_r2_act, obs=_is2_prior())
+            _r2_act_run = run(copy.deepcopy(_r2_act), obs=_is2_prior())
+            _r2_g = globals()
+            _r2_prev_ci = _r2_g["_check_clean_importer"]
+            _r2_g["_check_clean_importer"] = lambda *_a, **_k: None
+            try:
+                _r2_flip_run = run(copy.deepcopy(_r2_act), obs=_is2_prior())
+            finally:
+                _r2_g["_check_clean_importer"] = _r2_prev_ci
             # The three-kind store while ACTIVE: this vector covers exactly that the one exemption stays
             # importer-only on an active store too, so widening it to the assistant or the automation
             # kind drops the reported count below 3 and reads red here. The clean HO high-water is raised
@@ -9554,9 +9803,17 @@ def self_test():
         finally:
             _opf_store.SUPPORTED_SPEC_VERSION = _r2_prev_ssv
             _opf_store.SUPPORTED_HOMES = _r2_prev_homes
-        check("r2-importer-current-handoff-exempt-when-active",
-              _r2_act_run is not None and not _r2_act_run.findings and not handoff_msgs(_r2_act_run)
-              and _r2_act_run.checks.get("C-HANDOFF") == "PASS" and pending_only(_r2_act_run))
+        _r2_ci_msg = ("C-IMPORTED-SEGREGATION: clean record 'HO-2' (type 'handoff') carries actor.kind "
+                      "'importer'; a clean-series record MUST NOT carry it (spec 8.6)")
+
+        def _r2_ci_finding(res):
+            return (res is not None and res.status == INVALID and res.findings == [_r2_ci_msg]
+                    and res.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                    and not handoff_msgs(res) and res.checks.get("C-HANDOFF") == "PASS" and pending_only(res))
+        check("r2-importer-clean-handoff-segregation-finding", _r2_ci_finding(_r2_act_run))
+        check("r2-importer-clean-handoff-segregation-flip-red",
+              _r2_flip_run is not None and not _r2_flip_run.findings
+              and _r2_flip_run.checks.get("C-HANDOFF") == "PASS" and not _r2_ci_finding(_r2_flip_run))
         check("r2-assistant-and-automation-handoffs-counted-while-active",
               _r2k_act_run is not None and handoff_msgs(_r2k_act_run) == [_r2_three_msg]
               and _r2k_act_run.findings == [_r2_three_msg] and pending_only(_r2k_act_run))
@@ -9607,7 +9864,10 @@ def self_test():
         # The same holds for the sibling current-state joins fed by the same collectors: C-RECEIPTS over
         # backlog_item and done, and C-DECISION-CHAINS over pending_decision, are CANNOT-EVALUATE when
         # their records could not all be read (red if either passes over the partial set), while an
-        # unread type that none of the three reads leaves all three a PASS (red if the scoping widens).
+        # unread type that none of the three reads leaves C-RECEIPTS and C-DECISION-CHAINS a PASS (red if
+        # the scoping widens). The clean-importer rule reads every clean type, so on this inactive store
+        # C-HANDOFF, where it reports, is CANNOT-EVALUATE with that rule's one message and no handoff-count
+        # message (red if the rule passes over an unread type, or the handoff count's scoping widens).
         # C-LINKS reads EVERY type as a link source and target, so the same unread type leaves it
         # CANNOT-EVALUATE (red if it passes over any partial collection).
         f = clean_machine()
@@ -9637,8 +9897,12 @@ def self_test():
         _r2_other = run(f)
         check("current-state-joins-pass-when-another-type-unread",
               _r2_other is not None and _r2_other.checks.get("C-RECORDS") == "CANNOT-EVALUATE"
-              and all(_r2_other.checks.get(cid) == "PASS"
-                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS")))
+              and all(_r2_other.checks.get(cid) == "PASS" for cid in ("C-RECEIPTS", "C-DECISION-CHAINS"))
+              and _r2_other.checks.get("C-HANDOFF") == "CANNOT-EVALUATE"
+              and _r2_other.by_check.get("C-HANDOFF")
+              == ["C-HANDOFF: the records of 'finding' could not all be read or confirmed (see C-RECORDS, "
+                  "C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the clean-importer rule (spec 8.6) is not "
+                  "evaluated over the records not read"])
 
         def _links_unread(res):
             return (res is not None and res.checks.get("C-LINKS") == "CANNOT-EVALUATE"
@@ -10488,8 +10752,9 @@ def self_test():
               and any("its only receipt(s) 'DN-1' are importer-authored" in f_
                       for f_ in _r1_imp.by_check.get("C-RECEIPTS", []))
               and not any("has no done receipt" in f_ for f_ in _r1_imp.by_check.get("C-RECEIPTS", [])))
-        # ... and an importer-authored ratified backlog_item is owed no receipt: exempt history, the store
-        # stays VALID (red when the join starts requiring receipts of importer-authored records again).
+        # ... and an importer-authored ratified backlog_item is owed no receipt: C-RECEIPTS passes and the
+        # store's one finding is the item's own clean-importer finding (red when the join starts requiring
+        # receipts of importer-authored records again).
         f = clean_machine()
         _r1_impbi = envelope("BI-1", "backlog_item", "done",
                              actor={"kind": "importer", "id": "import-assistant"})
@@ -10501,8 +10766,10 @@ def self_test():
         del _r1_impo["prior"]["records"]["DN-1"]
         del _r1_impo["prior"]["digests"]["DN-1"]
         del _r1_impo["prior"]["held"]["DN"]
+        _r1_impr = run(f, obs=_r1_impo)
         check("r1-importer-authored-backlog-item-owes-no-receipt",
-              run(f, obs=_r1_impo).status == VALID)
+              _r1_impr is not None and _r1_impr.findings == [_ci_inactive("backlog_item", "BI-1")]
+              and not _r1_impr.cannot_evaluate and _r1_impr.checks.get("C-RECEIPTS") == "PASS")
         # ... yet the exemption is from owing and conferring only: a clean receipt naming an open
         # importer-authored backlog_item is the C-RECEIPTS finding a receipt naming an open clean item is
         # (red when the receipt targets are read among the non-importer items alone).
@@ -10513,7 +10780,8 @@ def self_test():
         _r1_tgt = run(f)
         check("r1-clean-receipt-of-unratified-importer-item-finding",
               _r1_tgt is not None and _r1_tgt.status == INVALID
-              and {c for c, v in _r1_tgt.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and {c for c, v in _r1_tgt.checks.items() if v != "PASS"} == {"C-RECEIPTS", "C-HANDOFF"}
+              and _r1_tgt.by_check.get("C-HANDOFF") == [_ci_inactive("backlog_item", "BI-2")]
               and _r1_tgt.by_check.get("C-RECEIPTS")
               == ["C-RECEIPTS: done 'DN-2' receipt_of -> backlog_item 'BI-2' which is not ratified at 'done' "
                   "(state 'open'; spec 8.5)"])
@@ -10527,7 +10795,8 @@ def self_test():
         _r1_two = run(f)
         check("r1-two-clean-receipts-of-importer-authored-item-finding",
               _r1_two is not None and _r1_two.status == INVALID
-              and {c for c, v in _r1_two.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and {c for c, v in _r1_two.checks.items() if v != "PASS"} == {"C-RECEIPTS", "C-HANDOFF"}
+              and _r1_two.by_check.get("C-HANDOFF") == [_ci_inactive("backlog_item", "BI-1")]
               and _r1_two.by_check.get("C-RECEIPTS")
               == ["C-RECEIPTS: backlog_item 'BI-1' has 2 done receipts; the receipt is one-to-one "
                   "(spec 8.5)"])
@@ -10547,8 +10816,9 @@ def self_test():
                       for f_ in _r3_imp.by_check.get("C-DECISION-CHAINS", [])))
         # ... and an importer-authored supersedes link removes no current authority: a clean decided PD-1
         # that an importer-authored withdrawn PD-2 supersedes stays its chain's one current resolution,
-        # and with no importer decision current the store is VALID (red when the C-DECISION-CHAINS count
-        # lets an importer-authored link supersede, as only the firewall arm's derivation does).
+        # and with no importer decision current the store's one finding is PD-2's own clean-importer finding
+        # (red when the C-DECISION-CHAINS count lets an importer-authored link supersede, as only the
+        # firewall arm's derivation does).
         f = clean_machine()
         _r3_implk = pd(2, status="withdrawn", supersedes="PD-1")
         _r3_implk["actor"] = {"kind": "importer", "id": "import-assistant"}
@@ -10556,8 +10826,8 @@ def self_test():
         f["counters.toml"] = counters(PD=2)
         _r3_lk = run(f)
         check("r3-importer-link-removes-no-authority",
-              _r3_lk is not None and _r3_lk.status == VALID
-              and _r3_lk.checks.get("C-DECISION-CHAINS") == "PASS")
+              _r3_lk is not None and _r3_lk.findings == [_ci_inactive("pending_decision", "PD-2")]
+              and not _r3_lk.cannot_evaluate and _r3_lk.checks.get("C-DECISION-CHAINS") == "PASS")
         # Only the exact kind `importer` is barred by the receipt firewall and exempt from the chain
         # derivation: a done authored by a lookalike kind (another case, an extension, a prefix, padding)
         # or by an actor whose kind cannot be read still confers its receipt in the count, and such a
@@ -10769,26 +11039,30 @@ def self_test():
         _fw_rc = _fw_run(_fw_receipt(), _fw_dig)
         check("firewall-inactive-importer-receipt-finding",
               _fw_rc is not None and _fw_rc.status == INVALID
-              and {c for c, v in _fw_rc.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and {c for c, v in _fw_rc.checks.items() if v != "PASS"} == {"C-RECEIPTS", "C-HANDOFF"}
+              and _fw_rc.by_check.get("C-HANDOFF") == [_ci_inactive("done", "DN-1")]
               and _fw_rc.by_check.get("C-RECEIPTS")
               == ["C-RECEIPTS: ratified backlog_item 'BI-1' is authored by a non-importer actor but its only "
                   "receipt(s) 'DN-1' are importer-authored; it MUST hold a clean receipt authored by a "
                   "non-importer actor, or a maintainer-authored maintainer_decision correcting it (spec 8.6)"]
               and _fw_disclosed(_fw_rc))
-        # The spec 8.6 remedy is accepted on this store too; a maintainer decision that links the item by
-        # any relation but `corrects` is no remedy (red when the remedy accepts any relation).
+        # The spec 8.6 remedy is accepted on this store too, its one finding the receipt's own
+        # clean-importer finding; a maintainer decision that links the item by any relation but `corrects`
+        # is no remedy (red when the remedy accepts any relation).
         _fw_rm = _fw_run(_fw_receipt(md(1, links=[{"rel": "corrects", "id": "BI-1"}])), _fw_dig)
         _fw_rl = _fw_run(_fw_receipt(md(1, links=[{"rel": "relates", "id": "BI-1"}])), _fw_dig)
         check("firewall-inactive-corrects-remedy-accepted",
-              _fw_rm is not None and _fw_rm.status == VALID and _fw_disclosed(_fw_rm))
+              _fw_rm is not None and _fw_rm.findings == [_ci_inactive("done", "DN-1")]
+              and not _fw_rm.cannot_evaluate and _fw_rm.checks.get("C-RECEIPTS") == "PASS"
+              and _fw_disclosed(_fw_rm))
         check("firewall-inactive-non-corrects-remedy-confers-nothing",
               _fw_rl is not None and _fw_rl.checks.get("C-RECEIPTS") == "FINDING"
               and any("'BI-1'" in m and "importer-authored" in m for m in _fw_rl.by_check.get("C-RECEIPTS", [])))
         # The decision-chain arm on this store: an importer-authored decision's `supersedes` links remove
         # no current authority, over the chain section 8.8 defines with those links included. A maintainer
         # PD-1 decided that an importer-authored PD-2 supersedes stays the chain's one resolution, and the
-        # store certifies (red when an importer-authored link counts toward supersession again: the arm
-        # then reads PD-2 as the resolution and reports it).
+        # store's one finding is PD-2's own clean-importer finding (red when an importer-authored link
+        # counts toward supersession again: the arm then reads PD-2 as the resolution and reports it).
         def _fw_shape(head=False, archived=False):
             m = clean_machine()
             rows = [pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})]
@@ -10805,7 +11079,8 @@ def self_test():
 
         _fw_ch = run(_fw_shape())
         check("firewall-inactive-importer-link-keeps-clean-resolution",
-              _fw_ch is not None and _fw_ch.status == VALID
+              _fw_ch is not None and _fw_ch.findings == [_ci_inactive("pending_decision", "PD-2")]
+              and not _fw_ch.cannot_evaluate
               and _fw_ch.checks.get("C-DECISION-CHAINS") == "PASS" and _fw_disclosed(_fw_ch))
         # ... so a maintainer PD-3 that supersedes PD-2 is a second current resolution of the one chain
         # PD-2 joins, a C-DECISION-CHAINS finding (spec 8.5, 8.8), never two one-member chains that each
@@ -10816,12 +11091,14 @@ def self_test():
         _fw_jh = run(_fw_shape(head=True))
         check("firewall-inactive-importer-joined-two-heads-finding",
               _fw_jh is not None and _fw_jh.status == INVALID
-              and {c for c, v in _fw_jh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and {c for c, v in _fw_jh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS", "C-HANDOFF"}
+              and _fw_jh.by_check.get("C-HANDOFF") == [_ci_inactive("pending_decision", "PD-2")]
               and _fw_jh.by_check.get("C-DECISION-CHAINS") == _fw_two and _fw_disclosed(_fw_jh))
         _fw_ajh = run(_fw_shape(head=True, archived=True))
         check("firewall-inactive-archived-importer-joined-two-heads-finding",
               _fw_ajh is not None and _fw_ajh.status == INVALID
-              and {c for c, v in _fw_ajh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and {c for c, v in _fw_ajh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS", "C-HANDOFF"}
+              and _fw_ajh.by_check.get("C-HANDOFF") == [_ci_inactive("pending_decision", "PD-2")]
               and _fw_ajh.by_check.get("C-DECISION-CHAINS") == _fw_two and _fw_disclosed(_fw_ajh))
         # A chain no non-importer decision resolves (an importer-authored PD-1 decided alone) is the arm's
         # finding: resolving it now takes a new clean decision linking back (spec 8.6; red when the arm
@@ -10832,7 +11109,8 @@ def self_test():
         _fw_lone = run(f)
         check("firewall-inactive-importer-only-chain-finding",
               _fw_lone is not None and _fw_lone.status == INVALID
-              and {c for c, v in _fw_lone.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and {c for c, v in _fw_lone.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS", "C-HANDOFF"}
+              and _fw_lone.by_check.get("C-HANDOFF") == [_ci_inactive("pending_decision", "PD-1")]
               and _fw_lone.by_check.get("C-DECISION-CHAINS")
               == ["C-DECISION-CHAINS: importer-authored pending_decision 'PD-1' is the current effective "
                   "resolution of a clean pending_decision chain; resolving it now takes a new clean decision "
@@ -10948,17 +11226,23 @@ def self_test():
               all(_fw_cant(r, "C-DECISION-CHAINS", _fw_lk_pd, "the chains are not evaluated as a pass")
                   and _fw_cant(r, "C-DECISION-CHAINS", _fw_lk_pd, "the decision-chain firewall")
                   for r in [_fw_lk_chain(cur=k) for k in _fw_lk_kinds] + [_fw_lk_chain(old="Importer")]))
-        # Legacy importer-authored clean history the firewall leaves alone: an importer-authored item ratified
-        # at done with its importer-authored receipt, and an importer-authored decision a maintainer decision
-        # supersedes, certify VALID (red when either arm grades importer-authored history it must not).
+        # Importer-authored clean records the receipt and decision-chain arms leave alone: an importer-authored
+        # item ratified at done with its importer-authored receipt, and an importer-authored decision a
+        # maintainer decision supersedes, draw no receipt or chain finding, only one clean-importer finding
+        # per record (spec 8.6) under C-HANDOFF (red when either arm grades those records).
         f = clean_machine()
         f["backlog_item.index.toml"] = idx([dict(bi(1, "done"), actor={"kind": "importer"}), bi(2, "open")])
         f["done.index.toml"] = idx([copy.deepcopy(_fw_idn)])
         f["pending_decision.index.toml"] = idx([dict(pd(1), actor={"kind": "importer"}), pd(2, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=2)
         _fw_hist = _fw_run(f, _fw_dig)
-        check("firewall-inactive-legacy-history-valid",
-              _fw_hist is not None and _fw_hist.status == VALID and _fw_disclosed(_fw_hist))
+        check("firewall-inactive-importer-history-clean-importer-findings-only",
+              _fw_hist is not None and not _fw_hist.cannot_evaluate
+              and {c for c, v in _fw_hist.checks.items() if v != "PASS"} == {"C-HANDOFF"}
+              and sorted(_fw_hist.findings)
+              == sorted([_ci_inactive("backlog_item", "BI-1"), _ci_inactive("done", "DN-1"),
+                         _ci_inactive("pending_decision", "PD-1")])
+              and _fw_disclosed(_fw_hist))
         # The firewall fails closed on this inactive store as on an active one: a clean-record reader that
         # did not evaluate leaves its records unseated, so each arm whose own record types are unread is
         # CANNOT-EVALUATE naming that reader in one message, never a pass over them (red when the driver
@@ -12507,10 +12791,11 @@ def self_test():
                                         for f in _f6cr.findings))
 
         # Fable F2: a dedicated LOCAL sync_target (dir:/path -> tcanon is None) whose committed pointer names
-        # a canonicalizable REMOTE is a C-SYNC-AGREE finding (leg 2), symmetric with the actual-remote leg's
-        # local-target-with-a-remote finding. Pre-fix leg 2 short-circuited on `tcanon and pcanon` (tcanon
-        # None) and passed the remote pointer silently. Hand-set the remote Target, since resolve_store
-        # rejects a remote committed pointer before validate_store sees it.
+        # a canonicalizable REMOTE is still a C-SYNC-AGREE finding (leg 2): the dir: target is refused on
+        # that leg whatever the pointer holds, so a remote pointer is never passed silently. Pre-fix leg 2
+        # short-circuited on `tcanon and pcanon` (tcanon None) and passed the remote pointer silently.
+        # Hand-set the remote Target, since resolve_store rejects a remote committed pointer before
+        # validate_store sees it.
         _lt = clean_machine()
         _lt["manifest.toml"] = base_manifest()
         _lt["manifest.toml"]["store"] = {"sync_target": "dir:/some/where"}
@@ -12519,9 +12804,198 @@ def self_test():
         _ltr = validate_store(_ltres, observations={"tracked": "tracked", "actual_remote": "",
                                                     "prior": clean_prior()["prior"]})
         check("sync-local-target-remote-pointer-invalid", _ltr is not None and _ltr.status == INVALID)
-        check("sync-local-target-remote-pointer-named",
-              _ltr is not None and any("is a local target but the" in f
-                                       and "committed pointer names a remote" in f for f in _ltr.findings))
+        check("sync-dir-target-refused-despite-remote-pointer",
+              _ltr is not None and any("is a dir: filesystem target" in f
+                                       and "no committed pointer can agree" in f for f in _ltr.findings))
+
+        # A filesystem sync target is accepted only as git:<absolute path>. A dedicated dir: target is
+        # refused on EACH leg, each naming the remedy, even with a local committed pointer and NO actual
+        # remote (where the actual-remote leg used to pass silently) or no observation at all. Each leg's
+        # finding is asserted by its own text, so removing either leg's refusal fails its vector.
+        def _sync_case(target, actual, pointer=None):
+            m = clean_machine()
+            m["manifest.toml"] = base_manifest()
+            m["manifest.toml"]["store"] = {"sync_target": target}
+            res = resolve_store(build(m))
+            if pointer is not None:
+                res.target = classify_target(pointer)
+            obs = {"tracked": "tracked", "prior": clean_prior()["prior"]}
+            if actual is not None:
+                obs["actual_remote"] = actual
+            return validate_store(res, observations=obs)
+
+        def _sync_findings(r):
+            return [f for f in (r.findings if r is not None else []) if "C-SYNC-AGREE" in f]
+
+        _remedy = "use git:<absolute path>"
+        for _tag, _act in (("no-remote", ""), ("remote", "/srv/opf-store.git"), ("unobserved", None)):
+            _dr = _sync_case("dir:/srv/opf-store", _act)
+            check("sync-dir-target-{}-invalid".format(_tag), _dr is not None and _dr.status == INVALID)
+            check("sync-dir-target-{}-pointer-leg-refused".format(_tag),
+                  any("is a dir: filesystem target" in f and "no committed pointer can agree" in f
+                      and _remedy in f for f in _sync_findings(_dr)))
+            check("sync-dir-target-{}-remote-leg-refused".format(_tag),
+                  any("is a dir: filesystem target" in f and "actual remote" in f and "cannot agree" in f
+                      and _remedy in f for f in _sync_findings(_dr)))
+        # The bare absolute path, the other filesystem form outside git:, is refused on both legs alike.
+        _bp = _sync_case("/srv/opf-store", "")
+        check("sync-bare-path-target-both-legs-refused",
+              sum(1 for f in _sync_findings(_bp) if "is a bare-path filesystem target" in f and _remedy in f) == 2)
+        # git:<absolute path> canonicalizes to a comparable local form: it agrees with a matching actual
+        # remote and committed pointer (spelling-normalized: repeated slashes, '.' and a trailing slash),
+        # and a different path is a finding on each leg.
+        _ga = _sync_case("git:/srv/opf-store.git", "/srv/opf-store.git", pointer="git:/srv//./opf-store.git/")
+        check("sync-git-abs-path-agrees-valid", _ga is not None and _ga.status == VALID)
+        _gr = _sync_case("git:/srv/opf-store.git", "/srv/other.git")
+        check("sync-git-abs-path-other-remote-invalid", _gr is not None and _gr.status == INVALID)
+        check("sync-git-abs-path-other-remote-named",
+              any("does not match the store repository's actual remote '/srv/other.git'" in f
+                  for f in _sync_findings(_gr)))
+        _gp = _sync_case("git:/srv/opf-store.git", "/srv/opf-store.git", pointer="git:/srv/other.git")
+        check("sync-git-abs-path-other-pointer-invalid", _gp is not None and _gp.status == INVALID)
+        check("sync-git-abs-path-other-pointer-named",
+              any("committed pointer remote '/srv/other.git' does not agree" in f for f in _sync_findings(_gp)))
+        # No '.git' fold for a local path (a different directory), and a '..' segment is unresolvable.
+        _gg = _sync_case("git:/srv/opf-store", "/srv/opf-store.git")
+        check("sync-git-abs-path-no-dotgit-fold", _gg is not None and _gg.status == INVALID)
+        _gd = _sync_case("git:/srv/x/../opf-store.git", "/srv/opf-store.git")
+        check("sync-git-abs-path-dotdot-cant", _gd is not None and _gd.status == CANNOT_EVALUATE)
+        # A relative git: path is refused on both legs, naming the remedy (it used to be cannot-evaluate).
+        for _tag, _rel in (("subdir", "git:srv/opf-store.git"), ("dot", "git:./opf-store.git"),
+                           ("bare-name", "git:opf-store")):
+            _rr = _sync_case(_rel, "/srv/opf-store.git")
+            check("sync-git-relative-refused-{}".format(_tag),
+                  _rr is not None and _rr.status == INVALID
+                  and sum(1 for f in _sync_findings(_rr)
+                          if "is a relative git: filesystem target" in f and _remedy in f) == 2)
+        # https and ssh URL targets compare exactly as before: equivalent spellings agree, a different repo
+        # is a finding, and a local-path actual remote or committed pointer against a URL target stays the
+        # disclosed cannot-evaluate it was (the local form is used only for a git:<absolute path> target).
+        _url = "https://example.invalid/org/store.git"
+        _ssh = "ssh://git@example.invalid/org/store"
+        for _tag, _tg in (("https", _url), ("ssh", _ssh)):
+            _uv = _sync_case(_tg, "git@example.invalid:org/store.git")
+            check("sync-{}-target-equivalent-remote-valid".format(_tag), _uv is not None and _uv.status == VALID)
+            _ud = _sync_case(_tg, "https://example.invalid/org/other.git")
+            check("sync-{}-target-other-remote-invalid".format(_tag), _ud is not None and _ud.status == INVALID)
+            _ul = _sync_case(_tg, "/srv/opf-store.git")
+            check("sync-{}-target-local-remote-cant".format(_tag),
+                  _ul is not None and _ul.status == CANNOT_EVALUATE and not _sync_findings(_ul))
+            _up = _sync_case(_tg, "git@example.invalid:org/store.git", pointer="git:/srv/opf-store.git")
+            check("sync-{}-target-local-pointer-cant".format(_tag),
+                  _up is not None and _up.status == CANNOT_EVALUATE and not _sync_findings(_up))
+        # A file:// URL names a filesystem repository outside the git:<absolute path> form, so it is refused
+        # on both legs with the remedy, spelled bare or under git: (it used to be cannot-evaluate).
+        for _tag, _fu in (("bare", "file:///srv/opf-store.git"), ("git", "git:file:///srv/opf-store.git"),
+                          ("upper", "FILE:///srv/opf-store.git")):
+            _fr = _sync_case(_fu, "/srv/opf-store.git")
+            check("sync-file-url-target-refused-{}".format(_tag),
+                  _fr is not None and _fr.status == INVALID
+                  and sum(1 for f in _sync_findings(_fr)
+                          if "is a file:// URL filesystem target" in f and _remedy in f) == 2)
+        # Whitespace is significant in a path: a git: path or an actual remote path with leading or trailing
+        # whitespace is refused as ambiguous, never trimmed into agreement with the unpadded spelling.
+        _pt = _sync_case("git:/srv/opf-store ", "/srv/opf-store")
+        check("sync-git-abs-path-padded-target-refused",
+              _pt is not None and _pt.status == INVALID
+              and sum(1 for f in _sync_findings(_pt)
+                      if "leading or trailing whitespace, an ambiguous filesystem target" in f
+                      and _remedy in f) == 2)
+        _pl = _sync_case("git: /srv/opf-store", "/srv/opf-store")
+        check("sync-git-abs-path-leading-space-target-refused",
+              _pl is not None and _pl.status == INVALID
+              and any("leading or trailing whitespace" in f for f in _sync_findings(_pl)))
+        for _tag, _pr in (("trailing", "/srv/opf-store "), ("leading", " /srv/opf-store")):
+            _pa = _sync_case("git:/srv/opf-store", _pr)
+            check("sync-git-abs-path-padded-remote-refused-{}".format(_tag),
+                  _pa is not None and _pa.status == INVALID
+                  and any("actual remote {!r} is a filesystem path with leading or trailing whitespace".format(_pr)
+                          in f for f in _sync_findings(_pa)))
+        # Git reads any '://' as a scheme separator (it refuses /srv/a://repo as protocol '/srv/a'), so a
+        # spelling containing '://' is a URL form on BOTH legs, never an absolute path: it agrees with
+        # nothing, whichever leg spells it, bare or under git:, padded or not.
+        for _tag, _tg, _ar in (("in-target", "git:/srv/a://repo", "/srv/a:/repo"),
+                               ("in-remote", "git:/srv/a:/repo", "/srv/a://repo"),
+                               ("in-both", "git:/srv/a://repo", "/srv/a://repo"),
+                               ("other-remote", "git:/srv/a://repo", "/srv/a:/other"),
+                               ("bare", "/srv/a://repo", "/srv/a://repo"),
+                               ("bare-padded", "/srv/a://repo ", "/srv/a://repo")):
+            _sv = _sync_case(_tg, _ar)
+            check("sync-scheme-substring-path-refused-{}".format(_tag),
+                  _sv is not None and _sv.status in (INVALID, CANNOT_EVALUATE))
+            # The rule that refuses each: a git: target holding '://' is a URL form no canonicalizer can
+            # split, a cannot-evaluate naming that form (never a path mismatch), and a padded bare one is a
+            # URL with leading or trailing whitespace, refused on both legs.
+            if _tag == "other-remote":
+                check("sync-scheme-substring-path-other-remote-target-unresolved",
+                      _sv is not None and _sv.status == CANNOT_EVALUATE and not _sync_findings(_sv)
+                      and any("the sync_target remote form '/srv/a://repo' cannot be canonicalized" in c
+                              for c in _sv.cannot_evaluate))
+            elif _tag == "bare-padded":
+                check("sync-scheme-substring-path-bare-padded-url-whitespace",
+                      _sv is not None and _sv.status == INVALID
+                      and sum(1 for f in _sync_findings(_sv)
+                              if "is a URL with leading or trailing whitespace" in f) == 2)
+        # A path-shaped actual remote holding '://' never names the git:<absolute path> target through
+        # git: against a target whose path differs from the one it spells it is a mismatch finding, and
+        # against the same path it stays a disclosed cannot-evaluate.
+        _so = _sync_case("git:/srv/a%3A%2F%2Frepo", "/srv/a://repo")
+        check("sync-scheme-substring-remote-other-path-invalid",
+              _so is not None and _so.status == INVALID
+              and any("does not match the store repository's actual remote '/srv/a://repo': git reads its "
+                      "'://' as an unsupported protocol" in f for f in _sync_findings(_so)))
+        _ss = _sync_case("git:/srv/a:/repo", "/srv/a://repo")
+        check("sync-scheme-substring-remote-same-path-cant",
+              _ss is not None and _ss.status == CANNOT_EVALUATE and not _sync_findings(_ss)
+              and any("the actual remote '/srv/a://repo' cannot be canonicalized" in c
+                      for c in _ss.cannot_evaluate))
+        # Whitespace is significant to git in a URL as in a path: a URL actual remote or URL target with
+        # leading or trailing whitespace is refused by its own message, never trimmed into agreement.
+        for _tag, _tg, _ar in (("remote-trailing", _url, _url + " "), ("remote-leading", _url, " " + _url),
+                               ("remote-ssh", _ssh, _ssh + " ")):
+            _wr = _sync_case(_tg, _ar)
+            check("sync-url-padded-{}-refused".format(_tag),
+                  _wr is not None and _wr.status == INVALID
+                  and any("actual remote {!r} is a URL with leading or trailing whitespace".format(_ar) in f
+                          for f in _sync_findings(_wr)))
+        for _tag, _tg in (("target-trailing", _url + " "), ("target-git-leading", "git: " + _url)):
+            _wt = _sync_case(_tg, _url)
+            check("sync-url-padded-{}-refused".format(_tag),
+                  _wt is not None and _wt.status == INVALID
+                  and sum(1 for f in _sync_findings(_wt)
+                          if "is a URL with leading or trailing whitespace" in f) == 2)
+        # A remote stored with a line ending of its own keeps it (git's one line ending is removed), so it
+        # is a padded path, refused.
+        _nl = _sync_case("git:/srv/opf-store", "/srv/opf-store\n")
+        check("sync-git-abs-path-newline-remote-refused", _nl is not None and _nl.status == INVALID
+              and any("leading or trailing whitespace" in f for f in _sync_findings(_nl)))
+        # A present remote whose URL is only whitespace is described as blank, never as absent or a URL.
+        for _tag, _tg in (("git-path", "git:/srv/opf-store"), ("url", _url)):
+            _br = _sync_case(_tg, "   ")
+            check("sync-blank-remote-{}-refused-as-blank".format(_tag),
+                  _br is not None and _br.status == INVALID
+                  and any("is present but blank or whitespace-only" in f for f in _sync_findings(_br))
+                  and not any("has no actual remote" in f or "URL" in f for f in _sync_findings(_br)))
+        _bd = _sync_case("dir:/srv/opf-store", "   ")
+        check("sync-blank-remote-labelled-blank",
+              any("actual remote (present but blank: '   ')" in f for f in _sync_findings(_bd)))
+        # A blank git: payload names no remote: refused on both legs, never read as a URL form.
+        check("fs-path-form-blank", _fs_path_form("") == "blank" and _fs_path_form(" \t") == "blank")
+        check("fs-path-form-scheme-substring-url", _fs_path_form("/srv/a://repo") is None
+              and _fs_path_form("/srv/a://repo ") is None and _fs_path_form("FILE:///srv/a") == "file-url")
+        _bg = _sync_case("git:   ", "/srv/opf-store")
+        check("sync-blank-git-payload-refused",
+              _bg is not None and _bg.status == INVALID
+              and sum(1 for f in _sync_findings(_bg) if "has a blank git: payload" in f) == 2
+              and not any("remote form" in c for c in (_bg.cannot_evaluate if _bg is not None else [])))
+        # The actual-remote leg labels a supplied but malformed observation as malformed, not as unobserved.
+        _mr = _sync_case("dir:/srv/opf-store", 5)
+        check("sync-dir-target-malformed-remote-labelled",
+              any("actual remote (the `actual_remote` observation was supplied but malformed)" in f
+                  for f in _sync_findings(_mr)))
+        _ur = _sync_case("dir:/srv/opf-store", None)
+        check("sync-dir-target-unobserved-remote-labelled",
+              any("actual remote (no `actual_remote` observation was supplied)" in f for f in _sync_findings(_ur)))
 
         # F-5: _canonical_remote exotic edges.
         # (a) an scp bracketed-IPv6 host whose PATH itself contains '@' must not mis-split on a colon

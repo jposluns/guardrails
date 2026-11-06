@@ -7,9 +7,10 @@ independently of fixture writes. The lane builds the shared poison tree and cont
 (_config_poison_fixture), removes the hook/ignore/attributes poison, proves the fsmonitor and
 malformed-config controls discriminate (config/fsmonitor-control, config/malformed-control,
 config/xdg-malformed-control), runs the four fsmonitor member probes, then runs every registered
-member except the two real-checkout archive readers (which retain caller config by contract)
-under malformed HOME and XDG configuration and asserts each member rc. Malformed HOME/XDG config
-also covers reads such as rev-parse, which hooks/ignore poison cannot see.
+member except the two real-checkout archive readers and the two bare tracked-file listing gates
+(which retain caller config by contract) under malformed HOME and XDG configuration and asserts
+each member rc. Malformed HOME/XDG config also covers reads such as rev-parse, which hooks/ignore
+poison cannot see.
 
   selftest_git_fixture_env_config_malformed.py                              exit 0 pass, 1 failure
   selftest_git_fixture_env_config_malformed.py --execution-report ABS_PATH  also write check IDs

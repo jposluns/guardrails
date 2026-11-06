@@ -11452,6 +11452,325 @@ def _gitalias_oracle_cases(tmp):
     shutil.rmtree(str(root), ignore_errors=True)
 
 
+# The child of the record-surface checks that can block or exhaust memory where the read is unbounded or
+# waits for a FIFO writer: it loads the hook script from the file in argv[1] (importlib, so a mutated copy
+# can be loaded in its place), reads the registry JSON in argv[2] and either runs the resume probes over
+# the root in argv[3] and prints their findings as one JSON line, or, with argv[4] "doctor", runs
+# tools/orch_doctor.py --resume-audit rooted at argv[3] and prints its exit code and output, or, with
+# argv[4] "haystack", prints the stop path's pending-decisions haystack as one JSON line, or, with argv[4]
+# "hold", builds the stop decision's context from live state rooted at argv[3] and prints the decision's
+# verdict and disposition rows as one JSON line.
+_RECORD_SURFACE_CHILD = (
+    "import importlib.util, json, sys\n"
+    "from pathlib import Path\n"
+    "spec = importlib.util.spec_from_file_location('aiqt_hooks', sys.argv[1])\n"
+    "hooks = importlib.util.module_from_spec(spec)\n"
+    "sys.modules['aiqt_hooks'] = hooks\n"
+    "spec.loader.exec_module(hooks)\n"
+    "reg = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))\n"
+    "if sys.argv[4:5] == ['doctor']:\n"
+    "    sys.path.insert(0, sys.argv[5])\n"
+    "    import orch_doctor\n"
+    "    root = Path(sys.argv[3])\n"
+    "    orch_doctor.repo_root = lambda: root\n"
+    "    sys.argv = ['orch_doctor.py', '--resume-audit']\n"
+    "    print(json.dumps(orch_doctor.main()))\n"
+    "elif sys.argv[4:5] == ['haystack']:\n"
+    "    print(json.dumps(hooks._orch_pending_haystack(reg, sys.argv[3])))\n"
+    "elif sys.argv[4:5] == ['hold']:\n"
+    "    data = {'hook_event_name': 'Stop', 'cwd': sys.argv[3], 'session_id': 's1'}\n"
+    "    ctx = hooks._orch_build_ctx(reg, sys.argv[3], 'stop', data, record_checkpoint=False)[0]\n"
+    "    verdict, _reason, disposition = hooks.decide_yield(ctx)\n"
+    "    print(json.dumps([verdict, [list(d) for d in disposition]]))\n"
+    "else:\n"
+    "    print(json.dumps(hooks._orch_resume_probes(reg, sys.argv[3])))\n")
+
+
+def _record_surface_child(hooks_file, root, reg, mode=None):
+    """Run _RECORD_SURFACE_CHILD (mode None, "doctor", "haystack" or "hold") in a new session under a 1 GiB
+    address-space limit and a 20 s wall clock, killing its whole process group at the end: (timed out,
+    exit code, stdout lines)."""
+    import resource
+    import signal
+    reg_path = root / "child-registry.json"
+    reg_path.write_text(json.dumps(reg), encoding="utf-8")
+    argv = [sys.executable, "-I", "-B", "-c", _RECORD_SURFACE_CHILD, str(hooks_file), str(reg_path), str(root)]
+    if mode == "doctor":
+        argv += ["doctor", str(Path(__file__).resolve().parent)]
+    elif mode in ("haystack", "hold"):
+        argv += [mode]
+
+    def _limit():
+        resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True, preexec_fn=_limit,
+                            env=_controlled_child_env(root, XDG_STATE_HOME=str(root / "xdg")))
+    timed_out = False
+    try:
+        out, _err = proc.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        os.killpg(proc.pid, signal.SIGKILL)
+        out, _err = proc.communicate()
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    return (timed_out, proc.returncode, out.splitlines())
+
+
+def _record_surface_cases(tmp, hooks=aiqt_hooks, hooks_file=None):
+    """The resume probes' record surfaces (handoff, findings, pending_decisions): each is read without
+    waiting for a FIFO writer, as a regular file only, to at most the bound plus one byte; a key present
+    with an unusable value and a record block that is not a table are cannot-evaluate findings. hooks and
+    hooks_file let a mutated copy of the hook script be checked in place of the real one."""
+    hooks_file = hooks_file or hooks.__file__
+    bound = hooks._ORCH_BARRIER_MAX_BYTES
+    base = tmp / "record-surface"
+    base.mkdir()
+    counter = [0]
+
+    def fixture(name):
+        root = base / name
+        root.mkdir()
+        rec = {}
+        for key in ("findings", "pending_decisions", "handoff"):
+            (root / (key + ".md")).write_text("", encoding="utf-8")
+            rec[key] = str(root / (key + ".md"))
+        return root, {"version": 1, "record": rec, "state_dir": str(root / "state")}
+
+    def probes(reg, root):
+        return hooks._orch_resume_probes(reg, str(root))
+
+    def has(found, *parts):
+        return any(all(p in fi for p in parts) for fi in found)
+
+    def special(root, kind):
+        # a FIFO with no writer, a character device that never ends, or a directory
+        if kind == "fifo":
+            os.mkfifo(str(root / "fifo"))
+            return str(root / "fifo")
+        if kind == "device":
+            return "/dev/zero"
+        (root / "dir").mkdir()
+        return str(root / "dir")
+
+    prefix = {"findings": "declared record surface findings unreadable (",
+              "pending_decisions": "declared record surface pending_decisions unreadable (",
+              "handoff": "declared handoff unreadable ("}
+    for key, cid in (("findings", "resume-surface/findings-empty-file-clean"),
+                     ("pending_decisions", "resume-surface/pending_decisions-empty-file-clean"),
+                     ("handoff", "resume-surface/handoff-empty-file-clean")):
+        root, reg = fixture("clean-" + key)
+        check(cid, probes(reg, root), [])
+    # A FIFO with no writer and /dev/zero run in a child under a timeout and a memory limit, so a
+    # blocking open or an unbounded read is a red row rather than a hung or exhausted run.
+    for key, kind, cid in (
+            ("findings", "fifo", "resume-surface/findings-fifo-not-regular"),
+            ("findings", "device", "resume-surface/findings-device-not-regular"),
+            ("pending_decisions", "fifo", "resume-surface/pending_decisions-fifo-not-regular"),
+            ("pending_decisions", "device", "resume-surface/pending_decisions-device-not-regular"),
+            ("handoff", "fifo", "resume-surface/handoff-fifo-not-regular"),
+            ("handoff", "device", "resume-surface/handoff-device-not-regular")):
+        root, reg = fixture(kind + "-" + key)
+        reg["record"][key] = special(root, kind)
+        timed_out, code, lines = _record_surface_child(hooks_file, root, reg)
+        found = json.loads(lines[-1]) if (code == 0 and lines) else []
+        check(cid, (timed_out, code, has(found, prefix[key] + "not a regular file)", "cannot-evaluate")),
+              (False, 0, True))
+    for key, cid in (("findings", "resume-surface/findings-directory-not-regular"),
+                     ("pending_decisions", "resume-surface/pending_decisions-directory-not-regular"),
+                     ("handoff", "resume-surface/handoff-directory-not-regular")):
+        root, reg = fixture("dir-" + key)
+        reg["record"][key] = special(root, "directory")
+        check(cid, has(probes(reg, root), prefix[key] + "not a regular file)", "cannot-evaluate"), True)
+    # The bound: just under, at and just over it. The handoff and the findings register are parsed,
+    # so one longer than the bound is a finding; pending_decisions only has to be readable.
+    over_finding = {"findings": "declared findings register unreadable (larger than the",
+                    "pending_decisions": None,
+                    "handoff": prefix["handoff"] + "larger than the"}
+    for key, label, offset, cid in (
+            ("findings", "under", -1, "resume-surface/findings-size-under-bound"),
+            ("findings", "at", 0, "resume-surface/findings-size-at-bound"),
+            ("findings", "over", 1, "resume-surface/findings-size-over-bound"),
+            ("pending_decisions", "under", -1, "resume-surface/pending_decisions-size-under-bound"),
+            ("pending_decisions", "at", 0, "resume-surface/pending_decisions-size-at-bound"),
+            ("pending_decisions", "over", 1, "resume-surface/pending_decisions-size-over-bound"),
+            ("handoff", "under", -1, "resume-surface/handoff-size-under-bound"),
+            ("handoff", "at", 0, "resume-surface/handoff-size-at-bound"),
+            ("handoff", "over", 1, "resume-surface/handoff-size-over-bound")):
+        root, reg = fixture("size-{}-{}".format(label, key))
+        (root / (key + ".md")).write_bytes(b"x" * (bound + offset))
+        found = probes(reg, root)
+        want = (label == "over" and over_finding[key] is not None)
+        check(cid, (has(found, over_finding[key] or "larger than the"), want and len(found) == 1
+                    or not want and found == []), (want, True))
+
+    def counted_reads(run):
+        # the byte count of every os.read the hook script makes while run() runs
+        real_read = hooks.os.read
+        got = []
+
+        def counted(fd, n, _real=real_read, _got=got):
+            chunk = _real(fd, n)
+            _got.append(len(chunk))
+            return chunk
+        hooks.os.read = counted
+        try:
+            run()
+        finally:
+            hooks.os.read = real_read
+        return got
+
+    # No read takes more than the bound plus one byte, from a file far longer than the bound; the
+    # findings register is read twice (this probe and the merge-pending probe), each bounded.
+    for key, cid in (("findings", "resume-surface/findings-read-within-bound"),
+                     ("pending_decisions", "resume-surface/pending_decisions-read-within-bound"),
+                     ("handoff", "resume-surface/handoff-read-within-bound")):
+        root, reg = fixture("bigread-" + key)
+        (root / (key + ".md")).write_bytes(b"x" * (bound * 16))
+        got = counted_reads(lambda: probes(reg, root))
+        per_read = 2 if key == "findings" else 1
+        check(cid, (sum(got) <= per_read * (bound + 1), sum(got) > 0), (True, True))
+    kind_words = {"empty-string": "an empty string", "null": "null", "number": "a number",
+                  "float": "a number", "boolean": "a boolean", "list": "a list", "object": "an object"}
+    for key, kind, value, cid in (
+            ("findings", "empty-string", "", "resume-surface/findings-value-empty-string-cannot-evaluate"),
+            ("findings", "null", None, "resume-surface/findings-value-null-cannot-evaluate"),
+            ("findings", "number", 7, "resume-surface/findings-value-number-cannot-evaluate"),
+            ("findings", "float", 1.5, "resume-surface/findings-value-float-cannot-evaluate"),
+            ("findings", "boolean", True, "resume-surface/findings-value-boolean-cannot-evaluate"),
+            ("findings", "list", ["a"], "resume-surface/findings-value-list-cannot-evaluate"),
+            ("findings", "object", {"a": 1}, "resume-surface/findings-value-object-cannot-evaluate"),
+            ("pending_decisions", "empty-string", "",
+             "resume-surface/pending_decisions-value-empty-string-cannot-evaluate"),
+            ("pending_decisions", "null", None, "resume-surface/pending_decisions-value-null-cannot-evaluate"),
+            ("pending_decisions", "number", 7, "resume-surface/pending_decisions-value-number-cannot-evaluate"),
+            ("pending_decisions", "float", 1.5, "resume-surface/pending_decisions-value-float-cannot-evaluate"),
+            ("pending_decisions", "boolean", True,
+             "resume-surface/pending_decisions-value-boolean-cannot-evaluate"),
+            ("pending_decisions", "list", ["a"], "resume-surface/pending_decisions-value-list-cannot-evaluate"),
+            ("pending_decisions", "object", {"a": 1},
+             "resume-surface/pending_decisions-value-object-cannot-evaluate"),
+            ("handoff", "empty-string", "", "resume-surface/handoff-value-empty-string-cannot-evaluate"),
+            ("handoff", "null", None, "resume-surface/handoff-value-null-cannot-evaluate"),
+            ("handoff", "number", 7, "resume-surface/handoff-value-number-cannot-evaluate"),
+            ("handoff", "float", 1.5, "resume-surface/handoff-value-float-cannot-evaluate"),
+            ("handoff", "boolean", True, "resume-surface/handoff-value-boolean-cannot-evaluate"),
+            ("handoff", "list", ["a"], "resume-surface/handoff-value-list-cannot-evaluate"),
+            ("handoff", "object", {"a": 1}, "resume-surface/handoff-value-object-cannot-evaluate")):
+        root, reg = fixture("value-{}-{}".format(kind, key))
+        reg["record"][key] = value
+        check(cid, probes(reg, root),
+              ["the registry declares record.{} with an unusable value ({}), not a non-empty path "
+               "string: cannot-evaluate".format(key, kind_words[kind])])
+    for key, cid in (("findings", "resume-surface/findings-absent-key-clean"),
+                     ("pending_decisions", "resume-surface/pending_decisions-absent-key-clean"),
+                     ("handoff", "resume-surface/handoff-absent-key-clean")):
+        root, reg = fixture("absent-" + key)
+        del reg["record"][key]
+        check(cid, probes(reg, root), [])
+    for kind, value, words, cid in (
+            ("list", ["x"], "a list", "resume-surface/record-block-list-cannot-evaluate"),
+            ("string", "x", "a string", "resume-surface/record-block-string-cannot-evaluate"),
+            ("number", 3, "a number", "resume-surface/record-block-number-cannot-evaluate"),
+            ("boolean", False, "a boolean", "resume-surface/record-block-boolean-cannot-evaluate"),
+            ("null", None, "null", "resume-surface/record-block-null-cannot-evaluate")):
+        root, reg = fixture("block-" + kind)
+        reg["record"] = value
+        check(cid, probes(reg, root),
+              ["the registry declares the record block as {}, not a table, so no record surface can be "
+               "probed: cannot-evaluate".format(words)])
+    root, reg = fixture("block-absent")
+    del reg["record"]
+    check("resume-surface/record-block-absent-clean", probes(reg, root), [])
+    # The doctor's --resume-audit over a FIFO record.findings ends promptly with the finding.
+    root, reg = fixture("doctor-fifo")
+    os.mkfifo(str(root / "fifo"))
+    reg["record"]["findings"] = str(root / "fifo")
+    (root / ".aiqt").mkdir()
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps(reg), encoding="utf-8")
+    timed_out, code, lines = _record_surface_child(hooks_file, root, reg, mode="doctor")
+    check("resume-surface/doctor-resume-audit-fifo-findings-prompt",
+          (timed_out, code, lines[-1:] == ["1"],
+           any("declared record surface findings unreadable (not a regular file)" in ln for ln in lines)),
+          (False, 0, True, True))
+    # The stop path's pending-decisions haystack is None for a surface it cannot read in full, and the stop
+    # decision built from live state then holds a human-decision item as cannot-evaluate: a FIFO with no
+    # writer, /dev/null (a device that ends under the bound, so only the regular-file check refuses it),
+    # /dev/zero (a device that never ends), a directory, and a file longer than the bound whose first line
+    # is the item's decision row. Each runs in a child under a timeout and a memory limit.
+    held = ["DENY", [["cannot_evaluate", "H-1", "cannot-evaluate", "pending surface unreadable; held"]]]
+    for kind, cid in (("fifo", "stop/pending-decisions-fifo-holds"),
+                      ("device", "stop/pending-decisions-device-holds"),
+                      ("endless-device", "stop/pending-decisions-endless-device-holds"),
+                      ("directory", "stop/pending-decisions-directory-holds"),
+                      ("over", "stop/pending-decisions-size-over-bound-holds")):
+        f = Fixture(base, "hold-" + kind)
+        f.set_items([item("H-1", blocker={"kind": "human-decision", "ref": "D-1"})])
+        reg = json.loads((f.root / ".aiqt" / "orchestration.local.json").read_text(encoding="utf-8"))
+        if kind == "device":
+            reg["record"]["pending_decisions"] = "/dev/null"
+        elif kind == "endless-device":
+            reg["record"]["pending_decisions"] = special(f.root, "device")
+        elif kind == "over":
+            row = b"| D-1 | a |\n"
+            f.pending.write_bytes(row + b"x" * (bound + 1 - len(row)))
+        else:
+            reg["record"]["pending_decisions"] = special(f.root, kind)
+        got = []
+        for mode in ("haystack", "hold"):
+            timed_out, code, lines = _record_surface_child(hooks_file, f.root, reg, mode=mode)
+            out = json.loads(lines[-1]) if (code == 0 and lines) else lines[-1:]
+            if mode == "haystack" and isinstance(out, str):
+                out = "{} characters read".format(len(out))  # a read haystack is named by its length only
+            got.append((timed_out, code, out))
+        check(cid, got, [(False, 0, None), (False, 0, held)])
+    # The control: the same item over a readable surface holding its decision row is blocked, not held.
+    f = Fixture(base, "hold-control")
+    f.set_items([item("H-1", blocker={"kind": "human-decision", "ref": "D-1"})])
+    f.pending.write_bytes(b"| D-1 | a |\n")
+    reg = json.loads((f.root / ".aiqt" / "orchestration.local.json").read_text(encoding="utf-8"))
+    timed_out, code, lines = _record_surface_child(hooks_file, f.root, reg, mode="hold")
+    check("stop/pending-decisions-row-read-blocks",
+          (timed_out, code, json.loads(lines[-1]) if (code == 0 and lines) else lines[-1:]),
+          (False, 0, ["ALLOW", [["blocked", "H-1", "human-decision", "D-1"]]]))
+    for label, offset, cid in (("under", -1, "stop/pending-decisions-size-under-bound-read"),
+                               ("at", 0, "stop/pending-decisions-size-at-bound-read")):
+        root, reg = fixture("haystack-size-" + label)
+        (root / "pending_decisions.md").write_bytes(b"x" * (bound + offset))
+        got = hooks._orch_pending_haystack(reg, str(root))
+        check(cid, (got is None, len(got or "")), (offset > 0, 0 if offset > 0 else bound + offset))
+    root, reg = fixture("haystack-newlines")
+    (root / "pending_decisions.md").write_bytes(b"| D-1 | a |\r\n| D-2 | b |\rD-3: c\n")
+    check("stop/pending-decisions-line-endings-read", hooks._orch_pending_haystack(reg, str(root)),
+          "| D-1 | a |\n| D-2 | b |\nD-3: c\n")
+    # A handoff and a findings register with bare-CR or CRLF line endings give the findings their LF forms
+    # give, as a text-mode read did: the handoff's Branch and Gate lines follow a CR, and the findings
+    # register's open row on a merged pull request is not joined to its merge_pending row.
+    f = Fixture(base, "line-endings")
+    f._git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+           "commit", "-q", "--allow-empty", "-m", "first (#9)")
+    f._git("-c", "user.name=T", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false",
+           "commit", "-q", "--allow-empty", "-m", "second (#7)")
+    reg = json.loads((f.root / ".aiqt" / "orchestration.local.json").read_text(encoding="utf-8"))
+    handoff_lf = b"# Handoff\nBranch: other-branch\nGate: green @ 0000000\n"
+    findings_lf = b"# Findings\n| F-1 | open | pr:9 |\n| F-2 | merge_pending | pr:7 |\n"
+    for surface, text, cid in (
+            (f.handoff, handoff_lf, "resume-surface/handoff-line-endings-same-findings"),
+            (f.findings, findings_lf, "resume-surface/findings-line-endings-same-findings")):
+        got = []
+        for eol in (b"\n", b"\r\n", b"\r"):
+            surface.write_bytes(text.replace(b"\n", eol))
+            got.append(hooks._orch_resume_probes(reg, str(f.root)))
+        surface.write_bytes(b"")
+        starts = (("handoff names branch other-branch but HEAD is on main",
+                   "handoff gate marker cites commit 0000000 but HEAD is ") if surface == f.handoff
+                  else ("findings row still merge_pending on pr:7 ",))
+        want = [fi for fi in got[0] if fi.startswith(starts)]
+        check(cid, (len(want), got[1] == got[0], got[2] == got[0]), (len(starts), True, True))
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -11484,6 +11803,7 @@ def _main_isolated(report_path=None):
     saved_probe = aiqt_hooks._orch_dirfd_has_registry
     try:
         aiqt_hooks._orch_dirfd_has_registry = _registry_ceiling(tmp, saved_probe)
+        _record_surface_cases(tmp)
         # ---------- component 1: the stop guard ----------
         f = Fixture(tmp, "stop")
         stop = lambda: aiqt_hooks.orch_stop_guard(f.payload("Stop"))
@@ -11918,6 +12238,52 @@ def _main_isolated(report_path=None):
                  '{"mode": "attended", "x": 1}\n', "deny"),
                 ("ask/json-object-trailing-garbage-denies-armed",
                  '{"mode": "attended"} trailing\n', "deny"),
+                # The structured operating-mode record (mode plus only phase, set_by and set_at) is read by its
+                # mode exactly as the bare object is. The attended vectors prove the record is accepted (a refused
+                # record arms and denies); the unattended vector pins the deny but cannot prove acceptance, since a
+                # refused record denies alike, so ask/json-mode-record-unattended-read-by-mode below proves it:
+                ("ask/json-mode-record-unattended-denies",
+                 '{"mode": "unattended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-attended-allows",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "allow"),
+                ("ask/json-mode-record-attended-compound-phase-allows",
+                 '{"mode": "attended (iPad); continuous mode", "phase": "review", "set_by": "operator",'
+                 ' "set_at": "2026-11-04T23:59:59Z"}\n', "allow"),
+                ("ask/json-mode-record-attended-subset-allows",
+                 '{"mode": "attended", "set_at": "2026-11-04T00:00:00Z"}\n', "allow"),
+                # A record that breaks the shape fails CLOSED to armed even with an attended mode:
+                ("ask/json-mode-record-extra-key-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z", "note": "x"}\n', "deny"),
+                ("ask/json-mode-record-mode-not-string-denies-armed",
+                 '{"mode": 1, "phase": null, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-phase-number-denies-armed",
+                 '{"mode": "attended", "phase": 2, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-phase-nested-object-denies-armed",
+                 '{"mode": "attended", "phase": {"mode": "attended"}, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-set-by-null-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": null, "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-set-at-malformed-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator", "set_at": "2026-11-04 17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-set-at-offset-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T17:47:04+00:00"}\n', "deny"),
+                ("ask/json-mode-record-set-at-trailing-newline-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T17:47:04Z\\n"}\n', "deny"),
+                ("ask/json-mode-record-set-at-hour-24-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T24:00:00Z"}\n', "deny"),
+                ("ask/json-mode-record-set-at-month-13-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-13-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-set-at-number-denies-armed",
+                 '{"mode": "attended", "set_at": 1793814424}\n', "deny"),
+                ("ask/json-mode-record-duplicate-key-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z", "set_at": "2026-11-04T17:47:05Z"}\n', "deny"),
                 # Prose merely MENTIONING a mode word, with no declaration line and no JSON, stays fail-open:
                 ("ask/prose-mentions-mode-allows",
                  "Yesterday we worked unattended; today attended.\n", "allow"),
@@ -11929,6 +12295,20 @@ def _main_isolated(report_path=None):
                               {"questions": [{"question": "pick one"}]},
                               extra={"tool_use_id": "tu-1"})
             check(check_id, _verdict(ask()), want)
+        # An accepted unattended record and a refused one both read as the guards-armed `unattended` token, so
+        # the reader is observed at its classifier: an accepted record hands its own `mode` string to it, while
+        # a refused record fails closed before the classifier sees anything.
+        _rec_seen = []
+        _rec_classify = aiqt_hooks._orch_mode_classify
+        try:
+            aiqt_hooks._orch_mode_classify = lambda value: (_rec_seen.append(value), _rec_classify(value))[1]
+            _rec_token = aiqt_hooks._orch_mode_classify_text(
+                '{"mode": "unattended; overnight", "phase": null, "set_by": "operator",'
+                ' "set_at": "2026-11-04T17:47:04Z"}\n')
+        finally:
+            aiqt_hooks._orch_mode_classify = _rec_classify
+        check("ask/json-mode-record-unattended-read-by-mode", (_rec_token, _rec_seen),
+              ("unattended", ["unattended; overnight"]))
         # absent mode record fails open (no marker): the fixture DELETES the file, so this tests ABSENCE
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
@@ -12563,15 +12943,18 @@ def _main_isolated(report_path=None):
         # quote, or a '#' whose comment reading depends on context) warns with a note saying so, since a
         # later `&` can be a hidden detach: in the unquoted here-document row the apostrophe leaves the scan
         # open while bash starts `sleep 1` in the background. The quoted here-document row, whose delimiter
-        # line never comes, is the disclosed over-warn on a safe body. Each row reads ("allow", False, False, False) with the guard keeping its
-        # silent allow on "unbalanced", and the note check fails if it gives the detach note instead.
+        # line never comes, is the disclosed over-warn on a safe body. Each row holds an `&` the scan cannot
+        # place, since a command with no `&` byte and no runtime start form holds no detach and the detector
+        # reads nothing in it.
+        # Each row reads ("allow", False, False, False) with the guard keeping its silent allow on
+        # "unbalanced", and the note check fails if it gives the detach note instead.
         ti_note_of = lambda res: (res[1] or {}).get("systemMessage", "")
         check("trunc/fg-unbalanced-no-registry-warns",
               [(_verdict(res), "could not read this foreground command to its end" in ti_note_of(res),
                 "trkasy" in ti_note_of(res), "run_in_background" in ti_note_of(res))
                for res in (ti_call({"command": v}) for v in (
-                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's file\nEOX",
-                   "cat <<EOF\nuser's file\nEOF\nsleep 1 &", "[[ x =~ (a)#b ]] || echo RAN"))],
+                   "echo 'oops & bg", "cat > f <<'EOF'\nthe user's & file\nEOX",
+                   "cat <<EOF\nuser's file\nEOF\nsleep 1 &", "[[ x =~ (a)#b ]] || echo RAN # &"))],
               [("warn", True, True, True)] * 4)
         # A run_in_background that is present but not a boolean gets the unreadable-input note naming the
         # malformed flag (the platform's reading of such a flag is unknown, so the call may run in the
@@ -13442,6 +13825,11 @@ def _main_isolated(report_path=None):
         # before the body skip too). A body whose end the scan cannot tell keeps the scan's reading of it
         # as shell text, so the apostrophe still denies: no delimiter line, a delimiter line that is not the
         # whole line (indented under <<, or ending in a carriage return), and a here-document in a subshell.
+        # Here and in the body rows below, a body apostrophe denies only with an `&` after it, which the
+        # scan cannot show is quoted text: a command with no `&` byte and no runtime start form holds no
+        # detach, and the guard allows it. Two rows deny on their `&` alone, apostrophe or not, since the
+        # scan reads that body as code and its `&` as a bare detach: the here-document in a subshell here,
+        # and the line with a second here-document in the outside-write-form rows below.
         check("trunc/fg-quoted-heredoc-then-amp-denies",
               _verdict(bg("cat > /abs/f <<'EOF'\nThe project's own material.\nEOF\nsleep 5 &", rib=False)),
               "deny")
@@ -13449,8 +13837,8 @@ def _main_isolated(report_path=None):
               _verdict(bg("cat > /abs/f <<EOF\n$(sleep 1 &)\nEOF", rib=False)), "deny")
         check("trunc/fg-quoted-heredoc-unread-body-denies",
               [_verdict(bg(v, rib=False)) for v in (
-                  "cat > /abs/f <<'EOF'\nit's\nEOFX", "cat > /abs/f <<'EOF'\nit's\n\tEOF",
-                  "cat > /abs/f <<'EOF'\nit's\nEOF\r\n", "(cat > /abs/f <<'EOF'\nit's\nEOF\n)")],
+                  "cat > /abs/f <<'EOF'\nit's & more\nEOFX", "cat > /abs/f <<'EOF'\nit's & more\n\tEOF",
+                  "cat > /abs/f <<'EOF'\nit's & more\nEOF\r\n", "(cat > /abs/f <<'EOF'\nit's & more\nEOF\n)")],
               ["deny"] * 4)
         # A quoted here-document body that a shell runs is code, not data: fed to a shell, sourced from
         # stdin, or piped into one, its `&` detaches in real bash, so the scan reads it as code and the body
@@ -13486,8 +13874,9 @@ def _main_isolated(report_path=None):
         # closed): cat to standard output, a quoted or expanded target, tee, and a target under /dev.
         check("trunc/fg-quoted-heredoc-unknown-consumer-denies",
               [_verdict(bg(v, rib=False)) for v in (
-                  "cat <<'EOF'\nit's\nEOF", "cat > \"/abs/f\" <<'EOF'\nit's\nEOF", "cat > $F <<'EOF'\nit's\nEOF",
-                  "tee /abs/f <<'EOF'\nit's\nEOF", "cat > dev/stdout <<'EOF'\nit's\nEOF")],
+                  "cat <<'EOF'\nit's & more\nEOF", "cat > \"/abs/f\" <<'EOF'\nit's & more\nEOF",
+                  "cat > $F <<'EOF'\nit's & more\nEOF", "tee /abs/f <<'EOF'\nit's & more\nEOF",
+                  "cat > dev/stdout <<'EOF'\nit's & more\nEOF")],
               ["deny"] * 5)
         check("trunc/fg-quoted-heredoc-cat-to-file-allows",
               [_verdict(bg(v, rib=False)) for v in (
@@ -13519,18 +13908,25 @@ def _main_isolated(report_path=None):
                   "enable -f ./cat.so cat", "PATH=./bin")],
               ["deny"] * 5)
         # A cat write followed or preceded by any other command reads every body as code, as before the
-        # body skip, so a body apostrophe denies; so does a write outside the one plain form (the
+        # body skip, so a body apostrophe before a body `&` denies; so does a write outside the one plain form (the
         # here-document first, '>|', a second redirect or here-document on the line, '<<-', a second word).
         check("trunc/fg-quoted-heredoc-write-then-command-denies",
               [_verdict(bg(v, rib=False)) for v in (
-                  "cat > /abs/f <<'EOF'\nit's\nEOF\ntrue", "cat > /abs/f <<'EOF'\nit's\nEOF\necho done",
-                  "true\ncat > /abs/f <<'EOF'\nit's\nEOF", "cat > /abs/f <<'EOF'; true\nit's\nEOF")],
-              ["deny"] * 4)
+                  "cat > /abs/f <<'EOF'\nit's & more\nEOF\ntrue", "cat > /abs/f <<'EOF'\nit's & more\nEOF\necho done",
+                  "true\ncat > /abs/f <<'EOF'\nit's & more\nEOF", "cat > /abs/f <<'EOF'; true\nit's & more\nEOF",
+                  "cat > /abs/f <<'EOF'\nit's & more\nEOF\nsha256sum /abs/f")],
+              ["deny"] * 5)
+        # The same write and later command with no `&` byte anywhere allows: the open quote the body
+        # apostrophe leaves cannot hide a detach that is not there. The last row above is its twin with an
+        # `&`, which still denies. This row denies if the detector reads an open quote as a detach on its own.
+        check("trunc/fg-quoted-heredoc-write-then-command-no-amp-allows",
+              _verdict(bg("cat > /abs/f <<'EOF'\nit's\nEOF\nsha256sum /abs/f", rib=False)), "allow")
         check("trunc/fg-quoted-heredoc-outside-write-form-denies",
               [_verdict(bg(v, rib=False)) for v in (
-                  "cat <<'EOF' > /abs/f\nit's\nEOF", "cat >| f.txt <<'EOF'\nit's\nEOF",
-                  "cat > /abs/f <<'A' 3<<'B'\nit's\nA\nx\nB", "cat > /abs/f <<-'EOF'\n\tit's\n\tEOF",
-                  "cat > /abs/f 2>/abs/e <<'EOF'\nit's\nEOF", "cat > /abs/f x <<'EOF'\nit's\nEOF")],
+                  "cat <<'EOF' > /abs/f\nit's & more\nEOF", "cat >| f.txt <<'EOF'\nit's & more\nEOF",
+                  "cat > /abs/f <<'A' 3<<'B'\nit's & more\nA\nx\nB",
+                  "cat > /abs/f <<-'EOF'\n\tit's & more\n\tEOF",
+                  "cat > /abs/f 2>/abs/e <<'EOF'\nit's & more\nEOF", "cat > /abs/f x <<'EOF'\nit's & more\nEOF")],
               ["deny"] * 6)
         # A substitution after the commit-message form's body makes the lexer lex again reading no body
         # (_SubstHeredocRetry); that pass places the body `&` in the substitution, so the deny stands. It
@@ -13782,17 +14178,20 @@ def _main_isolated(report_path=None):
         # `)` or at a word start inside an open ${...}, so the foreground scan reads every one as
         # unbalanced, and the guard denies every one (a and b as the detach a lexer reading reaches). At the
         # base commit a and b denied as a detach and c to i allowed; the earlier comment rule allowed all
-        # nine.
+        # nine. Vectors c to h each carry one `&` in the text of their uncertain '#', which a comment holds
+        # in bash, so the guard has an `&` it cannot place. Vector i's `&` sits in a trailing comment every
+        # reading drops; it denies because its `(a)#b` is uncertain and the command holds an `&` byte. With
+        # no `&` byte and no runtime start form the command holds no detach and the guard allows it.
         _fg_hash_vectors = (
             'case x in x)# "\n :;; esac; printf RUN & # "\nwait',
             'echo ${x:-$(true # "\n)} & printf RUN # "\nwait',
-            "case a in a)# it's\n echo RAN;; esac # '",
-            "echo case; (true)# it's\n echo RAN # '",
-            "echo ${x:-$(echo a # it's\n)}; echo RAN # '",
-            "${ true; # it's\n}; echo RAN # '",
-            "${| true; # it's\n}; echo RAN # '",
-            "f()# it's\n{ echo RAN; }\nf # '",
-            "[[ x =~ (a)#b ]] || echo RAN",
+            "case a in a)# it's &\n echo RAN;; esac # '",
+            "echo case; (true)# it's &\n echo RAN # '",
+            "echo ${x:-$(echo a # it's &\n)}; echo RAN # '",
+            "${ true; # it's &\n}; echo RAN # '",
+            "${| true; # it's &\n}; echo RAN # '",
+            "f()# it's &\n{ echo RAN; }\nf # '",
+            "[[ x =~ (a)#b ]] || echo RAN # &",
         )
         check("trunc/fg-hash-lexer-vectors-deny",
               [_verdict(bg(v, rib=False)) for v in _fg_hash_vectors], ["deny"] * len(_fg_hash_vectors))
@@ -13821,8 +14220,10 @@ def _main_isolated(report_path=None):
                _verdict(bg('echo "${x#y}" "$(basename ${f#x})"', rib=False))],
               ["allow", "allow"])
         # A scan that ends inside an open quote denies with a reason about the quote, not a false claim
-        # that a bare '&' was found (before this fix it reused the bare-& detach reason).
-        uq = bg("cat > f <<'EOF'\nthe user's file\nEOX", rib=False)
+        # that a bare '&' was found (before this fix it reused the bare-& detach reason). The body holds an
+        # '&' after the apostrophe: with no '&' byte and no runtime start form the command holds no detach
+        # and the guard allows it.
+        uq = bg("cat > f <<'EOF'\nthe user's & file\nEOX", rib=False)
         uq_reason = (uq[1] or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
         check("trunc/fg-unbalanced-quote-reason-names-quote",
               (_verdict(uq), "quote still open" in uq_reason, "detaches a child" in uq_reason),

@@ -82,7 +82,12 @@ with exit 2). This gate holds where it runs:
      one workflow HOST_PATCH_WORKFLOW only, the Python host pin step, exactly HOST_PIN_STEP, may stand
      between setup-python and the probe (tools/check_python_host_pin.py holds that step as the one right
      after setup-python there), and the probe step right after it is then exactly HOST_PROBE_STEP (the same
-     shape, its name saying it runs after that gate); no other step, and no other spelling of either step,
+     shape, its name saying it runs after that gate); in the scope job SCOPE_JOB_ID of that same workflow
+     only, the fast-lane decision step, matched as SCOPE_DECIDE_STEP (tools/check_ci_parity.py pins that
+     job's whole body line for line), may stand there instead, because the decision must run before any
+     step that runs the checkout's own code, and the probe step right after it is then exactly
+     SCOPE_PROBE_STEP (the same shape, its name saying it runs after the decision); no other step, and no
+     other spelling of any of these steps,
      is passed over. The job carries
      no continue-on-error, and the
      interpreter words are python3 or python only. A value before the probe, in a step with no run: key or
@@ -100,10 +105,10 @@ with exit 2). This gate holds where it runs:
      is read from the repository root (R12). A word that does not resolve, or resolves to
      a path that is not self-guarded (a same-named file elsewhere included), is a finding. A directory the
      launcher walk cannot list is cannot-evaluate, and a declared launcher that is absent is a finding.
-  5. completeness: every entry point, enumerated from (a) every .py with a module-level __main__ guard
-     (tools/check_python_floor.py's own walk and EXCLUDED_TREES), (b) both runners' rosters, (c) every workflow's
-     python3 launch targets, (d) every registry runner (tools/selftest_checks.toml, through the execution gate's
-     schema validator) and (e) the hook registrations, is classified SELF (it carries the pinned guard),
+  5. completeness: every entry point, enumerated from (a) every tracked .py with a module-level __main__ guard
+     (tools/check_python_floor.py's tracked-file listing, git ls-files, outside its EXCLUDED_TREES), (b) both
+     runners' rosters, (c) every workflow's python3 launch targets, (d) every registry runner
+     (tools/selftest_checks.toml, through the execution gate's schema validator) and (e) the hook registrations, is classified SELF (it carries the pinned guard),
      NOT-APPLICABLE (a static scan of it and its local import closure finds no spawn or wait API), LAUNCHER (it
      reads a child's status and every declared launch is through a guarded launcher) or RESIDUAL (it reads one
      and has no declared launcher). A LAUNCHER or RESIDUAL entry's direct launch is unguarded, so each must be
@@ -212,7 +217,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _selftest_exit_report  # noqa: E402  (the execution report, finalized at interpreter exit)
 import check_ci_parity  # noqa: E402  (the validated roster reader and loader)
 import check_entry_guard  # noqa: E402  (the non-blocking regular-file reader and the registry runners)
-import check_python_floor  # noqa: E402  (the shipped-entrypoint walk)
+import check_python_floor  # noqa: E402  (the shipped-entrypoint listing)
 import check_selftest_execution  # noqa: E402  (the registry schema)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,7 +231,8 @@ CLI_COPIES = (("opf/tools/opf.py", "opf.py"), ("tools/check_selftest_execution.p
               ("opf/tools/_opf_import_complete.py", "_opf_import_complete.py"),
               ("tools/check_gitleaks_pin.py", "check_gitleaks_pin.py"),
               ("tools/check_must_deliver.py", "check_must_deliver.py"), ("tools/_load_bound.py", "_load_bound.py"),
-              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"))
+              ("tools/check_verifier_delivery.py", "check_verifier_delivery.py"),
+              ("tools/render_og_cards.py", "render_og_cards.py"))
 # The CLI copy whose __main__ body is the one call _entry() (it raises its own exit rather than calling sys.exit):
 # its guard is the first statement of its one top-level _entry(), exactly ENTRY_GUARD.
 ENTRY_COPIES = (("tools/check_opf_declaration.py", "check_opf_declaration.py"),)
@@ -310,6 +316,18 @@ HOST_PIN_STEP = (("name", "Python host pin"), ("shell", "bash"),
                  ("run", "python3 -I -B tools/check_python_host_pin.py"))
 HOST_PROBE_STEP = (("name", "Child exit status observable (after the host pin gate)"), ("shell", "bash"),
                    ("run", "python3 -I -B " + CANONICAL_REL))
+# The scope job of that same workflow runs its fast-lane decision step between setup-python and the
+# probe: the decision must run before any step that runs the checkout's own code (the probe runs
+# opf/tools/_child_status.py from the checkout), and tools/check_ci_parity.py pins that job's whole
+# body (SCOPE_JOB) line for line, so the exact body is that pin's bound. Here the step is matched by
+# its key/value pairs (its env: block and run: block scalar read as nested values), in the scope job
+# of HOST_PATCH_WORKFLOW only, and the probe step right after it is then SCOPE_PROBE_STEP, the probe
+# with the name that placement makes true.
+SCOPE_JOB_ID = "scope"
+SCOPE_DECIDE_STEP = (("name", "Site fast-lane scope decision"), ("id", "decide"), ("shell", "bash"),
+                     ("env", None), ("run", "|"))
+SCOPE_PROBE_STEP = (("name", "Child exit status observable (after the scope decision)"), ("shell", "bash"),
+                    ("run", "python3 -I -B " + CANONICAL_REL))
 SETUP_PYTHON_USES = "actions/setup-python@"
 JOBS_INDENT = 2
 # The closed workflow grammar (read_workflow): a key line, and the one-line scalars a value may be (quoted and
@@ -455,17 +473,18 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_standards_currency.py",
     "tools/check_standards_urls_live.py",
     "tools/check_version_monotonicity.py",
+    "tools/ci_site_scope.py",
     "tools/conformance.py",
     "tools/doctor.py",
     "tools/gen_adapters.py",
     "tools/gen_agents.py",
     "tools/gen_claude.py",
     "tools/gen_cursor.py",
+    "tools/gen_draft_site.py",
     "tools/gen_enforceability.py",
     "tools/gen_enforcement_register.py",
     "tools/gen_first_pin_demo.py",
     "tools/gen_hooks.py",
-    "tools/gen_install.py",
     "tools/gen_manifest.py",
     "tools/gen_mappings.py",
     "tools/gen_reference_facts.py",
@@ -500,6 +519,10 @@ DYNAMIC_LOADS_REVIEWED = (
     ("opf/tools/check_opf_init_contract.py", (),
      ("opf/tools/_opf_init_contract.py",), "runpy.run_path of opf/tools/_opf_init_contract.py inside the child "
      "script it launches, a string the scan does not parse"),
+    ("tools/_selftest_exit_report.py", ("loader.exec_module(main)",), (),
+     "the registered runner named in its own argv, run as __main__ by _bootstrap_main, which only the execution "
+     "gate's launch shim calls; every registered runner is an entry point classified on its own, so the row "
+     "follows nothing"),
     ("tools/check_opf_enforce_platforms.py",
      ("importlib.util.spec_from_file_location('_opf_enforce_platforms_hook', str(path))",
       "spec.loader.exec_module(module)"),
@@ -509,6 +532,9 @@ DYNAMIC_LOADS_REVIEWED = (
      ("tools/check_python_floor.py", "tools/check_python_host_pin.py"),
      "its own source, whole or with one check changed, and the python-floor gate's source for the names it "
      "shares, loaded in its self-test"),
+    ("tools/_selftest_exit_report.py", ("loader.exec_module(main)",), (),
+     "the registered self-test runner, loaded as __main__ by _bootstrap_main only in the child the execution "
+     "gate launches, never in a process that imports this module to arm its report"),
     ("tools/gen_crosswalk.py",
      ("importlib.util.spec_from_file_location('_crosswalk_fdopen_flip_' + flip_path.stem, flip_path)",
       "spec.loader.exec_module(reverted)"),
@@ -1042,7 +1068,9 @@ def workflow_findings(rel, text):
     every value that names Python must sit in a step with a run: key after its job's one setup-python step and
     the probe step right after that, which is exactly PROBE_STEP; in a HOST_PATCH_JOBS job of the workflow
     HOST_PATCH_WORKFLOW only, the step right after setup-python may instead be exactly HOST_PIN_STEP, with
-    exactly HOST_PROBE_STEP right after it; the
+    exactly HOST_PROBE_STEP right after it; in the SCOPE_JOB_ID job of that workflow only, it may instead
+    be the fast-lane decision step, matched as SCOPE_DECIDE_STEP, with exactly SCOPE_PROBE_STEP right
+    after it; the
     job carries no continue-on-error, and every
     interpreter word is one of PLAIN_INTERPRETERS."""
     try:
@@ -1067,14 +1095,18 @@ def workflow_findings(rel, text):
             out.append("{}: job {} launches Python with {} setup-python steps, not one".format(rel, job, len(setups)))
             continue
         probe = setups[0] + 1
-        pin, want_probe = None, PROBE_STEP
+        pin, want_probe, before = None, PROBE_STEP, "setup-python"
         if (rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS and probe < len(steps)
                 and _step_pairs(steps[probe]) == HOST_PIN_STEP):
             pin, probe, want_probe = probe, probe + 1, HOST_PROBE_STEP
+            before = "the Python host pin step"
+        elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe < len(steps)
+                and _step_pairs(steps[probe]) == SCOPE_DECIDE_STEP):
+            pin, probe, want_probe = probe, probe + 1, SCOPE_PROBE_STEP
+            before = "the scope decision step"
         if probe == len(steps) or _step_pairs(steps[probe]) != want_probe:
             out.append("{}: job {}: the step right after {} is not the child-status probe step exactly "
-                       "(its name, shell: bash and run, and no other key)".format(
-                           rel, job, "setup-python" if pin is None else "the Python host pin step"))
+                       "(its name, shell: bash and run, and no other key)".format(rel, job, before))
             continue
         if any(key == "continue-on-error" for _index, key, _value, _child in entries):
             out.append("{}: job {} launches Python and carries continue-on-error, which would mask a probe "
@@ -1972,6 +2004,19 @@ def _inputs():
     host_probe_lines = ["{}: {}".format(key, value) for key, value in HOST_PROBE_STEP]
     host_probe = ("      - " + host_probe_lines[0] + "\n"
                   + "".join("        " + line + "\n" for line in host_probe_lines[1:]))
+    # The scope job's decision step, as SCOPE_DECIDE_STEP matches it (its env: block and run:
+    # block scalar are nested values, so their contents are the parity pin's bound, not this
+    # gate's), and the probe named for the placement right after it.
+    scope_decide = ("      - name: Site fast-lane scope decision\n"
+                    "        id: decide\n"
+                    "        shell: bash\n"
+                    "        env:\n"
+                    "          EVENT_NAME: event\n"
+                    "        run: |\n"
+                    '          python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide\n')
+    scope_probe_lines = ["{}: {}".format(key, value) for key, value in SCOPE_PROBE_STEP]
+    scope_probe = ("      - " + scope_probe_lines[0] + "\n"
+                   + "".join("        " + line + "\n" for line in scope_probe_lines[1:]))
     # Each a workflow the closed grammar does not classify at one line: an anchor, a merge key, a tag, a folded
     # value, a flow mapping, a repeated key, a tab, a literal line less indented than its first, a document
     # marker, a quoted scalar continued, a step that is not a mapping, and a trailing comment.
@@ -2028,6 +2073,18 @@ def _inputs():
                            + "        timeout-minutes: 5\n" + host_probe + gate + launch,
         "host-pin-old-probe": "jobs:\n  opf-host-patch:\n" + head + setup + pin_step + step + gate + launch,
         "host-probe-ahead": "jobs:\n  opf-host-patch:\n" + head + setup + step + pin_step + gate + launch,
+        # The order the scope job of quality.yml runs: the fast-lane decision step right after
+        # setup-python, the probe named for that placement right after it; the same order under
+        # any other job id, or in any other workflow, is a finding. The departures: the decision
+        # followed by the probe named for the plain placement, and the probe ahead of the
+        # decision, which this gate accepts (the decision's own placement is the parity pin's to
+        # hold).
+        "scope-decide-before-probe": "jobs:\n  scope:\n" + head + setup + scope_decide + scope_probe
+                                     + gate + launch,
+        "scope-decide-other-job": "jobs:\n  lone:\n" + head + setup + scope_decide + scope_probe
+                                  + gate + launch,
+        "scope-decide-old-probe": "jobs:\n  scope:\n" + head + setup + scope_decide + step + gate + launch,
+        "scope-probe-ahead": "jobs:\n  scope:\n" + head + setup + step + scope_decide + gate + launch,
         "later-job-key": "jobs:\n  one:\n" + head + setup + step + "   two:\n" + head + gate + launch,
         "targets-hash": guarded + gate + "        run: echo a#b; python3 -I -B tools/child.py\n",
         "block-hash-line": "jobs:\n  lone:\n" + head + gate + "        run: |\n          echo x\\\n"
@@ -2044,7 +2101,7 @@ def _inputs():
                          + 'python3 -I -B "$here/../../../../opf/tools/opf.py"\npython3 -I -B "$OPF_DIR/opf.py"\n',
         "shell-same-name": "#!/bin/sh\n" + here_line + "python3 -I -B tools/opf.py\n"
                            'opf_tool=${OPF_TOOL:-$here/../tools/opf.py}\n',
-        "shell-here-unbound": _swap(real[SHELL_REAL[0]], here_line, "here=$(pwd)\n"),
+        "shell-here-unbound": _swap(real[SHELL_REAL[0]], 'here=$(CDPATH= cd -- "$dir" && pwd)', "here=$(pwd)"),
         "shell-dir-unbound": _swap(real[SHELL_REAL[1]], 'dir=$(dirname -- "$0")', "dir=$(pwd)"),
         "hooks": real[HOOKS_JSON_REL],
         "hooks-unregistered": _swap(real[HOOKS_JSON_REL], '"absolute_paths"\n', '"no_such_mode"\n'),
@@ -2344,6 +2401,14 @@ def _vectors(module, trees, texts, canonical_tree):
         ("launchers/workflow-host-pin-job-config-combined", lambda: host_job_held(host_jobs[2])),
         ("launchers/workflow-host-pin-job-config-malformed", lambda: host_job_held(host_jobs[3])),
         ("launchers/workflow-host-pin-job-config-system", lambda: host_job_held(host_jobs[4])),
+        ("launchers/workflow-scope-decide-before-probe", lambda: not quality_workflow("scope-decide-before-probe")),
+        ("launchers/workflow-scope-decide-other-job", lambda: quality_workflow("scope-decide-other-job")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "lone")]),
+        ("launchers/workflow-scope-decide-other-workflow", lambda: workflow("scope-decide-before-probe")
+         == [not_probe_in("w", "scope")]),
+        ("launchers/workflow-scope-decide-old-probe-name", lambda: quality_workflow("scope-decide-old-probe")
+         == [not_probe_in(m.HOST_PATCH_WORKFLOW, "scope", "the scope decision step")]),
+        ("launchers/workflow-scope-probe-ahead-of-decide", lambda: not quality_workflow("scope-probe-ahead")),
         ("launchers/workflow-block-hash-line", lambda: workflow("block-hash-line")
          == ["w:9: job lone: names Python before the child-status probe step"]),
         ("launchers/workflow-defaults-after-steps", lambda: workflow("defaults-after-steps") == ["w:14: " + outside]),
@@ -2600,7 +2665,7 @@ MUTANTS = (
      "rel == HOST_PATCH_WORKFLOW and probe", "launchers/workflow-host-pin-other-job"),
     ("workflow-host-pin-workflow-scope", "rel == HOST_PATCH_WORKFLOW and job in HOST_PATCH_JOBS",
      "job in HOST_PATCH_JOBS", "launchers/workflow-host-pin-opf-job-other-workflow"),
-    ("workflow-host-pin-workflow-true", "if (rel == HOST_PATCH_WORKFLOW and", "if (True and",
+    ("workflow-host-pin-workflow-true", "        if (rel == HOST_PATCH_WORKFLOW and", "        if (True and",
      "launchers/workflow-host-pin-git-job-other-workflow"),
     ("workflow-host-pin-prefix", "_step_pairs(steps[probe]) == HOST_PIN_STEP",
      "_step_pairs(steps[probe])[:len(HOST_PIN_STEP)] == HOST_PIN_STEP",
@@ -2620,6 +2685,16 @@ MUTANTS = (
      "launchers/workflow-host-pin-job-config-malformed"),
     ("host-patch-job-config-system", ', "git-fixture-env-config-system-host-patch")', ")",
      "launchers/workflow-host-pin-job-config-system"),
+    ("workflow-scope-decide-accept",
+     "elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe < len(steps)\n"
+     "                and _step_pairs(steps[probe]) == SCOPE_DECIDE_STEP):",
+     "elif False:", "launchers/workflow-scope-decide-before-probe"),
+    ("workflow-scope-decide-job", "rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID and probe",
+     "rel == HOST_PATCH_WORKFLOW and probe", "launchers/workflow-scope-decide-other-job"),
+    ("workflow-scope-decide-workflow", "elif (rel == HOST_PATCH_WORKFLOW and job == SCOPE_JOB_ID",
+     "elif (job == SCOPE_JOB_ID", "launchers/workflow-scope-decide-other-workflow"),
+    ("workflow-scope-probe-name", "pin, probe, want_probe = probe, probe + 1, SCOPE_PROBE_STEP",
+     "pin, probe, want_probe = probe, probe + 1, PROBE_STEP", "launchers/workflow-scope-decide-old-probe-name"),
     ("workflow-setup", "        if len(setups) != 1:\n", "        if False:\n", "launchers/workflow-no-setup"),
     ("workflow-py-word", "return bool(PYTHON_WORD_RE.search(text) or PY_WORD_RE.search(text))",
      "return bool(PYTHON_WORD_RE.search(text))", "launchers/workflow-names-py-file"),
@@ -2712,7 +2787,7 @@ MUTANTS = (
 UNMUTATED = {"copies/real-copies-identical", "entries/real-entries-pass", "entries/entry-function-real-pass",
              "launchers/real-launchers-pass",
              "launchers/real-workflows-in-grammar", "launchers/workflow-host-probe-ahead-of-pin",
-             "completeness/scan-clean-module"}
+             "launchers/workflow-scope-probe-ahead-of-decide", "completeness/scan-clean-module"}
 
 
 def _load_mutant(source, directory, number):
@@ -3078,6 +3153,11 @@ def self_test(lane, report_path=None):
                                 ("launchers/workflow-host-pin-job-config-combined", 0),
                                 ("launchers/workflow-host-pin-job-config-malformed", 0),
                                 ("launchers/workflow-host-pin-job-config-system", 0),
+                                ("launchers/workflow-scope-decide-before-probe", 0),
+                                ("launchers/workflow-scope-decide-other-job", 0),
+                                ("launchers/workflow-scope-decide-other-workflow", 0),
+                                ("launchers/workflow-scope-decide-old-probe-name", 0),
+                                ("launchers/workflow-scope-probe-ahead-of-decide", 0),
                                 ("launchers/workflow-block-hash-line", 0),
                                 ("launchers/workflow-defaults-after-steps", 0),
                                 ("launchers/workflow-python-outside-run-step", 0),
