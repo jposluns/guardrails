@@ -9,7 +9,7 @@ disagree.
 The website is [opfiles.ai](https://opfiles.ai). The standard is open source under the Apache
 License 2.0, except vendored third-party material, which remains under its own terms.
 
-Reference CLI status. Available: init, render, doctor, absorb, record. Partial: adopt (plan, approve, reconcile and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
+Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
 
 ## Why it exists
 

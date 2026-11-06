@@ -451,7 +451,8 @@ def _inline(site, value):
 
 # The reference CLI status note: generated from VERB_STATUS in opf/tools/opf.py, read as a literal from the
 # file's syntax tree (the module is never imported or run), and rendered wherever the $OPF_STATUS token
-# appears, on the opf/README.md line that starts with its prefix, and on the Adopt line of opf/site/llms.txt.
+# appears, on the opf/README.md and opf/spec/OPF-SPEC.md lines that start with its prefix, and on the Adopt
+# line of opf/site/llms.txt.
 STATUS_SOURCE = "opf/tools/opf.py"
 STATUS_PREFIX = "Reference CLI status. "
 _STATUS_KINDS = ("available", "partial", "in progress")
@@ -462,6 +463,7 @@ _LLMS_ADOPT = ("- [Adopt](/adopt/): installing or adopting OPFiles is at /adopt/
                "verify), or create the plain-TOML store and wire its checks by hand. ")
 STATUS_LINES = (
     ("opf/README.md", STATUS_PREFIX, ""),
+    ("opf/spec/OPF-SPEC.md", STATUS_PREFIX, ""),
     ("opf/site/llms.txt", "- [Adopt](/adopt/): ", _LLMS_ADOPT),
 )
 
@@ -513,7 +515,8 @@ def status_note(table=None):
 def status_lines(root, check, table=None):
     """Write (or with `check`, compare) the status lines of STATUS_LINES under root: 0 clean or written, 1 on
     drift (check), 2 when a file cannot be read or written, is not a regular file, or has other than 1 line
-    starting with its prefix (nothing is written then)."""
+    starting with its prefix (nothing is written then). Each changed file is written to a temporary file
+    first, and none is replaced until all are written."""
     try:
         note = status_note(table)
     except RefusedPage as exc:
@@ -538,20 +541,39 @@ def status_lines(root, check, table=None):
             return 2
         lines[hits[0]] = lead + note
         planned.append((rel, path, data, "\n".join(lines).encode("utf-8")))
-    drift = False
-    for rel, path, data, fresh in planned:
-        if fresh == data:
-            continue
-        if check:
+    pending = [(rel, path, fresh) for rel, path, data, fresh in planned if fresh != data]
+    if check:
+        for rel, _path, _fresh in pending:
             print("drift: {}".format(rel))
-            drift = True
-            continue
-        with open(path, "wb") as handle:
-            handle.write(fresh)
-        print("wrote {}".format(rel))
-    if drift:
-        print("run tools/gen_draft_site.py to regenerate")
-    return 1 if drift else 0
+        if pending:
+            print("run tools/gen_draft_site.py to regenerate")
+        return 1 if pending else 0
+    # Every changed file is written to a temporary file beside it first, and only once all are written is
+    # each replaced, so a write that fails leaves every file as it was. A replace that fails part-way is
+    # reported (exit 2) and can leave the files before it replaced.
+    staged = []
+    try:
+        for rel, path, fresh in pending:
+            temp = path.with_name(".{}.{}.tmp".format(path.name, os.getpid()))
+            with open(temp, "xb") as handle:
+                staged.append(temp)
+                handle.write(fresh)
+            os.chmod(temp, stat.S_IMODE(os.stat(path).st_mode))
+        for (rel, path, _fresh), temp in zip(pending, staged):
+            os.replace(temp, path)
+            print("wrote {}".format(rel))
+    except OSError as exc:
+        print("error: cannot write the status lines ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    finally:
+        for temp in staged:
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print("error: cannot remove the temporary file {} ({})".format(temp, exc), file=sys.stderr)
+    return 0
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -2831,13 +2853,31 @@ def _self_test():
             readme = handle.read()
         codes.append(status_lines(tmp, True, fixture_table[:3]))
         with open(Path(tmp) / "opf/site/llms.txt", "a", encoding="utf-8") as handle:
-            handle.write(STATUS_LINES[1][1] + "twice\n")
+            handle.write(STATUS_LINES[-1][1] + "twice\n")
         codes.append(status_lines(tmp, False, fixture_table))
         with open(Path(tmp) / "opf/README.md", encoding="utf-8") as handle:
             after = handle.read()
     expect("status/lines-codes", codes == [1, 0, 0, 1, 2], codes)
     expect("status/lines-written", readme == "# T\n\n{}\nkept\n".format(status_note(fixture_table)), readme)
     expect("status/doubled-prefix-writes-nothing", after == readme, after)
+    # A temporary file that cannot be written (its name already taken by a directory) refuses the run at
+    # exit 2 with every status line file as it was: no file is replaced until every temporary file is written.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-status-atomic-") as tmp:
+        for rel, prefix, _lead in STATUS_LINES:
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("# T\n\n{}old\nkept\n".format(prefix))
+        last = Path(tmp) / STATUS_LINES[-1][0]
+        os.mkdir(last.with_name(".{}.{}.tmp".format(last.name, os.getpid())))
+        code = status_lines(tmp, False, fixture_table)
+        kept = []
+        for rel, prefix, _lead in STATUS_LINES:
+            with open(Path(tmp) / rel, encoding="utf-8") as handle:
+                kept.append(handle.read() == "# T\n\n{}old\nkept\n".format(prefix))
+        leftovers = sorted(name for rel, _p, _l in STATUS_LINES for name in os.listdir((Path(tmp) / rel).parent)
+                           if name.endswith(".tmp") and name != last.with_name(".{}.{}.tmp".format(
+                               last.name, os.getpid())).name)
+    expect("status/write-all-or-nothing", code == 2 and all(kept) and not leftovers, (code, kept, leftovers))
     for name, bad in (("status/unknown-status-refused", '(("a", "done", ""),)'),
                       ("status/short-row-refused", '(("a", "available"),)'),
                       ("status/computed-table-refused", 'tuple(x for x in ())')):
