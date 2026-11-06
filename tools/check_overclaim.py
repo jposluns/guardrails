@@ -1192,17 +1192,19 @@ def _md_mech_scope(md_text, ref):
 
 
 class _MechHtmlParser(HTMLParser):
-    """Build a mini-DOM for each mechanism <details class="more"> block (reverse leg, FIX F round 17), so the
+    """Build a mini-DOM for each mechanism <details> block (reverse leg, FIX F round 17), so the
     reverse leg can validate the block against an EXACT grammar: the allowed child elements, their attributes,
     and their fixed text, rejecting any raw text or element OUTSIDE the expected nodes and recording every
     block per ref (a DUPLICATE ref is preserved as a separate block, never collapsed into a set). Each block is
     a node: {"tag", "attrs" (dict), "children" (list of nodes), "text" (concatenated data directly under this
-    node)}. Nodes are collected only while a details.more root is open; everything else on the page is ignored.
-    _validate_mech_html does the structural comparison."""
+    node)}. Every <details> element on the register page is a mechanism block (render_html emits no other), so
+    a root is admitted by its tag alone, whatever its attributes: no class value, duplicated or not, can keep a
+    details root out of validation. Nodes are collected only while a details root is open; everything else on
+    the page is ignored. _validate_mech_html does the structural comparison."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.blocks = []
-        self._stack = []  # open nodes within the current block ([] when outside any details.more block)
+        self._stack = []  # open nodes within the current block ([] when outside any details block)
         self.stray_details_closes = 0  # unbalanced </details> a browser treats as a premature/extra close (F-356)
 
     def handle_starttag(self, tag, attrs):
@@ -1211,7 +1213,7 @@ class _MechHtmlParser(HTMLParser):
         first = {}
         for k, v in attrs:
             first.setdefault(k, v)  # a browser keeps the FIRST occurrence of a duplicated attribute (F-353)
-        if not self._stack and not (tag == "details" and "more" in first.get("class", "").split()):
+        if not self._stack and tag != "details":
             return  # outside any mechanism block
         node = {"tag": tag, "attrs": first, "dup_attrs": dups, "children": [], "text": ""}
         if self._stack:
@@ -1237,7 +1239,7 @@ class _MechHtmlParser(HTMLParser):
                 closed = self._stack[i]
                 del self._stack[i:]  # closes the matched node (and any unclosed descendants, a malformation)
                 if not self._stack:
-                    self.blocks.append(closed)  # the details.more root closed
+                    self.blocks.append(closed)  # the details root closed
                 return
         # a stray end tag with no open match: well-formed generated HTML never reaches here; ignore it
 
@@ -1260,13 +1262,13 @@ def _mech_node_attrs(node, keys, classes, findings, where):
 
 
 def _validate_mech_html(block, expected):
-    """Validate one mechanism <details class="more"> mini-DOM node against the EXACT grammar render_html emits,
+    """Validate one mechanism <details> mini-DOM node against the EXACT grammar render_html emits,
     returning (ref, findings). The block MUST be exactly:
-        <details class="more" id=...><summary><code>REF</code></summary><div class="inner">
+        <details id=...><summary><code>REF</code></summary>
           <ul><li>Label: <code>value</code></li> ...</ul>
-          <p class="ledger-residual-label">RESIDUAL_HEADING</p>
+          <p>RESIDUAL_HEADING</p>
           <blockquote class="ledger-residual" data-mech="REF">residue</blockquote>
-        </div></details>
+        </details>
     Any raw (non-whitespace) text outside the code/li/label/residue text nodes, any unexpected element, a
     residual-label <p> whose text is not exactly the heading, or a data-mech that disagrees with the summary
     ref is a finding; the <li> metadata multiset must equal expected[ref] (FIX F, round 17). Each node also
@@ -1278,15 +1280,15 @@ def _validate_mech_html(block, expected):
     page-bound and asset-closure legs); the shipped page is separately byte-pinned by enforcement-register-drift."""
     F = []
     blank = lambda s: s.strip() == ""
-    _mech_node_attrs(block, ("class", "id"), ("more",), F, "details.more")
+    _mech_node_attrs(block, ("id",), None, F, "details")
     ref = None
     if not blank(block["text"]):
         F.append("reverse(html): raw text directly inside a mechanism <details>")
     kids = block["children"]
-    if [c["tag"] for c in kids] != ["summary", "div"]:
-        F.append("reverse(html): <details> children are {} not [summary, div]".format([c["tag"] for c in kids]))
+    if [c["tag"] for c in kids] != ["summary", "ul", "p", "blockquote"]:
+        F.append("reverse(html): <details> children are {} not [summary, ul, p, blockquote]".format(
+            [c["tag"] for c in kids]))
     summary = next((c for c in kids if c["tag"] == "summary"), None)
-    inner = next((c for c in kids if c["tag"] == "div"), None)
     if summary is not None:
         _mech_node_attrs(summary, (), None, F, "summary")
         if not blank(summary["text"]):
@@ -1303,60 +1305,52 @@ def _validate_mech_html(block, expected):
     if ref is not None:  # tie the block id to the ref, as data-mech is tied below (FIX F, round 19)
         expected_id = "mechanism-" + ref.replace(":", "-")
         if block["attrs"].get("id") != expected_id:
-            F.append("reverse(html): <details.more> id {!r} does not match expected {!r}".format(
+            F.append("reverse(html): <details> id {!r} does not match expected {!r}".format(
                 block["attrs"].get("id"), expected_id))
-    if inner is not None:
-        _mech_node_attrs(inner, ("class",), ("inner",), F, "div.inner")
-        if "inner" not in inner["attrs"].get("class", "").split():
-            F.append("reverse(html): the mechanism <div> is not class 'inner'")
-        if not blank(inner["text"]):
-            F.append("reverse(html): raw text directly inside div.inner")
-        ikids = inner["children"]
-        if [c["tag"] for c in ikids] != ["ul", "p", "blockquote"]:
-            F.append("reverse(html): div.inner children are {} not [ul, p, blockquote]".format(
-                [c["tag"] for c in ikids]))
-        ul = next((c for c in ikids if c["tag"] == "ul"), None)
-        p = next((c for c in ikids if c["tag"] == "p"), None)
-        bq = next((c for c in ikids if c["tag"] == "blockquote"), None)
-        if ul is not None:
-            _mech_node_attrs(ul, (), None, F, "ul")
-            if not blank(ul["text"]):  # catches <ul>Kind: gate</ul>
-                F.append("reverse(html): raw text directly inside <ul>")
-            observed = []
-            for li in ul["children"]:
-                if li["tag"] != "li":
-                    F.append("reverse(html): <ul> child is <{}> not <li>".format(li["tag"]))
-                    continue
-                _mech_node_attrs(li, (), None, F, "li")
-                lcode = li["children"]
-                if [c["tag"] for c in lcode] != ["code"]:
-                    F.append("reverse(html): <li> children are {} not [code]".format([c["tag"] for c in lcode]))
-                    continue
-                if lcode[0]["children"]:
-                    F.append("reverse(html): <li><code> has child elements")
-                _mech_node_attrs(lcode[0], (), None, F, "li><code")
-                observed.append((li["text"].replace(":", "").strip(), lcode[0]["text"].strip()))
-            if sorted(observed) != sorted(exp_fields):
-                F.append("reverse(html): mechanism {} renders fields {} but enumerates {}".format(
-                    ref, sorted(observed), sorted(exp_fields)))
-        if p is not None:
-            _mech_node_attrs(p, ("class",), ("ledger-residual-label",), F, "p.ledger-residual-label")
-            if "ledger-residual-label" not in p["attrs"].get("class", "").split():
-                F.append("reverse(html): the residual-label <p> is not class 'ledger-residual-label'")
-            if p["children"]:
-                F.append("reverse(html): the residual-label <p> has child elements")
-            if p["text"].strip() != gen_enforcement_register.RESIDUAL_HEADING:  # catches extra text in the <p>
-                F.append("reverse(html): residual-label <p> text {!r} is not the residual heading".format(
-                    p["text"].strip()))
-        if bq is not None:
-            _mech_node_attrs(bq, ("class", "data-mech"), ("ledger-residual",), F, "blockquote.ledger-residual")
-            if "ledger-residual" not in bq["attrs"].get("class", "").split():
-                F.append("reverse(html): the residual <blockquote> is not class 'ledger-residual'")
-            if bq["children"]:  # the residue is escaped text: a real child element is an injection
-                F.append("reverse(html): the residual <blockquote> has child elements")
-            if bq["attrs"].get("data-mech") != ref:
-                F.append("reverse(html): residual <blockquote> data-mech {!r} does not match ref {!r}".format(
-                    bq["attrs"].get("data-mech"), ref))
+    # the field list, residual label and residual blockquote are direct children of <details>
+    ul = next((c for c in kids if c["tag"] == "ul"), None)
+    p = next((c for c in kids if c["tag"] == "p"), None)
+    bq = next((c for c in kids if c["tag"] == "blockquote"), None)
+    if ul is not None:
+        _mech_node_attrs(ul, (), None, F, "ul")
+        if not blank(ul["text"]):  # catches <ul>Kind: gate</ul>
+            F.append("reverse(html): raw text directly inside <ul>")
+        observed = []
+        for li in ul["children"]:
+            if li["tag"] != "li":
+                F.append("reverse(html): <ul> child is <{}> not <li>".format(li["tag"]))
+                continue
+            _mech_node_attrs(li, (), None, F, "li")
+            lcode = li["children"]
+            if [c["tag"] for c in lcode] != ["code"]:
+                F.append("reverse(html): <li> children are {} not [code]".format([c["tag"] for c in lcode]))
+                continue
+            if lcode[0]["children"]:
+                F.append("reverse(html): <li><code> has child elements")
+            _mech_node_attrs(lcode[0], (), None, F, "li><code")
+            observed.append((li["text"].replace(":", "").strip(), lcode[0]["text"].strip()))
+        if sorted(observed) != sorted(exp_fields):
+            F.append("reverse(html): mechanism {} renders fields {} but enumerates {}".format(
+                ref, sorted(observed), sorted(exp_fields)))
+    if p is not None:
+        _mech_node_attrs(p, (), None, F, "p")
+        if p["children"]:
+            F.append("reverse(html): the residual-label <p> has child elements")
+        if p["text"].strip() != gen_enforcement_register.RESIDUAL_HEADING:  # catches extra text in the <p>
+            F.append("reverse(html): residual-label <p> text {!r} is not the residual heading".format(
+                p["text"].strip()))
+    if bq is not None:
+        # The ledger-residual class is the one class this block keeps (no stylesheet defines it): the
+        # generator's byte-fidelity check emits it as part of the exact residual block, and this check
+        # requires it, so a residual block rendered in some other shape fails here too.
+        _mech_node_attrs(bq, ("class", "data-mech"), ("ledger-residual",), F, "blockquote.ledger-residual")
+        if "ledger-residual" not in bq["attrs"].get("class", "").split():
+            F.append("reverse(html): the residual <blockquote> is not class 'ledger-residual'")
+        if bq["children"]:  # the residue is escaped text: a real child element is an injection
+            F.append("reverse(html): the residual <blockquote> has child elements")
+        if bq["attrs"].get("data-mech") != ref:
+            F.append("reverse(html): residual <blockquote> data-mech {!r} does not match ref {!r}".format(
+                bq["attrs"].get("data-mech"), ref))
     return (ref, F)
 
 
@@ -3322,13 +3316,13 @@ def _page_bound_source_self_test():
         #   (3) a DUPLICATE complete block with the same ref but a distinct HTML id.
         # MUTATION: reverting to the tag-whitelist parser + the ref-collapsing seen-set lets (1) and (2) slip
         # (text outside <li> was ignored) and (3) collapse silently -> these assertions fail.
-        _ul_evade = html_page.replace("            <ul>\n", "            <ul>Kind: gate\n", 1)
+        _ul_evade = html_page.replace("\n          <ul>\n", "\n          <ul>Kind: gate\n", 1)
         if not _reverse_leg(md_text, _ul_evade, pbs):
             failures.append("COMPLETENESS(reverse): text inside <ul> must be caught (FIX F)")
         _p_evade = html_page.replace("ledger)</p>", "ledger) guarantees</p>", 1)
         if not _reverse_leg(md_text, _p_evade, pbs):
             failures.append("COMPLETENESS(reverse): extra text in the residual-label <p> must be caught (FIX F)")
-        _b0 = html_page.index('<details class="more"')
+        _b0 = html_page.index('<details id="mechanism-')
         _b1 = html_page.index("</details>", _b0) + len("</details>")
         _dup = html_page[_b0:_b1].replace('id="mechanism-', 'id="mechanism-dup-', 1)
         _dup_page = html_page[:_b1] + "\n" + _dup + html_page[_b1:]
@@ -3339,45 +3333,53 @@ def _page_bound_source_self_test():
         # as an ATTRIBUTE (a <li title=...>, an extra data-*, an extra class token) leaves the <li> text and the
         # field multiset unchanged, so the r17 structural leg passed it, and Collector 1's VisibleText scan
         # strips attributes, so the forward leg misses it too: the attribute channel is the last un-enumerated
-        # HTML surface. Each injection lands on a REAL mechanism node of the built register fixture (the 14-space
-        # mechanism <li>, the first .more details root, the first ledger-residual blockquote) and must be caught
+        # HTML surface. Each injection lands on a REAL mechanism node of the built register fixture (the 12-space
+        # mechanism <li>, the first details root, the first ledger-residual blockquote) and must be caught
         # by the SAME _reverse_leg on real render bytes. The n5b clean assertion above already re-confirms the
         # attribute allowlist does NOT over-fire (0 reverse findings over the fixture's mechanism blocks); the
         # shipped 54-block page is bound separately by the enforcement-register-drift byte-pin.
         _li_title = html_page.replace(
-            "              <li>", '              <li title="Guarantees secure output">', 1)
+            "            <li>", '            <li title="Guarantees secure output">', 1)
         if not _reverse_leg(md_text, _li_title, pbs):
             failures.append("COMPLETENESS(reverse): a title attribute on a mechanism <li> must be caught (FIX F)")
         _bq_data = html_page.replace(
             "data-mech=", 'data-guarantee="secure output" data-mech=', 1)
         if not _reverse_leg(md_text, _bq_data, pbs):
             failures.append("COMPLETENESS(reverse): an extra data-* on the residual <blockquote> must be caught (FIX F)")
-        _cls_tok = html_page.replace('class="more"', 'class="more secure-by-default"', 1)
+        _cls_tok = html_page.replace('class="ledger-residual"', 'class="ledger-residual secure-by-default"', 1)
         if not _reverse_leg(md_text, _cls_tok, pbs):
             failures.append("COMPLETENESS(reverse): an extra class token on a mechanism node must be caught (FIX F)")
-        # r19: a payload-first DUPLICATE class attribute (dict(attrs) keeps the last, a browser DOM the first)
-        # must be caught by the duplicate-key flag, and an overclaim in the <details> id VALUE by the id tie.
-        _dup_cls = html_page.replace('class="more"', 'class="more guarantees-everything" class="more"', 1)
+        _root_cls = html_page.replace('<details id="mechanism-', '<details class="secure-by-default" id="mechanism-', 1)
+        if not _reverse_leg(md_text, _root_cls, pbs):
+            failures.append("COMPLETENESS(reverse): a class attribute on a mechanism <details> root must be caught")
+        # A payload-first DUPLICATE class attribute (dict(attrs) keeps the last, a browser DOM the first) must be
+        # caught by the duplicate-key flag, a payload-first duplicate id on the root likewise, and an overclaim in
+        # the <details> id VALUE by the id tie.
+        _dup_cls = html_page.replace(
+            'class="ledger-residual"', 'class="ledger-residual guarantees-everything" class="ledger-residual"', 1)
         if not _reverse_leg(md_text, _dup_cls, pbs):
             failures.append("COMPLETENESS(reverse): a payload-first duplicate class attribute must be caught (FIX F, r19)")
+        _dup_id = html_page.replace('<details id="mechanism-', '<details id="guarantees-everything" id="mechanism-', 1)
+        if not _reverse_leg(md_text, _dup_id, pbs):
+            failures.append("COMPLETENESS(reverse): a payload-first duplicate id on a mechanism root must be caught")
         _id_val = html_page.replace('id="mechanism-', 'id="OVERCLAIM mechanism-', 1)
         if not _reverse_leg(md_text, _id_val, pbs):
             failures.append("COMPLETENESS(reverse): an overclaim in a mechanism <details> id must be caught (FIX F, r19)")
-        # r20 (F-353): a decoy-LAST duplicate class must not let a details.more root evade admission. A browser
-        # keeps the FIRST class ("more ..."), rendering the block; the old last-wins dict() saw "decoy", dropped the
-        # root, and never ran the dup/attribute checks. Inject a duplicate of the first block (originals all stay, so
-        # no absence-catch masks it) whose root carries a payload-first, decoy-last class.
-        _r0 = html_page.index('<details class="more"')
+        # A decoy-LAST duplicate class must not let a details root evade admission. Roots are admitted by tag, so
+        # no class value can drop one; the block still runs the dup/attribute checks. Inject a duplicate of the
+        # first block (originals all stay, so no absence-catch masks it) whose root carries a payload-first,
+        # decoy-last class.
+        _r0 = html_page.index('<details id="mechanism-')
         _r1 = html_page.index("</details>", _r0) + len("</details>")
         _decoy = html_page[_r0:_r1].replace(
-            '<details class="more"', '<details class="more guarantees-secure-output" class="decoy"', 1)
+            '<details id="mechanism-', '<details class="guarantees-secure-output" class="decoy" id="mechanism-', 1)
         _dup_admit = html_page.replace("</main>", _decoy + "\n</main>", 1)
         if not _reverse_leg(md_text, _dup_admit, pbs):
             failures.append("COMPLETENESS(reverse): a decoy-last duplicate class must not evade root admission (FIX F, r20)")
         # r20 (F-354): an EOF-unclosed mechanism <details> root (a browser tree-builder still renders it) must be
         # caught by the post-close open-stack check, not silently dropped because it never hit an end tag.
         _unclosed = html_page.replace(
-            "</main>", '<details class="more" title="guarantees secure output"><summary><code>gate:decoy</code></summary>\n</main>', 1)
+            "</main>", '<details title="guarantees secure output"><summary><code>gate:decoy</code></summary>\n</main>', 1)
         if not _reverse_leg(md_text, _unclosed, pbs):
             failures.append("COMPLETENESS(reverse): an EOF-unclosed mechanism <details> root must be caught (FIX F, r20)")
         # r21 (F-356): a premature/extra </details> closes a mechanism block early, letting stray content render at

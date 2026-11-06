@@ -46,11 +46,11 @@ Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
     attribute, or a text-sink token into a `<script>`/`<style>` body, is NOT detected and would render
     under-escaped; `{{content}}` (the body fragment) is not sink-validated at all. There is no live
     exposure at HEAD: the retired `_shell.html` shell is no longer checked in, and the in-memory test
-    shells place every token in a quoted attribute or element text. This is a disclosed residual on FUTURE shell edits, consistent with the maintainer-authored-
-    shell threat model, not a live defect; closing it fully would need a quoting/raw-text-aware
-    collector (a future slice). The URL fields (canonical, og-url) are attribute-escaped, NOT
-    URL-scheme-validated; a maintainer-authored `javascript:` value in the frontmatter would render
-    literally into an href/content attribute.
+    shells place every token in a quoted attribute or element text. This is a disclosed residual on
+    FUTURE shell edits, consistent with the maintainer-authored-shell threat model, not a live defect;
+    closing it fully would need a quoting/raw-text-aware collector (a future slice). The URL fields
+    (canonical, og-url) are attribute-escaped, NOT URL-scheme-validated; a maintainer-authored
+    `javascript:` value in the frontmatter would render literally into an href/content attribute.
   - md_to_html's HTML-block pass-through preserves the block bytes exactly for the type-1 subset and
     for lines beginning with `<`; heading/paragraph/hr blocks have their trailing whole-block
     whitespace normalized before classification, and paragraphs fold internal per-line ASCII
@@ -72,9 +72,9 @@ Residuals (disclosed per `10-ACCUR-disclose-guard-residuals`):
     every discovered `docs/**/*.md` must be declared in GENSRC_OUTPUTS or `--check`/generation fails
     closed (exit 2), and any `.md` that is a symbolic link is refused. An unreadable subtree or a
     symlinked directory fails closed (exit 2) rather than vanishing: the walk refuses to follow either.
-    There is no filename-prefix exemption: the only shell template (`_shell.html`) is `.html`, never a
-    `.md` discovery candidate, so an underscore-prefixed, nested, or symlinked stray `.md` fails loud
-    instead of vanishing.
+    There is no filename-prefix exemption (the retired shell template, `_shell.html`, was `.html`,
+    never a `.md` discovery candidate), so an underscore-prefixed, nested, or symlinked stray `.md`
+    fails loud instead of vanishing.
   - Source and target symlink protection is a pre-check (`is_symlink()` + `resolve()` bounding); a
     committed symlink is refused. The check/use gap between the pre-check and the read/write syscall
     is NOT race-free (no openat/O_NOFOLLOW/beneath containment). This is an accepted residual for a
@@ -821,9 +821,9 @@ def main(argv=None):
     # Discovery is RECURSIVE (an explicit os.scandir walk, which unlike rglob fails closed on an
     # unreadable subtree or a symlinked directory) and has NO filename-prefix exemption, so an
     # underscore-prefixed, nested-subdirectory, or symlinked stray .md fails loud rather than silently
-    # vanishing. The retired shell template (_shell.html) was .html, never a .md discovery candidate. A .md
-    # that is a symbolic link is refused outright (reading it would pull an out-of-tree file into the
-    # pipeline).
+    # vanishing. The retired shell template (_shell.html) was .html, never a .md discovery candidate.
+    # A .md that is a symbolic link is refused outright (reading it would pull an out-of-tree file into
+    # the pipeline).
     declared_sources = {src_rel for src_rel, _ in entries}
     try:
         discovered = _discover_md(docs_root, root)

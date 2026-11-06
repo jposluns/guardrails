@@ -570,10 +570,13 @@ def render_html(rows, roadmap, controls, enforced_union):
     out.append('        <p>{}</p>'.format(_t(EXPLAINER)))
     out.append('        <p class="lead">Summary: {}.</p>'.format("; ".join(
         '{}: <strong>{}</strong>'.format(_t(label), counts[label]) for label in STATUS_LABELS)))
-    out.append('        <div class="tablewrap">')
-    out.append('          <table class="dtable">')
-    out.append('            <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th>'
-               '<th>{}</th></tr></thead>'.format(_t(COLUMN_HEADING)))
+    # Template markup only: a plain table inside a focusable scroll wrapper, a plain legend list, and plain
+    # details blocks, so every class the body carries is one the template stylesheet defines, except the
+    # residual blockquote's class (see the comment at that block).
+    out.append('        <div class="tablewrap" tabindex="0">')
+    out.append('          <table>')
+    out.append('            <thead><tr><th scope="col">Rule</th><th scope="col">Corpus ID</th>'
+               '<th scope="col">Status</th><th scope="col">{}</th></tr></thead>'.format(_t(COLUMN_HEADING)))
     out.append('            <tbody>')
     for cid, title, _fm in rows:
         row = roadmap[cid]
@@ -598,7 +601,7 @@ def render_html(rows, roadmap, controls, enforced_union):
     out.append('        </div>')
     out.append('        <h2>Mechanisms</h2>')
     classes_present = _classes_present(enforced_union, controls)
-    out.append('        <ul class="class-legend">')
+    out.append('        <ul>')
     for letter, desc in CLASS_LEGEND:
         if letter in classes_present:
             out.append('          <li>Class <code>{}</code>: {}</li>'.format(_t(letter), _t(desc)))
@@ -607,13 +610,14 @@ def render_html(rows, roadmap, controls, enforced_union):
         ctrl = controls[ref]
         residue = _residue_display(ctrl["residue"], "residue {}".format(ref))
         anchor = "mechanism-{}-{}".format(ctrl["kind"], ctrl["id"])
-        out.append('        <details class="more" id="{anchor}">'.format(anchor=_a(anchor)))
+        # The mechanism block is a plain details element; tools/check_overclaim.py's reverse leg treats
+        # every details element on this page as a mechanism block and validates it against this shape.
+        out.append('        <details id="{anchor}">'.format(anchor=_a(anchor)))
         out.append('          <summary><code>{ref}</code></summary>'.format(ref=_t(ref)))
-        out.append('          <div class="inner">')
-        out.append('            <ul>')
+        out.append('          <ul>')
         for label, key in _MECH_FIELDS:
-            out.append('              <li>{}: <code>{}</code></li>'.format(label, _t(ctrl[key])))
-        out.append('            </ul>')
+            out.append('            <li>{}: <code>{}</code></li>'.format(label, _t(ctrl[key])))
+        out.append('          </ul>')
         # The technical-limits residual is rendered VERBATIM from the ledger inside a labelled blockquote:
         # the residue is element text (HTML-escaped by _t), so a residue token shaped like a tag renders
         # as visible text, not markup. The data-mech attribute names the control this quotation declares.
@@ -623,10 +627,13 @@ def render_html(rows, roadmap, controls, enforced_union):
         # A multi-line residue keeps its newlines here verbatim in the page source; the template
         # stylesheet styles it as a plain blockquote, so the byte checks below, not the styling,
         # carry the fidelity guarantee.
-        out.append('            <p class="ledger-residual-label">{}</p>'.format(_t(RESIDUAL_HEADING)))
-        out.append('            <blockquote class="ledger-residual" data-mech="{mech}">{text}</blockquote>'
+        # No stylesheet defines the ledger-residual class; it stays because 2 checks read it:
+        # _assert_display_fidelity below requires this exact block, class included, as a byte substring
+        # of the composed page, and tools/check_overclaim.py _validate_mech_html requires the residual
+        # blockquote to carry it.
+        out.append('          <p>{}</p>'.format(_t(RESIDUAL_HEADING)))
+        out.append('          <blockquote class="ledger-residual" data-mech="{mech}">{text}</blockquote>'
                    .format(mech=_a(ref), text=_t(residue)))
-        out.append('          </div>')
         out.append('        </details>')
     inner = "\n".join(out)
     # Reject an en/em dash anywhere in the emitted block (defence in depth over the per-field checks).

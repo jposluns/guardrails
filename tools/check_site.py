@@ -391,32 +391,42 @@ SHELL_CLASS_EXCLUSIONS = {}  # {"<root>/<page path>": "why the page cannot carry
 class _RootElement(HTMLParser):
     """The document's first start tag and its attributes. Only a real start tag counts: the doctype,
     text, and comments are not start tags, so a shell marker that survives only inside an HTML comment
-    can never present itself as the page's root element."""
+    can never present itself as the page's root element. A browser keeps the FIRST of a repeated
+    attribute, so the attrs dict keeps the first too, and every repeated attribute name is recorded."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.tag = None
         self.attrs = None
+        self.dup_attrs = frozenset()
 
     def handle_starttag(self, tag, attrs):
         if self.tag is None:
             self.tag = tag
-            self.attrs = dict(attrs)
+            first = {}
+            dups = set()
+            for k, v in attrs:
+                if k in first:
+                    dups.add(k)
+                else:
+                    first[k] = v
+            self.attrs = first
+            self.dup_attrs = frozenset(dups)
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
 
 
 def _root_element(text):
-    """(tag, attrs dict) of the page's first start tag, or (None, None) when the page has none or does
-    not parse."""
+    """(tag, attrs dict keeping the first of a repeated attribute, repeated attribute names) of the page's
+    first start tag, or (None, None, frozenset()) when the page has none or does not parse."""
     parser = _RootElement()
     try:
         parser.feed(text)
         parser.close()
     except (ValueError, AssertionError):
-        return None, None
-    return parser.tag, parser.attrs
+        return None, None, frozenset()
+    return parser.tag, parser.attrs, parser.dup_attrs
 
 
 def shell_class_findings(subdir, page_rel, label, text, template, draft_folders):
@@ -434,12 +444,19 @@ def shell_class_findings(subdir, page_rel, label, text, template, draft_folders)
     # The rule reads the page's REAL root element, not a substring: a marker that appears only inside
     # an HTML comment, or after some other first element, is not the document's root and does not pass.
     marker = '<html lang="en" class="site-{}">'.format(key)
-    tag, attrs = _root_element(text)
+    tag, attrs, dups = _root_element(text)
+    findings = []
+    # A repeated class or lang on the root is a finding even when its first value is the marker's: a
+    # browser keeps the first value and a tool that keeps the last reads another, so the page's shell
+    # and language are ambiguous.
+    for name in sorted(dups & {"class", "lang"}):
+        findings.append("{}: the root element repeats the {} attribute (a browser keeps only the first "
+                        "value)".format(label, name))
     if tag != "html" or (attrs or {}).get("lang") != "en" \
             or (attrs or {}).get("class") != "site-{}".format(key):
-        return ["{}: not on the template shell (the root element is not {}) and not a recorded "
-                "exclusion".format(label, marker)]
-    return []
+        findings.append("{}: not on the template shell (the root element is not {}) and not a recorded "
+                        "exclusion".format(label, marker))
+    return findings
 
 
 # The generated pages composed on the template shell outside the template declaration (tools/gen_site.py
@@ -1091,7 +1108,8 @@ def _self_test():
 def _shell_class_self_test():
     """The shell-class rule: a page on the template shell passes; an old-shell page flips the rule red; a
     recorded exclusion with a reason passes; an exclusion whose reason is empty is itself a finding; the
-    marker satisfies the rule only as the page's real root element, never inside a comment; and the root
+    marker satisfies the rule only as the page's real root element, never inside a comment; a repeated
+    class or lang on the root is a finding whichever value comes first; and the root
     scan itself reports an off-shell page, so the rule cannot silently drop out of the scan."""
     import contextlib
     import io
@@ -1109,6 +1127,22 @@ def _shell_class_self_test():
     got = shell_class_findings("site", "a.html", "site/a.html", commented, False, draft)
     check("shell-class/commented-marker-fails",
           len(got) == 1 and "not on the template shell" in got[0], got)
+    # A repeated class or lang on the root: the marker value first still fails on the repeat alone; the
+    # marker value last (where a last-wins parse would have passed it) fails on the repeat and on the
+    # first value a browser keeps.
+    dup_class_last = '<!doctype html><html lang="en" class="site-aiqt" class="site-other"><title>t</title>'
+    got = shell_class_findings("site", "a.html", "site/a.html", dup_class_last, False, draft)
+    check("shell-class/duplicate-class-on-root-fails",
+          len(got) == 1 and "repeats the class attribute" in got[0], got)
+    dup_class_first = '<!doctype html><html lang="en" class="site-other" class="site-aiqt"><title>t</title>'
+    got = shell_class_findings("site", "a.html", "site/a.html", dup_class_first, False, draft)
+    check("shell-class/duplicate-class-marker-last-fails",
+          len(got) == 2 and "repeats the class attribute" in got[0] and "not on the template shell" in got[1],
+          got)
+    dup_lang = '<!doctype html><html lang="en" lang="fr" class="site-aiqt"><title>t</title>'
+    got = shell_class_findings("site", "a.html", "site/a.html", dup_lang, False, draft)
+    check("shell-class/duplicate-lang-on-root-fails",
+          len(got) == 1 and "repeats the lang attribute" in got[0], got)
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "site"
