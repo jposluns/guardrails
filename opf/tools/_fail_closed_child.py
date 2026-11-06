@@ -14,13 +14,18 @@ from SystemExit's own code slot (SystemExit.__dict__["code"]), never through get
 whose code property lies about the slot cannot pass; an audit hook (which cannot be removed) records
 as a fault every thread started through _thread directly, outside threading (a start is threading's
 own only when its target is exactly a bound method of threading.Thread._bootstrap on a real
-threading.Thread, read through the method type's own slots), the creation of another interpreter
+threading.Thread, read through the method type's own slots), every unraisable exception (a destructor's
+or an atexit callback's; CPython raises the sys.unraisablehook event before it calls whichever hook is
+installed, so a replaced hook, a no-op or a collecting one, still leaves the fault recorded), the
+creation of another interpreter
 where its documented event arrives (measured on CPython 3.14.4, _interpreters.create() delivered no
 cpython.PyInterpreterState_New event to an installed hook, so interpreter creation from Python is
 actually caught by the _interpreters refusals and the import fault, and the event leg is a backstop
 for deliveries that do occur) and the import of an interpreter-creating module; and _install
 replaces every non-query function of _interpreters with a refusal that records a fault first, so code
 in another interpreter, which no hook of this interpreter can observe, is refused at the attempt.
+sys.unraisablehook is wrapped too, and the finalizer records as a fault a hook that is no longer that
+wrapper, so a hook replaced with one that reports nothing is a fault even when nothing raised.
 
 THE RECORD: the parent passes the record path and a fresh nonce on the child's argv. The loaded code
 settles its verdict only through exit_with(code), which records the decided code (an int in 0 to 255;
@@ -51,7 +56,11 @@ flushes what remains.
 THE PARENT (minimal, this slice): run_child first calls the canonical child-status guard, carried
 below as the inline copy tools/check_child_status_coverage.py pins by AST to opf/tools/_child_status.py,
 as every parent must (with SIGCHLD ignored a failed child reads as exit 0), launches the child, captures
-both streams, and passes ONLY when both streams are byte-empty (the "empty" streams mode of the
+both streams (each retained only up to _STREAM_CAP bytes; a stream past it is drained, discarded and
+refused), opens the record without following a symlink or blocking (O_NOFOLLOW, O_NONBLOCK) and reads
+it only when fstat shows a regular file, at most _RECORD_CAP plus one bytes (a FIFO, a device or a
+symlink at the record path is refused, never waited on), and passes ONLY when both streams are
+byte-empty (the "empty" streams mode of the
 existing contract), the record exists, parses, carries exactly the expected keys and the launch's
 nonce, lists no fault, its decided code is an int in 0 to 255 equal to the child's exit status, and
 that code is 0 or 1; a recorded 1 with exit 1 stays 1, and anything else is 2.
@@ -66,7 +75,8 @@ tools/_selftest_exit_report.py; its bytecode-cache-refusing runner loader and it
 the exit callbacks are not yet observed here. The reporting path RETURNS instead of ending with
 os._exit(decided_code), trading away the no-loaded-code-runs-after-the-record property: interpreter
 teardown (destructors of objects still alive) runs after the record exists, and deliberately hostile
-code there could still end the process with a matching os._exit; in exchange the record no longer
+code there could still end the process with a matching os._exit, or replace sys.unraisablehook there
+and then fault silently (a fault recorded after the record exists reaches no record); in exchange the record no longer
 fixes the exit status by construction, so a spoofed confirmation is contradicted by the real exit
 status at the parent whenever that status differs from the decided code, which the os._exit form
 could not refuse. A spoofed confirmation whose later exit carries the MATCHING status (a caught
@@ -103,14 +113,19 @@ import importlib.util
 import json
 import os
 import secrets
+import selectors
+import stat
 import subprocess
 import tempfile
 import threading
+import time
 import types
 
 NAME = "_fail_closed_child.py"
 CHILD_TIMEOUT = 120
 _RECORD_CAP = 1 << 20    # bytes; a genuine record is small, so anything larger is malformed
+_STREAM_CAP = 1 << 16    # bytes retained per child stream; any byte already refuses, so this is diagnostics
+_UNRAISABLE_EVENT = "sys.unraisablehook"   # raised before CPython calls the installed hook, any hook
 _GC_PASSES = 3           # the bounded exit-time collection: stop early once a pass frees nothing
 _THREAD_START_EVENTS = ("_thread.start_new_thread", "_thread.start_joinable_thread")
 # The audit event CPython documents for the creation of an interpreter; receiving it is a fault. The
@@ -128,7 +143,7 @@ _BOOTSTRAP = threading.Thread._bootstrap   # every thread threading starts runs 
 _SYSTEM_EXIT_CODE = SystemExit.__dict__["code"]
 _STATE = {"installed": False, "armed": False, "armed_pid": None, "decided": None, "raised": None,
           "confirmed": None, "main_ident": None, "record_path": None, "nonce": None, "check_ids": [],
-          "faults": [], "thread_hook": None}
+          "faults": [], "thread_hook": None, "unraisable_hook": None}
 # The child bootstrap the parent launches: sys.argv is [-c, <module dir>, <payload>, <record>, <nonce>].
 _CHILD_SHIM = ("import sys; sys.path.insert(0, sys.argv[1]); "
                "import _fail_closed_child; _fail_closed_child._child_main()")
@@ -244,6 +259,19 @@ def _thread_hook(args, *, _STATE=_STATE, _SYSTEM_EXIT_CODE=_SYSTEM_EXIT_CODE,
     _STATE["thread_hook"](args)
 
 
+def _unraisable_fault(message, *, _STATE=_STATE):
+    """Record one unraisable-exception fault: the audit leg's and the finalizer's hook check's."""
+    _STATE["faults"].append(message)  # recorded before any hook runs
+
+
+def _unraisable_hook(unraisable, *, _STATE=_STATE):
+    """sys.unraisablehook while installed: defer to the hook it replaced. The fault itself is recorded
+    FIRST by the audit hook's sys.unraisablehook leg, which CPython raises before it calls whichever
+    hook is installed, so a replaced hook cannot drop it; this wrapper's identity is what the finalizer
+    requires back, so a hook replaced and left in place is a fault even when nothing raised."""
+    _STATE["unraisable_hook"](unraisable)
+
+
 def _genuine_bootstrap(target, *, _BOOTSTRAP=_BOOTSTRAP, _MethodType=types.MethodType,
                        _Thread=threading.Thread, issubclass=issubclass, type=type):
     """Whether a thread-start target is threading's own: exactly a bound method (its type, never an
@@ -255,15 +283,21 @@ def _genuine_bootstrap(target, *, _BOOTSTRAP=_BOOTSTRAP, _MethodType=types.Metho
 
 def _audit(event, args, *, _STATE=_STATE, _THREAD_START_EVENTS=_THREAD_START_EVENTS,
            _SUBINTERP_MODULES=_SUBINTERP_MODULES, _INTERP_NEW_EVENT=_INTERP_NEW_EVENT,
+           _UNRAISABLE_EVENT=_UNRAISABLE_EVENT, _unraisable_fault=_unraisable_fault,
            _genuine_bootstrap=_genuine_bootstrap, _exact_str=str.__str__,
            BaseException=BaseException):
     """The audit hook from installation on: record, as a fault, a thread started through _thread
-    directly, outside threading, the creation of another interpreter when its event is delivered, and
+    directly, outside threading, every unraisable exception (its event precedes the call of whichever
+    hook is installed), the creation of another interpreter when its event is delivered, and
     the import of an interpreter-creating module by its exact plain name (a str subclass's own hashing
     or equality decides nothing: the name is read through str's own __str__ first, and one that is not
     a str is unclassifiable, so a fault). It never raises (a raising hook would abort the audited
     operation instead of recording it)."""
     try:
+        if event == _UNRAISABLE_EVENT:
+            _unraisable_fault("an unraisable exception was reported (a destructor, an atexit callback "
+                              "or another callback whose exception cannot propagate raised)")
+            return
         if event == "import":
             name = _exact_str(args[0])
             if name in _SUBINTERP_MODULES:
@@ -314,8 +348,8 @@ def _refuse_interp_entries():
 def _install():
     """Install the observation hooks; idempotent. _child_main calls this before any loaded code runs,
     so nothing the payload executes precedes them. The audit hook cannot be removed; replacing the
-    excepthook or this module's state afterwards is loaded code replacing the reporting machinery, the
-    disclosed residual."""
+    threading excepthook or this module's state afterwards is loaded code replacing the reporting
+    machinery, the disclosed residual. A replaced sys.unraisablehook is not: the finalizer refuses it."""
     if _STATE["installed"]:
         return
     _refuse_interp_entries()
@@ -323,11 +357,14 @@ def _install():
     _STATE["main_ident"] = threading.main_thread().ident
     _STATE["thread_hook"] = threading.excepthook
     threading.excepthook = _thread_hook
+    _STATE["unraisable_hook"] = sys.unraisablehook
+    sys.unraisablehook = _unraisable_hook
     sys.addaudithook(_audit)
 
 
 def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collect, _dump=json.dump,
               _exit=os._exit, _getpid=os.getpid, _note=_note, _GC_PASSES=_GC_PASSES, sys=sys,
+              _wrapper=_unraisable_hook, _unraisable_fault=_unraisable_fault,
               open=open, list=list, range=range, BaseException=BaseException):
     """The exit handler, the process's first atexit registration so it runs after every other exit
     callback: refuse outright in any process other than the one that armed (a forked process inherits
@@ -348,7 +385,10 @@ def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collec
         for stream in (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__):
             if stream is not None:
                 stream.flush()
-        settled = (_STATE["decided"] is not None and _STATE["raised"] is not None
+        if sys.unraisablehook is not _wrapper:
+            _unraisable_fault("sys.unraisablehook is no longer the installed wrapper, so a destructor "
+                              "or atexit fault could have gone unreported")
+        settled =(_STATE["decided"] is not None and _STATE["raised"] is not None
                    and _STATE["confirmed"] is _STATE["raised"])
         decided = _STATE["decided"] if settled else None
         if decided is None:
@@ -442,26 +482,79 @@ def _child_env():
 
 
 def _read_record(record_path):
-    """(parsed record or None, whether anything exists at the path). A record that exists but cannot
-    be read, decoded or parsed is (None, True), never a pass and never a raise: the read is bounded
-    to _RECORD_CAP plus one byte, so a record over the cap is malformed like any other, where an
+    """(parsed record or None, whether anything exists at the path, the refusal or None). A record
+    that exists but cannot be opened, read, decoded or parsed is (None, True, its refusal), never a
+    pass and never a raise. The open never follows a symlink and never blocks (a FIFO left at the
+    path would otherwise hold the parent with no limit), and only a regular file, by fstat, is read;
+    the read is bounded to _RECORD_CAP plus one byte, so a record over the cap is refused, where an
     unbounded read of an oversized record could raise under memory pressure instead of refusing."""
     try:
-        with open(record_path, "rb") as handle:
-            raw = handle.read(_RECORD_CAP + 1)
+        fd = os.open(record_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
-        return None, False
+        return None, False, None
     except (OSError, MemoryError):
-        return None, True
+        return None, True, "record-unreadable"
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, True, "record-not-regular"
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            raw = handle.read(_RECORD_CAP + 1)
+    except (OSError, MemoryError):
+        return None, True, "record-unreadable"
+    finally:
+        os.close(fd)
     if len(raw) > _RECORD_CAP:
-        return None, True
+        return None, True, "record-over-cap"
     try:
         record = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, RecursionError, MemoryError):
         # RecursionError: json's refusal of deep nesting; MemoryError: a record too large to parse
         # under pressure: such a record is malformed like any other, never a pass and never a raise
-        return None, True
-    return record, True
+        return None, True, "record-malformed"
+    return record, True, None
+
+
+def _capture(directory, payload, record_path, nonce, timeout):
+    """Launch the child under _CHILD_SHIM and return (status, stdout, stderr, whether a stream went over
+    the cap). Each stream
+    keeps at most _STREAM_CAP plus one bytes, so a child flooding either one cannot exhaust the
+    parent's memory; past the cap the stream is drained and discarded to its end, so the child still
+    finishes and its record is read as usual. A child outliving timeout is killed and reaped and
+    subprocess.TimeoutExpired raised; a launch failure raises OSError."""
+    command = [sys.executable, "-I", "-B", "-c", _CHILD_SHIM, directory, str(payload),
+               str(record_path), nonce]
+    deadline = time.monotonic() + timeout
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_child_env())
+    out_fd, err_fd = proc.stdout.fileno(), proc.stderr.fileno()
+    kept = {out_fd: bytearray(), err_fd: bytearray()}
+    over = False
+    try:
+        with selectors.DefaultSelector() as selector:
+            for stream_fd in kept:
+                selector.register(stream_fd, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fd, 1 << 16)
+                    if not chunk:
+                        selector.unregister(key.fd)
+                        continue
+                    buffer = kept[key.fd]
+                    if len(buffer) <= _STREAM_CAP:
+                        buffer += chunk[:_STREAM_CAP + 1 - len(buffer)]
+                    if len(buffer) > _STREAM_CAP:
+                        over = True
+        status = proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        proc.stdout.close()
+        proc.stderr.close()
+    return status, bytes(kept[out_fd]), bytes(kept[err_fd]), over
 
 
 def _verdict(status, stdout, stderr, record, nonce):
@@ -497,21 +590,23 @@ def run_child(payload, record_path, module_dir=None, timeout=CHILD_TIMEOUT):
     """Launch the payload in a child under the contract and return (verdict, detail). The canonical
     child-status guard runs FIRST, as it must in every parent (with SIGCHLD ignored a failed child
     reads as exit 0, so nothing here could be trusted). The detail carries the raw status, both
-    streams, the parsed record (or None) and whether anything exists at the record path."""
+    streams (each cut at _STREAM_CAP plus one bytes), the parsed record (or None), whether anything
+    exists at the record path, and the refusal the bounds or the record read made (or None)."""
     _child_status_refusal_exit(NAME)
     nonce = secrets.token_hex(16)
     directory = os.path.dirname(os.path.abspath(__file__)) if module_dir is None else str(module_dir)
-    command = [sys.executable, "-I", "-B", "-c", _CHILD_SHIM, directory, str(payload),
-               str(record_path), nonce]
     try:
-        result = subprocess.run(command, capture_output=True, timeout=timeout, env=_child_env())
+        status, stdout, stderr, over = _capture(directory, payload, record_path, nonce, timeout)
     except (OSError, subprocess.SubprocessError) as exc:
         return 2, {"status": None, "stdout": b"", "stderr": b"", "record": None,
-                   "record_present": False, "launch": "launch failed ({})".format(type(exc).__name__)}
-    record, record_present = _read_record(record_path)
-    verdict = _verdict(result.returncode, result.stdout, result.stderr, record, nonce)
-    return verdict, {"status": result.returncode, "stdout": result.stdout, "stderr": result.stderr,
-                     "record": record, "record_present": record_present, "launch": None}
+                   "record_present": False, "problem": None,
+                   "launch": "launch failed ({})".format(type(exc).__name__)}
+    record, record_present, problem = _read_record(record_path)
+    verdict = _verdict(status, stdout, stderr, record, nonce)
+    if over:
+        verdict, problem = 2, "stream-over-cap"
+    return verdict, {"status": status, "stdout": stdout, "stderr": stderr, "record": record,
+                     "record_present": record_present, "problem": problem, "launch": None}
 
 
 # ----------------------------------------------------------------------------------- the self-test
@@ -695,6 +790,150 @@ with open(fcc._STATE["record_path"], "x", encoding="utf-8") as handle:
     handle.write(" " * (1 << 20))
 os._exit(0)
 """
+_UNRAISABLE_PREFIX = """import atexit
+import gc
+import sys
+import _fail_closed_child as fcc
+
+
+class Boom:
+    def __del__(self):
+        raise RuntimeError("destructor fault")
+
+
+def boom():
+    raise RuntimeError("atexit fault")
+
+
+"""
+_NOOP_HOOK_ATEXIT = _UNRAISABLE_PREFIX + """sys.unraisablehook = lambda unraisable: None
+atexit.register(boom)
+fcc.exit_with(0)
+"""
+_COLLECTING_HOOK_ATEXIT = _UNRAISABLE_PREFIX + """seen = []
+sys.unraisablehook = seen.append
+atexit.register(boom)
+fcc.exit_with(0)
+"""
+_NOOP_HOOK_DESTRUCTOR = _UNRAISABLE_PREFIX + """sys.unraisablehook = lambda unraisable: None
+obj = Boom()
+obj.cycle = obj
+del obj
+fcc.exit_with(0)
+"""
+_COLLECTING_HOOK_DESTRUCTOR = _UNRAISABLE_PREFIX + """seen = []
+sys.unraisablehook = seen.append
+obj = Boom()
+obj.cycle = obj
+del obj
+fcc.exit_with(0)
+"""
+_HOOK_REPLACED_ONLY = _UNRAISABLE_PREFIX + """sys.unraisablehook = lambda unraisable: None
+fcc.exit_with(0)
+"""
+_HOOK_RESTORED = _UNRAISABLE_PREFIX + """installed = sys.unraisablehook
+sys.unraisablehook = lambda unraisable: None
+obj = Boom()
+obj.cycle = obj
+del obj
+gc.collect()
+sys.unraisablehook = installed
+fcc.exit_with(0)
+"""
+
+
+def _sized_record(total):
+    """A payload writing a genuine record padded with spaces to exactly total bytes, then os._exit(0)."""
+    return ("import json\nimport os\nimport _fail_closed_child as fcc\n"
+            "body = json.dumps({{'nonce': fcc._STATE['nonce'], 'decided_code': 0, 'check_ids': [], "
+            "'faults': []}})\n"
+            "with open(fcc._STATE['record_path'], 'x', encoding='utf-8') as handle:\n"
+            "    handle.write(body + ' ' * ({} - len(body)))\n"
+            "os._exit(0)\n".format(total))
+
+
+def _sized_stdout(total):
+    """A payload writing exactly total bytes to stdout, then settling 0."""
+    return ("import sys\nimport _fail_closed_child as fcc\n"
+            "sys.stdout.buffer.write(b'x' * {})\nsys.stdout.flush()\nfcc.exit_with(0)\n".format(total))
+
+
+_RECORD_AT_CAP = _sized_record(1 << 20)
+_RECORD_CAP_PLUS_ONE = _sized_record((1 << 20) + 1)
+_STDOUT_AT_CAP = _sized_stdout(1 << 16)
+_STDOUT_CAP_PLUS_ONE = _sized_stdout((1 << 16) + 1)
+_SPARSE_RECORD = """import os
+import _fail_closed_child as fcc
+with open(fcc._STATE["record_path"], "xb") as handle:
+    handle.truncate(4 << 30)
+os._exit(0)
+"""
+_FIFO_RECORD = """import os
+import _fail_closed_child as fcc
+os.mkfifo(fcc._STATE["record_path"])
+os._exit(0)
+"""
+_DEV_ZERO_SYMLINK = """import os
+import _fail_closed_child as fcc
+os.symlink("/dev/zero", fcc._STATE["record_path"])
+os._exit(0)
+"""
+
+# The isolated parent: an ISOLATED vector runs run_child itself in a separate process under its own
+# address-space limit and a wall-clock timeout, so a flip that reads without a bound or blocks on a
+# FIFO is observed red as a refusal or a timeout, never by exhausting or holding the self-test.
+_ISOLATED_AS_LIMIT = 1 << 30
+_ISOLATED_TIMEOUT = 60
+_ISOLATED_SHIM = ("import json, resource, sys; "
+                  "resource.setrlimit(resource.RLIMIT_AS, (int(sys.argv[4]), int(sys.argv[4]))); "
+                  "sys.path.insert(0, sys.argv[1]); import _fail_closed_child as m; "
+                  "v, d = m.run_child(sys.argv[2], sys.argv[3], timeout=30); "
+                  "print(json.dumps(list(m._summary(v, d))))")
+
+
+def _run_isolated(module_dir, payload, record_path):
+    """The summary of run_child run in an isolated parent process (a list from its JSON), or a
+    one-element tuple naming why none was read (a timeout, a nonzero exit, unparsable output). The
+    isolated parent leads its own session and its whole group is killed when it ends or times out."""
+    import signal
+    command = [sys.executable, "-I", "-B", "-c", _ISOLATED_SHIM, str(module_dir), str(payload),
+               str(record_path), str(_ISOLATED_AS_LIMIT)]
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env=_child_env(), start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=_ISOLATED_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        out, err = None, None
+    finally:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        if proc.returncode is None:
+            proc.communicate()
+    if out is None:
+        return ("isolated parent timed out",)
+    if proc.returncode != 0:
+        return ("isolated parent exited {}: {!r}".format(proc.returncode, err[-400:]),)
+    try:
+        return tuple(json.loads(out.decode("utf-8")))
+    except (UnicodeDecodeError, ValueError):
+        return ("isolated parent output unparsable",)
+
+
+# The disclosures pinned in the module docstring, compared with its whitespace collapsed.
+DISCLOSURES = (
+    ("contract/spoof-residual-disclosed-in-record-terms",
+     "while a spoof followed by an exit carrying the MATCHING status still reads as the decided code "
+     "(the spoofed-confirmation residual disclosed in NOT YET COVERED below, pinned by its vector)",
+     "spoof-disclosure-record-removed"),
+    ("contract/spoof-residual-disclosed-in-not-yet-covered",
+     "A spoofed confirmation whose later exit carries the MATCHING status (a caught exit_with(0), a "
+     "frameless read of that exception's code arranged from atexit, then a raw sys.exit(0) or falling "
+     "off the end) still reads as the decided code; that residual is not closed here, and its vector "
+     "pins the disclosed behaviour.",
+     "spoof-disclosure-not-yet-covered-removed"),
+)
 
 # One flip per vector family, each an exact single occurrence in this module's source, each written
 # here as adjacent string literals so the table's own text never matches the code it names.
@@ -762,65 +1001,142 @@ FLIPS = {
     "oversized-record-accepted": (
         '    if len(raw) > _RECORD' '_CAP:\n        return None, True',
         '    if False and len(raw) > _RECORD_CAP:\n        return None, True'),
+    "unraisable-faults-dropped": (
+        '    _STATE["faults"].append(message)  # recorded before any hoo' 'k runs',
+        '    pass'),
+    "unraisable-audit-ignored": (
+        '        if event == _UNRAISABLE' '_EVENT:',
+        '        if False and event == _UNRAISABLE_EVENT:'),
+    "replaced-unraisable-hook-accepted": (
+        '        if sys.unraisablehook is not _wrap' 'per:',
+        '        if False and sys.unraisablehook is not _wrapper:'),
+    "record-cap-inclusive": (
+        '    if len(raw) > _RECORD_C' 'AP:',
+        '    if len(raw) >= _RECORD_CAP:'),
+    "record-read-unbounded": (
+        '            raw = handle.read(_RECORD_CAP' ' + 1)',
+        '            raw = handle.read()'),
+    "record-open-blocking": (
+        '        fd = os.open(record_path, os.O_RDONLY | os.O_NON' 'BLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)',
+        '        fd = os.open(record_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)'),
+    "record-type-unchecked": (
+        '        if not stat.S_ISREG(os.fstat(fd).st_mo' 'de):',
+        '        if False and not stat.S_ISREG(os.fstat(fd).st_mode):'),
+    "record-open-follows-symlink": (
+        '        fd = os.open(record_path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOL' 'LOW | os.O_CLOEXEC)',
+        '        fd = os.open(record_path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)'),
+    "stream-cap-inclusive": (
+        '                    if len(buffer) > _STREAM' '_CAP:',
+        '                    if len(buffer) >= _STREAM_CAP:'),
+    "stream-cap-unchecked": (
+        '                    if len(buffer) > _STREAM_C' 'AP:\n                        over = True',
+        '                    if False:\n                        over = True'),
+    "spoof-disclosure-record-removed": (
+        'MATCHING status still reads as the decided code (the spoofed-confirmation residual disclosed in NOT\n'
+        'YET COVERED below, pinned by its vec' 'tor)',
+        'MATCHING status'),
+    "spoof-disclosure-not-yet-covered-removed": (
+        'or falling off the end) still reads as the decided code; that residual is not closed here, and its\n'
+        'vector pins the disclosed behavi' 'our.',
+        'or falling off the end).'),
 }
+
+# Vectors whose parent runs isolated (_run_isolated): a flip of theirs can block or exhaust memory.
+ISOLATED = frozenset(("contract/sparse-record-read-bounded", "contract/fifo-record-not-waited-on",
+                      "contract/fifo-record-not-regular-refused", "contract/dev-zero-symlink-refused"))
 
 # (check id, payload source, sidecar file or None, expected summary, flip key). A summary is
 # (verdict, whether anything exists at the record path, whether a parsed record lists a fault), so a
 # flip whose verdict agrees for another reason (the default excepthook's traceback already dirties
 # stderr for a SystemExit subclass) is still observed red on the record it wrote.
 VECTORS = (
-    ("contract/clean-run-passes", _CLEAN, None, (0, True, False), "record-write-broken"),
-    ("contract/recorded-one-stays-one", _ONE, None, (1, True, False), "nonzero-mapped-to-two"),
-    ("contract/raw-systemexit-zero-refused", _RAW_EXIT, None, (2, False, False),
+    ("contract/clean-run-passes", _CLEAN, None, (0, True, False, None), "record-write-broken"),
+    ("contract/recorded-one-stays-one", _ONE, None, (1, True, False, None), "nonzero-mapped-to-two"),
+    ("contract/raw-systemexit-zero-refused", _RAW_EXIT, None, (2, False, False, None),
      "unsettled-defaults-to-zero"),
-    ("contract/os-exit-at-import-refused", _EXIT_AT_IMPORT, _EXIT_AT_IMPORT_SIDECAR, (2, False, False),
+    ("contract/os-exit-at-import-refused", _EXIT_AT_IMPORT, _EXIT_AT_IMPORT_SIDECAR, (2, False, False, None),
      "exit-zero-without-record-accepted"),
-    ("contract/os-exit-in-main-refused", _EXIT_IN_MAIN, None, (2, False, False),
+    ("contract/os-exit-in-main-refused", _EXIT_IN_MAIN, None, (2, False, False, None),
      "exit-zero-without-record-accepted"),
-    ("contract/os-exit-in-atexit-refused", _EXIT_IN_ATEXIT, None, (2, False, False),
+    ("contract/os-exit-in-atexit-refused", _EXIT_IN_ATEXIT, None, (2, False, False, None),
      "exit-zero-without-record-accepted"),
-    ("contract/thread-systemexit-seven-refused", _THREAD_SEVEN, None, (2, True, True),
+    ("contract/thread-systemexit-seven-refused", _THREAD_SEVEN, None, (2, True, True, None),
      "any-thread-systemexit-clean"),
-    ("contract/thread-clean-systemexit-passes", _THREAD_CLEAN, None, (0, True, False),
+    ("contract/thread-clean-systemexit-passes", _THREAD_CLEAN, None, (0, True, False, None),
      "any-thread-systemexit-fault"),
-    ("contract/lying-code-property-refused", _LYING_SUBCLASS, None, (2, True, True),
+    ("contract/lying-code-property-refused", _LYING_SUBCLASS, None, (2, True, True, None),
      "code-read-through-getattr"),
-    ("contract/raw-thread-start-refused", _RAW_THREAD, None, (2, True, True),
+    ("contract/raw-thread-start-refused", _RAW_THREAD, None, (2, True, True, None),
      "audit-ignores-thread-starts"),
-    ("contract/decided-256-refused", _OUT_OF_RANGE, None, (2, False, False), "decided-code-unmapped"),
-    ("contract/wrong-nonce-refused", _WRONG_NONCE, None, (2, True, False), "nonce-check-skipped"),
-    ("contract/preexisting-record-refused", _PREEXISTING, None, (2, True, False),
+    ("contract/decided-256-refused", _OUT_OF_RANGE, None, (2, False, False, None), "decided-code-unmapped"),
+    ("contract/wrong-nonce-refused", _WRONG_NONCE, None, (2, True, False, None), "nonce-check-skipped"),
+    ("contract/preexisting-record-refused", _PREEXISTING, None, (2, True, False, None),
      "record-create-not-exclusive"),
-    ("contract/stderr-noise-refused", _NOISE, None, (2, True, False), "stream-rule-ignored"),
-    ("contract/fork-settle-reaped-refused", _FORK_WAITED, None, (2, False, False),
+    ("contract/stderr-noise-refused", _NOISE, None, (2, True, False, None), "stream-rule-ignored"),
+    ("contract/fork-settle-reaped-refused", _FORK_WAITED, None, (2, False, False, None),
      "fork-settle-accepted"),
-    ("contract/fork-settle-unreaped-refused", _FORK_UNWAITED, None, (2, False, False),
+    ("contract/fork-settle-unreaped-refused", _FORK_UNWAITED, None, (2, False, False, None),
      "fork-settle-accepted"),
-    ("contract/spoofed-confirm-raw-exit-refused", _CONFIRM_FROM_ATEXIT, None, (2, True, False),
+    ("contract/spoofed-confirm-raw-exit-refused", _CONFIRM_FROM_ATEXIT, None, (2, True, False, None),
      "status-decided-mismatch-ignored"),
-    ("contract/record-defers-to-real-status", _CONFIRM_FROM_ATEXIT, None, (2, True, False),
+    ("contract/record-defers-to-real-status", _CONFIRM_FROM_ATEXIT, None, (2, True, False, None),
      "record-then-forced-exit"),
-    ("contract/settled-three-refused", _SETTLED_THREE, None, (2, True, False),
+    ("contract/settled-three-refused", _SETTLED_THREE, None, (2, True, False, None),
      "any-decided-code-passes"),
-    ("contract/caught-exit-settles-nothing", _CAUGHT_EXIT, None, (2, False, False),
+    ("contract/caught-exit-settles-nothing", _CAUGHT_EXIT, None, (2, False, False, None),
      "caught-exit-still-settles"),
-    ("contract/thread-settle-rethrown-refused", _THREAD_SETTLE, None, (2, False, False),
+    ("contract/thread-settle-rethrown-refused", _THREAD_SETTLE, None, (2, False, False, None),
      "thread-settle-accepted"),
-    ("contract/deep-record-refused", _DEEP_RECORD, None, (2, True, False), "deep-record-raises"),
+    ("contract/deep-record-refused", _DEEP_RECORD, None, (2, True, False, "record-malformed"),
+     "deep-record-raises"),
     # the disclosed spoofed-confirmation residual: a spoof whose later exit carries the matching
     # status reads as the decided code; this vector pins that disclosure, it does not endorse it
     ("contract/spoofed-confirm-matching-exit-disclosed", _CONFIRM_MATCHING_EXIT, None,
-     (0, True, False), "record-write-broken"),
-    ("contract/oversized-record-refused", _OVERSIZED_RECORD, None, (2, True, False),
+     (0, True, False, None), "record-write-broken"),
+    ("contract/oversized-record-refused", _OVERSIZED_RECORD, None, (2, True, False, "record-over-cap"),
      "oversized-record-accepted"),
+    # a fault in an atexit callback or a destructor after exit_with(0), under a replaced hook that
+    # reports nothing (a no-op, or a collecting hook as pytest installs)
+    ("contract/noop-hook-atexit-fault-refused", _NOOP_HOOK_ATEXIT, None, (2, True, True, None),
+     "unraisable-faults-dropped"),
+    ("contract/collecting-hook-atexit-fault-refused", _COLLECTING_HOOK_ATEXIT, None,
+     (2, True, True, None), "unraisable-faults-dropped"),
+    ("contract/noop-hook-destructor-fault-refused", _NOOP_HOOK_DESTRUCTOR, None, (2, True, True, None),
+     "unraisable-faults-dropped"),
+    ("contract/collecting-hook-destructor-fault-refused", _COLLECTING_HOOK_DESTRUCTOR, None,
+     (2, True, True, None), "unraisable-faults-dropped"),
+    ("contract/unraisable-hook-replaced-refused", _HOOK_REPLACED_ONLY, None, (2, True, True, None),
+     "replaced-unraisable-hook-accepted"),
+    ("contract/unraisable-hook-restored-refused", _HOOK_RESTORED, None, (2, True, True, None),
+     "unraisable-audit-ignored"),
+    # the record read bound at each end: exactly the cap is read, one byte over is refused, and a
+    # large sparse record is refused by the bound under an address-space limit, not by running out
+    ("contract/record-at-cap-read", _RECORD_AT_CAP, None, (0, True, False, None),
+     "record-cap-inclusive"),
+    ("contract/record-cap-plus-one-refused", _RECORD_CAP_PLUS_ONE, None,
+     (2, True, False, "record-over-cap"), "oversized-record-accepted"),
+    ("contract/sparse-record-read-bounded", _SPARSE_RECORD, None, (2, True, False, "record-over-cap"),
+     "record-read-unbounded"),
+    ("contract/fifo-record-not-waited-on", _FIFO_RECORD, None, (2, True, False, "record-not-regular"),
+     "record-open-blocking"),
+    ("contract/fifo-record-not-regular-refused", _FIFO_RECORD, None,
+     (2, True, False, "record-not-regular"), "record-type-unchecked"),
+    ("contract/dev-zero-symlink-refused", _DEV_ZERO_SYMLINK, None,
+     (2, True, False, "record-unreadable"), "record-open-follows-symlink"),
+    # the stream capture bound at each end: exactly the cap is kept, one byte over is refused as such
+    ("contract/stdout-at-cap-kept", _STDOUT_AT_CAP, None, (2, True, False, None),
+     "stream-cap-inclusive"),
+    ("contract/stdout-cap-plus-one-refused", _STDOUT_CAP_PLUS_ONE, None,
+     (2, True, False, "stream-over-cap"), "stream-cap-unchecked"),
 )
 
 
 def _summary(verdict, detail):
-    """(verdict, record present, record lists a fault): the shape every vector is compared on."""
+    """(verdict, record present, record lists a fault, the refusal the bounds or the record read made):
+    the shape every vector is compared on."""
     record = detail["record"]
     listed = type(record) is dict and bool(record.get("faults"))
-    return verdict, detail["record_present"], listed
+    return verdict, detail["record_present"], listed, detail.get("problem")
 
 
 def _load_mutant(tmp, key, source, old, new):
@@ -861,12 +1177,22 @@ def self_test_results():
             if sidecar is not None:
                 with open(os.path.join(vector_dir, sidecar[0]), "x", encoding="utf-8") as handle:
                     handle.write(sidecar[1])
-            verdict, detail = run_child(payload, os.path.join(vector_dir, "real.json"))
-            got = _summary(verdict, detail)
-            out.append((check_id, got == expected, (got, expected, detail)))
+            if check_id in ISOLATED:
+                got = _run_isolated(os.path.dirname(os.path.abspath(__file__)), payload,
+                                    os.path.join(vector_dir, "real.json"))
+                out.append((check_id, got == expected, (got, expected)))
+            else:
+                verdict, detail = run_child(payload, os.path.join(vector_dir, "real.json"))
+                got = _summary(verdict, detail)
+                out.append((check_id, got == expected, (got, expected, detail)))
             mutant, reason = mutants[flip_key]
             if mutant is None:
                 out.append((check_id + "-flip-red", False, reason))
+                continue
+            if check_id in ISOLATED:
+                flip_got = _run_isolated(os.path.dirname(mutant.__file__), payload,
+                                         os.path.join(vector_dir, "flip.json"))
+                out.append((check_id + "-flip-red", flip_got != expected, (flip_key, flip_got, expected)))
                 continue
             try:
                 flip_verdict, flip_detail = mutant.run_child(payload,
@@ -879,6 +1205,14 @@ def self_test_results():
             flip_got = _summary(flip_verdict, flip_detail)
             out.append((check_id + "-flip-red", flip_got != expected,
                         (flip_key, flip_got, expected, flip_detail)))
+        for check_id, phrase, flip_key in DISCLOSURES:
+            out.append((check_id, phrase in " ".join(__doc__.split()), phrase))
+            mutant, reason = mutants[flip_key]
+            if mutant is None:
+                out.append((check_id + "-flip-red", False, reason))
+                continue
+            out.append((check_id + "-flip-red", phrase not in " ".join(mutant.__doc__.split()),
+                        (flip_key, phrase)))
     return out
 
 
@@ -899,10 +1233,14 @@ def self_test():
           "decided code outside 0 to 255, a settled 3, a dirty or lying thread exit, a raw _thread "
           "start, a wrong nonce, a record already present, stderr noise, a settle from a forked "
           "process, a caught exit, a spoofed confirmation before a raw exit 1, a thread's settle "
-          "rethrown from main, a record too deep to parse and a record over the size cap each read "
-          "2; a spoofed confirmation whose later exit carries the matching status reads the decided "
-          "code, the disclosed residual this suite pins; every paired flip of this module is "
-          "red)".format(len(results)))
+          "rethrown from main, a record too deep to parse, a record one byte over the size cap, a "
+          "large sparse record under an address-space limit, a FIFO or a symlink to /dev/zero at the "
+          "record path, stdout one byte over the capture cap, an atexit or destructor fault under a "
+          "no-op or collecting unraisable hook, a replaced hook and a fault under a hook later "
+          "restored each read 2; a record and stdout exactly at their caps are kept; a spoofed "
+          "confirmation whose later exit carries the matching status reads the decided code, the "
+          "disclosed residual this suite pins along with its docstring text; every paired flip of "
+          "this module is red)".format(len(results)))
     return 0
 
 
