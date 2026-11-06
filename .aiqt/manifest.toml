@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a7c73c1c9bb70b507800bdc6506a8df84952c22c83b5dd35d6f83f66b0aa853c"
+tree-sha256 = "6b081df262cd137e37802fbdd695abfc2db26867a12f48c5dc8b28f04fa5d3d4"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -946,8 +946,8 @@ sha256 = "6776098bcc3e8a873b832556493dbf8f34c5b3ef6967705bfb44a9958888fd2a"
 
 [[sources]]
 path = ".baseline/aiqt-card.toml"
-bytes = 906
-sha256 = "43ed9312917c89df43d8a838fb8906733d971773f77b2fa11486243dc69d4e41"
+bytes = 924
+sha256 = "831001ff869974c07bb55e14d7156660d87b380613bf47187da357a90e574681"
 
 [[sources]]
 path = ".baseline/build_card.js"
@@ -3996,8 +3996,8 @@ sha256 = "5f2f2f66393a7bdc81b2d87c85da43fc7582344dabe250069206abe2f2d96e73"
 
 [[sources]]
 path = "site/images/aiqt-card.png"
-bytes = 138465
-sha256 = "7b5f37ca5b5b0f4979a05ade454248417ab4247939a4ea0a919aacd040be86f1"
+bytes = 141788
+sha256 = "d11764f8f39f6d22fb4760087b135fa3e5896760d88bd9d7749e409b15d7c4a3"
 
 [[sources]]
 path = "site/index.html"
