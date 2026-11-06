@@ -6,7 +6,6 @@ tier: 10
 facet: QUALI
 secondary: [SECI]
 slug: minimize-dependencies
-map-nist-80053-broad: [SA-8]
 ---
 
 # Minimize external dependencies in favour of standard libraries
