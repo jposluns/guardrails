@@ -6,6 +6,13 @@ tools/og-cards/ with headless Chrome.
 
 Each card is a 1200 by 627 PNG under its site's live root, below 1 MB; a render that gives another size or a
 larger file is refused (exit 1) and nothing is kept. Exit 2 when Chrome cannot be started.
+
+A card is written as assets/<key>-og-<h>.png, <h> the first 8 lowercase hex digits of the SHA-256 of its
+bytes, so its URL changes whenever the card does (a link preview caches the image by its URL). Every other
+<key>-og*.png in that assets folder is then removed, so a render never leaves a stale or second card; the
+pages name the one card left (tools/gen_draft_site.py refuses none, 2 or a name that is not its bytes' hash).
+A new name is a new tracked path: git add it, update its 2 lines in .aiqt/core/ownership.toml (the binary
+list, and the release class for the aiqt.ai card), then run tools/gen_draft_site.py and tools/gen_manifest.py.
 """
 import sys
 
@@ -21,6 +28,8 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import fnmatch
+import hashlib
 import os
 import signal
 import struct
@@ -32,10 +41,12 @@ ROOT = Path(__file__).resolve().parents[1]
 CHROME = "/usr/bin/google-chrome"
 WIDTH, HEIGHT = 1200, 627
 MAX_BYTES = 1 << 20
-# (composition under tools/og-cards/, card path under the repository root)
+# The hex digits of the card's SHA-256 its name carries (tools/gen_draft_site.py CARD_HASH_DIGITS).
+HASH_DIGITS = 8
+# (composition under tools/og-cards/, the site's assets folder under the repository root, the site key)
 CARDS = (
-    ("aiqt-og.html", "site/assets/aiqt-og.png"),
-    ("opfiles-og.html", "opf/site/assets/opfiles-og.png"),
+    ("aiqt-og.html", "site/assets", "aiqt"),
+    ("opfiles-og.html", "opf/site/assets", "opfiles"),
 )
 
 
@@ -46,8 +57,39 @@ def png_size(data):
     return struct.unpack(">II", data[16:24])
 
 
-def render(source, target):
-    """Render one composition to target; an error string, or None when the card is written."""
+def card_name(key, data):
+    """The card's file name for these bytes: <key>-og-<h>.png."""
+    return "{}-og-{}.png".format(key, hashlib.sha256(data).hexdigest()[:HASH_DIGITS])
+
+
+def keep_one_card(folder, key, data, root=ROOT):
+    """Write data as the hashed card in folder (under root), then remove every other <key>-og*.png there.
+    An error string, or None when the one card is in place."""
+    path = Path(root) / folder
+    name = card_name(key, data)
+    os.makedirs(path, exist_ok=True)
+    scratch = path / (".{}.tmp".format(name))
+    try:
+        with open(scratch, "xb") as handle:
+            handle.write(data)
+        os.replace(scratch, path / name)
+    except OSError as exc:
+        return "cannot write {}/{} ({})".format(folder, name, exc)
+    print("wrote {}/{} ({} bytes)".format(folder, name, len(data)))
+    try:
+        others = sorted(entry for entry in os.listdir(path)
+                        if fnmatch.fnmatchcase(entry, "{}-og*.png".format(key)) and entry != name)
+        for entry in others:
+            os.unlink(path / entry)
+            print("removed {}/{}".format(folder, entry))
+    except OSError as exc:
+        return "cannot remove a stale card from {} ({})".format(folder, exc)
+    return None
+
+
+def render(source, folder, key):
+    """Render one composition to the site's hashed card in folder; an error string, or None when the card is
+    written and no other card of the site is left."""
     with tempfile.TemporaryDirectory(prefix="og-card-") as scratch:
         shot = Path(scratch) / "card.png"
         command = ["/usr/bin/google-chrome", "--headless", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
@@ -67,11 +109,7 @@ def render(source, target):
         return "{} rendered at {}, not {}x{}".format(source.name, size, WIDTH, HEIGHT)
     if len(data) >= MAX_BYTES:
         return "{} rendered to {} bytes, not below {}".format(source.name, len(data), MAX_BYTES)
-    path = ROOT / target
-    os.makedirs(path.parent, exist_ok=True)
-    path.write_bytes(data)
-    print("wrote {} ({} bytes)".format(target, len(data)))
-    return None
+    return keep_one_card(folder, key, data)
 
 
 def main(argv=None):
@@ -84,8 +122,8 @@ def main(argv=None):
         print("error: {} is not an executable; nothing rendered".format(CHROME), file=sys.stderr)
         return 2
     code = 0
-    for composition, target in CARDS:
-        error = render(ROOT / "tools" / "og-cards" / composition, target)
+    for composition, folder, key in CARDS:
+        error = render(ROOT / "tools" / "og-cards" / composition, folder, key)
         if error:
             print("error: {}".format(error), file=sys.stderr)
             code = 1

@@ -532,7 +532,7 @@ opf/site/_redirects text eol=lf
 opf/site/adopt.md text eol=lf
 opf/site/adopt/index.html text eol=lf
 opf/site/assets/baseline/logos/opfiles-touch.png binary
-opf/site/assets/opfiles-og.png binary
+opf/site/assets/opfiles-og-2c831447.png binary
 opf/site/core-files/index.html text eol=lf
 opf/site/disclosure/index.html text eol=lf
 opf/site/draft-src/404.toml text eol=lf
@@ -708,7 +708,7 @@ site/.well-known/security.txt text eol=lf
 site/404.html text eol=lf
 site/_headers text eol=lf
 site/_redirects text eol=lf
-site/assets/aiqt-og.png binary
+site/assets/aiqt-og-bba2c756.png binary
 site/assets/baseline/logos/aiqt-touch.png binary
 site/development.html text eol=lf
 site/disclosure/index.html text eol=lf
