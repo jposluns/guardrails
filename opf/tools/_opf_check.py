@@ -2536,7 +2536,7 @@ class ArchiveRead:
         self.source_bytes = source_bytes
 
 
-def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import_status, homes=1):
+def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import_status, homes=_opf_store.HOMES):
     """The archive as one _validate_archive walk read it, for a caller that must account the archive
     inputs it renders from: the record bodies archived_records seats, the archived worklog entries the
     walk mapped, the problems archived_records returns plus one per archived id seated more than once
