@@ -553,9 +553,10 @@ def _version_and_status():
 
 
 # The reference tooling module whose constants decide the spec_version that opf init writes into a new
-# store's manifest. The init command builds its manifest model with homes2 = (SUPPORTED_HOMES >= 2), and that
-# model takes HOMES2_SPEC_VERSION when homes2 holds and SUPPORTED_SPEC_VERSION otherwise; _init_store_version
-# applies the same selection to the same 3 constants, so the release line follows the tooling.
+# store's manifest. The init command in opf/tools/opf.py builds its manifest model with homes2 =
+# (SUPPORTED_HOMES >= 2), and that model (_manifest_model in opf/tools/_opf_init.py) takes HOMES2_SPEC_VERSION
+# when homes2 holds and SUPPORTED_SPEC_VERSION otherwise; _init_store_version applies the same selection to the
+# same 3 constants, so the release line follows the tooling. The self-test pins both halves from those two files.
 OPF_STORE_SOURCE = "opf/tools/_opf_store.py"
 _OPF_STORE_PATH = ROOT / OPF_STORE_SOURCE
 _STORE_CONSTANTS = (("SUPPORTED_HOMES", int), ("SUPPORTED_SPEC_VERSION", str), ("HOMES2_SPEC_VERSION", str))
@@ -573,9 +574,10 @@ def _store_constants(data, where):
     the interpreter honours is refused, not misread: an assignment nested in a module-level if, try, for or
     with body, an augmented or annotated assignment, a walrus, a del, a for or with target, a tuple or
     starred unpack, an import binding the name (as an alias, a dotted root or a wildcard), a def or class
-    of the name, an except-as, a match capture, a parameter, or a global or nonlocal declaration. The walk
-    is conservative: it also refuses a function local that reuses one of these names, which fails in the
-    safe direction. Disclosed residual: a dynamic store (globals()[name] = ..., setattr on the module, or
+    of the name, an except-as, a match capture, a parameter, a global or nonlocal declaration, or a type
+    alias. The walk is conservative and fails safe: it also refuses a function local, a class-body attribute
+    or a comprehension variable that reuses one of these names, though none of those binds the module
+    constant. Disclosed residual: a dynamic store (globals()[name] = ..., setattr on the module, or
     exec) is beyond any static reader and is not refused; the tooling's own self-test patches
     SUPPORTED_SPEC_VERSION through globals() at run time, which leaves the import-time value this reads
     unchanged. A PEP 695 type parameter of the name binds only in its own scope and is not inspected."""
@@ -2844,8 +2846,10 @@ def _self_test():
              "MAJOR.MINOR.PATCH")):
         expect(name, needle in refused(name, release_over, store_copy(**lines)), needle)
     # A later binding the interpreter honours, anywhere in the module, is refused instead of misread. Each
-    # vector appends one such binding to the shipped source; its flip renders the same source with the
-    # whole-tree walk disabled, where the line reads the shipped value that the module would not keep.
+    # vector appends one binding of a constant to the shipped source: one the module would keep, or one the
+    # conservative walk refuses although it leaves the module value alone (a parameter, a global or nonlocal
+    # declaration that assigns nothing). Its flip renders the same source with the whole-tree walk disabled,
+    # where the line reads the shipped value, so the walk is what refuses each vector.
     rebound = "must not be rebound ("
     rebind_vectors = (
         ("refuse/store-rebind-if", 'if True:\n    SUPPORTED_SPEC_VERSION = "9.8.7"\n', rebound),
@@ -2862,6 +2866,23 @@ def _self_test():
         ("refuse/store-rebind-class", "class SUPPORTED_SPEC_VERSION:\n    pass\n", "rebound by a def/class"),
         ("refuse/store-rebind-del", "del SUPPORTED_SPEC_VERSION\n", rebound),
         ("refuse/store-rebind-for-target", 'for SUPPORTED_SPEC_VERSION in ("9.8.7",):\n    pass\n', rebound),
+        ("refuse/store-rebind-except-as",
+         "try:\n    pass\nexcept Exception as SUPPORTED_SPEC_VERSION:\n    pass\n", "rebound by an except-as"),
+        ("refuse/store-rebind-match-capture", "match 0:\n    case SUPPORTED_SPEC_VERSION:\n        pass\n",
+         "rebound by a match capture"),
+        ("refuse/store-rebind-parameter", "def _f(SUPPORTED_SPEC_VERSION):\n    pass\n", "rebound by a parameter"),
+        ("refuse/store-rebind-global", "def _f():\n    global SUPPORTED_SPEC_VERSION\n",
+         "rebound by a global/nonlocal declaration"),
+        ("refuse/store-rebind-nonlocal",
+         "def _f():\n    def _g():\n        nonlocal SUPPORTED_SPEC_VERSION\n    SUPPORTED_SPEC_VERSION = 0\n",
+         "rebound by a global/nonlocal declaration"),
+        ("refuse/store-rebind-import-dotted-root", "import SUPPORTED_SPEC_VERSION.child\n", "rebound by an import"),
+        ("refuse/store-rebind-import-wildcard", "from os import *\n", "rebound by an import"),
+        ("refuse/store-rebind-augmented-if", 'if True:\n    SUPPORTED_SPEC_VERSION += ".1"\n', rebound),
+        ("refuse/store-rebind-annotated-if", 'if True:\n    SUPPORTED_SPEC_VERSION: str = "9.8.7"\n', rebound),
+        ("refuse/store-rebind-tuple-if", 'if True:\n    SUPPORTED_SPEC_VERSION, _x = "9.8.7", 0\n', rebound),
+        ("refuse/store-rebind-starred-if", 'if True:\n    *SUPPORTED_SPEC_VERSION, = "9.8.7",\n', rebound),
+        ("refuse/store-rebind-type-alias", "type SUPPORTED_SPEC_VERSION = str\n", rebound),
         ("refuse/store-rebind-homes-if", "if True:\n    SUPPORTED_HOMES = 2\n", rebound),
         ("refuse/store-rebind-homes2-if", 'if True:\n    HOMES2_SPEC_VERSION = "7.6.5"\n', rebound))
     saved_walk = globals()["_reject_rebinding"]
@@ -2903,6 +2924,57 @@ def _self_test():
             ("release/init-homes2-rule-flip-constant", b"homes2=False")):
         flipped_rules = init_homes2_rules(cli_source.replace(rule_anchor, replacement, 1))
         expect(name, flipped_rules != [init_rule] and len(flipped_rules) == 1, flipped_rules)
+
+    # The other half of the selection is in opf/tools/_opf_init.py: _manifest_model starts the model's
+    # spec_version at _opf_store.SUPPORTED_SPEC_VERSION (a "spec_version" key of its base dict literal) and
+    # replaces it with _opf_store.HOMES2_SPEC_VERSION under `if homes2:` (a spec_version= keyword of a call).
+    # Every spec_version setting in that function (a dict key, a call keyword or a subscript store) is read
+    # from the AST with the if test it sits under and must be exactly one of each of those two forms, so a
+    # change there turns this self-test red; the flips swap either value and both read as another rule.
+    init_model_source = "opf/tools/_opf_init.py"
+    model_rules = sorted([("dict key", "", "_opf_store.SUPPORTED_SPEC_VERSION"),
+                          ("keyword", "homes2", "_opf_store.HOMES2_SPEC_VERSION")])
+
+    def init_spec_rules(source):
+        rules = []
+        for function in ast.walk(ast.parse(source, filename=init_model_source)):
+            if not (isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and function.name == "_manifest_model"):
+                continue
+            guards = {}
+            for node in ast.walk(function):
+                if isinstance(node, ast.If):
+                    test = ast.unparse(node.test)
+                    for branch, guard in ((node.body, test), (node.orelse, "not ({})".format(test))):
+                        for statement in branch:
+                            for inner in ast.walk(statement):
+                                guards[id(inner)] = guard
+            for node in ast.walk(function):
+                guard = guards.get(id(node), "")
+                if isinstance(node, ast.Dict):
+                    rules.extend(("dict key", guard, ast.unparse(value)) for key, value in zip(node.keys, node.values)
+                                 if isinstance(key, ast.Constant) and key.value == "spec_version")
+                elif isinstance(node, ast.Call):
+                    rules.extend(("keyword", guard, ast.unparse(keyword.value)) for keyword in node.keywords
+                                 if keyword.arg == "spec_version")
+                elif (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+                      and isinstance(node.slice, ast.Constant) and node.slice.value == "spec_version"):
+                    rules.append(("subscript store", guard, ast.unparse(node.value)))
+        return sorted(rules)
+
+    with open(ROOT / init_model_source, "rb") as handle:
+        model_source = handle.read()
+    base_anchor = b'\n        "spec_version": _opf_store.SUPPORTED_SPEC_VERSION,'
+    homes2_anchor = b"spec_version=_opf_store.HOMES2_SPEC_VERSION"
+    expect("release/init-spec-rule-pinned", init_spec_rules(model_source) == model_rules
+           and model_source.count(base_anchor) == 1 and model_source.count(homes2_anchor) == 1,
+           init_spec_rules(model_source))
+    for name, anchor, replacement in (
+            ("release/init-spec-rule-flip-base", base_anchor,
+             b'\n        "spec_version": _opf_store.HOMES2_SPEC_VERSION,'),
+            ("release/init-spec-rule-flip-homes2", homes2_anchor, b"spec_version=_opf_store.SUPPORTED_SPEC_VERSION")):
+        flipped_rules = init_spec_rules(model_source.replace(anchor, replacement, 1))
+        expect(name, flipped_rules != model_rules and len(flipped_rules) == 2, flipped_rules)
     expect("refuse/store-unparsable", "cannot parse" in refused(
         "refuse/store-unparsable", release_over, store_source + b"\n)\n"))
     expect("refuse/store-unreadable", "cannot read" in refused("refuse/store-unreadable", release_over, None))
