@@ -13383,11 +13383,14 @@ def _main_isolated(monitor):
         # limits (_COMMIT_SECONDS for one evaluation, _COMMIT_PROBE_SECONDS per probe). Those limits are
         # not what these cases test (the classification is), and a host loaded past its CPU count
         # stretches the probes past them, turning a correct allow into a deadline denial. So the
-        # in-process cases run with both limits widened by the load-tolerance cap
-        # (_load_bound.MAX_LOAD_FACTOR); (pl239-probe-timeout), where the deadline IS the property,
-        # restores the production limits against a probe that sleeps far past them. The production limits
-        # come back where the protected_line cases end, and in the outer finally.
-        _pl_widened_limits = tuple(limit * _load_bound.MAX_LOAD_FACTOR for limit in _pl_production_limits)
+        # in-process cases run with both limits replaced by a generous fixed test-only budget: a case
+        # that asserts an allow is decided by classification alone, not by host speed (the budget stays
+        # finite only so a truly hung probe still ends inside the suite's outer bound).
+        # (pl239-probe-timeout), where the deadline IS the property, restores the production limits
+        # against a probe that sleeps far past them, and (pl239-deadline-forced-*) exhausts the budget
+        # deterministically with a zero evaluation budget. The production limits come back where the
+        # protected_line cases end, and in the outer finally.
+        _pl_widened_limits = (3600.0, 3600.0)
         aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_widened_limits
 
         def pexpect(label, command, want, cwd=None, detail=None, certificate=None):
@@ -14175,7 +14178,7 @@ def _main_isolated(monitor):
 
         # Exercise the real bounded runner with a slow or oversized substitute probe.
         for _case, _script, _detail in (
-                ("timeout", "import time; time.sleep(30)", "commit evaluation deadline exhausted"),
+                ("timeout", "import time; time.sleep(30)", "ran out of time on this host"),
                 ("output-budget", "import sys; sys.stdout.write('x' * 65537)",
                  "commit probe output budget exhausted")):
             _pl239_reads = []
@@ -14201,6 +14204,32 @@ def _main_isolated(monitor):
                 aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_widened_limits
         pexpect("(pl239-probe-restored)", "git commit", "allow", cwd=plf,
                 certificate=("A", "refs/heads/other"))
+
+        # A deterministically exhausted evaluation budget: no probe and no host timing involved, the
+        # first _commit_remaining call sees the zero budget already spent. The denial must still deny
+        # (fail-closed), must say the check ran out of time on this host, that this is not a finding
+        # that the commit is on a protected branch, and that a retry on a less busy host may pass, must
+        # keep the safe-route advice, and must never render the wording a proved protected-branch
+        # commit earns ((pl239-required-protected-control) pins that wording unchanged).
+        aiqt_hooks._COMMIT_SECONDS = 0.0
+        try:
+            for _case, _wording in (
+                    ("deny", "ran out of time on this host"),
+                    ("not-a-finding", "not a finding that the commit is on a protected branch"),
+                    ("retry-hint", "retrying the same command when the host is less busy may pass"),
+                    ("safe-route", "Safe route: push to a feature branch instead")):
+                pexpect("(pl239-deadline-forced-{})".format(_case), "git commit", "deny", cwd=plf,
+                        detail=_wording)
+            _pl239_forced_obj = plg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                     "tool_input": {"command": "git commit"}, "cwd": plf})[1]
+            _pl239_forced_reason = ((_pl239_forced_obj or {}).get("hookSpecificOutput", {})
+                                    .get("permissionDecisionReason", ""))
+            if "would commit on protected branch" in _pl239_forced_reason:
+                failures.append("(pl239-deadline-forced-wording) a timed-out evaluation must not render "
+                                "the protected-branch finding wording, got {!r}"
+                                .format(_pl239_forced_reason))
+        finally:
+            aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_widened_limits
 
         pexpect("(pl239-budget-command)", "git commit -m '" + "x" * 65536 + "'",
                 "deny", cwd=plf, detail="command size budget exhausted")

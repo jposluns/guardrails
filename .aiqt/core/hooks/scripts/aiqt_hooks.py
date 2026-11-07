@@ -13559,6 +13559,10 @@ def _push_protected(tokens, args, cwd):
 _COMMIT_SECONDS = 7.0
 _COMMIT_PROBE_SECONDS = 2.0
 _COMMIT_PROBE_BYTES = 65536
+# The one detail an exhausted time budget raises. _commit_denial renders exactly this detail as a
+# timeout denial: still a deny (fail-closed), worded as the check running out of time on this host,
+# never as a finding that the commit is on a protected branch.
+_COMMIT_DEADLINE_DETAIL = "commit evaluation deadline exhausted"
 
 
 class _CommitCannotEvaluate(Exception):
@@ -13568,7 +13572,7 @@ class _CommitCannotEvaluate(Exception):
 def _commit_remaining(deadline):
     remaining = deadline - time.monotonic()
     if not math.isfinite(remaining) or remaining <= 0:
-        raise _CommitCannotEvaluate("commit evaluation deadline exhausted")
+        raise _CommitCannotEvaluate(_COMMIT_DEADLINE_DETAIL)
     return remaining
 
 
@@ -13901,6 +13905,17 @@ def _commit_on_protected(evidence):
 
 
 def _commit_denial(detail):
+    if detail == _COMMIT_DEADLINE_DETAIL:
+        return _deny(
+            "AIQT rule artbr1 (branch-and-merge-on-green): " + detail + ": the protected-branch check "
+            "ran out of time on this host before its Git and filesystem probes finished, so the commit "
+            "is denied fail-closed (a timed-out check cannot allow). This is not a finding that the "
+            "commit is on a protected branch: the check reached no verdict about the branch at all, and "
+            "retrying the same command when the host is less busy may pass. Use a separate plain "
+            "feature-branch commit, or an exact absolute 'git -C /worktree commit' with a proved "
+            "non-protected branch; an admitted switch may precede it through &&. " + _PROTECTED_ALTS,
+            "AIQT guardrail: denied a commit whose check ran out of time on this host (rule artbr1, "
+            "fail-closed), not a protected-branch finding; a retry on a less busy host may pass.")
     return _deny(
         "AIQT rule artbr1 (branch-and-merge-on-green): " + detail + ". Commit denied because no "
         "admitted proof or lone no-remote exemption authorizes it. Use a separate plain feature-branch "
