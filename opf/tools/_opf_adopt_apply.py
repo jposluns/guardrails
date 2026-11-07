@@ -21926,13 +21926,14 @@ def _init_store_git_checks(check, ctx, refused):
         # The substrate's own mutex acquisition under the recover flag, the scrub's sibling: a confirmed-dead
         # holder's stale active record, with no recorded operation for the scrub to find, is removed by
         # run_init_operation's acquisition, and a substrate refusal after it names that removal (red against a
-        # dispatch that drops the substrate's report of what its acquisition removed).
+        # dispatch that drops the substrate's report of what its acquisition removed). The record names the
+        # substrate's own operation, since recovery releases only a leftover of the acquiring operation.
         root = init_op._plain_repo(os.path.join(base, "mutexrecover"), env)
         _opf_oplock.release_init_holder(_opf_oplock.acquire_init_operation(root, init_op.OPERATION))
         os.makedirs(os.path.dirname(os.path.join(root, init_op.LEASE_RELPATH)))
         dead_pid, dead_start = _opf_oplock._st_reaped_child()
         _opf_oplock._st_write_active_owned(root, dead_pid, dead_start, os.uname().nodename,
-                                           op_id="mutexrecover-op-id")
+                                           op_id="mutexrecover-op-id", operation=init_op.OPERATION)
         shutil.rmtree(os.path.join(root, store.WORKING_DIRNAME))
         active = os.path.join(_opf_oplock._st_ctl_dir(root), _opf_oplock.ACTIVE_NAME)
         planted = os.path.lexists(active)
@@ -21975,7 +21976,7 @@ def _init_store_git_checks(check, ctx, refused):
         os.makedirs(os.path.dirname(os.path.join(root, init_op.LEASE_RELPATH)))
         dead_pid, dead_start = _opf_oplock._st_reaped_child()
         _opf_oplock._st_write_active_owned(root, dead_pid, dead_start, os.uname().nodename,
-                                           op_id="mutexrecoverfail-op-id")
+                                           op_id="mutexrecoverfail-op-id", operation=init_op.OPERATION)
         shutil.rmtree(os.path.join(root, store.WORKING_DIRNAME))
         active = os.path.join(_opf_oplock._st_ctl_dir(root), _opf_oplock.ACTIVE_NAME)
         planted = os.path.lexists(active)
@@ -21987,6 +21988,28 @@ def _init_store_git_checks(check, ctx, refused):
               and "the coupled-init substrate's operation mutex WROTE" in said
               and "the operation mutex's stale active record " + _opf_oplock.ACTIVE_NAME in said
               and not os.path.lexists(active) and op_ids(root) == [], observed=said)
+        # A confirmed-dead holder's leftover of ANOTHER operation is never released by the substrate's
+        # acquisition: the refusal names that operation and the next step for it, reports no removal, and the
+        # active record stays byte for byte (red against a recovery that releases any operation's leftover, or
+        # a refusal that drops the next step).
+        root = init_op._plain_repo(os.path.join(base, "mutexother"), env)
+        _opf_oplock.release_init_holder(_opf_oplock.acquire_init_operation(root, init_op.OPERATION))
+        os.makedirs(os.path.dirname(os.path.join(root, init_op.LEASE_RELPATH)))
+        dead_pid, dead_start = _opf_oplock._st_reaped_child()
+        _opf_oplock._st_write_active_owned(root, dead_pid, dead_start, os.uname().nodename,
+                                           op_id="mutexother-op-id", operation="record")
+        shutil.rmtree(os.path.join(root, store.WORKING_DIRNAME))
+        active = os.path.join(_opf_oplock._st_ctl_dir(root), _opf_oplock.ACTIVE_NAME)
+        with open(active, "rb") as fh:
+            kept = fh.read()
+        res = dispatch(row, ctx(root, run_id=rid(), recover=True))
+        said = " ".join(res.findings)
+        with open(active, "rb") as fh:
+            after = fh.read()
+        check("init-store-substrate-mutex-keeps-another-operations-leftover",
+              refused(res, "holder of the 'record' operation, not this {!r} operation".format(init_op.OPERATION))
+              and _opf_oplock._other_operation_next_step("record") in said
+              and "operation mutex WROTE" not in said and after == kept and op_ids(root) == [], observed=said)
         # The removal order, pinned on the namers themselves: the mutex acquisition's staging leftovers before its
         # stale records, as it removes them (red against the two lists swapped), and a refusal names the scrub's
         # removals before those of the substrate acquisition that runs after the scrub (red against the two

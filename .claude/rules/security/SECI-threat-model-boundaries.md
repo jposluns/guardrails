@@ -4,8 +4,7 @@ origin: pack
 family: security
 facet: SECI
 slug: threat-model-boundaries
-map-nist-80053-tight: [SA-11(2)]
-map-nist-80053-broad: [SA-8]
+map-nist-80053-broad: [SA-8, SA-11(2)]
 map-nist-ssdf-tight: [PW.1.1]
 map-iso-23894-broad: [6.4.2]
 map-owasp-web-broad: [A06]

@@ -34,7 +34,11 @@ Legs, in order:
                  job-keys       the job carries no key but name, runs-on and steps, and carries the one if:
                                 line HEAVY_JOB_IF_LINE exactly as written (without it the job runs on every
                                 pull request; any other if:, a continue-on-error:, env:, defaults:,
-                                container: or strategy: can skip, mask, move or change what it runs);
+                                container: or strategy: can skip, mask, move or change what it runs) and
+                                the one needs: line HEAVY_JOB_NEEDS_LINE exactly as written (the pinned if:
+                                reads the scope job's site_only output, the site fast lane; without
+                                needs: scope that output reads empty and the fast lane silently dies, and
+                                another target reads another job's output);
                  runner         runs-on is RUNNER, ubuntu-24.04: the setup-python versions manifest lists a
                                 patch release's Linux builds by Ubuntu version, so the job names its image;
                  checkout       the first step is the checkout step as written (uses: CHECKOUT_USES and a
@@ -203,7 +207,8 @@ Legs, in order:
                                 path is exit 2 there, dynamic-target).
                So a top-level key outside TOP_KEYS, a missing concurrency: block or one other than
                CONCURRENCY_BLOCK, a missing job-level if: on a host-patch job or one other than
-               HEAVY_JOB_IF_LINE, any if: on the judge's job, another runner or checkout, an env: on a
+               HEAVY_JOB_IF_LINE, a missing job-level needs: on a host-patch job or one other than
+               HEAVY_JOB_NEEDS_LINE, any if: on the judge's job, another runner or checkout, an env: on a
                host-patch job or on any of its steps, removing or moving a
                host-patch job, its setup-python step, its Python host pin step or one of its suite steps,
                omitting, reordering, repeating or adding a suite step, changing a job id or the command a held
@@ -381,9 +386,11 @@ build's downstream patches and the system libraries an interpreter links (OpenSS
 others) can differ between the host and the runner, and this gate does not compare them. It does not check
 that the committed patch is what the host runs: when the host interpreter changes, the maintainer updates the
 source and every host-patch pin in one reviewed change, and until then every local run fails on the
-interpreter leg. CI cost: the five jobs carry the pinned heavy-job if:, so they run the OPF tooling self-test
+interpreter leg. CI cost: the five jobs carry the pinned heavy-job if: and needs: lines, so they run the OPF
+tooling self-test
 and the four git-fixture-env suites in every run on a push or on a merge-train-* pull request of this
-repository and in no other pull request run, the only CI run of each but the git-fixture-env-core suite, whose
+repository whose scope-job site_only output is not true (a site-only train skips them under the maintainer's
+recorded fast-lane authorization) and in no other pull request run, the only CI run of each but the git-fixture-env-core suite, whose
 '3.14' canary job runs it too, the four suites as four parallel jobs (so the host leg's wall time is its
 longest job, not the sum of the four), and an edit to a pull request's title or body starts
 no Quality run (the workflow does not run on edited). This gate compares the concurrency: block and the if: line
@@ -472,12 +479,20 @@ CONCURRENCY_BLOCK = (
 )
 # The keys a host-patch job may carry, and the one job-level if: line it must also carry, exactly as written
 # (a trailing comment included): it runs the job on a push and on a pull request whose head is a
-# merge-train-* branch of this repository. tools/check_ci_parity.py pins the same line (HEAVY_JOB_IF_LINE
+# merge-train-* branch of this repository, except when the scope job's site_only output is true (the
+# site fast lane: every changed path of the pull request is in the site allowlist, so the heavy suites
+# are skipped under the maintainer's recorded authorization; the Quality gates job passes a skipped
+# heavy job only then). The job must also carry the one needs: line HEAVY_JOB_NEEDS_LINE exactly as
+# written, which makes the scope job's output readable from the if: line (without needs: scope the
+# output reads empty and the job always runs, so the fast lane silently dies). tools/check_ci_parity.py
+# pins the same if: line (HEAVY_JOB_IF_LINE
 # there); the self-test holds the two copies equal. No job that carries the --jobs-only judge carries an
 # if: at all (outside-judge), so the jobs leg still runs outside these jobs on every event.
 JOB_KEYS = {"name", "runs-on", "steps"}
-HEAVY_JOB_IF_LINE = ("    if: github.event_name == 'push' || (startsWith(github.head_ref, 'merge-train-') && "
-                     "github.event.pull_request.head.repo.full_name == github.repository)")
+HEAVY_JOB_IF_LINE = ("    if: needs.scope.outputs.site_only != 'true' && (github.event_name == 'push' || "
+                     "(startsWith(github.head_ref, 'merge-train-') && "
+                     "github.event.pull_request.head.repo.full_name == github.repository))")
+HEAVY_JOB_NEEDS_LINE = "    needs: scope"
 # The first step of each host-patch job, as written: another ref, repository or path can put another tree
 # under the gate and the suite, and a persist-credentials other than false leaves the job token in the
 # checkout's git config, where every later step can read it (tools/check_ci_parity.py holds that input on
@@ -1183,14 +1198,22 @@ def _host_job_findings(job, tree, want):
     if "job-keys" in JOB_RULES:
         if "if" not in tree:
             found.append("{} carries no if:; the pinned if: line HEAVY_JOB_IF_LINE is required, so the job runs "
-                         "only on a push and on a merge-train-* pull request of this repository".format(where))
+                         "only on a push and on a merge-train-* pull request of this repository whose "
+                         "scope-job site_only output is not true".format(where))
+        if "needs" not in tree:
+            found.append("{} carries no needs:; the pinned needs line HEAVY_JOB_NEEDS_LINE is required, so "
+                         "the pinned if: line reads the scope job's site_only output (without needs: scope "
+                         "that output reads empty and the job runs whatever the scope job decided)".format(
+                             where))
         for key in tree:
             if key == "if" and getattr(tree[key], "written", None) == HEAVY_JOB_IF_LINE:
                 continue
+            if key == "needs" and getattr(tree[key], "written", None) == HEAVY_JOB_NEEDS_LINE:
+                continue
             if key not in JOB_KEYS:
                 found.append("{} carries {}:, which can skip, mask, move or change what it runs (a host-patch "
-                             "job carries only name, runs-on, steps and the pinned if: line "
-                             "HEAVY_JOB_IF_LINE)".format(where, key))
+                             "job carries only name, runs-on, steps, the pinned if: line HEAVY_JOB_IF_LINE "
+                             "and the pinned needs line HEAVY_JOB_NEEDS_LINE)".format(where, key))
     if "runner" in JOB_RULES and tree.get("runs-on") != RUNNER:
         found.append("{} runs on {!r}, not {!r}: the setup-python versions manifest lists the host patch's "
                      "Linux builds by Ubuntu version, so the job names its image".format(
@@ -1929,11 +1952,12 @@ def _lane_reading(reader, refusal, text):
 
 
 def _host_job(job):
-    """A whole host-patch job, laid out as quality.yml lays it out, its pinned if: line included."""
-    return ("  {0}:\n    name: {0}\n{2}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
+    """A whole host-patch job, laid out as quality.yml lays it out, its pinned if: and needs: lines
+    included."""
+    return ("  {0}:\n    name: {0}\n{2}\n{3}\n    runs-on: {1}\n    steps:\n      - uses: actions/checkout@v4\n"
             "        with:\n          fetch-depth: 0\n          fetch-tags: true\n"
             "          persist-credentials: false\n\n".format(
-                job, RUNNER, HEAVY_JOB_IF_LINE)
+                job, RUNNER, HEAVY_JOB_IF_LINE, HEAVY_JOB_NEEDS_LINE)
             + SETUP_STEP + GATE_STEP + _suite_step(job))
 
 
@@ -2123,6 +2147,7 @@ def _job_cases():
     persist = "          persist-credentials: false\n"
     runs = "    runs-on: "
     pinned_if = HEAVY_JOB_IF_LINE + "\n"
+    pinned_needs = HEAVY_JOB_NEEDS_LINE + "\n"
     block = "\n".join(CONCURRENCY_BLOCK) + "\n"
     second = "  second:\n    runs-on: ubuntu-latest\n    steps:\n"
     decoy = ("  decoy:\n    runs-on: ubuntu-latest\n    steps:\n"
@@ -2246,6 +2271,25 @@ def _job_cases():
          "opf-host-patch carries no if:", "job-keys"),
         ("jobs/git-fixture-env-job-if-missing-finding", ((GFE, pinned_if, ""),), (),
          GFE + " carries no if:", "job-keys"),
+        # The fast-lane condition dropped from the pinned if: line (the previous pin, which never reads
+        # the scope job's decision, so the heavy suites run on every site-only train): refused by
+        # job-keys like any other departure from HEAVY_JOB_IF_LINE.
+        ("jobs/job-if-scope-condition-dropped-finding",
+         ((OPF, pinned_if, "    if: github.event_name == 'push' || (startsWith(github.head_ref, "
+           "'merge-train-') && github.event.pull_request.head.repo.full_name == github.repository)\n"),),
+         (), "opf-host-patch carries if:", "job-keys"),
+        # HEAVY_JOB_NEEDS_LINE is the one needs: a host-patch job carries: without it the pinned if:
+        # line reads an empty site_only output, another target reads another job's output, and the
+        # pinned line respelled with a trailing comment is another line; each is refused by job-keys.
+        ("jobs/job-needs-missing-finding", ((OPF, pinned_needs, ""),), (),
+         "opf-host-patch carries no needs:", "job-keys"),
+        ("jobs/git-fixture-env-job-needs-missing-finding", ((GFE, pinned_needs, ""),), (),
+         GFE + " carries no needs:", "job-keys"),
+        ("jobs/job-needs-other-target-finding", ((OPF, pinned_needs, "    needs: floor\n"),), (),
+         "opf-host-patch carries needs:", "job-keys"),
+        ("jobs/job-needs-pinned-line-commented-finding",
+         ((GFE, pinned_needs, HEAVY_JOB_NEEDS_LINE + "  # the scope job\n"),), (),
+         GFE + " carries needs:", "job-keys"),
         ("jobs/job-continue-on-error-finding", ((GFE, runs, "    continue-on-error: true\n" + runs),), (),
          GFE + " carries continue-on-error:", "job-keys"),
         ("jobs/job-container-finding", ((OPF, runs, "    container: python:3.14.8\n" + runs),), (),
@@ -2617,6 +2661,9 @@ def _self_test_cases(base):
     check("jobs/host-jobs-pinned-if-passes", (
         all(HEAVY_JOB_IF_LINE + "\n" in _host_job(job) for job in HOST_JOBS), evaluate(_fixture(base), HOST)[0]),
         (True, 0))
+    check("jobs/host-jobs-pinned-needs-passes", (
+        all(HEAVY_JOB_NEEDS_LINE + "\n" in _host_job(job) for job in HOST_JOBS),
+        evaluate(_fixture(base), HOST)[0]), (True, 0))
     check("jobs/extra-step-after-gate-passes", evaluate(_fixture(base, workflow=_workflow(((
         OPF, GATE_STEP, GATE_STEP + "      - name: Python host pin self-test\n        run: " + GATE_RUN
         + " --self-test\n\n"),))), HOST)[0], 0)

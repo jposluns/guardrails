@@ -7,9 +7,9 @@ facet: TRUST
 secondary: [INTEG]
 slug: records-first
 map-nist-airmf-broad: [GOVERN 1.4]
-map-nist-ssdf-tight: [PW.1.2]
+map-nist-ssdf-broad: [PW.1.2]
 map-iso-42001-broad: [7.5.2, 7.5.3]
-map-iso-23894-tight: [6.7]
+map-iso-23894-broad: [6.7]
 ---
 
 # Records first

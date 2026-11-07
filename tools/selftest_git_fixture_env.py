@@ -714,6 +714,13 @@ CONFIG_EXCLUSIONS = {
             " and as the direct self-test launch CONFIG_DIRECT_SELFTESTS keeps, so each poisoned"
             " lane still enters that self-test's own entry point without any launcher sanitizing"
             " the environment first.",
+        ("tools/ci_site_scope.py",):
+            "A bare launch is a usage error by design, not a self-test: the tool runs only with a"
+            " mode flag, so with none it prints its usage and exits 2 (cannot evaluate) in every"
+            " lane and under any configuration, running no git (its self-test pins that exit as"
+            " launch/no-arguments-exit-2); its self-test stays in this roster as the direct"
+            " --self-test launch, registered in both CI and the standalone runner, and as the"
+            " ci-site-scope-selftest suite step.",
     },
     "archive": {
         ("tools/check_release_build.py", "--self-test"):
@@ -726,6 +733,17 @@ CONFIG_EXCLUSIONS = {
             "Real-checkout archives intentionally retain caller trust configuration.",
         ("tools/check_release_delta.py", "--self-test"):
             "Real-checkout archives intentionally retain caller trust configuration.",
+        ("tools/check_python_floor.py",):
+            "A bare launch is the real gate over this checkout, whose tracked-file listing (git"
+            " ls-files) drops the GIT_* environment and pins PATH but deliberately keeps the"
+            " caller's on-disk configuration (where safe.directory trust for the checkout lives),"
+            " so a malformed caller home fails it closed (exit 2) by design; it stays in the"
+            " combined and system lanes.",
+        ("tools/check_child_status_coverage.py",):
+            "A bare launch is the real gate over this checkout, whose entry point enumeration is"
+            " tools/check_python_floor.py's tracked-file listing, which deliberately keeps the"
+            " caller's on-disk configuration, so a malformed caller home fails it closed (exit 2)"
+            " by design; it stays in the combined and system lanes.",
     },
 }
 
@@ -1220,7 +1238,8 @@ def _config_poison_fixture(base):
 # exited 0 with no hook, fsmonitor or exposure record in every run. Each entry below gives its
 # lane time per run.
 # SIZING_ACCOUNT_ROSTER is the set _registered_selftests() returns at commit e5191908, the parent
-# of the commit that recorded these runs; a member registered later is outside the account.
+# of the commit that recorded these runs, with one member's argv replaced by its later launch
+# (below); a member registered later is outside the account.
 # The closure gate's leg-bounds change, merged with main on 2026-10-15, 2026-10-17, 2026-10-18,
 # 2026-10-19 and 2026-10-20, registers two such members, tools/check_opf_standalone_closure.py
 # --self-test --ci-job opf-closure-a and --ci-job opf-closure-b (its CI steps, one per closure CI
@@ -1239,6 +1258,22 @@ def _config_poison_fixture(base):
 # opf/tools self-tests, timed in every run), was later removed with the store-upgrade engine, so
 # the account constants below omit it: 100 account members, 88 timed, 10 measured in the
 # combined lane and 9 in the malformed lane. The runs and times recorded here are unchanged.
+# One account member, tools/check_site.py --self-test, was later relaunched: commit 64ffed7c5
+# changed its registered step in tools/run_all_checks.sh and quality.yml to
+# tools/check_selftest_execution.py --suite site-selftest, which runs the same self-test entry
+# point (check_site.py _self_test, now with the touch-icon vectors that commit added) through the
+# execution gate. SIZING_ACCOUNT_ROSTER holds the suite argv in its place, so the account still
+# names every member it covers and keeps its counts (100 members, 88 timed): the account does not
+# say whether this member was among its timed ones, so neither removing it nor moving the count
+# would be known to be right. Whatever the account recorded for it was a direct launch at commit
+# e5191908; no lane time of the suite launch is known.
+# Two account members, tools/check_install_page.py --self-test and tools/gen_install.py
+# --self-test, were later removed with the install page when aiqt.ai cut over to the template
+# site, so the account constants omit them: 98 account members, 10 measured in the combined lane
+# and 9 in the malformed lane. The account names neither, so it does not say whether either was
+# among its timed members: SIZING_ACCOUNT_TIMED stays 88, as for the relaunched member above, and
+# may overstate the timed members still registered by up to two, so the count of members with no
+# recorded time may understate by up to two. The runs and times recorded here are unchanged.
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
 # malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
 # and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
@@ -1402,7 +1437,8 @@ CONFIG_MEMBER_BOUNDS = {
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
 # from them and config/member-roster-figures pins them against _registered_selftests().
-# SIZING_ACCOUNT_ROSTER: every argv the whole-roster run covered, as registered when it was taken.
+# SIZING_ACCOUNT_ROSTER: every argv the whole-roster run covered, as registered when it was taken
+# but for the one relaunched member SIZING names.
 SIZING_ACCOUNT_ROSTER = frozenset({
     ("opf/tools/_journal.py", "--self-test"),
     ("opf/tools/_opf_adopt.py", "--self-test"),
@@ -1445,7 +1481,6 @@ SIZING_ACCOUNT_ROSTER = frozenset({
     ("tools/check_gensrc_failclose.py", "--self-test"),
     ("tools/check_git_option_table.py", "--self-test"),
     ("tools/check_hooks_preview.py", "--self-test"),
-    ("tools/check_install_page.py", "--self-test"),
     ("tools/check_instruction_budget.py",),
     ("tools/check_instruction_budget.py", "--self-test"),
     ("tools/check_internal_names.py", "--self-test"),
@@ -1473,7 +1508,8 @@ SIZING_ACCOUNT_ROSTER = frozenset({
     ("tools/check_selftest_execution.py", "--suite", "instruction-budget-selftest"),
     ("tools/check_selftest_execution.py", "--suite", "orch-behaviour-selftest"),
     ("tools/check_selftest_execution.py", "--suite", "python-floor-selftest"),
-    ("tools/check_site.py", "--self-test"),
+    # Registered as tools/check_site.py --self-test when the account was taken (see SIZING).
+    ("tools/check_selftest_execution.py", "--suite", "site-selftest"),
     ("tools/check_site_versions.py", "--self-test"),
     ("tools/check_sized_instructions.py", "--self-test"),
     ("tools/check_standards_currency.py", "--self-test"),
@@ -1489,7 +1525,6 @@ SIZING_ACCOUNT_ROSTER = frozenset({
     ("tools/gen_first_pin_demo.py", "--self-test"),
     ("tools/gen_gensrc.py", "--self-test"),
     ("tools/gen_hooks.py", "--self-test"),
-    ("tools/gen_install.py", "--self-test"),
     ("tools/gen_manifest.py", "--self-test"),
     ("tools/gen_reference_facts.py", "--self-test"),
     ("tools/gen_renderers.py", "--self-test"),

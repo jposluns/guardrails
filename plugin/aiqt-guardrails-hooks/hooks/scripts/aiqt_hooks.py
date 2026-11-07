@@ -4287,7 +4287,7 @@ def _is_diff_producer(tokens):
         # show ARGS): a genuine suppression flag in a real option position, no patch-enabling option
         # (-p/-u/--patch*/-U/--unified/-c/--cc or a p/u short cluster), and no unknown option. A suppression
         # token after '--' (a pathspec) or consumed as a value-taking option's argument (git show -S -s) does
-        # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). cleanlanguage adopter
+        # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). Adopter
         # report 2026-09-12; position- and cluster-aware hardening 2026-09-12.
         if _show_no_patch_exempt(rest):
             return False
@@ -18822,7 +18822,7 @@ _STDIN_PY_TOKEN_RE = re.compile(
     r"|(?P<redir>\d*(?:&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||[<>]))"
     r"|(?P<op>\|&|\|\||&&|;;|[|&;()`\n])"
     r"|(?P<word>(?:[^\s<>|&;()`'\"\\]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)"
-    r"|(?P<stray>.)", re.S)
+    r"|(?P<stray>.)", re.S | re.ASCII)
 # The redirects that feed a command's standard input (fd 0, written or implied).
 _STDIN_PY_FEEDS = frozenset(("<", "<<", "<<-", "<<<", "<>", "<&"))
 _STDIN_PY_PIPES = frozenset(("|", "|&"))
@@ -21252,6 +21252,13 @@ _ORCH_STATES = frozenset(("open", "closed", "proposed"))
 _ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FINDINGS
 _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
+# Enumerator-supplied text reaches a deny message only through _orch_clip, so each named field is one bounded
+# line: an id, a title, and a reason or detail field are each cut to these many characters (mark included).
+_ORCH_NAMED_ID_MAX = 80
+_ORCH_NAMED_TITLE_MAX = 120
+_ORCH_NAMED_REASON_MAX = 200
+_ORCH_CLIP_MARK = "[...]"
+_ORCH_CLIP_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f" "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
 # The `Operating-mode:` declaration is parsed per PHYSICAL line (the reader splits on newlines first, so the
 # value can never cross a line boundary): optional leading horizontal whitespace, then the key, then the value
 # is the REST OF THAT LINE ONLY. A present declaration whose value does not classify (empty or unrecognized)
@@ -21263,6 +21270,11 @@ _ORCH_MODE_DECL_LINE_RE = re.compile(r"^[ \t]*Operating-mode:[ \t]*(.*)$")
 # `attended (ipad); continuous mode` begin with the mode word and classify. Order: unattended before attended.
 _ORCH_MODE_UNATTENDED_RE = re.compile(r"unattended(\b|$)")
 _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
+# The structured operating-mode record a JSON mode file may carry instead of the bare {"mode": ...} object:
+# its keys include `mode` and are otherwise drawn only from these, and its `set_at` is a UTC time written
+# YYYY-MM-DDTHH:MM:SSZ in ASCII digits (matched whole, so a trailing newline or offset does not pass).
+_ORCH_MODE_RECORD_KEYS = frozenset(("mode", "phase", "set_by", "set_at"))
+_ORCH_MODE_SET_AT_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 # The guards-armed posture a present-but-unusable mode marker fails closed to: it carries the `unattended`
 # token, so the ask blocker arms on it and _orch_scope_live reads it as a live (non-None) mode. A recognized
 # mode value carries the `attended`/`unattended` family token (so both `unattended` and `attended` spellings,
@@ -21974,6 +21986,33 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_object_ok(obj):
+    """True when a parsed JSON object is a mode marker whose `mode` string the reader classifies: the bare
+    {"mode": str} object, or a structured operating-mode record whose keys include `mode` and are otherwise
+    drawn only from `phase`, `set_by` and `set_at` (_ORCH_MODE_RECORD_KEYS), with `mode` a string, `phase`
+    null or a string, `set_by` a string, and `set_at` a string of the form YYYY-MM-DDTHH:MM:SSZ that names a
+    real calendar time. False for anything else (another key, a wrong type, a malformed or impossible
+    `set_at`), which the caller fails closed to guards-armed. A duplicate key never reaches here: the parse
+    refuses it first (_orch_reject_duplicate_keys)."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("mode"), str):
+        return False
+    if not set(obj) <= _ORCH_MODE_RECORD_KEYS:
+        return False
+    if "phase" in obj and obj["phase"] is not None and not isinstance(obj["phase"], str):
+        return False
+    if "set_by" in obj and not isinstance(obj["set_by"], str):
+        return False
+    if "set_at" in obj:
+        m = _ORCH_MODE_SET_AT_RE.fullmatch(obj["set_at"]) if isinstance(obj["set_at"], str) else None
+        if m is None:
+            return False
+        try:
+            datetime.datetime(*(int(part) for part in m.groups()))
+        except ValueError:
+            return False                  # the form matched but the time does not exist (month 13, 24:00:00)
+    return True
+
+
 def _orch_mode_read(path):
     """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
     ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
@@ -22056,9 +22095,11 @@ def _orch_mode_detail(reg, root):
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
-        keys), or that parses to anything other than a dict with EXACTLY the single key `mode` whose value is a
-        string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
-        object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
+        keys), or that parses to anything other than an accepted mode object (_orch_mode_object_ok: the bare
+        {"mode": str} object, or a structured operating-mode record that adds only `phase`, `set_by` and
+        `set_at` of their stated types) whose `mode` string begins with attended or unattended (a scalar, an
+        array, an object with another key or a wrong-typed value or a malformed `set_at`, or an object whose
+        `mode` is absent, non-string, or an unrecognized value all fail closed here);
       - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
         `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
         the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
@@ -22071,8 +22112,9 @@ def _orch_mode_detail(reg, root):
       3. The value and the JSON `mode` string are classified by the word-anchored mode grammar
          (_orch_mode_classify), a prefix match at the start, never a substring, so `disattended` and
          `not-attended` do NOT match `attended`.
-      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and an exactly-{"mode": str} shape,
-         so duplicate keys, extra keys, and non-object or non-string-mode values all fail closed."""
+      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and a closed shape (the bare
+         {"mode": str} object or the structured record of _orch_mode_object_ok), so duplicate keys, other
+         keys, wrong-typed record fields, and non-object or non-string-mode values all fail closed."""
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
@@ -22108,11 +22150,11 @@ def _orch_mode_classify_text(text):
         # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
         # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
-    if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
+    if _orch_mode_object_ok(obj):
         classified = _orch_mode_classify(obj["mode"])
         return classified if classified is not None else _ORCH_MODE_ARMED
-    # Any other JSON (a scalar, an array, an object with extra keys, or a dict without a string `mode`) is a
-    # present-but-unrecognized marker and fails CLOSED to guards-armed.
+    # Any other JSON (a scalar, an array, an object with a key outside the record keys or a value of the wrong
+    # type, or a dict without a string `mode`) is a present-but-unrecognized marker and fails CLOSED.
     return _ORCH_MODE_ARMED
 
 
@@ -22294,6 +22336,17 @@ def _orch_escape_active(reg, root):
     return (True, None)
 
 
+def _orch_clip(value, limit):
+    """value as one bounded line for a deny message: every control character (LF and CR included) and
+    every Unicode line or paragraph separator becomes a space, and text longer than limit is cut to
+    exactly limit characters ending in _ORCH_CLIP_MARK, so enumerator-supplied text can neither split a
+    reason across lines nor grow it without bound."""
+    text = _ORCH_CLIP_CONTROL_RE.sub(" ", str(value))
+    if len(text) > limit:
+        text = text[:limit - len(_ORCH_CLIP_MARK)] + _ORCH_CLIP_MARK
+    return text
+
+
 def validate_enumeration(obj):
     """AEI v1 strict validation: (items, None) on a valid enumeration, (None, detail) otherwise. A
     duplicate id, a malformed item or field, an unknown version, a missing envelope, or a non-dict
@@ -22303,7 +22356,8 @@ def validate_enumeration(obj):
         return (None, "payload is not a JSON object")
     version = obj.get("version")
     if type(version) is not int or version != 1:
-        return (None, "unknown AEI version {!r} (an exact integer 1 is required)".format(version))
+        return (None, "unknown AEI version {} (an exact integer 1 is required)".format(
+            _orch_clip(repr(version), _ORCH_NAMED_REASON_MAX)))
     gen = obj.get("generated_at_utc")
     gen_ts = _orch_parse_utc(gen) if isinstance(gen, str) else None
     if gen_ts is None:
@@ -22324,29 +22378,31 @@ def validate_enumeration(obj):
         iid = raw.get("id")
         if not isinstance(iid, str) or not iid:
             return (None, "an item has no string id")
+        named_iid = _orch_clip(iid, _ORCH_NAMED_ID_MAX)
         if iid in seen:
-            return (None, "duplicate item id {!r}".format(iid))
+            return (None, "duplicate item id {}".format(_orch_clip(repr(iid), _ORCH_NAMED_ID_MAX)))
         seen.add(iid)
         title = raw.get("title")
         if title is not None and not isinstance(title, str):
-            return (None, "item {} has a non-string title".format(iid))
+            return (None, "item {} has a non-string title".format(named_iid))
         state = raw.get("state")
         if state not in _ORCH_STATES:
-            return (None, "item {} has invalid state {!r}".format(iid, state))
+            return (None, "item {} has invalid state {}".format(
+                named_iid, _orch_clip(repr(state), _ORCH_NAMED_REASON_MAX)))
         granted = raw.get("granted")
         if not isinstance(granted, bool):
-            return (None, "item {} has a non-boolean granted".format(iid))
+            return (None, "item {} has a non-boolean granted".format(named_iid))
         blocker = raw.get("blocker")
         if blocker is not None:
             if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
                     or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
-                return (None, "item {} has a malformed blocker".format(iid))
+                return (None, "item {} has a malformed blocker".format(named_iid))
             ev = blocker.get("evidence")
             obs = blocker.get("observed_at_utc")
             if (ev is not None and not isinstance(ev, str)) \
                     or (obs is not None and not isinstance(obs, str)):
                 return (None, "item {} has a malformed blocker field (evidence/observed_at_utc)"
-                        .format(iid))
+                        .format(named_iid))
         out.append({"id": iid, "title": title if isinstance(title, str) and title else iid,
                     "state": state, "granted": granted, "blocker": blocker})
     return (out, None)
@@ -22372,10 +22428,12 @@ def _orch_enumerate(reg, root):
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
     except (OSError, subprocess.SubprocessError) as exc:
-        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(exc))
+        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(
+            _orch_clip(exc, _ORCH_NAMED_REASON_MAX)))
     if result.returncode != 0:
         return ("ENUMERATOR_ERROR",
-                "enumerator exit {}: {}".format(result.returncode, (result.stderr or "")[:200]))
+                "enumerator exit {}: {}".format(result.returncode,
+                                                _orch_clip(result.stderr or "", _ORCH_NAMED_REASON_MAX)))
     try:
         payload = json.loads(result.stdout)
     except ValueError as exc:
@@ -22432,16 +22490,18 @@ def _orch_pending_haystack(reg, root):
     forge a row via the id-colon match). Returns None when no surface is declared or it is
     unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
     than demoting it to a definite actionable; FIX 1 DENIES the stop on that cannot-evaluate below the loop
-    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block."""
+    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block. The surface is
+    read by _orch_record_surface_read, so a FIFO, a device or a directory there is unreadable at once
+    rather than stalling the hook, and a file longer than _ORCH_BARRIER_MAX_BYTES is unreadable too,
+    since a truncated record could hide a decision row."""
     rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
     declared = _orch_path(root, rec.get("pending_decisions"))
     if not declared:
         return None
-    try:
-        with open(declared, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
+    data, detail = _orch_record_surface_read(declared)
+    if detail is not None or len(data) > _ORCH_BARRIER_MAX_BYTES:
         return None
+    return _orch_record_surface_text(data)
 
 
 def _orch_attestation_refs(reg, root, staleness):
@@ -22660,7 +22720,8 @@ def decide_yield(ctx):
         # the unevaluable items are NAMED here exactly as on the stop path below, so a
         # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
         # correct, not only that one exists
-        named_sched = ", ".join(i for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
+        named_sched = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
         if len(sched_cannot) > _ORCH_MAX_NAMED:
             named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
@@ -22684,12 +22745,14 @@ def decide_yield(ctx):
             return ("DENY",
                     "wake hygiene: a permitted idle must name the item or blocker it will recheck; "
                     "pending: {}".format(
-                        ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
+                        ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                  for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
             cannot_items = ctx.get("cannot_evaluate", [])
             # the unevaluable items are NAMED (bounded), so a scope-level cannot-evaluate such as
             # lease:max_age_hours tells the operator WHAT to correct, not only that one exists
-            named_cannot = ", ".join(i for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
+            named_cannot = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                     for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
             if len(cannot_items) > _ORCH_MAX_NAMED:
                 named_cannot += "; and {} more".format(len(cannot_items) - _ORCH_MAX_NAMED)
             return ("DENY",
@@ -22711,7 +22774,9 @@ def decide_yield(ctx):
                 .format(ctx["schedule_denials"]), disposition)
     named = ctx["actionable"][:_ORCH_MAX_NAMED]
     more = len(ctx["actionable"]) - len(named)
-    listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
+    listing = "; ".join("{} ({}: {})".format(_orch_clip(i, _ORCH_NAMED_ID_MAX),
+                                             _orch_clip(t, _ORCH_NAMED_TITLE_MAX),
+                                             _orch_clip(w, _ORCH_NAMED_REASON_MAX)) for i, t, w in named)
     if more > 0:
         listing += "; and {} more".format(more)
     if kind == "ask":
@@ -22720,7 +22785,8 @@ def decide_yield(ctx):
         if held:
             # the mixed backlog names BOTH sets in one reason: the actionable items above carry the
             # two exits, and the held items are named so the operator knows what to repair
-            named_held = ", ".join(i for i, _c, _p in held[:_ORCH_MAX_NAMED])
+            named_held = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                   for i, _c, _p in held[:_ORCH_MAX_NAMED])
             if len(held) > _ORCH_MAX_NAMED:
                 named_held += "; and {} more".format(len(held) - _ORCH_MAX_NAMED)
             held_note = (" Additionally, a proof source for {} open item(s) is unreadable "
@@ -23846,6 +23912,65 @@ def _orch_lexed_amp_places(command, amps):
     return kinds
 
 
+# Runtime start forms: words and forms that can start a background job in a command with no '&' byte, so
+# an open quote or an uncertain '#' in such a command still denies (_orch_foreground_detach_lexed). coproc
+# runs its command asynchronously; eval reads a string, and an '&' built in it at run time, as code;
+# setsid can return before its command finishes (always under -f); disown leaves a job no one waits for;
+# source and a lone '.' (one at the start, or after whitespace (a blank, a newline or other whitespace),
+# ';', '|', '(', '{' or a backquote, with a blank after it) read a file as code, and a here-string (<<<)
+# fed to a shell is code too; a process substitution, <( ) or >( ), runs its command asynchronously. The
+# search reads two texts, each with every quote and backslash removed, so e'v'al, "eval" and \eval match
+# as well: the command as written, which reads a start form written whole, and the command with every
+# backslash-newline pair removed first, which reads a form split by a pair bash joins (ev\<newline>al is
+# eval, <\<newline>( a process substitution) whole. Not every pair is one bash joins (one whose backslash
+# is itself escaped, one ending a comment line, one inside single quotes), and removing such a pair can
+# glue a start word on the next line to the word before it, so a start form in EITHER text keeps the scan's
+# verdict: removing the pairs never lifts a deny the first text gives. '<<<', '<(' and '>(' have no
+# lookbehind, so the second text reads them wherever they sit, whatever is glued in front. The start words
+# and the '.' have one: the start words coproc, eval, setsid, disown and source refuse a match after a word
+# character, a '.' or a '-', and the '.' matches only after whitespace (a blank, a newline or other
+# whitespace), ';', '|', '(', '{' or a backquote, or at the start of the text. When a start word, or a '.'
+# and the blank after it, is split by a backslash-newline pair and any other backslash-newline pair comes
+# before it in the command, the search may miss it: the first text keeps it split, and the second also
+# removes the earlier pair, so the split word can be glued to whatever stood before that pair, and where
+# its lookbehind refuses what is glued in front it is read in neither text. Where the search misses such a
+# form that bash runs, the no-'&' allow can be taken (a disclosed residual). Known shapes, examples and not
+# the full set, each missed in both contexts the self-test pins while bash runs the form:
+# : x\\<newline>ev\<newline>al, : x.\\<newline>ev\<newline>al, # c\<newline>sou\<newline>rce,
+# #-\<newline>sou\<newline>rce, : x\<newline>\\<newline>ev\<newline>al and
+# : x\\<newline>\\<newline>ev\<newline>al (each earlier pair removed, eval glued to the x),
+# : x\\<newline>.\<newline> f, : x\<newline>\\<newline>.\<newline> f and #\<newline>.\<newline> f. Others
+# are read: a blank in : \\<newline>ev\<newline>al, a '/' in : /\\<newline>ev\<newline>al and the '#' of a
+# bare comment line in #\<newline>sou\<newline>rce are not refused, nor is the blank in
+# : \\<newline>.\<newline> f. A start word right after a pair inside single quotes, before the closing quote
+# or directly after it (echo 'x\<newline>'eval), is part of the quoted word, so bash runs no start word
+# there; a start word later in the command can run, as eval does in echo 'x\<newline>'; ev\<newline>al,
+# which the second text reads. A word that matches only after a removal, or one in a body or comment, reads
+# as a start form all the same, which only keeps the scan's verdict. A '.' right after a ')' is not read
+# (prose ends a sentence that way far more often than a case pattern runs '.'), nor is a start word built
+# at run time (from a variable or an ANSI-C escape).
+_ORCH_RUNTIME_START_RE = re.compile(
+    r"(?<![\w.-])(?:coproc|eval|setsid|disown|source)(?![\w.-])|(?<![^\s;|({`])\.(?=[ \t])|<<<|[<>]\(")
+_ORCH_RUNTIME_START_UNQUOTE = str.maketrans("", "", "'\"\\")
+
+
+def _orch_runtime_start_readings(command):
+    """The two texts the runtime start search (_ORCH_RUNTIME_START_RE) reads, a start form in either keeping
+    the scan's verdict: the command with every quote and backslash removed, which reads a start word written
+    whole (one after a pair bash does not join included), and the command with every backslash-newline pair
+    removed first, then every quote and backslash, which reads a form split by a pair bash joins. When a
+    start word, or a '.' and the blank after it, is split by a backslash-newline pair and any other
+    backslash-newline pair comes before it in the command, the search may miss it (a disclosed residual): the
+    first text keeps it split, and the second also removes the earlier pair, so the split word can be glued
+    to whatever stood before that pair, where a start word's lookbehind refuses a word character, a '.' or a
+    '-' and the '.' matches only after whitespace (a blank, a newline or other whitespace), ';', '|', '(',
+    '{' or a backquote, or at the start of the text. '<<<', '<(' and '>(' have no lookbehind and match in
+    the second text wherever they sit. A start word right after a pair inside single quotes, before the
+    closing quote or directly after it, is part of the quoted word, so bash runs no start word there."""
+    return (command.translate(_ORCH_RUNTIME_START_UNQUOTE),
+            command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
+
+
 def _orch_foreground_detach_lexed(command, lifts=None):
     """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
     scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
@@ -23879,14 +24004,20 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
     caller that must know whether it did reads the list instead of running the scan again.
 
-    COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
-    scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
-    cost more than both scan rules together) is not run; a command that also holds no '#' and no quote
-    gives None from both scan rules (they return anything else only at one of those four characters, or
-    at the end inside a quote one of them opened), so the scan is not run either. The verdict is the same
-    either way."""
+    NO '&': a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for
+    the scan, so the lex (which can cost more than both scan rules together) is not run. Its "unbalanced"
+    (an open quote or an uncertain '#') says only that a LATER '&' might be hidden, and there is none, so
+    it is None without the scan (an apostrophe in a quoted here-document body the scan reads as code, ahead
+    of any later command, was denied as a possible detach although the command holds no '&' at all), UNLESS
+    the command holds a runtime start form (_ORCH_RUNTIME_START_RE) that can start a background job with no
+    '&' byte: there the scan decides as it does for any command, so an open quote or an uncertain '#' still
+    denies. A command that also holds no '#' and no quote gives None from both scan rules (they return
+    anything else only at one of those four characters, or at the end inside a quote one of them opened),
+    so the scan is not run either. The verdict is the same either way."""
     if "&" not in command:
         if "#" not in command and "'" not in command and '"' not in command:
+            return None
+        if not any(_ORCH_RUNTIME_START_RE.search(text) for text in _orch_runtime_start_readings(command)):
             return None
         return _orch_foreground_detach_kind(command)
     try:
@@ -23980,12 +24111,14 @@ def _orch_foreground_detach(command):
     b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
     body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
     to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
-    is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
-    lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
-    inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
-    is to quote the delimiter and write the content with `cat > file` in a call of its own that holds
-    nothing but such writes, then run any other command in a separate call, or to write the text to a file
-    and pass the file.
+    is still DENIED although nothing detaches where the command holds an `&` or a runtime start form
+    (_ORCH_RUNTIME_START_RE), and so is a body `&` under an unquoted delimiter, which the lexer refuses; the
+    guard allows such a body in a command that holds neither (_orch_foreground_detach_lexed), where the
+    open quote has no `&` to hide. The commit-message form's body is NOT denied for an unbalanced
+    apostrophe: it sits inside the outer double quotes, where the scan reads an apostrophe as a literal
+    character. The remedy is to quote the delimiter and write the content with `cat > file` in a call of its
+    own that holds nothing but such writes, then run any other command in a separate call, or to write the
+    text to a file and pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
@@ -31684,20 +31817,121 @@ def _orch_resume_audit_findings(status, reg, root):
     return findings
 
 
+def _orch_record_value_kind(value):
+    """The kind of a registry value in plain words, for a cannot-evaluate finding: an empty string, null,
+    a boolean (tested before a number, since a JSON boolean is a Python int), a number, a list or an
+    object; never a Python type name."""
+    if isinstance(value, str):
+        return "an empty string" if not value else "a string"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "a list"
+    return "an object" if isinstance(value, dict) else "a value of another kind"
+
+
+def _orch_record_unusable(key, value):
+    """The finding for a record key that is present with a value _orch_path refuses. It names the key
+    and the value's kind, never the value itself, so a large value stays out of the text."""
+    return ("the registry declares record.{} with an unusable value ({}), not a non-empty path string: "
+            "cannot-evaluate".format(key, _orch_record_value_kind(value)))
+
+
+def _orch_record_block(reg):
+    """(record table, finding or None). An absent record block is ({}, None): nothing is declared. A
+    record block that is present and not a table (a list, a string, a number, a boolean or null) is
+    ({}, a cannot-evaluate finding naming the block and its kind), so it never reads as nothing to check."""
+    if "record" not in reg:
+        return ({}, None)
+    rec = reg["record"]
+    if isinstance(rec, dict):
+        return (rec, None)
+    return ({}, "the registry declares the record block as {}, not a table, so no record surface can be "
+                "probed: cannot-evaluate".format(_orch_record_value_kind(rec)))
+
+
+def _orch_record_surface_read(path):
+    """Read a declared record surface without waiting for a FIFO writer and without reading past the
+    bound: (data, None) with at most _ORCH_BARRIER_MAX_BYTES + 1 bytes, or (None, detail). The open is
+    os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead
+    of waiting for one; the opened descriptor is fstat'ed and anything not a regular file (a FIFO, a
+    device, a directory) is (None, "not a regular file") without a read; a UNIX socket fails the open
+    (ENXIO). The read asks for at most _ORCH_BARRIER_MAX_BYTES + 1 bytes in all, so a caller tells a file
+    longer than the bound by len(data) > _ORCH_BARRIER_MAX_BYTES and decides what that means for its
+    surface. A failed open (a missing file, a NUL character in the path), read or close is (None, its
+    text). The descriptor is closed exactly once on every path. Not bounded here: the path lookup can
+    stall on a hung mount, and a regular file on a stalled filesystem can stall the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:  # ValueError: a path with a NUL character
+        return (None, str(exc))
+    chunks, total, detail = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            detail = "not a regular file"
+        else:
+            while total <= _ORCH_BARRIER_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except OSError as exc:
+        detail = str(exc)
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            detail = detail or str(exc)
+    if detail is not None:
+        return (None, detail)
+    return (b"".join(chunks), None)
+
+
+def _orch_record_surface_text(data):
+    """Decode the bytes _orch_record_surface_read gave for a record surface (handoff, findings or
+    pending_decisions) with the newline translation a text-mode open applies: a CRLF and then a lone CR
+    each become LF, so a Branch or Gate line, a findings row or a decision row after a CR still starts a
+    line. The bound is judged on the bytes, before this."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
-    finding strings; empty means the recorded state matches observed reality."""
+    finding strings; empty means the recorded state matches observed reality. A record block that is
+    present and not a table is one cannot-evaluate finding (_orch_record_block). Each of handoff,
+    findings and pending_decisions that is present in the record with a value _orch_path refuses (an
+    empty string, null, a number, a boolean, a list or an object) is a cannot-evaluate finding naming the
+    key and the value's kind; an absent key is undeclared. Each declared surface is read by
+    _orch_record_surface_read: a FIFO, a device, a directory or anything else not a regular file is a
+    finding without a read, and no read takes more than _ORCH_BARRIER_MAX_BYTES + 1 bytes. A handoff
+    longer than the bound is a finding, since its Branch and Gate lines are parsed and a truncated handoff
+    cannot be judged; the findings register's content is parsed by _orch_merge_pending_findings, which
+    makes a longer register a finding there; pending_decisions is only required to be readable here, so a
+    longer regular file is no finding from this probe."""
     findings = []
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    rec, block_finding = _orch_record_block(reg)
+    if block_finding is not None:
+        findings.append(block_finding)
+    for key in ("handoff", "findings", "pending_decisions"):
+        if key in rec and _orch_path(root, rec[key]) is None:
+            findings.append(_orch_record_unusable(key, rec[key]))
     handoff_path = _orch_path(root, rec.get("handoff"))
     if handoff_path:
-        try:
-            with open(handoff_path, "r", encoding="utf-8", errors="replace") as fh:
-                handoff = fh.read()
-        except OSError as exc:
+        data, detail = _orch_record_surface_read(handoff_path)
+        if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+            detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+        if detail is not None:
             findings.append("declared handoff unreadable ({}): cannot-evaluate, the barrier holds"
-                            .format(exc))
+                            .format(detail))
             handoff = ""
+        else:
+            handoff = _orch_record_surface_text(data)
         m = re.search(r"^Branch:\s*(\S+)\s*$", handoff, re.MULTILINE)
         if m:
             actual = _head_branch(root)
@@ -31719,12 +31953,10 @@ def _orch_resume_probes(reg, root):
     for key in ("findings", "pending_decisions"):
         path = _orch_path(root, rec.get(key))
         if path:
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    fh.read()
-            except OSError as exc:
+            _data, detail = _orch_record_surface_read(path)
+            if detail is not None:
                 findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
-                                .format(key, exc))
+                                .format(key, detail))
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     if lease:
         path = _orch_path(root, lease.get("path"))
@@ -31759,16 +31991,21 @@ def _orch_resume_probes(reg, root):
 def _orch_merge_pending_findings(reg, root):
     """The cheap in-hook layer of the record-drift check: an OPEN merge_pending row whose pr:N ref
     already has first-parent merge evidence is a divergence finding. tools/check_record_drift.py is
-    the authoritative gate; this probe only feeds the resume audit."""
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    the authoritative gate; this probe only feeds the resume audit. A record block that is not a table
+    and an unusable findings value are reported once, by _orch_resume_probes; here they declare nothing.
+    The register is read by _orch_record_surface_read; one that is not a regular file, cannot be read,
+    or is longer than _ORCH_BARRIER_MAX_BYTES is a cannot-evaluate finding, since a truncated register
+    could hide a merge_pending row."""
+    rec = _orch_record_block(reg)[0]
     path = _orch_path(root, rec.get("findings"))
     if not path:
         return []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError as exc:
-        return ["declared findings register unreadable ({}): cannot-evaluate".format(exc)]
+    data, detail = _orch_record_surface_read(path)
+    if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+        detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+    if detail is not None:
+        return ["declared findings register unreadable ({}): cannot-evaluate".format(detail)]
+    text = _orch_record_surface_text(data)
     prs = set()
     for line in text.splitlines():
         if "merge_pending" in line:
@@ -35571,7 +35808,7 @@ _WRTSCP_MAX_BYTES = 64 * 1024                    # 64 KB: both artifacts are sma
 # SAME human-authorization discipline as any other scope widening (guardrail-config-integrity), so the actor
 # must not be able to self-declare a companion-store widening through a covered write; freezing the registry
 # against its own covered writes closes that self-widening residual (raised independently by our own QA and
-# the cleanlanguage adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
+# an adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
 # reads companion_stores from EITHER file (via _orch_registry, which falls back to the committed
 # .aiqt/orchestration.json when the LOCAL file is absent), so freezing only the LOCAL file left a covered
 # Write of companion_stores into .aiqt/orchestration.json to take effect IN-SESSION (its cross-repo allow
@@ -36692,9 +36929,10 @@ class _DeadlineWindow:
 
     def _take(self):
         """The take, run with every maskable signal blocked, in the order the class docstring gives. The
-        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
-        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
-        back, with the disposition, before the exception goes on."""
+        clock is read just before the take, so the take itself counts as time the window used. That does
+        not keep the restore from being late: _give_back says by how much a caller timer can come back late.
+        Anything that raises once the timer is taken gives it back, with the disposition, before the
+        exception goes on."""
         handler = signal.getsignal(signal.SIGALRM)
         began = time.monotonic()
         timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
@@ -36716,8 +36954,12 @@ class _DeadlineWindow:
 
     def _give_back(self):
         """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
-        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
-        due expiry queued last. `armed` is False when it returns or raises."""
+        operation through _twice, the clock read once to decide whether the caller's timer came due and what
+        it has left, and a due expiry queued last. setitimer counts the countdown from the moment the re-arm
+        runs, so a caller timer comes back late by the time between that clock read and the re-arm (normally
+        microseconds; a stall of the process in between adds its whole length) plus up to a microsecond from
+        setitimer rounding up; a relative re-arm computed before it runs cannot avoid this. `armed` is False
+        when it returns or raises."""
         self._live = False
         if not self.armed:
             return
