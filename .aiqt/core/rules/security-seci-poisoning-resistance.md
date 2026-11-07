@@ -17,8 +17,8 @@ map-owasp-llm-tight: [LLM05]
 map-owasp-llm-broad: [LLM09]
 map-owasp-asi-tight: [ASI06]
 map-owasp-mcp-broad: [MCP03]
-map-csa-aicm-tight: [DSP-21, MDS-08]
-map-csa-aicm-broad: [DSP-23, MDS-01, MDS-06, MDS-07]
+map-csa-aicm-tight: [DSP-21]
+map-csa-aicm-broad: [DSP-23, MDS-01, MDS-06, MDS-07, MDS-08]
 ---
 
 # Resist data, model, and memory poisoning
