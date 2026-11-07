@@ -53,9 +53,28 @@ outside the tree; this entry imports nothing beside the standard library, so the
 file runs alone. It exits nonzero only when it cannot write the decision at all, which fails the
 scope job and so fails Quality gates (fail-closed, never a silent fast lane).
 
+This tool also carries the CI selection plan in SHADOW MODE: a pure select(paths, registry)
+function over the changed-path list and a parsed tools/ci_checks.toml registry, which maps each
+changed path to the registry steps whose triggers claim it and derives a per-job run/skip plan.
+The plan is advisory only: nothing reads it, no output records it, and no job is skipped or
+added by it. The scope job extracts the BASE tree's registry (git --no-replace-objects show
+HEAD^1:tools/ci_checks.toml, the same base-copy discipline as the decision tool itself, inside
+the same decision step, so it still runs before any step that runs the tested tree's code) and
+runs --ci-select --shadow, which prints the plan to the log and appends it to the step summary
+and always exits 0: a malformed or missing base registry, any cannot-evaluate, and any event
+that is not a merge-train pull request each print a cannot-evaluate or full-run plan and never
+fail or change the run. Selection is fail-closed toward the full run: an empty diff, a path
+shape that is not plain repo-relative, a changed CI or selector file (FULL_RUN_PATHS), a path
+no trigger claims, and a path claimed only by the universal ** glob each decide the full run.
+Trigger globs match per path segment (** spans whole segments and needs at least one; * and ?
+never cross a /), exactly as tools/check_ci_selection.py declares them. --explain --base REV
+prints the same plan locally, over the diff against REV and the working tree's registry.
+
 Usage:
   ci_site_scope.py --merge-base REV        decide against REV, print site_only=true|false
   ci_site_scope.py --ci-decide             the scope job entry (environment-driven, above)
+  ci_site_scope.py --ci-select --shadow    the scope job's advisory selection plan (above)
+  ci_site_scope.py --explain --base REV    print the selection plan against REV locally
   ci_site_scope.py --self-test             the self-test
   ci_site_scope.py --execution-report ABS  the self-test, also writing the executed check ids
 """
@@ -171,6 +190,318 @@ MERGE_PARENT_COUNT = 2
 # --no-replace-objects, so a replace ref can neither swap HEAD's parent list nor the trees the
 # diff compares.
 HEX_DIGITS = frozenset(b"0123456789abcdef")
+
+# --- CI selection in shadow mode (module docstring, SHADOW MODE) ---
+# Module globals, so the self-test's revert cases can patch each rule out and observe its
+# vector flip. Every rule is fail-closed toward the full run; none of them, and nothing else
+# in this mode, reads or writes the site_only decision above.
+# A change to CI control or to the selection machinery itself always decides the full run.
+FULL_RUN_PATHS = (
+    ".github/**",
+    ".gitattributes",
+    "tools/ci_checks.toml",
+    "tools/ci_site_scope.py",
+    "tools/check_ci_selection.py",
+    "tools/check_ci_parity.py",
+    "tools/selftest_checks.toml",
+    "tools/run_all_checks.sh",
+)
+UNIVERSAL_GLOB = "**"
+# A path matched by no trigger of any entry decides the full run.
+REQUIRE_CLAIMED = True
+# A path whose every matching trigger is the bare ** glob decides the full run: no entry
+# claims it specifically, so the mapping for it is effectively undeclared.
+REQUIRE_SPECIFIC_CLAIM = True
+# An entry nobody has reviewed is always selected, whatever its triggers say.
+ALWAYS_RUN_UNREVIEWED = True
+REGISTRY_MAX_BYTES = 4 * 1024 * 1024
+SHADOW_HEADER = ("ci-select shadow plan (advisory: nothing reads it, and no job is skipped "
+                 "or added by it)")
+
+
+def _segment_match(part, name):
+    """Whether one path segment matches one glob segment of * and ?: the greedy match that
+    returns to the last * on a mismatch, so * and ? never cross a / (the caller splits on it)."""
+    p = n = 0
+    star, mark = -1, 0
+    while n < len(name):
+        if p < len(part) and part[p] == "*":
+            star, mark = p, n
+            p += 1
+        elif p < len(part) and (part[p] == "?" or part[p] == name[n]):
+            p += 1
+            n += 1
+        elif star >= 0:
+            p, mark = star + 1, mark + 1
+            n = mark
+        else:
+            return False
+    while p < len(part) and part[p] == "*":
+        p += 1
+    return p == len(part)
+
+
+def _glob_match(glob, path):
+    """Whether path fully matches a segment glob: ** spans whole segments (a trailing ** needs
+    at least one), * and ? stay inside one segment. The same semantics as
+    tools/check_ci_selection.py's glob_match, restated here because this file is extracted and
+    run alone (module docstring) and so can import no sibling."""
+    names = path.split("/")
+    parts = glob.split("/")
+    reach = {0}
+    for position, part in enumerate(parts):
+        if part == "**":
+            if position == len(parts) - 1:
+                return any(start < len(names) for start in reach)
+            nxt = set()
+            for start in reach:
+                end = start
+                while True:
+                    nxt.add(end)
+                    if end >= len(names) or not names[end]:
+                        break
+                    end += 1
+            reach = nxt
+        else:
+            reach = {start + 1 for start in reach
+                     if start < len(names) and _segment_match(part, names[start])}
+        if not reach:
+            return False
+    return len(names) in reach
+
+
+def _glob_shape_error(glob):
+    """Why a trigger string is not a repository-relative glob, or None (the shape rules of
+    tools/check_ci_selection.py, restated for the extracted-alone copy)."""
+    if not glob or glob.startswith("/") or "\\" in glob:
+        return "is not a repository-relative glob"
+    if any(segment in ("", ".", "..") for segment in glob.split("/")):
+        return "has an empty, '.' or '..' segment"
+    if any(ord(char) < 0x21 or ord(char) == 0x7F for char in glob):
+        return "carries a space or control character"
+    return None
+
+
+def _registry_entries(registry):
+    """((job, step, triggers, reviewed) rows, None) from a parsed registry, or (None, reason)
+    when any field the selection reads is missing or malformed (fail-closed, cannot evaluate).
+    Fields the selection does not read (categories, scope, the weekly keys) are left to the
+    declaration gate, tools/check_ci_selection.py."""
+    if not isinstance(registry, dict):
+        return None, "the registry is not a table"
+    version = registry.get("format-version")
+    # type() first: True == 1 in Python, and a boolean is not the integer 1 TOML must carry.
+    if type(version) is not int or version != 1:
+        return None, "the registry's format-version is not the integer 1"
+    checks = registry.get("check")
+    if not isinstance(checks, list) or not checks:
+        return None, "the registry's check is not a non-empty array of tables"
+    rows = []
+    for index, entry in enumerate(checks):
+        label = "registry check #{}".format(index + 1)
+        if not isinstance(entry, dict):
+            return None, label + " is not a table"
+        job, step = entry.get("job"), entry.get("step")
+        if not isinstance(job, str) or not job.strip():
+            return None, label + " has no job name"
+        if not isinstance(step, str) or not step.strip():
+            return None, label + " has no step name"
+        triggers = entry.get("triggers")
+        if not isinstance(triggers, list) or not all(isinstance(glob, str) for glob in triggers):
+            return None, label + " triggers is not a list of strings"
+        for glob in triggers:
+            reason = _glob_shape_error(glob)
+            if reason is not None:
+                return None, "{} trigger {!r} {}".format(label, glob, reason)
+        reviewed = entry.get("reviewed")
+        if not isinstance(reviewed, bool):
+            return None, label + " reviewed is not a boolean"
+        rows.append((job, step, tuple(triggers), reviewed))
+    return rows, None
+
+
+def select(paths, registry):
+    """The pure selection plan over the changed paths and a parsed registry (tools/
+    ci_checks.toml as tomllib parses it): (plan, None), or (None, reason) when the inputs
+    cannot be judged at all. The plan is a dict: "full_run" is None or the reason every job
+    runs, "paths" is the tuple of paths decided over (a rename read with detection off records
+    both sides here), and "jobs" maps each registry job, in first-appearance order, to
+    {"run": bool, "why": str}. Fail-closed: an empty list, a path that is not a plain
+    repo-relative file path, a FULL_RUN_PATHS match, an unclaimed path and a path claimed only
+    by the universal ** glob each decide the full run; an unreviewed entry and an entry with
+    no triggers are always selected. The site_only decision above is never read or written."""
+    rows, problem = _registry_entries(registry)
+    if problem is not None:
+        return None, problem
+    try:
+        items = list(paths)
+    except TypeError:
+        return None, "the changed-path list is not iterable"
+    jobs = {}
+    for job, _step, _triggers, _reviewed in rows:
+        jobs.setdefault(job, {"run": False, "why": ""})
+    reason = None
+    if not items:
+        reason = "the diff is empty, so the change cannot be mapped to any trigger"
+    else:
+        for path in items:
+            if not _plain_relative(path):
+                reason = "{!r} is not a plain repo-relative file path".format(path)
+                break
+            if any(_glob_match(glob, path) for glob in FULL_RUN_PATHS):
+                reason = "{} is CI control or selection machinery (FULL_RUN_PATHS)".format(path)
+                break
+            claims = [glob for _job, _step, triggers, _reviewed in rows
+                      for glob in triggers if _glob_match(glob, path)]
+            if REQUIRE_CLAIMED and not claims:
+                reason = "{} matches no trigger of any registry entry".format(path)
+                break
+            if REQUIRE_SPECIFIC_CLAIM and claims and all(
+                    glob == UNIVERSAL_GLOB for glob in claims):
+                reason = "{} is claimed only by the universal ** glob".format(path)
+                break
+    if reason is not None:
+        for job in jobs:
+            jobs[job] = {"run": True, "why": "full run: " + reason}
+        return {"full_run": reason, "paths": tuple(items), "jobs": jobs}, None
+    for job, step, triggers, reviewed in rows:
+        if jobs[job]["run"]:
+            continue
+        if ALWAYS_RUN_UNREVIEWED and not reviewed:
+            jobs[job] = {"run": True,
+                         "why": "step {!r} is unreviewed, so it always runs".format(step)}
+            continue
+        if not triggers:
+            jobs[job] = {"run": True,
+                         "why": "step {!r} declares no triggers, so it always runs".format(step)}
+            continue
+        hit = next(((glob, path) for glob in triggers for path in items
+                    if _glob_match(glob, path)), None)
+        if hit is not None:
+            jobs[job] = {"run": True, "why": "trigger {!r} of step {!r} matches {!r}".format(
+                hit[0], step, hit[1])}
+    for job, verdict in jobs.items():
+        if not verdict["run"]:
+            verdict["why"] = "no trigger of its steps matches a changed path"
+    return {"full_run": None, "paths": tuple(items), "jobs": jobs}, None
+
+
+def plan_lines(plan):
+    """The printable plan, deterministic over its input: the verdict line, one line per changed
+    path (both sides of a rename appear, because the diff is read with rename detection off),
+    and one line per job with its reason. The same text goes to the log and the step summary."""
+    if plan["full_run"] is not None:
+        lines = ["plan: full run ({})".format(plan["full_run"])]
+    else:
+        lines = ["plan: selective over {} changed path(s)".format(len(plan["paths"]))]
+    for path in plan["paths"]:
+        lines.append("  path {!r}".format(path))
+    for job, verdict in plan["jobs"].items():
+        lines.append("  job {}: {} ({})".format(
+            job, "run" if verdict["run"] else "skip", verdict["why"]))
+    return lines
+
+
+def _registry_from_file(path):
+    """(parsed registry, None) read from path, or (None, reason) on any read or parse failure,
+    never an exception: the shadow plan must stay cannot-evaluate, not a crash."""
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(REGISTRY_MAX_BYTES + 1)
+    except OSError as exc:
+        return None, "cannot read the registry at {}: {}".format(path, exc)
+    if len(data) > REGISTRY_MAX_BYTES:
+        return None, "the registry at {} is larger than {} bytes".format(path, REGISTRY_MAX_BYTES)
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        return None, "the registry at {} is not UTF-8: {}".format(path, exc)
+    # ValueError and RecursionError too: tomllib raises a BARE ValueError (not TOMLDecodeError)
+    # on an integer literal past CPython's int-string limit, and a RecursionError on a deeply
+    # nested array or inline table; MemoryError on exhaustion. Each is cannot-evaluate here.
+    try:
+        return tomllib.loads(text), None
+    except (tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        return None, "the registry at {} is not valid TOML: {}: {}".format(
+            path, type(exc).__name__, exc)
+
+
+def ci_select():
+    """The scope job's shadow-selection entry: read the same environment as --ci-decide plus
+    CHECKS_REGISTRY (the path the workflow extracted the BASE tree's tools/ci_checks.toml to),
+    print the plan to the log, append it to GITHUB_STEP_SUMMARY when that is set, and ALWAYS
+    exit 0: the plan is advisory, nothing reads it, GITHUB_OUTPUT is never written, and no
+    failure here may fail or change the run. Any event that is not a merge-train pull request
+    is a full-run plan; a missing or malformed registry, a head that is not the tested
+    two-parent merge, and any diff-read error are each a cannot-evaluate plan. Like
+    --ci-decide, this path must stay import-free beyond the standard library, because the
+    extracted base copy runs alone."""
+    lines = [SHADOW_HEADER]
+    event = os.environ.get("EVENT_NAME", "")
+    head_ref = os.environ.get("HEAD_REF", "")
+    head_repo = os.environ.get("HEAD_REPO", "")
+    base_repo = os.environ.get("BASE_REPO", "")
+    head_sha = os.environ.get("HEAD_SHA", "")
+    registry_path = os.environ.get("CHECKS_REGISTRY", "")
+    plan = None
+    note = ""
+    if not train_head(event, head_ref, head_repo, base_repo):
+        note = ("plan: full run (event {!r} with head ref {!r} of repository {!r} (base {!r}) "
+                "is not a merge-train-* pull request of this repository)".format(
+                    event, head_ref, head_repo, base_repo))
+    elif not registry_path:
+        note = "plan: cannot evaluate (CHECKS_REGISTRY is not set); the full suite runs"
+    else:
+        parents, problem = merge_parents(os.getcwd())
+        if problem is not None:
+            note = "plan: cannot evaluate ({}); the full suite runs".format(problem)
+        elif not head_sha or parents[1] != head_sha:
+            note = ("plan: cannot evaluate (the checked-out merge commit's second parent {!r} "
+                    "is not the pull request's head commit {!r}); the full suite runs".format(
+                        parents[1], head_sha))
+        else:
+            paths, problem = changed_paths(os.getcwd(), parents[0])
+            if problem is None:
+                registry, problem = _registry_from_file(registry_path)
+                if problem is None:
+                    plan, problem = select(paths, registry)
+            if problem is not None:
+                note = "plan: cannot evaluate ({}); the full suite runs".format(problem)
+    if plan is not None:
+        lines.extend(plan_lines(plan))
+    else:
+        lines.append(note)
+    text = "\n".join(lines)
+    print(text)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY", "")
+    if summary:
+        try:
+            with open(summary, "a", encoding="utf-8") as handle:
+                handle.write("```\n" + text + "\n```\n")
+        except OSError as exc:
+            print("cannot append the plan to GITHUB_STEP_SUMMARY: {}".format(exc),
+                  file=sys.stderr)
+    return 0
+
+
+def explain(root, base):
+    """The local plan: read the changed paths against base (rename detection off, both sides
+    recorded), read the WORKING TREE's tools/ci_checks.toml, and print the plan with every
+    reason. Exits 0 on a clean plan, 2 on cannot-evaluate (a bad revision, a missing or
+    malformed registry); unlike --ci-select --shadow this is a local query, so failing loudly
+    is correct here."""
+    paths, problem = changed_paths(root, base)
+    if problem is None:
+        registry, problem = _registry_from_file(
+            str(Path(root) / "tools" / "ci_checks.toml"))
+        if problem is None:
+            plan, problem = select(paths, registry)
+    if problem is not None:
+        print("cannot evaluate: {}".format(problem), file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
+    for line in plan_lines(plan):
+        print(line)
+    return EXIT_OK
 
 
 def _plain_relative(path):
@@ -572,6 +903,62 @@ def _ci_decide_run(repo, event, output, head_ref="merge-train-1", head_repo="exa
     return proc.returncode, recorded, proc.stdout
 
 
+def _ci_select_run(repo, event, head_ref="merge-train-1", head_repo="example/repo",
+                   base_repo="example/repo", head_sha=None, registry=None, output=None,
+                   summary=None):
+    """Run the planted copy's --ci-select --shadow with a controlled environment, as
+    _ci_decide_run runs --ci-decide (None leaves a variable unset); (exit code, printed stdout,
+    whether the GITHUB_OUTPUT target exists afterwards, so a case can pin that the shadow plan
+    never writes an output)."""
+    env = _git_env()
+    for name in ("GITHUB_OUTPUT", "GITHUB_STEP_SUMMARY", "EVENT_NAME", "HEAD_REF", "HEAD_REPO",
+                 "BASE_REPO", "HEAD_SHA", "CHECKS_REGISTRY"):
+        env.pop(name, None)
+    for name, value in (("EVENT_NAME", event), ("HEAD_REF", head_ref), ("HEAD_REPO", head_repo),
+                        ("BASE_REPO", base_repo), ("HEAD_SHA", head_sha),
+                        ("CHECKS_REGISTRY", registry), ("GITHUB_OUTPUT", output),
+                        ("GITHUB_STEP_SUMMARY", summary)):
+        if value is not None:
+            env[name] = str(value)
+    proc = subprocess.run(
+        [sys.executable, "-I", "-B", str(repo / "tools" / "ci_site_scope.py"),
+         "--ci-select", "--shadow"],
+        capture_output=True, text=True, timeout=GIT_TIMEOUT, cwd=str(repo), env=env)
+    written = output is not None and os.path.isfile(str(output))
+    return proc.returncode, proc.stdout, written
+
+
+# The registry the CLI selection cases extract for the planted tool: three reviewed entries so
+# the trigger matching itself decides, with the universal glob claimed by a reviewed whole-repo
+# scan exactly as the real registry's secrets scans claim it.
+SELECT_REGISTRY_TOML = (
+    'format-version = 1\n'
+    '\n'
+    '[[check]]\n'
+    'job = "site"\n'
+    'step = "Site gate"\n'
+    'categories = ["site"]\n'
+    'scope = "sub-tree"\n'
+    'triggers = ["site/**", "opf/site/**", ".aiqt/**"]\n'
+    'reviewed = true\n'
+    '\n'
+    '[[check]]\n'
+    'job = "tools"\n'
+    'step = "Tool gate"\n'
+    'categories = ["ci"]\n'
+    'scope = "sub-tree"\n'
+    'triggers = ["tools/**"]\n'
+    'reviewed = true\n'
+    '\n'
+    '[[check]]\n'
+    'job = "scan"\n'
+    'step = "Whole-repo scan"\n'
+    'categories = ["secrets"]\n'
+    'scope = "whole-repo"\n'
+    'triggers = ["**"]\n'
+    'reviewed = true\n')
+
+
 def self_test(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -660,6 +1047,133 @@ def self_test(report_path=None):
     with _patched(TRAIN_PREFIX=""):
         check("revert/train-prefix-dropped-red",
               train_head("pull_request", "feature-x", "o/r", "o/r"), True)
+    # ---------- the pure selection plan (shadow mode), every rule ----------
+    import fnmatch
+
+    def _select_entry(job, step, triggers, reviewed=True):
+        return {"job": job, "step": step, "categories": ["ci"], "scope": "sub-tree",
+                "triggers": triggers, "reviewed": reviewed}
+    select_rows = [
+        _select_entry("ci", "Workflow gate", [".github/**"]),
+        _select_entry("lint", "Tool gate", ["tools/*.py"]),
+        _select_entry("lint", "Docs gate", ["docs/**"]),
+        _select_entry("site", "Site gate", ["site/**", "opf/site/**", ".aiqt/**"]),
+        _select_entry("scan", "Whole-repo scan", ["**"]),
+        _select_entry("deep", "Deep tool gate", ["tools/**"]),
+        _select_entry("draft", "Unreviewed gate", ["opf/**"], reviewed=False),
+        _select_entry("agg", "Aggregate", []),
+    ]
+    select_registry = {"format-version": 1, "check": select_rows}
+    # the same registry without the universal-glob scan, so an unclaimed path exists
+    narrow_registry = {"format-version": 1,
+                       "check": [row for row in select_rows if row["job"] != "scan"]}
+
+    def _runs(paths, registry):
+        plan, problem = select(paths, registry)
+        if problem is not None or plan is None:
+            return problem
+        return (plan["full_run"],
+                {job: verdict["run"] for job, verdict in plan["jobs"].items()})
+    check("select/selective-single-tool-change", _runs(["tools/x.py"], select_registry),
+          (None, {"ci": False, "lint": True, "site": False, "scan": True, "deep": True,
+                  "draft": True, "agg": True}))
+    check("select/mixed-change-selects-both",
+          _runs(["tools/x.py", "site/a.css"], select_registry),
+          (None, {"ci": False, "lint": True, "site": True, "scan": True, "deep": True,
+                  "draft": True, "agg": True}))
+    empty_plan, empty_problem = select([], select_registry)
+    check("select/empty-diff-full-run",
+          (empty_problem, empty_plan["full_run"] is not None,
+           all(verdict["run"] for verdict in empty_plan["jobs"].values())),
+          (None, True, True))
+    check("select/not-iterable-cannot-evaluate",
+          select(None, select_registry)[0] is None
+          and select(None, select_registry)[1] is not None, True)
+    check("select/bad-path-full-run",
+          [select([path], select_registry)[0]["full_run"] is not None
+           for path in ("site/../a", "/site/a", "", "site//a")],
+          [True, True, True, True])
+    check("select/unknown-path-full-run",
+          "matches no trigger" in (select(["README.md"], narrow_registry)[0]["full_run"] or ""),
+          True)
+    check("select/only-universal-claim-full-run",
+          "claimed only by the universal" in (
+              select(["README.md"], select_registry)[0]["full_run"] or ""),
+          True)
+    check("select/full-run-paths",
+          [select([path], select_registry)[0]["full_run"] is not None
+           for path in (".github/workflows/quality.yml", ".gitattributes",
+                        "tools/ci_checks.toml", "tools/ci_site_scope.py",
+                        "tools/check_ci_selection.py", "tools/check_ci_parity.py",
+                        "tools/selftest_checks.toml", "tools/run_all_checks.sh")],
+          [True] * 8)
+    # segment semantics: * and ? never cross a /, with each boundary tested just inside, at,
+    # and outside it
+    check("select/glob-star-within-segment",
+          [_glob_match("tools/*.py", "tools/x.py"), _glob_match("tools/*.py", "tools/sub/x.py"),
+           _glob_match("*", "a"), _glob_match("*", "a/b"), _glob_match("a?c", "abc"),
+           _glob_match("a?c", "a/c")],
+          [True, False, True, False, True, False])
+    check("select/glob-doublestar-boundary",
+          [_glob_match("docs/**", "docs/a"), _glob_match("docs/**", "docs/a/b"),
+           _glob_match("docs/**", "docs"), _glob_match("docs/**", "docsx/a"),
+           _glob_match("**", "a"), _glob_match("**", "a/b/c")],
+          [True, True, False, False, True, True])
+    check("select/registry-malformed-cannot-evaluate",
+          [select(["site/a"], registry)[0] is None for registry in (
+              None,
+              {"format-version": 2, "check": select_rows},
+              {"format-version": True, "check": select_rows},
+              {"format-version": 1},
+              {"format-version": 1, "check": [None]},
+              {"format-version": 1, "check": [dict(select_rows[0], job=7)]},
+              {"format-version": 1, "check": [dict(select_rows[0], triggers="x")]},
+              {"format-version": 1, "check": [dict(select_rows[0], triggers=[7])]},
+              {"format-version": 1, "check": [dict(select_rows[0], triggers=["/a"])]},
+              {"format-version": 1, "check": [dict(select_rows[0], triggers=["a/../b"])]},
+              {"format-version": 1, "check": [dict(select_rows[0], reviewed="yes")]})],
+          [True] * 11)
+    selective = select(["site/a.css"], select_registry)[0]
+    check("select/unreviewed-always-runs",
+          (selective["full_run"], selective["jobs"]["draft"]["run"],
+           "unreviewed" in selective["jobs"]["draft"]["why"]),
+          (None, True, True))
+    check("select/no-triggers-always-runs",
+          (selective["jobs"]["agg"]["run"],
+           "declares no triggers" in selective["jobs"]["agg"]["why"]),
+          (True, True))
+    check("select/skip-why-recorded", selective["jobs"]["ci"],
+          {"run": False, "why": "no trigger of its steps matches a changed path"})
+    # the site_only decision is unchanged by the selection: the same vectors decide the same
+    # before and after a select() pass, and equal the recorded pre-selection truths
+    unchanged_vectors = (["site/index.html"], ["tools/t.py"], ["site/index.html", "tools/t.py"],
+                         [], ["opf/site/a.css"], [".aiqt/manifest.toml"],
+                         ["opf/site/tooling.html"])
+    unchanged_want = [True, False, False, False, True, True, False]
+    before_selection = [site_only(vector) for vector in unchanged_vectors]
+    for vector in unchanged_vectors:
+        select(vector, select_registry)
+    check("select/site-only-unchanged-before-and-after",
+          (before_selection, [site_only(vector) for vector in unchanged_vectors]),
+          (unchanged_want, unchanged_want))
+    # ---------- selection revert cases: each rule patched out flips its vector ----------
+    with _patched(FULL_RUN_PATHS=()):
+        check("revert/full-run-paths-dropped-red",
+              select([".github/workflows/quality.yml"], select_registry)[0]["full_run"] is None,
+              True)
+    with _patched(REQUIRE_CLAIMED=False):
+        check("revert/unknown-path-rule-dropped-red",
+              select(["README.md"], narrow_registry)[0]["full_run"] is None, True)
+    with _patched(REQUIRE_SPECIFIC_CLAIM=False):
+        check("revert/universal-claim-rule-dropped-red",
+              select(["README.md"], select_registry)[0]["full_run"] is None, True)
+    with _patched(_glob_match=lambda glob, path: fnmatch.fnmatchcase(path, glob)):
+        # fnmatch lets * cross a /, so the segment rule's vector flips to a lint match
+        check("revert/segment-glob-crossing-red",
+              select(["tools/sub/x.py"], select_registry)[0]["jobs"]["lint"]["run"], True)
+    with _patched(ALWAYS_RUN_UNREVIEWED=False):
+        check("revert/unreviewed-rule-dropped-red",
+              select(["site/a.css"], select_registry)[0]["jobs"]["draft"]["run"], False)
     # ---------- the CLI over synthetic repos, as the workflow runs it ----------
     # The probe runs under the fixture environment too: git reads the caller's global config even
     # for --version, so a malformed caller config would otherwise read as git being unavailable.
@@ -962,6 +1476,133 @@ def self_test(report_path=None):
             _plant_tool(bare)
             check("cli/outside-repo-exit-2", _cli_outcome(bare, "HEAD"),
                   (2, "site_only=false"))
+        with tempfile.TemporaryDirectory() as scratch:
+            # ---------- the --ci-select --shadow entry the scope job runs ----------
+            # a merge-train merge whose train side adds, deletes and renames within the site
+            # trees: the plan is selective, both rename sides and every changed path are
+            # recorded, the summary receives the same text, and GITHUB_OUTPUT is NEVER written
+            repo, base = _fixture_repo(Path(scratch), env)
+            registry_file = Path(scratch) / "ci_checks_base.toml"
+            registry_file.write_text(SELECT_REGISTRY_TOML, encoding="utf-8")
+            _fixture_git(repo, "checkout", "-q", "-b", "merge-train-5", env=env)
+            (repo / "site" / "new.html").write_text("a\n")
+            _fixture_git(repo, "add", "site/new.html", env=env)
+            _fixture_git(repo, "rm", "-q", "opf/site/a.css", env=env)
+            _fixture_git(repo, "mv", "site/index.html", "site/renamed.html", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "train site change", env=env)
+            train_tip = _fixture_rev(repo, "HEAD", env)
+            _fixture_git(repo, "checkout", "-q", "main", env=env)
+            _fixture_git(repo, "merge", "-q", "--no-ff", "-m", "merge", "merge-train-5",
+                         env=env)
+            summary_file = Path(scratch) / "summary.md"
+            rc, out, wrote = _ci_select_run(
+                repo, "pull_request", head_sha=train_tip, registry=registry_file,
+                output=Path(scratch) / "never-output", summary=summary_file)
+            with open(summary_file, encoding="utf-8") as handle:
+                summary_text = handle.read()
+            check("ciselect/train-plan-selective-and-summary",
+                  (rc, wrote, "plan: selective over 4 changed path(s)" in out,
+                   "job site: run" in out, "job tools: skip" in out, "job scan: run" in out,
+                   SHADOW_HEADER in out, SHADOW_HEADER in summary_text),
+                  (0, False, True, True, True, True, True, True))
+            check("ciselect/addition-deletion-rename-recorded",
+                  [needle in out for needle in
+                   ("'site/new.html'", "'opf/site/a.css'", "'site/index.html'",
+                    "'site/renamed.html'")],
+                  [True, True, True, True])
+            # every non-train shape is a full-run plan, exit 0, with no output written
+            check("ciselect/push-schedule-dispatch-full-run",
+                  [_ci_select_run(repo, event, head_sha=train_tip, registry=registry_file,
+                                  output=Path(scratch) / ("no-output-" + event))[::2]
+                   + ("plan: full run" in _ci_select_run(
+                       repo, event, head_sha=train_tip, registry=registry_file)[1],)
+                   for event in ("push", "schedule", "workflow_dispatch")],
+                  [(0, False, True)] * 3)
+            check("ciselect/fork-head-full-run",
+                  (lambda result: (result[0], "plan: full run" in result[1]))(
+                      _ci_select_run(repo, "pull_request", head_repo="fork/repo",
+                                     head_sha=train_tip, registry=registry_file)),
+                  (0, True))
+            check("ciselect/non-train-head-full-run",
+                  (lambda result: (result[0], "plan: full run" in result[1]))(
+                      _ci_select_run(repo, "pull_request", head_ref="feature-x",
+                                     head_sha=train_tip, registry=registry_file)),
+                  (0, True))
+            # a missing, malformed or undeclared base registry is a cannot-evaluate plan that
+            # never fails the step and never writes an output
+            check("ciselect/missing-registry-cannot-evaluate",
+                  (lambda result: (result[0], result[2],
+                                   "plan: cannot evaluate" in result[1],
+                                   "cannot read the registry" in result[1]))(
+                      _ci_select_run(repo, "pull_request", head_sha=train_tip,
+                                     registry=Path(scratch) / "absent.toml",
+                                     output=Path(scratch) / "no-output-missing")),
+                  (0, False, True, True))
+            broken_file = Path(scratch) / "broken.toml"
+            broken_file.write_text("format-version = [\n", encoding="utf-8")
+            check("ciselect/malformed-registry-cannot-evaluate",
+                  (lambda result: (result[0], result[2],
+                                   "plan: cannot evaluate" in result[1],
+                                   "not valid TOML" in result[1]))(
+                      _ci_select_run(repo, "pull_request", head_sha=train_tip,
+                                     registry=broken_file,
+                                     output=Path(scratch) / "no-output-broken")),
+                  (0, False, True, True))
+            check("ciselect/unset-registry-cannot-evaluate",
+                  (lambda result: (result[0], "CHECKS_REGISTRY is not set" in result[1]))(
+                      _ci_select_run(repo, "pull_request", head_sha=train_tip)),
+                  (0, True))
+        with tempfile.TemporaryDirectory() as scratch:
+            # a linear head is cannot-evaluate for the shadow plan too, still exit 0
+            repo, base = _fixture_repo(Path(scratch), env)
+            (repo / "site" / "index.html").write_text("b\n")
+            _fixture_git(repo, "add", "-A", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "linear site change", env=env)
+            registry_file = Path(scratch) / "ci_checks_base.toml"
+            registry_file.write_text(SELECT_REGISTRY_TOML, encoding="utf-8")
+            check("ciselect/linear-head-cannot-evaluate",
+                  (lambda result: (result[0], "plan: cannot evaluate" in result[1]))(
+                      _ci_select_run(repo, "pull_request", head_sha="0" * 40,
+                                     registry=registry_file)),
+                  (0, True))
+        with tempfile.TemporaryDirectory() as scratch:
+            # ---------- the local --explain --base REV query ----------
+            repo, base = _fixture_repo(Path(scratch), env)
+            _fixture_git(repo, "mv", "site/index.html", "tools/index.html", env=env)
+            (repo / "site" / "new.html").write_text("a\n")
+            _fixture_git(repo, "add", "site/new.html", env=env)
+            _fixture_git(repo, "rm", "-q", "opf/site/a.css", env=env)
+            _fixture_git(repo, "commit", "-q", "-m", "mixed change", env=env)
+
+            def _explain_outcome(target_repo, base_rev):
+                proc = subprocess.run(
+                    [sys.executable, "-I", "-B",
+                     str(target_repo / "tools" / "ci_site_scope.py"),
+                     "--explain", "--base", base_rev],
+                    capture_output=True, text=True, timeout=GIT_TIMEOUT,
+                    cwd=str(target_repo), env=_git_env())
+                return proc.returncode, proc.stdout, proc.stderr
+            # no registry in the working tree yet: a local cannot-evaluate fails loudly
+            rc, out, err = _explain_outcome(repo, base)
+            check("explain/missing-registry-exit-2",
+                  (rc, "cannot evaluate" in err, "cannot read the registry" in err),
+                  (2, True, True))
+            (repo / "tools" / "ci_checks.toml").write_text(SELECT_REGISTRY_TOML,
+                                                           encoding="utf-8")
+            rc, out, err = _explain_outcome(repo, base)
+            check("explain/plan-selects-and-records-both-rename-sides",
+                  (rc, "plan: selective over 4 changed path(s)" in out,
+                   "'site/index.html'" in out, "'tools/index.html'" in out,
+                   "'site/new.html'" in out, "'opf/site/a.css'" in out,
+                   "job site: run" in out, "job tools: run" in out),
+                  (0, True, True, True, True, True, True, True))
+            rc, out, err = _explain_outcome(repo, "no-such-revision")
+            check("explain/bad-revision-exit-2", (rc, "cannot evaluate" in err), (2, True))
+            (repo / "tools" / "ci_checks.toml").write_text("format-version = [\n",
+                                                           encoding="utf-8")
+            rc, out, err = _explain_outcome(repo, base)
+            check("explain/malformed-registry-exit-2",
+                  (rc, "not valid TOML" in err), (2, True))
     # usage errors are cannot-evaluate through main, with no decision line; the usage text goes to
     # the error stream, captured here so this suite's own error stream stays clean for the
     # execution-reconciliation harness
@@ -977,6 +1618,14 @@ def self_test(report_path=None):
     check("launch/unknown-flag-exit-2", _usage_outcome(["--unknown"]), (2, True))
     check("launch/merge-base-missing-value-exit-2", _usage_outcome(["--merge-base"]), (2, True))
     check("launch/empty-merge-base-exit-2", _usage_outcome(["--merge-base", ""]), (2, True))
+    check("launch/ci-select-without-shadow-exit-2",
+          [_usage_outcome(["--ci-select"]), _usage_outcome(["--shadow"]),
+           _usage_outcome(["--ci-select", "--shadow", "extra"])],
+          [(2, True)] * 3)
+    check("launch/explain-missing-base-exit-2",
+          [_usage_outcome(["--explain"]), _usage_outcome(["--explain", "--base"]),
+           _usage_outcome(["--explain", "--base", ""])],
+          [(2, True)] * 3)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -1000,14 +1649,22 @@ def self_test(report_path=None):
           "with a note naming its cause, false on a valid two-parent merge that changes a tools/ "
           "file, and true on the matching site-only merge, also when the tool is extracted alone "
           "outside any repository, when the merge carries a gpgsig or a mergetag header, when an "
-          "info/grafts file rewrites HEAD's parents and when a replace ref swaps the base); "
+          "info/grafts file rewrites HEAD's parents and when a replace ref swaps the base; the "
+          "shadow selection maps each changed path to the registry triggers that claim it per "
+          "path segment, decides the full run on an empty diff, a bad path shape, a CI or "
+          "selector file, an unclaimed path and a path claimed only by **, each selection rule "
+          "patched out flips its vector, the site_only decision reads the same before and after "
+          "a selection pass, --ci-select --shadow exits 0 and writes no output on every event, "
+          "head shape and registry failure, recording both sides of a rename, and --explain "
+          "prints the same plan locally, exiting 2 on a bad revision or a missing or malformed "
+          "registry); "
           "execution set "
           "reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
 
-USAGE = ("usage: ci_site_scope.py [--merge-base REV | --ci-decide | --self-test | "
-         "--execution-report ABS_PATH]")
+USAGE = ("usage: ci_site_scope.py [--merge-base REV | --ci-decide | --ci-select --shadow | "
+         "--explain --base REV | --self-test | --execution-report ABS_PATH]")
 
 
 def main(argv):
@@ -1019,14 +1676,18 @@ def main(argv):
         return decide(ROOT, argv[1])
     if argv == ["--ci-decide"]:
         return ci_decide()
+    if argv == ["--ci-select", "--shadow"]:
+        return ci_select()
+    if len(argv) == 3 and argv[0] == "--explain" and argv[1] == "--base" and argv[2]:
+        return explain(ROOT, argv[2])
     print(USAGE, file=sys.stderr)
     return EXIT_CANNOT_EVALUATE
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--ci-decide"]:
+    if sys.argv[1:] in (["--ci-decide"], ["--ci-select", "--shadow"]):
         # Dispatched before any sibling import: the scope job runs this file alone, extracted
-        # from the base tree into a directory outside the repository, so the decision path must
-        # not depend on a module that was not extracted with it.
-        sys.exit(ci_decide())
+        # from the base tree into a directory outside the repository, so neither entry's path
+        # may depend on a module that was not extracted with it.
+        sys.exit(main(sys.argv[1:]))
     _exit_report().exit_with(main(sys.argv[1:]))

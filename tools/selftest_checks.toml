@@ -2005,6 +2005,28 @@ expected-check-ids = [
   "revert/regenerated-widened-red",
   "revert/heavy-read-exclusion-dropped-red",
   "revert/train-prefix-dropped-red",
+  # ---------- the pure selection plan (shadow mode) ----------
+  "select/selective-single-tool-change",
+  "select/mixed-change-selects-both",
+  "select/empty-diff-full-run",
+  "select/not-iterable-cannot-evaluate",
+  "select/bad-path-full-run",
+  "select/unknown-path-full-run",
+  "select/only-universal-claim-full-run",
+  "select/full-run-paths",
+  "select/glob-star-within-segment",
+  "select/glob-doublestar-boundary",
+  "select/registry-malformed-cannot-evaluate",
+  "select/unreviewed-always-runs",
+  "select/no-triggers-always-runs",
+  "select/skip-why-recorded",
+  "select/site-only-unchanged-before-and-after",
+  # ---------- selection revert cases ----------
+  "revert/full-run-paths-dropped-red",
+  "revert/unknown-path-rule-dropped-red",
+  "revert/universal-claim-rule-dropped-red",
+  "revert/segment-glob-crossing-red",
+  "revert/unreviewed-rule-dropped-red",
   # ---------- the CLI over synthetic repos ----------
   "cli/site-only-true-exit-0",
   "cli/empty-diff-false-exit-0",
@@ -2035,11 +2057,28 @@ expected-check-ids = [
   "cidecide/replaced-base-raw-object-true",
   "cidecide/no-output-exit-1",
   "cidecide/unwritable-output-exit-1",
+  # ---------- the --ci-select --shadow entry the scope job runs ----------
+  "ciselect/train-plan-selective-and-summary",
+  "ciselect/addition-deletion-rename-recorded",
+  "ciselect/push-schedule-dispatch-full-run",
+  "ciselect/fork-head-full-run",
+  "ciselect/non-train-head-full-run",
+  "ciselect/missing-registry-cannot-evaluate",
+  "ciselect/malformed-registry-cannot-evaluate",
+  "ciselect/unset-registry-cannot-evaluate",
+  "ciselect/linear-head-cannot-evaluate",
+  # ---------- the local --explain --base REV query ----------
+  "explain/missing-registry-exit-2",
+  "explain/plan-selects-and-records-both-rename-sides",
+  "explain/bad-revision-exit-2",
+  "explain/malformed-registry-exit-2",
   # ---------- launch shapes ----------
   "launch/no-arguments-exit-2",
   "launch/unknown-flag-exit-2",
   "launch/merge-base-missing-value-exit-2",
   "launch/empty-merge-base-exit-2",
+  "launch/ci-select-without-shadow-exit-2",
+  "launch/explain-missing-base-exit-2",
 ]
 
 [[suite]]

@@ -190,6 +190,16 @@ jobs:
       # job's whole body (SCOPE_JOB), the step order included; that pin is a consistency check
       # within this reviewed repository, not an authorization (the maintainer's recorded decision
       # above is the authorization).
+      # After the decision is written, the same step prints the CI selection plan in SHADOW
+      # MODE: it extracts the BASE tree's registry the same way it extracted the tool (git
+      # --no-replace-objects show HEAD^1:tools/ci_checks.toml into the runner's temporary
+      # directory, still before any step that runs the pull request's own code) and runs the
+      # already-extracted base tool with --ci-select --shadow, which prints the per-job plan to
+      # the log and the step summary and always exits 0. The plan is advisory only: nothing
+      # reads it, it writes no output, and no job is skipped or added by it; a malformed or
+      # missing base registry, and any cannot-evaluate, print a cannot-evaluate plan and never
+      # fail or change the run (the if ! guard keeps even an unexpected selector failure from
+      # ending this step red).
       - name: Site fast-lane scope decision
         id: decide
         shell: bash
@@ -199,6 +209,7 @@ jobs:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHECKS_REGISTRY: ${{ runner.temp }}/ci_checks_base.toml
         run: |
           set -euo pipefail
           decided="no"
@@ -209,6 +220,19 @@ jobs:
           if [ "${decided}" = "no" ]; then
             echo "site_only=false" >> "${GITHUB_OUTPUT}"
             echo "site_only=false (the base commit has no readable scope tool)"
+          fi
+          planned="no"
+          if git --no-replace-objects show "HEAD^1:tools/ci_checks.toml" > "${RUNNER_TEMP}/ci_checks_base.toml"; then
+            if [ "${decided}" = "yes" ]; then
+              planned="yes"
+            fi
+          fi
+          if [ "${planned}" = "yes" ]; then
+            if ! python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-select --shadow; then
+              echo "ci-select shadow plan: cannot evaluate (the selector exited nonzero); the plan is advisory and the run is unchanged"
+            fi
+          else
+            echo "ci-select shadow plan: cannot evaluate (the base commit has no readable scope tool or registry); the full suite runs"
           fi
 
       - name: Child exit status observable (after the scope decision)
