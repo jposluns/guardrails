@@ -239,6 +239,16 @@ _SUBSET = [
 # plain, one leg at a time, on a 24-CPU host: 1.48 to 1.51 s, each exit 0, load5 5.5 at each start,
 # rounded up. That load is lighter than the run above's (13.7 to 24.6), so the figure is INFERRED at a
 # heavier load, as at any other opf/ tree; the leg's bound is its 1260 s config-lane floor, not this.
+# One row comes from a run at this tree: opf-doctor-selftest carries 288 s, from three runs MEASURED on
+# 2026-11-07 at opf/ tree cb8d93dd8e91bdc110c91b09023937f60bcb08e9, each as the gate runs it (python3
+# -I -B against a copy of opf/ alone, through _materialize and _run_one), plain, one leg at a time, on a
+# shared 80-CPU host: 262.47 s (load5 16.80 at its start), 287.65 s (load5 17.34) and 283.57 s (load5
+# 23.64), each exit 0; the slowest, rounded up. Its former 69 s figure (68.5 s at 7bf8107f) predates
+# later growth of that self-test. A change that alters opf/ makes this figure INFERRED, as for every
+# row. On this tree the leg's bound is still its declared-wait term, 1560 s (3 x 288 = 864 s), so no
+# job's worst case moves; its headroom term would set that bound only at a multiplier above
+# 1560 / 288 = 5.41666... (5.416 x 288 = 1559.808 s stays below it, 5.417 x 288 = 1560.096 s exceeds
+# it), above the 5.412 below.
 # _LOAD_HEADROOM is the allowance for a slower or more loaded host than that run's. The multiplier is
 # an INFERENCE, not a measurement, and no observation supports it (one measured run contradicts it, see
 # below): the host carried other work during the run, but a host loaded beyond it adds contention these
@@ -269,17 +279,21 @@ _SUBSET = [
 # opf-adopt-complete-selftest, both in C, are bounded by the headroom term), and the largest
 # multiplier that fits every job is 5.412 (at 5.413, job C's worst case is 21601.2 s, over its
 # limit).
-# The multiplier does NOT cover the one loaded run measured against it, and cannot. One --self-test
+# The multiplier did NOT cover the one loaded run measured against it, against the ceilings of that
+# day. One --self-test
 # run on 2026-10-15, at the revision carrying this table, at load5 about 50 (between 42 and 61 while it
 # ran), passed (exit 0) with three legs past their ceilings by unequal factors: opf-doctor-selftest
-# took 299.3 s, 4.34 times its 69 s ceiling; opf-init-selftest 299.6 s, 1.31 times its 228 s;
+# took 299.3 s, 4.34 times its then 69 s ceiling; opf-init-selftest 299.6 s, 1.31 times its 228 s;
 # opf-pack-manifest-selftest 28.7 s, 1.69 times its 17 s. opf-doctor-selftest finished inside its
 # then 1140 s bound only because its declared-wait term set that bound (3 x 69 = 207 s alone would
 # have killed it); its bound is now 1560 s, its declared waits (1500 s) plus the 60 s launch margin,
 # above its 1260 s config-lane deadline plus that margin. That is one run at one load,
-# REPORTED by its account and not reproduced here. Covering it on the headroom term alone needs a
-# multiplier above 299.3 / 69 = 4.33768... (so 4.338 to three places, since 4.337 x 69 = 299.253
-# falls short of 299.3); the multiplier is one constant for every leg. At 4.338 every job now fits
+# REPORTED by its account and not reproduced here. Against the 69 s ceiling, covering it on the
+# headroom term alone needed a multiplier above 299.3 / 69 = 4.33768... (so 4.338 to three places,
+# since 4.337 x 69 = 299.253 falls short of 299.3); the multiplier is one constant for every leg.
+# Against this leg's 288 s row measured at this tree (above), 299.3 s is 1.04 times the ceiling,
+# inside 3 x 288 = 864 s; that compares a run at another opf/ tree with a ceiling measured at this
+# one, an INFERENCE, never a measurement of this tree under that load. At 4.338 every job now fits
 # (job C's worst case is then 19021.2 s, the only one that moves, since only opf-adopt-state-selftest's
 # and opf-adopt-complete-selftest's headroom terms, 2602.8 s each, then exceed their other terms), but
 # this change, which holds the lane-member legs to their config-lane deadlines, leaves the
@@ -315,7 +329,7 @@ _LEG_CEILING_S = {
     "opf-homes-contract": 1,  # INFERRED here (measured at 7bf8107f: 0.4 s at load5 13.9)
     "opf-tooling-selftest": 486,  # INFERRED here (measured at 7bf8107f: 485.6 s at load5 13.9)
     "opf-drift-selftest": 3,  # INFERRED here (measured at 7bf8107f: 2.7 s at load5 15.9)
-    "opf-doctor-selftest": 69,  # INFERRED here (measured at 7bf8107f: 68.5 s at load5 15.9)
+    "opf-doctor-selftest": 288,  # MEASURED at cb8d93dd (262.5 to 287.7 s at load5 16.8 to 23.6, three runs)
     "opf-init-selftest": 228,  # INFERRED here (measured at 7bf8107f: 227.4 s at load5 16.3)
     "opf-init-contract-validator-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.1 s at load5 17.6)
     "opf-init-contract-check-selftest": 1,  # INFERRED here (measured at 7bf8107f: 0.1 s at load5 17.6)
@@ -412,7 +426,7 @@ _MIN_LEG_BOUND_S = 60
 # command exited 0 under its 1200 s budget in all three lanes, and the other legs of the closure
 # member took 1868.4 s, 164.9 s and 791.2 s (system) and 1851.2 s, 145.1 s and 568.5 s (malformed)
 # (opf-tooling-selftest, opf-doctor-selftest and opf-adopt-apply-selftest, against recorded ceilings
-# of 486 s, 69 s and 9 s). Earlier CI runs, REPORTED by the former basis of this floor and not
+# of 486 s, 69 s and 9 s then; opf-doctor-selftest's row is now 288 s). Earlier CI runs, REPORTED by the former basis of this floor and not
 # re-read here, killed the leg at its then 273 s bound (3 x its 91 s ceiling) in all four
 # config-injection lanes. Every kill is a LOWER bound on a lane run, never a
 # length: no lane length of this leg has been measured, so that the floor covers its slowest lane
@@ -504,7 +518,7 @@ _CI_WORKFLOW = Path(".github") / "workflows" / "quality.yml"
 # commonmark-headings-selftest) cannot hold. C could (18350 s), but C is the job the headroom
 # multiplier moves: with the leg in C the largest multiplier that fits every job falls from 5.412 to
 # 4.354 (at 4.355, job C's worst case is 21602.0 s), barely above the 4.338 the loaded
-# opf-doctor-selftest run needs (see _LEG_CEILING_S). F, like B and D, is not moved by the headroom
+# opf-doctor-selftest run needed against that leg's former 69 s ceiling (see _LEG_CEILING_S). F, like B and D, is not moved by the headroom
 # multiplier up to 5.412 (the leg's 1260 s floor exceeds its headroom term, 2 s times the
 # multiplier). When the declared waits of opf.py's and _opf_adopt_apply.py's sources grew by 1206 s each
 # (the two legs' declared-wait sums from 3554.012 s to 4760.012 s and from 2820 s to 4026 s), the
