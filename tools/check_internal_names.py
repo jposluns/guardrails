@@ -3315,24 +3315,33 @@ def _self_test(caller_env=None):
             frozen_both = "if rel in frozen_map and " + "hashlib.sha256(raw).hexdigest() == frozen_map[rel]:"
             pdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-pinned-mutant-"))
             try:
-                for check_id, verdict, relname, data, expect, mutations in (
-                        ("pinned-binary/pinned-bytes-pass", pinned_verdict, "font.otf", pinned_font, "clean",
+                # Each vector carries its flip id as a literal beside its check id, so the execution gate
+                # can resolve every id statically.
+                for check_id, flip_id, verdict, relname, data, expect, mutations in (
+                        ("pinned-binary/pinned-bytes-pass", "pinned-binary/pinned-bytes-pass-flip",
+                         pinned_verdict, "font.otf", pinned_font, "clean",
                          ((pin_role, "if False:"),)),
-                        ("pinned-binary/byte-changed-unevaluable", pinned_verdict, "font.otf", font_changed,
+                        ("pinned-binary/byte-changed-unevaluable", "pinned-binary/byte-changed-unevaluable-flip",
+                         pinned_verdict, "font.otf", font_changed,
                          "font.otf" + not_utf8, (("if data is not None and " + pin_digest, "if data is not None:"),)),
-                        ("pinned-binary/other-path-unevaluable", pinned_verdict, "copy.otf", pinned_font,
+                        ("pinned-binary/other-path-unevaluable", "pinned-binary/other-path-unevaluable-flip",
+                         pinned_verdict, "copy.otf", pinned_font,
                          "copy.otf" + not_utf8,
                          ((pin_role, "if True:"),
                           (pin_digest, "hashlib.sha256(data).hexdigest() in pinned_map.values():"))),
-                        ("pinned-binary/pinned-bytes-scanned", pinned_verdict, "font.otf",
+                        ("pinned-binary/pinned-bytes-scanned", "pinned-binary/pinned-bytes-scanned-flip",
+                         pinned_verdict, "font.otf",
                          pinned_font + b"\xc0" + role_word + b"\xff", None,
                          (('scan_role_text(data.' + 'decode("ascii", "replace"), honour_marker=False)',
                            'scan_role_text("")'),)),
-                        ("tracker/frozen-pinned-vendor-passes", frozen_verdict, "vendor/builder.js", builder,
+                        ("tracker/frozen-pinned-vendor-passes", "tracker/frozen-pinned-vendor-passes-flip",
+                         frozen_verdict, "vendor/builder.js", builder,
                          "clean", ((frozen_both, "if False:"),)),
-                        ("tracker/frozen-pinned-vendor-byte-changed", frozen_verdict, "vendor/builder.js",
+                        ("tracker/frozen-pinned-vendor-byte-changed", "tracker/frozen-pinned-vendor-byte-changed-flip",
+                         frozen_verdict, "vendor/builder.js",
                          builder_changed, "vendor/builder.js" + ratchet_zero, ((frozen_both, "if rel in frozen_map:"),)),
-                        ("tracker/frozen-pinned-vendor-other-path", frozen_verdict, "vendor/copy.js", builder,
+                        ("tracker/frozen-pinned-vendor-other-path", "tracker/frozen-pinned-vendor-other-path-flip",
+                         frozen_verdict, "vendor/copy.js", builder,
                          "vendor/copy.js" + ratchet_zero,
                          ((frozen_both, "if hashlib.sha256(raw).hexdigest() in frozen_map.values():"),))):
                     if expect is None:
@@ -3353,7 +3362,7 @@ def _self_test(caller_env=None):
                         flipped = verdict(module, relname, data)
                         if (flipped == expect) if expect == "clean" else (expect in flipped):
                             faults.append("the vector still holds with its binding removed")
-                    check(check_id + "-flip", not faults, (faults, flipped))
+                    check(flip_id, not faults, (faults, flipped))
                     font_pins = (("font.otf", hashlib.sha256(pinned_font).hexdigest()),)
             finally:
                 shutil.rmtree(pdir, ignore_errors=True)
