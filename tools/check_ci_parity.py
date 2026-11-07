@@ -624,6 +624,12 @@ REPO_GATES = frozenset({
     ".github/check_newtab_contract.py",
 })
 
+# The pinned build gates copied from the shared site template package, each named; no general .baseline
+# executable allowance. The pin gate (tools/check_baseline_pin.py) holds their bytes.
+PINNED_BUILD_GATES = frozenset({
+    ".baseline/check_palette.py",
+})
+
 # The one status branch protection requires. In a workflow with more than one job,
 # exactly one job carries this name, a job-level if: of always(), and a needs: list
 # naming every other job exactly once (module docstring, REQUIRED STATUS).
@@ -683,18 +689,80 @@ REQUIRED_STATUS_JOB = (
     "        " + STEP_SHELL_LINE,
     "        env:",
     "          RESULTS: ${{ join(needs.*.result, ' ') }}",
+    "          SITE_ONLY: ${{ needs.scope.outputs.site_only }}",
+    "          EVENT_NAME: ${{ github.event_name }}",
+    "          HEAD_REF: ${{ github.head_ref }}",
+    "          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}",
+    "          BASE_REPO: ${{ github.repository }}",
+    "          OTHER_RESULTS: ${{ needs.scope.result || 'missing' }} "
+    "${{ needs.secrets.result || 'missing' }} "
+    "${{ needs.site.result || 'missing' }} "
+    "${{ needs.opf-closure-a.result || 'missing' }} "
+    "${{ needs.opf-closure-b.result || 'missing' }} "
+    "${{ needs.opf-closure-c.result || 'missing' }} "
+    "${{ needs.opf-closure-d.result || 'missing' }} "
+    "${{ needs.opf-closure-e.result || 'missing' }} "
+    "${{ needs.opf-closure-f.result || 'missing' }} "
+    "${{ needs.release.result || 'missing' }} "
+    "${{ needs.generated.result || 'missing' }} "
+    "${{ needs.registry.result || 'missing' }}",
+    "          HEAVY_RESULTS: ${{ needs.opf-tooling-a.result || 'missing' }} "
+    "${{ needs.opf-tooling-b.result || 'missing' }} "
+    "${{ needs.opf-tooling-c.result || 'missing' }} "
+    "${{ needs.selftest-execution.result || 'missing' }} "
+    "${{ needs.git-fixture-env-core.result || 'missing' }} "
+    "${{ needs.opf-host-patch.result || 'missing' }} "
+    "${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} "
+    "${{ needs.git-fixture-env-config-combined-host-patch.result || "
+    "'missing' }} "
+    "${{ needs.git-fixture-env-config-malformed-host-patch.result || "
+    "'missing' }} "
+    "${{ needs.git-fixture-env-config-system-host-patch.result || "
+    "'missing' }} "
+    "${{ needs.byte-canon-matrix.result || 'missing' }}",
     "        run: |",
     "          set -euo pipefail",
     '          echo "Needed job results: ${RESULTS}"',
-    '          rest="${RESULTS:-none}"',
-    '          rest="${rest//success/}"',
-    '          rest="${rest// /}"',
-    '          if [ -n "$rest" ]; then',
-    '            echo "Quality gates: FAILED, every needed job must conclude '
-    'success"',
+    '          echo "site_only: ${SITE_ONLY:-unset}"',
+    '          other="${OTHER_RESULTS:-missing}"',
+    '          other="${other//success/}"',
+    '          other="${other// /}"',
+    '          if [ -n "$other" ]; then',
+    '            echo "Quality gates: FAILED, every always-run job must '
+    'conclude success"',
     "            exit 1",
     "          fi",
-    '          echo "Quality gates: PASS, every needed job concluded success"',
+    '          heavy="${HEAVY_RESULTS:-missing}"',
+    '          heavy="${heavy//success/}"',
+    '          accept="no"',
+    '          if [ "${SITE_ONLY:-false}" = "true" ]; then',
+    '            accept="yes"',
+    "          fi",
+    '          if [ "${EVENT_NAME:-}" != "pull_request" ]; then',
+    '            accept="no"',
+    "          fi",
+    '          head_ref="${HEAD_REF:-}"',
+    '          if [ "${head_ref}" = "${head_ref#merge-train-}" ]; then',
+    '            accept="no"',
+    "          fi",
+    '          if [ -z "${HEAD_REPO:-}" ]; then',
+    '            accept="no"',
+    "          fi",
+    '          if [ "${HEAD_REPO:-}" != "${BASE_REPO:-}" ]; then',
+    '            accept="no"',
+    "          fi",
+    '          if [ "${accept}" = "yes" ]; then',
+    '            heavy="${heavy//skipped/}"',
+    "          fi",
+    '          heavy="${heavy// /}"',
+    '          if [ -n "$heavy" ]; then',
+    '            echo "Quality gates: FAILED, a heavy job must conclude '
+    'success, or be skipped only in a site-only merge-train pull request '
+    'of this repository"',
+    "            exit 1",
+    "          fi",
+    '          echo "Quality gates: PASS, every needed job concluded as '
+    'required"',
 )
 
 # The one top-level concurrency: block quality.yml must carry, compared line for line
@@ -715,11 +783,20 @@ CONCURRENCY_BLOCK = (
 # written, and the quality.yml jobs that must carry it (module docstring, LANES): a
 # heavy job runs on a push and on a pull request whose head is a merge-train-*
 # branch of this repository, and is skipped on every other pull request, which
-# Quality gates reads as not success.
+# Quality gates reads as not success. The site fast lane adds the leading
+# needs.scope condition: when the scope job reads the pull request as site-only
+# (every changed path in the site allowlist), the heavy job is skipped and
+# Quality gates passes that one skip; on a push the scope job always emits
+# site_only=false, so a push to main runs the full suite. Each heavy job must
+# carry needs: scope, and the scope job must be present, or the condition reads
+# an empty output and the fast lane silently never engages.
 HEAVY_JOB_IF_LINE = (
-    "    if: github.event_name == 'push' || "
+    "    if: needs.scope.outputs.site_only != 'true' && "
+    "(github.event_name == 'push' || "
     "(startsWith(github.head_ref, 'merge-train-') && "
-    "github.event.pull_request.head.repo.full_name == github.repository)")
+    "github.event.pull_request.head.repo.full_name == github.repository))")
+HEAVY_JOB_NEEDS_LINE = "    needs: scope"
+SCOPE_JOB_ID = "scope"
 HEAVY_JOBS = frozenset({
     "opf-tooling-a", "opf-tooling-b", "opf-tooling-c", "selftest-execution",
     "git-fixture-env-core",
@@ -727,6 +804,80 @@ HEAVY_JOBS = frozenset({
     "git-fixture-env-config-combined-host-patch",
     "git-fixture-env-config-malformed-host-patch",
     "git-fixture-env-config-system-host-patch", "byte-canon-matrix",
+})
+
+# The scope job, pinned line for line after its job-id line as REQUIRED_STATUS_JOB pins
+# the Quality gates job (module docstring, LANES). Its decision step runs FIRST, before
+# any step that runs the checkout's own code, and extracts the base tree's copy of
+# tools/ci_site_scope.py (git --no-replace-objects show HEAD^1:... into the runner's
+# temporary directory), so an ordinary train cannot repoint the decision from inside
+# this job (a train that edits the workflow itself is outside what any pull_request
+# workflow covers); when the base has no readable copy the step writes
+# site_only=false, the full suite. The extracted tool then requires HEAD's raw commit
+# object to record exactly two parents, the second equal to HEAD_SHA, and reads the
+# diff against the first; the job's comments state that rule, and this pin compares
+# the job's non-comment lines only, so it holds the lines that run the rule, not the
+# comments that describe it. Any departure in the job body (outputs:, env:, a
+# step, a run line, the step ORDER) is a lane finding, because those lines choose
+# which copy of the tool decides, which inputs it reads and what runs before it. This
+# pin is a consistency check within the reviewed repository, not an authorization.
+SCOPE_JOB = (
+    "    name: Site fast-lane scope",
+    "    runs-on: ubuntu-latest",
+    "    outputs:",
+    "      site_only: ${{ steps.decide.outputs.site_only }}",
+    "    steps:",
+    "      - uses: actions/checkout@v4",
+    "        with:",
+    "          fetch-depth: 0",
+    "          fetch-tags: true",
+    "          persist-credentials: false",
+    "      - uses: actions/setup-python@v5",
+    "        with:",
+    "          python-version: '3.14'",
+    "      - name: Site fast-lane scope decision",
+    "        id: decide",
+    "        " + STEP_SHELL_LINE,
+    "        env:",
+    "          EVENT_NAME: ${{ github.event_name }}",
+    "          HEAD_REF: ${{ github.head_ref }}",
+    "          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}",
+    "          BASE_REPO: ${{ github.repository }}",
+    "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+    "        run: |",
+    "          set -euo pipefail",
+    '          decided="no"',
+    '          if git --no-replace-objects show "HEAD^1:tools/ci_site_scope.py" > '
+    '"${RUNNER_TEMP}/ci_site_scope_base.py"; then',
+    '            python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
+    '            decided="yes"',
+    "          fi",
+    '          if [ "${decided}" = "no" ]; then',
+    '            echo "site_only=false" >> "${GITHUB_OUTPUT}"',
+    '            echo "site_only=false (the base commit has no readable scope tool)"',
+    "          fi",
+    "      - name: Child exit status observable (after the scope decision)",
+    "        " + STEP_SHELL_LINE,
+    "        run: python3 -I -B opf/tools/_child_status.py",
+    "      - name: Site scope self-test",
+    "        " + STEP_SHELL_LINE,
+    "        run: python3 -I -B tools/ci_site_scope.py --self-test",
+)
+# The decide step's run lines that the generic grammar would refuse, admitted exactly
+# as written because the SCOPE_JOB pin holds them in place: the base-copy extraction
+# (a git show with a redirect, replace refs disabled), the base-copy launch (a
+# runtime-derived target path)
+# and the fail-closed fallback write. The git show line names tools/ci_site_scope.py,
+# so that path is recorded as this line's extraction origin for the shadow scan; the
+# step contributes no parity member (the tool's self-test member comes from its own
+# step, and no local leg runs --ci-decide).
+SCOPE_DECIDE_SHOW_LINE = (
+    'if git --no-replace-objects show "HEAD^1:tools/ci_site_scope.py" > '
+    '"${RUNNER_TEMP}/ci_site_scope_base.py"; then')
+SCOPE_DECIDE_RUN_LINES = frozenset({
+    SCOPE_DECIDE_SHOW_LINE,
+    'python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
+    'echo "site_only=false" >> "${GITHUB_OUTPUT}"',
 })
 
 # The members that may run only in a job carrying the pinned HEAVY_JOB_IF_LINE
@@ -1282,7 +1433,8 @@ def normalize(tokens, masked_ok=False, raws=None):
                 "dynamic-target",
                 "gate target must be a literal tools/*.py path",
             )
-        if (target not in REPO_GATES and not PY_TARGET_RE.fullmatch(target)
+        if (target not in REPO_GATES and target not in PINNED_BUILD_GATES
+                and not PY_TARGET_RE.fullmatch(target)
                 or ".." in target.split("/")):
             return Result(
                 False,
@@ -1290,7 +1442,7 @@ def normalize(tokens, masked_ok=False, raws=None):
                 "gate-target",
                 "unsupported gate target {!r}; expected a literal "
                 "tools/*.py path, {} or gitleaks dir".format(
-                    target, " or ".join(sorted(REPO_GATES))),
+                    target, " or ".join(sorted(REPO_GATES | PINNED_BUILD_GATES))),
             )
         canonical = [target]
 
@@ -2321,6 +2473,18 @@ def _classify_ci_command(
         ))
         return
 
+    if block and stripped in SCOPE_DECIDE_RUN_LINES:
+        # The pinned scope-decision lines (SCOPE_JOB): the base-copy extraction, the
+        # base-copy launch and the fail-closed fallback write, each admitted only as
+        # the exact reviewed spelling the scope-job pin holds in place. The git show
+        # line names tools/ci_site_scope.py, so that path is recorded as this line's
+        # extraction origin for the shadow scan; no parity member is added (no local
+        # leg runs --ci-decide, and the self-test member comes from its own step).
+        if stripped == SCOPE_DECIDE_SHOW_LINE:
+            origins.setdefault(line_number, set()).add(
+                "tools/ci_site_scope.py")
+        return
+
     tokenized = _tokenize(stripped)
     if not tokenized.ok:
         diagnostics.append(_diagnostic(
@@ -2561,6 +2725,42 @@ def _aggregator_shape_findings(aggregator, lines, start):
     return []
 
 
+def _scope_job_shape_findings(lines, start, source):
+    """Compare the scope job's body (the lines after its job-id line on lines[start])
+    with SCOPE_JOB, blank and whole-line comment lines skipped, every other line
+    exactly. Any departure is a lane finding: the job's outputs:, env: and steps are
+    what choose which copy of tools/ci_site_scope.py decides the fast lane and which
+    inputs it reads, so none of them may drift unreviewed."""
+    body = []
+    for index in range(start + 1, len(lines)):
+        raw = lines[index]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent <= 2:
+            break
+        body.append((index + 1, raw))
+    for position in range(max(len(body), len(SCOPE_JOB))):
+        got = body[position] if position < len(body) else None
+        want = SCOPE_JOB[position] if position < len(SCOPE_JOB) else None
+        if got is None or got[1] != want:
+            return [Finding(
+                "lane",
+                SCOPE_JOB_ID,
+                "the scope job of {} departs from the pinned scope job "
+                "(SCOPE_JOB) at {}: got {!r}, expected {!r}; only the pinned "
+                "body is known to decide the fast lane with the base "
+                "commit's copy of the scope tool".format(
+                    source,
+                    "the end of the job" if got is None
+                    else "line {}".format(got[0]),
+                    None if got is None else got[1].strip(),
+                    None if want is None else want.strip()),
+            )]
+    return []
+
+
 def _required_status_findings(
         job_ids, job_fields, lines, source, diagnostics):
     """Flag a result-masking key on any job; in a multi-job workflow, also
@@ -2663,6 +2863,30 @@ def _lane_findings(job_ids, job_fields, lines, source, job_members):
                 "removal or rename lets its lane run without the "
                 "if:".format(job, source),
             ))
+        if HEAVY_JOBS & set(job_fields) and SCOPE_JOB_ID not in job_fields:
+            findings.append(Finding(
+                "lane",
+                SCOPE_JOB_ID,
+                "the scope job {!r} is missing from {}; the pinned "
+                "HEAVY_JOB_IF_LINE reads needs.scope.outputs.site_only, so "
+                "without the scope job the fast lane reads an empty output "
+                "and never engages, and the site-only skip is "
+                "unreviewable".format(SCOPE_JOB_ID, source),
+            ))
+        for job in sorted(HEAVY_JOBS & set(job_fields)):
+            if job_fields[job].get("needs", (0, ""))[1] != SCOPE_JOB_ID:
+                findings.append(Finding(
+                    "lane",
+                    job,
+                    "heavy job {!r} of {} does not carry needs: scope; the "
+                    "pinned HEAVY_JOB_IF_LINE reads "
+                    "needs.scope.outputs.site_only, which is empty without "
+                    "the needs: edge, so the fast lane silently never "
+                    "engages".format(job, source),
+                ))
+        if SCOPE_JOB_ID in job_fields:
+            findings.extend(_scope_job_shape_findings(
+                lines, job_fields[SCOPE_JOB_ID]["start"], source))
     if block is None and source == CI_SOURCE:
         findings.append(Finding(
             "lane",
@@ -3337,6 +3561,14 @@ def extract_ci(text, source=CI_SOURCE):
 
             if stripped == STEP_SHELL_LINE:
                 current_step["shell"].append(line_number)
+                index += 1
+                continue
+
+            if re.fullmatch(r"id: [a-z][a-z0-9_-]*", stripped):
+                # A step id only names the step for a steps.<id>.outputs
+                # read (the scope job's site_only output); it cannot mask
+                # a result or change what runs, so a plain identifier is
+                # admitted and any other spelling stays refused.
                 index += 1
                 continue
 
@@ -5670,6 +5902,9 @@ def self_test():
         # The child-status probe and its coverage gate, mandatory as the contracts are.
         "python3 -I -B opf/tools/_child_status.py",
         "python3 -I -B tools/check_child_status_coverage.py",
+        # The scope tool's self-test, which the pinned SCOPE_JOB fixture body runs on
+        # the CI side of every heavy fixture, so both sides carry it everywhere.
+        "python3 -I -B tools/ci_site_scope.py --self-test",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -5698,13 +5933,18 @@ def self_test():
         return "\n".join(lines) + "\n"
 
     # Every HEAVY_JOBS job, each carrying the pinned if:, which the LANES
-    # presence rule requires of every quality.yml fixture.
-    heavy_job_lines = tuple(
+    # presence rule requires of every quality.yml fixture; the scope job is the
+    # pinned SCOPE_JOB body, which the scope-pin rule requires wherever heavy
+    # jobs read its output.
+    heavy_job_lines = (
+        ("  scope:",) + SCOPE_JOB
+    ) + tuple(
         line
         for job in sorted(HEAVY_JOBS)
         for line in (
             "  " + job + ":",
             HEAVY_JOB_IF_LINE,
+            HEAVY_JOB_NEEDS_LINE,
             "    runs-on: ubuntu-latest",
             "    steps:",
             "      - uses: actions/checkout@v4",
@@ -5740,7 +5980,7 @@ def self_test():
             lines.extend(("  gates:",) + REQUIRED_STATUS_JOB[:2])
             lines.append("    needs:")
             lines.extend("      - " + job
-                         for job in ["quality"] + sorted(HEAVY_JOBS))
+                         for job in ["quality", "scope"] + sorted(HEAVY_JOBS))
             lines.extend(REQUIRED_STATUS_JOB[3:])
         return "\n".join(lines) + "\n"
 
@@ -5856,13 +6096,29 @@ def self_test():
             failures.append(
                 "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
                 "mandatory member would be undetected again".format(member))
+        # The pinned SCOPE_JOB fixture body still runs the child-status probe on the
+        # CI side, so dropping that member from both command rosters leaves it CI-only
+        # there; the missing-mandatory finding (absent from the local runner) still
+        # fires, which is what this vector guards.
         case("01h mandatory member removed from both runners: " + member,
              evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
-             1, ("missing-mandatory",), (), ())
+             1, ("missing-mandatory",), (),
+             ("opf/tools/_child_status.py",)
+             if member == "opf/tools/_child_status.py" else ())
     unknown = "python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
                   ci_fixture(common + (unknown,)), ()), 2)
+    # The pinned palette gate is accepted by its exact path on both runners; a sibling under .baseline/
+    # is still refused, so the allowance is the one named file.
+    palette = "python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css"
+    case("01i pinned build gate matched",
+         evaluate(local_fixture(common + (palette,)), ci_fixture(common + (palette,)), ()), 0)
+    case("01j pinned build gate local-only",
+         evaluate(local_fixture(common + (palette,)), ci_fixture(common), ()), 1, ("local-only",))
+    sibling = "python3 -I -B .baseline/other.py"
+    case("01k unpinned .baseline executable refused",
+         evaluate(local_fixture(common + (sibling,)), ci_fixture(common + (sibling,)), ()), 2)
 
     fail_without_change = evaluate(
         local_fixture(common + (
@@ -7551,7 +7807,8 @@ def self_test():
 
     aggregator_head = ("  quality:", "    name: Quality gates")
     always = ("    if: always()",)
-    heavy_needs = tuple("      - " + job for job in sorted(HEAVY_JOBS))
+    heavy_needs = ("      - scope",) + tuple(
+        "      - " + job for job in sorted(HEAVY_JOBS))
     needs_both = ("    needs:", "      - one", "      - two") + heavy_needs
     multi_local = local_fixture(
         common + ("python3 tools/a.py", "python3 tools/b.py"))
@@ -7609,7 +7866,8 @@ def self_test():
          evaluate(multi_local,
                   multi_job_ci(aggregator_head + always
                                + ("    needs: [" + ", ".join(
-                                   ["one", "two"] + sorted(HEAVY_JOBS))
+                                   ["one", "two", "scope"]
+                                   + sorted(HEAVY_JOBS))
                                    + "]",)), ()),
          0)
     case("30k a needs: entry that is not a plain job id is cannot-evaluate",
@@ -7826,18 +8084,32 @@ def self_test():
     # needed result is not success is a finding. Each red fixture passed
     # before the change.
     for label, old, new in (
-            ("33a a deleted exit 1", "            exit 1\n", ""),
+            ("33a a deleted always-run exit 1",
+             "must conclude success\"\n            exit 1\n",
+             "must conclude success\"\n"),
+            ("33a2 a deleted heavy exit 1",
+             "of this repository\"\n            exit 1\n",
+             "of this repository\"\n"),
             ("33b a success filter that strips every result",
-             'rest="${rest//success/}"', 'rest="${rest//[a-z]/}"'),
+             'other="${other//success/}"', 'other="${other//[a-z]/}"'),
             ("33c an empty result read as success",
-             'rest="${RESULTS:-none}"', 'rest="${RESULTS:-success}"'),
-            ("33d an inverted test", 'if [ -n "$rest" ]',
-             'if [ -z "$rest" ]'),
+             'other="${OTHER_RESULTS:-missing}"',
+             'other="${OTHER_RESULTS:-success}"'),
+            ("33c2 an empty heavy result read as success",
+             'heavy="${HEAVY_RESULTS:-missing}"',
+             'heavy="${HEAVY_RESULTS:-success}"'),
+            ("33c3 a site-only default of true",
+             'if [ "${SITE_ONLY:-false}" = "true" ]; then',
+             'if [ "${SITE_ONLY:-true}" = "true" ]; then'),
+            ("33d an inverted test", 'if [ -n "$other" ]',
+             'if [ -z "$other" ]'),
+            ("33d2 an inverted heavy test", 'if [ -n "$heavy" ]',
+             'if [ -z "$heavy" ]'),
             ("33e if: ${{ always() }}", "    if: always()\n",
              "    if: ${{ always() }}\n"),
             ("33f an added step",
-             "concluded success\"\n",
-             "concluded success\"\n"
+             "concluded as required\"\n",
+             "concluded as required\"\n"
              "      - uses: actions/checkout@v4\n")):
         finding_case(
             label + " in Quality gates is a finding",
@@ -7877,10 +8149,30 @@ def self_test():
         failures.append("33i the pinned run: body is not indented 10")
     bash = shutil.which("bash", path=os.defpath)
 
-    def aggregate(body, results):
+    def aggregate(body, other, heavy, site_only, results="unused",
+                  event="pull_request", head_ref="merge-train-1",
+                  head_repo="octo/repo", base_repo="octo/repo"):
+        # The default head context is an accepting one (a merge-train pull request of
+        # this repository), so the result vectors keep testing the result logic and
+        # the train vectors below vary one condition at a time; None leaves the
+        # variable unset.
         env = dict(PATH=os.defpath, LC_ALL="C")
         if results is not None:
             env["RESULTS"] = results
+        if other is not None:
+            env["OTHER_RESULTS"] = other
+        if heavy is not None:
+            env["HEAVY_RESULTS"] = heavy
+        if site_only is not None:
+            env["SITE_ONLY"] = site_only
+        if event is not None:
+            env["EVENT_NAME"] = event
+        if head_ref is not None:
+            env["HEAD_REF"] = head_ref
+        if head_repo is not None:
+            env["HEAD_REPO"] = head_repo
+        if base_repo is not None:
+            env["BASE_REPO"] = base_repo
         return subprocess.run(
             ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
              "\n".join(body) + "\n"],
@@ -7890,31 +8182,116 @@ def self_test():
     if bash is None:
         failures.append("33i bash not found on " + os.defpath)
     else:
-        for results, want in (
-                (" ".join(("success",) * 10), 0),
-                ("success", 0),
-                ("failure", 1),
-                ("cancelled", 1),
-                ("skipped", 1),
-                ("success failure", 1),
-                ("success cancelled success", 1),
-                ("success skipped", 1),
-                ("neutral", 1),
-                ("", 1),
-                (None, 1)):
+        # (OTHER_RESULTS, HEAVY_RESULTS, SITE_ONLY, want): every non-heavy
+        # result must be success whatever SITE_ONLY says; a heavy skipped
+        # passes only under SITE_ONLY exactly true; every other spelling,
+        # case, empty or unset value fails.
+        for other, heavy, site_only, want in (
+                (" ".join(("success",) * 12),
+                 " ".join(("success",) * 11), None, 0),
+                ("success", "success", None, 0),
+                ("success", "success", "true", 0),
+                ("success", "success", "false", 0),
+                ("success success", "skipped skipped", "true", 0),
+                ("success", "success skipped success", "true", 0),
+                ("success", "skipped", None, 1),
+                ("success", "skipped", "false", 1),
+                ("success", "skipped", "TRUE", 1),
+                ("success", "skipped", "true ", 1),
+                ("success", "failure", "true", 1),
+                ("success", "cancelled", "true", 1),
+                ("success", "neutral", "true", 1),
+                ("skipped", "success", "true", 1),
+                ("failure", "success", None, 1),
+                ("cancelled", "success", None, 1),
+                ("success failure", "success", None, 1),
+                ("neutral", "success", None, 1),
+                ("", "success", None, 1),
+                ("success", "", None, 1),
+                (None, "success", None, 1),
+                ("success", None, None, 1),
+                (None, None, None, 1)):
             count += 1
-            got = aggregate(pinned_body, results)
+            got = aggregate(pinned_body, other, heavy, site_only)
             if got != want:
                 failures.append(
-                    "33i pinned body with RESULTS={!r}: exit {}, "
-                    "expected {}".format(results, got, want))
+                    "33i pinned body with OTHER_RESULTS={!r} "
+                    "HEAVY_RESULTS={!r} SITE_ONLY={!r}: exit {}, "
+                    "expected {}".format(other, heavy, site_only, got, want))
+        # The skip-acceptance train conditions: a skipped heavy job passes only in a
+        # pull_request whose head ref starts with merge-train- and whose head
+        # repository is non-empty and equal to the base repository; the prefix
+        # boundary is tested just inside, exactly at, and just outside it.
+        for label, overrides, want in (
+                ("push event", dict(event="push"), 1),
+                ("no event", dict(event=None), 1),
+                ("non-train head", dict(head_ref="feature-x"), 1),
+                ("empty head ref", dict(head_ref=""), 1),
+                ("unset head ref", dict(head_ref=None), 1),
+                ("head ref just inside the prefix",
+                 dict(head_ref="merge-train-7"), 0),
+                ("head ref exactly the prefix",
+                 dict(head_ref="merge-train-"), 0),
+                ("head ref just outside the prefix",
+                 dict(head_ref="merge-train"), 1),
+                ("head ref glued past the prefix",
+                 dict(head_ref="merge-trainx"), 1),
+                ("fork head repository", dict(head_repo="fork/repo"), 1),
+                ("empty repositories",
+                 dict(head_repo="", base_repo=""), 1),
+                ("unset repositories",
+                 dict(head_repo=None, base_repo=None), 1)):
+            count += 1
+            got = aggregate(pinned_body, "success", "skipped", "true",
+                            **overrides)
+            if got != want:
+                failures.append(
+                    "33i pinned body with a skipped heavy job, SITE_ONLY=true "
+                    "and {}: exit {}, expected {}".format(label, got, want))
         count += 1
         if aggregate(tuple(line for line in pinned_body
                            if line.strip() != "exit 1"),
-                     "success failure") != 0:
+                     "success failure", "success", None) != 0:
             failures.append(
                 "33i the deleted-exit-1 body did not pass a failure, so the "
                 "scenarios above do not discriminate")
+        # The site-only train guard discriminates: a body whose skipped-strip runs
+        # unconditionally (the whole acceptance chain around it removed) passes a
+        # skipped heavy job with no SITE_ONLY at all, which the vector above refuses.
+        guard = ('accept="no"\n'
+                 'if [ "${SITE_ONLY:-false}" = "true" ]; then\n'
+                 '  accept="yes"\n'
+                 'fi\n'
+                 'if [ "${EVENT_NAME:-}" != "pull_request" ]; then\n'
+                 '  accept="no"\n'
+                 'fi\n'
+                 'head_ref="${HEAD_REF:-}"\n'
+                 'if [ "${head_ref}" = "${head_ref#merge-train-}" ]; then\n'
+                 '  accept="no"\n'
+                 'fi\n'
+                 'if [ -z "${HEAD_REPO:-}" ]; then\n'
+                 '  accept="no"\n'
+                 'fi\n'
+                 'if [ "${HEAD_REPO:-}" != "${BASE_REPO:-}" ]; then\n'
+                 '  accept="no"\n'
+                 'fi\n'
+                 'if [ "${accept}" = "yes" ]; then\n'
+                 '  heavy="${heavy//skipped/}"\n'
+                 'fi\n')
+        body_text = "\n".join(pinned_body) + "\n"
+        count += 1
+        if guard not in body_text:
+            failures.append(
+                "33i the pinned body does not carry the site-only guard "
+                "block this vector removes")
+        else:
+            unguarded = tuple(body_text.replace(
+                guard, 'heavy="${heavy//skipped/}"\n', 1).split("\n"))
+            if aggregate(unguarded, "success", "skipped", None) != 0:
+                failures.append(
+                    "33i the unguarded skipped-strip body did not pass a "
+                    "skipped heavy job, so the SITE_ONLY vectors do not "
+                    "discriminate")
         # 33i options: a failing pipeline followed by a succeeding command,
         # with no set line of its own, exits nonzero only when the launch
         # carries both -e and -o pipefail, so dropping either option from
@@ -7923,7 +8300,7 @@ def self_test():
         # fails.
         options_body = ("false | true", "true")
         count += 1
-        if aggregate(options_body, None) == 0:
+        if aggregate(options_body, None, None, None, results=None) == 0:
             failures.append(
                 "33i a failing pipeline with no set line exited 0, so the "
                 "launch does not apply -e and -o pipefail")
@@ -8876,19 +9253,24 @@ def self_test():
     def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None,
                 top=CONCURRENCY_BLOCK, job_tail=(),
                 light_commands=None, opf_id="opf-tooling-a",
-                opf_commands=("python3 tools/b.py",), drop_heavy=()):
+                opf_commands=("python3 tools/b.py",), drop_heavy=(),
+                heavy_needs=HEAVY_JOB_NEEDS_LINE, scope_job=True):
         other_heavy = sorted(
             HEAVY_JOBS - {"opf-tooling-a"} - set(drop_heavy))
         lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
-        for job, commands, condition in (
+        if scope_job:
+            lines.extend(("  scope:",) + SCOPE_JOB)
+        for job, commands, condition, needs_line in (
                 ("secrets",
                  common + ("python3 tools/a.py",)
                  if light_commands is None else light_commands,
-                 light_if),
-                (opf_id, opf_commands, heavy_if)):
+                 light_if, None),
+                (opf_id, opf_commands, heavy_if, heavy_needs)):
             lines.extend(("  " + job + ":", "    name: Job " + job))
             if condition is not None:
                 lines.append(condition)
+            if needs_line is not None:
+                lines.append(needs_line)
             lines.extend(job_tail)
             lines.extend(("    runs-on: ubuntu-latest", "    steps:",
                           "      - uses: actions/checkout@v4"))
@@ -8902,12 +9284,15 @@ def self_test():
             lines.extend((
                 "  " + job + ":",
                 HEAVY_JOB_IF_LINE,
+                HEAVY_JOB_NEEDS_LINE,
                 "    runs-on: ubuntu-latest",
                 "    steps:",
                 "      - uses: actions/checkout@v4",
             ))
         lines.extend(aggregator_head + always
-                     + ("    needs:", "      - secrets", "      - " + opf_id)
+                     + ("    needs:",)
+                     + (("      - scope",) if scope_job else ())
+                     + ("      - secrets", "      - " + opf_id)
                      + tuple("      - " + job for job in other_heavy))
         lines.extend(REQUIRED_STATUS_JOB[
             REQUIRED_STATUS_JOB.index(REQUIRED_STATUS_NEEDS_SLOT) + 1:])
@@ -9046,6 +9431,82 @@ def self_test():
                        ((MSG_LEAKS_CI_SOURCE, conditional_scan),)),
               1, "job 'quality' of {} carries a job-level if:".format(
                   MSG_LEAKS_CI_SOURCE))
+
+    # 39k SITE FAST LANE WIRING: the pinned heavy-job if: reads
+    # needs.scope.outputs.site_only, which is empty unless the job carries
+    # needs: scope and the scope job exists, so a missing edge or a missing
+    # scope job disables the fast lane silently and each is a lane finding.
+    # Before these rules both fixtures passed, so each vector fails on revert.
+    lane_case("39k a heavy job without needs: scope is a lane finding",
+              evaluate(multi_local, lane_ci(heavy_needs=None), ()), 1,
+              "does not carry needs: scope")
+    lane_case("39k a heavy job whose needs: names another job is a lane "
+              "finding",
+              evaluate(multi_local, lane_ci(
+                  heavy_needs="    needs: secrets"), ()), 1,
+              "does not carry needs: scope")
+    lane_case("39k the scope job absent while heavy jobs read its output is "
+              "a lane finding",
+              evaluate(multi_local, lane_ci(scope_job=False), ()), 1,
+              "is missing from")
+    lane_case("39k control: the scope job present with needs: scope on every "
+              "heavy job passes",
+              evaluate(multi_local, lane_ci(), ()), 0)
+
+    # 39m SCOPE JOB PIN: the scope job is pinned line for line (SCOPE_JOB), so a
+    # departure in its outputs:, env: or steps — the lines that choose which copy of
+    # the scope tool decides the fast lane and which inputs it reads — is a lane
+    # finding. Each red fixture passes without the pin, so each vector fails on
+    # revert; the 39k control above is the green control.
+    for label, old, new in (
+            ("a hardwired site_only output",
+             "      site_only: ${{ steps.decide.outputs.site_only }}\n",
+             "      site_only: 'true'\n"),
+            ("the decision run from the checkout's own copy",
+             '            python3 -I -B "${RUNNER_TEMP}/'
+             'ci_site_scope_base.py" --ci-decide\n',
+             "            python3 -I -B tools/ci_site_scope.py "
+             "--ci-decide\n"),
+            ("a dropped HEAD_REF env line",
+             "          HEAD_REF: ${{ github.head_ref }}\n",
+             ""),
+            ("a dropped HEAD_SHA env line",
+             "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
+             ""),
+            ("a dropped fallback write",
+             '            echo "site_only=false" >> "${GITHUB_OUTPUT}"\n',
+             ""),
+            ("an added step before the decision",
+             "      - name: Site fast-lane scope decision\n",
+             "      - name: Extra gate\n        shell: bash\n"
+             "        run: python3 tools/a.py\n"
+             "      - name: Site fast-lane scope decision\n")):
+        mutated_ci = lane_ci().replace(old, new, 1)
+        count += 1
+        if mutated_ci == lane_ci():
+            failures.append(
+                "39m mutation did not apply: " + label)
+        lane_case("39m a scope job departing from the pinned SCOPE_JOB is a "
+                  "lane finding: " + label,
+                  evaluate(multi_local, mutated_ci, ()), 1,
+                  "departs from the pinned scope job")
+
+    # 39m STEP ORDER: the decision step is pinned FIRST after checkout and setup-python, before
+    # the probe and the scope self-test, the steps that run the checkout's own code. A pure
+    # reorder keeps every pinned line present, so only the line-for-line order pin catches it;
+    # the vector fails on revert to any set-based or per-step comparison.
+    scope_block = "\n".join(("  scope:",) + SCOPE_JOB) + "\n"
+    reordered_block = "\n".join(
+        ("  scope:",) + SCOPE_JOB[:13] + SCOPE_JOB[-6:] + SCOPE_JOB[13:-6]) + "\n"
+    reordered_ci = lane_ci().replace(scope_block, reordered_block, 1)
+    count += 1
+    if reordered_ci == lane_ci():
+        failures.append("39m mutation did not apply: the probe and self-test reordered "
+                        "ahead of the decision")
+    lane_case("39m a scope job departing from the pinned SCOPE_JOB is a lane finding: "
+              "the probe and self-test reordered ahead of the decision",
+              evaluate(multi_local, reordered_ci, ()), 1,
+              "departs from the pinned scope job")
 
     # 39j HEAVY PRESENCE and HEAVY COMMANDS: every HEAVY_JOBS job must be
     # present in quality.yml, and a HEAVY_COMMANDS member may run only in a

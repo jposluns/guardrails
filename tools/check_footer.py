@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-"""Nav-coverage gate: every site/*.html carries exactly one /disclosure link INSIDE its <nav>.
+"""Nav-coverage gate: every live site/ and opf/site/ page carries exactly one disclosure link INSIDE its <nav>.
 
-The disclosure matrix is the site's standing "what we claim, and what we do not" page; every public
-page must point to it from its primary navigation so a reader is never more than one click from the
-limitations. This gate asserts that link is present, and IN THE NAV, on every page EXCEPT an explicit
-allowlist, and fails closed if a non-exempt page lacks it or the allowlist drifts. A /disclosure link
-elsewhere in the page body or footer does NOT satisfy the requirement: only anchors nested inside a
-<nav> element count, so the link cannot drift out of the nav and still pass. <nav> nesting is tracked,
-so an anchor is attributed to the nav only while one is open.
+The disclosure matrix is the site's standing "what we claim, and what we do not" page; every live public
+page (every page that is not a generated template page) must point to it from its primary navigation so a reader is
+never more than one click from the limitations. This gate asserts that link is present, and IN THE NAV, on
+every live page EXCEPT an explicit allowlist, and fails closed if a non-exempt live page lacks it or the
+allowlist drifts. A /disclosure link elsewhere in the page body or footer does NOT satisfy the
+requirement: only anchors nested inside a <nav> element count, so the link cannot drift out of the nav
+and still pass. <nav> nesting is tracked, so an anchor is attributed to the nav only while one is open.
 
-(Historically this gate required the link in the <footer>; B-10 moved the canonical disclosure link
-into the site nav and repurposed this gate accordingly. The filename is retained as its gate identity.)
+(Historically this gate required the link in the <footer>; the canonical disclosure link later moved
+into the site nav and this gate was repurposed accordingly. The filename is retained as its gate identity.)
+
+The template pages (the targets tools/gen_draft_site.py lists in GENSRC_OUTPUTS, read through
+tools/_template_pages.py) follow the shared site template, whose top bar has no Disclosure item, so a draft
+rule covers them instead (stated beside check_draft_pages): exactly one link to the template disclosure page
+in the template landing page's "About this project" region, none required on the other template pages. The
+landing page and that link follow the root's template base: draft/index.html and /draft/disclosure/ while
+the pages are staged under draft/, index.html and /disclosure/ once promoted to the root. The same
+partition applies to opf/site/ (the opfiles.ai template pages): its live pages keep the ./disclosure nav rule.
 
 Coverage spans TWO required roots: site/ (the aiqt.ai site, absolute /disclosure) and opf/site/ (the
 opfiles.ai site, served from opf/site as its own root, whose pages link ./disclosure relative so it
-resolves within opf/site; every opf/site page carries the nav, so nothing is exempt). Each tree is a REQUIRED
+resolves within opf/site). Neither root allowlists a page, so every page that is not a template page must
+carry its nav link (a page under draft/ that the generator does not list included); the template pages are
+exempt from the nav rule and are held to the draft rule instead (the same absolute href on both roots). A
+live 404 page (any page named 404.html that is not a template page, in either root) is the one exception to the per-root form: it is served
+at whatever missing URL was requested, so a relative link would resolve against that URL, and it must carry
+the root-absolute /disclosure instead; a relative ./disclosure on a 404 page is a missing link. Each tree is a REQUIRED
 coverage input: if a root is absent, unreadable, or carries no .html pages, the gate fails closed (exit 2) rather than reporting a clean pass over nothing. A page must be a REGULAR
 file, opened O_NOFOLLOW and confirmed regular via fstat on the opened fd, so a symlink/FIFO/socket/device
 .html (or site/ itself as a symlink) is fail-closed and never read or followed, and the check-then-read
@@ -24,10 +37,10 @@ adversarial input. This gate does NOT defend against a concurrent-write attacker
 component symlink race (full component-wise containment is the OS/CI-isolation layer's job per
 SYSTEM-HARDENING.md), nor cross-check the page set against an expected/tracked index (page presence and
 git-tracking are gen_manifest's concern). Those are out of a trusted-input coverage gate's scope. The allowlist is empty:
-every public page carries the nav, so none is exempt. It stays an EXPLICIT mechanism, not a silent skip:
+no live page is exempt (the template pages are partitioned out by the draft rule, not allowlisted). It stays an EXPLICIT mechanism, not a silent skip:
 an allowlisted page that is missing, or that starts carrying the link, is allowlist drift and fails.
 
-  check_footer.py             scan site/*.html
+  check_footer.py             scan every .html page under site/ and opf/site/
   check_footer.py --self-test  assert the present/missing/drift and fail-closed paths each resolve
 
 Exit 0 clean, 1 on any coverage finding, 2 on a missing/unreadable/empty required input (fail-closed).
@@ -53,21 +66,45 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _walk import walk_files  # noqa: E402  fail-closed tree walk (os.walk, not rglob)
+import _template_pages  # noqa: E402  which pages the site template generates (GENSRC_OUTPUTS, not a folder name)
 
 DISCLOSURE_HREF = "/disclosure"
-# Pages exempt from the nav-link requirement, relative to site/. Empty: every page carries the nav.
+# Pages exempt from the nav-link requirement, relative to site/. Empty: every live site/ page (every page
+# that is not a template page, which the draft rule below covers instead) carries the nav.
 ALLOWLIST = frozenset()
 
 # Coverage roots, each (subdir, disclosure_href, allowlist). Both are REQUIRED inputs (an absent,
 # unreadable, or page-less root is fail-closed exit 2, never a clean pass over nothing). site/ is the
-# aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure. opf/site is the
+# aiqt.ai site, served at root, so its nav disclosure link is the absolute /disclosure/ (the disclosure page
+# is the folder page site/disclosure/index.html). A live 404 page still carries DISCLOSURE_HREF. opf/site is the
 # opfiles.ai site, served from opf/site as its own root (Cloudflare Pages builds opf/site), so its pages
 # link the disclosure page RELATIVE (./disclosure): a relative link resolves within opf/site whatever the
-# mount point. Every opf/site page carries the nav, so the allowlist is empty (like site/).
+# mount point. Every live opf/site page (every page that is not a template page, which the draft rule below
+# covers instead) carries the nav, so the allowlist is empty (like site/).
 COVERAGE_ROOTS = (
-    ("site", "/disclosure", frozenset()),
+    ("site", "/disclosure/", frozenset()),
     ("opf/site", "./disclosure", frozenset()),
 )
+# A 404 page is served at any missing URL, however deep, so its links must not depend on the request
+# path: on a page with this file name the root-absolute DISCLOSURE_HREF replaces the root's own form.
+NOT_FOUND_PAGE = "404.html"
+
+
+def required_href(name, href):
+    """The disclosure href a page named `name` (relative to its root) must carry, given its root's form."""
+    return DISCLOSURE_HREF if Path(name).name == NOT_FOUND_PAGE else href
+
+
+# The template pages (the targets tools/gen_draft_site.py lists in GENSRC_OUTPUTS, read through
+# tools/_template_pages.py, never a folder name) follow the shared site template (baseline 1.7.0), whose top
+# bar has no Disclosure item: the template landing page links the disclosure page from its "About this
+# project" region (p.about), and the inner template pages carry no disclosure link. So the live rule above
+# covers every other page of the root, and the draft rule covers the template pages: exactly one link to the
+# template disclosure page inside the About region of the template landing page, and none required
+# elsewhere. Both follow the root's template base (_template_pages.template_base): draft/index.html and
+# /draft/disclosure/ while the pages are staged under draft/, index.html and /disclosure/ once promoted, so
+# the draft rule replaces the live rule for those pages at promotion with no change here. The opfiles.ai
+# template pages take the same partition: its live pages keep the relative ./disclosure nav rule.
 
 
 class _Anchors(HTMLParser):
@@ -92,6 +129,61 @@ class _Anchors(HTMLParser):
             self._nav_depth -= 1
 
 
+class _AboutAnchors(HTMLParser):
+    """Collect the href of every <a> inside a <p class="about">, the landing page's "About this project"
+    line (template specification section 7.24). A <p> cannot nest, so the region closes at its </p>."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hrefs = []
+        self._open = False
+
+    def handle_starttag(self, tag, attrs):
+        d = dict(attrs)
+        if tag == "p":
+            self._open = "about" in (d.get("class") or "").split()
+        elif tag == "a" and self._open and d.get("href") is not None:
+            self.hrefs.append(d["href"].strip())
+
+    def handle_endtag(self, tag):
+        if tag == "p":
+            self._open = False
+
+
+def check_draft_pages(pages, template_base="draft/"):
+    """pages: {name under the root: html_text} for the root's template pages; `template_base` is the
+    folder holding them ("draft/" staged, "" promoted). Return a sorted list of findings for the draft
+    rule: the landing page (<base>index.html) must exist once any template page does and carry exactly one
+    /<base>disclosure/ link inside its About region; the other template pages need none."""
+    if not pages:
+        return []
+    landing, about_href = template_base + "index.html", "/" + template_base + "disclosure/"
+    if landing not in pages:
+        return ["{}: missing; the draft rule needs the draft landing page".format(landing)]
+    parser = _AboutAnchors()
+    parser.feed(pages[landing])
+    count = sum(1 for h in parser.hrefs if h == about_href)
+    if count == 0:
+        return ["{}: missing the {} link in its About region".format(landing, about_href)]
+    if count > 1:
+        return ["{}: carries {} {} links in its About region (expected exactly one)".format(
+            landing, count, about_href)]
+    return []
+
+
+def check_site_pages(pages, allowlist, href=DISCLOSURE_HREF, subdir="site", targets=None):
+    """One coverage root (`subdir`, site/ or opf/site/): the live rule (check_pages, with the root's own
+    href) over every page that is not a template page and the draft rule (check_draft_pages) over the
+    template pages. `targets` (a fixture's GENSRC_OUTPUTS targets) defaults to the generator's declaration;
+    OSError or ValueError when it cannot be read."""
+    if targets is None:
+        targets = _template_pages.template_targets()
+    draft = {name: text for name, text in pages.items()
+             if _template_pages.is_template_page(subdir, name, targets)}
+    live = {name: text for name, text in pages.items() if name not in draft}
+    base = _template_pages.template_base(subdir, targets)
+    return sorted(check_pages(live, allowlist, href) + check_draft_pages(draft, base or ""))
+
+
 def disclosure_link_count(text, href=DISCLOSURE_HREF):
     """Number of <a href="{href}"> links nested inside a <nav> in one page's HTML. The href is
     tree-appropriate: absolute /disclosure for site/, relative ./disclosure for the opf/site tree."""
@@ -103,24 +195,26 @@ def disclosure_link_count(text, href=DISCLOSURE_HREF):
 def check_pages(pages, allowlist, href=DISCLOSURE_HREF):
     """pages: {name: html_text}. Return a sorted list of findings. Enforces exactly one `href` disclosure
     link in the nav on every page not in allowlist, and treats a missing or newly-linking allowlisted page
-    as drift. Callers guarantee pages is non-empty; emptiness is a fail-closed input error handled in run()."""
+    as drift. A 404 page is held to the root-absolute DISCLOSURE_HREF instead (required_href). Callers
+    guarantee pages is non-empty; emptiness is a fail-closed input error handled in run()."""
     findings = []
     for name in sorted(allowlist):
         if name not in pages:
             findings.append(
                 "{}: allowlisted for the nav link but no such page exists (allowlist drift)".format(name))
     for name in sorted(pages):
-        count = disclosure_link_count(pages[name], href)
+        want = required_href(name, href)
+        count = disclosure_link_count(pages[name], want)
         if name in allowlist:
             if count:
                 findings.append(
                     "{}: allowlisted as nav-exempt but now carries {} {} link(s); "
-                    "remove it from the allowlist (allowlist drift)".format(name, count, href))
+                    "remove it from the allowlist (allowlist drift)".format(name, count, want))
         elif count == 0:
-            findings.append("{}: missing the {} nav link".format(name, href))
+            findings.append("{}: missing the {} nav link".format(name, want))
         elif count > 1:
             findings.append(
-                "{}: carries {} {} links (expected exactly one)".format(name, count, href))
+                "{}: carries {} {} links (expected exactly one)".format(name, count, want))
     return findings
 
 
@@ -204,14 +298,32 @@ def _run_one(root, subdir, href, allowlist):
             print("error: cannot load {} ({}); a symlink, non-regular, unreadable, or undecodable page is "
                   "fail-closed".format(f.relative_to(root), exc), file=sys.stderr)
             return 2
-    findings = check_pages(pages, allowlist, href)
+    # The live/template partition applies to every coverage root: the template pages of site/ (aiqt.ai) and
+    # opf/site/ (opfiles.ai) both follow the shared site template, and each root's live pages keep their href.
+    try:
+        targets = _template_pages.template_targets()
+    except (OSError, ValueError) as exc:
+        print("error: cannot read the template page targets ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    findings = check_site_pages(pages, allowlist, href, subdir, targets)
     if findings:
         print("FAIL: {} nav-coverage issue(s) under {}/".format(len(findings), subdir))
         for finding in sorted(set(findings)):
             print("  {}/{}".format(subdir, finding))
         return 1
     allow_str = ", ".join(sorted(allowlist)) or "none"
-    print("PASS: every {}/ page carries the {} nav link (allowlist: {})".format(subdir, href, allow_str))
+    live_scope, draft_note = "", ""
+    base = _template_pages.template_base(subdir, targets)
+    if any(_template_pages.is_template_page(subdir, name, targets) for name in pages):
+        live_scope = " that is not a template page"
+        draft_note = "; the template landing page {}/{}index.html carries the /{}disclosure/ About link".format(
+            subdir, base, base)
+    if href == DISCLOSURE_HREF:
+        carried = "the {} nav link".format(href)
+    else:
+        carried = "the {} nav link ({} pages carry {})".format(href, NOT_FOUND_PAGE, DISCLOSURE_HREF)
+    print("PASS: every {}/ page{} carries {} (allowlist: {}){}".format(
+        subdir, live_scope, carried, allow_str, draft_note))
     return 0
 
 
@@ -592,7 +704,44 @@ def _close_guard_vectors(base):
     return failures, len(cases) + len(other_cases) + 3
 
 
+_REAL_TEMPLATE_TARGETS = _template_pages.template_targets
+
+
+def _staged_targets():
+    """The page targets tools/gen_draft_site.py builds in the staged form (each site's pages under its root's
+    draft/ folder, base "/draft/"), the form before promotion."""
+    import gen_draft_site
+    return frozenset(gen_draft_site.build(sites=gen_draft_site.staged_sites(), registered=False))
+
+
+def _promoted_targets():
+    """The page targets tools/gen_draft_site.py builds at base "/" (each site's pages at its own root, the
+    /draft/ placeholder included): the promoted state."""
+    import gen_draft_site
+    return frozenset(gen_draft_site.build(sites=gen_draft_site.promoted_sites(), registered=False))
+
+
+def _use_declaration(targets):
+    """While `targets` is a set, the declaration read with no fixture root is that set, so a run() leg built
+    in the staged or the promoted layout is judged against the matching declaration; None restores the real
+    reader (the real-tree case). A fixture root (_template_pages.ROOT patched) always reads its own file."""
+    if targets is None:
+        _template_pages.template_targets = _REAL_TEMPLATE_TARGETS
+        return
+    real_root = _template_pages.ROOT
+    _template_pages.template_targets = (
+        lambda root=None: targets if root is None and _template_pages.ROOT == real_root
+        else _REAL_TEMPLATE_TARGETS(root))
+
+
 def _self_test():
+    try:
+        return _self_test_cases()
+    finally:
+        _use_declaration(None)
+
+
+def _self_test_cases():
     import tempfile
     nav = '<nav><a href="/disclosure">Disclosure</a></nav>'
     cases = [
@@ -621,9 +770,179 @@ def _self_test():
         ("stale allowlist entry is drift", {"about.html": nav}, frozenset({"gone.html"}),
          ["gone.html: allowlisted for the nav link but no such page exists (allowlist drift)"]),
     ]
+    # The draft rule beside the live rule (check_site_pages, the site/ root): the live rule still binds every
+    # page outside draft/, and under draft/ only the landing page's About region link is required.
+    about = ('<div class="region"><p class="lbl">About this project</p><div><p class="about">'
+             '<a href="/draft/disclosure/">Disclosure</a><span class="dot" aria-hidden="true">&middot;</span>'
+             '<a href="/draft/license/">Licence</a></p></div></div>')
+    draft_nav = '<nav><a href="/draft/install/">Install</a></nav>'
+    site_cases = [
+        ("live page without the nav link fails beside a good draft",
+         {"about.html": "<nav></nav>", "draft/index.html": draft_nav + about},
+         ["about.html: missing the /disclosure nav link"]),
+        ("live page with only an About link still fails",
+         {"about.html": about.replace("/draft/disclosure/", "/disclosure")},
+         ["about.html: missing the /disclosure nav link"]),
+        ("draft landing without the About link fails",
+         {"about.html": nav, "draft/index.html": draft_nav},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("draft landing with the link only in its nav fails",
+         {"about.html": nav, "draft/index.html": '<nav><a href="/draft/disclosure/">Disclosure</a></nav>'},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("draft landing with 2 About links fails",
+         {"about.html": nav, "draft/index.html": about + about},
+         ["draft/index.html: carries 2 /draft/disclosure/ links in its About region (expected exactly one)"]),
+        ("draft inner page passes with no disclosure link",
+         {"about.html": nav, "draft/index.html": draft_nav + about, "draft/license/index.html": draft_nav}, []),
+        ("draft pages without the draft landing page fail",
+         {"about.html": nav, "draft/license/index.html": draft_nav},
+         ["draft/index.html: missing; the draft rule needs the draft landing page"]),
+        ("a live page named draft.html stays under the live rule",
+         {"about.html": nav, "draft.html": "<nav></nav>"},
+         ["draft.html: missing the /disclosure nav link"]),
+    ]
+    # The real declaration is promoted, so the staged cases name the staged declaration explicitly and each
+    # has a promoted counterpart (the promoted lists below) judged against the promoted one.
+    staged, promoted = _staged_targets(), _promoted_targets()
     failures = []
     for label, pages, allow, expected in cases:
         got = sorted(check_pages(pages, allow))
+        if got != sorted(expected):
+            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    for label, pages, expected in site_cases:
+        got = check_site_pages(pages, frozenset(), DISCLOSURE_HREF, "site", staged)
+        if got != sorted(expected):
+            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    # The same partition on the opf/site root: live opfiles.ai pages keep the relative ./disclosure nav
+    # rule, and opf/site/draft/ follows the draft rule (the landing page's About link, none elsewhere).
+    opf_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
+    opf_draft_nav = '<nav><a href="/draft/model/">The model</a></nav>'
+    opf_cases = [
+        ("opfiles: good live pages and a good draft pass",
+         {"index.html": opf_nav, "draft/index.html": opf_draft_nav + about,
+          "draft/model/index.html": opf_draft_nav}, []),
+        ("opfiles: draft pages without the draft landing page fail",
+         {"index.html": opf_nav, "draft/model/index.html": opf_draft_nav},
+         ["draft/index.html: missing; the draft rule needs the draft landing page"]),
+        ("opfiles: draft landing without the About link fails",
+         {"index.html": opf_nav, "draft/index.html": opf_draft_nav},
+         ["draft/index.html: missing the /draft/disclosure/ link in its About region"]),
+        ("opfiles: draft landing with 2 About links fails",
+         {"index.html": opf_nav, "draft/index.html": about + about},
+         ["draft/index.html: carries 2 /draft/disclosure/ links in its About region (expected exactly one)"]),
+        ("opfiles: live page without the ./disclosure nav link still fails beside a good draft",
+         {"index.html": opf_nav, "manifest.html": "<nav></nav>", "draft/index.html": opf_draft_nav + about},
+         ["manifest.html: missing the ./disclosure nav link"]),
+        ("opfiles: live page carrying only the absolute /disclosure link still fails",
+         {"index.html": nav, "draft/index.html": opf_draft_nav + about},
+         ["index.html: missing the ./disclosure nav link"]),
+    ]
+    for label, pages, expected in opf_cases:
+        got = check_site_pages(pages, frozenset(), "./disclosure", "opf/site", staged)
+        if got != sorted(expected):
+            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    # The same rules once promoted: the template pages sit at the root, the landing page is index.html with
+    # its /disclosure/ About link, and every kept old page of the root stays under the live rule.
+    root_about = about.replace("/draft/disclosure/", "/disclosure/").replace("/draft/license/", "/license/")
+    root_nav = '<nav><a href="/install/">Install</a></nav>'
+    opf_root_nav = '<nav><a href="/model/">The model</a></nav>'
+    promoted_cases = [
+        ("promoted: kept page without the nav link fails beside a good landing", DISCLOSURE_HREF, "site",
+         {"about.html": "<nav></nav>", "index.html": root_nav + root_about},
+         ["about.html: missing the /disclosure nav link"]),
+        ("promoted: kept page with only an About link still fails", DISCLOSURE_HREF, "site",
+         {"about.html": root_about.replace("/disclosure/", "/disclosure"), "index.html": root_nav + root_about},
+         ["about.html: missing the /disclosure nav link"]),
+        ("promoted: landing without the About link fails", DISCLOSURE_HREF, "site",
+         {"about.html": nav, "index.html": root_nav},
+         ["index.html: missing the /disclosure/ link in its About region"]),
+        ("promoted: landing with the link only in its nav fails", DISCLOSURE_HREF, "site",
+         {"about.html": nav, "index.html": '<nav><a href="/disclosure/">Disclosure</a></nav>'},
+         ["index.html: missing the /disclosure/ link in its About region"]),
+        ("promoted: landing with 2 About links fails", DISCLOSURE_HREF, "site",
+         {"about.html": nav, "index.html": root_about + root_about},
+         ["index.html: carries 2 /disclosure/ links in its About region (expected exactly one)"]),
+        ("promoted: inner page passes with no disclosure link", DISCLOSURE_HREF, "site",
+         {"about.html": nav, "index.html": root_nav + root_about, "license/index.html": root_nav}, []),
+        ("promoted: inner pages without the landing page fail", DISCLOSURE_HREF, "site",
+         {"about.html": nav, "license/index.html": root_nav},
+         ["index.html: missing; the draft rule needs the draft landing page"]),
+        ("promoted: a kept page named draft.html stays under the live rule", DISCLOSURE_HREF, "site",
+         {"index.html": root_nav + root_about, "draft.html": "<nav></nav>"},
+         ["draft.html: missing the /disclosure nav link"]),
+        ("opfiles promoted: good kept pages and a good landing pass", "./disclosure", "opf/site",
+         {"manifest.html": opf_nav, "index.html": opf_root_nav + root_about, "model/index.html": opf_root_nav},
+         []),
+        ("opfiles promoted: inner pages without the landing page fail", "./disclosure", "opf/site",
+         {"manifest.html": opf_nav, "model/index.html": opf_root_nav},
+         ["index.html: missing; the draft rule needs the draft landing page"]),
+        ("opfiles promoted: landing without the About link fails", "./disclosure", "opf/site",
+         {"manifest.html": opf_nav, "index.html": opf_root_nav},
+         ["index.html: missing the /disclosure/ link in its About region"]),
+        ("opfiles promoted: landing with 2 About links fails", "./disclosure", "opf/site",
+         {"manifest.html": opf_nav, "index.html": root_about + root_about},
+         ["index.html: carries 2 /disclosure/ links in its About region (expected exactly one)"]),
+        ("opfiles promoted: kept page without the ./disclosure nav link fails beside a good landing",
+         "./disclosure", "opf/site",
+         {"manifest.html": "<nav></nav>", "index.html": opf_root_nav + root_about},
+         ["manifest.html: missing the ./disclosure nav link"]),
+        ("opfiles promoted: kept page carrying only the absolute /disclosure link still fails",
+         "./disclosure", "opf/site", {"manifest.html": nav, "index.html": opf_root_nav + root_about},
+         ["manifest.html: missing the ./disclosure nav link"]),
+    ]
+    for label, root_href, subdir, pages, expected in promoted_cases:
+        got = check_site_pages(pages, frozenset(), root_href, subdir, promoted)
+        if got != sorted(expected):
+            failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
+    # The template pages as the generator builds them, staged (the declared build) and promoted (the same
+    # pages at base "/" in each site's live root): the draft rule follows the template base, and a page
+    # under draft/ that the generator does not list is a live page in either state.
+    import gen_draft_site
+    staged_out = gen_draft_site.build(sites=gen_draft_site.staged_sites(), registered=False)
+    promoted_out = gen_draft_site.build(sites=gen_draft_site.promoted_sites(), registered=False)
+    s_home, s_inner = staged_out["site/draft/index.html"], staged_out["site/draft/install/index.html"]
+    p_home, p_inner = promoted_out["site/index.html"], promoted_out["site/install/index.html"]
+    o_home, o_inner = promoted_out["opf/site/index.html"], promoted_out["opf/site/model/index.html"]
+    p_holder, o_holder = promoted_out["site/draft/index.html"], promoted_out["opf/site/draft/index.html"]
+    state_cases = [
+        ("staged: the generator's draft pages pass", "/disclosure", "site", staged,
+         {"about.html": nav, "draft/index.html": s_home, "draft/install/index.html": s_inner}, []),
+        ("staged: an unlisted page under draft/ is a live page", "/disclosure", "site", staged,
+         {"about.html": nav, "draft/index.html": s_home, "draft/old.html": "<nav></nav>"},
+         ["draft/old.html: missing the /disclosure nav link"]),
+        ("staged: a root index.html is a live page", "/disclosure", "site", staged,
+         {"index.html": p_home, "draft/index.html": s_home}, ["index.html: missing the /disclosure nav link"]),
+        ("promoted: the generator's landing and inner page pass", "/disclosure", "site", promoted,
+         {"about.html": nav, "index.html": p_home, "install/index.html": p_inner}, []),
+        ("promoted: landing without its About link fails", "/disclosure", "site", promoted,
+         {"index.html": p_inner}, ["index.html: missing the /disclosure/ link in its About region"]),
+        ("promoted: landing with the staged About link fails", "/disclosure", "site", promoted,
+         {"index.html": s_home}, ["index.html: missing the /disclosure/ link in its About region"]),
+        ("promoted: landing with 2 About links fails", "/disclosure", "site", promoted,
+         {"index.html": p_home + p_home},
+         ["index.html: carries 2 /disclosure/ links in its About region (expected exactly one)"]),
+        ("promoted: inner page without the landing page fails", "/disclosure", "site", promoted,
+         {"install/index.html": p_inner}, ["index.html: missing; the draft rule needs the draft landing page"]),
+        ("promoted: a page left under draft/ is a live page", "/disclosure", "site", promoted,
+         {"index.html": p_home, "draft/index.html": p_holder, "draft/old.html": "<nav></nav>"},
+         ["draft/old.html: missing the /disclosure nav link"]),
+        ("promoted: the /draft/ placeholder is a generated page (no nav link needed)", "/disclosure", "site",
+         promoted, {"about.html": nav, "index.html": p_home, "draft/index.html": p_holder}, []),
+        ("promoted: the /draft/ placeholder text at an unlisted path is a live page", "/disclosure", "site",
+         promoted, {"about.html": nav, "index.html": p_home, "draft/old.html": p_holder},
+         ["draft/old.html: missing the /disclosure nav link"]),
+        ("promoted: the /draft/ placeholder without the landing page fails", "/disclosure", "site", promoted,
+         {"about.html": nav, "draft/index.html": p_holder},
+         ["index.html: missing; the draft rule needs the draft landing page"]),
+        ("opfiles promoted: the /draft/ placeholder is a generated page (no nav link needed)", "./disclosure",
+         "opf/site", promoted, {"manifest.html": opf_nav, "index.html": o_home, "draft/index.html": o_holder}, []),
+        ("opfiles promoted: landing and inner page pass", "./disclosure", "opf/site", promoted,
+         {"manifest.html": opf_nav, "index.html": o_home, "model/index.html": o_inner}, []),
+        ("opfiles promoted: landing without its About link fails", "./disclosure", "opf/site", promoted,
+         {"index.html": o_inner}, ["index.html: missing the /disclosure/ link in its About region"]),
+    ]
+    for label, root_href, subdir, targets, pages, expected in state_cases:
+        got = check_site_pages(pages, frozenset(), root_href, subdir, targets)
         if got != sorted(expected):
             failures.append("{}: expected {} got {}".format(label, sorted(expected), got))
     # run() fail-closed on a missing/empty/unreadable required input; clean on a good tree (exit codes).
@@ -641,6 +960,9 @@ def _self_test():
     def quiet_run(r):
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             return run(r)
+    # These run() legs build the staged layout (template pages under draft/, a live root index.html and
+    # 404.html), so they read the staged declaration; the promoted legs and the real tree follow them.
+    _use_declaration(staged)
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         if quiet_one(root) != 2:
@@ -657,6 +979,17 @@ def _self_test():
         (root / "site" / "zz-undecodable.html").write_bytes(b"\xff\xfe<nav></nav>")
         if quiet_one(root) != 2:
             failures.append("an undecodable page did not fail closed (expected exit 2, not a traceback)")
+    with tempfile.TemporaryDirectory() as d1:
+        root1 = Path(d1)
+        (root1 / "site" / "draft" / "license").mkdir(parents=True)
+        (root1 / "site" / "about.html").write_text(nav, encoding="utf-8")
+        (root1 / "site" / "draft" / "index.html").write_text(draft_nav + about, encoding="utf-8")
+        (root1 / "site" / "draft" / "license" / "index.html").write_text(draft_nav, encoding="utf-8")
+        if quiet_one(root1) != 0:
+            failures.append("a site/ tree with a good draft did not pass (expected exit 0)")
+        (root1 / "site" / "draft" / "index.html").write_text(draft_nav, encoding="utf-8")
+        if quiet_one(root1) != 1:
+            failures.append("a draft landing page without its About link did not report a finding (expected 1)")
     with tempfile.TemporaryDirectory() as d2:
         root2 = Path(d2)
         (root2 / "site").mkdir()
@@ -677,13 +1010,15 @@ def _self_test():
         if quiet_one(root3) != 2:
             failures.append("a symlinked site/ root did not fail closed (expected exit 2)")
     # opf/site coverage: the relative ./disclosure nav link is tree-appropriate (opf/site is served as its
-    # own root), every page carries the nav (empty allowlist), a page missing the link is a finding, and an
+    # own root), every live page carries the nav (empty allowlist), a page missing the link is a finding, and an
     # absent opf/site root fails closed. run() requires BOTH roots, so it is exercised over a two-root tree.
     rel_nav = '<nav><a href="./disclosure">Disclosure</a></nav>'
+    # run() holds each site/ page to the site/ root's own href in COVERAGE_ROOTS.
+    site_nav = '<nav><a href="{}">Disclosure</a></nav>'.format(dict((s, h) for s, h, _a in COVERAGE_ROOTS)["site"])
     with tempfile.TemporaryDirectory() as d4:
         root4 = Path(d4)
         (root4 / "site").mkdir()
-        (root4 / "site" / "about.html").write_text(nav, encoding="utf-8")
+        (root4 / "site" / "about.html").write_text(site_nav, encoding="utf-8")
         if quiet_run(root4) != 2:
             failures.append("run() with site/ present but opf/site absent did not fail closed (expected 2)")
         (root4 / "opf" / "site").mkdir(parents=True)
@@ -695,6 +1030,106 @@ def _self_test():
         (root4 / "opf" / "site" / "stale.html").write_text(nav, encoding="utf-8")
         if quiet_run(root4) != 1:
             failures.append("an opf/site page missing the ./disclosure nav link was not reported (expected 1)")
+        os.remove(str(root4 / "opf" / "site" / "stale.html"))
+        # the opfiles.ai draft through the real two-root run(): a good draft passes, a draft landing page
+        # without its About link is a finding, and draft pages without a landing page are a finding.
+        (root4 / "opf" / "site" / "draft" / "model").mkdir(parents=True)
+        (root4 / "opf" / "site" / "draft" / "index.html").write_text(opf_draft_nav + about, encoding="utf-8")
+        (root4 / "opf" / "site" / "draft" / "model" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
+        if quiet_run(root4) != 0:
+            failures.append("a two-root tree with a good opf/site/draft/ did not pass (expected exit 0)")
+        (root4 / "opf" / "site" / "draft" / "index.html").write_text(opf_draft_nav, encoding="utf-8")
+        if quiet_run(root4) != 1:
+            failures.append("an opf/site/draft/ landing page without its About link was not reported (expected 1)")
+        os.remove(str(root4 / "opf" / "site" / "draft" / "index.html"))
+        if quiet_run(root4) != 1:
+            failures.append("opf/site/draft/ pages without the landing page were not reported (expected 1)")
+    # A 404 page carries the root-absolute /disclosure on either root: it passes there, and the relative
+    # ./disclosure (which a nested missing URL would resolve below the root) is a missing link.
+    with tempfile.TemporaryDirectory() as d4b:
+        root4b = Path(d4b)
+        (root4b / "site").mkdir()
+        (root4b / "site" / "about.html").write_text(site_nav, encoding="utf-8")
+        (root4b / "opf" / "site").mkdir(parents=True)
+        (root4b / "opf" / "site" / "index.html").write_text(rel_nav, encoding="utf-8")
+        (root4b / "opf" / "site" / "404.html").write_text(nav, encoding="utf-8")
+        if quiet_run(root4b) != 0:
+            failures.append("an opf/site 404 page carrying the root-absolute /disclosure did not pass")
+        (root4b / "opf" / "site" / "404.html").write_text(rel_nav, encoding="utf-8")
+        if quiet_run(root4b) != 1:
+            failures.append("an opf/site 404 page carrying the relative ./disclosure was not reported (expected 1)")
+    # The promoted layout through the real two-root run(): the generated pages at each root and the /draft/
+    # placeholder pass beside kept pages carrying the nav link; a landing page without its About link, a kept
+    # page without the nav link, and the placeholder's text at an unlisted path under draft/ are findings.
+    _use_declaration(promoted)
+    with tempfile.TemporaryDirectory() as d4c:
+        root4c = Path(d4c)
+        pages4c = {"site/about.html": site_nav, "site/index.html": root_nav + root_about,
+                   "site/install/index.html": root_nav, "site/draft/index.html": p_holder,
+                   "opf/site/manifest.html": rel_nav, "opf/site/index.html": opf_root_nav + root_about,
+                   "opf/site/model/index.html": opf_root_nav, "opf/site/draft/index.html": o_holder}
+        for rel, text in pages4c.items():
+            (root4c / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root4c / rel).write_text(text, encoding="utf-8")
+        if quiet_run(root4c) != 0:
+            failures.append("a promoted two-root tree with its /draft/ placeholders did not pass (expected exit 0)")
+        for rel, text, label in (
+                ("site/index.html", root_nav, "a promoted landing page without its About link"),
+                ("opf/site/index.html", opf_root_nav, "a promoted opf/site landing page without its About link"),
+                ("site/about.html", "<nav></nav>", "a kept promoted page without the nav link"),
+                ("opf/site/manifest.html", nav, "a kept promoted opf/site page without the ./disclosure link")):
+            (root4c / rel).write_text(text, encoding="utf-8")
+            if quiet_run(root4c) != 1:
+                failures.append("{} was not reported (expected 1)".format(label))
+            (root4c / rel).write_text(pages4c[rel], encoding="utf-8")
+        (root4c / "site" / "draft" / "old.html").write_text(p_holder, encoding="utf-8")
+        if quiet_run(root4c) != 1:
+            failures.append("the placeholder's text at an unlisted promoted draft/ path was not reported (expected 1)")
+    # The real tree under the real declaration (promoted) passes.
+    _use_declaration(None)
+    got = quiet_run(Path(__file__).resolve().parents[1])
+    if got != 0:
+        failures.append("the real tree under the real declaration did not pass (expected exit 0, got {})".format(got))
+    # A malformed GENSRC_OUTPUTS entry fails closed with exit 2 (a named reason), never a crash with exit 1;
+    # a well-formed declaration over the same tree passes.
+    entry = '{"target": "site/draft/index.html", "kind": "file", "sources": ("src.toml",), "regenerate": "x"}'
+    for label, literal, expected in (
+            ("a well-formed declaration", "(" + entry + ",)", 0),
+            ("an entry without a target", '({"tool": "x"},)', 2),
+            ("a bare string entry", '("site/draft/index.html",)', 2),
+            ("a list target", '({"target": ["a"]},)', 2),
+            ("an int target", '({"target": 5},)', 2),
+            ("a full entry with a list target", "(" + entry.replace('"site/draft/index.html"', '["a"]') + ",)", 2),
+            ("a full entry with an int target", "(" + entry.replace('"site/draft/index.html"', "5") + ",)", 2)):
+        with tempfile.TemporaryDirectory() as d7:
+            root7 = Path(d7)
+            (root7 / "tools").mkdir()
+            (root7 / "site").mkdir()
+            (root7 / "src.toml").write_text("x", encoding="utf-8")
+            (root7 / "site" / "about.html").write_text(nav, encoding="utf-8")
+            (root7 / _template_pages.GENERATOR).write_text("GENSRC_OUTPUTS = {}\n".format(literal), encoding="utf-8")
+            saved = _template_pages.ROOT
+            _template_pages.ROOT = root7
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    got = _run_one(root7, "site", DISCLOSURE_HREF, frozenset())
+            except Exception as exc:  # a crash is the failure this case pins, so it is recorded, not raised
+                got = "{}: {}".format(type(exc).__name__, exc)
+            finally:
+                _template_pages.ROOT = saved
+            if got != expected or (expected == 2 and "cannot read the template page targets" not in err.getvalue()):
+                failures.append("declaration, {}: expected exit {}, got {} {!r}".format(
+                    label, expected, got, err.getvalue()))
+    for label, pages, expected in (
+            ("404 page with root-absolute link passes on the relative root", {"404.html": nav}, []),
+            ("404 page with relative link fails on the relative root", {"404.html": rel_nav},
+             ["404.html: missing the /disclosure nav link"]),
+            ("non-404 page with root-absolute link fails on the relative root", {"about.html": nav},
+             ["about.html: missing the ./disclosure nav link"])):
+        got = check_pages(pages, frozenset(), "./disclosure")
+        if got != expected:
+            failures.append("{}: expected {} got {}".format(label, expected, got))
     with tempfile.TemporaryDirectory() as d5:
         closed = _close_vectors_guarded(Path(d5))
     if closed is None:
@@ -712,8 +1147,12 @@ def _self_test():
         for f in failures:
             print("  " + f)
         return 1
-    print("PASS: check_footer self-test ({} check_pages cases + run() exit-code legs + {} #378 close-vector "
-          "runs + {} close-vector guard cases)".format(len(cases), close_runs, guard_cases))
+    print("PASS: check_footer self-test ({} check_pages cases + {} draft-rule cases + {} opfiles draft-rule "
+          "cases + {} promoted draft-rule cases + {} staged and promoted template cases + run() exit-code legs + "
+          "7 declaration cases + {} #378 close-vector runs + "
+          "{} close-vector guard cases)".format(
+              len(cases), len(site_cases), len(opf_cases), len(promoted_cases), len(state_cases), close_runs,
+              guard_cases))
     return 0
 
 
@@ -734,7 +1173,7 @@ def main():
 # threading's census and the runtime's live count of low-level _thread workers together, so a worker's
 # later fault is recorded instead of killed silently by the exit, and a thread or low-level worker still
 # running at the bound fails the verdict closed (exit 2). On Linux the settle also waits on the OS's own
-# thread list for this process (_os_threads_pending), which still shows a worker while the runtime clears
+# thread list for this process (_os_threads_state), which still shows a worker while the runtime clears
 # its thread state (its thread-local and context values' destructors run there, after the runtime's live
 # count and threading's census already dropped it), a faulthandler watchdog and a thread a C extension
 # starts. The verdict then ends the process with os._exit, so an
@@ -880,16 +1319,32 @@ def _install_fault_hooks():
 _TASK_DIR = "/proc/self/task" if sys.platform.startswith("linux") else None
 
 
-def _os_threads_pending():
-    """True while the OS lists a thread of this process besides the calling one, and when that list
-    exists but cannot be read (fail-closed); False where the platform has no such list."""
+def _os_threads_state():
+    """The OS thread list's term by name: "OS thread list" while it lists a thread of this process besides
+    the calling one, "OS thread list unreadable" when it exists but cannot be read (fail-closed), None
+    otherwise and where the platform has no such list."""
     import os
     if _TASK_DIR is None:
-        return False
+        return None
     try:
-        return len(os.listdir(_TASK_DIR)) != 1
+        return "OS thread list" if len(os.listdir(_TASK_DIR)) != 1 else None
     except OSError:
-        return True
+        return "OS thread list unreadable"
+
+
+def _pending_terms():
+    """The names of the liveness terms besides threading's census still pending, in the settle's order:
+    the runtime's live count of low-level workers, a started worker's flag, and the OS thread list."""
+    import _thread as _lowlevel
+    terms = []
+    if _lowlevel._count():
+        terms.append("runtime count")
+    if any(_state[0] for _state in _LOADED_WORKERS):
+        terms.append("worker flag")
+    listed = _os_threads_state()
+    if listed is not None:
+        terms.append(listed)
+    return terms
 
 
 def _drain_pending_signals():
@@ -918,7 +1373,6 @@ def _gate_exit(code):
     import os
     import threading as _threads
     import time
-    import _thread as _lowlevel
     if type(code) is bool:
         code = 1 if code else 0
     elif code is None:
@@ -941,12 +1395,12 @@ def _gate_exit(code):
         code = low
     if code == 0:
         current = _threads.current_thread()
-        deadline = time.monotonic() + _SETTLE_SECONDS
+        started = time.monotonic()
+        deadline = started + _SETTLE_SECONDS
         while True:
             running = [worker for worker in _threads.enumerate()
                        if worker is not current and worker.is_alive()]
-            pending = (_lowlevel._count() or any(_state[0] for _state in _LOADED_WORKERS)
-                       or _os_threads_pending())
+            pending = _pending_terms()
             remaining = deadline - time.monotonic()
             if (not running and not pending) or remaining <= 0:
                 break
@@ -955,8 +1409,12 @@ def _gate_exit(code):
             else:
                 time.sleep(min(remaining, 0.05))
         if running or pending:
-            sys.stderr.write("{}: a worker thread or low-level worker was still running at the verdict; "
-                             "fail-closed\n".format(_FAULT_MARKER))
+            # The terms still pending and the time spent settling are named, so a failing run says
+            # whether a worker outlasted the bound and which term still saw it.
+            sys.stderr.write("{}: a worker thread or low-level worker was still running at the verdict "
+                             "(pending: {}; settled {:.3f}s of {:.3f}s); fail-closed\n".format(
+                                 _FAULT_MARKER, ", ".join((["thread census"] if running else []) + pending),
+                                 time.monotonic() - started, _SETTLE_SECONDS))
             code = 2
     if code == 0 and (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False)):
         sys.stderr.write("{}: {} background fault(s) from loaded code over a passing verdict; "
@@ -981,13 +1439,16 @@ def _gate_exit(code):
             _drain_pending_signals()
         except BaseException:  # noqa: BLE001  a handler's own escape fails the verdict, never the exit
             code = 2
-        if (_LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False) or _lowlevel._count()
-                or any(_state[0] for _state in _LOADED_WORKERS) or _os_threads_pending()):
+        late = _pending_terms()
+        if _LOADED_FAULTS or getattr(sys, "_loaded_code_fault", False):
+            late.insert(0, "fault record")
+        if late:
             code = 2
         if code != 0:
             try:
-                os.write(2, ("{}: a background fault or a worker was recorded during the exit flush; "
-                             "fail-closed\n".format(_FAULT_MARKER)).encode("utf-8"))
+                os.write(2, ("{}: a background fault or a worker was recorded during the exit flush "
+                             "(found: {}); fail-closed\n".format(
+                                 _FAULT_MARKER, ", ".join(late) or "signal handler escape")).encode("utf-8"))
             except OSError:
                 pass
     os._exit(code)
@@ -1013,7 +1474,7 @@ sys.path.insert(0, tool.rsplit("/", 1)[0])
 spec = importlib.util.spec_from_file_location("_fault_channel_probe_target", tool)
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
-gate._SETTLE_SECONDS = 2.0
+gate._SETTLE_SECONDS = float(sys.argv[3]) if len(sys.argv) > 3 else 2.0
 def load():
     case = importlib.util.spec_from_file_location("_fault_channel_fixture", fixture)
     module = importlib.util.module_from_spec(case)
@@ -1322,6 +1783,90 @@ def _entry_wiring_failures():
                         "fail-closed form")
     return failures
 
+
+# A failure whose child ran carries the child's LOADED-CODE-FAULT lines, cut to this many characters (the
+# " [cut]" suffix that then follows is outside the limit), so it says why the case failed without carrying
+# an unbounded stream.
+_FAULT_LINES_LIMIT = 600
+
+
+def _fault_lines(stderr):
+    """The child's LOADED-CODE-FAULT lines joined with " | "; when longer than _FAULT_LINES_LIMIT
+    characters, the first _FAULT_LINES_LIMIT of them followed by " [cut]", which the limit excludes."""
+    said = " | ".join(line for line in stderr.splitlines() if line.startswith(_FAULT_MARKER + ":"))
+    if len(said) > _FAULT_LINES_LIMIT:
+        said = said[:_FAULT_LINES_LIMIT] + " [cut]"
+    return said or "no {} line".format(_FAULT_MARKER)
+
+
+_SETTLE_PREFIX = (_FAULT_MARKER + ": a worker thread or low-level worker was still running at the verdict "
+                  "(pending: ")
+
+
+def _settle_report(stderr):
+    """The settle line's pending terms, seconds settled and bound, read from a child's stderr; ([], None, None)
+    without such a line, and None for the seconds when they do not parse."""
+    for line in stderr.splitlines():
+        if line.startswith(_SETTLE_PREFIX):
+            terms, _sep, rest = line[len(_SETTLE_PREFIX):].partition("; settled ")
+            settled, _sep, rest = rest.partition("s of ")
+            try:
+                return terms.split(", "), float(settled), float(rest.partition("s)")[0])
+            except ValueError:
+                return terms.split(", "), None, None
+    return [], None, None
+
+
+# The clean finishing rows pass only when the settle sees the worker's teardown end within the probe's
+# bound, so a host that stalls that teardown past the bound fails them. Such a failure is named from what
+# the child reported, never assumed: a child that failed closed with the settle line as its only marker,
+# the settle having reached its bound with only the worker's own liveness terms pending (never an
+# unreadable thread list), gets a prefix saying the worker was still pending at the bound. A finishing
+# fixture that regressed into a worker that never ends reports exactly the same, so the prefix names both
+# causes and cannot tell them apart. Either way the row still fails, never a pass; a settle that stops
+# waiting early leaves the re-read after the flushes to fail it under that re-read's own marker, unprefixed.
+_FINISHING_LABELS = ("finishing-thread", "lowlevel-finishing", "lowlevel-local-finishing",
+                     "runtime-count-return-finishing")
+_STALL_TERMS = ("thread census", "runtime count", "worker flag", "OS thread list")
+
+
+def _stall_name(label, code, stderr):
+    """A prefix for a clean finishing row's child that failed closed only because its worker was still
+    pending at the probe's settle bound, a host stall past the bound or a worker that no longer ends (see
+    _FINISHING_LABELS); "" otherwise. The row still fails."""
+    if label not in _FINISHING_LABELS or code != 2:
+        return ""
+    terms, settled, bound = _settle_report(stderr)
+    markers = [line for line in stderr.splitlines() if line.startswith(_FAULT_MARKER + ":")]
+    if (settled is None or bound is None or settled < bound or len(markers) != 1
+            or not terms or any(term not in _STALL_TERMS for term in terms)):
+        return ""
+    return ("worker still pending at the probe's {:.3f}s settle bound on this host (settled {:.3f}s, pending "
+            "{}), a host stall past the bound or a worker that no longer ends; this still fails: ".format(
+                bound, settled, ", ".join(terms)))
+
+
+# The settle names the term it still waited on. The fixture's low-level worker has a thread-local value
+# whose destructor blocks on an event nothing ever sets, so that teardown stays on the OS thread list until
+# the probe's own exit, however long the host stalls before the settle; the fixture returns only once the
+# destructor has begun. Under a 0.1s bound the child must fail closed naming that term (red when the
+# settle line names no pending term).
+_SETTLE_NAMED_TERM = "OS thread list"
+_SETTLE_NAMED_FIXTURE = ("import _thread, threading\n"
+                         "entered = threading.Event()\n"
+                         "never = threading.Event()\n"
+                         "store = threading.local()\n"
+                         "class Held:\n"
+                         "    def __del__(self):\n"
+                         "        entered.set()\n"
+                         "        never.wait()\n"
+                         "def worker():\n"
+                         "    store.value = Held()\n"
+                         "_thread.start_new_thread(worker, ())\n"
+                         "entered.wait()\n")
+_SETTLE_NAMED_ROW = ("settle-bound-named", _SETTLE_NAMED_FIXTURE, 2, True, None, ("0.1",))
+
+
 def _fault_channel_vectors():
     """One failure string per fault-channel case whose child did not end as required: the expected exit
     code, the fault marker exactly when a fault must be recorded, and for the atexit case no trace of the
@@ -1333,26 +1878,34 @@ def _fault_channel_vectors():
     import tempfile
     failures = []
     tool = str(Path(__file__).resolve())
+    rows = [(label, body, expected, marked, absent, ())
+            for label, body, expected, marked, absent in _FAULT_CHANNEL_CASES]
+    rows.append(_SETTLE_NAMED_ROW)
     with tempfile.TemporaryDirectory(prefix="check-footer-fault-channel-") as tmp:
         probe = Path(tmp) / "probe.py"
         probe.write_text(_FAULT_CHANNEL_PROBE, encoding="utf-8")
-        for index, (label, body, expected, marked, absent) in enumerate(_FAULT_CHANNEL_CASES):
+        for index, (label, body, expected, marked, absent, bound) in enumerate(rows):
             case = Path(tmp) / "fault_channel_{}.py".format(index)
             case.write_text(body, encoding="utf-8")
             try:
-                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)],
+                child = subprocess.run([sys.executable, "-I", "-B", str(probe), tool, str(case)] + list(bound),
                                        capture_output=True, text=True, timeout=120)
             except (OSError, subprocess.SubprocessError) as exc:
                 failures.append("fault-channel/{}: probe did not run ({})".format(label, type(exc).__name__))
                 continue
-            if child.returncode != expected:
-                failures.append("fault-channel/{}: expected exit {}, got {}".format(
-                    label, expected, child.returncode))
+            said = _fault_lines(child.stderr)
+            if label == _SETTLE_NAMED_ROW[0]:
+                if child.returncode != 2 or _SETTLE_NAMED_TERM not in _settle_report(child.stderr)[0]:
+                    failures.append("fault-channel/{}: expected exit 2 naming {!r} as pending, got exit {}; "
+                                    "child said: {}".format(label, _SETTLE_NAMED_TERM, child.returncode, said))
+            elif child.returncode != expected:
+                failures.append("fault-channel/{}: {}expected exit {}, got {}; child said: {}".format(
+                    label, _stall_name(label, child.returncode, child.stderr), expected, child.returncode, said))
             elif marked != ((_FAULT_MARKER + ":") in child.stderr):
-                failures.append("fault-channel/{}: fault marker {}".format(
-                    label, "absent" if marked else "present"))
+                failures.append("fault-channel/{}: fault marker {}; child said: {}".format(
+                    label, "absent" if marked else "present", said))
             elif absent is not None and absent in child.stderr:
-                failures.append("fault-channel/{}: the atexit callback ran".format(label))
+                failures.append("fault-channel/{}: the atexit callback ran; child said: {}".format(label, said))
     failures.extend(_flush_window_failures())
     failures.extend(_entry_wiring_failures())
     return failures

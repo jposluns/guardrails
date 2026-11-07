@@ -123,6 +123,11 @@ that hosts it (this interpreter, python3 -I -B, on the sibling child script); th
 importing that parser and starting that child. Callers: check_brief_capability (decode_brief refuses what forbidden()
 finds, PreflightText reads read()), check_verifier_delivery (_declared_inputs refuses both and takes
 read()'s declarations); both call forbidden() first, so read() may assume LF-only line ends.
+
+SELF-TEST FIXTURES (verbatim_tempdir). Both callers' self-tests write fixture briefs that name a fresh
+temporary directory on an INPUT line, so that directory's path must render exactly as written under this
+reading. verbatim_tempdir draws it, and it is the one place this module touches the filesystem outside
+the parse: it makes directories through the caller's `make` and removes the marked draws it made.
 """
 import bisect
 import html
@@ -132,6 +137,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import unicodedata
 
@@ -1138,3 +1144,23 @@ def read(text):
     inputs.sort(key=lambda pair: pair[0])
     bad.sort(key=lambda pair: pair[0])
     return inputs, bad
+
+
+def verbatim_tempdir(prefix, error, make=tempfile.mkdtemp, attempts=64):
+    """A fresh directory from `make` (tempfile.mkdtemp) whose path is pure ASCII with no character of
+    RENDERING_MARK_RE, so a self-test fixture brief that names it on an INPUT line renders it exactly as
+    written. mkdtemp draws its name from an alphabet that holds `_`, and a name such as `-_k9b51z_`
+    renders as emphasis, which drops both marks and names a path that does not exist; such a draw is
+    removed and drawn again. A temporary root that itself holds a mark, or `attempts` marked draws, raises
+    `error` (the caller's cannot-evaluate refusal): the fixtures cannot be written there. Returns the
+    path as a string."""
+    root = tempfile.gettempdir()
+    if not root.isascii() or RENDERING_MARK_RE.search(root) is not None:
+        raise error("self-test: the temporary root {} holds a character the CommonMark reading "
+                    "renders, so the INPUT fixtures cannot name it verbatim".format(root))
+    for _ in range(attempts):
+        directory = make(prefix=prefix)
+        if directory.isascii() and RENDERING_MARK_RE.search(directory) is None:
+            return directory
+        os.rmdir(directory)
+    raise error("self-test: {} temporary directory names in a row held a rendering mark".format(attempts))

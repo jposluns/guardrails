@@ -1395,7 +1395,7 @@ def _self_test_isolated():
                 env.update(extra)
             return env
 
-        def _run(args, cwd, extra=None, stdout=subprocess.DEVNULL):
+        def _run(args, cwd, extra=None, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL):
             # Run a pack script under sh and return its exit status. A missing sh is a harness error.
             sh = shutil.which("sh")
             if sh is None:
@@ -1403,7 +1403,7 @@ def _self_test_isolated():
             argv = [os.path.abspath(sh)] + list(args)
             try:
                 proc = subprocess.run(argv, cwd=str(cwd), env=_env(extra),
-                                      stdout=stdout, stderr=subprocess.DEVNULL, timeout=300)
+                                      stdout=stdout, stderr=stderr, timeout=300)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise OSError("could not run {} in {} ({})".format(args, cwd, exc))
             return proc.returncode
@@ -2434,13 +2434,13 @@ def _self_test_isolated():
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]
 
-            def _stubbed(root, rc_doctor=0, rc_render=0, args=(), extra=None):
+            def _stubbed(root, rc_doctor=0, rc_render=0, args=(), extra=None, stderr=subprocess.DEVNULL):
                 serial[0] += 1
                 log = base / "stub-log-{}".format(serial[0])
                 env = dict(OPF_TOOL=str(stub), OPF_STUB_LOG=str(log),
                            OPF_STUB_RC_DOCTOR=str(rc_doctor), OPF_STUB_RC_RENDER=str(rc_render))
                 env.update(extra or dict())
-                rc = _run([rel + "/pre-commit"] + list(args), root, env)
+                rc = _run([rel + "/pre-commit"] + list(args), root, env, stderr=stderr)
                 calls = []
                 if log.is_file():
                     calls = [line.split(chr(31)) for line in log.read_text(encoding="utf-8").splitlines()]
@@ -2472,6 +2472,26 @@ def _self_test_isolated():
             expect("hook-abnormal-status-normalized", (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
             rc, calls, _f = _stubbed(stubbed, args=("x",))
             expect("hook-usage", (rc, calls), (EXIT_ERROR, []))
+
+            # The snapshot's remote list holds one value per line, so a push URL that still holds a line
+            # break once git's own line ending is removed exits 2 naming it, before any step: a trailing
+            # newline, a double newline and an inner newline alike. A plain push URL runs both steps.
+            def _pushurl_hook(tag, pushurl):
+                root = _fixture("pushurl-" + tag, remote="https://example.invalid/org/store.git")
+                _git(root, home, "config", "remote.origin.pushurl", pushurl)
+                err = base / ("pushurl-" + tag + ".err")
+                with open(str(err), "wb") as fh:
+                    rc, calls, _f = _stubbed(root, stderr=fh)
+                return rc, [c[0] for c in calls], err.read_text(encoding="utf-8")
+
+            line_break = ("opf-pre-commit: cannot evaluate: the push URL of remote origin holds a line break, "
+                          "which the snapshot cannot carry\n")
+            for tag, pushurl in (("trailing-newline", "/srv/store\n"), ("double-newline", "/srv/store\n\n"),
+                                 ("inner-newline", "/srv/a\nb")):
+                expect("hook-pushurl-line-break-refused-" + tag, _pushurl_hook(tag, pushurl),
+                       (EXIT_ERROR, [], line_break))
+            expect("hook-pushurl-plain-passes", _pushurl_hook("plain", "/srv/store"),
+                   (EXIT_OK, ["doctor", "render"], ""))
             # Every snapshot is removed on exit.
             expect("hook-snapshots-removed", sorted(os.listdir(str(snaps))), [])
             # Fail closed, each before any step: a git older than the 2.32 floor, and an environment whose

@@ -163,19 +163,19 @@ _ROSTER_NAMESPACES.update(IMPORTER_TYPES)
 _ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
 
 # A record whose schema has not shipped in the baseline validator is a named CANNOT-EVALUATE deferral,
-# never graded INVALID (F4; round-5 F-2). This covers the module tier (schemas land in U2M) AND the
-# importer-only legacy_fragment type (deprecated for new stores, spec 8.1: no record schema ships in the
-# baseline validator, so records in an existing store stay readable as a named deferral).
+# never graded INVALID. This covers the module tier (schemas land in U2M) AND the legacy_fragment type,
+# which the standard does not define (it reserves LF unassigned, spec 8.1): no record schema ships in the
+# baseline validator, so records in an existing store stay readable as a named deferral.
 _SCHEMA_DEFERRAL = ("record schema not available to the baseline validator; deferred (module-tier schemas "
-                    "land in U2M; legacy_fragment is deprecated for new stores and has no baseline "
-                    "record schema)")
+                    "land in U2M; the standard reserves LF unassigned and no record type uses it, so "
+                    "legacy_fragment has no baseline record schema)")
 
 
 def _schema_deferred(tname):
     """True when `tname` is an enabled module-tier OR importer type whose record schema has not shipped
     (it is in MODULE_TYPES or IMPORTER_TYPES but has no BASELINE_SPECS entry). Its records are a named
-    CANNOT-EVALUATE deferral, not graded INVALID by the baseline-only validator (F4; round-5 F-2 extends
-    this from the module tier to the importer legacy_fragment type)."""
+    CANNOT-EVALUATE deferral, not graded INVALID by the baseline-only validator; this covers the module
+    tier and the legacy_fragment name in IMPORTER_TYPES."""
     return tname not in BASELINE_SPECS and (tname in MODULE_TYPES or tname in IMPORTER_TYPES)
 
 # The closed spec-11 integrity roster. Every required check calls rep.ran(<id>) once; result() reconciles
@@ -1225,12 +1225,58 @@ def _canonical_remote(url):
     return (host.lower(), p)
 
 
-def _target_remote_canon(target):
+def _fs_path_form(value):
+    """How a remote spelling (a `git:` payload, or an observed actual remote) names a filesystem repository
+    rather than a URL. Both C-SYNC-AGREE legs classify through this one function, so a spelling classifies
+    the same whichever leg reads it. A filesystem sync target is accepted only as git:<absolute path> (spec
+    5.6), so this returns "blank" for an empty or whitespace-only value (it names no repository, and is
+    never a URL); "file-url" for a file:// URL; None for any other spelling containing '://', tested before
+    the absolute-path test because git reads any '://' as a scheme separator (it refuses /srv/a://repo as an
+    unsupported protocol '/srv/a', never opening it as a directory), so such a spelling is a URL form on
+    both legs and never a filesystem path; "absolute" for a POSIX-absolute path; "padded" for an absolute
+    path with leading or trailing whitespace (whitespace is significant in a path, so such a spelling is
+    ambiguous: refused, never trimmed); "relative" for any other path-shaped payload (no scheme and no
+    scp-style host colon before the first slash, the forms _canonical_remote cannot split into a host and a
+    path); and None for an scp-style host:path form, which _canonical_remote handles unchanged."""
+    s = value.strip() if isinstance(value, str) else ""
+    if not s:
+        return "blank"
+    if s[:len("file://")].lower() == "file://":
+        return "file-url"
+    if "://" in s:
+        return None
+    if s.startswith("/"):
+        return "absolute" if s == value else "padded"
+    slash, colon = s.find("/"), s.find(":")
+    if colon == -1 or (slash != -1 and slash < colon):
+        return "relative"
+    return None
+
+
+def _local_path_canon(value):
+    """The comparable local form of an absolute filesystem repository path: ("", path) with repeated
+    slashes, '.' segments and a trailing slash dropped. _canonical_remote never returns an empty host, so a
+    local form cannot collide with a URL endpoint. The path is otherwise kept exactly, whitespace included
+    (no trimming, and no '.git' fold: /srv/a and /srv/a.git are different directories). A '..' segment is
+    unresolvable (None), since folding it lexically can name a different directory than the one git opens
+    through a symlink."""
+    s = value if isinstance(value, str) else ""
+    if not s.startswith("/"):
+        return None
+    segs = [seg for seg in s.split("/") if seg not in ("", ".")]
+    if not segs or ".." in segs:
+        return None
+    return ("", "/" + "/".join(segs))
+
+
+def _target_remote_canon(target, local_paths=True):
     """The canonical (host, path) forms a REMOTE target (spec 5.5) names, for host+path agreement against
     an observed remote. Returns (canon_set, unresolved): `canon_set` is the set of canonical forms (empty
     when a remote target names no canonicalizable form), and `unresolved` lists the raw target forms the
     equivalence could not canonicalize (disclosed, never silently matched; F8). Returns (None, []) for a
-    LOCAL (dir:/path) target that names no git remote."""
+    LOCAL (dir:/path) target that names no git remote. A git:<absolute path> target canonicalizes to its
+    local form (_local_path_canon) when `local_paths` is true; with it false that form stays unresolved,
+    exactly as a URL-only canonicalizer leaves it."""
     if target.kind in ("github", "gitlab"):
         host = "github.com" if target.kind == "github" else "gitlab.com"
         val = target.value.strip().lstrip("/")
@@ -1240,6 +1286,11 @@ def _target_remote_canon(target):
             return set(), [target.value]
         return {(host, val)}, []
     if target.kind == "git":
+        if local_paths and _fs_path_form(target.value) == "absolute":
+            lc = _local_path_canon(target.value)
+            if lc is None:
+                return set(), [target.value]
+            return {lc}, []
         c = _canonical_remote(target.value)
         if c is None:
             return set(), [target.value]
@@ -1927,7 +1978,7 @@ def _archive_triaged_dir(archive_rel, path):
 
 
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1,
-                      unread=None, unconfirmed=None, active_counted=None):
+                      unread=None, unconfirmed=None, active_counted=None, walk=None):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
     (OPF-SPEC 12/13). Enumeration and record-schema faults attribute to the caller's C-ARCHIVE-ENUM focus;
@@ -1972,7 +2023,9 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     at. `active_counted` (when given) maps each active location the caller's
     collectors read in full to the ids counted there, keyed store-relative exactly as an archive.toml
     destination names it (`<type>.index.toml`, `worklog.toml`); only membership is read for a ledger.
-    Without it no active location is counted, so a destination naming one stays in `unread`."""
+    Without it no active location is counted, so a destination naming one stays in `unread`. `walk`
+    (when given, a dict whose caller's report has a `cannot` list) takes "tree": "absent" when no
+    archive tree exists, "unreadable" when one exists but cannot be listed, else "listed"."""
     if unread is None:
         unread = set()
     if unconfirmed is None:
@@ -1999,12 +2052,18 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     # grading), matching C-CONTAINMENT.
     partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep, homes)
     archive_rel = _rel(machine_rel, ARCHIVE_DIRNAME)
+    cant_before = len(rep.cannot) if walk is not None else 0
     years, top_files = _list_dir(root_fd, archive_rel, rep, unread, enabled_types)
     if years is None:
         # An ABSENT archive/ tree means no rotation has happened (clean). A tree that EXISTS but cannot
         # be listed takes the same return, with the cant and every enabled type already recorded unread
-        # by _list_dir above, so nothing downstream reads the unwalked tree as rotation-free.
+        # by _list_dir above, so nothing downstream reads the unwalked tree as rotation-free. Only the
+        # listing's own cant tells the two apart, so `walk` reads it from the report.
+        if walk is not None:
+            walk["tree"] = "unreadable" if len(rep.cannot) > cant_before else "absent"
         return archive_recs, archive_worklogs, rotatable
+    if walk is not None:
+        walk["tree"] = "listed"
     for fn_ in (top_files or []):
         # A regular file directly under archive/ is unmanaged: only <YYYY> bucket directories belong here.
         # C-CONTAINMENT skips the archive subtree, so its stray-path grading lives here (spec 12/14.2; B2).
@@ -2552,6 +2611,73 @@ def archived_records(root_fd, machine_rel, enabled_types, registered_vendors, im
     archive_recs, _worklogs, rotatable = _validate_archive(
         root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=homes)
     return archive_recs, rep.cannot + rep.findings + rotatable
+
+
+class ArchiveRead:
+    """What one archive walk held (archive_read). `tree` is "absent" (no archive tree: nothing rotated),
+    "unreadable" (a tree exists but cannot be listed) or "listed". `records` lists one
+    (location, type, body) triple per archived row the walk seated, in walk order, so a duplicate id
+    keeps every copy. `worklog` lists one (location, entry) pair per archived worklog entry the walk
+    mapped, bucket by bucket in walk order and in ledger order within a bucket. `problems` lists every
+    cannot-evaluate, finding and C-ROTATION message, a duplicate archived id included. `complete` is
+    False when any record population could not be read or confirmed in full. `source_bytes` maps each
+    store-relative path the walk parsed to the exact bytes of that parse."""
+    __slots__ = ("tree", "records", "worklog", "problems", "complete", "source_bytes")
+
+    def __init__(self, tree, records, worklog, problems, complete, source_bytes):
+        self.tree = tree
+        self.records = records
+        self.worklog = worklog
+        self.problems = problems
+        self.complete = complete
+        self.source_bytes = source_bytes
+
+
+def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import_status, homes=1):
+    """The archive as one _validate_archive walk read it, for a caller that must account the archive
+    inputs it renders from: the record bodies archived_records seats, the archived worklog entries the
+    walk mapped, the problems archived_records returns plus one per archived id seated more than once
+    (every copy kept), whether every population was read and confirmed in full, and the bytes of each
+    archive.toml, index and worklog the walk parsed. Those bytes are the report's read cache
+    (_read_toml, _gather_worklog), the first read of each path. The bucket scan reads each manifest,
+    index and worklog once, and every returned record and worklog entry is parsed from that read. A
+    destination probe (_dest_index_has_id) reads an index again only where the bucket scan counted
+    nothing at that path; it never seats a record, and whatever it finds leaves `complete` False (a miss
+    also adds a finding). Where the scan read that path first, its bytes are the ones kept; where it did
+    not (the index was not listed, or its read failed), the probe's bytes are kept although no record
+    comes from them. A file that could not be read or parsed has no bytes and a problem names it.
+
+    A problem the doctor files under another check names that check, so the problems are not the doctor's
+    C-ARCHIVE-ENUM list alone: a non-terminal archived record, or a bucket that rotates records with no
+    worklog span, is a C-ROTATION message, as the doctor reports it; an archived id seated more than once
+    is a C-ID-SPACE message, which the doctor reports under C-ID-SPACE in its own wording. archive_read
+    reads no active records, so an archived id that repeats an active one is reported by the doctor
+    alone, and since it passes the walk no active locations, a destination naming one leaves `complete`
+    False where the doctor counts it. A caller relies on the result only when `problems` is empty and
+    `complete` is True."""
+    rep = _Report()
+    rep.ran("C-ARCHIVE-ENUM")
+    unread, unconfirmed, walk = set(), set(), {}
+    archive_recs, archive_worklogs, rotatable = _validate_archive(
+        root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=homes,
+        unread=unread, unconfirmed=unconfirmed, walk=walk)
+    problems = rep.cannot + rep.findings + rotatable
+    seen = {}
+    for rec in archive_recs:
+        if isinstance(rec.id, str):
+            seen.setdefault(rec.id, []).append(rec.location)
+    for rid in sorted(seen):
+        if len(seen[rid]) > 1:
+            problems.append("C-ID-SPACE: archived id {!r} is seated {} times ({}); every copy is kept "
+                            "and none stands for another (spec 8.2, 11)".format(
+                                rid, len(seen[rid]), ", ".join(seen[rid])))
+    complete = not (rep.cannot or unread or unconfirmed)
+    records = [(rec.location, rec.rtype, rec.body) for rec in archive_recs]
+    # Each bucket's map holds the entries _gather_worklog parsed from the one read whose bytes the read
+    # cache keeps; an entry it left out (not a table, no WL id, a reused id) already made `complete` False.
+    worklog = [("archive/{}".format(year), entry)
+               for year, wl_map in archive_worklogs.items() for entry in wl_map.values()]
+    return ArchiveRead(walk.get("tree"), records, worklog, problems, complete, dict(rep.toml_reads))
 
 
 def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
@@ -3982,7 +4108,7 @@ def classify_containment(manifest_data, machine_rel):
     # above IMPORTED_SPEC_VERSION, so even the reserved 2.0.0 / homes = 2 declaration C-MANIFEST accepts
     # stays inactive until activation), and admitted ONLY directly in the machine store. The names derive
     # from the enabled-type roster in _opf_store, so the leaf set cannot drift from the imported
-    # id/counter namespace set; the importer-only legacy_fragment contributes no leaf.
+    # id/counter namespace set; legacy_fragment, on the unassigned LF, contributes no leaf.
     imported = imported_series_active(manifest_data)
     imported_leaves = _opf_store.imported_leaf_names(enabled_types) if imported else frozenset()
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
@@ -5013,8 +5139,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-COUNTERS: {} is absent (one monotonic high-water per namespace is required; spec "
                     "8.2)".format(_rel(machine_rel, COUNTERS_NAME)))
     elif cst == "ok":
-        # Importer/quarantine namespaces (IMPORTER_TYPES, i.e. LF) are ACCEPTED-if-present but NOT
-        # REQUIRED: a store scaffolded before LF's deprecation (spec 8.1) carries an LF counter from
+        # IMPORTER_TYPES namespaces (i.e. LF) are ACCEPTED-if-present but NOT REQUIRED: a store
+        # scaffolded before the standard reserved LF unassigned (spec 8.1) carries an LF counter from
         # opf init while legacy_fragment stays out of the manifest [types] (schema-deferred), so LF is
         # absent from known_ns; passing it as optional keeps such a store clean without requiring LF on
         # a store that lacks it, as a new store does (spec 8.2).
@@ -5356,13 +5482,48 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.finding("C-SYNC-AGREE: [store].sync_target {!r} does not classify as a target (spec "
                         "5.5): {}".format(sync_target, exc))
         else:
-            tcanon, tunresolved = _target_remote_canon(tgt)   # canonical (host, path) forms, None (local)
+            # A filesystem sync target is accepted only as git:<absolute path> (spec 5.6). A dir:, bare-path,
+            # relative git:, file:// URL or whitespace-padded git: path dedicated target (tcanon None) names
+            # nothing either leg can agree with, so BOTH legs refuse it, each naming the remedy, whatever the
+            # committed pointer and the actual remote observation hold. Only a git:<absolute path> target
+            # compares the committed pointer and the actual remote by their local form; a URL target
+            # compares exactly as a URL. classify_target trims the whole value, which would drop whitespace
+            # ending a git: path or a bare URL, so the payload is classified from the untrimmed value.
+            # Whitespace is significant to git in a URL as in a path (git sends a padded ssh:// path to the
+            # server as written), so a URL target with leading or trailing whitespace is refused too, as is
+            # a blank git: payload, which names no remote at all.
+            tpayload = tgt.value
+            if tgt.kind == "git":
+                tpayload = (sync_target.lstrip()[len("git:"):] if sync_target.lstrip().startswith("git:")
+                            else sync_target)
+            tform = _fs_path_form(tpayload) if tgt.kind == "git" else None
+            tform_word = {"dir": "dir:", "path": "bare-path"}.get(tgt.kind) or {
+                "file-url": "file:// URL",
+                "padded": "git: path with leading or trailing whitespace, an ambiguous"}.get(tform, "relative git:")
+            tnot_fs = None
+            if tform == "blank":
+                tnot_fs = "has a blank git: payload, which names no remote"
+            elif tgt.kind == "git" and tform is None and tpayload != tpayload.strip():
+                tnot_fs = ("is a URL with leading or trailing whitespace, which is ambiguous (git does not "
+                           "trim it)")
+            if tform in ("relative", "file-url", "padded") or tnot_fs is not None:
+                tcanon, tunresolved = None, []
+            else:
+                tcanon, tunresolved = _target_remote_canon(tgt)   # canonical (host, path) forms, None (local)
             for raw in tunresolved:
                 rep.cant("C-SYNC-AGREE: the sync_target remote form {!r} cannot be canonicalized for "
                          "host+path agreement (a disclosed residual; spec 5.5)".format(raw))
             # Leg 2: a committed pointer that names a REMOTE disagreeing with the sync_target (B3).
-            if pointer_target is not None and not pointer_target.local:
-                pcanon, pun = _target_remote_canon(pointer_target)
+            if tnot_fs is not None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} {}, so no committed pointer can agree "
+                            "with it as a dedicated sync target (spec 5.5/5.6)".format(sync_target, tnot_fs))
+            elif tcanon is None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a {} filesystem target, which no "
+                            "committed pointer can agree with as a dedicated sync target; a filesystem sync "
+                            "target is accepted only as git:<absolute path> (use git:<absolute path>; spec "
+                            "5.5/5.6)".format(sync_target, tform_word))
+            elif pointer_target is not None and not pointer_target.local:
+                pcanon, pun = _target_remote_canon(pointer_target, local_paths=tform == "absolute")
                 for raw in pun:
                     # Symmetric with the sync_target unresolved-forms cant (F7): a committed pointer naming a
                     # REMOTE the equivalence cannot canonicalize is a disclosed CANNOT-EVALUATE, never a
@@ -5373,33 +5534,67 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 if tcanon and pcanon and not _canon_sets_agree(pcanon, tcanon, tgt.kind):
                     rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
                                 "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
-                elif pcanon and tcanon is None:
-                    # A dedicated LOCAL sync_target (dir:/path -> tcanon is None) names NO remote, so a
-                    # committed pointer that names a canonicalizable REMOTE contradicts it. Symmetric with
-                    # the actual-remote leg's local-target-with-a-remote finding (leg 3) and the
-                    # relocated-local committed-pointer-remote finding, so leg 2 does not silently pass a
-                    # remote pointer against a local sync_target (Fable F2).
-                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a local target but the "
-                                "committed pointer names a remote {} target {!r} (spec 5.6)".format(
-                                    sync_target, pointer_target.kind, pointer_target.value))
             # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. Equivalent
             # URL forms (https / ssh scp-style git@host:path, with or without a trailing .git) compare by
             # canonical host+path, so a valid shorthand is not rejected by a naive strip-compare (F8).
-            if actual is None:
+            # A remote whose URL is empty is absent; one whose URL is only whitespace is present but blank.
+            aform = _fs_path_form(actual) if isinstance(actual, str) and actual != "" else None
+            alabel = (repr(actual) if actual_present else "present but blank: {!r}".format(actual)
+                      if aform == "blank" else "none" if isinstance(actual, str) else actual_reason)
+            if tnot_fs is not None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} {}, so the store repository's actual "
+                            "remote ({}) cannot agree with it as a dedicated sync target (spec 5.5/5.6)".format(
+                                sync_target, tnot_fs, alabel))
+            elif tcanon is None:
+                # Refused on this leg too, and before the observation is consulted: with no remote, or no
+                # observation, a filesystem target outside the git: form still names nothing to agree with.
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a {} filesystem target, which the "
+                            "store repository's actual remote ({}) cannot agree with as a dedicated sync "
+                            "target; a filesystem sync target is accepted only as git:<absolute path> (use "
+                            "git:<absolute path>; spec 5.5/5.6)".format(sync_target, tform_word, alabel))
+            elif actual is None:
                 rep.cant("C-SYNC-AGREE: {}; the sync-target / remote agreement (spec 5.6) is required "
                          "for a dedicated sync target and is not evaluable by a parse-only engine".format(
                              actual_reason))
-            elif tcanon is None:
-                # a local dir:/path sync target with an observed remote cannot be canonicalized to compare
-                if actual_present:
-                    rep.finding("C-SYNC-AGREE: [store].sync_target {!r} is a local target but the store "
-                                "repository has an actual remote {!r} (spec 5.6)".format(sync_target, actual))
+            elif aform == "blank":
+                rep.finding("C-SYNC-AGREE: the manifest declares a dedicated sync_target {!r} but the store "
+                            "repository's actual remote {!r} is present but blank or whitespace-only, which "
+                            "names no remote (spec 5.6)".format(sync_target, actual))
             elif not actual_present:
                 rep.finding("C-SYNC-AGREE: the manifest declares a dedicated sync_target {!r} but the "
                             "store repository has no actual remote (spec 5.6)".format(sync_target))
+            elif tform == "absolute" and aform == "padded":
+                # whitespace is significant in a path, so an actual remote path with leading or trailing
+                # whitespace is ambiguous: refused, never trimmed into agreement with the target
+                rep.finding("C-SYNC-AGREE: the store repository's actual remote {!r} is a filesystem path with "
+                            "leading or trailing whitespace, which is ambiguous and cannot agree with the "
+                            "manifest sync_target {!r} (spec 5.6)".format(actual, sync_target))
+            elif aform is None and actual != actual.strip():
+                # whitespace is significant to git in a URL too, and _canonical_remote trims, so a URL actual
+                # remote with leading or trailing whitespace is refused here, never trimmed into agreement
+                rep.finding("C-SYNC-AGREE: the store repository's actual remote {!r} is a URL with leading or "
+                            "trailing whitespace, which is ambiguous and cannot agree with the manifest "
+                            "sync_target {!r} (spec 5.6)".format(actual, sync_target))
             else:
                 acanon = _canonical_remote(actual)
-                if acanon is None:
+                if acanon is None and tform == "absolute" and aform == "absolute":
+                    # a git:<absolute path> target is reached through a local-path remote: compare that
+                    # path's local form, classified exactly as the target was (a remote containing '://' is
+                    # a URL form, never this branch); a URL target never takes this branch, so it compares
+                    # as before, and a file:// remote stays the disclosed residual
+                    acanon = _local_path_canon(actual)
+                # A path-shaped remote holding '://' (/srv/a://repo) is read by git as an unsupported
+                # protocol, or as a bundle file at the path the OS resolves, which takes no push. Against a
+                # git:<absolute path> target whose local form differs from that path it is a sure mismatch;
+                # where the two paths are the same it stays the disclosed residual below.
+                afold = (_local_path_canon(actual) if acanon is None and tform == "absolute" and aform is None
+                         and actual.startswith("/") else None)
+                if afold is not None and tcanon and afold not in tcanon:
+                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
+                                "repository's actual remote {!r}: git reads its '://' as an unsupported "
+                                "protocol, and the path it otherwise names, {!r}, is a different path (spec "
+                                "5.6)".format(sync_target, actual, afold[1]))
+                elif acanon is None:
                     # a form the equivalence cannot canonicalize is disclosed, never a silent mismatch (F8)
                     rep.cant("C-SYNC-AGREE: the actual remote {!r} cannot be canonicalized for "
                              "host+path agreement against the sync_target (a disclosed residual; spec "
@@ -5624,8 +5819,8 @@ def _enabled_modules(manifest_data):
 
 def _authoritative_types(enabled_modules, declared_types):
     """The type -> NORMATIVE-namespace roster the store must carry: the twelve baseline types, each
-    module-tier type whose module is enabled, and any importer-only type (legacy_fragment) the manifest
-    actually declares (present only after an import). Namespaces are U1's normative ones, never the
+    module-tier type whose module is enabled, and legacy_fragment (on LF, which the standard reserves
+    unassigned) when the manifest actually declares it (present only after an import). Namespaces are U1's normative ones, never the
     manifest's declared values (validate_manifest already graded those; guard-input-soundness)."""
     roster = dict(BASELINE_TYPES)
     for tname, (ns, module) in MODULE_TYPES.items():
@@ -6012,8 +6207,8 @@ def self_test():
         check("b1-nonwl-gap-below-max-invalid", _b1gr is not None and _b1gr.status == INVALID)
         check("b1-nonwl-gap-below-max-named",
               _b1gr is not None and any("C-NO-DELETION" in f and "FN-2" in f for f in _b1gr.findings))
-        # F-2: a declared importer legacy_fragment type defers to a named CANNOT-EVALUATE (it is deprecated for
-        # new stores and has no baseline record schema), never a false INVALID.
+        # A declared legacy_fragment type defers to a named CANNOT-EVALUATE (the standard defines no such
+        # type and reserves LF unassigned, so it has no baseline record schema), never a false INVALID.
         _lff = clean_machine()
         _lff["manifest.toml"] = base_manifest()
         _lff["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
@@ -6841,8 +7036,8 @@ def self_test():
         # OPF-IMPORTED-SERIES IS-2: the imported-series managed leaves (spec 8.2/4.2), behind the
         # DERIVED activation. ACTIVE (the activated 2.0.0 / homes = 2 store, both tooling gates patched
         # inside the vector): worklog.imported.toml and each enabled non-ledger type
-        # <type>.imported.index.toml are managed leaves DIRECTLY in the machine store; the importer-only
-        # legacy_fragment contributes none (its LF namespace is outside the imported series), and a
+        # <type>.imported.index.toml are managed leaves DIRECTLY in the machine store; legacy_fragment
+        # contributes none (the standard reserves LF unassigned, outside the imported series), and a
         # deeper path of a leaf name stays a stray. The pure legs drive classify_containment directly,
         # each as the bare two-argument call (the classification derives the activation from the
         # manifest itself; a caller-supplied flag with an inactive default let an omitting consumer
@@ -7544,7 +7739,7 @@ def self_test():
                           _xs_run is not None and _xs_run.checks.get("C-LINKS") == "PASS"
                           and len(_xs_run.findings) == 1
                           and "an imported-to-clean link MUST be refused" in _xs_run.findings[0])
-            # A clean link into an imported namespace the series refuses (the importer-only LF) is the
+            # A clean link into an imported namespace the series refuses (the unassigned LF) is the
             # per-record validator's finding, and the target, resolving in neither series, is a C-LINKS
             # dangling finding beside it; the doctor reports both (red when the namespace refusal is
             # dropped from the link validator, which leaves only the dangling finding).
@@ -10503,6 +10698,273 @@ def self_test():
         check("presence-gates-moved-row-probe-hit-uncounted-cannot-evaluate",
               _probe_hit_uncounted == ("cant", "cant"))
 
+        # archive_read runs the one archive walk archived_records runs, so on every archive shape below its
+        # records and problems equal that reader's, and the bytes it returns are exactly the fixture bytes
+        # of the files the walk parsed: none for a file that is absent or did not parse, and the first read
+        # of an index the destination probe reads again. A row the schema refuses is kept beside its
+        # finding, a row that is not a table is a cannot-evaluate, and a duplicate archived id keeps both
+        # copies and adds one problem beyond archived_records'.
+        _ar_mf = "archive/2026/archive.toml"
+        _ar_wl = "archive/2026/worklog.toml"
+        _ar_pd = "archive/2026/pending_decision.index.toml"
+        _ar_mf25 = "archive/2025/archive.toml"
+        _ar_wl25 = "archive/2025/worklog.toml"
+        _ar_pd25 = "archive/2025/pending_decision.index.toml"
+
+        def _ar_bytes(doc):
+            return (doc if isinstance(doc, str) else _opf_emit.emit(doc)).encode("utf-8")
+
+        def _ar_moved(*rows, wl_span=("WL-1", "WL-2"), bucket="2026"):
+            return {"schema": 1,
+                    "moved": [{"id": rid, "type": "pending_decision",
+                               "destination": "archive/{}/pending_decision.index.toml".format(bucket)}
+                              for rid in rows],
+                    "worklog_moved": [{"span": list(wl_span),
+                                       "destination": "archive/{}/worklog.toml".format(bucket)}]}
+
+        def _ar_run(machine):
+            aroot = build(machine)
+            ares = resolve_store(aroot)
+            afd = _open_store_root_fd(ares.store_root, ares.pointer_source != "default")
+            try:
+                atypes = _authoritative_types(_enabled_modules(machine["manifest.toml"]),
+                                              machine["manifest.toml"]["types"])
+                legacy = archived_records(afd, ares.machine_rel, atypes, frozenset(), None)
+                read = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+            finally:
+                os.close(afd)
+            return ares.machine_rel, legacy, read
+
+        def _ar_case_absent(f):
+            del f[_ar_mf]
+            del f[_ar_wl]
+            return ()
+
+        def _ar_case_unreadable(f):
+            del f[_ar_mf]
+            del f[_ar_wl]
+            f["archive"] = "not a directory\n"
+            return ()
+
+        def _ar_case_one_year(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_several_years(f):
+            f[_ar_mf25] = _ar_moved("PD-1", wl_span=("WL-1", "WL-1"), bucket="2025")
+            f[_ar_pd25] = idx([pd(1)])
+            f[_ar_wl25] = {"schema": 1, "entry": [wl(1)]}
+            f[_ar_mf] = _ar_moved("PD-2", wl_span=("WL-2", "WL-2"))
+            f[_ar_pd] = idx([pd(2, supersedes="PD-1")])
+            f[_ar_wl] = {"schema": 1, "entry": [wl(2)]}
+            return (_ar_mf25, _ar_pd25, _ar_wl25, _ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_missing_destination(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            return (_ar_mf, _ar_wl)
+
+        def _ar_case_malformed_manifest(f):
+            f[_ar_mf] = "this is not valid toml === ["
+            f[_ar_pd] = idx([pd(1)])
+            return ()
+
+        def _ar_case_malformed_index(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = {"schema": 1, "record": "PD-1"}
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_incomplete_enumeration(f):
+            f[_ar_mf] = _ar_moved("PD-1", "PD-2")
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_unenumerated_record(f):
+            f[_ar_mf] = _ar_moved()
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_malformed_row(f):
+            f[_ar_mf] = _ar_moved("PD-1", "PD-2")
+            f[_ar_pd] = idx([pd(1), {"id": "PD-2"}])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_non_table_row(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = 'schema = 1\nrecord = ["PD-1"]\n'
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        # (name, fixture, tree, complete, clean, seated pending decision ids)
+        for _name, _case, _tree, _complete, _clean, _seated in (
+                ("absent", _ar_case_absent, "absent", True, True, []),
+                ("unreadable", _ar_case_unreadable, "unreadable", False, False, []),
+                ("one-year", _ar_case_one_year, "listed", True, True, ["PD-1"]),
+                ("several-years", _ar_case_several_years, "listed", True, True, ["PD-1", "PD-2"]),
+                ("missing-destination", _ar_case_missing_destination, "listed", False, False, []),
+                ("malformed-manifest", _ar_case_malformed_manifest, "listed", False, False, []),
+                ("malformed-index", _ar_case_malformed_index, "listed", False, False, []),
+                ("incomplete-enumeration", _ar_case_incomplete_enumeration, "listed", False, False, ["PD-1"]),
+                ("unenumerated-record", _ar_case_unenumerated_record, "listed", True, False, ["PD-1"]),
+                ("malformed-row", _ar_case_malformed_row, "listed", True, False, ["PD-1", "PD-2"]),
+                ("non-table-row", _ar_case_non_table_row, "listed", False, False, [])):
+            f = clean_machine()
+            _parsed = _case(f)
+            _mrel, (_lrecs, _lprobs), _rd = _ar_run(f)
+            check("archive-read-{}-records-match-archived-records".format(_name),
+                  _rd.records == [(r.location, r.rtype, r.body) for r in _lrecs])
+            check("archive-read-{}-problems-match-archived-records".format(_name), _rd.problems == _lprobs)
+            check("archive-read-{}-bytes-are-the-parsed-fixture-bytes".format(_name),
+                  _rd.source_bytes == {_mrel + "/" + rel: _ar_bytes(f[rel]) for rel in _parsed})
+            check("archive-read-{}-tree-and-completeness".format(_name),
+                  (_rd.tree, _rd.complete, not _rd.problems) == (_tree, _complete, _clean))
+            check("archive-read-{}-seats-every-read-row".format(_name),
+                  [b.get("id") for _l, t, b in _rd.records if t == "pending_decision"] == _seated)
+            check("archive-read-{}-returns-the-parsed-worklog-entries".format(_name),
+                  _rd.worklog == [("archive/" + rel.split("/")[1], e) for rel in _parsed
+                                  if rel.endswith("/worklog.toml") for e in f[rel]["entry"]])
+        f = clean_machine()
+        _ar_case_several_years(f)
+        f[_ar_pd] = idx([pd(1)])
+        f[_ar_mf] = _ar_moved("PD-1", wl_span=("WL-2", "WL-2"))
+        _mrel, (_lrecs, _lprobs), _rd = _ar_run(f)
+        _ar_dup = [p for p in _rd.problems if p not in _lprobs]
+        check("archive-read-duplicate-id-keeps-every-copy",
+              [(l, b.get("id")) for l, _t, b in _rd.records]
+              == [("archive/2025", "PD-1"), ("archive/2026", "PD-1")]
+              and _rd.records == [(r.location, r.rtype, r.body) for r in _lrecs])
+        check("archive-read-duplicate-id-is-a-problem",
+              _rd.problems[:len(_lprobs)] == _lprobs and len(_ar_dup) == 1
+              and _ar_dup[0].startswith("C-ID-SPACE: archived id 'PD-1' is seated 2 times"))
+        # The doctor files that duplicate under C-ID-SPACE too, not under C-ARCHIVE-ENUM.
+        _ar_doc = run(f)
+        check("archive-read-duplicate-id-is-the-doctors-id-space-check",
+              _ar_doc is not None
+              and any("duplicate id 'PD-1'" in m for m in _ar_doc.by_check.get("C-ID-SPACE", []))
+              and not any("PD-1" in m for m in _ar_doc.by_check.get("C-ARCHIVE-ENUM", [])))
+
+        # A non-terminal archived record is a C-ROTATION problem, the message the doctor reports under its
+        # C-ROTATION check and not under C-ARCHIVE-ENUM.
+        f = clean_machine()
+        _ar_case_one_year(f)
+        f[_ar_pd] = idx([pd(1, status="open")])
+        _mrel, _legacy, _rd = _ar_run(f)
+        _ar_rot = [p for p in _rd.problems if p.startswith("C-ROTATION: archived record 'PD-1'")]
+        _ar_doc = run(f)
+        check("archive-read-non-terminal-record-is-the-doctors-rotation-problem",
+              len(_ar_rot) == 1 and _ar_doc is not None
+              and _ar_rot[0] in _ar_doc.by_check.get("C-ROTATION", [])
+              and _ar_rot[0] not in _ar_doc.by_check.get("C-ARCHIVE-ENUM", []))
+
+        # An archive holding only a rotated worklog seats no record, and its worklog entries come back,
+        # parsed from the bytes returned for that worklog.
+        f = clean_machine()
+        _mrel, _legacy, _rd = _ar_run(f)
+        check("archive-read-worklog-only-archive-returns-its-entries",
+              _rd.records == [] and _rd.complete and not _rd.problems
+              and [e.get("id") for _l, e in _rd.worklog] == ["WL-1", "WL-2"]
+              and _rd.source_bytes.get(_mrel + "/" + _ar_wl) == _ar_bytes(f[_ar_wl]))
+
+        # Each archive file is read once, and the records, worklog entries and bytes archive_read returns
+        # all come from that read: right after its first read each file is rewritten on disk with other
+        # content (another title, another summary, a comment before the manifest), so a second read would
+        # parse other bytes. The result must equal archive_read's over the unchanged tree, and a fresh read
+        # of the rewritten tree must differ from it, so the rewrite is visible to any second read. Red
+        # under a reader that walks the archive twice, keeping the first walk's bytes and returning the
+        # second walk's records.
+        from unittest.mock import patch as _ar_patch
+
+        def _ar_changed(machine):
+            out = {}
+            for rel, doc in machine.items():
+                if not rel.startswith("archive/"):
+                    continue
+                if rel.endswith("/archive.toml"):
+                    out[rel] = "# rewritten after the first read\n" + _ar_bytes(doc).decode("utf-8")
+                elif rel.endswith("/worklog.toml"):
+                    out[rel] = {"schema": 1, "entry": [dict(e, summary="rewritten") for e in doc["entry"]]}
+                else:
+                    out[rel] = idx([dict(r, title="rewritten") for r in doc["record"]])
+            return out
+
+        def _ar_single_read(machine):
+            changed = _ar_changed(machine)
+            _brel, _blegacy, base_read = _ar_run(machine)
+            aroot = build(machine)
+            ares = resolve_store(aroot)
+            disk = {ares.machine_rel + "/" + rel: Path(ares.store_root) / ares.machine_rel / rel
+                    for rel in changed}
+            counts = {}
+            real_read_contained = _journal._read_contained
+
+            def read_then_rewrite(fd, relpath, *args, **kwargs):
+                got = real_read_contained(fd, relpath, *args, **kwargs)
+                counts[relpath] = counts.get(relpath, 0) + 1
+                if counts[relpath] == 1 and relpath in disk:
+                    doc = changed[relpath[len(ares.machine_rel) + 1:]]
+                    disk[relpath].write_text(doc if isinstance(doc, str) else _opf_emit.emit(doc),
+                                             encoding="utf-8")
+                return got
+
+            afd = _open_store_root_fd(ares.store_root, ares.pointer_source != "default")
+            try:
+                atypes = _authoritative_types(_enabled_modules(machine["manifest.toml"]),
+                                              machine["manifest.toml"]["types"])
+                with _ar_patch.object(_journal, "_read_contained", read_then_rewrite):
+                    read = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+                again = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+            finally:
+                os.close(afd)
+            archive_counts = {p: n for p, n in counts.items() if p.startswith(ares.machine_rel + "/archive/")}
+            return (archive_counts == {p: 1 for p in disk}
+                    and read.complete and not read.problems and read.records and read.worklog
+                    and (read.records, read.worklog, read.source_bytes)
+                    == (base_read.records, base_read.worklog, base_read.source_bytes)
+                    and again.records != read.records and again.worklog != read.worklog
+                    and all(again.source_bytes.get(p) != read.source_bytes.get(p) for p in disk))
+
+        f = clean_machine()
+        _ar_case_several_years(f)
+        check("archive-read-reads-each-file-once-and-returns-that-read", _ar_single_read(f))
+        _real_validate_archive = _validate_archive
+
+        def _validate_archive_twice(*args, **kwargs):
+            _real_validate_archive(*args, **kwargs)
+            return _real_validate_archive(*args, **kwargs)
+
+        globals()["_validate_archive"] = _validate_archive_twice
+        try:
+            _ar_flipped = _ar_single_read(f)
+        finally:
+            globals()["_validate_archive"] = _real_validate_archive
+        check("archive-read-single-read-red-under-a-second-walk", not _ar_flipped)
+
+        # The reader contract a decision view relies on: an archived pending decision comes back with the
+        # bytes of the index it was parsed from and of the manifest that enumerates it. Red when the read
+        # cache does not keep the bytes of the reads the walk parsed.
+        def _ar_contract(machine):
+            mrel, _legacy, read = _ar_run(machine)
+            return (read.tree == "listed" and read.complete and not read.problems
+                    and [b.get("id") for _l, t, b in read.records if t == "pending_decision"] == ["PD-1"]
+                    and all(read.source_bytes.get(mrel + "/" + rel) == _ar_bytes(machine[rel])
+                            for rel in (_ar_mf, _ar_pd)))
+
+        f = clean_machine()
+        _ar_case_one_year(f)
+        check("archive-read-contract-pending-decision-with-index-and-manifest-bytes", _ar_contract(f))
+        _real_read_toml = _read_toml
+
+        def _read_toml_dropping_bytes(root_fd, relpath, rep):
+            data, st = _real_read_toml(root_fd, relpath, rep)
+            rep.toml_reads.pop(relpath, None)
+            return data, st
+
+        globals()["_read_toml"] = _read_toml_dropping_bytes
+        try:
+            _ar_flipped = _ar_contract(f)
+        finally:
+            globals()["_read_toml"] = _real_read_toml
+        check("archive-read-contract-red-when-bytes-dropped", not _ar_flipped)
+
         def _presence_worklog(wl_rows, wl2_in_bucket=False, extra=None):
             f = clean_machine()
             f["archive/2026/archive.toml"]["worklog_moved"] = wl_rows
@@ -12671,10 +13133,11 @@ def self_test():
                                         for f in _f6cr.findings))
 
         # Fable F2: a dedicated LOCAL sync_target (dir:/path -> tcanon is None) whose committed pointer names
-        # a canonicalizable REMOTE is a C-SYNC-AGREE finding (leg 2), symmetric with the actual-remote leg's
-        # local-target-with-a-remote finding. Pre-fix leg 2 short-circuited on `tcanon and pcanon` (tcanon
-        # None) and passed the remote pointer silently. Hand-set the remote Target, since resolve_store
-        # rejects a remote committed pointer before validate_store sees it.
+        # a canonicalizable REMOTE is still a C-SYNC-AGREE finding (leg 2): the dir: target is refused on
+        # that leg whatever the pointer holds, so a remote pointer is never passed silently. Pre-fix leg 2
+        # short-circuited on `tcanon and pcanon` (tcanon None) and passed the remote pointer silently.
+        # Hand-set the remote Target, since resolve_store rejects a remote committed pointer before
+        # validate_store sees it.
         _lt = clean_machine()
         _lt["manifest.toml"] = base_manifest()
         _lt["manifest.toml"]["store"] = {"sync_target": "dir:/some/where"}
@@ -12683,9 +13146,198 @@ def self_test():
         _ltr = validate_store(_ltres, observations={"tracked": "tracked", "actual_remote": "",
                                                     "prior": clean_prior()["prior"]})
         check("sync-local-target-remote-pointer-invalid", _ltr is not None and _ltr.status == INVALID)
-        check("sync-local-target-remote-pointer-named",
-              _ltr is not None and any("is a local target but the" in f
-                                       and "committed pointer names a remote" in f for f in _ltr.findings))
+        check("sync-dir-target-refused-despite-remote-pointer",
+              _ltr is not None and any("is a dir: filesystem target" in f
+                                       and "no committed pointer can agree" in f for f in _ltr.findings))
+
+        # A filesystem sync target is accepted only as git:<absolute path>. A dedicated dir: target is
+        # refused on EACH leg, each naming the remedy, even with a local committed pointer and NO actual
+        # remote (where the actual-remote leg used to pass silently) or no observation at all. Each leg's
+        # finding is asserted by its own text, so removing either leg's refusal fails its vector.
+        def _sync_case(target, actual, pointer=None):
+            m = clean_machine()
+            m["manifest.toml"] = base_manifest()
+            m["manifest.toml"]["store"] = {"sync_target": target}
+            res = resolve_store(build(m))
+            if pointer is not None:
+                res.target = classify_target(pointer)
+            obs = {"tracked": "tracked", "prior": clean_prior()["prior"]}
+            if actual is not None:
+                obs["actual_remote"] = actual
+            return validate_store(res, observations=obs)
+
+        def _sync_findings(r):
+            return [f for f in (r.findings if r is not None else []) if "C-SYNC-AGREE" in f]
+
+        _remedy = "use git:<absolute path>"
+        for _tag, _act in (("no-remote", ""), ("remote", "/srv/opf-store.git"), ("unobserved", None)):
+            _dr = _sync_case("dir:/srv/opf-store", _act)
+            check("sync-dir-target-{}-invalid".format(_tag), _dr is not None and _dr.status == INVALID)
+            check("sync-dir-target-{}-pointer-leg-refused".format(_tag),
+                  any("is a dir: filesystem target" in f and "no committed pointer can agree" in f
+                      and _remedy in f for f in _sync_findings(_dr)))
+            check("sync-dir-target-{}-remote-leg-refused".format(_tag),
+                  any("is a dir: filesystem target" in f and "actual remote" in f and "cannot agree" in f
+                      and _remedy in f for f in _sync_findings(_dr)))
+        # The bare absolute path, the other filesystem form outside git:, is refused on both legs alike.
+        _bp = _sync_case("/srv/opf-store", "")
+        check("sync-bare-path-target-both-legs-refused",
+              sum(1 for f in _sync_findings(_bp) if "is a bare-path filesystem target" in f and _remedy in f) == 2)
+        # git:<absolute path> canonicalizes to a comparable local form: it agrees with a matching actual
+        # remote and committed pointer (spelling-normalized: repeated slashes, '.' and a trailing slash),
+        # and a different path is a finding on each leg.
+        _ga = _sync_case("git:/srv/opf-store.git", "/srv/opf-store.git", pointer="git:/srv//./opf-store.git/")
+        check("sync-git-abs-path-agrees-valid", _ga is not None and _ga.status == VALID)
+        _gr = _sync_case("git:/srv/opf-store.git", "/srv/other.git")
+        check("sync-git-abs-path-other-remote-invalid", _gr is not None and _gr.status == INVALID)
+        check("sync-git-abs-path-other-remote-named",
+              any("does not match the store repository's actual remote '/srv/other.git'" in f
+                  for f in _sync_findings(_gr)))
+        _gp = _sync_case("git:/srv/opf-store.git", "/srv/opf-store.git", pointer="git:/srv/other.git")
+        check("sync-git-abs-path-other-pointer-invalid", _gp is not None and _gp.status == INVALID)
+        check("sync-git-abs-path-other-pointer-named",
+              any("committed pointer remote '/srv/other.git' does not agree" in f for f in _sync_findings(_gp)))
+        # No '.git' fold for a local path (a different directory), and a '..' segment is unresolvable.
+        _gg = _sync_case("git:/srv/opf-store", "/srv/opf-store.git")
+        check("sync-git-abs-path-no-dotgit-fold", _gg is not None and _gg.status == INVALID)
+        _gd = _sync_case("git:/srv/x/../opf-store.git", "/srv/opf-store.git")
+        check("sync-git-abs-path-dotdot-cant", _gd is not None and _gd.status == CANNOT_EVALUATE)
+        # A relative git: path is refused on both legs, naming the remedy (it used to be cannot-evaluate).
+        for _tag, _rel in (("subdir", "git:srv/opf-store.git"), ("dot", "git:./opf-store.git"),
+                           ("bare-name", "git:opf-store")):
+            _rr = _sync_case(_rel, "/srv/opf-store.git")
+            check("sync-git-relative-refused-{}".format(_tag),
+                  _rr is not None and _rr.status == INVALID
+                  and sum(1 for f in _sync_findings(_rr)
+                          if "is a relative git: filesystem target" in f and _remedy in f) == 2)
+        # https and ssh URL targets compare exactly as before: equivalent spellings agree, a different repo
+        # is a finding, and a local-path actual remote or committed pointer against a URL target stays the
+        # disclosed cannot-evaluate it was (the local form is used only for a git:<absolute path> target).
+        _url = "https://example.invalid/org/store.git"
+        _ssh = "ssh://git@example.invalid/org/store"
+        for _tag, _tg in (("https", _url), ("ssh", _ssh)):
+            _uv = _sync_case(_tg, "git@example.invalid:org/store.git")
+            check("sync-{}-target-equivalent-remote-valid".format(_tag), _uv is not None and _uv.status == VALID)
+            _ud = _sync_case(_tg, "https://example.invalid/org/other.git")
+            check("sync-{}-target-other-remote-invalid".format(_tag), _ud is not None and _ud.status == INVALID)
+            _ul = _sync_case(_tg, "/srv/opf-store.git")
+            check("sync-{}-target-local-remote-cant".format(_tag),
+                  _ul is not None and _ul.status == CANNOT_EVALUATE and not _sync_findings(_ul))
+            _up = _sync_case(_tg, "git@example.invalid:org/store.git", pointer="git:/srv/opf-store.git")
+            check("sync-{}-target-local-pointer-cant".format(_tag),
+                  _up is not None and _up.status == CANNOT_EVALUATE and not _sync_findings(_up))
+        # A file:// URL names a filesystem repository outside the git:<absolute path> form, so it is refused
+        # on both legs with the remedy, spelled bare or under git: (it used to be cannot-evaluate).
+        for _tag, _fu in (("bare", "file:///srv/opf-store.git"), ("git", "git:file:///srv/opf-store.git"),
+                          ("upper", "FILE:///srv/opf-store.git")):
+            _fr = _sync_case(_fu, "/srv/opf-store.git")
+            check("sync-file-url-target-refused-{}".format(_tag),
+                  _fr is not None and _fr.status == INVALID
+                  and sum(1 for f in _sync_findings(_fr)
+                          if "is a file:// URL filesystem target" in f and _remedy in f) == 2)
+        # Whitespace is significant in a path: a git: path or an actual remote path with leading or trailing
+        # whitespace is refused as ambiguous, never trimmed into agreement with the unpadded spelling.
+        _pt = _sync_case("git:/srv/opf-store ", "/srv/opf-store")
+        check("sync-git-abs-path-padded-target-refused",
+              _pt is not None and _pt.status == INVALID
+              and sum(1 for f in _sync_findings(_pt)
+                      if "leading or trailing whitespace, an ambiguous filesystem target" in f
+                      and _remedy in f) == 2)
+        _pl = _sync_case("git: /srv/opf-store", "/srv/opf-store")
+        check("sync-git-abs-path-leading-space-target-refused",
+              _pl is not None and _pl.status == INVALID
+              and any("leading or trailing whitespace" in f for f in _sync_findings(_pl)))
+        for _tag, _pr in (("trailing", "/srv/opf-store "), ("leading", " /srv/opf-store")):
+            _pa = _sync_case("git:/srv/opf-store", _pr)
+            check("sync-git-abs-path-padded-remote-refused-{}".format(_tag),
+                  _pa is not None and _pa.status == INVALID
+                  and any("actual remote {!r} is a filesystem path with leading or trailing whitespace".format(_pr)
+                          in f for f in _sync_findings(_pa)))
+        # Git reads any '://' as a scheme separator (it refuses /srv/a://repo as protocol '/srv/a'), so a
+        # spelling containing '://' is a URL form on BOTH legs, never an absolute path: it agrees with
+        # nothing, whichever leg spells it, bare or under git:, padded or not.
+        for _tag, _tg, _ar in (("in-target", "git:/srv/a://repo", "/srv/a:/repo"),
+                               ("in-remote", "git:/srv/a:/repo", "/srv/a://repo"),
+                               ("in-both", "git:/srv/a://repo", "/srv/a://repo"),
+                               ("other-remote", "git:/srv/a://repo", "/srv/a:/other"),
+                               ("bare", "/srv/a://repo", "/srv/a://repo"),
+                               ("bare-padded", "/srv/a://repo ", "/srv/a://repo")):
+            _sv = _sync_case(_tg, _ar)
+            check("sync-scheme-substring-path-refused-{}".format(_tag),
+                  _sv is not None and _sv.status in (INVALID, CANNOT_EVALUATE))
+            # The rule that refuses each: a git: target holding '://' is a URL form no canonicalizer can
+            # split, a cannot-evaluate naming that form (never a path mismatch), and a padded bare one is a
+            # URL with leading or trailing whitespace, refused on both legs.
+            if _tag == "other-remote":
+                check("sync-scheme-substring-path-other-remote-target-unresolved",
+                      _sv is not None and _sv.status == CANNOT_EVALUATE and not _sync_findings(_sv)
+                      and any("the sync_target remote form '/srv/a://repo' cannot be canonicalized" in c
+                              for c in _sv.cannot_evaluate))
+            elif _tag == "bare-padded":
+                check("sync-scheme-substring-path-bare-padded-url-whitespace",
+                      _sv is not None and _sv.status == INVALID
+                      and sum(1 for f in _sync_findings(_sv)
+                              if "is a URL with leading or trailing whitespace" in f) == 2)
+        # A path-shaped actual remote holding '://' never names the git:<absolute path> target through
+        # git: against a target whose path differs from the one it spells it is a mismatch finding, and
+        # against the same path it stays a disclosed cannot-evaluate.
+        _so = _sync_case("git:/srv/a%3A%2F%2Frepo", "/srv/a://repo")
+        check("sync-scheme-substring-remote-other-path-invalid",
+              _so is not None and _so.status == INVALID
+              and any("does not match the store repository's actual remote '/srv/a://repo': git reads its "
+                      "'://' as an unsupported protocol" in f for f in _sync_findings(_so)))
+        _ss = _sync_case("git:/srv/a:/repo", "/srv/a://repo")
+        check("sync-scheme-substring-remote-same-path-cant",
+              _ss is not None and _ss.status == CANNOT_EVALUATE and not _sync_findings(_ss)
+              and any("the actual remote '/srv/a://repo' cannot be canonicalized" in c
+                      for c in _ss.cannot_evaluate))
+        # Whitespace is significant to git in a URL as in a path: a URL actual remote or URL target with
+        # leading or trailing whitespace is refused by its own message, never trimmed into agreement.
+        for _tag, _tg, _ar in (("remote-trailing", _url, _url + " "), ("remote-leading", _url, " " + _url),
+                               ("remote-ssh", _ssh, _ssh + " ")):
+            _wr = _sync_case(_tg, _ar)
+            check("sync-url-padded-{}-refused".format(_tag),
+                  _wr is not None and _wr.status == INVALID
+                  and any("actual remote {!r} is a URL with leading or trailing whitespace".format(_ar) in f
+                          for f in _sync_findings(_wr)))
+        for _tag, _tg in (("target-trailing", _url + " "), ("target-git-leading", "git: " + _url)):
+            _wt = _sync_case(_tg, _url)
+            check("sync-url-padded-{}-refused".format(_tag),
+                  _wt is not None and _wt.status == INVALID
+                  and sum(1 for f in _sync_findings(_wt)
+                          if "is a URL with leading or trailing whitespace" in f) == 2)
+        # A remote stored with a line ending of its own keeps it (git's one line ending is removed), so it
+        # is a padded path, refused.
+        _nl = _sync_case("git:/srv/opf-store", "/srv/opf-store\n")
+        check("sync-git-abs-path-newline-remote-refused", _nl is not None and _nl.status == INVALID
+              and any("leading or trailing whitespace" in f for f in _sync_findings(_nl)))
+        # A present remote whose URL is only whitespace is described as blank, never as absent or a URL.
+        for _tag, _tg in (("git-path", "git:/srv/opf-store"), ("url", _url)):
+            _br = _sync_case(_tg, "   ")
+            check("sync-blank-remote-{}-refused-as-blank".format(_tag),
+                  _br is not None and _br.status == INVALID
+                  and any("is present but blank or whitespace-only" in f for f in _sync_findings(_br))
+                  and not any("has no actual remote" in f or "URL" in f for f in _sync_findings(_br)))
+        _bd = _sync_case("dir:/srv/opf-store", "   ")
+        check("sync-blank-remote-labelled-blank",
+              any("actual remote (present but blank: '   ')" in f for f in _sync_findings(_bd)))
+        # A blank git: payload names no remote: refused on both legs, never read as a URL form.
+        check("fs-path-form-blank", _fs_path_form("") == "blank" and _fs_path_form(" \t") == "blank")
+        check("fs-path-form-scheme-substring-url", _fs_path_form("/srv/a://repo") is None
+              and _fs_path_form("/srv/a://repo ") is None and _fs_path_form("FILE:///srv/a") == "file-url")
+        _bg = _sync_case("git:   ", "/srv/opf-store")
+        check("sync-blank-git-payload-refused",
+              _bg is not None and _bg.status == INVALID
+              and sum(1 for f in _sync_findings(_bg) if "has a blank git: payload" in f) == 2
+              and not any("remote form" in c for c in (_bg.cannot_evaluate if _bg is not None else [])))
+        # The actual-remote leg labels a supplied but malformed observation as malformed, not as unobserved.
+        _mr = _sync_case("dir:/srv/opf-store", 5)
+        check("sync-dir-target-malformed-remote-labelled",
+              any("actual remote (the `actual_remote` observation was supplied but malformed)" in f
+                  for f in _sync_findings(_mr)))
+        _ur = _sync_case("dir:/srv/opf-store", None)
+        check("sync-dir-target-unobserved-remote-labelled",
+              any("actual remote (no `actual_remote` observation was supplied)" in f for f in _sync_findings(_ur)))
 
         # F-5: _canonical_remote exotic edges.
         # (a) an scp bracketed-IPv6 host whose PATH itself contains '@' must not mis-split on a colon
