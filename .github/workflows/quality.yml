@@ -113,15 +113,14 @@ jobs:
   # Coverage account (gate discipline), from each heavy job's own steps and the files its suites read:
   # opf-tooling-a, opf-tooling-b, opf-tooling-c, opf-host-patch and selftest-execution run the
   # self-tests of tools under tools/ and opf/tools/ over synthetic fixtures those modules build
-  # themselves, with these site-tree verdict inputs: opf/tools/check_opf_homes.py (live gate AND
-  # self-test, opf-tooling-a) reads the five excluded homes pages and has no always-run sibling,
-  # so those five exclusions are load-bearing; tools/check_opf_declaration.py
-  # (live gate AND self-test, selftest-execution) reads opf/site/tooling.html and walks the whole
-  # tree decoding every .md and .html file, site pages included, so that gate and its self-test
-  # also run in the always-run site job below and a site-only change that turns them red fails
-  # every lane (the execution-reconciled registration stays in selftest-execution; the
-  # tooling.html exclusion is retained as a deliberate conservative margin, not because an
-  # always-run read is missing).
+  # themselves. The whole-repository live gates those jobs once held run in the always-run
+  # tree-gates job below, among them opf/tools/check_opf_homes.py, which reads the five excluded
+  # homes pages, and tools/check_opf_declaration.py, which reads opf/site/tooling.html and walks
+  # the whole tree decoding every .md and .html file, site pages included, so a site-only change
+  # that turns either red fails every lane; the opf-declaration live gate and its
+  # execution-reconciled suite also run in the always-run site job below (the suite's registration
+  # stays in selftest-execution). The five homes exclusions and the tooling.html exclusion are
+  # retained as a deliberate conservative margin, not because an always-run read is missing.
   # git-fixture-env-core runs the core suite, whose inputs are tools/ modules and generated
   # fixtures, never site/ or opf/site/; git-fixture-env-core-host-patch is that same core suite
   # repeated on the pinned host Python. The three git-fixture-env config host jobs rerun the
@@ -137,13 +136,14 @@ jobs:
   # (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, git-fixture-env-core,
   # opf-host-patch, the four git-fixture-env host-patch jobs and byte-canon-matrix): every
   # step of those jobs is skipped, and of their commands only the child-status probe, the
-  # opf-declaration live gate and its selftest-execution suite, and check_byte_canon.py (live
-  # gate and self-test) also run, as the same command, in an always-run job, so every other
-  # command in them runs nowhere else in CI on such a train (among them the OPF tooling live
-  # gates and self-tests, the opf.py self-test, check_selftest_execution.py --self-test and its
-  # other suites there, check_entry_guard.py, check_child_status_coverage.py, every
+  # opf-declaration suite, and check_byte_canon.py (live gate and self-test) also run, as the
+  # same command, in an always-run job, so every other command in them runs nowhere else in CI
+  # on such a train (among them the OPF tooling self-tests, the opf.py self-test,
+  # check_selftest_execution.py --self-test and its other suites there, every
   # git-fixture-env suite, and check_python_host_pin.py beyond the registry job's --jobs-only
-  # run). It also gives up the host, configuration and platform repetitions of the checks above:
+  # run); the whole-repository live gates those jobs once held (the seven OPF tooling live
+  # gates, check_entry_guard.py, check_child_status_coverage.py and the opf-declaration live
+  # gate) run in the always-run tree-gates job in every run instead. It also gives up the host, configuration and platform repetitions of the checks above:
   # the host-patch jobs' exact host Python, the config lanes' hostile git configurations
   # and byte-canon-matrix's platforms. The three regenerated records are
   # validated by the always-run registry and release jobs (gen_manifest.py --check,
@@ -497,10 +497,6 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_homes.py --self-test
 
-      - name: OPF homes contract drift gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_homes.py
-
       - name: OPF journal direct self-test
         shell: bash
         run: python3 -I -B opf/tools/_journal.py --self-test
@@ -508,10 +504,6 @@ jobs:
       - name: OPF prompt-pack manifest drift gate self-test (PR7 slice 1)
         shell: bash
         run: python3 -I -B opf/tools/check_opf_prompt_pack.py --self-test
-
-      - name: OPF prompt-pack manifest drift gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_prompt_pack.py
 
       - name: OPF adoption schema and read-only planning self-test
         shell: bash
@@ -565,17 +557,9 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_doctor.py --self-test
 
-      - name: OPF store-integrity gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_doctor.py
-
       - name: OPF enforcement-pack platform coverage gate self-test
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py --self-test
-
-      - name: OPF enforcement-pack platform coverage gate
-        shell: bash
-        run: python3 -I -B tools/check_opf_enforce_platforms.py
 
       - name: OPF adoption apply-shell self-test (clean-start adoption U1)
         shell: bash
@@ -592,10 +576,6 @@ jobs:
       - name: OPF source-only init gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init.py --self-test
-
-      - name: OPF source-only init gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_init.py
 
       - name: OPF init Keep-contract validator self-test
         shell: bash
@@ -629,10 +609,6 @@ jobs:
         shell: bash
         run: python3 -I -B opf/tools/check_opf_drift.py --self-test
 
-      - name: OPF render-drift gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_drift.py
-
       - name: OPF record-authoring gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_record.py --self-test --red-on-revert
@@ -656,10 +632,6 @@ jobs:
       - name: OPF init contract consistency gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init_contract.py --self-test
-
-      - name: OPF init contract consistency gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_init_contract.py
 
       - name: OPF operation-lock self-test
         shell: bash
@@ -1228,31 +1200,23 @@ jobs:
       - name: Entry-guard self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
-      - name: Entry-guard gate
-        shell: bash
-        run: python3 -I -B tools/check_entry_guard.py
       - name: Verifier delivery self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
 
-      # The child-status probe's own vectors and the coverage gate that holds every probe placement, every
-      # inline copy of the guard and every entry point's classification (execution-reconciled self-tests).
+      # The child-status probe's own vectors and the coverage suite that holds every probe placement, every
+      # inline copy of the guard and every entry point's classification (execution-reconciled self-tests);
+      # the coverage live gate itself runs in the always-run tree-gates job below.
       - name: Child-status probe self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite child-status-selftest
       - name: Child-status coverage self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite child-status-coverage-selftest
-      - name: Child-status coverage
-        shell: bash
-        run: python3 -I -B tools/check_child_status_coverage.py
 
       - name: OPF declaration self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
-      - name: OPF declaration gate
-        shell: bash
-        run: python3 -I -B tools/check_opf_declaration.py
 
   git-fixture-env-core:
     name: Git-fixture-env core self-test
@@ -1731,6 +1695,70 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_byte_canon.py
 
+  # Whole-repository live gates, held out of the selectable jobs so they run in every run: each
+  # reads the tree as a whole (the OPF homes contract pages, the tooling.html declaration surface
+  # and every .md and .html file, rendered output drift, platform coverage declarations, entry-point
+  # classifications and probe placements), so no changed-path selection can bound its inputs. Every
+  # command below is byte-identical to the step it replaces in a selectable job; only the job
+  # holding it changed, so the set of commands CI runs is unchanged.
+  tree-gates:
+    name: Whole-repository live gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Child exit status observable (before any gate)
+        shell: bash
+        run: python3 -I -B opf/tools/_child_status.py
+
+      - name: OPF homes contract drift gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_homes.py
+
+      - name: OPF prompt-pack manifest drift gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_prompt_pack.py
+
+      - name: OPF store-integrity gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_doctor.py
+
+      - name: OPF enforcement-pack platform coverage gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_platforms.py
+
+      - name: OPF source-only init gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init.py
+
+      - name: OPF render-drift gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_drift.py
+
+      - name: OPF init contract consistency gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init_contract.py
+
+      - name: Entry-guard gate
+        shell: bash
+        run: python3 -I -B tools/check_entry_guard.py
+
+      - name: Child-status coverage
+        shell: bash
+        run: python3 -I -B tools/check_child_status_coverage.py
+
+      - name: OPF declaration gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_declaration.py
+
   # The one required status of this workflow. GitHub reads a SKIPPED required job as passing, so
   # a plain needs: dependency is not enough: when a needed job fails or is cancelled, a job without
   # if: always() is skipped and the required status would read green. if: always() makes this job
@@ -1767,6 +1795,7 @@ jobs:
       - git-fixture-env-config-malformed-host-patch
       - git-fixture-env-config-system-host-patch
       - registry
+      - tree-gates
       - byte-canon-matrix
     runs-on: ubuntu-latest
     steps:
@@ -1779,7 +1808,7 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           BASE_REPO: ${{ github.repository }}
-          OTHER_RESULTS: ${{ needs.scope.result || 'missing' }} ${{ needs.secrets.result || 'missing' }} ${{ needs.site.result || 'missing' }} ${{ needs.opf-closure-a.result || 'missing' }} ${{ needs.opf-closure-b.result || 'missing' }} ${{ needs.opf-closure-c.result || 'missing' }} ${{ needs.opf-closure-d.result || 'missing' }} ${{ needs.opf-closure-e.result || 'missing' }} ${{ needs.opf-closure-f.result || 'missing' }} ${{ needs.release.result || 'missing' }} ${{ needs.generated.result || 'missing' }} ${{ needs.registry.result || 'missing' }}
+          OTHER_RESULTS: ${{ needs.scope.result || 'missing' }} ${{ needs.secrets.result || 'missing' }} ${{ needs.site.result || 'missing' }} ${{ needs.opf-closure-a.result || 'missing' }} ${{ needs.opf-closure-b.result || 'missing' }} ${{ needs.opf-closure-c.result || 'missing' }} ${{ needs.opf-closure-d.result || 'missing' }} ${{ needs.opf-closure-e.result || 'missing' }} ${{ needs.opf-closure-f.result || 'missing' }} ${{ needs.release.result || 'missing' }} ${{ needs.generated.result || 'missing' }} ${{ needs.registry.result || 'missing' }} ${{ needs.tree-gates.result || 'missing' }}
           HEAVY_RESULTS: ${{ needs.opf-tooling-a.result || 'missing' }} ${{ needs.opf-tooling-b.result || 'missing' }} ${{ needs.opf-tooling-c.result || 'missing' }} ${{ needs.selftest-execution.result || 'missing' }} ${{ needs.git-fixture-env-core.result || 'missing' }} ${{ needs.opf-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-combined-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-malformed-host-patch.result || 'missing' }} ${{ needs.git-fixture-env-config-system-host-patch.result || 'missing' }} ${{ needs.byte-canon-matrix.result || 'missing' }}
         run: |
           set -euo pipefail
