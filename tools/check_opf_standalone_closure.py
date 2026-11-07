@@ -191,7 +191,7 @@ _SUBSET = [
 # exit 2 (cannot evaluate), never a failure the leg reported and never a pass.
 # Each leg bound is the LARGEST of:
 #   * _LOAD_HEADROOM times the slowest run of that leg recorded at the opf/ tree named below
-#     (_LEG_CEILING_S; INFERRED for any other opf/ tree, this one included);
+#     (_LEG_CEILING_S; INFERRED for any other opf/ tree, and for this one except a row marked MEASURED at it);
 #   * a DELIBERATE DEADLINE derived from the leg's own sources: the SUM of the literal wait SITES they
 #     declare (numeric literals in timeout= arguments and `timeout` parameter defaults, read from the
 #     copied sources on every run by _declared_wait_s), plus _LAUNCH_MARGIN_S. This sum is NOT the
@@ -226,7 +226,8 @@ _SUBSET = [
 # to 24.6). A later refresh that changes opf/ CARRIES THESE FIGURES FORWARD AS INFERRED, not measured,
 # until the legs are re-measured at the refreshed tree. Refreshes of this change onto main have changed
 # opf/ since (the first, on 2026-10-16, onto c66fbe560a12b5258c1c2589fdbeba4e82c78afc), so each row's
-# figure is INFERRED for this tree, as for every opf/ tree other than the one named above (compare
+# figure is INFERRED for this tree unless the row is marked MEASURED at it, as for every opf/ tree other than
+# the one named above (compare
 # `git rev-parse HEAD:opf` with it). Two rows come from no run at all: opf-adopt-state-selftest and
 # opf-adopt-complete-selftest, legs main added after that run, carry main's 600 s figure (not
 # measured on 2026-10-11; under the former flat 600 s bound, an inference), never a measurement.
