@@ -413,8 +413,10 @@ class = "pack-immutable"
 path = "site/assets/baseline/logos/aiqt-touch.png"
 class = "pack-immutable"
 
-# The aiqt.ai link-preview card, rendered by tools/render_og_cards.py: the owner-approved image named as
-# og:image and twitter:image on every page; it changes only on the owner's instruction.
+# The aiqt.ai link-preview card, named as og:image and twitter:image on every page: the owner-approved image
+# from pull request #973, committed as a finished PNG. It changes only on the owner's instruction. Neither
+# tools/render_og_cards.py nor .baseline/build_card.js reproduces it, so neither is run over it without that
+# instruction.
 [[release-class]]
 path = "site/assets/aiqt-og.png"
 class = "pack-immutable"

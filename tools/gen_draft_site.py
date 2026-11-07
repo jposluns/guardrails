@@ -85,9 +85,10 @@ ASSETS = "assets/baseline/"
 DRAFT_DIR = "draft/"
 MAX_PAGE_BYTES = 1 << 20
 # The link-preview card each site's pages name as og:image and twitter:image: the owner-approved PNG under the
-# site's live root (/assets/<site>-og.png, 1200 by 627, rendered by tools/render_og_cards.py from tools/og-cards/),
-# with its alt text; the image and its copy change only on the owner's instruction, so these values are not
-# derived from the card builder's data files.
+# site's live root (/assets/<site>-og.png, 1200 by 627, from pull request #973), with its alt text. The image and
+# its copy change only on the owner's instruction. Neither tools/render_og_cards.py nor .baseline/build_card.js
+# reproduces it, so neither is run over it without that instruction, and these values are not derived from the
+# card builder's data files.
 CARD = "assets/{}-og.png"
 CARD_WIDTH, CARD_HEIGHT = 1200, 627
 # The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,
