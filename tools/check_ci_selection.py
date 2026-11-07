@@ -22,6 +22,15 @@ A finding (exit 1), each printed with its rule id:
                          matches none of the entry's triggers
   weekly-only-unauthorized  weekly-only = true with no weekly-only-authorization reference
   undetermined-over-ceiling more entries have scope "undetermined" than UNDETERMINED_CEILING
+  input-not-triggered    for a reviewed = true entry only: a path or glob in the step's read-and-launch
+                         inventory (tools/ci_inputs.py), or a repository script the inventory sees it
+                         launch, matches none of the entry's triggers; a glob datum D/** is covered
+                         only by the same glob, by **, or by a containing E/**
+  unresolved-input       for a reviewed = true entry only: an unresolved read or launch site in the
+                         step's inventory has no current disposition in tools/ci_inputs_dispositions.toml
+
+Every entry is reviewed = false today, so the two inventory rules hold no entry yet; the gate still
+validates tools/ci_inputs_dispositions.toml on every run and reports the reviewed-entry count.
 
 Globs match tracked paths segment by segment: `**` spans any number of segments, `*` and `?` stay inside
 one segment. The import closure is static: from each repository .py path the step's run: text names, every
@@ -29,7 +38,9 @@ one segment. The import closure is static: from each repository .py path the ste
 importing file's own directory (sys.path[0] under `python3 -I`), followed transitively. A module loaded
 through importlib, a sys.path entry added at run time, or a script launched as a subprocess is outside it.
 
-Cannot evaluate (exit 2), never a pass: a registry or workflow that is missing, not a regular file,
+Cannot evaluate (exit 2), never a pass: a dispositions file that is missing, unreadable, oversized,
+not TOML or outside its schema (tools/ci_inputs.py reads it under the same bounds as the registry);
+a registry or workflow that is missing, not a regular file,
 unreadable, over MAX_BYTES or not UTF-8; a registry that is not TOML (TOMLDecodeError or a bare
 ValueError), nests too deeply (RecursionError) or exhausts memory (MemoryError); a format-version other
 than the integer 1; any workflow character, line or value outside the accepted grammar below, a run:
@@ -125,6 +136,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY = "tools/ci_checks.toml"
+DISPOSITIONS = "tools/ci_inputs_dispositions.toml"
 WORKFLOW = ".github/workflows/quality.yml"
 MAX_BYTES = 4 * 1024 * 1024
 
@@ -721,10 +733,27 @@ def _entry_findings(index, entry):
     return findings, label, not findings
 
 
-def evaluate(workflow_text, registry_text, tracked, read_source):
-    """Every (rule id, message) finding of the registry against the workflow and the tracked paths."""
+def _ci_inputs():
+    """The inventory module, imported from this file's own directory on first use (the import sits
+    here, not at the top, because ci_inputs imports this module's closure helpers at its own top).
+    This running module registers itself under its import name first, so a __main__ run hands
+    ci_inputs the same module object and the same CannotEvaluate class, never a second instance."""
+    sys.modules.setdefault("check_ci_selection", sys.modules[__name__])
+    directory = str(Path(__file__).resolve().parent)
+    if directory not in sys.path:
+        sys.path.append(directory)
+    import ci_inputs
+    return ci_inputs
+
+
+def evaluate(workflow_text, registry_text, tracked, read_source, dispositions_text=None):
+    """Every (rule id, message) finding of the registry against the workflow and the tracked paths.
+    dispositions_text, when given, is validated and feeds the two reviewed-entry inventory rules;
+    None (the in-memory fixtures) reads as no dispositions."""
     steps = workflow_run_steps(workflow_text)
     checks = load_registry(registry_text, REGISTRY)
+    inputs_module = _ci_inputs() if dispositions_text is not None else None
+    dispositions = inputs_module.load_dispositions(dispositions_text) if inputs_module else []
     tracked = frozenset(tracked)
     if not tracked:
         raise CannotEvaluate("the tracked-file set is empty; an empty tree is never assumed")
@@ -782,6 +811,25 @@ def evaluate(workflow_text, registry_text, tracked, read_source):
                     findings.append(("import-not-triggered",
                                      "{}: {} is in the check's import closure but matches no trigger".format(
                                          label, path)))
+            if entry.get("reviewed") is True:
+                if inputs_module is None:
+                    inputs_module = _ci_inputs()
+                inventory = inputs_module.step_inventory(
+                    runs[key][0], tracked, read_source, dispositions,
+                    "{}:{}".format(WORKFLOW, runs[key][1]), imports)
+                for row in inventory["data"]:
+                    if not any(inputs_module.trigger_covers(glob, row["path"]) for glob in triggers):
+                        findings.append(("input-not-triggered",
+                                         "{}: {} ({}) is in the step's read-and-launch inventory but "
+                                         "matches no trigger".format(label, row["path"], row["site"])))
+                for script in inventory["launches"]:
+                    if not any(glob_match(glob, script) for glob in triggers):
+                        findings.append(("input-not-triggered",
+                                         "{}: launched script {} matches no trigger".format(label, script)))
+                for site in inventory["unresolved"]:
+                    findings.append(("unresolved-input",
+                                     "{}: unresolved site {} ({}) has no current disposition".format(
+                                         label, site["site"], site["reason"])))
     if undetermined > UNDETERMINED_CEILING:
         findings.append(("undetermined-over-ceiling", "{} entries are undetermined; the ceiling is {}".format(
             undetermined, UNDETERMINED_CEILING)))
@@ -815,8 +863,11 @@ def tracked_files(root):
 def run_gate(root):
     root = Path(root)
     try:
-        findings = evaluate(read_text(root / WORKFLOW, WORKFLOW), read_text(root / REGISTRY, REGISTRY),
-                            tracked_files(root), lambda rel: read_text(root / rel, rel))
+        registry_text = read_text(root / REGISTRY, REGISTRY)
+        findings = evaluate(read_text(root / WORKFLOW, WORKFLOW), registry_text,
+                            tracked_files(root), lambda rel: read_text(root / rel, rel),
+                            read_text(root / DISPOSITIONS, DISPOSITIONS))
+        entries = load_registry(registry_text, REGISTRY)
     except CannotEvaluate as exc:
         print("CANNOT EVALUATE: {}".format(exc), file=sys.stderr)
         return 2
@@ -825,8 +876,10 @@ def run_gate(root):
     if findings:
         print("RESULT: FAIL: {} finding(s) in {}".format(len(findings), REGISTRY))
         return 1
+    reviewed = sum(1 for entry in entries if entry.get("reviewed") is True)
     print("PASS: {} declares every run: step of {} exactly once, with valid fields, live triggers and "
-          "covered import closures".format(REGISTRY, WORKFLOW))
+          "covered import closures; {} of {} entries are reviewed = true and held to the two "
+          "inventory rules".format(REGISTRY, WORKFLOW, reviewed, len(entries)))
     return 0
 
 
@@ -882,11 +935,11 @@ FIXTURE_SOURCES = {
 }
 
 
-def _entry(job, step, scope, triggers, categories=("ci",), extra=""):
+def _entry(job, step, scope, triggers, categories=("ci",), extra="", reviewed=False):
     return ("[[check]]\njob = {!r}\nstep = {!r}\ncategories = [{}]\nscope = {!r}\ntriggers = [{}]\n"
-            "reviewed = false\n{}\n").format(
+            "reviewed = {}\n{}\n").format(
         job, step, ", ".join(repr(c) for c in categories), scope, ", ".join(repr(t) for t in triggers),
-        extra).replace("'", '"')
+        "true" if reviewed else "false", extra).replace("'", '"')
 
 
 FIXTURE_ENTRIES = {
@@ -905,7 +958,7 @@ def _registry(changes=None, extra=""):
     return "format-version = 1\n\n" + body + extra
 
 
-def _rules(registry, workflow=FIXTURE_WORKFLOW, tracked=FIXTURE_TRACKED, sources=None):
+def _rules(registry, workflow=FIXTURE_WORKFLOW, tracked=FIXTURE_TRACKED, sources=None, dispositions=None):
     """The sorted rule ids evaluate() reports, or ('cannot-evaluate', message)."""
     sources = FIXTURE_SOURCES if sources is None else sources
 
@@ -915,7 +968,8 @@ def _rules(registry, workflow=FIXTURE_WORKFLOW, tracked=FIXTURE_TRACKED, sources
         return sources[rel]
 
     try:
-        return sorted(rule for rule, _message in evaluate(workflow, registry, tracked, read_source))
+        return sorted(rule for rule, _message in evaluate(workflow, registry, tracked, read_source,
+                                                          dispositions))
     except CannotEvaluate as exc:
         return ("cannot-evaluate", str(exc))
 
@@ -955,8 +1009,183 @@ def _open_value_workflow(site, opener, closer):
     raise ValueError(site)
 
 
+INPUT_FIXTURE_WORKFLOW = (
+    "name: Inputs\n"
+    "on:\n"
+    "  pull_request:\n"
+    "jobs:\n"
+    "  lint:\n"
+    "    steps:\n"
+    "      - name: Inventory\n"
+    "        run: python3 -I -B tools/inv.py\n")
+INPUT_FIXTURE_TRACKED = ("tools/inv.py", "tools/launched.py", "tools/_leaf.py", "docs/a.md", "VERSION")
+INPUT_ANCHOR = 'from pathlib import Path\nROOT = Path(__file__).resolve().parents[1]\n'
+INPUT_READ = INPUT_ANCHOR + '(ROOT / "docs" / "a.md").read_text()\n'
+INPUT_LISTING = "import os\n" + INPUT_ANCHOR + 'os.listdir(ROOT / "tools")\n'
+INPUT_UNRESOLVED = 'def f(p):\n    open(p, "rb")\n'
+INPUT_CWD = ('import subprocess\nimport sys\n'
+             'subprocess.run([sys.executable, "tools/launched.py"], cwd=somewhere)\n')
+INPUT_DIR_FD = 'import os\nos.open("payload", 0, dir_fd=7)\n'
+INPUT_SETATTR = ("import os\n" + INPUT_ANCHOR
+                 + 'setattr(os, "ROOT", 1)\nopen(ROOT / "VERSION", "rb")\n')
+INPUT_DISPOSITION = ('format-version = 1\n\n[[disposition]]\nfile = "tools/inv.py"\nqualname = "f"\n'
+                     'fingerprint = "{}"\nkind = "scratch"\nrationale = "fixture"\n')
+
+
+def _input_rules(source, triggers, reviewed=True, dispositions=None, sources=None):
+    """The rule ids for one reviewed-entry inventory fixture over the one-step workflow above."""
+    all_sources = {"tools/inv.py": source}
+    all_sources.update(sources or {})
+    registry = "format-version = 1\n\n" + _entry("lint", "Inventory", "self-test", triggers,
+                                                 reviewed=reviewed)
+    return _rules(registry, INPUT_FIXTURE_WORKFLOW, INPUT_FIXTURE_TRACKED, all_sources, dispositions)
+
+
+def _inventory_checks():
+    """The read-and-launch inventory checks (tools/ci_inputs.py and the two reviewed-entry rules).
+    They run under this gate's registered suite, and ci_inputs.py --self-test runs the same set."""
+    inv = _ci_inputs()
+
+    def sites(source):
+        return sorted((row["class"], tuple(row["paths"]), tuple(row["scripts"]))
+                      for row in inv.classify_module("tools/inv.py", source))
+
+    got = sites(INPUT_READ)
+    check("inputs/anchored-parents-resolves", got == [("2", ("docs/a.md",), ())], got)
+    got = sites("import os\nHERE = os.path.dirname(os.path.abspath(__file__))\n"
+                "R = os.path.dirname(HERE)\nopen(os.path.join(R, \"VERSION\"), \"rb\")\n")
+    check("inputs/anchored-dirname-chain-resolves", got == [("2", ("VERSION",), ())], got)
+    got = sites("from pathlib import Path\nR = Path(__file__).parent.parent\n"
+                "(R / \"VERSION\").read_bytes()\n")
+    check("inputs/anchored-parent-chain-resolves", got == [("2", ("VERSION",), ())], got)
+    got = sites('open("VERSION", "rb")\n')
+    check("inputs/literal-read-class-1", got == [("1", ("VERSION",), ())], got)
+    got = sites(INPUT_CWD)
+    check("inputs/literal-under-cwd-unresolved", got == [("3b", (), ())], got)
+    got = sites("import subprocess\nimport sys\n" + INPUT_ANCHOR
+                + 'subprocess.run([sys.executable, "tools/launched.py"], cwd=str(ROOT))\n')
+    check("inputs/cwd-root-keeps-class-1", got == [("1", (), ("tools/launched.py",))], got)
+    got = sites('import os\nos.chdir("/x")\nopen("VERSION", "rb")\n')
+    check("inputs/literal-after-chdir-unresolved", got == [("3b", (), ())], got)
+    got = sites(INPUT_DIR_FD)
+    check("inputs/dir-fd-unresolved", got == [("3b", (), ())], got)
+    got = sites('import tempfile\nd = tempfile.mkdtemp()\nopen(d + "/x", "rb")\n')
+    check("inputs/scratch-mkdtemp", got == [("3a", (), ())], got)
+    got = sites('import tempfile\nwith tempfile.TemporaryDirectory() as d:\n    open(d, "rb")\n')
+    check("inputs/scratch-tempdir-with", got == [("3a", (), ())], got)
+    got = sites(INPUT_UNRESOLVED)
+    check("inputs/param-no-caller-unresolved", got == [("3b", (), ())], got)
+    got = sites(INPUT_ANCHOR + 'def f(p):\n    open(p, "rb")\nf(ROOT / "VERSION")\n')
+    check("inputs/param-root-callers-resolve", got == [("2", ("VERSION",), ())], got)
+    got = sites(INPUT_ANCHOR + 'def f(p):\n    open(p, "rb")\nf(ROOT / "VERSION")\nh = f\n')
+    check("inputs/function-value-unresolved", got == [("3b", (), ())], got)
+    got = sites(INPUT_ANCHOR + 'def g(q):\n    global ROOT\n    ROOT = q\nopen(ROOT / "VERSION", "rb")\n')
+    check("inputs/global-rebound-unresolved", got == [("3b", (), ())], got)
+    got = sites(INPUT_SETATTR)
+    check("inputs/setattr-rebound-unresolved", got == [("3b", (), ())], got)
+    got = sites(INPUT_ANCHOR + 'for rel in ("VERSION", "docs/a.md"):\n    open(ROOT / rel, "rb")\n')
+    check("inputs/loop-literal-unrolls", got == [("2", ("VERSION", "docs/a.md"), ())], got)
+    got = sites(INPUT_ANCHOR + 'for rel in names:\n    open(ROOT / rel, "rb")\n')
+    check("inputs/loop-opaque-unresolved", got == [("3b", (), ())], got)
+    got = sites(INPUT_LISTING)
+    check("inputs/listing-becomes-glob", got == [("2", ("tools/**",), ())], got)
+    got = sites("import subprocess\n" + INPUT_ANCHOR + 'subprocess.run(["git", "-C", str(ROOT), "log"])\n')
+    check("inputs/git-root-whole-repo", got == [("2", ("**",), ())], got)
+    got = sites('import subprocess\nimport tempfile\nt = tempfile.mkdtemp()\n'
+                'subprocess.run(["git", "-C", t, "init"])\n')
+    check("inputs/git-scratch", got == [("3a", (), ())], got)
+    got = sites("open(*parts)\n")
+    check("inputs/unknown-shape-starred", got == [("3b", (), ())], got)
+    got = sites("import subprocess\nsubprocess.run(**kw)\n")
+    check("inputs/unknown-shape-kwargs", got == [("3b", (), ())], got)
+
+    launcher = ("import subprocess\nimport sys\n" + INPUT_ANCHOR
+                + 'subprocess.run([sys.executable, "-I", "-B", str(ROOT / "tools" / "launched.py")])\n')
+    launched = ("import _leaf\nimport subprocess\nimport sys\n" + INPUT_ANCHOR
+                + 'subprocess.run([sys.executable, str(ROOT / "tools" / "inv.py")])\n')
+    fixture_sources = {"tools/inv.py": launcher, "tools/launched.py": launched, "tools/_leaf.py": "x = 1\n"}
+
+    def read_fixture(rel):
+        if rel not in fixture_sources:
+            raise CannotEvaluate("{}: unreadable (fixture)".format(rel))
+        return fixture_sources[rel]
+
+    record = inv.step_inventory("python3 -I -B tools/inv.py", INPUT_FIXTURE_TRACKED, read_fixture,
+                                [], "fixture")
+    check("inputs/launch-followed-with-cycle",
+          record["launches"] == ["tools/inv.py", "tools/launched.py"]
+          and "tools/_leaf.py" in record["closure"] and record["unresolved"] == []
+          and record["data"] == [], record)
+
+    for name, text in (("inputs/dispositions-bad-toml", "not toml ["),
+                       ("inputs/dispositions-deep-nesting", "x = " + "[" * 4000 + "]" * 4000),
+                       ("inputs/dispositions-unknown-kind", INPUT_DISPOSITION.format("0" * 64).replace(
+                           '"scratch"', '"mystery"'))):
+        try:
+            inv.load_dispositions(text)
+            got = "loaded"
+        except CannotEvaluate as exc:
+            got = str(exc)
+        check(name, got != "loaded", got)
+
+    got = _input_rules(INPUT_READ, ["tools/inv.py"])
+    check("refuse/input-not-triggered", got == ["input-not-triggered"], got)
+    got = _input_rules(INPUT_READ, ["tools/inv.py"], reviewed=False)
+    check("pass/input-unreviewed-ignored", got == [], got)
+    got = _input_rules(INPUT_READ, ["tools/inv.py", "docs/a.md"])
+    check("pass/input-covered", got == [], got)
+    got = _input_rules(INPUT_LISTING, ["tools/inv.py", "tools/launched.py", "tools/_leaf.py"])
+    check("refuse/input-glob-not-covered", got == ["input-not-triggered"], got)
+    got = _input_rules(INPUT_LISTING, ["tools/**"])
+    check("pass/input-glob-covered-by-double-star", got == [], got)
+    got = _input_rules(INPUT_UNRESOLVED, ["tools/inv.py"])
+    check("refuse/unresolved-input", got == ["unresolved-input"], got)
+    fingerprint = inv.classify_module("tools/inv.py", INPUT_UNRESOLVED)[0]["fingerprint"]
+    got = _input_rules(INPUT_UNRESOLVED, ["tools/inv.py"],
+                       dispositions=INPUT_DISPOSITION.format(fingerprint))
+    check("pass/unresolved-input-dispositioned", got == [], got)
+    got = _input_rules(INPUT_UNRESOLVED, ["tools/inv.py"], dispositions=INPUT_DISPOSITION.format("0" * 64))
+    check("refuse/unresolved-input-stale-fingerprint", got == ["unresolved-input"], got)
+    got = _input_rules(INPUT_READ, ["tools/inv.py", "docs/a.md"], dispositions="not toml [")
+    check("cannot-evaluate/dispositions-not-toml", tuple(got[:1]) == ("cannot-evaluate",), got)
+
+    # Each flip disables one classifier or matching rule in process and shows the covering check
+    # above turn red (the case then wrongly resolves); the original attribute is always restored.
+    saved = inv.CWD_KWARGS
+    try:
+        inv.CWD_KWARGS = frozenset()
+        got = sites(INPUT_CWD)
+    finally:
+        inv.CWD_KWARGS = saved
+    check("flip/cwd-rule-detected", got == [("1", (), ("tools/launched.py",))], got)
+    saved = inv.DIR_FD_KWARGS
+    try:
+        inv.DIR_FD_KWARGS = frozenset()
+        got = sites(INPUT_DIR_FD)
+    finally:
+        inv.DIR_FD_KWARGS = saved
+    check("flip/dir-fd-rule-detected", got == [("1", ("payload",), ())], got)
+    saved = inv._rebound
+    try:
+        inv._rebound = lambda facts, name: False
+        got = sites(INPUT_SETATTR)
+    finally:
+        inv._rebound = saved
+    check("flip/rebind-rule-detected", got == [("2", ("VERSION",), ())], got)
+    saved = inv.disposition_matches
+    try:
+        inv.disposition_matches = lambda row, rel, site: (row["file"] == rel
+                                                          and row["qualname"] == site["qualname"])
+        got = _input_rules(INPUT_UNRESOLVED, ["tools/inv.py"],
+                           dispositions=INPUT_DISPOSITION.format("0" * 64))
+    finally:
+        inv.disposition_matches = saved
+    check("flip/stale-fingerprint-rule-detected", got == [], got)
+
+
 def _self_test():
     check("pass/fixture-clean", _rules(_registry()) == [], _rules(_registry()))
+    _inventory_checks()
 
     steps = workflow_run_steps(FIXTURE_WORKFLOW)
     check("workflow/reads-run-steps-only", [(job, name) for job, name, _run, _line in steps] == [
@@ -1456,7 +1685,11 @@ def _self_test():
           "line stays scanned, and after a run: block ended by a dedented comment the stale skip is "
           "cleared so a deeper line there is refused as a continued step; a .. "
           "path that collapses to a tracked file "
-          "passes; an unrecognized argument exits 2; the live tree "
+          "passes; the read-and-launch inventory checks hold (anchored, literal, scratch, parameter, "
+          "loop, rebinding, cwd, dir_fd, git, listing, launch-following, unknown-shape and "
+          "disposition vectors, the reviewed-entry rules input-not-triggered and unresolved-input, "
+          "an invalid dispositions file as cannot-evaluate, and four in-process rule flips each "
+          "turning a covering check red); an unrecognized argument exits 2; the live tree "
           "passes)".format(len(EXECUTED), 3 + sum(1 for name in EXECUTED if name.startswith("cannot-evaluate/shape-"))))
     return 0
 
