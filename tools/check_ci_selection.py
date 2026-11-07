@@ -34,10 +34,11 @@ unreadable, over MAX_BYTES or not UTF-8; a registry that is not TOML (TOMLDecode
 ValueError), nests too deeply (RecursionError) or exhausts memory (MemoryError); a format-version other
 than the integer 1; any workflow character, line or value outside the accepted grammar below, a run:
 step without a name, or one job holding two run: steps of one name; an anchor, alias or tag at a value
-start or flow-collection entry on a line outside a block scalar; a '#' directly after '[', '{' or ',',
-or inside an open flow collection and not preceded by a space, on such a line (YAML starts a comment at
-a '#' right after a flow indicator, so in `runs-on: [#]` the `#]` is a comment and the collection stays
-open, where this reader would count the line closed); a value starting with | or > that is not a block
+start or flow-collection entry on a line outside a block scalar; a '#' inside an open flow collection
+and not preceded by a space on such a line (YAML starts a comment at a '#' right after '[', '{' or ',',
+so in `runs-on: [#]` the `#]` is a comment and the collection stays open, where this reader would count
+the line closed; outside any flow collection a spaceless '#', as in `args: a,#b` or `run: echo x[#]`,
+stays text for YAML and for this reader alike); a value starting with | or > that is not a block
 scalar header followed by nothing or a comment; a blank line before a run: block's first
 content line indented deeper than that content line; a relative .py path in run: text that names no
 tracked file; a tracked-file listing that fails or is empty; a source in an import closure that cannot
@@ -66,9 +67,10 @@ reader is a positive grammar: it accepts exactly the shapes named here, and ever
                indicator (, [ ] { }), so a skip to the next space would run past a flow indicator and
                miss a scalar opened after it. No workflow uses one; the closed value `[&a,"x"]` is
                refused by this same rule, which is acceptable because it carries an anchor. A '#'
-               directly after '[', '{' or ',', or inside an open flow collection and not preceded by
-               a space, is refused the same way: YAML starts a comment there (so `[#]` stays open)
-               where this reader would read text, and no workflow carries one. The content lines of a
+               inside an open flow collection and not preceded by a space is refused the same way:
+               directly after '[', '{' or ',' YAML starts a comment there (so `[#]` stays open)
+               where this reader would read text, and no workflow carries one; outside any flow
+               collection a spaceless '#' stays text for both readers. The content lines of a
                block scalar (a value of | or > with its indicators, under any key) are text, never
                flow syntax, so none of these rules runs on them; every line deeper than the key that
                opened the block is skipped unread
@@ -287,7 +289,16 @@ def _block_scalar_indent(stripped, indent, where):
     plain scalar starting with a block indicator, so such a line is a parse error, never text.
     Detection stays conservative, so it can never skip a line YAML reads as structure: a header shape
     it does not model (a bare `- |` item, a quoted or non-identifier key) opens no skip here, and that
-    block's content lines stay scanned line by line and refused where the scanned rules refuse them."""
+    block's content lines stay scanned line by line and refused where the scanned rules refuse them.
+    That is a fail-closed over-refusal: YAML reads those content lines as text, and this gate may
+    refuse the workflow (exit 2) rather than skip a line it cannot prove is text; it never passes a
+    misread one. A header whose comment lacks the space before the '#', as in `script: |#c`, is
+    refused as outside the header grammar the same way: PyYAML's two loaders read that form
+    differently (a header with a comment, or a parse error), so the gate refuses both readings
+    rather than model either, another fail-closed over-refusal. A `- key: |` item's returned indent
+    includes the `- ` offset: the item's later keys sit at that deeper indent, and a skip measured
+    from the dash's own indent would swallow them (a sibling name:/run: pair, so a whole step) as
+    block content."""
     offset = 0
     body = stripped
     while body.startswith("- "):
@@ -317,15 +328,18 @@ def _value_left_open(content, where):
     open there is open. The reading is conservative: a quote anywhere inside a flow collection is read
     as opening a quoted scalar.
 
-    A '#' with no space before it is refused (CannotEvaluate, naming where) when it stands directly
-    after '[', '{' or ',', or anywhere inside an open flow collection. PyYAML starts a comment at a
-    '#' that directly follows a flow indicator, so in `runs-on: [#]` the `#]` is a comment and the
-    sequence stays open onto the following lines, while a reader that took the '#' for text would
-    count the ']' and call the line closed; the same holds after ','. Inside an open flow collection
-    every other spaceless '#' (as in `{a:#}`) is refused too rather than modelled: where PyYAML does
-    not read a comment there it rejects the document, so refusing is bounded and fail closed, like
-    the anchor rule below. Elsewhere in a plain scalar a spaceless '#' stays text for YAML and for
-    this reader alike.
+    A '#' with no space before it is refused (CannotEvaluate, naming where) anywhere inside an open
+    flow collection. PyYAML starts a comment at a '#' that directly follows a flow indicator, so in
+    `runs-on: [#]` the `#]` is a comment and the sequence stays open onto the following lines, while
+    a reader that took the '#' for text would count the ']' and call the line closed; the same holds
+    after ','. One rule covers the flow-indicator case too: every '[', '{' or ',' where YAML reads a
+    flow indicator is one this reader has counted, so the collection is already open (depth > 0) at
+    a '#' directly after it. Inside an open flow collection every other spaceless '#' (as in `{a:#}`)
+    is refused too rather than modelled: where PyYAML does not read a comment there it rejects the
+    document, so refusing is bounded and fail closed, like the anchor rule below. Outside any flow
+    collection a spaceless '#' stays text for YAML and for this reader alike: in `args: a,#b` and
+    `echo x[#]` the ',' and '[' are not at a value start and not inside a flow collection, so they
+    are text, not flow indicators, for both readers, and no comment starts after them.
 
     An anchor (&), alias (*) or tag (!) found at a value start or at the start of a flow-collection
     entry is refused (CannotEvaluate, naming where). Modelling where YAML ends such a node property is
@@ -341,15 +355,11 @@ def _value_left_open(content, where):
         after = content[index + 1:index + 2]
         if char == "#":
             previous = content[index - 1] if index else ""
-            if previous in "[{,":
-                raise CannotEvaluate(
-                    "{}: a '#' directly after {!r} is where YAML starts a comment and this reader "
-                    "does not; the flow collection would stay open onto the following "
-                    "lines".format(where, previous))
             if depth and previous != " ":
                 raise CannotEvaluate(
-                    "{}: a '#' inside a flow collection and not preceded by a space is not read by "
-                    "this gate".format(where))
+                    "{}: a '#' inside an open flow collection and not preceded by a space is not "
+                    "read by this gate; directly after '[', '{{' or ',' YAML starts a comment there "
+                    "and the collection would stay open onto the following lines".format(where))
             if index == 0 or previous == " ":
                 break
             at_start = False
@@ -1205,6 +1215,17 @@ def _self_test():
     got = _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace(
         "    name: Lint\n", "    name: Lint\n    runs-on: [a #]\n"))
     check("cannot-evaluate/flow-comment-after-space-leaves-open", tuple(got[:1]) == ("cannot-evaluate",), got)
+    # Outside any flow collection a spaceless '#' is text for YAML and for this reader alike: a '[',
+    # '{' or ',' not at a value start and not inside a flow collection is text, not a flow indicator,
+    # so no comment starts after it. Each plain form passes: under with:, and in a plain run: value
+    # after ',' and after '['. PyYAML loads all three as the literal text.
+    results = [
+        _rules(_registry(), workflow=FIXTURE_WORKFLOW
+               + "      - uses: actions/x@v1\n        with:\n          args: a,#b\n"),
+        _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace("run: echo done", "run: echo a,#b")),
+        _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace("run: echo done", "run: echo x[#]")),
+    ]
+    check("pass/spaceless-hash-outside-flow", all(got == [] for got in results), results)
 
     # The content lines of a block scalar (| or > with their indicators, under any key) are text, never
     # flow syntax: a script: | block under with: holding lines the anchor, alias, tag, flow-comment or
@@ -1246,6 +1267,25 @@ def _self_test():
     got = _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace(
         "    steps:\n", "    env:\n      NOTE: |\n        * item\n    steps:\n", 1))
     check("pass/block-scalar-under-job-key", got == [], got)
+    # A `- key: |` step item: the block's skip indent includes the `- ` offset, so the item's own
+    # later keys at the key's indent (here a name:/run: pair, a whole run: step YAML reads) end the
+    # block and are read; the step then needs a registry entry. A skip measured from the dash's
+    # indent would swallow those keys as block content and hide the step. The |1 header (an
+    # indentation indicator) opens the same skip.
+    results = []
+    for header, content in (("|", "          x\n"), ("|1", "         x\n")):
+        hidden_item = (FIXTURE_WORKFLOW + "      - env: {}\n".format(header) + content
+                       + "        name: Hidden\n        run: echo hidden\n")
+        results.append((header, _rules(_registry(), workflow=hidden_item)))
+    check("refuse/step-item-block-scalar-missing-entry",
+          all(got == ["missing-entry"] for _header, got in results), results)
+    # The same `- key: |` item inside a with: list: the sibling key line at the item's key indent
+    # ends the block and is still scanned, so a refusable value there is refused, never skipped.
+    got = _rules(_registry(), workflow=FIXTURE_WORKFLOW
+                 + "      - uses: actions/x@v1\n        with:\n          args:\n"
+                 "            - env: |\n                text\n              key: [#]\n")
+    check("cannot-evaluate/with-list-item-block-scalar-sibling-scanned",
+          tuple(got[:1]) == ("cannot-evaluate",), got)
 
     # A blank line before the first content line of a run: block, indented deeper than that content line,
     # is a YAML parse error; the gate refuses it. The boundary (content indent 10): a blank one space
@@ -1329,6 +1369,15 @@ def _self_test():
         "        run: |\n            git config --global core.autocrlf true\n          dedented content\n"))
     check("cannot-evaluate/block-dedent-under-content", got[0] == "cannot-evaluate", got)
 
+    # The run: block reader clears the generic block-scalar skip before it starts: when a dedented
+    # comment ends the block, the next line can sit deeper than the run: key, and a stale skip from
+    # the run: header would swallow that line where the reader refuses a continued run: step.
+    got = _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace(
+        "        run: |\n          git config --global core.autocrlf true\n",
+        "        run: |\n            git config --global core.autocrlf true\n"
+        "          # a note, not run text\n          after: x\n"))
+    check("cannot-evaluate/run-block-reset-after-dedented-comment", tuple(got[:1]) == ("cannot-evaluate",), got)
+
     # A run: text naming a path through `..` resolves against the tracked set: one collapsing to a
     # tracked path inside the tree passes; one leaving the tree names no tracked file.
     got = _rules(_registry(), workflow=FIXTURE_WORKFLOW.replace(
@@ -1388,8 +1437,10 @@ def _self_test():
           "a line under with: or a top-level key; a closed one passes), each of four anchor-led bypass "
           "forms at a job key, step key, with: line and \"- uses:\" item, an alias and a tag at a value "
           "start, a '#' directly after '[' or ',' and a '#' inside an open flow mapping with no space "
-          "before it at each of those four sites (a '#' after a space stays a comment, and inside a "
-          "still-open collection stays a left-open refusal), a value starting with | or > outside the "
+          "before it at each of those four sites (a '#' after a space stays a comment, inside a "
+          "still-open collection stays a left-open refusal, and outside any flow collection a "
+          "spaceless '#' after ',' or '[' stays text, under with: and in a plain run: value), a "
+          "value starting with | or > outside the "
           "block-scalar header grammar, and a blank line before a run: block's first content line "
           "indented one space deeper "
           "than it (a blank equal to or shallower than it passes), every "
@@ -1398,8 +1449,12 @@ def _self_test():
           "YAML types, a repeated job id, a dedented non-comment line under a run: block and a run path "
           "through .. that leaves the tree are cannot-evaluate; a quoted typed scalar stays text; a "
           "dedented comment ends a run: block as a comment; a block scalar's content lines (under a "
-          "with: script, a step key, a top-level key and a key under a job key) are skipped as text "
-          "while the same lines outside one are refused, and the block ends at its key's indent; a .. "
+          "with: script, a step key, a top-level key, a key under a job key, a `- key: |` step item "
+          "and a `- key: |` item in a with: list) are skipped as text while the same lines outside "
+          "one are refused, and the block ends at its key's own indent, dash offset included, so a "
+          "step after a `- key: |` item header stays read and needs an entry, a with: list sibling "
+          "line stays scanned, and after a run: block ended by a dedented comment the stale skip is "
+          "cleared so a deeper line there is refused as a continued step; a .. "
           "path that collapses to a tracked file "
           "passes; an unrecognized argument exits 2; the live tree "
           "passes)".format(len(EXECUTED), 3 + sum(1 for name in EXECUTED if name.startswith("cannot-evaluate/shape-"))))
