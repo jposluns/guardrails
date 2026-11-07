@@ -787,7 +787,7 @@ def render_zip(data, license_text):
 
 def render_instructions(data):
     header = ("AIQT™: a standard for your AI assistant\n"
-              "Version {v} . Licensed under the Apache License 2.0 "
+              "Version {v}. Licensed under the Apache License 2.0 "
               "(https://www.apache.org/licenses/LICENSE-2.0)\n"
               "{attr}").format(v=data["meta"]["version"], attr=data["attribution"])
     blocks = [

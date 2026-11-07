@@ -5,7 +5,7 @@ title = "Install"
 kind = "document"
 label = "Install"
 heading = "Add AIQT to your AI development assistant"
-meta = "Give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project's records. Using a chat assistant? Download the skill."
+meta = "Give your development assistant 1 prompt and it prepares an adoption plan, with OPFiles for your project's records, and installs AIQT once you approve it. Using a chat assistant? Download the Skill."
 
 [[body]]
 component = "label"
@@ -16,7 +16,7 @@ component = "code"
 id = "install-prompt"
 variant = "prompt-block"
 text = "Install AIQT Guardrails in this project and walk me through adopting it. Read https://aiqt.ai/llms.txt and the repository https://github.com/jposluns/guardrails first. Propose an adoption plan: the AIQT rules, hooks, and checks that fit this project's languages and tools, and OPFiles (https://opfiles.ai/llms.txt) for the project's operational records unless I opt out. Before building any new guardrail, check whether jposluns/guardrails already has one that fits. Name every file you would create or change, and why. Change nothing until I approve the plan."
-note = "Paste it into Claude Code, Codex, Antigravity CLI, Gemini CLI, Cursor, Copilot, or any other development assistant."
+note = "Paste it into Claude Code, Codex, Antigravity CLI, Gemini CLI, Cursor, Copilot, or any other development assistant. The developer tooling is in preview: the generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release."
 
 [[body]]
 component = "prose"
@@ -25,12 +25,12 @@ html = '''<p>Google announced that from 18 June 2026 Gemini CLI would stop servi
 [[body]]
 component = "section"
 lbl = "Chat assistants"
-heading = "Or add the skill"
+heading = "Or add the Skill"
 id = "skill"
 
 [[body]]
 component = "prose"
-html = '''<p><a href="/downloads/aiqt-skill-1.0.6.zip">Download the AIQT skill</a> (zip, 28 KB) and install it the way your AI assistant installs any skill. <a href="$BASE/install/details/">Step-by-step instructions for each assistant</a>, and the instruction file for assistants without skills.</p>'''
+html = '''<p><a href="/downloads/aiqt-skill-1.0.6.zip">Download the AIQT Skill</a> (zip, 28 KB) and install it the way your AI assistant installs any Skill. <a href="$BASE/install/details/">Step-by-step instructions for each assistant</a>, and the instruction file for assistants without Skills.</p>'''
 
 [[body]]
 component = "section"
@@ -40,7 +40,7 @@ id = "opf"
 
 [[body]]
 component = "prose"
-html = '''<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions, and handoffs in one machine-written source, generates the readable versions from it, and fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open, and it significantly cuts errors.</p><p>An AIQT adoption sets up OPF by default. It is optional: say so in your plan review and the adoption skips it, and you can add it later.</p>'''
+html = '''<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions, and handoffs in one machine-written source, generates the readable versions from it, and, where the drift check is configured as a required commit or CI check, fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open.</p><p>An AIQT adoption plan includes OPF by default. It is optional: say so in your plan review and the plan skips it, and you can add it later. The reference OPF tooling cannot apply or complete an adoption yet: its apply and complete stages refuse to run, so your assistant prepares the plan and stops at the approval step rather than doing the missing stages by hand.</p>'''
 
 [[body]]
 component = "section"
@@ -50,11 +50,11 @@ id = "code"
 
 [[body]]
 component = "prose"
-html = '''<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat skill needs no Python.</p>'''
+html = '''<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat Skill needs no Python.</p>'''
 
 [[body]]
 component = "prose"
-html = '''<p>Planning for a team? See <a href="$BASE/future/">what is coming for teams and enterprises</a>.</p>'''
+html = '''<p>Planning for a team? See <a href="$BASE/future/">ideas for teams and enterprises</a>.</p>'''
 
 [[body]]
 component = "next"

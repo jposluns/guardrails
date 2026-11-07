@@ -23,7 +23,7 @@ rail = "The ordering"
 [[body]]
 component = "callout"
 rule = true
-html = "<p class=\"ordering\"><span class=\"tier\">(Accuracy = Integrity = Quality = Trust)</span> &gt; <span class=\"p\">Progress</span> &gt; <span class=\"s\">Speed</span> &gt; <span class=\"c\">Cost</span></p><p>The 4 facets are the top tier, co-equal, with no ranking among them. Below them, in order, come 3 more: Progress (decide and act when the answer is already clear), Speed (do it with fewer wasted steps), and Cost (do it cheaply). When 2 of these pull against each other, the higher one wins, every time. Verification is never the thing that gets cut.</p>"
+html = "<p class=\"ordering\"><span class=\"tier\">(Accuracy = Integrity = Quality = Trust)</span> &gt; <span class=\"p\">Progress</span> &gt; <span class=\"s\">Speed</span> &gt; <span class=\"c\">Cost</span></p><p>The 4 facets are the top tier, co-equal, with no ranking among them. Below them, in order, come three more: Progress (decide and act when the answer is already clear), Speed (do it with fewer wasted steps), and Cost (do it cheaply). When two of these pull against each other, the higher one wins, every time. When a constraint forces a compromise on the top tier, the assistant halts and escalates the tradeoff explicitly rather than resolving it silently. Verification is never the thing that gets cut.</p>"
 
 [[body]]
 component = "clause"
@@ -131,7 +131,7 @@ heading = "Where AIQT was built, used, and tested on itself"
 
 [[body]]
 component = "prose"
-html = "<p>These five are drawn from the GRC Library's own history, the project that built AIQT and held itself to it first. They name the tension, then show the same moment resolved twice: once with the shortcut taken, once with the standard applied.</p>"
+html = "<p>These five are drawn from the GRC Library's own history, the project that built AIQT and held itself to it first; the source records behind them are not yet published. They name the tension, then show the same moment resolved twice: once with the shortcut taken, once with the standard applied.</p>"
 
 [[body]]
 component = "clauses"
@@ -142,7 +142,7 @@ html = "<p><strong>Speed vs Accuracy</strong></p><p><em>Without AIQT.</em> The c
 
 [[body.items]]
 n = "3.10"
-html = "<p><strong>Progress vs Integrity</strong></p><p><em>Without AIQT.</em> The change is ready, one audit gate fails, and the deadline argues for an exemption. The gate is weakened and the work keeps moving. The defect the gate was reporting ships anyway, the gate now protects nothing, and every future failure has a precedent for being silenced.</p><p><em>With AIQT.</em> A failing gate is signal, never friction. The artefact is fixed, or the change is descoped, and the rule deliberately offers no exception path. Progress resumes one fix later, on work that actually passes: a pass obtained by lowering the bar is not a pass.</p>"
+html = "<p><strong>Progress vs Integrity</strong></p><p><em>Without AIQT.</em> The change is ready, one audit gate fails, and the deadline argues for an exemption. The gate is weakened and the work keeps moving. The defect the gate was reporting ships anyway, the gate now protects nothing, and every future failure has a precedent for being silenced.</p><p><em>With AIQT.</em> A failing gate is signal, never friction. The artefact is fixed, or the change is descoped: a gate is never weakened to obtain a pass, and a reduction of a gate lands only through the maintainer's explicit, recorded authorization. Progress resumes one fix later, on work that actually passes: a pass obtained by lowering the bar is not a pass.</p>"
 
 [[body.items]]
 n = "3.11"

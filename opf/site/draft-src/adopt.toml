@@ -5,7 +5,7 @@ title = "Adopt"
 kind = "document"
 label = "Adopt"
 heading = "Ask your assistant for a plan. Review it, then authorize."
-meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes, then inspect the scaffolded store and validation results. In this build the reference tooling stops after approval."
+meta = "Ask your AI development assistant to read the standard, inspect your project, and propose an adoption plan naming what it would create, import, or retire. Review that plan before authorizing changes. In this build the reference tooling stops after approval: it prints the approval without recording it, your assistant reports the stages still pending, and no store is scaffolded."
 
 [[body]]
 component = "label"
@@ -27,7 +27,7 @@ component = "steps"
 items = [
   '''Give your assistant this site's machine-readable entry point, <a href="/llms.txt"><code>/llms.txt</code></a>, and the adoption guide, <a href="/adopt.md"><code>/adopt.md</code></a>, as the starting material.''',
   "Review the plan it proposes: what it would create, import, or retire.",
-  "Authorize, then inspect the scaffolded store and the validation results (the reference tooling cannot apply a plan yet).",
+  "Authorize, then read the approval the reference tooling prints, which it does not record, and your assistant's report of the stages still pending. The reference tooling cannot apply a plan yet, so this path scaffolds no store: an assistant following the pack stops at approval and reports, and a project with no prior records can use the interim <code>opf init</code> route instead.",
 ]
 
 [[body]]
@@ -72,7 +72,7 @@ html = '''The eleven baseline typed indexes, each a <code>.index.toml</code> fil
 component = "prose"
 html = '''<p>The imported leaves: one <code>&lt;type&gt;.imported.index.toml</code> beside each of those eleven indexes, plus <code>worklog.imported.toml</code> for the worklog, each empty to start. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).</p>
 <p>Then write the committed pointer <code>.opf.toml</code> at your product repository root, so the store resolves from a stable location (specification section 4.3). In the manifest, a <code>[profiles.aiqt]</code> table is optional and is ignored by base-only tooling; a base adopter need not add it.</p>
-<p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest: also set <code>layout</code>, <code>posture</code> and <code>import_status</code>, register each enabled type in <code>[types]</code>, and declare views and the other settings (see <a href="$BASE/standard/">the standard</a> for the normative shape, and <a href="$BASE/core-files/">the core store files</a> for every table it can carry):</p>'''
+<p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest: also set <code>layout</code>, <code>posture</code>, and <code>import_status</code>, register each enabled type in <code>[types]</code>, and declare views and the other settings (see <a href="$BASE/standard/">the standard</a> for the normative shape, and <a href="$BASE/core-files/">the technical details page</a> for every table it can carry):</p>'''
 
 [[body]]
 component = "code"
@@ -95,7 +95,7 @@ html = '''<p>The reference tooling's <code>opf init</code> does not scaffold a 2
 
 [[body]]
 component = "prose"
-html = "<p>The <code>opf</code> reference CLI, its 10 command verbs, and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>.</p>"
+html = "<p>The <code>opf</code> reference CLI, its 10 command verbs, and what each does today are on <a href=\"$BASE/core-files/#tooling\">the technical details page</a>. The pack's <a href=\"https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md\" target=\"_blank\" rel=\"noopener noreferrer\">change log<span class=\"vh\"> (opens in a new tab)</span></a> has no OPFiles entry yet.</p>"
 
 [[body]]
 component = "next"
