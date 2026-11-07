@@ -669,7 +669,8 @@ REQUIRED_STATUS_JOB = (
     "${{ needs.opf-closure-f.result || 'missing' }} "
     "${{ needs.release.result || 'missing' }} "
     "${{ needs.generated.result || 'missing' }} "
-    "${{ needs.registry.result || 'missing' }}",
+    "${{ needs.registry.result || 'missing' }} "
+    "${{ needs.tree-gates.result || 'missing' }}",
     "          HEAVY_RESULTS: ${{ needs.opf-tooling-a.result || 'missing' }} "
     "${{ needs.opf-tooling-b.result || 'missing' }} "
     "${{ needs.opf-tooling-c.result || 'missing' }} "

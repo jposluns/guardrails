@@ -1469,7 +1469,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "opf-tooling-a"
+job = "tree-gates"
 step = "OPF homes contract drift gate"
 categories = ["opf"]
 scope = "whole-repo"
@@ -1560,7 +1560,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "opf-tooling-a"
+job = "tree-gates"
 step = "OPF prompt-pack manifest drift gate"
 categories = ["opf"]
 scope = "sub-tree"
@@ -2250,7 +2250,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "opf-tooling-b"
+job = "tree-gates"
 step = "OPF store-integrity gate"
 categories = ["opf"]
 scope = "whole-repo"
@@ -2278,7 +2278,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "opf-tooling-b"
+job = "tree-gates"
 step = "OPF enforcement-pack platform coverage gate"
 categories = ["opf"]
 scope = "per-file"
@@ -2600,7 +2600,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "opf-tooling-b"
+job = "tree-gates"
 step = "OPF source-only init gate"
 categories = ["opf"]
 scope = "whole-repo"
@@ -2775,7 +2775,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "opf-tooling-c"
+job = "tree-gates"
 step = "OPF render-drift gate"
 categories = ["opf"]
 scope = "undetermined"
@@ -3182,7 +3182,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "opf-tooling-c"
+job = "tree-gates"
 step = "OPF init contract consistency gate"
 categories = ["opf"]
 scope = "per-file"
@@ -8249,7 +8249,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "selftest-execution"
+job = "tree-gates"
 step = "Entry-guard gate"
 categories = ["ci"]
 scope = "per-file"
@@ -8711,7 +8711,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "selftest-execution"
+job = "tree-gates"
 step = "Child-status coverage"
 categories = ["ci"]
 scope = "whole-repo"
@@ -8825,7 +8825,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "selftest-execution"
+job = "tree-gates"
 step = "OPF declaration gate"
 categories = ["ci"]
 scope = "whole-repo"
@@ -12513,6 +12513,14 @@ triggers = [
   "tools/gen_rules.py",
   "tools/leak-hashes.txt",
 ]
+reviewed = false
+
+[[check]]
+job = "tree-gates"
+step = "Child exit status observable (before any gate)"
+categories = ["probe"]
+scope = "probe"
+triggers = ["opf/tools/_child_status.py"]
 reviewed = false
 
 [[check]]
