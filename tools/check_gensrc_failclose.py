@@ -1944,32 +1944,54 @@ def _self_test_main_isolated():
                  "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
             return slow, hang, leaky, leaky_reject, leaky_reject_escape
 
+        # Sizing, so each position is decided by the code under test and not by host speed:
+        #   * The 1 s per-probe budget is applied at the _run_check seam only. PROBE_TIMEOUT itself stays
+        #     at its gate value, because the sweep also uses it as the plain wall-clock timeout of every
+        #     template git command (_materialize_git); cut to 1 s, a git call slowed past 1 s by host load
+        #     ended the sweep cannot-evaluate (exit 2) before any probe ran, at whichever position it hit.
+        #   * The stall bound is 3 wall s, three poll intervals (_load_bound.POLL_S): at 1 s, one poll in
+        #     which a starved child showed no output and no CPU tick already fired it, so a slow or leaky
+        #     generator could be stopped before its own exit. At the injected cap the budget is 16 wall s,
+        #     so the silent hang is still stopped by the stall bound at most 3 + 1 (poll) + 5 (SCAN_S) = 9
+        #     wall s in, 7 s before the budget could fire.
+        #   * The three leaky fixtures run under the injected cap: their 16 wall s budget cannot cut the
+        #     generator's own exit short, and only the stall bound stops each on its leaked descendant.
+        #   * On the idle clock the budget is 1 wall s and the slow generator sleeps 2 s, so the budget
+        #     fires before it can exit; the stop kind is checked, so that position fails if anything
+        #     other than the budget ends the run.
+        _LOAD_CASE_BUDGET_S, _LOAD_CASE_STALL_S = 1, 3
+
         def _evaluate_load_tolerance(fixtures):
             global _run_check, _now, _load_factor, PROBE_TIMEOUT, PROBE_STALL_S
             slow, hang, leaky, leaky_reject, leaky_reject_escape = fixtures
-            stops = []
+            lane = {"name": None}
+            stops = {"hang": [], "idle": []}
 
-            def _spy_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+            def _budgeted_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
                 try:
-                    return saved_run_check(script_path, cwd, timeout, env_overrides)
+                    return saved_run_check(script_path, cwd, min(timeout, _LOAD_CASE_BUDGET_S), env_overrides)
                 except _load_bound.Hung as exc:
-                    stops.append(exc.kind)
+                    if lane["name"] in stops:
+                        stops[lane["name"]].append(exc.kind)
                     raise
 
-            PROBE_TIMEOUT, PROBE_STALL_S = 1, 1
+            PROBE_STALL_S = _LOAD_CASE_STALL_S
+            _run_check = _budgeted_run_check
             try:
                 _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
                 _now = _load_bound.LoadClock(factor=lambda: _load_factor())
                 rc_slow = sweep_quiet(slow)
-                _run_check = _spy_run_check
+                lane["name"] = "hang"
                 rc_hang = sweep_quiet(hang)
-                _run_check = saved_run_check
-                _load_factor = lambda: 1.0  # noqa: E731
-                _now = _load_bound.LoadClock(factor=lambda: _load_factor())
-                rc_idle = sweep_quiet(slow)
+                lane["name"] = None
                 rc_leaky = sweep_quiet(leaky)
                 rc_leaky_reject = sweep_quiet(leaky_reject)
                 rc_leaky_reject_escape, escape_out, escape_err = sweep_captured_streams(leaky_reject_escape)
+                _load_factor = lambda: 1.0  # noqa: E731
+                _now = _load_bound.LoadClock(factor=lambda: _load_factor())
+                lane["name"] = "idle"
+                rc_idle = sweep_quiet(slow)
+                lane["name"] = None
             finally:
                 _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
                 _now = saved_now
@@ -1979,15 +2001,20 @@ def _self_test_main_isolated():
                 # and an observed list is killed; never a silent pass, never a false leak
                 # (_cleanup_leaked_descendant).
                 _cleanup_leaked_descendant(leaked, failures, cannot)
-            if (rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky, rc_leaky_reject,
+            if (rc_slow, rc_hang, rc_idle, sorted(set(stops["hang"])), rc_leaky, rc_leaky_reject,
                     rc_leaky_reject_escape) != (0, 2, 2, ["stall"], 1, 0, 2):
                 failures.append("load tolerance: expected (slow under load, silent hang, slow on an idle host, "
                                 "the bound that stopped the hang, exit 0 on a corrupt target beside a leaked "
                                 "descendant, a nonzero rejection beside the same leak, a stopped rejection "
                                 "that left the target escaping) = "
                                 "(0, 2, 2, ['stall'], 1, 0, 2), got {!r}"
-                                .format((rc_slow, rc_hang, rc_idle, sorted(set(stops)), rc_leaky,
+                                .format((rc_slow, rc_hang, rc_idle, sorted(set(stops["hang"])), rc_leaky,
                                          rc_leaky_reject, rc_leaky_reject_escape)))
+            # The idle-host exit 2 must be the 1 s budget overrunning, not any other cannot-evaluate cause.
+            if sorted(set(stops["idle"])) != ["budget"]:
+                failures.append("load tolerance: expected the slow generator on an idle host to be stopped "
+                                "by the load-adjusted budget alone (['budget']), got {!r}"
+                                .format(sorted(set(stops["idle"]))))
             # The escaping fixture's exit 2 must come from the stopped-path CONTAINMENT validation, not
             # from any other cannot-evaluate condition that shares the exit code: require the
             # containment diagnostic itself (printed in the sweep's CANNOT-EVALUATE report).
