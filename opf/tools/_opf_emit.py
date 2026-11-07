@@ -3061,6 +3061,25 @@ def _fixture_main(nonce, fixture_id, argv, expected, process_fixture):
     sys.stdout.buffer.flush()
 
 
+# The most stdout bytes a missing-completion message carries.
+_FIXTURE_STDOUT_TAIL_BYTES = 4096
+
+
+def _fixture_stdout_tail(stdout):
+    """The labelled, bounded tail of a fixture child's stdout for a missing-completion message.
+
+    Some fixtures (the watchdog group's among them) print which check failed to stdout, so the
+    child's stderr alone can arrive with no cause. Only the last _FIXTURE_STDOUT_TAIL_BYTES bytes
+    are kept, so a fixture that prints a lot cannot flood the message; a cut is marked with the
+    total size, and the bytes are decoded with errors="replace".
+    """
+    limit = _FIXTURE_STDOUT_TAIL_BYTES
+    if len(stdout) <= limit:
+        return "\nstdout: " + stdout.decode("utf-8", "replace")
+    return ("\nstdout (last {} of {} bytes, earlier output cut): ".format(limit, len(stdout))
+            + stdout[len(stdout) - limit:].decode("utf-8", "replace"))
+
+
 def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture=False,
                      timeout=120, cwd=None, env=None, capture_output=False, text=False,
                      stdout=None, stderr=None, check=False):
@@ -3096,7 +3115,8 @@ def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture
     trailer = ("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode()
     if not result.stdout.endswith(trailer):
         raise FixtureIncomplete("missing/mismatched completion for " + fixture_id
-                                + ": " + result.stderr.decode("utf-8", "replace"))
+                                + ": " + result.stderr.decode("utf-8", "replace")
+                                + _fixture_stdout_tail(result.stdout))
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
     result.stdout = result.stdout[:-len(trailer)]
@@ -3747,6 +3767,66 @@ def _st_guardian_close_reuse():
     if [problem.split(":")[0] for problem in red] != ["REUSE"]:
         failures.append("guardian-close-reuse under the close-then-rebind body: expected red by REUSE alone, "
                         "got {}".format(red or "green"))
+    return failures
+
+
+def _st_fixture_stdout_diagnosis():
+    """A fixture child that prints its diagnosis to stdout and exits without its completion trailer
+    raises FixtureIncomplete, and the message keeps its prefix and carries that line under the stdout
+    label. The flip swaps _fixture_stdout_tail for one returning nothing (the message without the
+    stdout part) and requires the same check to go red. The bound is checked with stdout just under,
+    exactly at and just over _FIXTURE_STDOUT_TAIL_BYTES, and with a cut that splits a UTF-8 sequence.
+    Returns the failures."""
+    import sys
+    failures = []
+    known = "OPF-EMIT-STDOUT-DIAGNOSIS: watchdog check 7 failed"
+    fixture_id = "emit/stdout-diagnosis"
+    body = "print(" + repr(known) + ", flush=True)\nimport os\nos._exit(0)"
+
+    def check():
+        try:
+            run_status_owned([sys.executable, "-I", "-B", "-c", body],
+                             fixture_id=fixture_id, timeout=60)
+        except FixtureIncomplete as exc:
+            message = str(exc)
+        else:
+            return ["a fixture without its completion trailer was accepted"]
+        problems = []
+        if not message.startswith("missing/mismatched completion for " + fixture_id + ": "):
+            problems.append("the message prefix changed: {!r}".format(message[:200]))
+        if "\nstdout: " + known + "\n" not in message:
+            problems.append("the message lacks the labelled stdout line: {!r}".format(message[-500:]))
+        return problems
+
+    failures += ["fixture-stdout-diagnosis: " + problem for problem in check()]
+    real_tail = globals()["_fixture_stdout_tail"]
+    globals()["_fixture_stdout_tail"] = lambda stdout: ""
+    try:
+        flipped = check()
+    finally:
+        globals()["_fixture_stdout_tail"] = real_tail
+    if not flipped:
+        failures.append("fixture-stdout-diagnosis flip: with the stdout part removed the check stayed green")
+
+    limit = _FIXTURE_STDOUT_TAIL_BYTES
+    for size in (limit - 1, limit, limit + 1):
+        data = b"a" * (size - 1) + b"Z"
+        if size > limit:
+            want = ("\nstdout (last {} of {} bytes, earlier output cut): ".format(limit, size)
+                    + "a" * (limit - 1) + "Z")
+        else:
+            want = "\nstdout: " + data.decode("ascii")
+        got = _fixture_stdout_tail(data)
+        if got != want:
+            failures.append("fixture-stdout-bound/{}: expected {!r}, got {!r}".format(
+                size, want[:80] + "..." + want[-20:], got[:80] + "..." + got[-20:]))
+    split = b"\xc3\xa9" * limit + b"x"
+    got = _fixture_stdout_tail(split)
+    label = "\nstdout (last {} of {} bytes, earlier output cut): ".format(limit, len(split))
+    if not (got.startswith(label + chr(0xFFFD)) and got.endswith(chr(0xE9) + "x")
+            and len(got[len(label):].encode("utf-8")) <= limit + 2):
+        failures.append("fixture-stdout-bound/split-utf8: expected a replaced partial sequence and a "
+                        "bounded tail, got {!r}".format(got[:120]))
     return failures
 
 
@@ -5064,6 +5144,10 @@ def _self_test_body():
 
     # #378 P1: the guardian's subject-pidfd close, green, and red by REUSE alone under the pre-fix body.
     failures.extend(_st_guardian_close_reuse())
+
+    # A fixture that reports its failed check on stdout and then exits without its completion trailer
+    # carries that stdout line, labelled and bounded, in the FixtureIncomplete message.
+    failures.extend(_st_fixture_stdout_diagnosis())
 
     # A loaded module ending the process, at load or in a later call into it, is exit 2 through self_test,
     # the callable both this module's entry and the opf.py self-test registry invoke.
