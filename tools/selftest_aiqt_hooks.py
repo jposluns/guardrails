@@ -13383,14 +13383,21 @@ def _main_isolated(monitor):
         # limits (_COMMIT_SECONDS for one evaluation, _COMMIT_PROBE_SECONDS per probe). Those limits are
         # not what these cases test (the classification is), and a host loaded past its CPU count
         # stretches the probes past them, turning a correct allow into a deadline denial. So the
-        # in-process cases run with both limits replaced by a generous fixed test-only budget: a case
-        # that asserts an allow is decided by classification alone, not by host speed (the budget stays
-        # finite only so a truly hung probe still ends inside the suite's outer bound).
+        # in-process cases run with both limits replaced by a fixed test-only budget: each production
+        # limit times the load-tolerance cap (_load_bound.MAX_LOAD_FACTOR, 16), so 112 s for one
+        # evaluation and 32 s for one probe. That is the most a run-queue factor can stretch a probe
+        # before _load_bound stops counting it, so a case that asserts an allow is decided by
+        # classification, not by host speed. It is also the bound on a hung probe: one probe ends after
+        # at most 32 s and one evaluation after at most 112 s, as a named deadline denial of that case,
+        # and _commit_run kills the probe's whole process group on every exit, so no probe child
+        # outlives its case. The whole suite needs no outer kill to end a hung probe.
         # (pl239-probe-timeout), where the deadline IS the property, restores the production limits
-        # against a probe that sleeps far past them, and (pl239-deadline-forced-*) exhausts the budget
-        # deterministically with a zero evaluation budget. The production limits come back where the
-        # protected_line cases end, and in the outer finally.
-        _pl_widened_limits = (3600.0, 3600.0)
+        # against a probe that sleeps far past them, (pl239-probe-closed-*) and
+        # (pl239-remote-probe-timeout) run one substitute probe at the production probe limit, and
+        # (pl239-deadline-forced-*) exhausts the budget deterministically with a zero evaluation
+        # budget. The production limits come back where the protected_line cases end, and in the
+        # outer finally.
+        _pl_widened_limits = tuple(limit * _load_bound.MAX_LOAD_FACTOR for limit in _pl_production_limits)
         aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_widened_limits
 
         def pexpect(label, command, want, cwd=None, detail=None, certificate=None):
@@ -14204,6 +14211,108 @@ def _main_isolated(monitor):
                 aiqt_hooks._COMMIT_SECONDS, aiqt_hooks._COMMIT_PROBE_SECONDS = _pl_widened_limits
         pexpect("(pl239-probe-restored)", "git commit", "allow", cwd=plf,
                 certificate=("A", "refs/heads/other"))
+
+        # One substitute probe at the production probe limit while the evaluation keeps the widened
+        # budget, so the per-probe limit is what fires. A probe that ran out of time must render the
+        # timeout denial (still a deny), never a generic probe failure, never "remote absence could
+        # not be proved", and never the protected-branch finding.
+        _pl239_production_probe = _pl_production_limits[1]
+        _pl239_selectors = aiqt_hooks.selectors
+
+        def _pl239_production_probe_run(argv, deadline):
+            saved_probe = aiqt_hooks._COMMIT_PROBE_SECONDS
+            aiqt_hooks._COMMIT_PROBE_SECONDS = _pl239_production_probe
+            try:
+                return aiqt_hooks._commit_run(argv, deadline)
+            finally:
+                aiqt_hooks._COMMIT_PROBE_SECONDS = saved_probe
+
+        def _pl239_judge_commit(cwd):
+            code, obj, _stderr = plg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                      "tool_input": {"command": "git commit"}, "cwd": cwd})
+            reason = (obj.get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+                      if isinstance(obj, dict) else "")
+            return _reduce_result(code, obj), reason
+
+        def _pl239_check_timeout_denial(label, got, reason, reads):
+            if got != "deny":
+                failures.append("{}: expected deny, got {}".format(label, got))
+            if "ran out of time on this host" not in reason:
+                failures.append("{}: expected the timeout wording, got {!r}".format(label, reason))
+            for wrong in ("commit probe failed", "Commit denied because no admitted proof",
+                          "remote absence could not be proved", "would commit on protected branch"):
+                if wrong in reason:
+                    failures.append("{}: a timed-out probe must not render {!r}, got {!r}"
+                                    .format(label, wrong, reason))
+            if len(reads) != 1:
+                failures.append("{}: substitute probe not reached exactly once: {!r}".format(label, reads))
+
+        class _Pl239NoStreamSelector:
+            """Observes no open stream, as after a probe closed both outputs: the read loop ends at once."""
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                return False
+
+            def register(self, fileobj, events, data=None):
+                return None
+
+            def get_map(self):
+                return {}
+
+        # A probe that closes both output streams and then stalls on a feature branch: the read loop
+        # sees end of file, so the budget runs out in the bounded wait for the probe's exit, which
+        # raises subprocess.TimeoutExpired. (pl239-probe-closed-output) is a real child that closes
+        # its streams; (pl239-probe-closed-forced) stands in a selector that observes no open stream,
+        # so the bounded wait is reached whatever the host load.
+        for _case, _script, _selectors in (
+                ("closed-output", "import os, time; os.close(1); os.close(2); time.sleep(30)",
+                 _pl239_selectors),
+                ("closed-forced", "import time; time.sleep(30)",
+                 types.SimpleNamespace(DefaultSelector=_Pl239NoStreamSelector,
+                                       EVENT_READ=_pl239_selectors.EVENT_READ))):
+            _pl239_reads = []
+
+            def _pl239_closed_git(repo, deadline, *args):
+                if args == _pl239_view_query:
+                    _pl239_reads.append(repo)
+                    return _pl239_production_probe_run(
+                        [sys.executable, "-I", "-B", "-c", _script], deadline)
+                return _pl239_original_git(repo, deadline, *args)
+
+            aiqt_hooks._commit_git = _pl239_closed_git
+            aiqt_hooks.selectors = _selectors
+            try:
+                _pl239_got, _pl239_reason = _pl239_judge_commit(plf)
+            finally:
+                aiqt_hooks._commit_git = _pl239_original_git
+                aiqt_hooks.selectors = _pl239_selectors
+            _pl239_check_timeout_denial("(pl239-probe-{})".format(_case), _pl239_got, _pl239_reason,
+                                        _pl239_reads)
+
+        # A lone commit on a protected branch, where the no-remote exemption is judged: the remote
+        # probe stalls past the production probe limit, and that per-probe timeout must propagate as
+        # the timeout denial instead of reading as an unproved remote absence.
+        _pl239_reads = []
+
+        def _pl239_stalled_remote_git(repo, deadline, *args):
+            if args == ("remote",):
+                _pl239_reads.append(repo)
+                return _pl239_production_probe_run(
+                    [sys.executable, "-I", "-B", "-c", "import time; time.sleep(30)"], deadline)
+            return _pl239_original_git(repo, deadline, *args)
+
+        aiqt_hooks._commit_git = _pl239_stalled_remote_git
+        try:
+            _pl239_got, _pl239_reason = _pl239_judge_commit(plr)
+        finally:
+            aiqt_hooks._commit_git = _pl239_original_git
+        _pl239_check_timeout_denial("(pl239-remote-probe-timeout)", _pl239_got, _pl239_reason,
+                                    _pl239_reads)
+        pexpect("(pl239-remote-probe-restored)", "git commit", "deny", cwd=plr,
+                detail="would commit on protected branch")
 
         # A deterministically exhausted evaluation budget: no probe and no host timing involved, the
         # first _commit_remaining call sees the zero budget already spent. The denial must still deny

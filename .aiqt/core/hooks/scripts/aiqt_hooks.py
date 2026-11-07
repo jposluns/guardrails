@@ -13617,6 +13617,10 @@ def _commit_run(argv, deadline):
                                            output[1].decode("utf-8"))
     except _CommitCannotEvaluate:
         raise
+    except subprocess.TimeoutExpired as exc:
+        # A probe that closed its output but outlived its time is the budget running out (the wait
+        # above is bounded by the same deadline), so it renders as the timeout denial, still a deny.
+        raise _CommitCannotEvaluate(_COMMIT_DEADLINE_DETAIL) from exc
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise _CommitCannotEvaluate("commit probe failed: " + type(exc).__name__) from exc
     finally:
@@ -13784,10 +13788,12 @@ def _commit_switch_ref(step, target, deadline, created):
 
 
 def _repo_has_remote(repo, deadline):
-    """D only: True for a remote, False for proved absence, None for any probe failure.
+    """D only: True for a remote, False for proved absence, None for any other probe failure.
 
     Preserve config remote line presence (including whitespace names) and both legacy
     common-directory mechanisms. These observations consume the SAME commit deadline.
+    An exhausted time budget (a per-probe or evaluation timeout) is re-raised, not turned
+    into None, so it renders as the timeout denial; it still denies.
     """
     try:
         output = _commit_checked(_commit_git(repo, deadline, "remote"))
@@ -13800,7 +13806,9 @@ def _repo_has_remote(repo, deadline):
         result = _commit_fs(deadline, "legacy", common)
         _commit_remaining(deadline)
         return result if type(result) is bool else None
-    except _CommitCannotEvaluate:
+    except _CommitCannotEvaluate as exc:
+        if str(exc) == _COMMIT_DEADLINE_DETAIL:
+            raise
         return None
 
 
