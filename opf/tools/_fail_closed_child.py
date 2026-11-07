@@ -55,9 +55,15 @@ restores itself before the end check (a fake that puts the genuine constructor b
 or a destructor that runs when the run leg drops the traceback after the handoff) passes those
 identity checks and is refused instead by the excepthook wrapper, which reads a clean SystemExit as
 clean only when it is, by identity, the exception the thread is handling (read through the
-sys.exception bound at import), so forged args that reach the wrapper are a fault however the
-constructor was restored, while a restored fake whose forged args never reach it (one that raises a
-SystemExit, which the thread machinery drops silently) is the restored-channel residual below; the
+sys.exception bound at import), so args carrying a clean SystemExit other than that exception are a
+fault however the constructor was restored. That comparison is by identity only, so it does NOT
+catch a restored fake that alters the handled exception itself and passes the genuine args on (one
+that sets the code of the handled SystemExit(1) to 0, so the wrapper sees the very exception being
+handled with a clean code), nor a restored fake that keeps the args from reaching the wrapper at all
+(one that raises a SystemExit, which the thread machinery drops silently, or one that rebinds the
+hook local in the calling invoke_excepthook frame, whose frame locals write through on Python 3.13
+and later, so another hook is called and no fault is recorded): each reads as a pass and is the
+restored-channel residual below; the
 _bootstrap_inner wrapper is required back by identity at exit like the hooks; and the finalizer refuses a recorded sys.stderr or sys.__stderr__ object that no
 longer resolves write or flush to the type-level method it resolved at install, at the object itself
 and at each layer below it reached through .buffer and then .raw (an instance attribute shadowing
@@ -142,9 +148,11 @@ it is called, or a destructor that runs after the thread's exception was handed 
 end check), inside the window between the checks that bracket it (the finalizer's identity and
 member checks see only the state at exit, and a thread's _invoke_excepthook, its cells and
 threading.ExceptHookArgs are read only as the thread starts and again after it ran; for
-threading.ExceptHookArgs this remainder is only a restored fake whose forged args never reach the
-excepthook wrapper, since the wrapper refuses a clean SystemExit that is not the exception the thread
-is handling), the two exempt
+threading.ExceptHookArgs this remainder is a restored fake that keeps the args from reaching the
+excepthook wrapper, by raising a SystemExit or by rebinding the hook local in the calling
+invoke_excepthook frame through its write-through frame locals, or that sets the handled
+SystemExit's own code to a clean one and passes the genuine args on, since the wrapper refuses only a
+clean SystemExit that is not, by identity, the exception the thread is handling), the two exempt
 fallback cells named above, and any mutable state these functions read that the list above does not
 pin (state of the io objects below the recorded members, or the C-level printers the default hooks
 fall back to, which no Python-level identity pin can bracket): every such restored channel, and loaded
@@ -152,8 +160,9 @@ code standing in for the thread-run machinery so no installed check runs at all 
 subclass that overrides _bootstrap_inner, the run leg below the _bootstrap start target the audit
 hook verifies, so a _bootstrap override is already a recorded start fault while a _bootstrap_inner
 override is not), is the same
-loaded-code-replacing-the-reporting-machinery residual; the deleted-hook-restored
-and subclassed-bootstrap-inner vectors pin the two disclosed passes.
+loaded-code-replacing-the-reporting-machinery residual; the deleted-hook-restored,
+subclassed-bootstrap-inner, handled-code-zeroed-excepthookargs and hook-local-rebound-excepthookargs
+vectors pin the four disclosed passes.
 
   _fail_closed_child.py --self-test   the contract's real-child vectors, each paired with one flip of
                                       this module observed red (the flipped copy runs real children
@@ -1350,6 +1359,55 @@ worker.start()
 worker.join()
 fcc.exit_with(0)
 """
+# A self-restoring fake that forges nothing the wrapper compares: it sets the code of the handled
+# SystemExit(1) to 0 and passes the genuine args on, so the wrapper sees the exception the thread is
+# handling, by identity, with a clean code. Not caught; its vector pins the disclosed pass.
+_EXCEPTHOOKARGS_HANDLED_CODE_ZEROED = """import threading
+import _fail_closed_child as fcc
+real = threading.ExceptHookArgs
+
+
+def disguise(seq):
+    threading.ExceptHookArgs = real
+    seq[1].code = 0
+    return real(seq)
+
+
+def run():
+    threading.ExceptHookArgs = disguise
+    raise SystemExit(1)
+
+
+worker = threading.Thread(target=run)
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
+# A self-restoring fake that rebinds the hook local of the calling invoke_excepthook frame (frame
+# locals write through on Python 3.13 and later), so a no-op is called in place of the wrapper and
+# the thread's RuntimeError is recorded nowhere. Not caught; its vector pins the disclosed pass.
+_EXCEPTHOOKARGS_HOOK_LOCAL_REBOUND = """import sys
+import threading
+import _fail_closed_child as fcc
+real = threading.ExceptHookArgs
+
+
+def disguise(seq):
+    threading.ExceptHookArgs = real
+    sys._getframe(1).f_locals["hook"] = lambda args: None
+    return real(seq)
+
+
+def run():
+    threading.ExceptHookArgs = disguise
+    raise RuntimeError("swallowed")
+
+
+worker = threading.Thread(target=run)
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
 # A fake that RAISES a SystemExit instead of returning args: the raise escapes the genuine
 # _invoke_excepthook (it catches Exception only) and the thread machinery drops a SystemExit
 # silently, so the excepthook wrapper never runs and only the identity check (here at the thread's
@@ -1614,8 +1672,9 @@ DISCLOSURES = (
      "installed check runs at all (a threading.Thread subclass that overrides _bootstrap_inner, the "
      "run leg below the _bootstrap start target the audit hook verifies, so a _bootstrap override is "
      "already a recorded start fault while a _bootstrap_inner override is not), is the same "
-     "loaded-code-replacing-the-reporting-machinery residual; the deleted-hook-restored and "
-     "subclassed-bootstrap-inner vectors pin the two disclosed passes.",
+     "loaded-code-replacing-the-reporting-machinery residual; the deleted-hook-restored, "
+     "subclassed-bootstrap-inner, handled-code-zeroed-excepthookargs and "
+     "hook-local-rebound-excepthookargs vectors pin the four disclosed passes.",
      "restored-channel-disclosure-removed"),
 )
 
@@ -1737,7 +1796,8 @@ FLIPS = {
         '        if bootstrap_now is not _bootstrap_ho' 'ok:',
         '        if False and bootstrap_now is not _bootstrap_hook:'),
     "restored-channel-disclosure-removed": (
-        'residual; the deleted-hook-restored\nand subclassed-bootstrap-inner vectors pin the two '
+        'residual; the deleted-hook-restored,\nsubclassed-bootstrap-inner, '
+        'handled-code-zeroed-excepthookargs and hook-local-rebound-excepthookargs\nvectors pin the four '
         'disclosed pas' 'ses.',
         'residual.'),
     "replaced-excepthookargs-accepted": (
@@ -1939,6 +1999,14 @@ VECTORS = (
      (2, True, True, None), "handed-exception-unchecked"),
     ("contract/destructor-restored-excepthookargs-refused", _EXCEPTHOOKARGS_DESTRUCTOR_RESTORED, None,
      (2, True, True, None), "handed-exception-unchecked"),
+    # a self-restoring fake that zeroes the handled SystemExit's own code, and one that rebinds the
+    # hook local of the calling invoke_excepthook frame so the wrapper is never called, each read as
+    # a pass: the disclosed replaced-reporting-machinery residual their vectors pin (they do not
+    # endorse it), so a change that closes or widens either turns this suite red
+    ("contract/handled-code-zeroed-excepthookargs-disclosed", _EXCEPTHOOKARGS_HANDLED_CODE_ZEROED,
+     None, (0, True, False, None), "record-write-broken"),
+    ("contract/hook-local-rebound-excepthookargs-disclosed", _EXCEPTHOOKARGS_HOOK_LOCAL_REBOUND,
+     None, (0, True, False, None), "record-write-broken"),
     ("contract/captured-exc-info-refused", _EXC_INFO_CAPTURED, None, (2, True, True, None),
      "invoke-cells-and-handed-exception-unchecked"),
     ("contract/rebound-invoke-cell-refused", _INVOKE_CELL_REBOUND, None, (2, True, True, None),
@@ -2099,7 +2167,9 @@ def self_test():
           "and ITIMER_VIRTUAL timers (left armed at exit, or delivering their signals into the run) "
           "still reads its decided 0; a spoofed confirmation whose later exit carries the matching "
           "status, a destructor fault under a deleted hook with every channel restored before exit, "
-          "and a Thread subclass running its own _bootstrap_inner, each read the disclosed verdict "
+          "a Thread subclass running its own _bootstrap_inner, and a self-restoring "
+          "threading.ExceptHookArgs fake that zeroes the handled SystemExit's code or rebinds the "
+          "calling frame's hook local, each read the disclosed verdict "
           "this suite pins along with its docstring text; every paired flip of this module is "
           "red)".format(len(results)))
     return 0
