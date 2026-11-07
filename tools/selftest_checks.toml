@@ -5368,4 +5368,8 @@ expected-check-ids = [
   # ---------- a later card refused: the cards already written are named and kept ----------
   "main/later-card-refusal-names-earlier-cards-kept",
   "guard-removed/main/later-card-refusal-names-earlier-cards-kept",
+  # ---------- the refusal note: none on the first card, only cards actually written named ----------
+  "main/first-card-refusal-carries-no-note",
+  "main/errored-card-not-listed-as-written",
+  "main/later-refusal-with-no-card-written-says-none",
 ]

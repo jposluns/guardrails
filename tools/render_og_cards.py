@@ -45,11 +45,17 @@ it, that lands after the recheck has read the directory's path back from its des
 card wherever the directory then sits. Where the real path of a served assets directory does not itself
 contain site/assets or opf/site/assets as a run of whole components (for example where ROOT/site/assets
 or ROOT/opf/site/assets is itself a symlink to another directory; in this checkout both are real
-directories), the window opens earlier: a rename that lands after the recheck's parent walk has opened the
-output directory's first parent also keeps the card, because the walk follows the parents the directory
-had when the walk began and the read-back path then carries no served assets name. Nothing here removes a
-card so kept. The cards are written one at a time, so a refusal of a later card removes nothing written
-earlier in the run; its message says so and names each card already written. The
+directories), the window opens earlier, at the recheck's parent walk: a rename of the output directory
+that lands after the walk has opened the directory's first parent also keeps the card, while a rename of
+that first parent landing at the same point is refused and keeps the card only once the walk has opened
+the first parent's own parent (by the same walk order, a rename of a directory higher up keeps the card
+once the walk has opened that directory's own parent), because the walk goes on from the parents it has
+already opened, which the renamed directory has left, and the read-back path then carries no served
+assets name. In both layouts a rename that lands between the read-back of the path and the stat that
+confirms it is refused (the recheck fails closed): that gap inside the spans called kept here is on the
+safe side and narrows no claim. Nothing here removes a card so kept. The cards are written one at a time,
+so a refusal of a later card removes nothing written earlier in the run; its message says so and names
+each card already written. The
 O_NOFOLLOW on the directory open covers the final path component only: an existing output directory
 reached through a symlinked parent is opened (the parent symlink is followed, and the opened directory is
 then judged by its identity and read-back path), while a final component that is itself a symlink,
@@ -416,9 +422,15 @@ def _write_card(path, data):
     Where the real path of a served assets directory does not itself contain site/assets or
     opf/site/assets as a run of whole components (for example where ROOT/site/assets or
     ROOT/opf/site/assets is itself a symlink to another directory; in this checkout both are real
-    directories), a rename that lands after the recheck's parent walk has opened the directory's first
-    parent also keeps the card: the walk follows the parents the directory had when the walk began, and
-    the read-back path then carries no served assets name. Nothing here removes a card so kept."""
+    directories), a rename of the directory that lands after the recheck's parent walk has opened the
+    directory's first parent also keeps the card, while a rename of that first parent landing at the same
+    point is refused and keeps the card only once the walk has opened the first parent's own parent (by the
+    same walk order, a rename of a directory higher up keeps the card once the walk has opened that
+    directory's own parent): the walk goes on from the parents it has already opened, which the renamed
+    directory has left, and the read-back path then carries no served assets name. In both layouts a rename
+    that lands between the read-back of the path and the stat that confirms it is refused (the recheck fails
+    closed): that gap inside the spans called kept here is on the safe side and narrows no claim. Nothing
+    here removes a card so kept."""
     directory = path.parent
     reason = _name_refusal(directory)
     if reason:
@@ -1132,6 +1144,40 @@ def _self_test():
         check("guard-removed/main/later-card-refusal-names-earlier-cards-kept",
               got == 2 and "already written earlier" not in message, (got, message))
 
+        # main(): a refusal of the first card carries no note about earlier cards, since none can have
+        # been written; and only cards actually written are named: a first card that failed with an error
+        # is not listed when the second is refused, whose message then says that no card was written.
+        def _refusing_render(source, target):
+            raise Refused("{} stands in for a card refused by the recheck".format(target))
+
+        def _error_then_refuse(source, target):
+            if target == kept_targets[0]:
+                return "{} stands in for a card that failed with an error".format(target)
+            raise Refused("{} stands in for a later card refused by the recheck".format(target))
+
+        def _stand_in_run(stand_in):
+            import contextlib
+            import io
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = _patched("CHROME", sys.executable, _patched, "render", stand_in, main,
+                                ["--out", str(kept_out)])
+            return code, err.getvalue()
+
+        got, message = _stand_in_run(_refusing_render)
+        check("main/first-card-refusal-carries-no-note",
+              got == 2 and "{} stands in for a card refused".format(kept_targets[0]) in message
+              and "written earlier" not in message, (got, message))
+        got, message = _stand_in_run(_error_then_refuse)
+        check("main/errored-card-not-listed-as-written",
+              got == 2 and "{} stands in for a later card refused".format(kept_targets[1]) in message
+              and "Cards already written" not in message
+              and message.count(str(kept_targets[0])) == 1, (got, message))
+        check("main/later-refusal-with-no-card-written-says-none",
+              got == 2
+              and message.endswith(" Nothing more rendered. No card was written earlier in this run.\n"),
+              (got, message))
+
     if FAILURES:
         print("SELF-TEST FAIL: render_og_cards {} of {} check(s) failed".format(len(FAILURES), len(EXECUTED)))
         for failure in FAILURES:
@@ -1158,7 +1204,9 @@ def _self_test():
           "a directory renamed into served assets after the checks is refused by the post-write recheck "
           "and the card name unlinked through the held descriptor; a later card refused after an earlier "
           "card is written names the earlier card in its message and leaves it in place, and the message "
-          "check fails with that note removed; a .. across a symlink is refused while one "
+          "check fails with that note removed; a refusal of the first card carries no such note, and a "
+          "card that failed with an error is not named as written, the later refusal then saying no card "
+          "was written; a .. across a symlink is refused while one "
           "across a real directory is folded and accepted; a symlink planted at a missing component and "
           "reported as ENOTDIR is refused as a symlink, not an I/O error; an existing directory behind a "
           "symlinked parent is opened while that symlink as the nearest existing ancestor of a missing "
