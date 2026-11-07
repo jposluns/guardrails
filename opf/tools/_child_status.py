@@ -20,8 +20,8 @@ after the Python host pin step, which tools/check_python_host_pin.py holds as th
 setup-python there. opf/tools/opf.py, tools/check_selftest_execution.py and
 the hooks dispatcher (.aiqt/core/hooks/scripts/aiqt_hooks.py and its generated plugin copy) carry inline
 copies, because each is a single-file unit that cannot import a sibling; opf/tools/_opf_adopt_complete.py,
-opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py, tools/check_gitleaks_pin.py,
-tools/check_must_deliver.py and tools/check_verifier_delivery.py carry the same inline copy at their entry
+opf/tools/_opf_adopt_state.py, opf/tools/_opf_import_complete.py, opf/tools/_opf_adopt_verdict.py,
+tools/check_gitleaks_pin.py, tools/check_must_deliver.py and tools/check_verifier_delivery.py carry the same inline copy at their entry
 lines, and opf/tools/_opf_declaration.py and tools/check_opf_declaration.py carry it too.
 tools/check_child_status_coverage.py pins every copy to this text by AST and enumerates every entry point.
 

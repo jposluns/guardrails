@@ -588,6 +588,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py
 
+      - name: OPF enforcement-pack residual register gate self-test
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_residuals.py --self-test
+
+      - name: OPF enforcement-pack residual register gate
+        shell: bash
+        run: python3 -I -B tools/check_opf_enforce_residuals.py
+
       - name: OPF adoption apply-shell self-test (clean-start adoption U1)
         shell: bash
         run: python3 -I -B opf/tools/_opf_adopt_apply.py --self-test
@@ -595,6 +603,10 @@ jobs:
       - name: OPF import completion per-source evaluator self-test
         shell: bash
         run: python3 -I -B opf/tools/_opf_import_complete.py --self-test
+
+      - name: OPF adoption verdict scorer self-test
+        shell: bash
+        run: python3 -I -B opf/tools/_opf_adopt_verdict.py --self-test
 
       - name: OPF release import-history parser self-test (inert until the imported-release writer lands)
         shell: bash

@@ -22,6 +22,8 @@
 # itself, so it drops no GIT_ variable: opf.py runs its git reads under an allowlist environment that drops
 # every inherited GIT_ variable (GIT_TRACE* and GIT_TRACE2* included).
 #
+# Residual (spec 14.1): a hand-written canonical, self-consistent record passes both checks.
+# Residual (spec 14.1): server-side branch protection is outside the pack and adopter-attested.
 # Inert until adoption installs it; the CI receipt-identity comparison is a later release (U25).
 set -u
 if [ "$#" -gt 1 ]; then
