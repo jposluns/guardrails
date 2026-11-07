@@ -65,8 +65,14 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    imported counter row of each enabled type beside its clean row), `version.toml`,
    `worklog.toml`, the eleven baseline `<type>.index.toml` files (worklog is the
    exempt ledger listed above, not an index), the eleven `<type>.imported.index.toml` leaves, and
-   `worklog.imported.toml`, all empty to start; specification sections 4, 8 and 9 give the full
-   file baseline. The reference tooling's `opf init` does not scaffold this store yet: its
+   `worklog.imported.toml`, each holding exactly the starting contents under "Hand-start file
+   contents" below, never a zero-byte file; specification sections 4, 8 and 9 give the full file
+   baseline. This release's tooling grades every store under specification 1.2.0, so a 2.0.0 hand
+   start does not yet reach VALID: its `opf doctor --require-store` refuses the imported counter
+   rows in `counters.toml` and reports the imported leaves as unregistered paths. Until the
+   tooling implements 2.0.0, `opf init` in a new repository is the route that reaches VALID with
+   this release: commit the paths it creates, run `opf render --write`, and commit the rendered
+   views. The reference tooling's `opf init` does not scaffold this store yet: its
    scaffold still writes a 1.2.0 store, a format the specification's validation refuses
    (specification section 9.2). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
@@ -209,6 +215,116 @@ the check allowed performed none (so a read-only `opf doctor` or `--declaration`
 `opf doctor` appends the same report.
 
 The reference tooling requires Python 3.14 or newer.
+
+## Hand-start file contents
+
+Each file that step 1 of "Getting started" creates starts with exactly the bytes below: every
+required key, no records and no releases, in the canonical form the reference tooling's emitter
+writes. That emitter ends every file with one LF, so a zero-byte file is never in canonical form,
+and under specification section 5.7 `opf doctor` refuses a machine-store TOML file that is not in
+canonical form. The info string of each block names the files that start with it; `<type>`
+stands for each of the eleven baseline index types: `autonomous_decision`, `backlog_item`,
+`block`, `contribution`, `done`, `finding`, `handoff`, `maintainer_decision`,
+`pending_decision`, `preference_pattern` and `reference`. The manifest carries the required
+`[opf]` keys and one `[types.<name>]` table per baseline type; the optional tables of specification
+section 9 (`[store]`, `[modules]`, `[providers]`, `[views]`, `[deliverables]` and the rest) may be
+added. The zero counter rows apply only to a new store: a re-adoption seeds both counter series
+from its pinned ancestral snapshot and never zero-seeds prior ancestry (specification section
+8.2). As step 1 states, this release's tooling does not yet grade these files VALID.
+
+```toml opf-starter manifest.toml
+[opf]
+homes = 2
+import_status = "none"
+layout = "inline"
+posture = "required"
+spec_version = "2.0.0"
+standard = "opf"
+
+[types]
+
+[types.autonomous_decision]
+namespace = "AD"
+
+[types.backlog_item]
+namespace = "BI"
+
+[types.block]
+namespace = "BL"
+
+[types.contribution]
+namespace = "CN"
+
+[types.done]
+namespace = "DN"
+
+[types.finding]
+namespace = "FN"
+
+[types.handoff]
+namespace = "HO"
+
+[types.maintainer_decision]
+namespace = "MD"
+
+[types.pending_decision]
+namespace = "PD"
+
+[types.preference_pattern]
+namespace = "PP"
+
+[types.reference]
+namespace = "RF"
+
+[types.worklog]
+namespace = "WL"
+```
+
+```toml opf-starter counters.toml
+schema = 1
+
+[counters]
+AD = 0
+BI = 0
+BL = 0
+CN = 0
+DN = 0
+FN = 0
+HO = 0
+MD = 0
+PD = 0
+PP = 0
+RF = 0
+WL = 0
+"imported:AD" = 0
+"imported:BI" = 0
+"imported:BL" = 0
+"imported:CN" = 0
+"imported:DN" = 0
+"imported:FN" = 0
+"imported:HO" = 0
+"imported:MD" = 0
+"imported:PD" = 0
+"imported:PP" = 0
+"imported:RF" = 0
+"imported:WL" = 0
+```
+
+```toml opf-starter version.toml
+release = []
+schema = 1
+summary = []
+```
+
+```toml opf-starter worklog.toml worklog.imported.toml
+entry = []
+schema = 1
+```
+
+```toml opf-starter <type>.index.toml <type>.imported.index.toml
+record = []
+schema = 1
+```
 
 ---
 
