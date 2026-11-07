@@ -24353,13 +24353,16 @@ def _verb_intercepted(here, dispatch, argv):
     under any name runs and no store or declaration is read. Returns (the names called, in order, a helper's
     as "module.attribute" and a refused import as "import module", the leading _bootstrap dropped; the exit,
     or the exception the dispatch raised; stderr). Between the replacement and the restore, nothing defined
-    in this module or a helper is called other than the import gate (_VerbHelperImportGate)."""
+    in this module or a helper is called other than the import gate (_VerbHelperImportGate). A function this
+    module defines is one inspect.isfunction admits (a def or a lambda, not a class, a builtin or a bound
+    method) whose __module__ is this module's name, so a function imported from another module is kept."""
     import contextlib
+    import inspect
     import io
     import types
     called = []
     saved = [(here, name, value) for name, value in vars(here).items()
-             if isinstance(value, types.FunctionType) and value.__module__ == here.__name__
+             if inspect.isfunction(value) and value.__module__ == here.__name__
              and value is not dispatch]
     for module_name, module in sorted(sys.modules.items()):
         if module_name.startswith("_opf_") and isinstance(module, types.ModuleType) and module is not here:
@@ -24600,6 +24603,51 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, en
 _VERB_REFUSALS = {"upgrade": "UPGRADE_NONE", "import": "IMPORT_RETIRED"}
 
 
+def _verb_intercepted_faults():
+    """Hold what _verb_intercepted replaces, and return the faults, empty when it holds. A function this
+    module defines (a def, and a lambda bound here) must be replaced by a recorder during the dispatch, so
+    calling it records its name and returns 0; the dispatch itself, a class this module defines, a bound
+    method of an instance of that class, a function bound here but defined in another module, and a builtin
+    bound here must each be kept as it is. After the dispatch, every one of them must be the original again."""
+    here = sys.modules[__name__]
+    probes = dict(_verb_status_probe_lambda=lambda: None,
+                  _verb_status_probe_method=_VerbHelperImportGate([]).find_spec,
+                  _verb_status_probe_foreign=os.path.join, _verb_status_probe_builtin=len)
+    seen = {}
+
+    def dispatch(argv):
+        # reads each attribute and calls the two that must be recorders; nothing this module defines runs
+        for attr, value in originals.items():
+            seen[attr] = getattr(here, attr) is value
+        here._verb_tree(argv)
+        here._verb_status_probe_lambda()
+        return EXIT_OK
+
+    probes["_verb_status_probe_dispatch"] = dispatch
+    originals = dict(probes, _verb_tree=here._verb_tree, _VerbHelperImportGate=here._VerbHelperImportGate)
+    replaced = ("_verb_tree", "_verb_status_probe_lambda")
+    faults = []
+    for attr in probes:
+        setattr(here, attr, probes[attr])
+    try:
+        called, routed, err = _verb_intercepted(here, dispatch, ["probe"])
+    finally:
+        for attr in probes:
+            delattr(here, attr)
+    want = dict((attr, attr not in replaced) for attr in originals)
+    if seen != want:
+        faults.append("_verb_intercepted kept {} and replaced {}, not kept {} and replaced {}".format(
+            sorted(attr for attr in seen if seen[attr]), sorted(attr for attr in seen if not seen[attr]),
+            sorted(attr for attr in want if want[attr]), sorted(replaced)))
+    if called != list(replaced) or routed != EXIT_OK or err:
+        faults.append("_verb_intercepted recorded {}, exit {!r}, stderr {!r}, not {}, exit 0 and no stderr".format(
+            called, routed, err, list(replaced)))
+    if here._verb_tree is not originals["_verb_tree"] or (
+            here._VerbHelperImportGate is not originals["_VerbHelperImportGate"]):
+        faults.append("_verb_intercepted did not restore _verb_tree and _VerbHelperImportGate")
+    return faults
+
+
 def _verb_status_self_test():
     """Hold VERB_STATUS to the dispatch (_verb_status_faults), then show that each flip fails, named: an in
     progress stub marked available, an available verb marked in progress, a verb dropped or doubled, a
@@ -24613,9 +24661,10 @@ def _verb_status_self_test():
     guard), and an engine entry called during the refusal run of a subcommand it is not listed for. No flip
     runs a handler other than a refusing one, and no flip makes a real engine call outside the refusal run
     of a subcommand the entry is listed for; the two flips that call an entry where it is not permitted call
-    it with no arguments, so a guard that let it through raises TypeError before the engine runs."""
+    it with no arguments, so a guard that let it through raises TypeError before the engine runs. What the
+    intercepted dispatch replaces and keeps is held first (_verb_intercepted_faults)."""
     here = sys.modules[__name__]
-    faults = _verb_status_faults()
+    faults = _verb_intercepted_faults() + _verb_status_faults()
     real_main = main
 
     def renamed(argv):
