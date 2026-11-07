@@ -175,6 +175,18 @@ PROBE_TIMEOUT = 120  # per --check; an own exit beside the stop stands, else can
 # silent; 60 s is far above that on a working host.
 PROBE_STALL_S = 60
 TOTAL_TIMEOUT = 1800  # backstop for the whole sweep; exceeding it is cannot-evaluate, never a hang
+# Wall-clock bound on each template-setup git call (init, the real_root ls-files, add, commit, the
+# ls-files readback) and on the self-test fixture builders. Deliberately NOT PROBE_TIMEOUT: the
+# self-test cuts PROBE_TIMEOUT to 1 s to exercise the probe bounds, and a setup call reading that bound
+# could time out on a loaded host and turn a vector's verdict into an unrelated cannot-evaluate.
+# Measured on the real tree with the host at load 21 on 80 CPUs: add 3.9 s at most, gc 2.8 s, every
+# other setup call under 0.1 s; 600 s is over 150 times the slowest and still below TOTAL_TIMEOUT, so
+# only a hung git reaches it (then the setup fails closed, cannot-evaluate).
+SETUP_GIT_TIMEOUT = 600
+# The template gc is an optimisation only (a gc that fails or overruns leaves the loose objects in
+# place). Its bound and its argv are module-level so the self-test can substitute a stand-in that hangs.
+TEMPLATE_GC_TIMEOUT = SETUP_GIT_TIMEOUT
+_TEMPLATE_GC_ARGS = ("gc", "--quiet")
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # Linux/CI have it; degrade safely where the platform lacks it
 _load_factor = _load_bound.load_factor  # module-level indirection so the self-test can inject host load
 # The sweep clock: monotonic, load-adjusted; module-level so the self-test can inject a clock (deadline).
@@ -359,19 +371,58 @@ def _materialize_git(template, real_root):
         # or auto-maintenance run that would repack/prune template/.git after this returns and race the
         # per-call copytree of the template. It hardens hermeticity only; it changes nothing the
         # gate certifies about a generator's --check.
-        return subprocess.run(
-            ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
-             "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
-             "-c", "init.defaultBranch=main", *_TEMPLATE_GIT_NO_MAINTENANCE, *args],
-            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
+        # The bound is SETUP_GIT_TIMEOUT (sized from measured runs), never PROBE_TIMEOUT; a hung call
+        # is a named setup failure (OSError, cannot-evaluate), not an unexpected error.
+        try:
+            return subprocess.run(
+                ["git", "-C", str(cwd), "-c", "user.name=aiqt-failclose",
+                 "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
+                 "-c", "init.defaultBranch=main", *_TEMPLATE_GIT_NO_MAINTENANCE, *args],
+                capture_output=True, env=env, timeout=SETUP_GIT_TIMEOUT, shell=False)
+        except subprocess.TimeoutExpired:
+            raise OSError("template `git {}` exceeded its {} s setup bound; fail-closed"
+                          .format(args[0], SETUP_GIT_TIMEOUT)) from None
+
+    def gc():
+        # Foreground gc as the leader of its own process group: on an overrun the WHOLE group (gc and
+        # the repack/pack-objects/prune children it spawns) is killed while the leader is still
+        # unreaped, so no orphaned child keeps rewriting template/.git under a per-call copytree.
+        # Returns "" when gc completed with exit 0, else why it did not (non-fatal to the caller).
+        try:
+            proc = subprocess.Popen(
+                ["git", "-C", str(template), "-c", "user.name=aiqt-failclose",
+                 "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
+                 "-c", "init.defaultBranch=main", *_TEMPLATE_GIT_NO_MAINTENANCE, *_TEMPLATE_GC_ARGS],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env=env, shell=False, start_new_session=True)
+        except OSError as exc:
+            return "gc could not be launched ({})".format(exc)
+        with proc:
+            try:
+                rc = proc.wait(timeout=TEMPLATE_GC_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                unsignalled = _load_bound._kill_group(proc, None)  # numeric group id, leader unreaped
+                if unsignalled:
+                    proc.kill()
+                    proc.wait()
+                    # A descendant may still be rewriting template/.git: the template cannot be trusted.
+                    raise OSError("template gc overran its {} s bound and its process group could not "
+                                  "be stopped ({}); fail-closed".format(TEMPLATE_GC_TIMEOUT, unsignalled))
+                proc.wait()
+                return "gc overran its {} s bound; its process group was killed".format(TEMPLATE_GC_TIMEOUT)
+        return "" if rc == 0 else "gc exited {}".format(rc)
 
     if git(template, "init", "-q", "--template=").returncode != 0:
         raise OSError("cannot git-init the failclose sandbox template")
     # -c core.fsmonitor=false and --no-optional-locks (top-level, before the subcommand) override any
     # repo-local fsmonitor hook program in real_root and skip the optional index-lock refresh.
-    probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
-                            "--no-optional-locks", "ls-files", "-z"],
-                           capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False)
+    try:
+        probe = subprocess.run(["git", "-C", str(real_root), "-c", "core.fsmonitor=false",
+                                "--no-optional-locks", "ls-files", "-z"],
+                               capture_output=True, env=env, timeout=SETUP_GIT_TIMEOUT, shell=False)
+    except subprocess.TimeoutExpired:
+        raise OSError("real_root `git ls-files` exceeded its {} s setup bound; fail-closed"
+                      .format(SETUP_GIT_TIMEOUT)) from None
     if probe.returncode != 0:
         raise OSError("cannot enumerate real_root's tracked set (git ls-files exit {}); fail-closed"
                       .format(probe.returncode))
@@ -388,6 +439,18 @@ def _materialize_git(template, real_root):
         raise OSError("cannot git-add the tracked set into the failclose template")
     if git(template, "commit", "-q", "-m", "failclose template", "--no-verify").returncode != 0:
         raise OSError("cannot commit the failclose sandbox template")
+    # Pack the loose objects into a single packfile so each per-probe copytree of the template copies a
+    # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). This
+    # gc runs in the FOREGROUND; _TEMPLATE_GIT_NO_MAINTENANCE stops both this gc and the earlier commit
+    # from detaching a background auto-gc/auto-maintenance run that would keep repacking/pruning
+    # template/.git and race the per-call copytree. A gc failure or overrun is non-fatal: git writes a
+    # pack (and its index) before deleting the loose objects it holds, so a gc that fails or is killed
+    # leaves a repo that still works with loose objects, only slower. The readback below runs AFTER the gc
+    # so the template is checked on its final state either way.
+    gc_outcome = gc()
+    if gc_outcome:
+        print("note: template {} (non-fatal: the template keeps its loose objects)".format(gc_outcome),
+              file=sys.stderr)
     # The materialized index MUST equal real_root's tracked set: any missing member is fail-closed.
     readback = git(template, "ls-files", "-z")
     if readback.returncode != 0:
@@ -401,13 +464,6 @@ def _materialize_git(template, real_root):
         missing = sorted(set(tracked) - materialized)
         raise OSError("the materialized template index does not equal real_root's tracked set "
                       "({} member(s) missing, e.g. {}); fail-closed".format(len(missing), missing[:3]))
-    # Pack the loose objects into a single packfile so each per-probe copytree of the template copies a
-    # handful of .git files instead of one loose object per tracked blob (a large per-probe speed-up). This
-    # gc runs in the FOREGROUND; _TEMPLATE_GIT_NO_MAINTENANCE (carried by git() above) stops both this gc
-    # and the earlier commit from detaching a background auto-gc/auto-maintenance run that would keep
-    # repacking/pruning template/.git and race the per-call copytree. A gc failure is non-fatal:
-    # the repo still works with loose objects, only slower.
-    git(template, "gc", "--quiet")
 
 
 def _run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
@@ -1286,7 +1342,7 @@ def _run_write(root, stem):
     try:
         proc = subprocess.run([sys.executable, str(root / "tools" / "gen_{}.py".format(stem))],
                               cwd=str(root), env=_sanitized_env(), capture_output=True,
-                              timeout=PROBE_TIMEOUT, check=False)
+                              timeout=SETUP_GIT_TIMEOUT, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise _FixtureSetupError("gen_{}.py write run did not complete ({})".format(stem, exc)) from exc
     if proc.returncode != 0:
@@ -1306,7 +1362,7 @@ def _git_fixture(repo, *args):
             ["git", "-C", str(repo), "-c", "user.name=aiqt-failclose",
              "-c", "user.email=failclose@invalid", "-c", "commit.gpgsign=false",
              "-c", "init.defaultBranch=main", *args],
-            capture_output=True, env=env, timeout=PROBE_TIMEOUT, shell=False, check=True)
+            capture_output=True, env=env, timeout=SETUP_GIT_TIMEOUT, shell=False, check=True)
     except subprocess.CalledProcessError as exc:
         raise _FixtureSetupError("git {} exited {} ({})"
                                  .format(" ".join(args), exc.returncode, _tail(exc.stderr))) from exc
@@ -1527,6 +1583,7 @@ _SELF_TEST_VECTORS = (
     "forced probe failure",
     "tracked-set mismatch",
     "no-maintenance flags",
+    "template gc overrun",
     "injected setup vector",
     "injected None-fixture vector",
     "injected BaseException vector",
@@ -2138,7 +2195,8 @@ def _self_test_main_isolated():
         #     gc.autoDetach=false, maintenance.auto=false), so no detached auto-gc / auto-maintenance run can
         #     churn template/.git while a per-call copytree reads it (the intermittent hermeticity race). The
         #     template git invocations are CAPTURED during a REAL _materialize_git run over a small fixture
-        #     repo by wrapping the module's subprocess.run, then every template git command (init, add,
+        #     repo by wrapping subprocess.Popen (which subprocess.run also calls), then every template git
+        #     command (init, add,
         #     commit, ls-files, gc) is
         #     asserted to carry all three flags. The discriminating flip is removing
         #     _TEMPLATE_GIT_NO_MAINTENANCE from the git() helper: the captured argv would then lack the flags
@@ -2152,18 +2210,21 @@ def _self_test_main_isolated():
 
         def _check_no_maintenance(repo, record):
             captured = []
-            saved_subprocess_run = subprocess.run
+            saved_subprocess_popen = subprocess.Popen
 
-            def _recording_run(cmd, *a, **kw):
-                captured.append(list(cmd))  # record argv, then delegate to the real subprocess.run
-                return saved_subprocess_run(cmd, *a, **kw)
+            def _recording_popen(cmd, *a, **kw):
+                # Every template git launch goes through subprocess.Popen (subprocess.run calls it, and
+                # the template gc launches it directly in its own process group): record the argv, then
+                # delegate to the real Popen.
+                captured.append(list(cmd))
+                return saved_subprocess_popen(cmd, *a, **kw)
 
             template_str = str(no_maintenance_template)
             try:
-                subprocess.run = _recording_run
+                subprocess.Popen = _recording_popen
                 _materialize_git(no_maintenance_template, repo)
             finally:
-                subprocess.run = saved_subprocess_run
+                subprocess.Popen = saved_subprocess_popen
 
             def _top_c_values(cmd):
                 # The `-c key=value` top-level options git carries before its subcommand, plus that
@@ -2205,6 +2266,51 @@ def _self_test_main_isolated():
                         lambda repo: _check_no_maintenance(repo, failure_record))
 
         _no_maintenance_vector(cannot, failures, _no_maintenance)
+
+        # (r2) A template gc that overruns its bound is non-fatal and leaves nothing running: the gc argv
+        #     is replaced by a stand-in (a git shell alias whose child sleeps 60 s, carrying a unique token)
+        #     and its bound cut to 2 s. A conformant repo must still pass (exit 0) on the loose-object
+        #     template, an escaping symlink-swap generator must still be cannot-evaluate (exit 2) with the
+        #     containment diagnostic, the stderr must name the gc overrun, and no process carrying the
+        #     token may survive (the whole gc process group is killed, not just git). Flips: an unguarded
+        #     gc (its overrun raises out of the setup) turns the exit-0 leg into exit 2; a kill of the git
+        #     leader alone leaves the sleeping child alive and fails the survivor leg.
+        gc_token = "gensrc-gc-standin-{}".format(os.getpid())
+
+        def _gc_overrun_fixtures():
+            return (_build_repo(tmp / "gc-overrun-good", {"goodfile": _GOODFILE}),
+                    _build_repo(tmp / "gc-overrun-swap", {"swap": _SYMLINK_SWAP}))
+
+        def _evaluate_gc_overrun(fixtures):
+            global TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS
+            good, swap = fixtures
+            saved_gc = (TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS)
+            standin = "!{} -c 'import time; time.sleep(60)' {}".format(sys.executable, gc_token)
+            TEMPLATE_GC_TIMEOUT = 2
+            _TEMPLATE_GC_ARGS = ("-c", "alias.gcstandin=" + standin, "gcstandin")
+            try:
+                rc_good, good_out, good_err = sweep_captured_streams(good)
+                survivors = _load_bound._alive_with(gc_token)
+                rc_swap, swap_out, swap_err = sweep_captured_streams(swap)
+            finally:
+                TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS = saved_gc
+                _cleanup_leaked_descendant(gc_token, failures, cannot)
+            if rc_good != 0:
+                failures.append("template gc overrun: a conformant repo must still pass (exit 0) when the "
+                                "template gc overruns its bound, got exit {!r}, stdout {!r} stderr {!r}"
+                                .format(rc_good, good_out, good_err))
+            if "gc overran its 2 s bound" not in good_err:
+                failures.append("template gc overrun: expected the non-fatal gc overrun note on stderr, got "
+                                "{!r}".format(good_err))
+            if survivors != []:
+                failures.append("template gc overrun: the gc stand-in's child survived its stop (pids {!r}): "
+                                "the whole gc process group must be killed".format(survivors))
+            if rc_swap != 2 or "left the target uncontained" not in swap_out:
+                failures.append("template gc overrun: an escaping symlink-swap generator must still be "
+                                "cannot-evaluate (exit 2) with the containment diagnostic, got exit {!r}, "
+                                "stdout {!r} stderr {!r}".format(rc_swap, swap_out, swap_err))
+
+        _run_vector(cannot, failures, "template gc overrun", _gc_overrun_fixtures, _evaluate_gc_overrun)
 
         # (s) The self-test verdict: a cannot-evaluate vector beside an assertion failure exits 2 (not 1)
         #     and names both; a cleanup or census error still prints every cannot line, before its own
@@ -2575,7 +2681,9 @@ def _self_test_main_isolated():
           "failure and a tracked-set mismatch each fail closed (exit 2) with no git add -A fallback; and "
           "every template git command carries the no-maintenance flags (gc.auto=0, gc.autoDetach="
           "false, maintenance.auto=false) so no detached auto-gc / auto-maintenance can race the per-call "
-          "copytree of the template; and the {} #378 close-vector runs pass, each flip leg red by its own "
+          "copytree of the template; a template gc that overruns its bound is non-fatal (a conformant repo "
+          "still passes, an escaping generator is still exit 2 with the containment diagnostic) and its "
+          "whole process group is killed; and the {} #378 close-vector runs pass, each flip leg red by its own "
           "assertion; and the leaked-descendant cleanup caller probes drive its three distinct results "
           "(an observed scan, an unobservable-scan failure, and the no-/proc named cannot-evaluate, "
           "exit 2) through the real caller".format(census_matched, close_runs))
