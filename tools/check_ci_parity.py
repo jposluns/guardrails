@@ -745,9 +745,11 @@ CONCURRENCY_BLOCK = (
 
 # The one job-level if: line a job other than Quality gates may carry, exactly as
 # written, and the quality.yml jobs that must carry it (module docstring, LANES): a
-# heavy job runs on a push and on a pull request whose head is a merge-train-*
-# branch of this repository, and is skipped on every other pull request, which
-# Quality gates reads as not success. The site fast lane adds the leading
+# heavy job runs on a push, on a workflow_dispatch or schedule run of
+# refs/heads/main (a manual or nightly full run; on any other ref it is
+# skipped), and on a pull request whose head is a merge-train-* branch of this
+# repository, and is skipped on every other pull request, which Quality gates
+# reads as not success. The site fast lane adds the leading
 # needs.scope condition: when the scope job reads the pull request as site-only
 # (every changed path in the site allowlist), the heavy job is skipped and
 # Quality gates passes that one skip; on a push the scope job always emits
@@ -757,6 +759,8 @@ CONCURRENCY_BLOCK = (
 HEAVY_JOB_IF_LINE = (
     "    if: needs.scope.outputs.site_only != 'true' && "
     "(github.event_name == 'push' || "
+    "((github.event_name == 'workflow_dispatch' || "
+    "github.event_name == 'schedule') && github.ref == 'refs/heads/main') || "
     "(startsWith(github.head_ref, 'merge-train-') && "
     "github.event.pull_request.head.repo.full_name == github.repository))")
 HEAVY_JOB_NEEDS_LINE = "    needs: scope"
@@ -921,6 +925,17 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_release_cut.py --protected <ref:origin/${GITHUB_REF_NAME}>",
+        "reason": (
+            "A workflow_dispatch or schedule run has no pushed range, so the CI "
+            "job supplies only its runtime-derived origin ref and the gate "
+            "compares the checked-out tip with its first parent. The bare leg "
+            "runs locally."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": "tools/check_version_monotonicity.py --base <ref:origin/${GITHUB_BASE_REF}>",
         "reason": (
             "CI derives the comparison base from trusted event and repository "
@@ -955,9 +970,10 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_branch_root.py --protected <ref:origin/${GITHUB_REF_NAME}> --max-lag 200",
         "reason": (
-            "The push-to-main CI job self-checks the protected line against its "
-            "runtime-derived origin ref; there is no local equivalent of the "
-            "protected-ref comparison."
+            "The CI job's leg for a push to main, a workflow_dispatch or a "
+            "schedule run checks HEAD against the runtime-derived origin ref of "
+            "the ref the run is for (on a push, a self-check of the protected "
+            "line); there is no local equivalent of the protected-ref comparison."
         ),
         "backlog": "GD-123",
     },
@@ -8879,7 +8895,38 @@ def self_test():
             ("always()", "    if: always()"),
             ("the line wrapped in ${{ }}",
              "    if: ${{ " + HEAVY_JOB_IF_LINE[8:] + " }}"),
-            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy")):
+            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy"),
+            # A manual or scheduled run runs the heavy jobs only on main: the
+            # ref condition dropped, widened to every branch, or moved off the
+            # dispatch arm would run them on a dispatch of any other ref.
+            ("the dispatch arm without its main ref condition",
+             HEAVY_JOB_IF_LINE.replace(
+                 " && github.ref == 'refs/heads/main'", "", 1)),
+            ("the dispatch arm on every branch",
+             HEAVY_JOB_IF_LINE.replace(
+                 "github.ref == 'refs/heads/main'",
+                 "startsWith(github.ref, 'refs/heads/')", 1)),
+            ("the dispatch arm on another ref",
+             HEAVY_JOB_IF_LINE.replace(
+                 "'refs/heads/main'", "'refs/heads/dev'", 1)),
+            ("the dispatch arm's ref condition negated",
+             HEAVY_JOB_IF_LINE.replace(
+                 "github.ref == 'refs/heads/main'",
+                 "github.ref != 'refs/heads/main'", 1)),
+            ("the ref condition bound to the schedule event alone",
+             HEAVY_JOB_IF_LINE.replace(
+                 "((github.event_name == 'workflow_dispatch' || "
+                 "github.event_name == 'schedule') && "
+                 "github.ref == 'refs/heads/main')",
+                 "(github.event_name == 'workflow_dispatch' || "
+                 "github.event_name == 'schedule' && "
+                 "github.ref == 'refs/heads/main')", 1)),
+            ("the previous line, without the dispatch arm",
+             "    if: needs.scope.outputs.site_only != 'true' && "
+             "(github.event_name == 'push' || "
+             "(startsWith(github.head_ref, 'merge-train-') && "
+             "github.event.pull_request.head.repo.full_name == "
+             "github.repository))")):
         lane_case("39e a widened or respelled heavy-job if: is a lane "
                   "finding: " + label,
                   evaluate(multi_local, lane_ci(heavy_if=line), ()), 1,
@@ -9377,6 +9424,12 @@ def self_test():
                  labeled + "  pull_request_target:\n    types: [labeled]\n", 1,
                  "pull_request_target")
     labeled_case("41h control: types: [labeled] passes", labeled, 0)
+    labeled_case("41h control: a workflow_dispatch trigger beside the labeled "
+                 "pull_request and push passes",
+                 labeled + "  push:\n    branches: [main]\n  workflow_dispatch:\n", 0)
+    labeled_case("41h control: a schedule trigger beside the labeled pull_request "
+                 "passes",
+                 labeled + "  schedule:\n    - cron: '17 3 * * *'\n", 0)
     labeled_case("41h control: a plain scalar types: labeled passes",
                  pr_types("labeled"), 0)
     # A quality.yml with no top-level on: line schedules no Quality run for the

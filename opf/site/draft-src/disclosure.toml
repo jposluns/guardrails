@@ -14,7 +14,7 @@ lbl = "Entry 1"
 id = "d-1"
 heading = "Draft status"
 rail = "Draft status"
-claim = '''The specification is a working draft and the reference tooling lands verb by verb. A conformance claim names its scope and which profiles were evaluated.'''
+claim = '''The reference tooling lands verb by verb. A conformance claim names its scope and which profiles were evaluated.'''
 limitation = '''Until the validation tooling covers a given claim, conformance to that claim is self-asserted, and any report says so. An unqualified "conformant" claim is never emitted, by tooling or by prose.'''
 evidence = '''<a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a> <a href="$BASE/standard/">The standard</a>'''
 
@@ -55,7 +55,7 @@ id = "d-5"
 heading = "The single-writer lease"
 rail = "The single-writer lease"
 claim = '''The standard's cross-system contract requires a divergence check to detect a collision between 2 systems afterward.'''
-limitation = '''The lease has a propagation window: a second system may begin before observing the held lease. The divergence check and the lease are specified controls, not complete CLI coverage, and opf sync is planned. The operation lock that opf init takes excludes other OPF runs on the same store only. It does not exclude runs on another store in the same repository or writers on another system.'''
+limitation = '''The lease has a propagation window: a second system may begin before observing the held lease. The divergence check and the lease are specified controls, not complete CLI coverage, and opf sync exits 2 in this build. The operation lock that opf init takes excludes other OPF runs on the same store only. It does not exclude runs on another store in the same repository or writers on another system.'''
 evidence = '''<a href="$BASE/core-files/#lease">The single-writer lease</a>'''
 
 [[body]]
@@ -75,7 +75,7 @@ id = "d-7"
 heading = "Adoption and the prompt pack"
 rail = "Adoption and the prompt pack"
 claim = '''The reference CLI runs adoption investigation; opf adopt plan, approve, reconcile and status run, and plan, approve and status write nothing.'''
-limitation = '''apply refuses every plan in this build and complete refuses every invocation, each with exit 2, so adoption cannot finish yet and no receipt, completion check or retirement is recorded. Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path. The prompt pack's procedures are instructions an assistant is asked to follow; they do not control what the assistant does. The interim clean-start route initializes a store with <code>opf init</code>; it is not an adoption, and a later <code>opf adopt</code> run reads that store as re-adoption. That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.'''
+limitation = '''apply refuses every plan in this build and complete refuses every invocation, each with exit 2, so no receipt, completion check or retirement is recorded. Ordinary import is retired and refuses with exit 2, and nothing in the reference CLI creates legacy_fragment records; the type remains only for stores that already hold such records from the reference CLI's retired import path. The prompt pack's procedures are instructions an assistant is asked to follow; they do not control what the assistant does. The interim clean-start route initializes a store with <code>opf init</code>; it is not an adoption, and a later <code>opf adopt</code> run reads that store as re-adoption. That reading is the reference tooling's 1.2.0 behaviour and diverges from the specification, whose section 9.2 validation refusals refuse a 1.2.0 manifest as a store.'''
 evidence = '''<a href="$BASE/adopt/">Adopt</a> <a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-QUICKSTART.md" target="_blank" rel="noopener noreferrer">The quickstart<span class="vh"> (opens in a new tab)</span></a>'''
 
 [[body]]
