@@ -33,9 +33,11 @@ Cannot evaluate (exit 2), never a pass: a registry or workflow that is missing, 
 unreadable, over MAX_BYTES or not UTF-8; a registry that is not TOML (TOMLDecodeError or a bare
 ValueError), nests too deeply (RecursionError) or exhausts memory (MemoryError); a format-version other
 than the integer 1; any workflow character, line or value outside the accepted grammar below, a run:
-step without a name, or one job holding two run: steps of one name; a relative .py path in run: text
-that names no tracked file; a tracked-file listing that fails or is empty; a source in an import
-closure that cannot be read or parsed.
+step without a name, or one job holding two run: steps of one name; an anchor, alias or tag at a value
+start or flow-collection entry on a line outside a run: block; a blank line before a run: block's first
+content line indented deeper than that content line; a relative .py path in run: text that names no
+tracked file; a tracked-file listing that fails or is empty; a source in an import closure that cannot
+be read or parsed.
 
 The workflow is read by a line reader, not a YAML parser, so the gate stays standard-library only. The
 reader is a positive grammar: it accepts exactly the shapes named here, and everything else is refused
@@ -54,7 +56,12 @@ reader is a positive grammar: it accepts exactly the shapes named here, and ever
                (' or "), flow sequence ([) or flow mapping ({) opened where a value or key starts,
                or anywhere inside a flow collection, closes on that same line (\\" and '' close
                nothing); YAML would continue an open one onto the following lines, which this reader
-               would take as keys of their own, so it is refused
+               would take as keys of their own, so it is refused. An anchor (&), alias (*) or tag (!)
+               at a value start or at the start of a flow-collection entry on such a line is refused
+               outright rather than modelled: YAML ends an anchor or alias name at whitespace or a flow
+               indicator (, [ ] { }), so a skip to the next space would run past a flow indicator and
+               miss a scalar opened after it. No workflow uses one; the closed value `[&a,"x"]` is
+               refused by this same rule, which is acceptable because it carries an anchor
   scalars     a one-line name or run value that is single-quoted ('' doubling, no other quote),
                double-quoted (no escapes, no inner quote), or plain starting with a letter,
                underscore, dot or slash and not a value YAML types (null, ~, true/false/yes/no/on/off
@@ -62,7 +69,9 @@ reader is a positive grammar: it accepts exactly the shapes named here, and ever
                underscores, a date or timestamp form) and holding no mapping indicator; a run: block
                under |, |-, > or >- whose content is every line at or beyond the indent of its first
                content line, ending at the first line at or under the key's indent or at a dedented
-               comment line (a comment, never run text; a dedented non-comment line is refused)
+               comment line (a comment, never run text; a dedented non-comment line is refused); a
+               blank line before the first content line indented deeper than that content line is
+               refused, because YAML rejects it while a line reader would take it for an empty line
   keys         a job id, job key or step key that YAML would type (on, off, yes, no, true, false,
                null in any case) is refused; `jobs:` twice, a job id twice, or a step key twice in
                one step is refused because YAML would keep only the last
@@ -254,7 +263,7 @@ def _quoted_end(text, start):
     return None
 
 
-def _value_left_open(content):
+def _value_left_open(content, where):
     """Whether one workflow line (indentation removed) opens a quoted scalar (' or "), a flow sequence
     ([) or a flow mapping ({) at a place a YAML value or key starts, or anywhere inside a flow
     collection, and does not close it on that line. YAML continues such a value onto the following
@@ -262,7 +271,16 @@ def _value_left_open(content):
     job id, a top-level key) would be text inside the value, and what follows would be read under
     another key than YAML reads it. A ' #' outside quotes starts a comment, so a flow collection still
     open there is open. The reading is conservative: a quote anywhere inside a flow collection is read
-    as opening a quoted scalar."""
+    as opening a quoted scalar.
+
+    An anchor (&), alias (*) or tag (!) found at a value start or at the start of a flow-collection
+    entry is refused (CannotEvaluate, naming where). Modelling where YAML ends such a node property is
+    error prone: the name ends at whitespace OR at a flow indicator (, [ ] { }), so scanning to the
+    next space would run past a flow indicator that re-opens a collection and let a quoted scalar
+    opened after it (for example `[&a,"x ]`) be read as closed when YAML continues it onto later lines.
+    No workflow under .github/workflows uses an anchor, alias or tag, so refusing the whole line is a
+    bounded fail-closed rule rather than a partial model. It also gives the otherwise-valid closed
+    value `[&a,"x"]` a named refusal, which is acceptable: it carries an anchor."""
     depth, at_start, index = 0, True, 0
     while index < len(content):
         char = content[index]
@@ -283,11 +301,9 @@ def _value_left_open(content):
             at_start = True
         elif char == " ":
             pass
-        elif char in "&!" and at_start:
-            # An anchor or tag: the node it marks starts after the next space.
-            while index < len(content) and content[index] != " ":
-                index += 1
-            continue
+        elif char in "&*!" and at_start:
+            raise CannotEvaluate("{}: an anchor, alias or tag ({!r}) at a value start or flow-collection "
+                                 "entry is not read by this gate".format(where, char))
         elif char in "-?" and at_start and after in ("", " "):
             pass
         elif char == ":" and (after in ("", " ") or (depth and after in ",[]{}")):
@@ -329,7 +345,7 @@ def workflow_run_steps(text, where=WORKFLOW):
         # Every line read or skipped below, top-level keys, lines before jobs:, job ids, job keys, step
         # keys and the opaque lines under with:, env: or any other nested key alike: a value left open
         # here would make YAML read the following lines as part of it.
-        if _value_left_open(stripped):
+        if _value_left_open(stripped, "{}:{}".format(where, number)):
             raise CannotEvaluate("{}:{}: a quoted scalar or flow collection opened on this line does not "
                                  "close on it; YAML would continue it onto the following lines".format(where, number))
         indent = len(line) - len(line.lstrip(" "))
@@ -408,10 +424,16 @@ def workflow_run_steps(text, where=WORKFLOW):
                 # the block is every later line at or beyond it, blank lines included, and ends at the
                 # first line at or under the key's indent or at a dedented comment line (a comment,
                 # never run text). A dedented non-comment line is outside the grammar.
-                block, content_indent = [], None
+                block, content_indent, leading_blanks = [], None, []
                 while index < len(lines):
                     raw = lines[index]
                     if not raw.strip():
+                        # A blank line before the first content line records its own indentation. YAML
+                        # detects a block scalar's indentation from the first non-empty line and rejects
+                        # a leading blank line indented deeper than that; a reader that treated every
+                        # blank line as empty would accept it and read a shorter, different block.
+                        if content_indent is None and raw:
+                            leading_blanks.append((index + 1, len(raw)))
                         block.append("")
                         index += 1
                         continue
@@ -420,6 +442,11 @@ def workflow_run_steps(text, where=WORKFLOW):
                         break
                     if content_indent is None:
                         content_indent = line_indent
+                        deeper = [number for number, blank in leading_blanks if blank > content_indent]
+                        if deeper:
+                            raise CannotEvaluate("{}:{}: a blank line before the first content line of a "
+                                                 "run: block is indented deeper than that content line; "
+                                                 "YAML rejects it".format(where, deeper[0]))
                     elif line_indent < content_indent:
                         if raw.lstrip(" ").startswith("#"):
                             index += 1
@@ -823,6 +850,10 @@ def _open_value_workflow(site, opener, closer):
     if site == "with-line":
         return FIXTURE_WORKFLOW + "      - uses: actions/cache@v4\n        with:\n          key: {}\n    env:\n" \
             "      {}\n".format(opener, closer) + UNREGISTERED_PROBE
+    if site == "uses-item":
+        # A "- uses:" step item: the value opened on the item line continues onto later lines.
+        return FIXTURE_WORKFLOW + "      - uses: {}\n        with:\n          k: v\n    env:\n      {}\n".format(
+            opener, closer) + UNREGISTERED_PROBE
     if site == "swallow-job-id":
         # A job key swallowing the next job id: YAML files the step under extra, the reader under other.
         return FIXTURE_WORKFLOW + "  extra:\n    runs-on: {}\n  other:\n    env:\n      {}\n    steps:\n".format(
@@ -1028,6 +1059,53 @@ def _self_test():
     got = _rules(_registry(), workflow=closed)
     check("pass/open-value-closed-on-line", got == [], got)
 
+    # An anchor (&), alias (*) or tag (!) at a value start or at the start of a flow-collection entry is
+    # refused on every line outside a run: block. Each of the four bypass forms (a flow sequence opening
+    # a double- or single-quoted scalar, a nested flow sequence, and a flow mapping, each led by an
+    # anchor so a skip-to-space would run past a flow indicator) at each of four sites (a job key, a step
+    # key, a with: line and a "- uses:" item) is refused. With the fix reverted the fixture registry
+    # passes every one while YAML reads a step the reader skipped.
+    for name, site, opener, closer in (
+            ("cannot-evaluate/anchor-dq-job-key", "job-key", '[&a,"x ]', 'x"]'),
+            ("cannot-evaluate/anchor-dq-step-key", "step-key", '[&a,"x ]', 'x"]'),
+            ("cannot-evaluate/anchor-dq-with-line", "with-line", '[&a,"x ]', 'x"]'),
+            ("cannot-evaluate/anchor-dq-uses-item", "uses-item", '[&a,"x ]', 'x"]'),
+            ("cannot-evaluate/anchor-sq-job-key", "job-key", "[&a,'x ]", "x']"),
+            ("cannot-evaluate/anchor-sq-step-key", "step-key", "[&a,'x ]", "x']"),
+            ("cannot-evaluate/anchor-sq-with-line", "with-line", "[&a,'x ]", "x']"),
+            ("cannot-evaluate/anchor-sq-uses-item", "uses-item", "[&a,'x ]", "x']"),
+            ("cannot-evaluate/anchor-seq-job-key", "job-key", "[&a,[ ],", "]"),
+            ("cannot-evaluate/anchor-seq-step-key", "step-key", "[&a,[ ],", "]"),
+            ("cannot-evaluate/anchor-seq-with-line", "with-line", "[&a,[ ],", "]"),
+            ("cannot-evaluate/anchor-seq-uses-item", "uses-item", "[&a,[ ],", "]"),
+            ("cannot-evaluate/anchor-map-job-key", "job-key", "{&a:[ ],", "}"),
+            ("cannot-evaluate/anchor-map-step-key", "step-key", "{&a:[ ],", "}"),
+            ("cannot-evaluate/anchor-map-with-line", "with-line", "{&a:[ ],", "}"),
+            ("cannot-evaluate/anchor-map-uses-item", "uses-item", "{&a:[ ],", "}")):
+        got = _rules(_registry(), workflow=_open_value_workflow(site, opener, closer))
+        check(name, tuple(got[:1]) == ("cannot-evaluate",), (name, got))
+    # An alias and a tag at a value start are refused too; the alias (*) was not caught by this gate
+    # before the anchor-property refusal was added.
+    for name, value in (("cannot-evaluate/alias-at-value-start", "*a"),
+                        ("cannot-evaluate/tag-at-value-start", "!!str x")):
+        got = _rules(_registry(), workflow=FIXTURE_WORKFLOW + "        working-directory: {}\n".format(value))
+        check(name, tuple(got[:1]) == ("cannot-evaluate",), got)
+
+    # A blank line before the first content line of a run: block, indented deeper than that content line,
+    # is a YAML parse error; the gate refuses it. The boundary (content indent 10): a blank one space
+    # deeper (11) is refused; a blank equal to (10) or shallower than (9) the content indent is kept.
+    def _run_block_blank(blank_spaces, content_spaces=10):
+        return FIXTURE_WORKFLOW.replace(
+            "        run: |\n          git config --global core.autocrlf true\n",
+            "        run: |\n" + " " * blank_spaces + "\n" + " " * content_spaces
+            + "git config --global core.autocrlf true\n")
+    got = _rules(_registry(), workflow=_run_block_blank(11))
+    check("cannot-evaluate/run-block-leading-blank-deeper", tuple(got[:1]) == ("cannot-evaluate",), got)
+    got = _rules(_registry(), workflow=_run_block_blank(10))
+    check("pass/run-block-leading-blank-equal", got == [], got)
+    got = _rules(_registry(), workflow=_run_block_blank(9))
+    check("pass/run-block-leading-blank-shallower", got == [], got)
+
     # Characters outside the accepted grammar, refused before any line is read, each naming its line
     # and character. First the line breaks YAML honours where a line reader does not: each would hide
     # one line inside another.
@@ -1151,7 +1229,10 @@ def _self_test():
           "repeated or second-block steps, block run headers with a comment, keep or indent indicator, a "
           "continued run or name, an untracked script, a folded, anchored or badly quoted name, and a "
           "quoted, flow sequence or flow mapping value left open across lines at a job key, a step key, "
-          "a line under with: or a top-level key; a closed one passes), every "
+          "a line under with: or a top-level key; a closed one passes), each of four anchor-led bypass "
+          "forms at a job key, step key, with: line and \"- uses:\" item, an alias and a tag at a value "
+          "start, and a blank line before a run: block's first content line indented one space deeper "
+          "than it (a blank equal to or shallower than it passes), every "
           "character outside the accepted grammar (a CR, NEL, U+2028 or U+2029 that would hide a line, a "
           "BOM, form feed, vertical tab, tab, NUL, C1 control or no-break space), a plain scalar or job id "
           "YAML types, a repeated job id, a dedented non-comment line under a run: block and a run path "
