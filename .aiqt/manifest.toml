@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "1bf45dc61cc99e37d104888e2267f366964c811acffdd4b40d58b649a0abda83"
+tree-sha256 = "11fcac7ecb7b216c563ffd115857a0aa03af64a033532258dd7c5db10cace15a"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 26024
-sha256 = "6ffa35254702ce448df2d072db8895dea7154d4c50f2fd183774db0c3921b723"
+bytes = 26176
+sha256 = "5cbd818e605afef006b21d8552cbf3e34055da352e68ae5c2ccf1b010c1e8383"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -4151,8 +4151,8 @@ sha256 = "001fee4d31d04dadaadef8ec61e026c634ce3be25189195693b0f19ad200d8b7"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 465207
-sha256 = "ce070d61a381d0c1c78c7ca43ae40ef1a80bb501d7735d89646c5aa1c6ce01c1"
+bytes = 494138
+sha256 = "01b00234ab7a4001eecf0100e317c1f1d3d267c9fd45180b58d5d64c6e258cfe"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
