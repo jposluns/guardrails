@@ -77,6 +77,7 @@ from _standards import load_manifests, ManifestError  # noqa: E402
 import gen_mappings  # noqa: E402  (the one mappings rendering source: rows, registry and wording)
 import gen_rules  # noqa: E402  (the one frontmatter parser and corpus loader)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
+from gen_gensrc import _reject_rebinding  # noqa: E402  (the one whole-tree single-binding walk)
 
 # The staging base path; each site's own base (SITES) is this while staging and "/" at its promotion.
 DRAFT_BASE = "/draft/"
@@ -565,8 +566,19 @@ def _store_constants(data, where):
     """The literal values of _STORE_CONSTANTS in the module source `data` (bytes), read by parsing it to an
     AST and evaluating only each binding's literal (ast.literal_eval); the module is never imported or run.
     RefusedPage (fail closed) when the source cannot be parsed, when a name is not bound exactly once at
-    module level by a plain assignment to that name alone, or when its value is not a literal of the
-    expected type."""
+    module level by a plain assignment to that name alone, when anything else in the module binds it, or
+    when its value is not a literal of the expected type.
+
+    Any other binding is found by walking the WHOLE tree (gen_gensrc._reject_rebinding), so a rebinding
+    the interpreter honours is refused, not misread: an assignment nested in a module-level if, try, for or
+    with body, an augmented or annotated assignment, a walrus, a del, a for or with target, a tuple or
+    starred unpack, an import binding the name (as an alias, a dotted root or a wildcard), a def or class
+    of the name, an except-as, a match capture, a parameter, or a global or nonlocal declaration. The walk
+    is conservative: it also refuses a function local that reuses one of these names, which fails in the
+    safe direction. Disclosed residual: a dynamic store (globals()[name] = ..., setattr on the module, or
+    exec) is beyond any static reader and is not refused; the tooling's own self-test patches
+    SUPPORTED_SPEC_VERSION through globals() at run time, which leaves the import-time value this reads
+    unchanged. A PEP 695 type parameter of the name binds only in its own scope and is not inspected."""
     try:
         tree = ast.parse(data, filename=where)
     except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
@@ -583,16 +595,35 @@ def _store_constants(data, where):
         for target in targets:
             for name_node in ast.walk(target):
                 if isinstance(name_node, ast.Name) and name_node.id in wanted:
-                    plain = isinstance(node, ast.Assign) and len(node.targets) == 1 and target is name_node
-                    bindings[name_node.id].append(node.value if plain else None)
+                    bindings[name_node.id].append((node, target, name_node))
     values = {}
     for name, kind in _STORE_CONSTANTS:
         found = bindings[name]
-        if len(found) != 1 or found[0] is None:
+        if len(found) != 1:
             raise RefusedPage("{}: {} must be bound exactly once at module level by a plain assignment "
                               "(found {} binding(s))".format(where, name, len(found)))
+        node, target, name_node = found[0]
+        if isinstance(node, ast.AugAssign):
+            form = "an augmented assignment"
+        elif isinstance(node, ast.AnnAssign):
+            form = "an annotated assignment"
+        elif isinstance(target, (ast.Tuple, ast.List, ast.Starred)):
+            form = "a tuple or starred target"
+        elif len(node.targets) != 1:
+            form = "a chained assignment"
+        elif target is not name_node:
+            form = "a target other than the bare name"
+        else:
+            form = None
+        if form is not None:
+            raise RefusedPage("{}: {} is bound by {}, not by a plain assignment to that name alone".format(
+                where, name, form))
         try:
-            value = ast.literal_eval(found[0])
+            _reject_rebinding(tree, name, {id(name_node)}, where, "plain")
+        except ValueError as exc:
+            raise RefusedPage(str(exc)) from exc
+        try:
+            value = ast.literal_eval(node.value)
         except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
             raise RefusedPage("{}: {} is not a literal ({}: {})".format(
                 where, name, type(exc).__name__, exc)) from exc
@@ -2799,7 +2830,9 @@ def _self_test():
             ("refuse/store-spec-augmented", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "1.0.0"'
                                              '\nSUPPORTED_SPEC_VERSION += ""'}, "found 2 binding"),
             ("refuse/store-spec-tuple", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION, _x = "1.0.0", 0'},
-             "plain assignment"),
+             "is bound by a tuple or starred target, not by a plain assignment"),
+            ("refuse/store-spec-starred", {"SUPPORTED_SPEC_VERSION": '\n*SUPPORTED_SPEC_VERSION, = "1.0.0", 0'},
+             "is bound by a tuple or starred target, not by a plain assignment"),
             ("refuse/store-spec-computed", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "1." + "0.0"'},
              "not a literal"),
             ("refuse/store-spec-not-semver", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "1.2"'},
@@ -2810,6 +2843,66 @@ def _self_test():
                                                 "HOMES2_SPEC_VERSION": '\nHOMES2_SPEC_VERSION = "2.0.0\\n"'},
              "MAJOR.MINOR.PATCH")):
         expect(name, needle in refused(name, release_over, store_copy(**lines)), needle)
+    # A later binding the interpreter honours, anywhere in the module, is refused instead of misread. Each
+    # vector appends one such binding to the shipped source; its flip renders the same source with the
+    # whole-tree walk disabled, where the line reads the shipped value that the module would not keep.
+    rebound = "must not be rebound ("
+    rebind_vectors = (
+        ("refuse/store-rebind-if", 'if True:\n    SUPPORTED_SPEC_VERSION = "9.8.7"\n', rebound),
+        ("refuse/store-rebind-try", 'try:\n    SUPPORTED_SPEC_VERSION = "9.8.7"\nexcept Exception:\n    pass\n',
+         rebound),
+        ("refuse/store-rebind-for-body", 'for _x in (0,):\n    SUPPORTED_SPEC_VERSION = "9.8.7"\n', rebound),
+        ("refuse/store-rebind-with-body",
+         'import contextlib\nwith contextlib.nullcontext():\n    SUPPORTED_SPEC_VERSION = "9.8.7"\n', rebound),
+        ("refuse/store-rebind-with-target",
+         'import contextlib\nwith contextlib.nullcontext("9.8.7") as SUPPORTED_SPEC_VERSION:\n    pass\n', rebound),
+        ("refuse/store-rebind-walrus", '(SUPPORTED_SPEC_VERSION := "9.8.7")\n', rebound),
+        ("refuse/store-rebind-import-as", "from os import sep as SUPPORTED_SPEC_VERSION\n", "rebound by an import"),
+        ("refuse/store-rebind-def", "def SUPPORTED_SPEC_VERSION():\n    pass\n", "rebound by a def/class"),
+        ("refuse/store-rebind-class", "class SUPPORTED_SPEC_VERSION:\n    pass\n", "rebound by a def/class"),
+        ("refuse/store-rebind-del", "del SUPPORTED_SPEC_VERSION\n", rebound),
+        ("refuse/store-rebind-for-target", 'for SUPPORTED_SPEC_VERSION in ("9.8.7",):\n    pass\n', rebound),
+        ("refuse/store-rebind-homes-if", "if True:\n    SUPPORTED_HOMES = 2\n", rebound),
+        ("refuse/store-rebind-homes2-if", 'if True:\n    HOMES2_SPEC_VERSION = "7.6.5"\n', rebound))
+    saved_walk = globals()["_reject_rebinding"]
+    for name, statement, needle in rebind_vectors:
+        source = store_source + b"\n" + statement.encode("utf-8")
+        expect(name, needle in refused(name, release_over, source), needle)
+        globals()["_reject_rebinding"] = lambda *_args: None
+        try:
+            flipped = release_over(source)
+        except RefusedPage as exc:
+            flipped = "refused: {}".format(exc)
+        finally:
+            globals()["_reject_rebinding"] = saved_walk
+        expect(name + "-flip", store_tail.format(store_version) in flipped, flipped)
+
+    # _init_store_version restates the init command's selection rule: opf/tools/opf.py builds the init
+    # manifest model with homes2=_opf_store.SUPPORTED_HOMES >= 2. Every homes2 argument of a _manifest_model
+    # call there is read from the AST and must be exactly that expression, so a change to opf's threshold
+    # turns this self-test red; the flips show a changed threshold and a constant both read as another rule.
+    opf_cli_source = "opf/tools/opf.py"
+    init_rule = "_opf_store.SUPPORTED_HOMES >= 2"
+
+    def init_homes2_rules(source):
+        rules = []
+        for node in ast.walk(ast.parse(source, filename=opf_cli_source)):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "_manifest_model"):
+                rules.extend(ast.unparse(arg) for arg in node.args)
+                rules.extend(ast.unparse(keyword.value) for keyword in node.keywords if keyword.arg == "homes2")
+        return rules
+
+    with open(ROOT / opf_cli_source, "rb") as handle:
+        cli_source = handle.read()
+    rule_anchor = "homes2={}".format(init_rule).encode("utf-8")
+    expect("release/init-homes2-rule-pinned", init_homes2_rules(cli_source) == [init_rule]
+           and cli_source.count(rule_anchor) == 1, init_homes2_rules(cli_source))
+    for name, replacement in (
+            ("release/init-homes2-rule-flip-threshold", b"homes2=_opf_store.SUPPORTED_HOMES >= 3"),
+            ("release/init-homes2-rule-flip-constant", b"homes2=False")):
+        flipped_rules = init_homes2_rules(cli_source.replace(rule_anchor, replacement, 1))
+        expect(name, flipped_rules != [init_rule] and len(flipped_rules) == 1, flipped_rules)
     expect("refuse/store-unparsable", "cannot parse" in refused(
         "refuse/store-unparsable", release_over, store_source + b"\n)\n"))
     expect("refuse/store-unreadable", "cannot read" in refused("refuse/store-unreadable", release_over, None))
