@@ -386,7 +386,10 @@ manifest residue carries the full
 contract and its residuals (a mode change after the question is asked, work the enumerator does not list,
 and question tools other than AskUserQuestion stay out of its view). The reader fails CLOSED to the
 guards-armed (`unattended`) posture, never silently disarming, when a marker IS present but cannot yield a
-recognized value: every outcome of reading the mode path other than not found or a decoded text (a mode path
+recognized value: every outcome of reading the declared mode path other than a decoded text (a declared mode
+file whose open reports not found, a symlink whose target is missing included, the deny naming the missing
+declared path; a symlinked mode file is otherwise followed to its target, which must pass every check below;
+a mode path
 holding a NUL character, or one that is not strict UTF-8 (a lone surrogate, which is also how a
 surrogate-escaped non-UTF-8 name arrives), refused fail-closed before any open even where the OS could open
 it; a file that cannot be opened or read, a socket included, whose non-blocking open itself fails (`ENXIO`
@@ -399,18 +402,17 @@ value is empty or does not begin with attended/unattended, a JSON-shaped marker 
 nesting too deep to parse included), a present JSON value that parses but is not an object with exactly a single string `mode` key (a
 scalar such as a number, boolean, or null, an array, an object with extra keys, or an object without a string
 `mode`), or a marker whose value falls outside the `attended`/`unattended` family. It preserves the fail-open
-(undeclared) answer only when NO marker is present: an undeclared mode path, a genuinely absent file (one
-whose open reports not found; a missing file under a parent path that is a regular file reports not a
-directory and fails closed, as any other unreadable file does), an empty
-or whitespace-only file, or content that carries no `Operating-mode:` declaration line, does not parse as
+(undeclared) answer only when NO marker is present: an undeclared mode path, an empty
+or whitespace-only file (present and readable, so no declared resource is missing; a shared file holding no
+text is the same no-declaration case as one holding only prose), or content that carries no `Operating-mode:` declaration line, does not parse as
 JSON, and whose first non-whitespace character is not `{`, `[`, or `"` (ordinary prose: a sentence merely
 mentioning attended or unattended, or one beginning with a number or word such as `42 items done` or `true
 trailing`, is such prose and does not arm). Every other input fails closed, so every input reaches one of
 the two answers; only a stall bounded by the hook timeout delays it (a path lookup on a hung mount, a read
 from a stalled filesystem, or what a device driver's open does). The scope check of the stop, idle and
 yield guards, the dispatch ledger and the prompt stamp reads the mode record through the same reader, and
-every fail-closed result counts there as a declared mode, so scope is live: a read failure (a file not valid
-UTF-8 or a path not strict UTF-8 included) and a read text whose declaration or JSON marker is malformed or
+every fail-closed result counts there as a declared mode, so scope is live: a read failure (a declared file
+that is absent, a file not valid UTF-8 or a path not strict UTF-8 included) and a read text whose declaration or JSON marker is malformed or
 unrecognized alike. A DECLARED lease `max_age_hours` that is not usable (a boolean, zero, negative, NaN,
 infinite or a non-number) on a lease that would otherwise read live is a scope CANNOT-EVALUATE, never
 unlimited freshness and never a silent guards-off: the stop, idle and yield guards route it into their
