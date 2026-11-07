@@ -130,7 +130,8 @@ from _opf_emit import emit_checked   # noqa: E402
 
 VALID, INVALID, CANNOT_EVALUATE = store.VALID, store.INVALID, store.CANNOT_EVALUATE
 # The imported managed leaves (spec 4.2, 8.3), inline in the machine store in either layout: one index per
-# enabled type except the importer-only legacy_fragment, and the imported worklog on its own number line.
+# enabled type except legacy_fragment (the standard reserves LF unassigned), and the imported worklog on its
+# own number line.
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
 IMPORTED_TYPES = tuple(sorted(

@@ -204,8 +204,9 @@ MODULE_TYPES = {
     "tier_assessment": ("TA", "operational_policy"),
     "session_lease": ("SL", "concurrent_operation"),
 }
-# Importer-only quarantine type: a known, namespace-bound type gated by no module toggle (created only
-# by an importer, never scaffolded, spec 8.1).
+# legacy_fragment is not an OPF record type: the standard reserves LF unassigned, no record type uses it,
+# and unmappable imported text stays verbatim in `unparsed` (spec 8.1/8.3). The name stays known here,
+# gated by no module toggle and never scaffolded, so the tools name it when they refuse or defer it.
 IMPORTER_TYPES = {
     "legacy_fragment": "LF",
 }
@@ -355,7 +356,7 @@ IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose store
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
 # The namespaces the imported series admits: the baseline and module-tier bindings, never the
-# importer-only legacy_fragment (LF), the reserved-excluded transaction (TX), or the unassigned CL
+# unassigned LF (no record type uses it), the reserved-excluded transaction (TX), or the unassigned CL
 # (spec 8.1/8.2). _opf_schema.IMPORTED_NAMESPACES is built from these SAME taxonomy maps (that module
 # imports this one, so the set is mirrored here rather than imported); the opf-check self-test
 # reconciles the two rosters so they cannot drift.
@@ -402,7 +403,7 @@ def imported_leaf_names(enabled_types):
     `<type>.imported.index.toml` per enabled non-ledger type, and worklog.imported.toml for the worklog
     ledger, whose imported home is a worklog-shaped ledger file, not an index (spec 4.2; the first
     imported-series release keeps these leaves inline in either layout). A type whose normative
-    namespace lies outside _IMPORTED_SERIES_NAMESPACES -- the importer-only legacy_fragment (LF) -- and
+    namespace lies outside _IMPORTED_SERIES_NAMESPACES -- legacy_fragment, on the unassigned LF -- and
     a name outside the section-8.1 roster contribute NO leaf (fail-closed), so the leaf roster derives
     from the same namespace set as the imported id and counter grammar and the two cannot drift
     (spec 8.2)."""
@@ -5417,8 +5418,8 @@ def self_test():
 
         # OPF-IMPORTED-SERIES IS-2: imported_leaf_names derives the imported machine-store leaf names
         # from an enabled-type roster: one <type>.imported.index.toml per non-ledger type, the worklog
-        # ledger worklog.imported.toml, NO leaf for the importer-only legacy_fragment (its LF
-        # namespace is outside the imported series, spec 8.2), and NO leaf for a name outside the
+        # ledger worklog.imported.toml, NO leaf for legacy_fragment (the standard reserves LF
+        # unassigned, so the imported series carries no LF, spec 8.1/8.2), and NO leaf for a name outside the
         # section-8.1 roster (fail-closed). The agreement with _opf_schema.IMPORTED_NAMESPACES is
         # reconciled in the opf-check self-test, beside the containment vectors that consume this
         # roster.
