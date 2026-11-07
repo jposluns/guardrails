@@ -3764,6 +3764,8 @@ def self_test(vectors_only=False):
         fetch_guards = []
         deadline_names = {}
         armed = []
+        armed_value = []
+        fetch_threads = []
         expired = []
         short_takes = []
         environments = []
@@ -3815,13 +3817,34 @@ def self_test(vectors_only=False):
         def track_armed(value):
             # The arming record behind "timeout:<guard>": written at the
             # settimeout call itself (the connect stub below and the
-            # SSLSocket.settimeout wrapper installed for timing runs), from
-            # the guard name the tracked left() value carries, so it records
-            # the timeout actually put in force on the socket, not merely
-            # the last deadline queried.
+            # SSLSocket.settimeout wrapper installed for timing runs). EVERY
+            # settimeout made on the fetch's own thread replaces the record:
+            # a left() value carrying a guard records that guard and its
+            # numeric value; a plain value NUMERICALLY EQUAL to the timeout
+            # already in force keeps the record (the stdlib's save/restore
+            # idiom: ssl.SSLSocket.do_handshake restores the timeout it
+            # found, as a plain float, in a finally that runs before the
+            # timeout it raised is attributed); any other plain value or
+            # None records that NO tracked deadline is in force (an empty
+            # record), so a socket timeout that follows an untracked arming
+            # is credited to no guard and the row cannot pass on a deadline
+            # an earlier call armed. Equality is at the socket's own stored
+            # resolution: the socket keeps its timeout in whole nanoseconds,
+            # so the restored plain float can sit within one nanosecond of
+            # the armed value, while any genuinely different arming (the
+            # 0.6 s flip against a sub-0.2 s deadline) sits far outside it.
+            # Another thread's settimeout (the fixture server's own sockets,
+            # including the plain timeout wrap_socket itself propagates)
+            # never touches the record.
+            if not fetch_threads or threading.current_thread() is not fetch_threads[0]:
+                return
             guard = getattr(value, "guard", None)
             if guard is not None:
                 armed[:] = [guard]
+                armed_value[:] = [float(value)]
+            elif not (armed_value and value is not None
+                      and abs(float(value) - armed_value[0]) <= 1e-9):
+                del armed[:], armed_value[:]
 
         def connect(sock, endpoint, timeout):
             connect_calls.append(endpoint)
@@ -3889,7 +3912,10 @@ def self_test(vectors_only=False):
             return "error:" + type(exc).__name__
 
         def timed_fetch(fetch, url, cap, deadline, context):
-            del armed[:], expired[:]
+            del armed[:], armed_value[:], expired[:]
+            # The straight-line fetch runs here, on this thread: only its
+            # own settimeout calls may write the arming record.
+            fetch_threads[:] = [threading.current_thread()]
             started = time.monotonic()
             try:
                 return fetch(url, cap, deadline, context)
@@ -4022,6 +4048,16 @@ def self_test(vectors_only=False):
                         return original_settimeout(sock, value)
 
                     patch(ssl.SSLSocket, "settimeout", tracked_settimeout)
+                    if config.get("untracked_tls_timeout"):
+                        # The flip the untracked-tls-timeout vector must
+                        # catch: a handshake that arms a plain 0.6 s float
+                        # instead of the connect deadline's tracked left()
+                        # value. The plain arming clears the record, so the
+                        # handshake's timeout is credited to no guard and
+                        # the row's cause check must fail.
+                        patch(module, "_tls", source_mutant(
+                            original_tls, "wrapped.settimeout(deadline.left())",
+                            "wrapped.settimeout(0.6)"))
                 patch(module, "_lookup", lookup)
                 if "hold_after_publish" in config:
                     patch(module, "queue", holding_queue)
@@ -4535,6 +4571,7 @@ def self_test(vectors_only=False):
                     "resolver-vector/blocked-timing", "resolver-vector/blocked-mutant",
                     "resolver-vector/retained-slot", "resolver-vector/leaked-slot",
                     "resolver-vector/positive-held-slot", "resolver-vector/sweep-leaked-slot",
+                    "timing-vector/untracked-tls-timeout",
                     "resolver-vector/cleanup")
     detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
@@ -4754,6 +4791,27 @@ def self_test(vectors_only=False):
             failures.append("the leaked slot did not fail the sweep's row INVALID")
         results.append((VECTOR_NAMES[11], failures))
 
+    def untracked_timeout_vector(base, contexts, results):
+        # A durable check that the timing verdict rests on what was ARMED,
+        # not on which deadline was last queried: with the handshake flipped
+        # to a plain 0.6 s settimeout (which ignores the connect deadline),
+        # the tls-stall run must fail its row INVALID, each refusal's
+        # recorded cause showing that no tracked deadline was in force. The
+        # unflipped TG-11/tls-timeout row is the on-time control.
+        failures = []
+        case = ("vector/untracked-tls-timeout", CANNOT_EVALUATE, "tls-deadline",
+                dict(mode="tls-stall", fetch_safety=8.0,
+                     guarded_causes=("timeout:connect", "timeout:connect"),
+                     untracked_tls_timeout=True))
+        run = run_case(base, contexts, case, False)
+        row = record_row(case, run, detected)
+        if run[0] or row["test_status"] != INVALID:
+            failures.append("the untracked handshake timeout did not fail the row INVALID")
+        if any(cause != "timeout:untracked" for cause in row.get("causes") or ["missing"]):
+            failures.append("the record did not show every refusal untracked: "
+                            + repr(row.get("causes")))
+        results.append((VECTOR_NAMES[12], failures))
+
     def resolver_vectors(base, contexts):
         # Returns (name, failures) per vector; a vector that raises reports
         # "cannot evaluate". Every vector releases its hold, then all workers
@@ -4766,7 +4824,8 @@ def self_test(vectors_only=False):
                               (retained_vector, VECTOR_NAMES[8:9]),
                               (leaked_vector, VECTOR_NAMES[9:10]),
                               (held_slot_vector, VECTOR_NAMES[10:11]),
-                              (sweep_leaked_vector, VECTOR_NAMES[11:12])):
+                              (sweep_leaked_vector, VECTOR_NAMES[11:12]),
+                              (untracked_timeout_vector, VECTOR_NAMES[12:13])):
             try:
                 vector(base, contexts, results)
             except Exception as exc:
@@ -4782,7 +4841,7 @@ def self_test(vectors_only=False):
             failures.append("the vectors left the resolver slot held")
         else:
             _RESOLVER_SLOT.release()
-        results.append((VECTOR_NAMES[12], failures))
+        results.append((VECTOR_NAMES[13], failures))
         return results
 
     try:

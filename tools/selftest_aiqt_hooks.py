@@ -5651,6 +5651,15 @@ def _sleeper(seconds, result=(0, None, None)):
 # only thing that ends it sooner; a stub that returns means no deadline fired, whatever the host load.
 _STALL_SECONDS = 20.0
 
+# Lateness allowance over a window's requested deadline, for the deadline cases that bound when their
+# deadline fired: the observed end may trail the request by scheduling delay under host load, so each bound
+# is the case's own requested window plus this allowance, never a bare wall ceiling. Sized at about five
+# times the worst scheduling overshoot measured for a short request under heavy CPU pressure (0.093 s past
+# a 0.25 s request at loadavg ~16-37 on a 16-CPU host), and under the 0.7 s head-room between the largest
+# bounded window here (0.3 s) and that window ceil-rounded to a whole second, so an arming rounded up to
+# whole seconds (the dl-ceil-flip vector) stays red while an honest delayed run stays green.
+_DEADLINE_LATE_ALLOWANCE = 0.5
+
 
 def _stall(seconds=None):
     """A handler that waits on an event nothing sets, up to `seconds` (default _STALL_SECONDS), then
@@ -5680,15 +5689,18 @@ def _deadline_path_failures():
                            "exit {} and {!r}".format(mode, code, err))
             continue
         # The stub stalls until a deadline ends it, so the exit code and the refusal are the evidence that
-        # the deadline fired; how long the run took is reported, not judged.
+        # the deadline fired; the elapsed time is judged only against the requested 0.1 s budget plus the
+        # load allowance, so a late arming (e.g. one rounded up to whole seconds, the dl-ceil-flip vector)
+        # is caught while an honest run delayed by host scheduling stays green.
         with _stub_handler(mode, _stall()):
             code, err, seconds = _main_run(mode, budget=0.1)
         want = ("AIQT guardrail: the {} check could not reach a decision within its 0.1-second budget on an "
                 "input of {} bytes; failing closed. Split the command into smaller calls, or move long content "
                 "into a file and pass its path.".format(mode, size))
-        if code != 2 or want not in err:
-            out.append("(dl-fires-{}) expected exit 2 with the deadline refusal, got exit {} after "
-                       "{:.2f}s and {!r}".format(mode, code, seconds, err))
+        if code != 2 or want not in err or seconds > 0.1 + _DEADLINE_LATE_ALLOWANCE:
+            out.append("(dl-fires-{}) expected exit 2 with the deadline refusal within {:.2f}s, got exit {} "
+                       "after {:.2f}s and {!r}".format(mode, 0.1 + _DEADLINE_LATE_ALLOWANCE, code, seconds,
+                                                       err))
 
     never = threading.Event()
 
@@ -5698,9 +5710,12 @@ def _deadline_path_failures():
             return _DEADLINE_PAYLOAD
     with _stub_handler("diff_source_pretool", _sleeper(0)):
         code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
-    if code != 2 or "on an input it had not finished reading" not in err:
-        out.append("(dl-read) a deadline during the payload read expected exit 2 naming the unread input, got "
-                   "exit {} after {:.2f}s and {!r}".format(code, seconds, err))
+    # The requested 0.1 s budget plus the load allowance also bounds when the read deadline fired.
+    if (code != 2 or "on an input it had not finished reading" not in err
+            or seconds > 0.1 + _DEADLINE_LATE_ALLOWANCE):
+        out.append("(dl-read) a deadline during the payload read expected exit 2 naming the unread input "
+                   "within {:.2f}s, got exit {} after {:.2f}s and {!r}".format(
+                       0.1 + _DEADLINE_LATE_ALLOWANCE, code, seconds, err))
 
     seen = []
 
@@ -5717,6 +5732,45 @@ def _deadline_path_failures():
             or any(timer != (0.0, 0.0) or handler != signal.SIG_DFL for timer, handler in seen)):
         out.append("(dl-cancelled) the decision must be written with the timer cancelled and SIGALRM back to "
                    "the caller's disposition, saw exit {} and {!r}".format(code, seen))
+    return out
+
+
+def _deadline_ceil_flip_failures():
+    """(dl-ceil-flip-fires, dl-ceil-flip-late) A window arming rounded up to whole seconds must be caught by
+    the lateness bounds: with every setitimer the hook makes ceil-rounded, a stalled 0.1-second budget still
+    exits 2 with the refusal (dl-ceil-flip-fires), but only about a whole second later, past the budget plus
+    _DEADLINE_LATE_ALLOWANCE (dl-ceil-flip-late), which is exactly what the bounded deadline cases (dl-fires,
+    dl-read, dl-nested-inner, dl-defer-twice-outer-deadline) refuse. The on-time control is those cases
+    themselves, which run unflipped in this same suite and must pass the same bound."""
+    out = []
+
+    class CeilSignal:
+        # A stand-in for aiqt_hooks.signal (the module-global the window's arming goes through): setitimer
+        # rounds a positive countdown up to whole seconds; everything else is the signal module.
+        @staticmethod
+        def setitimer(which, seconds, interval=0.0):
+            late = seconds if seconds <= 0 or seconds == int(seconds) else float(int(seconds)) + 1.0
+            return signal.setitimer(which, late, interval)
+
+        def __getattr__(self, name):
+            return getattr(signal, name)
+
+    saved = aiqt_hooks.signal
+    aiqt_hooks.signal = CeilSignal()
+    try:
+        with _stub_handler("diff_source_pretool", _stall()):
+            code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
+    finally:
+        aiqt_hooks.signal = saved
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, signal.SIG_DFL)
+    if code != 2 or "could not reach a decision" not in err:
+        out.append("(dl-ceil-flip-fires) the ceil-rounded arming must still fire the deadline and fail "
+                   "closed, got exit {} after {:.2f}s and {!r}".format(code, seconds, err))
+    elif seconds <= 0.1 + _DEADLINE_LATE_ALLOWANCE:
+        out.append("(dl-ceil-flip-late) the ceil-rounded arming fired within {:.2f}s, inside the bound the "
+                   "lateness checks allow, so the flip would not be caught; it must fire only around the "
+                   "rounded whole second (took {:.2f}s)".format(0.1 + _DEADLINE_LATE_ALLOWANCE, seconds))
     return out
 
 
@@ -5827,7 +5881,8 @@ def _deadline_restore_failures():
     if problem:
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
                    "the timer as found, {}".format(problem))
-    # The stub stalls for 3 s, short of the outer window's 5 s, so only the inner deadline gives exit 2. The
+    # The stub stalls for 3 s, short of the outer window's 5 s, so only the inner deadline gives exit 2,
+    # and it must fire within the inner call's requested 0.1 s budget plus the load allowance. The
     # outer countdown, armed after `began`, has at least 5 s less the time from `began` to its read left.
     began = time.monotonic()
     with aiqt_hooks._DeadlineWindow(5.0):
@@ -5835,7 +5890,8 @@ def _deadline_restore_failures():
             code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
         inside = signal.getitimer(signal.ITIMER_REAL)
         read = time.monotonic()
-    if (code != 2 or not 5.0 - (read - began) - 1e-5 <= inside[0] <= 5.0
+    if (code != 2 or seconds > 0.1 + _DEADLINE_LATE_ALLOWANCE
+            or not 5.0 - (read - began) - 1e-5 <= inside[0] <= 5.0
             or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
             or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
         out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer window "
@@ -7216,13 +7272,17 @@ def _deadline_outer_deadline_failures():
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
         signal.signal(signal.SIGUSR1, saved)
-    if not (caught == "the outer deadline" and len(injector.at) == 2 and len(ran) == 2
+    # The outer deadline must fire within its own requested 0.3 s window plus the load allowance: a window
+    # left armed late (e.g. an arming rounded up to whole seconds) is caught here, not absorbed.
+    if not (caught == "the outer deadline" and used <= 0.3 + _DEADLINE_LATE_ALLOWANCE
+            and len(injector.at) == 2 and len(ran) == 2
             and inner_armed is False and not inner.armed and not outer.armed
             and handler == signal.SIG_DFL and timer == (0.0, 0.0)):
         out.append("(dl-defer-twice-outer-deadline) two raising handlers at an inner window's first two close "
-                   "attempts must leave the outer deadline to fire, got {} after {:.2f}s, injected at {!r}, "
-                   "inner armed {} after its with statement, armed {} and {}".format(
-                       caught, used, injector.at, inner_armed, inner.armed, outer.armed))
+                   "attempts must leave the outer deadline to fire within {:.2f}s, got {} after {:.2f}s, "
+                   "injected at {!r}, inner armed {} after its with statement, armed {} and {}".format(
+                       0.3 + _DEADLINE_LATE_ALLOWANCE, caught, used, injector.at, inner_armed, inner.armed,
+                       outer.armed))
     return out
 
 
@@ -7829,7 +7889,8 @@ def _deadline_entry_message_failures():
 def _deadline_child(tmp):
     """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
     process; returns their failures."""
-    return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
+    return (_deadline_path_failures() + _deadline_ceil_flip_failures() + _deadline_restore_failures()
+            + _deadline_race_failures()
             + _deadline_take_failures() + _deadline_defer_failures() + _deadline_enclosing_restore_failures()
             + _deadline_rearm_failures() + _deadline_discard_failures() + _deadline_alarm_failures()
             + _deadline_mask_failures() + _deadline_mask_thread_failures() + _deadline_no_c_mask_failures()

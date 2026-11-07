@@ -1638,18 +1638,23 @@ def _watchdog_isolation_self_test(launch=None):
     return EXIT_FINDING if failed else EXIT_OK
 
 
-# Budget allowance for one deadline case, not a verdict: the deadline case
-# judges the mechanism by cause (the deadline the guardian armed, and the
-# recorded outcome and order of its cancel attempts), never by how much wall
-# time execution consumed, so no execution-latency ceiling decides a pass.
-# This allowance remains only in the per-case subprocess budget
-# (_deadline_case_budget) and the regression runner's leg charges, as the
-# generous safety stop on a run that never issues its verdict. Sizing note
-# kept from the measured bound it replaced: worst observed `cancelled -
+# Shared lateness allowance for one deadline case. The case judges the
+# mechanism by cause (the deadline the launched guardian will enforce, and
+# the recorded outcome and order of its cancel attempts), never by how much
+# wall time execution consumed; this allowance bounds only how long AFTER
+# that recorded deadline the first effective cancel may be observed, so an
+# enforcement path that reacts long after the deadline it recorded is red
+# by its recorded cause, while an honest cancel delayed by host load stays
+# green. The same figure remains the per-case subprocess budget's execution
+# term (_deadline_case_budget) and the regression runner's leg charges, the
+# generous safety stop on a run that never issues its verdict. Sizing, kept
+# from the measured bound this generalises: worst observed `cancelled -
 # start` for the pipe-stall and transient-census cases under 24 dedicated
 # CPU-pressure workers on a 16-CPU host already running at loadavg ~16-37
-# (12 runs, 2026-09-28) was 0.343 s against the requested 0.25 s timeout; 5.0
-# s allows about 50x that worst scheduling overshoot.
+# (12 runs, 2026-09-28) was 0.343 s against the requested 0.25 s timeout;
+# 5.0 s allows about 50x that worst scheduling overshoot, and sits under
+# the 6 s delay the late-enforcement vector forces, so that vector stays
+# red at any load (delay only adds to an already-exceeded lateness).
 _DEADLINE_EXECUTION_BOUND = 5.0
 # The deadline fixture's requested run_bounded timeout, and the allowance it
 # grants after the guardian's declared drain deadline for receipt delivery and
@@ -4142,19 +4147,25 @@ def _watchdog_deadline_case(mode):
     real_process = _opf_emit._FixtureProcess
     empty_since = [None]
     events = tempfile.TemporaryFile()
-    # Every guardian armed during this case, as (its absolute execution
-    # deadline, the clock at arming). The deadline is judged by what was
-    # armed and by what the cancel mechanism then did, never by how much
-    # wall time the run consumed.
+    # Every guardian launched during this case, as (the absolute execution
+    # deadline it will enforce, the clock at launch). The deadline is judged
+    # by what will be enforced and by what the cancel mechanism then did,
+    # never by how much wall time the run consumed.
     armed = []
 
     class TrackedProcess(real_process):
         # A subclass, not a factory function: callers patch attributes on
         # _opf_emit._FixtureProcess (the missing-reap safety case), and that
         # must keep working while this case has the name patched.
-        def __init__(self, deadline, **kwargs):
-            armed.append((deadline, time.monotonic()))
-            super().__init__(deadline, **kwargs)
+        def start(self):
+            # Record the deadline the cancel path will enforce: self.deadline
+            # is the attribute the guardian's supervision loop and its cleanup
+            # derivation read, sampled at the last parent-side step before the
+            # guardian is launched -- never the constructor argument, which a
+            # construction that stores a different deadline than it was given
+            # would not enforce.
+            armed.append((self.deadline, time.monotonic()))
+            return super().start()
 
     def record(row):
         os.write(events.fileno(), (json.dumps(row) + "\n").encode("ascii"))
@@ -4210,16 +4221,21 @@ def _watchdog_deadline_case(mode):
         # remaining at arming (arming can only follow run_bounded's own
         # clock sample, so delay only shrinks the remainder; a deadline
         # armed past the request fails this however lightly loaded the
-        # host is); the first cancel attempt took effect; and it was not
-        # observed before the armed deadline. A guardian that never
-        # cancels is stopped by the enclosing per-case budget
-        # (_deadline_case_budget), a safety stop, not this verdict.
+        # host is); the first cancel attempt took effect; and it was
+        # observed neither before the enforced deadline nor more than the
+        # shared lateness allowance (_DEADLINE_EXECUTION_BOUND, generous
+        # for a loaded host) after it, so enforcement that reacts long
+        # after the deadline it recorded is red by cause, however the
+        # delay arose. A guardian that never cancels is stopped by the
+        # enclosing per-case budget (_deadline_case_budget), a safety
+        # stop, not this verdict.
         execution_ok = (
             len(armed) == 1
             and armed[0][0] >= start + _DEADLINE_CASE_TIMEOUT
             and armed[0][0] - armed[0][1] <= _DEADLINE_CASE_TIMEOUT
             and bool(sends) and bool(sends[0][2])
             and sends[0][1] >= armed[0][0]
+            and sends[0][1] - armed[0][0] <= _DEADLINE_EXECUTION_BOUND
         )
         # Cleanup is checked against its own declared deadline. One second
         # (_DEADLINE_RECEIPT_ALLOWANCE) is allowed separately for receipt
@@ -5678,6 +5694,35 @@ def _watchdog_completion_case(mode, tree=None):
         # success).
         with patch.object(emit, "_fixture_signal", census_only):
             assert _watchdog_deadline_case("transient-census") == EXIT_FINDING
+        # Late ENFORCEMENT is red by cause: both reaction paths -- the
+        # guardian's supervision loop, which reads self.deadline after the
+        # fork, and the parent's close(), the only cancel route once
+        # run_bounded's own loop breaks -- act 6 s after the honestly
+        # armed deadline. The launch record keeps the honest deadline, so
+        # only the recorded cancel's lateness against the enforced
+        # deadline, bounded by the shared lateness allowance
+        # (_DEADLINE_EXECUTION_BOUND, 5.0 < 6), can fail this run, and it
+        # fails under any host load: a load stall delays the cancel
+        # further, never back under an already-exceeded allowance.
+        real_process, held = emit._FixtureProcess, []
+
+        class LateEnforcement(real_process):
+            def _guardian(self):
+                # Guardian-side only (runs after the fork): the parent-side
+                # launch record keeps the deadline the caller requested.
+                self.deadline += 6.0
+                return real_process._guardian(self)
+
+            def close(self):
+                if not held:
+                    held.append(True)
+                    time.sleep(6.0)
+                return real_process.close(self)
+
+        with patch.object(emit, "_FixtureProcess", LateEnforcement):
+            assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
+        # On-time control: the same case, unflipped, passes the same checks.
+        assert _watchdog_deadline_case("pipe-stall") == EXIT_OK
     elif mode == "subject-setup":
         real_subreaper, real_setsid = emit._fixture_subreaper, os.setsid
         in_guardian = [False]
@@ -7564,6 +7609,7 @@ def _watchdog_completion_case(mode, tree=None):
                         failures.append("unexpected: " + repr(exc))
 
                 worker = threading.Thread(target=cancel, daemon=True)
+                begun = time.monotonic()
                 with patch.object(signal, "pidfd_send_signal", rec_pidfd), \
                         patch.object(os, "killpg", rec_killpg), \
                         patch.object(emit, "_fixture_escalate_subject",
@@ -7576,11 +7622,18 @@ def _watchdog_completion_case(mode, tree=None):
                     if blocked:
                         os.kill(pid, signal.SIGCONT)  # unwedge the leak before failing
                         worker.join(30)
-                # The bounded join above is the evidence that close() returned
-                # within its cleanup budget; total wall time is not judged.
+                elapsed = time.monotonic() - begun
                 assert not blocked, "close() blocked past its bounded cleanup budget"
                 assert failures and "escalat" in failures[0], failures
                 assert emit._fixture_child_reaped(pid) is True
+                # Beyond the bounded join (a hang stop only), the whole
+                # cancel is held to a declared budget: with the cleanup
+                # grace patched to 1.0 s, close() against the frozen
+                # guardian owes about two grace periods plus the escalation
+                # grace -- a few seconds -- so 15 s is that budget with a
+                # generous allowance for a loaded host, and it stays under
+                # the 20 s join above, which proves nothing tighter.
+                assert elapsed < 15, elapsed
                 return pid, guardian_fd, subject, descendant, sequence, failures
 
         pid, guardian_fd, subject, descendant, sequence, failures = exercise(flip=False)
@@ -16068,7 +16121,12 @@ def _watchdog_regression_self_test():
          + 9 * _deadline_case_budget(_TREE_VECTOR_BACKSTOP)
          + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
-        ("bounded-diagnostics", 66), ("cleanup-budget", 21), ("deadline-flips", 77),
+        ("bounded-diagnostics", 66), ("cleanup-budget", 21),
+        # deadline-flips: the pre-existing three nested runs' declared base
+        # (77), plus the late-enforcement vector's two nested fixture calls
+        # at the pristine 0.25 s allowance (11 each) and the 6 s parent
+        # hold its flipped run makes inside close().
+        ("deadline-flips", 77 + 11 + 11 + 6),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),
