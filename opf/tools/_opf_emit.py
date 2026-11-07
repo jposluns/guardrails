@@ -3070,10 +3070,19 @@ def _fixture_stdout_tail(stdout):
 
     Some fixtures (the watchdog group's among them) print which check failed to stdout, so the
     child's stderr alone can arrive with no cause. Only the last _FIXTURE_STDOUT_TAIL_BYTES bytes
-    are kept, so a fixture that prints a lot cannot flood the message; a cut is marked with the
-    total size, and the bytes are decoded with errors="replace".
+    of stdout are kept, so the stdout part of the message is bounded; the stderr part is not
+    bounded, as before the stdout part was added. A cut is marked with the total size, and the
+    bytes are decoded with errors="replace".
+
+    The bound counts input bytes, not the decoded text: each undecodable byte becomes U+FFFD,
+    three bytes in UTF-8, so 4096 undecodable bytes can become up to 12288 bytes of UTF-8.
+
+    Empty stdout returns an empty string, so a child that printed nothing gets the message it
+    got before the stdout part was added, with no bare label.
     """
     limit = _FIXTURE_STDOUT_TAIL_BYTES
+    if not stdout:
+        return ""
     if len(stdout) <= limit:
         return "\nstdout: " + stdout.decode("utf-8", "replace")
     return ("\nstdout (last {} of {} bytes, earlier output cut): ".format(limit, len(stdout))
@@ -3774,9 +3783,11 @@ def _st_fixture_stdout_diagnosis():
     """A fixture child that prints its diagnosis to stdout and exits without its completion trailer
     raises FixtureIncomplete, and the message keeps its prefix and carries that line under the stdout
     label. The flip swaps _fixture_stdout_tail for one returning nothing (the message without the
-    stdout part) and requires the same check to go red. The bound is checked with stdout just under,
-    exactly at and just over _FIXTURE_STDOUT_TAIL_BYTES, and with a cut that splits a UTF-8 sequence.
-    Returns the failures."""
+    stdout part) and requires the same check to go red. A child that prints nothing and exits without
+    its trailer gets exactly the prefix and its stderr, with no bare stdout label; its flip restores a
+    helper that labels empty stdout and requires that check to go red. The bound is checked with stdout
+    just under, exactly at and just over _FIXTURE_STDOUT_TAIL_BYTES, and with a cut that splits a
+    UTF-8 sequence. Returns the failures."""
     import sys
     failures = []
     known = "OPF-EMIT-STDOUT-DIAGNOSIS: watchdog check 7 failed"
@@ -3808,6 +3819,33 @@ def _st_fixture_stdout_diagnosis():
     if not flipped:
         failures.append("fixture-stdout-diagnosis flip: with the stdout part removed the check stayed green")
 
+    # A child that prints nothing (stdout and stderr both empty) and exits without its trailer: the
+    # message is exactly the prefix, as it was before the stdout part was added, with no bare label.
+    empty_id = "emit/stdout-empty"
+    empty_body = "import os\nos._exit(0)"
+
+    def check_empty():
+        try:
+            run_status_owned([sys.executable, "-I", "-B", "-c", empty_body],
+                             fixture_id=empty_id, timeout=60)
+        except FixtureIncomplete as exc:
+            message = str(exc)
+        else:
+            return ["a fixture without its completion trailer was accepted"]
+        want = "missing/mismatched completion for " + empty_id + ": "
+        if message != want:
+            return ["expected exactly {!r}, got {!r}".format(want, message[:200])]
+        return []
+
+    failures += ["fixture-stdout-empty: " + problem for problem in check_empty()]
+    globals()["_fixture_stdout_tail"] = lambda stdout: real_tail(stdout) if stdout else "\nstdout: "
+    try:
+        flipped_empty = check_empty()
+    finally:
+        globals()["_fixture_stdout_tail"] = real_tail
+    if not flipped_empty:
+        failures.append("fixture-stdout-empty flip: with a bare label for empty stdout the check stayed green")
+
     limit = _FIXTURE_STDOUT_TAIL_BYTES
     for size in (limit - 1, limit, limit + 1):
         data = b"a" * (size - 1) + b"Z"
@@ -3820,13 +3858,18 @@ def _st_fixture_stdout_diagnosis():
         if got != want:
             failures.append("fixture-stdout-bound/{}: expected {!r}, got {!r}".format(
                 size, want[:80] + "..." + want[-20:], got[:80] + "..." + got[-20:]))
+    # The kept tail is the last limit input bytes; here it starts with one lone continuation byte. That
+    # byte decodes to U+FFFD, three bytes in UTF-8, so the tail re-encoded is exactly limit + 2 bytes.
+    # This checks the input-byte bound for this input, not a bound on the decoded size, which can reach
+    # three times limit when every kept byte is undecodable.
     split = b"\xc3\xa9" * limit + b"x"
     got = _fixture_stdout_tail(split)
     label = "\nstdout (last {} of {} bytes, earlier output cut): ".format(limit, len(split))
     if not (got.startswith(label + chr(0xFFFD)) and got.endswith(chr(0xE9) + "x")
-            and len(got[len(label):].encode("utf-8")) <= limit + 2):
+            and len(got[len(label):].encode("utf-8")) == limit + 2):
         failures.append("fixture-stdout-bound/split-utf8: expected a replaced partial sequence and a "
-                        "bounded tail, got {!r}".format(got[:120]))
+                        "tail of limit input bytes that re-encodes to exactly limit + 2 bytes, got "
+                        "{!r}".format(got[:120]))
     return failures
 
 
