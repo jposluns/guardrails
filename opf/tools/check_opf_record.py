@@ -3632,12 +3632,21 @@ def t27b_homes2_report(fx):
 
 
 def flip_t27b():
-    """Drop the journal_rel key from the report: the advice has no fallback home (the legacy one is
-    deleted), so the success report fails instead of naming the typed home."""
+    """The success report emitted without its journal_rel key: the JSON report line the verb prints
+    omits journal_rel, while the run still records and exits 0. Only the printed report is changed
+    (the report object, and so the commit advice read from it, is left whole), because the advice has
+    no fallback home (the legacy one is deleted): dropping the key from the object itself raises a
+    KeyError at the advice, a red met at the backstop rather than at the case's journal_rel assertion."""
     original = record._emit_success
+    dumps = json.dumps
 
     def without_journal_rel(report):
-        return original({k: v for k, v in report.items() if k != "journal_rel"})
+        stripped = {k: v for k, v in report.items() if k != "journal_rel"}
+
+        def dumping(obj, *args, **kwargs):
+            return dumps(stripped if obj is report else obj, *args, **kwargs)
+        with patch.object(record.json, "dumps", dumping):
+            return original(report)
     return patch.object(record, "_emit_success", without_journal_rel)
 
 
@@ -3729,14 +3738,16 @@ def _claims_retyped(payload, literal):
 
 
 def flip_t22_refuse():
-    """The reviewed head seam: a homes-2 claim raises instead of deriving and reserving."""
+    """The reviewed head seam: a homes-2 claim raises instead of deriving and reserving. Every argument
+    after homes passes through unchanged, so a keyword the live seam gains (imported_series) reaches it
+    and the flip stays a refusal on homes alone, never a signature TypeError at the backstop."""
     seam = record.claim_ids
 
-    def refusing(homes, high, demand, known_complete, reserved=None):
+    def refusing(homes, *args, **kwargs):
         if homes != 1:
             raise record.RecordError("homes-{} id allocation is not active in this build; refusing "
                                      "(the reviewed head seam)".format(homes))
-        return seam(homes, high, demand, known_complete)
+        return seam(homes, *args, **kwargs)
     return patch.object(record, "claim_ids", refusing)
 
 
@@ -5992,7 +6003,9 @@ def t116_own_capability_release_interrupt(fx):
 
 def flip_t116():
     """The self-acquired path's narrow release handler (OpLockError only): the interrupt raised by
-    the release passes through and displaces the publication refusal."""
+    the release passes through and displaces the publication refusal. The case calls _publish_homes2
+    in process, so its red is the case's own refusal assertion: the flip declares no backstop injection
+    (_INTENDED_BACKSTOPS), and any backstop line in its flipped run fails the discrimination."""
     original = record._publish_homes2
 
     def narrow_release(ctx, plan, subcommand, cap=None, run_id=None):
@@ -7964,7 +7977,6 @@ _SUBSTRING_BACKSTOPS = {
     flip_t64_recovery: ("BrokenPipeError(32, 'synthetic emission failure')",),
     flip_t68: ("MemoryError('synthetic allocation failure after the acquisition')",),
     flip_t77: ("OSError({}, ".format(errno.EMFILE),),
-    flip_t116: ("OSError({}, 'T116 injected".format(errno.EIO),),
     flip_t84: ("RecursionError('maximum recursion depth exceeded')",),
     flip_t85_derive_record: ("ValueError('synthetic underivable record home')",),
     _t86_declared_flip: ("NameError('t86 broken flip fixture')",),
@@ -8912,7 +8924,6 @@ _DECLARED_INJECTIONS = {
     "t69-release": (lambda: RuntimeError("fd release witness"),),
     "t69-token": (lambda: MemoryError("synthetic token allocation failure"),),
     "t77-emfile": (lambda: OSError(errno.EMFILE, "T77 injected: EMFILE on the retried claim"),),
-    "t116-dir-close": (lambda: OSError(errno.EIO, "T116 injected: the lease directory close fails"),),
     "t84-recursion": (lambda: RecursionError("maximum recursion depth exceeded"),),
     "t85-record-underivable": (lambda: ValueError("synthetic underivable record home"),),
     "t86-declared": (lambda: NameError("t86 broken flip fixture"),),
@@ -8926,8 +8937,8 @@ _DECLARED_INJECTIONS = {
 # an expected label and is the shared backstop envelope around exactly a repr the parent computed for that
 # injection before the child ran (_oop_declared, _bound_injection_oop; under the T87 flip
 # _discriminate_in_process: the in-process _injected, _EmissionStderr, _note_backstops and _bound_injection);
-# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T85, and
-# T116's, are each recorded by one test's injection site alone, so each of those declarations binds the test, the flip
+# any other backstop or exception in the flipped run fails the discrimination. The labels of T18 to T85 are
+# each recorded by one test's injection site alone, so each of those declarations binds the test, the flip
 # and the injection together (T69's two tests share one reverted _publish, so each has a flip of its own that
 # expects its own test's injection, and so has the record kind's underivable leg of T85), except
 # t22-t81-string-claims, which T22 and T81 record at the one site their shared string-claims flip lets a
@@ -8953,7 +8964,6 @@ _INTENDED_BACKSTOPS = {
     flip_t64_recovery: ("t64-emit",),
     flip_t68: ("t68-mark-copy",),
     flip_t77: ("t77-emfile",),
-    flip_t116: ("t116-dir-close",),
     flip_t84: ("t84-recursion",),
     flip_t85_derive_record: ("t85-record-underivable",),
     _t86_declared_flip: ("t86-declared",),
