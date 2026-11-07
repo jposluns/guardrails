@@ -16,13 +16,24 @@ either served card or into site/assets/ or opf/site/assets/, or whose case-folde
 anywhere (any checkout's served assets directory or anything inside one, not only this one's), is refused
 with exit 2 before Chrome is started, and each card path is checked again just before it is written. The
 output directory is also opened before any render and again by each write, without following a final
-symlink, and refused when its device and inode match a served assets directory or an ancestor of one up to
-the repository root (never a directory above the root), or when any parent reached from that open
-descriptor (an openat of "..", no path re-resolution, so a parent swapped in after the path checks cannot
-hide it) matches a served assets directory. The write never opens the card name: the bytes are renamed onto
-the card name from a new exclusively created temporary file, so a hard link or a planted symlink at that
-name is replaced as a directory entry, never written through; the temporary file is removed on any failure,
-an interrupt included. Each card is a 1200 by 627 PNG below 1 MB; a render
+symlink; a missing output directory is created only after the nearest existing ancestor has been opened
+and has passed every check, one mkdir at a time through the checked parent's descriptor, so a refused race
+never leaves a directory inside a served assets directory. The opened directory is refused when its device
+and inode match a served assets directory or an ancestor of one up to the repository root (never a
+directory above the root), when any parent reached from that open descriptor (an openat of "..", no path
+re-resolution, so a parent swapped in after the path checks cannot hide it) matches a served assets
+directory, or when the path read back from the descriptor itself (/proc/self/fd, confirmed against the
+descriptor's identity, so the name check binds to the opened object and not to the typed name) contains a
+served assets directory name, which refuses a component swapped to another checkout's served assets after
+the path checks; where that path cannot be read back, the write is refused (fail closed). An output
+directory whose parents the identity walk cannot open (for example one under an ancestor that is
+traversable but not readable where O_PATH is unavailable) is refused with the failure as the reason: the
+walk fails closed even where a plain write would succeed. The write never opens the card name: the bytes
+are renamed onto the card name from a new exclusively created temporary file, so a hard link or a planted
+symlink at that name is replaced as a directory entry, never written through; the temporary file is
+removed on any failure, an interrupt included (an interrupt can still leave a file descriptor, the
+temporary file's or an O_PATH one held by the parent walk, open for the moment the interrupted process
+takes to exit; no directory entry is left behind). Each card is a 1200 by 627 PNG below 1 MB; a render
 that gives another size or a larger file is refused (exit 1) and nothing is kept. Exit 2 when
 /usr/bin/google-chrome is missing or not executable (checked before any render); a Chrome launch that then
 fails (an OSError or a timeout from the subprocess) is reported and exits 1, like any other failed render.
@@ -138,13 +149,40 @@ def _assets_identities():
 _WALK_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY
 
 
+def _opened_dir_path(dir_fd):
+    """The path of the directory open as dir_fd, read back from the descriptor itself (/proc/self/fd) and
+    confirmed to name the same device and inode the descriptor holds, or None where the platform cannot
+    give one or the read-back path no longer names the opened directory (a deleted directory included).
+    The caller refuses on None: the name check must bind to the opened object, never to the typed name."""
+    try:
+        real = os.readlink("/proc/self/fd/{}".format(dir_fd))
+    except OSError:
+        return None
+    if not os.path.isabs(real):
+        return None
+    try:
+        status = os.stat(real)
+    except OSError:
+        return None
+    opened = os.fstat(dir_fd)
+    if (status.st_dev, status.st_ino) != (opened.st_dev, opened.st_ino):
+        return None
+    return real
+
+
 def _opened_dir_refusal(dir_fd, directory):
-    """None when neither the directory open as dir_fd nor any parent reached from that descriptor is a
-    refused identity, otherwise the plain reason. The directory itself is refused when its device and inode
-    match a served assets directory or an ancestor of one up to the repository root; each parent, reached
-    by an openat of ".." from the descriptor (never a path, so a parent swapped in after the path checks
-    cannot redirect the walk), is refused when it matches a served assets directory, which refuses a write
-    anywhere inside one. The walk ends at the filesystem root, where ".." is the directory itself."""
+    """None when the directory open as dir_fd is not a refused identity, no parent reached from that
+    descriptor is one, and the path read back from the descriptor passes the served-assets name check,
+    otherwise the plain reason. The directory itself is refused when its device and inode match a served
+    assets directory or an ancestor of one up to the repository root; each parent, reached by an openat of
+    ".." from the descriptor (never a path, so a parent swapped in after the path checks cannot redirect
+    the walk), is refused when it matches a served assets directory, which refuses a write anywhere inside
+    one. The walk ends at the filesystem root, where ".." is the directory itself. The identity checks
+    only know this checkout's served assets, so the name check is then applied to the opened directory's
+    own path, read back from the descriptor: a component swapped to another checkout's served assets after
+    the typed-name checks is refused here, and a directory whose path cannot be read back is refused too
+    (fail closed). An interrupt can leave one O_PATH walk descriptor open for the moment the process takes
+    to exit; the walk never leaves a directory entry behind."""
     directories, held = _assets_identities()
     status = os.fstat(dir_fd)
     if (status.st_dev, status.st_ino) in held:
@@ -155,7 +193,7 @@ def _opened_dir_refusal(dir_fd, directory):
         while True:
             parent = os.fstat(fd)
             if (parent.st_dev, parent.st_ino) == (status.st_dev, status.st_ino):
-                return None
+                break
             if (parent.st_dev, parent.st_ino) in directories:
                 return ("{} is inside a served assets directory (a parent has its device and inode), "
                         "whatever path reaches it".format(directory))
@@ -165,27 +203,83 @@ def _opened_dir_refusal(dir_fd, directory):
             os.close(previous)
     finally:
         os.close(fd)
+    real = _opened_dir_path(dir_fd)
+    if real is None:
+        return ("the output directory {} cannot be read back from its open descriptor, so the name check "
+                "cannot bind to the opened directory; refused (fail closed)".format(directory))
+    return _name_refusal(real)
+
+
+def _checked_dir_fd(directory):
+    """directory opened with O_RDONLY | O_DIRECTORY | O_NOFOLLOW and already past _opened_dir_refusal,
+    missing final components created one mkdir at a time through their parent's descriptor only after that
+    parent has itself been opened and has passed every check, so nothing is ever created under a directory
+    that fails the checks and a refused race leaves no directory behind. Raises Refused for a refused,
+    symlinked or unwalkable directory and OSError for a plain open failure; the caller closes the returned
+    descriptor, which is closed here on every failure."""
+    missing = []
+    probe = Path(os.path.normpath(os.fspath(directory)))
+    while True:
+        try:
+            fd = os.open(probe, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            break
+        except FileNotFoundError:
+            if probe.parent == probe:
+                raise
+            missing.append(probe.name)
+            probe = probe.parent
+        except OSError as exc:
+            if exc.errno == errno.ELOOP or (exc.errno == errno.ENOTDIR and os.path.islink(probe)):
+                raise Refused("{} is a symlink, not opened as the output directory".format(probe)) from exc
+            raise
+    try:
+        while True:
+            try:
+                reason = _opened_dir_refusal(fd, probe)
+            except OSError as exc:
+                raise Refused(
+                    "cannot walk the parents of the output directory {} ({}); an ancestor the walk cannot "
+                    "open, for example one that is traversable but not readable where O_PATH is "
+                    "unavailable, stops the identity walk, and the script fails closed even where a plain "
+                    "write would succeed".format(probe, exc)) from exc
+            if reason:
+                raise Refused(reason)
+            if not missing:
+                return fd
+            name = missing.pop()
+            try:
+                os.mkdir(name, 0o777, dir_fd=fd)
+            except FileExistsError:
+                pass
+            try:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise Refused("{} is a symlink, not opened as the output directory".format(
+                        probe / name)) from exc
+                raise
+            previous, fd = fd, child
+            os.close(previous)
+            probe = probe / name
+    except BaseException:
+        os.close(fd)
+        raise
 
 
 def _out_dir_identity_refusal(out_dir):
-    """The identity refusal for out_dir, created when missing and opened exactly as each write opens it, or
+    """The identity refusal for out_dir, opened exactly as each write opens it (any missing component
+    created only through its checked parent's descriptor, so a refused directory is never created), or
     None when it is accepted; run before any render, so a refused output directory never starts Chrome. A
-    directory that cannot be created, opened or walked is refused with the failure as the reason: a render
-    could only fail the same way later."""
-    directory = Path(out_dir)
+    directory that cannot be created, opened or walked is refused with the failure as the reason: an
+    unwalkable ancestor fails closed, and a render could only fail the same way later."""
     try:
-        os.makedirs(directory, exist_ok=True)
-        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        dir_fd = _checked_dir_fd(Path(out_dir))
+    except Refused as exc:
+        return str(exc)
     except OSError as exc:
-        if exc.errno == errno.ELOOP or (exc.errno == errno.ENOTDIR and os.path.islink(directory)):
-            return "{} is a symlink, not opened as the output directory".format(directory)
-        return "cannot open the output directory {} ({})".format(directory, exc)
-    try:
-        return _opened_dir_refusal(dir_fd, directory)
-    except OSError as exc:
-        return "cannot walk the parents of the output directory {} ({})".format(directory, exc)
-    finally:
-        os.close(dir_fd)
+        return "cannot open the output directory {} ({})".format(out_dir, exc)
+    os.close(dir_fd)
+    return None
 
 
 def card_targets(out_dir):
@@ -211,61 +305,62 @@ def png_size(data):
     return struct.unpack(">II", data[16:24])
 
 
+def _unlink_temp(temp_name, dir_fd):
+    """Remove the temporary card entry temp_name through dir_fd, quietly: a file the interrupted creation
+    never reached (ENOENT) or cannot remove is not a second failure to report over the first."""
+    try:
+        os.unlink(temp_name, dir_fd=dir_fd)
+    except OSError:
+        pass
+
+
 def _write_card(path, data):
     """Write data as the card at path without ever opening the card name for writing: the bytes go to a new
     temporary file created exclusively inside the directory and are renamed onto the card name, so a hard
     link or a symlink planted at that name (even between the last check and the write) is replaced as a
-    directory entry, never followed or truncated. The directory is created only after the path refusals have
-    passed, opened without following a final symlink, and refused when its identity, or a parent's reached
-    from the open descriptor, is a served assets directory, or when its own identity is an ancestor of one
-    up to the repository root. Raises Refused for a refused directory; returns an error string for a plain
-    I/O failure; re-raises any other failure (an interrupt included) with the temporary file removed; None
-    when the card is written."""
+    directory entry, never followed or truncated. The directory is opened without following a final symlink
+    and any missing component is created only through its checked parent's descriptor, after every refusal
+    has passed, so a refused race never leaves a directory behind; the opened directory is refused when its
+    identity, or a parent's reached from the open descriptor, is a served assets directory, when its own
+    identity is an ancestor of one up to the repository root, or when the path read back from its
+    descriptor contains a served assets directory name (another checkout's included). Raises Refused for a
+    refused directory; returns an error string for a plain I/O failure; re-raises any other failure (an
+    interrupt included) with the temporary file removed, the temporary file's creation itself covered by a
+    cleanup that uses only its name (a descriptor can still be left open for the moment an interrupted
+    process takes to exit); None when the card is written."""
     directory = path.parent
     reason = _name_refusal(directory)
     if reason:
         raise Refused(reason)
-    os.makedirs(directory, exist_ok=True)
     try:
-        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        dir_fd = _checked_dir_fd(directory)
     except OSError as exc:
-        if exc.errno == errno.ELOOP or (exc.errno == errno.ENOTDIR and os.path.islink(directory)):
-            raise Refused("{} is a symlink, not opened as the output directory".format(directory)) from exc
         return "cannot open the output directory {} ({})".format(directory, exc)
     try:
-        try:
-            reason = _opened_dir_refusal(dir_fd, directory)
-        except OSError as exc:
-            return "cannot walk the parents of the output directory {} ({})".format(directory, exc)
-        if reason:
-            raise Refused(reason)
         temp_name = ".{}.{}.tmp".format(path.name, os.urandom(8).hex())
-        try:
-            fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
-                         dir_fd=dir_fd)
-        except OSError as exc:
-            return "cannot create a temporary card file in {} ({})".format(directory, exc)
+        fd = -1
         try:
             try:
-                view = memoryview(data)
-                while view:
-                    view = view[os.write(fd, view):]
-                os.fsync(fd)
-            finally:
-                os.close(fd)
+                fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
+                             dir_fd=dir_fd)
+            except OSError as exc:
+                return "cannot create a temporary card file in {} ({})".format(directory, exc)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+            fd, pending = -1, fd
+            os.close(pending)
             os.replace(temp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         except OSError as exc:
-            try:
-                os.unlink(temp_name, dir_fd=dir_fd)
-            except OSError:
-                pass
+            _unlink_temp(temp_name, dir_fd)
             return "cannot write {} through its directory {} ({})".format(path.name, directory, exc)
         except BaseException:
-            try:
-                os.unlink(temp_name, dir_fd=dir_fd)
-            except OSError:
-                pass
+            _unlink_temp(temp_name, dir_fd)
             raise
+        finally:
+            if fd != -1:
+                os.close(fd)
         return None
     finally:
         os.close(dir_fd)
@@ -676,6 +771,111 @@ def _self_test():
         check("write/temp-removed-on-interrupt",
               got is KeyboardInterrupt and os.listdir(clean_dir) == [], (got, os.listdir(clean_dir)))
 
+        # The checks that bind to the opened directory, not the typed name: a parent swapped to another
+        # checkout's served assets after the typed-name check (whose identity no device-and-inode set can
+        # know) is refused by the path read back from the opened descriptor; a directory whose path cannot
+        # be read back is refused, and nothing is created for it; a refused race never leaves a directory
+        # inside served assets, from the write or from the pre-render identity check; missing components
+        # are still created for an accepted directory; an unwalkable ancestor fails closed with the cause
+        # stated; an interrupt during the temporary file's own creation leaves no file behind.
+        other_assets = Path(tmp) / "other" / "site" / "assets"
+        os.makedirs(other_assets / "sub")
+        swap_other = Path(tmp) / "swap-other"
+        os.makedirs(swap_other / "sub")
+        real_name_refusal = _name_refusal
+
+        def _swap_to_other_then_real(swapped_path):
+            if not os.path.islink(swap_other):
+                os.rename(swap_other, Path(tmp) / "swapped-other")
+                os.symlink(other_assets, swap_other)
+            return real_name_refusal(swapped_path)
+
+        got = _patched("ROOT", fixture, _patched, "_name_refusal", _swap_to_other_then_real, _write_to,
+                       swap_other / "sub" / served.name)
+        check("write/parent-swapped-into-other-checkout-assets-refused",
+              isinstance(got, Refused) and "served assets directory name" in str(got)
+              and os.listdir(other_assets / "sub") == [], (got, os.listdir(other_assets / "sub")))
+
+        swap_missing = Path(tmp) / "swap-missing"
+        os.makedirs(swap_missing)
+
+        def _swap_to_assets_then_real(swapped_path):
+            if not os.path.islink(swap_missing):
+                os.rename(swap_missing, Path(tmp) / "swapped-missing")
+                os.symlink(fixture / SERVED_ASSETS[0], swap_missing)
+            return real_name_refusal(swapped_path)
+
+        got = _patched("ROOT", fixture, _patched, "_name_refusal", _swap_to_assets_then_real, _write_to,
+                       swap_missing / "newdir" / served.name)
+        check("write/refused-race-creates-nothing-in-assets",
+              isinstance(got, Refused) and not os.path.exists(fixture / SERVED_ASSETS[0] / "newdir"),
+              (got, os.path.exists(fixture / SERVED_ASSETS[0] / "newdir")))
+
+        missing_under_assets = fixture / SERVED_ASSETS[0] / "new-out"
+        reason = _patched("ROOT", fixture, _out_dir_identity_refusal, str(missing_under_assets))
+        check("identity/missing-dir-under-assets-not-created",
+              isinstance(reason, str) and not os.path.exists(missing_under_assets),
+              (reason, os.path.exists(missing_under_assets)))
+
+        fresh = Path(tmp) / "fresh" / "a" / "b"
+        got = _patched("ROOT", fixture, _write_to, fresh / served.name)
+        check("write/missing-out-dir-created-through-checked-parents",
+              got is None and (fresh / served.name).read_bytes() == expected, (got,))
+
+        locked_out = Path(tmp) / "locked-out"
+        os.makedirs(locked_out)
+        real_os_open = os.open
+
+        def _denying_parent_open(open_target, flags, *args, **kwargs):
+            if open_target == ".." and kwargs.get("dir_fd") is not None:
+                raise PermissionError(errno.EACCES, "Permission denied", "..")
+            return real_os_open(open_target, flags, *args, **kwargs)
+
+        os.open = _denying_parent_open
+        try:
+            reason = _patched("ROOT", fixture, _out_dir_identity_refusal, str(locked_out))
+        finally:
+            os.open = real_os_open
+        check("walk/unsearchable-ancestor-fails-closed-with-cause",
+              isinstance(reason, str) and "cannot walk the parents" in reason and "fails closed" in reason,
+              reason)
+
+        burst_dir = Path(tmp) / "burst-out"
+        os.makedirs(burst_dir)
+
+        def _interrupting_create(open_target, flags, *args, **kwargs):
+            opened = real_os_open(open_target, flags, *args, **kwargs)
+            if flags & os.O_EXCL:
+                os.close(opened)
+                raise KeyboardInterrupt
+            return opened
+
+        os.open = _interrupting_create
+        try:
+            try:
+                got = _patched("ROOT", fixture, _write_to, burst_dir / served.name)
+            except KeyboardInterrupt:
+                got = KeyboardInterrupt
+        finally:
+            os.open = real_os_open
+        check("write/temp-removed-on-interrupt-during-create",
+              got is KeyboardInterrupt and os.listdir(burst_dir) == [], (got, os.listdir(burst_dir)))
+
+        no_proc = Path(tmp) / "no-proc-out"
+        real_readlink = os.readlink
+
+        def _failing_readlink(*args, **kwargs):
+            raise OSError(errno.ENOENT, "no descriptor path on this platform")
+
+        os.readlink = _failing_readlink
+        try:
+            got = _patched("ROOT", fixture, _write_to, no_proc / served.name)
+        finally:
+            os.readlink = real_readlink
+        check("write/descriptor-path-unreadable-fails-closed",
+              isinstance(got, Refused) and "cannot be read back" in str(got) and not os.path.exists(no_proc),
+              (got, os.path.exists(no_proc)))
+
         # main(): an output directory whose identity is a served assets directory, reached under a name the
         # path checks cannot refuse, exits 2 before render (the only place Chrome is started) is called.
         calls.clear()
@@ -701,8 +901,13 @@ def _self_test():
           "unchanged; an aliased assets directory, an ancestor of one and a parent swapped into an assets "
           "subdirectory are refused by device and inode; a directory above the repository root is accepted; a "
           "directory named like served assets is refused before it is created; a symlinked output directory is "
-          "never followed; an interrupted write removes its temporary file; Chrome is never "
-          "started)".format(len(EXECUTED)))
+          "never followed; an interrupted write removes its temporary file, the file's own creation included; "
+          "a parent swapped to another checkout's served assets after the typed-name check is refused by the "
+          "path read back from the opened descriptor, and a directory whose path cannot be read back is "
+          "refused; a refused race creates no directory inside served assets, from the write or from the "
+          "pre-render identity check, while missing components of an accepted directory are still created "
+          "through checked parents; an ancestor the walk cannot open fails closed with the cause stated; "
+          "Chrome is never started)".format(len(EXECUTED)))
     return 0
 
 

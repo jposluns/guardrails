@@ -1978,6 +1978,12 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/render_og_cards.py", "_opened_dir_refusal", "TRY", "previous", "fd", 1,
      _CS_P1.format("previous, fd = fd, above runs before os.close(previous), so the finally closes above, "
                    "never previous")),
+    ("tools/render_og_cards.py", "_checked_dir_fd", "TRY", "previous", "fd", 1,
+     _CS_P1.format("previous, fd = fd, child runs before os.close(previous), so the handler closes child, "
+                   "never previous")),
+    ("tools/render_og_cards.py", "_write_card", "TRY", "pending", "fd", 1,
+     _CS_P1.format("fd, pending = -1, fd moves the number out of fd before os.close(pending), so the "
+                   "finally's `if fd != -1` close never reaches it")),
     ("tools/gen_skill.py", "_open_dir_fd", "TRY", "prev", "fd", 1,
      _CS_P1.format("prev, fd = fd, nxt runs before os.close(prev), so the handler closes nxt (or nothing, once "
                    "an absent component left fd None), never prev")),

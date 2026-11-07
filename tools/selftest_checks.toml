@@ -5349,5 +5349,13 @@ expected-check-ids = [
   "write/dir-named-assets-refused-by-name",
   "write/symlinked-out-dir-not-followed",
   "write/temp-removed-on-interrupt",
+  # ---------- the checks bound to the opened directory, not the typed name ----------
+  "write/parent-swapped-into-other-checkout-assets-refused",
+  "write/refused-race-creates-nothing-in-assets",
+  "identity/missing-dir-under-assets-not-created",
+  "write/missing-out-dir-created-through-checked-parents",
+  "walk/unsearchable-ancestor-fails-closed-with-cause",
+  "write/temp-removed-on-interrupt-during-create",
+  "write/descriptor-path-unreadable-fails-closed",
   "main/identity-refused-out-exit-2-before-chrome",
 ]
