@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ca80a0ae9578fd569f5cc2101bd5067b318e3e3ef4cd89b3ec693f177614aa50"
+tree-sha256 = "c3b7ee31a7298e8c5c04d722fb180f5ea51e3d6ecfb6152de0f37cf8f6278a1b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3546,8 +3546,8 @@ sha256 = "450300205fcf4716161659e914ed8de24a5158df36a56e05655d8053d08ef574"
 
 [[sources]]
 path = "site/disclosure/index.html"
-bytes = 20686
-sha256 = "a6007ef4996bffecd3836503569b38500ad6f4ebc32ae4d4f1a26fb4200d73e7"
+bytes = 20512
+sha256 = "5b788e90d6e6c5efc6d4dadfc3e96d593d2c46dba8329e47adc76e2b8d153cad"
 
 [[sources]]
 path = "site/downloads/aiqt-instructions-1_5k.txt"
@@ -3611,8 +3611,8 @@ sha256 = "a6d72829acb499c049b2d73ccfc3a6b22f81d76036d65a1db1478c5aa78f7eaf"
 
 [[sources]]
 path = "site/draft-src/disclosure.toml"
-bytes = 13457
-sha256 = "2e69bb18e132b5c7e831325c0c4a4cf255f456915f999fe0a4fcb45c59f263f8"
+bytes = 13283
+sha256 = "8f8474d5c892385483da74fd73e71b66c338838c9aff9461a7f78cc7e0478fed"
 
 [[sources]]
 path = "site/draft-src/draft.toml"
