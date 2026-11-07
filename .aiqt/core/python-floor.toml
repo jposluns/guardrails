@@ -157,6 +157,7 @@ guarded-surfaces = [
     "tools/check_site_versions.py",
     "tools/check_sitemap.py",
     "tools/check_sized_instructions.py",
+    "tools/check_skill_frontmatter.py",
     "tools/check_standards_currency.py",
     "tools/check_standards_urls_live.py",
     "tools/check_verifier_delivery.py",

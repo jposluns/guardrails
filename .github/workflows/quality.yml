@@ -1676,6 +1676,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_dangerous_api.py
 
+      - name: Skill frontmatter self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite skill-frontmatter-selftest
+
+      - name: Skill frontmatter
+        shell: bash
+        run: python3 -I -B tools/check_skill_frontmatter.py
+
       # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit
       # that proves the harness end to end, and the internal-name leak gate. Mirrors the same legs in
       # tools/run_all_checks.sh (roster symmetry). The advisory digest runs last: audit_reference.py

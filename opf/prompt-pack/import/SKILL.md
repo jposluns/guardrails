@@ -1,6 +1,7 @@
 ---
 name: import
-description: The OPF post-adoption import procedure for an AI development assistant. After an
+description: >-
+  The OPF post-adoption import procedure for an AI development assistant. After an
   adoption whose plan disposes old files as `migrate`, turn each such source into imported
   records: read the source, write one canonical batch for it, pre-check the batch, and submit it
   through `opf record import --batch`. Each step states whether the reference tooling that ships

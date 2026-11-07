@@ -346,6 +346,11 @@ run_gate "git-option-table" python3 -I -B tools/check_git_option_table.py
 run_gate "dangerous-api-selftest" python3 -I -B tools/check_dangerous_api.py --self-test
 run_gate "dangerous-api" python3 -I -B tools/check_dangerous_api.py
 
+# Skill frontmatter: every tracked SKILL.md and every SKILL.md member of the site/downloads zips must
+# carry frontmatter the restricted reader accepts; anything outside its subset is cannot-evaluate.
+run_gate "skill-frontmatter-selftest" python3 -I -B tools/check_selftest_execution.py --suite skill-frontmatter-selftest
+run_gate "skill-frontmatter" python3 -I -B tools/check_skill_frontmatter.py
+
 # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
 # proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken
 # harness is a real failure); the internal-name scan is gating too.

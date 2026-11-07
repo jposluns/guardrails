@@ -98,6 +98,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, reconcile  # noqa: E402
 from _standards import dir_or_absent, dir_present  # noqa: E402
 from gen_rules import load_corpus  # noqa: E402
+# opf/tools/ carries the ONE shared skill frontmatter reader; reached downward, never forked here.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))
+import _skill_frontmatter  # noqa: E402
 
 # The canonical apex ordering. It MUST appear verbatim in the apex rule body (prjint1), so the skill's
 # top-line ordering is tied to the corpus and cannot silently drift from it.
@@ -922,7 +925,12 @@ def build_outputs(root, root_fd=None):
         "manifest.json": render_manifest(data),
         "provenance.md": render_provenance(data),
     }
-    standalone = [(root.joinpath(*INSTRUCTIONS_PARTS), render_instructions(data))]
+    # The built skill's frontmatter must read VALID under the shared restricted reader (the same reader
+    # tools/check_skill_frontmatter.py applies to every tracked SKILL.md); anything else fails closed.
+    verdict = _skill_frontmatter.evaluate_bytes(reserved_map["SKILL.md"].encode("utf-8"))
+    if verdict.status != _skill_frontmatter.VALID:
+        raise ValueError("the built SKILL.md frontmatter is not VALID: {}".format(verdict.describe()))
+    standalone =[(root.joinpath(*INSTRUCTIONS_PARTS), render_instructions(data))]
     # Both zips are written from the SAME bytes, so the version-numbered copy and the stable "latest" alias
     # are byte-identical by construction; gen_skill --check compares each to disk, so a divergence is caught.
     # The canonical LICENSE is packed into the archive (fail-closed: a missing, unreadable, linked or

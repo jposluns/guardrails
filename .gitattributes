@@ -656,6 +656,7 @@ opf/tools/_opf_worklog_regressions.py text eol=lf
 opf/tools/_opf_write_guard.py text eol=lf
 opf/tools/_optlevel.py text eol=lf
 opf/tools/_semver.py text eol=lf
+opf/tools/_skill_frontmatter.py text eol=lf
 opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json binary
 opf/tools/_vendor/licenses/marko-MIT.txt text eol=lf
 opf/tools/_vendor/marko-2.2.4.manifest.sha256 text eol=lf
@@ -880,6 +881,7 @@ tools/check_site.py text eol=lf
 tools/check_site_versions.py text eol=lf
 tools/check_sitemap.py text eol=lf
 tools/check_sized_instructions.py text eol=lf
+tools/check_skill_frontmatter.py text eol=lf
 tools/check_standards_currency.py text eol=lf
 tools/check_standards_urls_live.py text eol=lf
 tools/check_verifier_delivery.py text eol=lf

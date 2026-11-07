@@ -1,6 +1,7 @@
 ---
 name: adopt
-description: The OPF adoption procedure for an AI development assistant. Adopt OPFiles (OPF)
+description: >-
+  The OPF adoption procedure for an AI development assistant. Adopt OPFiles (OPF)
   into a project with the `opf adopt` verb, in order: investigate, propose one plan, take one
   approval, apply, verify. Each stage states whether the reference tooling that ships beside
   this pack can run it. Today investigation, planning and approval run, read-only; recording
