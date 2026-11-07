@@ -2,10 +2,12 @@
 """The shared fail-closed child contract, first slice: code that a gate or OPF command must load is run
 in a CHILD process, and the parent reads a pass only from the child's settled, recorded verdict, never
 from an exit status alone, so an os._exit, a SystemExit, or a fault in a thread, destructor, atexit
-callback or the exit flush cannot read as a pass, except through loaded code that replaces or deletes
-the reporting machinery itself (a hook, a stream object or its write or flush, the thread-run
-machinery, or the file on fd 2) and restores or stands in for it between checks, or a fault after the
-record exists whose report does not reach fd 2, the residuals disclosed in NOT YET COVERED below.
+callback or the exit flush cannot read as a pass, except through loaded code that alters any object
+the reporting machinery reads on its way to the record or to fd 2 (a hook, a stream object, a buffer
+or raw layer below one or a write or flush member at any layer, the thread-run machinery, a value its
+closures or threading's globals carry, or the file on fd 2) and restores or stands in for it between
+the checks that observe it, or a fault after the record exists whose report does not reach fd 2, the
+residuals disclosed in NOT YET COVERED below.
 
 THE CHILD SIDE (ported from tools/_selftest_exit_report.py): the parent launches
 [python, -I, -B, -c, _CHILD_SHIM, <this module's directory>, <payload>, <record>, <nonce>], and
@@ -39,11 +41,21 @@ was open on fd 2 at install, so a reporting channel still diverted at exit is it
 threading.Thread._bootstrap_inner is wrapped as well, and a thread observed starting or ending with an
 _invoke_excepthook that is not the one threading set (the per-thread slot _bootstrap_inner calls instead
 of threading.excepthook, so a replacement there swallows a report the excepthook wrapper never sees) is
-a fault, the wrapper required back by identity at exit like the hooks; and the finalizer refuses a
-recorded sys.stderr or sys.__stderr__ object that no longer resolves write or flush to the type-level
-method it resolved at install (an instance attribute shadowing either name, a replaced type-level
-method, or a changed type), so a report silently swallowed on the unreplaced object is a recorded
-fault too, not only a replaced object.
+a fault; "the one threading set" is required to be a plain function with threading's own code object and
+module globals AND, cell by cell and by identity, the closure values a thread constructed after install
+captures (so a sys.exc_info swapped only while Thread() ran, or a closure cell rebound afterwards, each
+faking a clean SystemExit, is a fault, not a pass; the two fallback cells holding the hooks that stood
+at the thread's construction are exempt, since each is read only when the live hook is already absent,
+replaced or raising, itself a recorded fault), and threading.ExceptHookArgs (the constructor the genuine
+_invoke_excepthook reads from threading's globals to build what the excepthook receives) is required
+back by identity at each thread's start and end and at exit, so a replacement there left in place, or
+restored only after the join, is a fault; the _bootstrap_inner wrapper is required back by identity at
+exit like the hooks; and the finalizer refuses a recorded sys.stderr or sys.__stderr__ object that no
+longer resolves write or flush to the type-level method it resolved at install, at the object itself
+and at each layer below it reached through .buffer and then .raw (an instance attribute shadowing
+either name at any recorded layer, a replaced type-level method, a changed type, or a layer object no
+longer the one recorded), so a report silently swallowed on the unreplaced top object, in its buffer
+or in its raw file is a recorded fault too, not only a replaced stream.
 
 THE RECORD: the parent passes the record path and a fresh nonce on the child's argv. The loaded code
 settles its verdict only through exit_with(code), which records the decided code (an int in 0 to 255;
@@ -106,13 +118,23 @@ or falling off the end) still reads as the decided code; that residual is not cl
 vector pins the disclosed behaviour. Deliberately hostile loaded code
 forging the record (the nonce is readable in process) or replacing this module's state in the child
 is the reporting-machinery residual the stronger contracts disclose; it is not closed here either.
-Neither is loaded code that deletes or replaces sys.unraisablehook (a deletion raises no
-sys.unraisablehook event, so a fault while it is absent is recorded nowhere and reported only to
-sys.stderr), threading.excepthook, threading.Thread._bootstrap_inner, a thread's own
-_invoke_excepthook slot, sys.stderr, sys.__stderr__, the write or flush member either stream
-resolves, or the file open on fd 2 and RESTORES each before the check that observes it runs (the
-finalizer's identity and member checks see only the state at exit, and a thread's _invoke_excepthook
-is read only as the thread starts and again after it ran): every such restored channel, and loaded
+Neither, in general, is loaded code that alters any object the reporting machinery reads on its way
+to the record or to fd 2 and restores or stands in for it between the checks that observe it: the
+checks pin each named object by identity at fixed moments (install, each thread's start and end, and
+exit), never continuously, so a diversion confined to the window between two checks still makes a
+fault read as a pass in process. The channels checked, each coverable only at those moments, are
+sys.unraisablehook (a deletion raises no sys.unraisablehook event, so a fault while it is absent is
+recorded nowhere and reported only to sys.stderr), threading.excepthook,
+threading.Thread._bootstrap_inner, a thread's own _invoke_excepthook slot with its closure cells,
+threading.ExceptHookArgs, sys.stderr, sys.__stderr__, the write or flush member resolved at any
+recorded layer of either stream (the object, its buffer, its raw file), or the file open on fd 2;
+what remains of the class after this slice is a diversion of any of these restored, from another
+thread or a C caller, inside the window between the checks that bracket it (the finalizer's identity
+and member checks see only the state at exit, and a thread's _invoke_excepthook, its cells and
+threading.ExceptHookArgs are read only as the thread starts and again after it ran), the two exempt
+fallback cells named above, and any mutable state these functions read that the list above does not
+pin (state of the io objects below the recorded members, or the C-level printers the default hooks
+fall back to, which no Python-level identity pin can bracket): every such restored channel, and loaded
 code standing in for the thread-run machinery so no installed check runs at all (a threading.Thread
 subclass that overrides _bootstrap_inner, the run leg below the _bootstrap start target the audit
 hook verifies, so a _bootstrap override is already a recorded start fault while a _bootstrap_inner
@@ -176,9 +198,20 @@ _BOOTSTRAP_INNER = threading.Thread._bootstrap_inner   # the per-thread run leg 
 # Every _invoke_excepthook threading itself sets is a closure of one inner function sharing one code
 # object and the threading module's own globals, so those of a throwaway (never started) Thread
 # identify them all; a per-thread replacement is what _bootstrap_inner calls INSTEAD of
-# threading.excepthook, so it must be refused at the thread, not at the module-level hook.
+# threading.excepthook, so it must be refused at the thread, not at the module-level hook. The
+# closure's cells are what the function READS (sys.exc_info among them), so _install records a
+# reference thread's cell values and _genuine_invoke requires them back by identity, except the two
+# fallback cells holding the hooks that stood at the thread's construction: each of those is read
+# only when the live hook is already absent, replaced or raising, itself a recorded fault, and an
+# honestly replaced sys.excepthook would otherwise read as a fault here.
 _INVOKE_CODE = threading.Thread(target=None)._invoke_excepthook.__code__
+_INVOKE_CELL_EXEMPT = frozenset(("old_excepthook", "old_sys_excepthook"))
+_INVOKE_CHECKED = tuple(name not in _INVOKE_CELL_EXEMPT for name in _INVOKE_CODE.co_freevars)
 _THREADING_DICT = vars(threading)
+# The ExceptHookArgs constructor threading set at import: the genuine _invoke_excepthook reads this
+# name from threading's globals to build what the excepthook receives, so a replacement there can
+# disguise any thread exception as a clean SystemExit while the function object itself stays genuine.
+_EXCEPT_HOOK_ARGS = threading.ExceptHookArgs
 # SystemExit's own code slot, read through the base descriptor so that a subclass's code property
 # (code the exception controls) never runs while a thread's end is classified.
 _SYSTEM_EXIT_CODE = SystemExit.__dict__["code"]
@@ -186,7 +219,7 @@ _STATE = {"installed": False, "armed": False, "armed_pid": None, "decided": None
           "confirmed": None, "main_ident": None, "record_path": None, "nonce": None, "check_ids": [],
           "faults": [], "thread_hook": None, "unraisable_hook": None, "start_stderr": None,
           "start_dunder_stderr": None, "start_fd2": None, "start_stderr_members": None,
-          "start_dunder_stderr_members": None}
+          "start_dunder_stderr_members": None, "invoke_cells": None}
 # The child bootstrap the parent launches: sys.argv is [-c, <module dir>, <payload>, <record>, <nonce>].
 _CHILD_SHIM = ("import sys; sys.path.insert(0, sys.argv[1]); "
                "import _fail_closed_child; _fail_closed_child._child_main()")
@@ -316,14 +349,27 @@ def _unraisable_hook(unraisable, *, _STATE=_STATE):
 
 
 def _genuine_invoke(thread, *, _INVOKE_CODE=_INVOKE_CODE, _THREADING_DICT=_THREADING_DICT,
-                    _FunctionType=type(_clean_status), type=type, BaseException=BaseException):
+                    _INVOKE_CHECKED=_INVOKE_CHECKED, _STATE=_STATE,
+                    _FunctionType=type(_clean_status), type=type, len=len, zip=zip,
+                    BaseException=BaseException):
     """Whether the thread runs with the _invoke_excepthook threading itself set: a plain function
-    sharing the code object and module globals of the closure threading makes per thread, so a thread
-    exception really reaches the installed excepthook. One that cannot be read is not genuine."""
+    sharing the code object and module globals of the closure threading makes per thread, each
+    non-exempt closure cell still holding, by identity, the value the reference thread _install
+    constructed captured (so a sys.exc_info swapped only while Thread() ran, or a cell rebound
+    afterwards, is not genuine), so a thread exception really reaches the installed excepthook with
+    the real exception. One that cannot be read is not genuine."""
     try:
         invoke = thread._invoke_excepthook
-        return (type(invoke) is _FunctionType and invoke.__code__ is _INVOKE_CODE
-                and invoke.__globals__ is _THREADING_DICT)
+        if not (type(invoke) is _FunctionType and invoke.__code__ is _INVOKE_CODE
+                and invoke.__globals__ is _THREADING_DICT):
+            return False
+        cells, recorded = invoke.__closure__, _STATE["invoke_cells"]
+        if recorded is None or cells is None or len(cells) != len(recorded):
+            return False
+        for checked, cell, captured in zip(_INVOKE_CHECKED, cells, recorded):
+            if checked and cell.cell_contents is not captured:
+                return False
+        return True
     except BaseException:
         return False
 
@@ -338,46 +384,90 @@ def _invoke_hook_fault(thread, moment, *, _STATE=_STATE, _genuine_invoke=_genuin
                             "set, so a thread fault could have gone unreported".format(moment))
 
 
+def _except_hook_args_fault(moment, *, _STATE=_STATE, _THREADING_DICT=_THREADING_DICT,
+                            _EXCEPT_HOOK_ARGS=_EXCEPT_HOOK_ARGS):
+    """Record the fault for threading.ExceptHookArgs observed, at a thread's start or end or at exit,
+    no longer the constructor threading set: the genuine _invoke_excepthook reads that name from
+    threading's globals to build what the excepthook receives, so a replacement there can hand every
+    hook a fake that disguises any thread exception as a clean SystemExit."""
+    if _THREADING_DICT.get("ExceptHookArgs") is _EXCEPT_HOOK_ARGS:
+        return
+    _STATE["faults"].append("threading.ExceptHookArgs ({}) is not the constructor threading set, so "
+                            "a thread fault could have been disguised as a clean exit".format(moment))
+
+
 def _bootstrap_inner_hook(self, *, _BOOTSTRAP_INNER=_BOOTSTRAP_INNER,
-                          _invoke_hook_fault=_invoke_hook_fault):
+                          _invoke_hook_fault=_invoke_hook_fault,
+                          _except_hook_args_fault=_except_hook_args_fault):
     """threading.Thread._bootstrap_inner while installed: require the per-thread _invoke_excepthook
-    to be the one threading set, before the thread's own code runs and again after it ended (the
-    second check runs after any exception was already handed to whatever sat in the slot, so a
-    replacement left in place is recorded even though it swallowed the report); the finalizer
-    requires this wrapper back by identity, like the hooks."""
+    to be the one threading set and threading.ExceptHookArgs to be the constructor it reads, before
+    the thread's own code runs and again after it ended (the second check runs after any exception
+    was already handed to whatever sat in the slot, so a replacement left in place is recorded even
+    though it swallowed the report); the finalizer requires this wrapper back by identity, like the
+    hooks."""
     _invoke_hook_fault(self, "started")
+    _except_hook_args_fault("as a thread started")
     try:
         _BOOTSTRAP_INNER(self)
     finally:
         _invoke_hook_fault(self, "ended")
+        _except_hook_args_fault("as a thread ended")
 
 
-def _stream_members(stream, *, type=type, getattr=getattr):
-    """(the stream's type, its type-level write, its type-level flush), recorded at install and
-    required back by _diverted_member at exit, or None for an absent stream."""
+def _stream_layer_below(layer, *, getattr=getattr):
+    """The next layer a report passes through below this one: the .buffer of a text stream, else the
+    .raw of a buffered one, else None; the callers bound the descent."""
+    below = getattr(layer, "buffer", None)
+    if below is None:
+        below = getattr(layer, "raw", None)
+    return below
+
+
+def _stream_members(stream, *, _stream_layer_below=_stream_layer_below, type=type, getattr=getattr,
+                    range=range, tuple=tuple):
+    """A tuple, for the stream and each layer a report passes through below it (its .buffer, then
+    that object's .raw, the walk bounded), of (the layer object, its type, its type-level write, its
+    type-level flush), recorded at install and required back by _diverted_member at exit, or None for
+    an absent stream."""
     if stream is None:
         return None
-    kind = type(stream)
-    return (kind, getattr(kind, "write", None), getattr(kind, "flush", None))
+    layers = []
+    layer = stream
+    for _ in range(4):
+        kind = type(layer)
+        layers.append((layer, kind, getattr(kind, "write", None), getattr(kind, "flush", None)))
+        layer = _stream_layer_below(layer)
+        if layer is None:
+            break
+    return tuple(layers)
 
 
-def _diverted_member(stream, recorded, *, type=type, getattr=getattr, vars=vars,
-                     BaseException=BaseException):
+def _diverted_member(stream, recorded, *, _stream_layer_below=_stream_layer_below, type=type,
+                     getattr=getattr, vars=vars, enumerate=enumerate, BaseException=BaseException):
     """How a reporting stream no longer resolves write or flush to the type-level method recorded at
-    install (None when both still do): an instance attribute shadowing either name, a replaced
-    type-level method, or a changed type each swallow a report while the object's identity still
-    holds, so each is a fault; a stream whose members cannot be examined is a fault too."""
+    install, at the stream itself or at any recorded layer below it (None when every recorded layer
+    still does): an instance attribute shadowing either name at any layer, a replaced type-level
+    method, a changed type, or a layer object no longer the one recorded each swallow a report while
+    the top object's identity still holds, so each is a fault; a stream whose layers cannot be
+    examined is a fault too."""
     try:
         if recorded is None:
             return None if stream is None else "appeared after install"
-        kind, write, flush = recorded
-        if type(stream) is not kind:
-            return "is no longer of the type recorded at install"
-        members = vars(stream)
-        if "write" in members or "flush" in members:
-            return "carries an instance attribute shadowing write or flush"
-        if getattr(kind, "write", None) is not write or getattr(kind, "flush", None) is not flush:
-            return "had a type-level write or flush replaced"
+        layer = stream
+        for depth, (obj, kind, write, flush) in enumerate(recorded):
+            where = (" at its buffer layer" if depth == 1 else
+                     " at its raw layer" if depth == 2 else
+                     " at a layer below its raw layer" if depth else "")
+            if layer is not obj:
+                return "no longer reaches the layer object recorded at install{}".format(where)
+            if type(layer) is not kind:
+                return "is no longer of the type recorded at install{}".format(where)
+            members = vars(layer)
+            if "write" in members or "flush" in members:
+                return "carries an instance attribute shadowing write or flush{}".format(where)
+            if getattr(kind, "write", None) is not write or getattr(kind, "flush", None) is not flush:
+                return "had a type-level write or flush replaced{}".format(where)
+            layer = _stream_layer_below(layer)
         return None
     except BaseException:
         return "could not have its write and flush members examined"
@@ -462,13 +552,17 @@ def _install():
     precedes them. The audit hook cannot be removed; replacing this module's state afterwards is
     loaded code replacing the reporting machinery, the disclosed residual. A sys.unraisablehook or
     threading.excepthook replaced or deleted, a sys.stderr or sys.__stderr__ replaced, a write or
-    flush shadowed or replaced on either recorded stream object, a thread run with an
-    _invoke_excepthook other than the one threading set, a replaced Thread._bootstrap_inner wrapper,
+    flush shadowed or replaced on either recorded stream object or on a buffer or raw layer below it,
+    a thread run with an _invoke_excepthook other than the one threading set (its non-exempt closure
+    cells required back by identity), a replaced threading.ExceptHookArgs, a replaced
+    Thread._bootstrap_inner wrapper,
     or an fd 2 re-opened and still so at exit is not: the finalizer (and, for the per-thread slot,
     the wrapper at the thread's start and end) requires each back (fd 2 by fstat device and inode,
     so a process whose fd 2 cannot be identified here is refused there too) and records a fault
     otherwise; only a channel diverted AND restored before the check that observes it runs remains
-    the disclosed residual."""
+    the disclosed residual. The reference closure cells are read from a throwaway thread constructed
+    HERE, after this module's excepthook wrapper is in place, so every thread the loaded code
+    constructs captures the same values by identity."""
     if _STATE["installed"]:
         return
     _refuse_interp_entries()
@@ -479,6 +573,8 @@ def _install():
     threading.Thread._bootstrap_inner = _bootstrap_inner_hook
     _STATE["unraisable_hook"] = sys.unraisablehook
     sys.unraisablehook = _unraisable_hook
+    _STATE["invoke_cells"] = tuple(
+        cell.cell_contents for cell in threading.Thread(target=None)._invoke_excepthook.__closure__)
     _STATE["start_stderr"] = sys.stderr
     _STATE["start_dunder_stderr"] = sys.__stderr__
     _STATE["start_stderr_members"] = _stream_members(sys.stderr)
@@ -495,6 +591,7 @@ def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collec
               _exit=os._exit, _getpid=os.getpid, _fstat=os.fstat, _note=_note, _GC_PASSES=_GC_PASSES,
               sys=sys, threading=threading, _wrapper=_unraisable_hook, _thread_wrapper=_thread_hook,
               _bootstrap_hook=_bootstrap_inner_hook, _diverted_member=_diverted_member,
+              _except_hook_args_fault=_except_hook_args_fault,
               _unraisable_fault=_unraisable_fault, getattr=getattr, open=open, list=list, range=range,
               OSError=OSError, BaseException=BaseException):
     """The exit handler, the process's first atexit registration so it runs after every other exit
@@ -502,8 +599,9 @@ def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collec
     this registration and the nonce, and its record would pass as the original's), run the bounded
     collection, flush the four stream objects, require back by identity the reporting channels
     recorded at install (both hook wrappers and the _bootstrap_inner wrapper, where an absent hook is
-    the same fault as a replaced one; the sys.stderr and sys.__stderr__ objects, each also required
-    to still resolve write and flush to the type-level methods recorded at install; and, by fstat
+    the same fault as a replaced one; threading.ExceptHookArgs; the sys.stderr and sys.__stderr__
+    objects, each also required to still resolve write and flush to the type-level methods recorded
+    at install at the object and at each recorded layer below it; and, by fstat
     device and inode, the file open on fd 2, so a channel still diverted here is a fault the record
     carries), and, ONLY when a decided
     code was settled through
@@ -534,6 +632,7 @@ def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collec
             _STATE["faults"].append("threading.Thread._bootstrap_inner is no longer the installed "
                                     "wrapper, so a thread's _invoke_excepthook could have gone "
                                     "unchecked")
+        _except_hook_args_fault("at exit")
         if sys.stderr is not _STATE["start_stderr"]:
             _STATE["faults"].append("sys.stderr is no longer the stream recorded at install, so a "
                                     "fault report could have been diverted from fd 2")
@@ -1088,6 +1187,46 @@ import _fail_closed_child as fcc
 sys.stderr.plain_note = "kept"
 fcc.exit_with(0)
 """
+_BUFFER_WRITE_SHADOWED = """import sys
+import _fail_closed_child as fcc
+
+
+class Boom:
+    def __del__(self):
+        raise RuntimeError("teardown fault")
+
+
+keeper = Boom()
+sys.stderr.buffer.write = lambda data: len(data)
+fcc.exit_with(0)
+"""
+_RAW_WRITE_SHADOWED = """import sys
+import _fail_closed_child as fcc
+
+
+class Boom:
+    def __del__(self):
+        raise RuntimeError("teardown fault")
+
+
+keeper = Boom()
+sys.stderr.buffer.raw.write = lambda data: len(data)
+fcc.exit_with(0)
+"""
+_STDERR_EMPTY_WRITE = """import sys
+import _fail_closed_child as fcc
+sys.stderr.write("")
+sys.stderr.flush()
+fcc.exit_with(0)
+"""
+_EXECUTOR_HONEST = """import concurrent.futures
+import _fail_closed_child as fcc
+with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    futures = [pool.submit(sum, range(100)), pool.submit(sum, range(10))]
+    if [item.result() for item in futures] != [4950, 45]:
+        raise RuntimeError("the executor results are wrong")
+fcc.exit_with(0)
+"""
 _INVOKE_REPLACED_AT_START = """import threading
 import _fail_closed_child as fcc
 worker = threading.Thread(target=lambda: 1 / 0)
@@ -1106,6 +1245,68 @@ def run():
 
 
 worker = threading.Thread(target=run)
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
+_EXCEPTHOOKARGS_REPLACED = """import threading
+import _fail_closed_child as fcc
+
+
+class FakeArgs:
+    exc_type = SystemExit
+    exc_value = SystemExit(0)
+    exc_traceback = None
+    thread = None
+
+
+threading.ExceptHookArgs = lambda seq: FakeArgs()
+worker = threading.Thread(target=lambda: 1 / 0)
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
+_EXCEPTHOOKARGS_RESTORED = """import threading
+import _fail_closed_child as fcc
+
+
+class FakeArgs:
+    exc_type = SystemExit
+    exc_value = SystemExit(0)
+    exc_traceback = None
+    thread = None
+
+
+real = threading.ExceptHookArgs
+threading.ExceptHookArgs = lambda seq: FakeArgs()
+worker = threading.Thread(target=lambda: 1 / 0)
+worker.start()
+worker.join()
+threading.ExceptHookArgs = real
+fcc.exit_with(0)
+"""
+_EXC_INFO_CAPTURED = """import sys
+import threading
+import _fail_closed_child as fcc
+real = sys.exc_info
+sys.exc_info = lambda: (SystemExit, SystemExit(0), None)
+worker = threading.Thread(target=lambda: 1 / 0)
+sys.exc_info = real
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
+_INVOKE_CELL_REBOUND = """import sys
+import threading
+import _fail_closed_child as fcc
+worker = threading.Thread(target=lambda: 1 / 0)
+for cell in worker._invoke_excepthook.__closure__:
+    try:
+        held = cell.cell_contents
+    except ValueError:
+        continue
+    if held is sys.exc_info:
+        cell.cell_contents = lambda: (SystemExit, SystemExit(0), None)
 worker.start()
 worker.join()
 fcc.exit_with(0)
@@ -1291,6 +1492,19 @@ DISCLOSURES = (
      "off the end) still reads as the decided code; that residual is not closed here, and its vector "
      "pins the disclosed behaviour.",
      "spoof-disclosure-not-yet-covered-removed"),
+    ("contract/residual-class-and-channel-list-disclosed-from-their-start",
+     "Neither, in general, is loaded code that alters any object the reporting machinery reads on "
+     "its way to the record or to fd 2 and restores or stands in for it between the checks that "
+     "observe it: the checks pin each named object by identity at fixed moments (install, each "
+     "thread's start and end, and exit), never continuously, so a diversion confined to the window "
+     "between two checks still makes a fault read as a pass in process. The channels checked, each "
+     "coverable only at those moments, are sys.unraisablehook (a deletion raises no "
+     "sys.unraisablehook event, so a fault while it is absent is recorded nowhere and reported only "
+     "to sys.stderr), threading.excepthook, threading.Thread._bootstrap_inner, a thread's own "
+     "_invoke_excepthook slot with its closure cells, threading.ExceptHookArgs, sys.stderr, "
+     "sys.__stderr__, the write or flush member resolved at any recorded layer of either stream "
+     "(the object, its buffer, its raw file), or the file open on fd 2;",
+     "channel-list-cut"),
     ("contract/restored-channel-residual-disclosed-in-not-yet-covered",
      "every such restored channel, and loaded code standing in for the thread-run machinery so no "
      "installed check runs at all (a threading.Thread subclass that overrides _bootstrap_inner, the "
@@ -1422,6 +1636,21 @@ FLIPS = {
         'residual; the deleted-hook-restored\nand subclassed-bootstrap-inner vectors pin the two '
         'disclosed pas' 'ses.',
         'residual.'),
+    "replaced-excepthookargs-accepted": (
+        '    if _THREADING_DICT.get("ExceptHookArgs") is _EXCEPT_HOOK' '_ARGS:\n        return',
+        '    if True:\n        return'),
+    "invoke-closure-cells-unchecked": (
+        '            if checked and cell.cell_contents is not cap' 'tured:',
+        '            if False and cell.cell_contents is not captured:'),
+    "stream-layer-walk-stopped": (
+        '    below = getattr(layer, "buf' 'fer", None)\n    if below is None:\n'
+        '        below = getattr(layer, "raw", None)\n    return below',
+        '    return None'),
+    "channel-list-cut": (
+        "threading.Thread._bootstrap_inner, a thread's own _invoke_excepthook slot with its closure cells,\n"
+        'threading.ExceptHookArgs, sys.stderr, sys.__stderr__, the write or flush member resolved at any\n'
+        'recorded layer of either stream (the object, its buffer, its raw fi' 'le), or the file open on fd 2;',
+        'threading.Thread._bootstrap_inner, or the file open on fd 2;'),
     "spoof-disclosure-record-removed": (
         'MATCHING status still reads as the decided code (the spoofed-confirmation residual disclosed in NOT\n'
         'YET COVERED below, pinned by its vec' 'tor)',
@@ -1557,6 +1786,32 @@ VECTORS = (
      (2, True, True, None), "stream-member-divert-ignored"),
     ("contract/stderr-plain-attr-passes", _STDERR_PLAIN_ATTR, None, (0, True, False, None),
      "record-write-broken"),
+    # the layers below the recorded stream objects: a write shadowed on sys.stderr's buffer or on its
+    # raw file swallows a report (here the teardown fault's) while the top object and its own members
+    # are untouched, so the finalizer's walk records a fault at the shadowed layer; an empty write
+    # pushed through every layer, and a ThreadPoolExecutor run whose worker threads start and end
+    # under the per-thread checks, each stay an honest pass
+    ("contract/shadowed-buffer-write-refused", _BUFFER_WRITE_SHADOWED, None, (2, True, True, None),
+     "stream-layer-walk-stopped"),
+    ("contract/shadowed-raw-write-refused", _RAW_WRITE_SHADOWED, None, (2, True, True, None),
+     "stream-layer-walk-stopped"),
+    ("contract/empty-stderr-write-passes", _STDERR_EMPTY_WRITE, None, (0, True, False, None),
+     "record-write-broken"),
+    ("contract/thread-pool-executor-passes", _EXECUTOR_HONEST, None, (0, True, False, None),
+     "record-write-broken"),
+    # what the genuine _invoke_excepthook READS, not the function object: threading.ExceptHookArgs
+    # replaced so every hook receives a fake clean SystemExit (left in place, or restored only after
+    # the join), a sys.exc_info swapped only while Thread() ran so the closure captured the fake, and
+    # the captured cell rebound in place afterwards; each is a recorded fault at the thread's start
+    # or end (the constructor at exit too)
+    ("contract/replaced-excepthookargs-refused", _EXCEPTHOOKARGS_REPLACED, None, (2, True, True, None),
+     "replaced-excepthookargs-accepted"),
+    ("contract/restored-excepthookargs-refused", _EXCEPTHOOKARGS_RESTORED, None, (2, True, True, None),
+     "replaced-excepthookargs-accepted"),
+    ("contract/captured-exc-info-refused", _EXC_INFO_CAPTURED, None, (2, True, True, None),
+     "invoke-closure-cells-unchecked"),
+    ("contract/rebound-invoke-cell-refused", _INVOKE_CELL_REBOUND, None, (2, True, True, None),
+     "invoke-closure-cells-unchecked"),
     # the per-thread _invoke_excepthook (what _bootstrap_inner calls instead of threading.excepthook,
     # so a replacement there never reaches the installed wrapper), replaced before the start or from
     # inside the thread; a replaced Thread._bootstrap_inner wrapper is required back at exit; and a
@@ -1691,11 +1946,15 @@ def self_test():
           "destructor fault under a no-op or collecting unraisable hook, a replaced hook, a fault "
           "under a hook later restored, a deleted unraisable hook, a replaced threading excepthook, "
           "a replaced sys.stderr or sys.__stderr__, a write or flush shadowed on either recorded "
-          "stream object, a thread started or ended with an _invoke_excepthook that is not the one "
-          "threading set, a replaced Thread._bootstrap_inner wrapper and a re-opened fd 2 each read "
+          "stream object or on its buffer or raw layer, a replaced threading.ExceptHookArgs (left "
+          "in place or restored only after the join), a sys.exc_info captured by a thread's closure "
+          "while swapped, a rebound closure cell, a thread started or ended with an "
+          "_invoke_excepthook that is not the one threading set, a replaced "
+          "Thread._bootstrap_inner wrapper and a re-opened fd 2 each read "
           "2; a record and stdout exactly at their caps are kept, a plain instance attribute on "
-          "sys.stderr still passes, and an honest payload under armed ITIMER_PROF and "
-          "ITIMER_VIRTUAL timers (left armed at exit, or delivering their signals into the run) "
+          "sys.stderr still passes, an empty stderr write pushed through every layer and a "
+          "ThreadPoolExecutor run each still read 0, and an honest payload under armed ITIMER_PROF "
+          "and ITIMER_VIRTUAL timers (left armed at exit, or delivering their signals into the run) "
           "still reads its decided 0; a spoofed confirmation whose later exit carries the matching "
           "status, a destructor fault under a deleted hook with every channel restored before exit, "
           "and a Thread subclass running its own _bootstrap_inner, each read the disclosed verdict "
