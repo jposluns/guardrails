@@ -198,8 +198,13 @@ jobs:
       # the log and the step summary and always exits 0. The plan is advisory only: nothing
       # reads it, it writes no output, and no job is skipped or added by it; a malformed or
       # missing base registry, and any cannot-evaluate, print a cannot-evaluate plan and never
-      # fail or change the run (the if ! guard keeps even an unexpected selector failure from
-      # ending this step red).
+      # fail or change the run: the jobs still run or skip by the site_only decision already
+      # written, which can be true (the if ! guard keeps even an unexpected selector failure
+      # from ending this step red). The launch is bounded by timeout -k 10 300 (TERM at 300
+      # seconds, KILL 10 seconds later), far above the selector's measured run time (about 15
+      # seconds for a selection over every tracked file, on a loaded development host), so a hang
+      # cannot time out this job: the bound's expiry exits nonzero, which the same if ! guard
+      # reports as cannot-evaluate with the step green.
       - name: Site fast-lane scope decision
         id: decide
         shell: bash
@@ -228,11 +233,11 @@ jobs:
             fi
           fi
           if [ "${planned}" = "yes" ]; then
-            if ! python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-select --shadow; then
-              echo "ci-select shadow plan: cannot evaluate (the selector exited nonzero); the plan is advisory and the run is unchanged"
+            if ! timeout -k 10 300 python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-select --shadow; then
+              echo "ci-select shadow plan: cannot evaluate (the selector exited nonzero or did not finish within 300 seconds); the plan is advisory and the run follows site_only"
             fi
           else
-            echo "ci-select shadow plan: cannot evaluate (the base commit has no readable scope tool or registry); the full suite runs"
+            echo "ci-select shadow plan: cannot evaluate (the base commit has no readable scope tool or registry); the plan is advisory and the run follows site_only"
           fi
 
       - name: Child exit status observable (after the scope decision)

@@ -835,14 +835,14 @@ SCOPE_JOB = (
     "            fi",
     "          fi",
     '          if [ "${planned}" = "yes" ]; then',
-    '            if ! python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-select '
-    "--shadow; then",
-    '              echo "ci-select shadow plan: cannot evaluate (the selector exited nonzero); '
-    'the plan is advisory and the run is unchanged"',
+    '            if ! timeout -k 10 300 python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" '
+    "--ci-select --shadow; then",
+    '              echo "ci-select shadow plan: cannot evaluate (the selector exited nonzero or '
+    'did not finish within 300 seconds); the plan is advisory and the run follows site_only"',
     "            fi",
     "          else",
     '            echo "ci-select shadow plan: cannot evaluate (the base commit has no readable '
-    'scope tool or registry); the full suite runs"',
+    'scope tool or registry); the plan is advisory and the run follows site_only"',
     "          fi",
     "      - name: Child exit status observable (after the scope decision)",
     "        " + STEP_SHELL_LINE,
@@ -871,8 +871,8 @@ SCOPE_SELECT_SHOW_LINE = (
     'if git --no-replace-objects show "HEAD^1:tools/ci_checks.toml" > '
     '"${RUNNER_TEMP}/ci_checks_base.toml"; then')
 SCOPE_SELECT_LAUNCH_LINE = (
-    'if ! python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-select '
-    "--shadow; then")
+    'if ! timeout -k 10 300 python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" '
+    "--ci-select --shadow; then")
 SCOPE_DECIDE_RUN_LINES = frozenset({
     SCOPE_DECIDE_SHOW_LINE,
     'python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
@@ -9032,12 +9032,13 @@ def self_test():
              '"${RUNNER_TEMP}/ci_checks_base.toml"; then\n',
              ""),
             ("a dropped shadow selection launch",
-             '            if ! python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" '
-             "--ci-select --shadow; then\n",
+             '            if ! timeout -k 10 300 python3 -I -B '
+             '"${RUNNER_TEMP}/ci_site_scope_base.py" --ci-select --shadow; then\n',
              ""),
             ("a dropped shadow cannot-evaluate fallback",
              '            echo "ci-select shadow plan: cannot evaluate (the base commit has '
-             'no readable scope tool or registry); the full suite runs"\n',
+             'no readable scope tool or registry); the plan is advisory and the run follows '
+             'site_only"\n',
              ""),
             ("a dropped CHECKS_REGISTRY env line",
              "          CHECKS_REGISTRY: ${{ runner.temp }}/ci_checks_base.toml\n",

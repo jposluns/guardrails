@@ -2013,6 +2013,10 @@ expected-check-ids = [
   "select/bad-path-full-run",
   "select/unknown-path-full-run",
   "select/only-universal-claim-full-run",
+  "select/universal-glob-by-meaning",
+  "select/universal-glob-agrees-with-matching",
+  "select/universal-spellings-full-run",
+  "select/universal-spelling-cannot-claim-top-level",
   "select/full-run-paths",
   "select/glob-star-within-segment",
   "select/glob-doublestar-boundary",
@@ -2025,6 +2029,9 @@ expected-check-ids = [
   "revert/full-run-paths-dropped-red",
   "revert/unknown-path-rule-dropped-red",
   "revert/universal-claim-rule-dropped-red",
+  "revert/universal-by-spelling-doublestar-star-red",
+  "revert/universal-by-spelling-star-doublestar-red",
+  "revert/universal-by-spelling-doublestar-doublestar-red",
   "revert/segment-glob-crossing-red",
   "revert/unreviewed-rule-dropped-red",
   # ---------- the CLI over synthetic repos ----------
@@ -2066,6 +2073,7 @@ expected-check-ids = [
   "ciselect/missing-registry-cannot-evaluate",
   "ciselect/malformed-registry-cannot-evaluate",
   "ciselect/unset-registry-cannot-evaluate",
+  "ciselect/cannot-evaluate-states-run-follows-site-only",
   "ciselect/linear-head-cannot-evaluate",
   # ---------- the local --explain --base REV query ----------
   "explain/missing-registry-exit-2",
