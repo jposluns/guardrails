@@ -74,8 +74,10 @@ tree (each run's tree is read from `git/commits/<sha>`, expected to need Content
 live), with optional per-job success requirements: every job of each name given concluded success in that
 run, so a skipped job never counts, and it refuses the tree when any completed run of that file on a commit
 with the same tree, within its read window, concluded anything but success, since a later pass never
-erases an earlier failure. That window is up to 5 listing pages, all read in full, with trees read for the
-newest 20 distinct head commits of completed runs of that file (when no successful run of that file is
+erases an earlier failure. A scheduled or manual run of that file (event `schedule` or `workflow_dispatch`)
+is advisory and is left out of this read: its success is never the accepted run and its failure never
+refuses the tree. That window is up to 5 listing pages, all read in full, with trees read for the
+newest 20 distinct head commits of completed runs of that file other than advisory runs (when no successful run of that file is
 listed, no tree is read and the read refuses): a non-success run on one of those commits with the same
 tree refuses wherever it is listed, a run on any further commit is not compared, and no successful run
 listed after the first such run is accepted, so no accepted run is older than one not compared (the
@@ -178,9 +180,11 @@ stays out of the checkout's git config (no job pushes or fetches after its check
 without it; a workflow outside that reader's conservative YAML subset is cannot-evaluate (exit 2),
 never skipped.
 `tools/ci-status.sh` requires a completed successful run of `.github/workflows/quality.yml` on every
-read, with or without `--require-base` and `--wait`, so a head with none (a member head) reads as missing
-(exit 1), never as passing. It also refuses a commit with any non-success run, a cancelled one included,
-so a cancelled run on a live head (a label added while its run is in progress, the `merge-train` label
+read, with or without `--require-base` and `--wait`, other than an advisory run (a run of any workflow
+whose event is `schedule` or `workflow_dispatch`: it is listed and named on a NOTE line, never counts as
+that run, never refuses the commit and keeps no `--wait` polling), so a head with none (a member head)
+reads as missing (exit 1), never as passing. It also refuses a commit with any non-success run other
+than an advisory one, a cancelled one included, so a cancelled run on a live head (a label added while its run is in progress, the `merge-train` label
 re-applied included, or a push back to an earlier head) needs a new head commit, labelled again.
 
 The maintainer authorized on 2026-10-25 what member heads no longer get from CI; each still runs once, on

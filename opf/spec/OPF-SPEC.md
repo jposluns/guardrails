@@ -1,13 +1,11 @@
 # OPFiles: the operational-files standard
 
 Formal name: AIQT Development Operational Standard. Public brand: OPFiles
-(opfiles.ai). Base discovery token: `opf`. Status: draft (specification only;
-schemas and the reference tooling, the scaffolder `opf init`, the adopter `opf adopt`,
-the post-adoption importer `opf import`, the validator `opf doctor`, the renderer `opf render`,
-the relocator `opf migrate`, the
-synchronizer `opf sync`, the schema-upgrader `opf upgrade`, the absorber `opf absorb`, and the
-record author `opf record`,
-ship in later releases).
+(opfiles.ai). Base discovery token: `opf`. Status: this specification is a draft. The
+reference tooling's status in this build is the generated status note that follows, also published
+in opf/README.md, on opfiles.ai, and in opf/site/llms.txt (generated from VERB_STATUS in
+opf/tools/opf.py):
+Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
 Date: 2026-10-24 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
