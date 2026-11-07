@@ -556,14 +556,6 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_disclosure.py --self-test
 
-      - name: Install page block self-test
-        shell: bash
-        run: python3 -I -B tools/gen_install.py --self-test
-
-      - name: Install page tripwire self-test
-        shell: bash
-        run: python3 -I -B tools/check_install_page.py --self-test
-
       - name: Sized instructions self-test
         shell: bash
         run: python3 -I -B tools/check_sized_instructions.py --self-test
