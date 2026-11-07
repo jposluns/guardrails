@@ -1249,18 +1249,17 @@ worker.start()
 worker.join()
 fcc.exit_with(0)
 """
+# The disguise is built with the real constructor so the args stay a genuine ExceptHookArgs: the
+# excepthook the genuine _invoke_excepthook calls accepts it and, seeing a SystemExit, silently
+# ignores it, so the thread fault is swallowed without the excepthook raising. A fake of the wrong
+# type would instead make that excepthook raise, and the thread machinery would then hand the raise
+# to whatever sys.excepthook the host installed, so the vector's verdict would turn on the host, not
+# on the detection under test. The sequence the genuine _invoke_excepthook passes is
+# [exc_type, exc_value, exc_traceback, thread]; seq[3] keeps the real thread so the hook can name it.
 _EXCEPTHOOKARGS_REPLACED = """import threading
 import _fail_closed_child as fcc
-
-
-class FakeArgs:
-    exc_type = SystemExit
-    exc_value = SystemExit(0)
-    exc_traceback = None
-    thread = None
-
-
-threading.ExceptHookArgs = lambda seq: FakeArgs()
+real = threading.ExceptHookArgs
+threading.ExceptHookArgs = lambda seq: real([SystemExit, SystemExit(0), None, seq[3]])
 worker = threading.Thread(target=lambda: 1 / 0)
 worker.start()
 worker.join()
@@ -1268,17 +1267,8 @@ fcc.exit_with(0)
 """
 _EXCEPTHOOKARGS_RESTORED = """import threading
 import _fail_closed_child as fcc
-
-
-class FakeArgs:
-    exc_type = SystemExit
-    exc_value = SystemExit(0)
-    exc_traceback = None
-    thread = None
-
-
 real = threading.ExceptHookArgs
-threading.ExceptHookArgs = lambda seq: FakeArgs()
+threading.ExceptHookArgs = lambda seq: real([SystemExit, SystemExit(0), None, seq[3]])
 worker = threading.Thread(target=lambda: 1 / 0)
 worker.start()
 worker.join()
