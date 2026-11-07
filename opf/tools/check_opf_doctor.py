@@ -93,10 +93,12 @@ launched isolated (-I -B). The tempdir is removed in a finally (test-hermeticity
 self-test SKIPs clean (a committed HEAD is required for the tracked/prior observations).
 
 The pre-commit floor (opf/enforcement/precommit: the staged-snapshot hook and its per-clone installer, which
-writes a pre-commit stub into the clone's untracked hooks directory and never sets core.hooksPath) rides
-fixtures of the same kind, each holding a copy of the pack at its pack path. The installer writes the stub,
-a rerun is a no-op, and other hooks are kept; it refuses (2, nothing changed) any core.hooksPath, the
-tracked pack directory included, an existing pre-commit hook, an unreadable pack hook or hooks directory
+writes a pre-commit stub and a pre-merge-commit stub into the clone's untracked hooks directory and never
+sets core.hooksPath) rides fixtures of the same kind, each holding a copy of the pack at its pack path. The
+installer writes both stubs, a rerun is a no-op, a clone holding the pre-commit stub alone gains the
+pre-merge-commit stub with its pre-commit stub kept, and other hooks are kept; it refuses (2, nothing
+changed) any core.hooksPath, the tracked pack directory included, an existing pre-commit or pre-merge-commit
+hook, an unreadable pack hook or hooks directory
 (unprivileged user only) and a hooks path that is not a directory; an inherited GIT_DIR naming another
 repository cannot redirect it, and a missing dirname run from another repository's pack directory installs
 nowhere (2). Inherited GIT_TRACE and GIT_TRACE2 destinations naming another repository's tracked file leave
@@ -112,8 +114,8 @@ holds the git directory, a git directory inside the main worktree's core.worktre
 (one outside it installs), a registry entry naming a top level of /, a linked worktree at the hooks
 directory, a hand-written .git file naming the git directory, a linked worktree moved by hand, an empty
 core.worktree (a stand-in git answers one), and a termination signal mid-install, which rolls back. A
-refusal after rollback names what is at the hooks directory, the stub path and the private directory by
-file type: a signal just after the ln or the final rmdir leaves nothing and says so; one just after the
+refusal after rollback names what is at the hooks directory, the two stub paths and the private directory by
+file type: a signal just after either ln or the final rmdir leaves nothing and says so; one just after the
 hooks directory's or the private directory's mkdir leaves that empty directory and names it; one that
 arrives before the hooks directory's mkdir leaves no hooks directory and names none; a stub the rollback
 cannot read is named, not taken as gone; a hooks directory that cannot be searched leaves the paths in it
@@ -153,6 +155,46 @@ when the snapshot removal fails (no rm), and a missing dirname stops the hook be
 CI residual is held as behaviour and text: a staged tamper the hook refuses, committed with --no-verify,
 passes the CI recipe, and the shipped files say so; git cherry-pick records the same tamper with the stub
 installed and no hook run, and the shipped files name the operations git commits without the hook.
+Through real `git merge` runs: a merge git merge would commit without stopping is stopped by the
+pre-merge-commit stub with HEAD unmoved, MERGE_HEAD naming the merged commit and the merge result staged;
+git commit then concludes it as a two-parent merge through the pre-commit check, and refuses one whose
+result carries a tamper by doctor's finding; concluding a merge, the staged result is compared with every
+parent: a git merge -s ours of a branch that added a record and raised its counters is refused at the
+concluding git commit by doctor's per-parent findings (the dropped record and the lowered counters, each
+named against the merged parent) with HEAD unmoved, a merge result that reopens a record at an
+unqualified terminal state is refused as terminal resurrection whether the reopen is staged in the merge
+resolution (both the HEAD-prior and the per-parent finding named) or carried by the merged branch, a
+clean merge whose result keeps both sides' added records concludes as a two-parent merge, a merged
+branch's own committed non-terminal status change (reaching a terminal state kept in the result)
+concludes ungraded, an octopus git merge -s ours of two branches (MERGE_HEAD naming two commits) is
+refused the same way, a merge resolution that edits the body of a done record only the merged branch
+holds is refused against that parent's digest and one that rewrites a release row only the merged branch
+holds is refused by the append-only comparison against that parent (each with HEAD unmoved, beside its
+two controls: the same merge with no edit concludes, and the same edit as an ordinary commit is refused
+against the HEAD prior); the first merge the pre-merge-commit stub stops (two branches each adding one file
+outside the store) and the -s ours drop, run again without the stubs, commit, so it is the stubs that
+stop them. The merge observation fails closed: a
+MERGE_HEAD the hook cannot validate (not hex, an unknown id, empty, whitespace alone, a tree id) exits 2
+at the hook by its own message, and one the hook passes but the observer cannot read back to usable snapshots (an
+oversized MERGE_HEAD of valid ids past the observer's bounded read, a parent commit holding no
+store, and an abbreviated commit id, which passes the hook's hex test and its git rev-parse resolution
+but is not the full-length id git writes) is doctor's named CANNOT-EVALUATE, each with HEAD unmoved,
+never an unchecked merge; the observer's remaining malformed branches sit behind the hook's validation,
+so doctor runs over the planted merge state directly and an empty MERGE_HEAD, an unreadable one (a
+directory at its path), a full-length id resolving to no commit, and a store path git cannot report
+(rev-parse --show-prefix failing) are each the same named CANNOT-EVALUATE; each of these observer cases
+(the abbreviated id included) also holds the note its own branch prints through doctor. Run as
+pre-merge-commit, the hook runs no step and exits 2. The shipped files disclose that git merge --no-verify
+skips the stubs, which comparisons a merge commit gets against each parent (record survival, counters,
+immutable bodies, release and imported append-only, the terminal state), that a merge commit's non-terminal status changes are not graded while a terminal state
+any parent holds must be kept by a record active in the result (one the result archives is not
+status-compared against a parent, two parents holding one record at different unqualified terminal
+states refuse every result that keeps it active, a merged parent record with an unparseable status or
+an unsupported type is a named cannot-evaluate, and a dropped worklog entry is caught only as a lowered
+counter), that a
+fast-forward merge or pull
+brings in commits with no hook run, and that the pre-merge-commit stop makes a scripted merge or pull
+exit 1 with MERGE_HEAD left behind.
 A SECOND, git-independent self-test leg verifies the enforcement pack's Claude Code deny hook
 (OPF-ENFORCE-PACK slice (b)): the shipped opf/enforcement/claude/pretooluse_deny.py is launched as a
 child (python -I, the doc-confirmed PreToolUse stdin/stdout contract) over throwaway store fixtures,
@@ -1445,17 +1487,20 @@ def _self_test_isolated():
                 return False
             return True
 
-        def _stub(root):
-            # The text of the installed pre-commit stub in the clone's untracked hooks directory, or None.
-            path = root / ".git" / "hooks" / "pre-commit"
+        def _stub(root, name="pre-commit"):
+            # The text of the installed stub `name` in the clone's untracked hooks directory, or None.
+            path = root / ".git" / "hooks" / name
             if not path.is_file() or not os.access(str(path), os.X_OK):
                 return None
             return path.read_text(encoding="utf-8")
 
         def _stub_ok(root):
-            # True when the stub is installed and names the pack hook at its pack path.
-            text = _stub(root)
-            return text is not None and ("hook='./" + rel + "/pre-commit'") in text
+            # True when both stubs are installed and name the pack hook at its pack path, the
+            # pre-merge-commit stub running it as pre-merge-commit.
+            text, merge_text = _stub(root), _stub(root, "pre-merge-commit")
+            hook = "hook='./" + rel + "/pre-commit'"
+            return (text is not None and hook in text and merge_text is not None and hook in merge_text
+                    and 'sh "$hook" pre-merge-commit\n' in merge_text)
 
         def _head(root):
             return _git_out(root, "rev-parse", "-q", "--verify", "HEAD")
@@ -1529,8 +1574,34 @@ def _self_test_isolated():
             # sets no core.hooksPath (0); a rerun is a no-op (0). ---
             inst = _fixture("install")
             expect("install-writes-stub", (_install(inst), _stub_ok(inst), _hookspath(inst)), (EXIT_OK, True, None))
-            first = _stub(inst)
-            expect("install-rerun-no-op", (_install(inst), _stub(inst) == first), (EXIT_OK, True))
+            first = (_stub(inst), _stub(inst, "pre-merge-commit"))
+            expect("install-rerun-no-op", (_install(inst), (_stub(inst), _stub(inst, "pre-merge-commit")) == first),
+                   (EXIT_OK, True))
+            # A pre-merge-commit hook already there, other than the stub, is refused like a pre-commit one:
+            # it is left as it was and no pre-commit stub is written either.
+            merge_planted = _fixture("install-planted-merge")
+            (merge_planted / ".git" / "hooks").mkdir(exist_ok=True)
+            (merge_planted / ".git" / "hooks" / "pre-merge-commit").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(str(merge_planted / ".git" / "hooks" / "pre-merge-commit"), 0o755)
+            expect("install-refuses-existing-merge-hook",
+                   (_install(merge_planted),
+                    (merge_planted / ".git" / "hooks" / "pre-merge-commit").read_text(encoding="utf-8"),
+                    _entry(merge_planted / ".git" / "hooks" / "pre-commit")),
+                   (EXIT_ERROR, "#!/bin/sh\nexit 0\n", False))
+            # A clone that holds the pre-commit stub alone (an earlier installer wrote only that one) gains the
+            # pre-merge-commit stub on a rerun, and its pre-commit stub is kept as it was.
+            upgrade = _fixture("install-upgrade")
+            if _install(upgrade) != EXIT_OK:
+                raise OSError("could not install the stubs in {}".format(upgrade))
+            upgrade_pc = (upgrade / ".git" / "hooks" / "pre-commit").read_bytes()
+            upgrade_ino = os.lstat(str(upgrade / ".git" / "hooks" / "pre-commit")).st_ino
+            if _entry(upgrade / ".git" / "hooks" / "pre-merge-commit"):
+                os.remove(str(upgrade / ".git" / "hooks" / "pre-merge-commit"))
+            expect("install-adds-merge-stub-beside-earlier-stub",
+                   (_install(upgrade), _stub_ok(upgrade),
+                    (upgrade / ".git" / "hooks" / "pre-commit").read_bytes() == upgrade_pc,
+                    os.lstat(str(upgrade / ".git" / "hooks" / "pre-commit")).st_ino == upgrade_ino),
+                   (EXIT_OK, True, True, True))
             # A core.hooksPath set to any value (git would run no hook from the hooks directory) is refused
             # (2) and left as it was, including the tracked pack directory a former install set.
             other = _fixture("install-other")
@@ -1982,12 +2053,15 @@ def _self_test_isolated():
                 lines = err.read_text(encoding="utf-8", errors="replace").strip().split("\n")
                 return rc, lines, ".opf-pre-commit-install." + pid.read_text(encoding="utf-8").strip()
 
-            def _seen(reason, root, priv, hooks_kind, stub_kind="nothing", priv_kind="nothing"):
+            def _seen(reason, root, priv, hooks_kind, stub_kind="nothing", priv_kind="nothing", merge_kind=None):
+                if merge_kind is None:
+                    merge_kind = stub_kind
                 hooks_dir = root / ".git" / "hooks"
                 text = "opf-pre-commit install: refused: " + reason + "; after the removal, what is there: "
                 text += str(hooks_dir) + ": " + hooks_kind
                 if hooks_kind == "a directory":
                     text += "; " + str(hooks_dir / "pre-commit") + ": " + stub_kind
+                    text += "; " + str(hooks_dir / "pre-merge-commit") + ": " + merge_kind
                     text += "; " + str(hooks_dir / priv) + ": " + priv_kind
                 return text
 
@@ -1996,7 +2070,8 @@ def _self_test_isolated():
                 if not hooks_dir.is_dir():
                     return None
                 return sorted((n, sorted(os.listdir(str(hooks_dir / n))) if (hooks_dir / n).is_dir() else "file")
-                              for n in os.listdir(str(hooks_dir)) if n == "pre-commit" or n.startswith(".opf-"))
+                              for n in os.listdir(str(hooks_dir))
+                              if n in ("pre-commit", "pre-merge-commit") or n.startswith(".opf-"))
 
             def _shimmed(tag, tools):
                 env = _path_without(next(iter(tools)), install_tools, tag)
@@ -2010,8 +2085,9 @@ def _self_test_isolated():
                 return env
 
             # A signal that lands just after a write (the stand-in runs the real command, then sends TERM; the
-            # installer runs the trap as soon as that command returns). After the ln or the final rmdir it
-            # leaves no stub and no private directory and names nothing at either. After a mkdir, the trap
+            # installer runs the trap as soon as that command returns). After the first ln, the ln of the
+            # pre-merge-commit stub (the pre-commit stub this run placed before it is removed too) or the final
+            # rmdir it leaves no stub and no private directory and names nothing at any. After a mkdir, the trap
             # runs before the directory is recorded as this run's, so that empty directory is left and named
             # (the disclosed instant); after the private mkdir in a run that made the hooks directory too,
             # that hooks directory is left as well, holding it, and both are named.
@@ -2019,6 +2095,8 @@ def _self_test_isolated():
                                             ("private-mkdir", "mkdir", real_mkdir, '[ "$1" = -m ]'),
                                             ("private-mkdir-in-made-hooks", "mkdir", real_mkdir, '[ "$1" = -m ]'),
                                             ("ln", "ln", real_ln, ":"),
+                                            ("merge-ln", "ln", real_ln,
+                                             'case "$3" in */pre-merge-commit) true ;; *) false ;; esac'),
                                             ("rmdir", "rmdir", real_rmdir, ":")):
                 after = _fixture("install-signal-after-" + label)
                 after_hooks = after / ".git" / "hooks"
@@ -2064,9 +2142,9 @@ def _self_test_isolated():
                                                          else "private directory " + str(arrived_hooks / priv)),
                               arrived, priv, "a directory",
                               priv_kind="a directory" if label == "private" else "nothing")))
-            # A signal after the final rmdir, with the stub unreadable to the rollback's comparison once the
-            # temporary file is gone (a stand-in cmp fails then): the stub is kept and named as a regular
-            # file, not taken as gone.
+            # A signal after the final rmdir, with the pre-commit stub unreadable to the rollback's comparison
+            # once the temporary files are gone (a stand-in cmp fails then): that stub is kept and named as a
+            # regular file, not taken as gone, and the pre-merge-commit stub, which compares, is removed.
             unread = _fixture("install-signal-unreadable-stub")
             (unread / ".git" / "hooks").mkdir(exist_ok=True)
             unread_env = _shimmed("install-signal-unreadable-stub", {
@@ -2079,7 +2157,8 @@ def _self_test_isolated():
             expect("install-signal-unreadable-stub-named",
                    (rc, _opf_names(unread), lines[-1]),
                    (EXIT_ERROR, [("pre-commit", "file")],
-                    _seen("stopped by a signal", unread, priv, "a directory", stub_kind="a regular file")))
+                    _seen("stopped by a signal", unread, priv, "a directory", stub_kind="a regular file",
+                          merge_kind="nothing")))
             # A signal that arrives before the hooks directory's mkdir makes it (the stand-in sends TERM and
             # fails without making it): no hooks directory, and the refusal, alone on the error output, names
             # nothing there.
@@ -2407,6 +2486,530 @@ def _self_test_isolated():
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise OSError("could not run git cherry-pick in {} ({})".format(picked, exc))
             expect("cherry-pick-skips-hook", (proc.returncode, _head(picked) != before), (EXIT_OK, True))
+
+            # Merge commits, through a real git merge and git commit. A merge git merge would record without
+            # stopping (no conflict) is stopped by the pre-merge-commit stub with its message; the merge result
+            # stays in the index and MERGE_HEAD names the merged commit, so git commit concludes the merge
+            # through the pre-commit check: a clean merge commits with both parents, and a merge whose result
+            # tampers with a record is refused by doctor's finding. Without the stubs the same merge commits.
+            def _merge(root, *args):
+                # A real `git merge --no-edit ...` (default: `side`), so git itself runs the installed
+                # pre-merge-commit hook. Returns (exit status, combined output).
+                merge_args = list(args) if args else ["side"]
+                try:
+                    proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
+                                           "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
+                                           "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
+                                           "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                                           "merge", "--no-edit"] + merge_args,
+                                          cwd=str(root), env=_env(), stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT, timeout=300)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise OSError("could not run git merge in {} ({})".format(root, exc))
+                return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+            def _diverged(name, tamper=False, install=True):
+                # A fixture whose side branch adds SIDE.md (or tampers with a record) and whose main branch
+                # adds MAIN.md after the fork, so merging side into main makes a merge commit with no conflict.
+                root = _fixture(name)
+                if install and _install(root) != EXIT_OK:
+                    raise OSError("could not install the stubs in {}".format(root))
+                _git(root, home, "checkout", "-q", "-b", "side")
+                if tamper:
+                    _tamper(root)
+                    _git(root, home, "add", done_rel)
+                else:
+                    (root / "SIDE.md").write_text("side\n", encoding="utf-8")
+                    _git(root, home, "add", "SIDE.md")
+                _git(root, home, "commit", "-q", "--no-verify", "-m", "side")
+                _git(root, home, "checkout", "-q", "main")
+                (root / "MAIN.md").write_text("main\n", encoding="utf-8")
+                _git(root, home, "add", "MAIN.md")
+                _git(root, home, "commit", "-q", "--no-verify", "-m", "main")
+                return root
+
+            merge_message = ("opf-pre-commit: refused as pre-merge-commit", "Conclude it with git commit",
+                             "rerun the merge as git merge --no-commit and conclude it with git commit")
+            merged = _diverged("merge-clean")
+            merged_side = _git_out(merged, "rev-parse", "side")
+            before = _head(merged)
+            rc, text = _merge(merged)
+            expect("merge-stopped-by-pre-merge-commit",
+                   (rc != EXIT_OK, _head(merged) == before, all(m in " ".join(text.split()) for m in merge_message)),
+                   (True, True, True))
+            staged = _git_out(merged, "write-tree")
+            expect("merge-stopped-leaves-merge-in-progress",
+                   (_git_out(merged, "rev-parse", "-q", "--verify", "MERGE_HEAD") == merged_side,
+                    _git_out(merged, "rev-parse", ":SIDE.md") == _git_out(merged, "rev-parse", "side:SIDE.md"),
+                    _git_out(merged, "rev-parse", ":MAIN.md") == _git_out(merged, "rev-parse", "main:MAIN.md")),
+                   (True, True, True))
+            rc, moved = _committed(merged)
+            expect("merge-concluded-by-git-commit",
+                   (rc, moved, _git_out(merged, "rev-parse", "HEAD^1") == before,
+                    _git_out(merged, "rev-parse", "HEAD^2") == merged_side,
+                    _git_out(merged, "rev-parse", "HEAD^{tree}") == staged,
+                    _git_out(merged, "rev-parse", "-q", "--verify", "MERGE_HEAD")),
+                   (EXIT_OK, True, True, True, True, None))
+            # The merged result is checked when git commit concludes it: a tamper the side branch committed
+            # past the hook is refused by doctor's finding, HEAD unmoved and the merge still in progress.
+            merge_tamper = _diverged("merge-tamper", tamper=True)
+            before = _head(merge_tamper)
+            rc, text = _merge(merge_tamper)
+            expect("merge-tamper-stopped-by-pre-merge-commit",
+                   (rc != EXIT_OK, _head(merge_tamper) == before, merge_message[0] in text), (True, True, True))
+            expect("merge-tamper-refused-by-git-commit",
+                   (_refused(merge_tamper),
+                    _git_out(merge_tamper, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+                    == _git_out(merge_tamper, "rev-parse", "side")),
+                   ((True, True, True), True))
+            # Without the stubs the same merge commits without stopping, so it is the stub that stops it.
+            merge_bare = _diverged("merge-no-hook", install=False)
+            rc, text = _merge(merge_bare)
+            expect("merge-without-hook-commits",
+                   (rc, _git_out(merge_bare, "rev-parse", "HEAD^2") == _git_out(merge_bare, "rev-parse", "side")),
+                   (EXIT_OK, True))
+
+            # Concluding a merge compares the staged result with EVERY parent (spec: never HEAD, the first
+            # parent, alone): a `git merge -s ours` of a branch that added records and raised its counters
+            # concludes without a conflict yet drops everything the branch added, so the concluding
+            # git commit must be refused by doctor's per-parent findings, HEAD unmoved.
+            def _grown(bi3=False, wl5=False):
+                # The clean fixture machine plus an added backlog_item BI-3 and/or worklog WL-5, each with
+                # its counter raised, so a branch that commits it ADDS records a merge result must keep.
+                m = clean_machine()
+                if bi3:
+                    m["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), bi(3, "open")])
+                    m["counters.toml"]["counters"]["BI"] = 3
+                if wl5:
+                    m["worklog.toml"]["entry"].append(wl(5))
+                    m["counters.toml"]["counters"]["WL"] = 5
+                return m
+
+            def _record_branch(root, branch, machine):
+                # A branch (from main) whose one commit writes `machine` into the store, past the hooks.
+                _git(root, home, "checkout", "-q", "-b", branch)
+                _write_machine(root, machine)
+                _git(root, home, "add", "-A")
+                _git(root, home, "commit", "-q", "--no-verify", "-m", branch)
+                _git(root, home, "checkout", "-q", "main")
+
+            def _advance_main(root, name):
+                (root / name).write_text("main\n", encoding="utf-8")
+                _git(root, home, "add", name)
+                _git(root, home, "commit", "-q", "--no-verify", "-m", "main")
+
+            machine_dir = "{}/{}".format(_opf_store.WORKING_DIRNAME, _opf_store.DEFAULT_MACHINE_SUBDIR)
+            ours = _fixture("merge-ours-drop")
+            expect("merge-ours-install", _install(ours), EXIT_OK)
+            _record_branch(ours, "side", _grown(bi3=True, wl5=True))
+            _advance_main(ours, "MAIN.md")
+            ours_side = _git_out(ours, "rev-parse", "side")
+            before = _head(ours)
+            rc, text = _merge(ours, "-s", "ours", "side")
+            expect("merge-ours-stopped-by-pre-merge-commit",
+                   (rc != EXIT_OK, _head(ours) == before,
+                    _git_out(ours, "rev-parse", "-q", "--verify", "MERGE_HEAD") == ours_side),
+                   (True, True, True))
+            rc, text = _commit(ours)
+            expect("merge-ours-drop-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(ours) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: record 'BI-3', held by merge parent " + ours_side
+                    in text,
+                    "FINDING: C-HISTORY-COUNTERS: against merge parent " + ours_side in text,
+                    _git_out(ours, "rev-parse", "-q", "--verify", "MERGE_HEAD") == ours_side),
+                   (True, True, True, True, True))
+            # The same -s ours merge without the stubs commits (and records the drop), so it is the hook
+            # that refuses it.
+            ours_bare = _fixture("merge-ours-no-hook")
+            _record_branch(ours_bare, "side", _grown(bi3=True, wl5=True))
+            _advance_main(ours_bare, "MAIN.md")
+            rc, text = _merge(ours_bare, "-s", "ours", "side")
+            expect("merge-ours-without-hook-commits",
+                   (rc, _git_out(ours_bare, "rev-parse", "HEAD^2")
+                    == _git_out(ours_bare, "rev-parse", "side"),
+                    "BI-3" in (ours_bare / machine_dir / "backlog_item.index.toml").read_text(
+                        encoding="utf-8")),
+                   (EXIT_OK, True, False))
+            # A clean merge whose result keeps BOTH sides' added records concludes through the per-parent
+            # comparison: the check must not over-refuse a merge that drops nothing.
+            keep = _fixture("merge-records-clean")
+            expect("merge-records-install", _install(keep), EXIT_OK)
+            _record_branch(keep, "side", _grown(wl5=True))
+            _write_machine(keep, _grown(bi3=True))
+            _git(keep, home, "add", "-A")
+            _git(keep, home, "commit", "-q", "--no-verify", "-m", "main records")
+            keep_side = _git_out(keep, "rev-parse", "side")
+            before = _head(keep)
+            rc, text = _merge(keep)
+            expect("merge-records-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(keep) == before),
+                   (True, True))
+            rc, moved = _committed(keep)
+            expect("merge-records-clean-concluded",
+                   (rc, moved, _git_out(keep, "rev-parse", "HEAD^1") == before,
+                    _git_out(keep, "rev-parse", "HEAD^2") == keep_side,
+                    "BI-3" in (keep / machine_dir / "backlog_item.index.toml").read_text(encoding="utf-8"),
+                    "WL-5" in (keep / machine_dir / "worklog.toml").read_text(encoding="utf-8")),
+                   (EXIT_OK, True, True, True, True, True))
+            # An octopus merge (MERGE_HEAD naming two commits): every merged parent is compared, so an
+            # -s ours octopus that drops what either branch added is refused against each parent.
+            octo = _fixture("merge-octopus-drop")
+            expect("merge-octopus-install", _install(octo), EXIT_OK)
+            _record_branch(octo, "side1", _grown(bi3=True))
+            _record_branch(octo, "side2", _grown(wl5=True))
+            _advance_main(octo, "MAIN.md")
+            octo_side1 = _git_out(octo, "rev-parse", "side1")
+            octo_side2 = _git_out(octo, "rev-parse", "side2")
+            before = _head(octo)
+            rc, text = _merge(octo, "-s", "ours", "side1", "side2")
+            octo_mh = _git_out(octo, "rev-parse", "--path-format=absolute", "--git-path", "MERGE_HEAD")
+            octo_heads = (Path(octo_mh).read_text(encoding="utf-8").split()
+                          if octo_mh and Path(octo_mh).is_file() else [])
+            expect("merge-octopus-stopped-by-pre-merge-commit",
+                   (rc != EXIT_OK, _head(octo) == before, octo_heads == [octo_side1, octo_side2]),
+                   (True, True, True))
+            rc, text = _commit(octo)
+            expect("merge-octopus-drop-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(octo) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: record 'BI-3', held by merge parent " + octo_side1
+                    in text,
+                    "FINDING: C-HISTORY-COUNTERS: against merge parent " + octo_side1 in text,
+                    "FINDING: C-HISTORY-COUNTERS: against merge parent " + octo_side2 in text),
+                   (True, True, True, True, True))
+            # A merge result that RESURRECTS a record at an unqualified terminal state is refused at the
+            # concluding git commit, whether the reopen is staged as part of the merge resolution or
+            # carried by the merged branch: a terminal state in any parent keeps that state in the result
+            # (terminal states are absorbing, so no branch's own committed transition is misgraded),
+            # while non-terminal status changes stay ungraded for a merge commit (the control below).
+            def _machine_bi2(status):
+                m = clean_machine()
+                m["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, status)])
+                return m
+
+            reopen = _fixture("merge-reopen-resolution", machine=_machine_bi2("dropped"))
+            expect("merge-reopen-install", _install(reopen), EXIT_OK)
+            _git(reopen, home, "checkout", "-q", "-b", "side")
+            (reopen / "SIDE.md").write_text("side\n", encoding="utf-8")
+            _git(reopen, home, "add", "SIDE.md")
+            _git(reopen, home, "commit", "-q", "--no-verify", "-m", "side")
+            _git(reopen, home, "checkout", "-q", "main")
+            _advance_main(reopen, "MAIN.md")
+            reopen_side = _git_out(reopen, "rev-parse", "side")
+            before = _head(reopen)
+            rc, text = _merge(reopen)
+            expect("merge-reopen-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(reopen) == before),
+                   (True, True))
+            # The reopen is staged as part of the merge resolution, before the concluding commit: both
+            # parents hold BI-2 at 'dropped', so the HEAD-prior grading and the per-parent grading each
+            # name the resurrection.
+            _write_machine(reopen, {"backlog_item.index.toml": idx([bi(1, "done"), bi(2, "open")])})
+            _git(reopen, home, "add", "-A")
+            rc, text = _commit(reopen)
+            expect("merge-resolution-reopen-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(reopen) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: prior record 'BI-2' was at unqualified terminal "
+                    "'dropped' but is now 'open'" in text,
+                    "FINDING: C-HISTORY-RESURRECTION: record 'BI-2' was at unqualified terminal "
+                    "'dropped' in merge parent " + reopen_side in text,
+                    _git_out(reopen, "rev-parse", "-q", "--verify", "MERGE_HEAD") == reopen_side),
+                   (True, True, True, True, True))
+            # The reopen carried by the merged branch (committed past the hook): the merge result takes
+            # the branch's reopened record, and the concluding commit is refused against the HEAD prior.
+            carried = _fixture("merge-reopen-carried", machine=_machine_bi2("dropped"))
+            expect("merge-carried-install", _install(carried), EXIT_OK)
+            _record_branch(carried, "side", _machine_bi2("open"))
+            _advance_main(carried, "MAIN.md")
+            carried_side = _git_out(carried, "rev-parse", "side")
+            before = _head(carried)
+            rc, text = _merge(carried)
+            expect("merge-carried-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(carried) == before),
+                   (True, True))
+            rc, text = _commit(carried)
+            expect("merge-branch-reopen-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(carried) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: prior record 'BI-2' was at unqualified terminal "
+                    "'dropped' but is now 'open'" in text,
+                    _git_out(carried, "rev-parse", "-q", "--verify", "MERGE_HEAD") == carried_side),
+                   (True, True, True, True))
+            # The clean-merge control: a merged branch's own non-terminal status change (open -> dropped,
+            # committed on the branch) concludes with the reached terminal state kept in the result, so
+            # the terminal grading over-refuses nothing and no branch's own transition is graded as this
+            # commit's.
+            settle = _fixture("merge-settled-clean")
+            expect("merge-settled-install", _install(settle), EXIT_OK)
+            _record_branch(settle, "side", _machine_bi2("dropped"))
+            _advance_main(settle, "MAIN.md")
+            settle_side = _git_out(settle, "rev-parse", "side")
+            before = _head(settle)
+            rc, text = _merge(settle)
+            expect("merge-settled-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(settle) == before),
+                   (True, True))
+            rc, moved = _committed(settle)
+            expect("merge-settled-clean-concluded",
+                   (rc, moved, _git_out(settle, "rev-parse", "HEAD^2") == settle_side,
+                    '"dropped"' in (settle / machine_dir / "backlog_item.index.toml").read_text(
+                        encoding="utf-8")),
+                   (EXIT_OK, True, True, True))
+            # A created-terminal record only the merged branch holds keeps its body through the merge: the
+            # side branch adds a done record (DN-2, the receipt of an added BI-3), and a merge resolution
+            # that edits its title is refused at the concluding git commit against the merged parent's
+            # digest (the HEAD prior does not hold DN-2, so only the per-parent body comparison sees it).
+            def _machine_dn2(title="t"):
+                m = clean_machine()
+                m["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open"), bi(3, "done")])
+                m["done.index.toml"] = idx([dn(1, "BI-1"), dn(2, "BI-3", title=title)])
+                m["counters.toml"]["counters"].update(BI=3, DN=2)
+                return m
+
+            body = _fixture("merge-body-resolution")
+            expect("merge-body-install", _install(body), EXIT_OK)
+            _record_branch(body, "side", _machine_dn2())
+            _advance_main(body, "MAIN.md")
+            body_side = _git_out(body, "rev-parse", "side")
+            before = _head(body)
+            rc, text = _merge(body)
+            expect("merge-body-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(body) == before),
+                   (True, True))
+            _write_machine(body, {"done.index.toml": idx([dn(1, "BI-1"), dn(2, "BI-3", title="edited")])})
+            _git(body, home, "add", "-A")
+            rc, text = _commit(body)
+            expect("merge-resolution-body-edit-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(body) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: immutable record 'DN-2' body changed since merge parent "
+                    + body_side in text,
+                    _git_out(body, "rev-parse", "-q", "--verify", "MERGE_HEAD") == body_side),
+                   (True, True, True, True))
+            # The controls: the same merge with no edit concludes (the merged parent's digest matches the
+            # body the result keeps, so the per-parent comparison over-refuses nothing), and the same edit
+            # as an ordinary commit is refused against the HEAD prior.
+            body_clean = _fixture("merge-body-clean")
+            expect("merge-body-clean-install", _install(body_clean), EXIT_OK)
+            _record_branch(body_clean, "side", _machine_dn2())
+            _advance_main(body_clean, "MAIN.md")
+            rc, text = _merge(body_clean)
+            rc, moved = _committed(body_clean)
+            expect("merge-body-clean-concluded",
+                   (rc, moved, _git_out(body_clean, "rev-parse", "HEAD^2")
+                    == _git_out(body_clean, "rev-parse", "side")),
+                   (EXIT_OK, True, True))
+            body_plain = _fixture("body-edit-ordinary", machine=_machine_dn2())
+            expect("body-edit-ordinary-install", _install(body_plain), EXIT_OK)
+            _write_machine(body_plain, {"done.index.toml": idx([dn(1, "BI-1"), dn(2, "BI-3", title="edited")])})
+            _git(body_plain, home, "add", "-A")
+            before = _head(body_plain)
+            rc, text = _commit(body_plain)
+            expect("body-edit-ordinary-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(body_plain) == before,
+                    "FINDING: C-HISTORY-RESURRECTION: immutable record 'DN-2' body changed since the prior "
+                    "committed snapshot" in text),
+                   (True, True, True))
+            # A release row only the merged branch holds stays byte-identical through the merge: the side
+            # branch cuts release 1.2.0 (WL-5), and a merge resolution that rewrites that row's date is
+            # refused at the concluding git commit by the append-only comparison against the merged parent
+            # (the HEAD prior holds two rows, so the third reads there as a plain append).
+            wl5_dig = _opf_release.compute_span_digest({**full_wl, 5: wl(5)}, (5, 5))
+            rel_changelog = make_changelog(["1.2.0", "1.1.0", "1.0.0"])
+            rel_digs = freeze_digests(rel_changelog, ["1.2.0", "1.1.0", "1.0.0"])
+
+            def _machine_rel3(date=TS):
+                m = clean_machine()
+                m["worklog.toml"] = {"schema": 1, "entry": [wl(3), wl(4), wl(5)]}
+                m["counters.toml"]["counters"]["WL"] = 5
+                row = rel_row("1.2.0", 5, 5, wl5_dig)
+                row["date"] = date
+                m["version.toml"] = {
+                    "schema": 1,
+                    "release": [rel_row("1.0.0", 1, 2, dig12), rel_row("1.1.0", 3, 4, dig34), row],
+                    "summary": [{"covers": v, "status": "published", "digest": rel_digs[v]}
+                                for v in ("1.0.0", "1.1.0", "1.2.0")]
+                    + [{"covers": "unreleased", "status": "working"}]}
+                return m
+
+            def _release_branch(root):
+                _git(root, home, "checkout", "-q", "-b", "side")
+                _write_machine(root, _machine_rel3())
+                (root / "CHANGELOG.md").write_text(rel_changelog, encoding="utf-8")
+                (root / "VERSION").write_text("1.2.0\n", encoding="utf-8")
+                _git(root, home, "add", "-A")
+                _git(root, home, "commit", "-q", "--no-verify", "-m", "side")
+                _git(root, home, "checkout", "-q", "main")
+                _advance_main(root, "MAIN.md")
+
+            rel_fx = _fixture("merge-release-resolution")
+            expect("merge-release-install", _install(rel_fx), EXIT_OK)
+            _release_branch(rel_fx)
+            rel_side = _git_out(rel_fx, "rev-parse", "side")
+            before = _head(rel_fx)
+            rc, text = _merge(rel_fx)
+            expect("merge-release-stopped-by-pre-merge-commit", (rc != EXIT_OK, _head(rel_fx) == before),
+                   (True, True))
+            _write_machine(rel_fx, {"version.toml": _machine_rel3(date="2026-06-02T00:00:00Z")["version.toml"]})
+            _git(rel_fx, home, "add", "-A")
+            rc, text = _commit(rel_fx)
+            expect("merge-resolution-release-rewrite-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(rel_fx) == before,
+                    "FINDING: C-HISTORY-APPEND-ONLY: against merge parent " + rel_side
+                    + ": release #3 (1.2.0) was rewritten" in text,
+                    _git_out(rel_fx, "rev-parse", "-q", "--verify", "MERGE_HEAD") == rel_side),
+                   (True, True, True, True))
+            # The controls: the same merge with no rewrite concludes, and the same rewrite as an ordinary
+            # commit is refused against the HEAD prior.
+            rel_clean = _fixture("merge-release-clean")
+            expect("merge-release-clean-install", _install(rel_clean), EXIT_OK)
+            _release_branch(rel_clean)
+            rc, text = _merge(rel_clean)
+            rc, moved = _committed(rel_clean)
+            expect("merge-release-clean-concluded",
+                   (rc, moved, _git_out(rel_clean, "rev-parse", "HEAD^2")
+                    == _git_out(rel_clean, "rev-parse", "side")),
+                   (EXIT_OK, True, True))
+            rel_plain = _fixture("release-rewrite-ordinary", machine=_machine_rel3())
+            (rel_plain / "CHANGELOG.md").write_text(rel_changelog, encoding="utf-8")
+            (rel_plain / "VERSION").write_text("1.2.0\n", encoding="utf-8")
+            _git(rel_plain, home, "add", "-A")
+            _git(rel_plain, home, "commit", "-q", "--no-verify", "-m", "release 1.2.0")
+            expect("release-rewrite-ordinary-install", _install(rel_plain), EXIT_OK)
+            _write_machine(rel_plain, {"version.toml": _machine_rel3(date="2026-06-02T00:00:00Z")["version.toml"]})
+            _git(rel_plain, home, "add", "-A")
+            before = _head(rel_plain)
+            rc, text = _commit(rel_plain)
+            expect("release-rewrite-ordinary-refused-by-git-commit",
+                   (rc != EXIT_OK, _head(rel_plain) == before,
+                    "FINDING: C-HISTORY-APPEND-ONLY: release #3 (1.2.0) was rewritten" in text),
+                   (True, True, True))
+            # Fail-closed merge observation, end to end: a MERGE_HEAD the hook cannot validate exits 2 at
+            # the hook, before any check (the hook's own message pins the layer), and one the hook passes
+            # but the observer cannot read back to usable snapshots is doctor's named CANNOT-EVALUATE,
+            # each refusing the commit with HEAD unmoved: never an unchecked merge.
+            planted = _fixture("merge-head-planted")
+            expect("merge-planted-install", _install(planted), EXIT_OK)
+            (planted / "CHANGE.md").write_text("change\n", encoding="utf-8")
+            _git(planted, home, "add", "CHANGE.md")
+            planted_mh = _git_out(planted, "rev-parse", "--path-format=absolute", "--git-path",
+                                  "MERGE_HEAD")
+            planted_head = _head(planted)
+            cant = "a merge is in progress but its merged parents could not be observed"
+
+            def _planted_commit(content):
+                Path(planted_mh).write_text(content, encoding="utf-8")
+                prc, ptext = _commit(planted)
+                return prc != EXIT_OK, _head(planted) == planted_head, ptext
+
+            refused, still, text = _planted_commit("zz-not-hex\n")
+            # The hook's own unquoted message pins the layer: the observer's defence-in-depth note
+            # quotes the value ("holds 'zz-not-hex'"), so a hook that stops validating does not pass.
+            expect("merge-head-not-hex-refused-by-hook",
+                   (refused, still, "holds zz-not-hex, which is not a commit id" in text),
+                   (True, True, True))
+            refused, still, text = _planted_commit("1234567890abcdef1234567890abcdef12345678\n")
+            expect("merge-head-unknown-id-refused-by-hook",
+                   (refused, still, "which is not a commit of this repository" in text),
+                   (True, True, True))
+            # The empty and the whitespace-only MERGE_HEAD are each pinned by the hook's own message, and
+            # no doctor step runs: the observer's own note ("MERGE_HEAD exists but names no commit") would
+            # otherwise keep a hook that passes whitespace green.
+            hook_no_commit = "opf-pre-commit: cannot evaluate: {} names no commit".format(planted_mh)
+            refused, still, text = _planted_commit("")
+            expect("merge-head-empty-refused-by-hook",
+                   (refused, still, hook_no_commit in text, "opf doctor" in text), (True, True, True, False))
+            refused, still, text = _planted_commit(" \n")
+            expect("merge-head-whitespace-refused-by-hook",
+                   (refused, still, hook_no_commit in text, "opf doctor" in text), (True, True, True, False))
+            tree_id = _git_out(planted, "rev-parse", "HEAD^{tree}")
+            refused, still, text = _planted_commit(tree_id + "\n")
+            expect("merge-head-tree-id-refused-by-hook",
+                   (refused, still, "which is not a commit of this repository" in text),
+                   (True, True, True))
+            # An oversized MERGE_HEAD of valid commit ids passes the hook's per-line validation; the
+            # observer's bounded read then refuses it, the engine's named CANNOT-EVALUATE.
+            lines_needed = (65536 // (len(planted_head) + 1)) + 1
+            refused, still, text = _planted_commit((planted_head + "\n") * lines_needed)
+            expect("merge-head-oversized-cannot-evaluate", (refused, still, cant in text),
+                   (True, True, True))
+            # A commit of this repository whose snapshot the observer cannot reconstruct (no store at
+            # that commit) passes the hook's validation and is the same named CANNOT-EVALUATE.
+            empty_tree = _git_out(planted, "hash-object", "-w", "-t", "tree", os.devnull)
+            storeless = _git_out(planted, "-c", "user.email=opf@example.invalid",
+                                 "-c", "user.name=OPF Self Test", "commit-tree", empty_tree,
+                                 "-m", "no store")
+            refused, still, text = _planted_commit(storeless + "\n")
+            expect("merge-storeless-parent-cannot-evaluate", (refused, still, cant in text),
+                   (True, True, True))
+            # The observer's own malformed-merge branches, each ending in the engine's named
+            # CANNOT-EVALUATE and each pinned by the note its own branch adds, which doctor prints as
+            # "opf doctor: note: ...": the engine's shared message alone stays green when a branch's own
+            # handling is removed and a later branch or the engine still holds the merge closed. An
+            # ABBREVIATED commit id passes the hook (its per-line test is hex, and git rev-parse --verify
+            # resolves an abbreviation), so the observer's full-length id test is reached end to end
+            # through git commit.
+            note = "opf doctor: note: merge: "
+            refused, still, text = _planted_commit(planted_head[:-1] + "\n")
+            expect("merge-head-abbreviated-id-cannot-evaluate",
+                   (refused, still, cant in text,
+                    note + "MERGE_HEAD holds {!r}, which is not a commit id".format(planted_head[:-1]) in text),
+                   (True, True, True, True))
+
+            # The remaining malformed branches sit behind the hook's validation (an empty, unreadable or
+            # unresolvable MERGE_HEAD exits 2 at the hook before any check runs), so the observer is
+            # driven directly: doctor runs over the fixture itself with the merge state planted and no
+            # hook in the way, and each branch is the same named CANNOT-EVALUATE, never an unchecked
+            # merge.
+            def _doctor_merge_text(extra_path=None):
+                env = _env()
+                if extra_path is not None:
+                    env["PATH"] = str(extra_path) + os.pathsep + env.get("PATH", os.defpath)
+                try:
+                    proc = subprocess.run(
+                        [sys.executable, "-I", "-B", str(Path(__file__).resolve().parent / "opf.py"),
+                         "doctor", "--root", str(planted)], cwd=str(planted), env=env,
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300)
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise OSError("could not run doctor over {} ({})".format(planted, exc))
+                return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+            # An empty MERGE_HEAD (the hook refuses one itself, so it is planted for doctor directly).
+            Path(planted_mh).write_text("", encoding="utf-8")
+            rc, text = _doctor_merge_text()
+            expect("merge-head-observer-empty-cannot-evaluate",
+                   (rc, cant in text, note + "MERGE_HEAD exists but names no commit" in text),
+                   (EXIT_ERROR, True, True))
+            # A full-length id that resolves to no commit of the repository (the hook verifies each id
+            # itself, so an unresolvable one is planted for doctor directly).
+            Path(planted_mh).write_text("1" * 40 + "\n", encoding="utf-8")
+            rc, text = _doctor_merge_text()
+            expect("merge-head-observer-unresolvable-cannot-evaluate",
+                   (rc, cant in text,
+                    note + "MERGE_HEAD names {}, which does not resolve to a commit of this "
+                    "repository".format("1" * 40) in text),
+                   (EXIT_ERROR, True, True))
+            # A MERGE_HEAD that exists but cannot be read back (a directory at its path).
+            Path(planted_mh).unlink()
+            Path(planted_mh).mkdir()
+            rc, text = _doctor_merge_text()
+            expect("merge-head-observer-unreadable-cannot-evaluate",
+                   (rc, cant in text, note + "MERGE_HEAD exists but cannot be read (" in text),
+                   (EXIT_ERROR, True, True))
+            Path(planted_mh).rmdir()
+            # A store path git cannot report: a git whose rev-parse --show-prefix fails while every other
+            # call runs as usual (the observer's scrubbed environment carries only PATH and HOME, so the
+            # real git is named in the wrapper by its absolute path, not an environment variable).
+            noprefix_bin = base / "noprefix-git-bin"
+            noprefix_bin.mkdir()
+            (noprefix_bin / "git").write_text(
+                "#!/bin/sh\n"
+                "for a in \"$@\"; do\n"
+                "    [ \"$a\" = --show-prefix ] && exit 1\n"
+                "done\n"
+                "exec \"" + git + "\" \"$@\"\n", encoding="utf-8")
+            os.chmod(str(noprefix_bin / "git"), 0o755)
+            Path(planted_mh).write_text(planted_head + "\n", encoding="utf-8")
+            rc, text = _doctor_merge_text(extra_path=noprefix_bin)
+            expect("merge-head-observer-prefix-cannot-evaluate",
+                   (rc, cant in text,
+                    note + "could not determine the store's path within the repository" in text),
+                   (EXIT_ERROR, True, True))
+            # Tolerant cleanup: a regression that ACCEPTS one of these commits makes git consume
+            # MERGE_HEAD, and the red vectors above must still be reported, not a harness error.
+            Path(planted_mh).unlink(missing_ok=True)
             hook_text = " ".join((pack / "pre-commit").read_text(encoding="utf-8").replace("#", " ").split())
             inst_text = " ".join((pack / "install.sh").read_text(encoding="utf-8").replace("#", " ").split())
             expect("residuals-disclosed", (
@@ -2415,8 +3018,29 @@ def _self_test_isolated():
                 "The hook runs checked-out code" in hook_text,
                 "Operations git commits without running any pre-commit hook: cherry-pick, revert, rebase"
                 in hook_text,
-                "no pre-commit hook for cherry-pick, revert, rebase, am or a merge that commits without stopping"
-                in inst_text,
+                "no pre-commit hook for cherry-pick, revert, rebase or am" in inst_text
+                and "git merge --no-verify skip them" in inst_text
+                and "a merge commit's non-terminal status changes are not graded" in inst_text
+                and "git merge --no-verify (git pull --no-verify) skips the pre-merge-commit stub" in hook_text
+                and "a merge commit's non-terminal status changes are not graded" in hook_text
+                and "terminal-status resurrection" in hook_text
+                and "terminal-status resurrection" in inst_text
+                and "tied counters do not expose it" in hook_text
+                and "tied counters do not expose it" in inst_text
+                and "caught only as a lowered counter: tied counters do not expose it" in inst_text
+                and "different unqualified terminal states" in hook_text
+                and "different unqualified terminal states" in inst_text
+                and "changed immutable bodies" in hook_text
+                and "changed immutable bodies" in inst_text
+                and "release-ledger append-only against each parent's release rows" in hook_text
+                and "rewritten or dropped release rows" in inst_text
+                and "imported append-only against each parent's imported records" in hook_text
+                and "changed or dropped imported records" in inst_text
+                and "is not status-compared" in hook_text
+                and "is not status-compared" in inst_text
+                and "unparseable status" in hook_text
+                and "unparseable status" in inst_text
+                and "which the pack does not install" not in hook_text,
                 "so a missing hook is never silent" in hook_text,
                 "It never sets core.hooksPath" in inst_text,
                 "Requires git 2.32 or later" in hook_text,
@@ -2428,8 +3052,14 @@ def _self_test_isolated():
                 "CI is the shared floor" in inst_text,
                 "or an includeIf onbranch: for a branch checked out later) is not seen" in inst_text,
                 "can leave that empty directory, and the hooks directory holding it when this run made that one"
-                in inst_text),
-                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True, True))
+                in inst_text,
+                "a fast-forward git merge or git pull" in hook_text
+                and "a fast-forward git merge or git pull" in inst_text,
+                "compared with every parent" in hook_text and "compared with every parent" in inst_text,
+                "exits 128" in hook_text and "exits 128" in inst_text
+                and "exit 1 and leave MERGE_HEAD" in hook_text and "exit 1 and leaves MERGE_HEAD" in inst_text),
+                (True, True, True, True, True, True, True, True, True, False, False, False, False, False, True,
+                 True, True, True, True))
 
             # --- The hook's contract, run by hand under a recording stub tool. ---
             serial = [0]
@@ -2472,6 +3102,11 @@ def _self_test_isolated():
             expect("hook-abnormal-status-normalized", (rc, [c[0] for c in calls]), (EXIT_ERROR, ["doctor"]))
             rc, calls, _f = _stubbed(stubbed, args=("x",))
             expect("hook-usage", (rc, calls), (EXIT_ERROR, []))
+            # Run as pre-merge-commit, the hook runs no step and refuses (2).
+            rc, calls, _f = _stubbed(stubbed, args=("pre-merge-commit",))
+            expect("hook-pre-merge-commit-refuses-without-steps", (rc, calls), (EXIT_ERROR, []))
+            rc, calls, _f = _stubbed(stubbed, args=("pre-merge-commit", "x"))
+            expect("hook-pre-merge-commit-surplus-usage", (rc, calls), (EXIT_ERROR, []))
 
             # The snapshot's remote list holds one value per line, so a push URL that still holds a line
             # break once git's own line ending is removed exits 2 naming it, before any step: a trailing
@@ -2576,9 +3211,12 @@ def _self_test_isolated():
               "child-launch failure -> 2; no-repo-root -> 2; invalid-git-marker -> 2; "
               "relative-toplevel probe -> None (exit 2); "
               "git executable absolutized (relative which() -> absolute argv[0]); "
-              "status contract 1=assertion 2=harness; pre-commit floor: installer writes a stub in the "
-              "untracked hooks directory, sets no core.hooksPath, keeps other hooks, and refuses any "
-              "hooksPath (another linked worktree's included), an existing pre-commit hook (compared byte "
+              "status contract 1=assertion 2=harness; pre-commit floor: installer writes a pre-commit "
+              "and a pre-merge-commit stub in the "
+              "untracked hooks directory (a clone holding the pre-commit stub alone gains the second "
+              "with the first kept), sets no core.hooksPath, keeps other hooks, and refuses any "
+              "hooksPath (another linked worktree's included), an existing pre-commit or pre-merge-commit "
+              "hook (compared byte "
               "for byte, never through a symlink), a symlinked hooks destination, a git directory in any "
               "worktree's top level (from a linked worktree, from the main one, and equal to the top level) "
               "while a separate git directory installs, a core.worktree top level (linked and main, from a linked worktree, the main one with no .git entry), an empty core.worktree, a top level of /, a worktree at the hooks directory, an unregistered or moved working tree, a signal rolled back with what is left named by file type (after chmod, ln and the last rmdir nothing; after either mkdir that empty directory, and the hooks directory holding it when this run made that too; before the hooks mkdir no directory; an unreadable stub named; an unsearchable hooks directory named not known), a directory arriving at either mkdir kept, a stale private directory refused and kept, an unreadable worktree registry, a worktree entry git cannot read, a closed or broken stdout leaving a successful install at 0, an "
@@ -2588,6 +3226,29 @@ def _self_test_isolated():
               "a refusal, "
               "branch-added hooks not run, "
               "linked worktree with spaces, stub refuses a missing pack hook, cherry-pick residual held; "
+              "real git merges: a merge git merge would record is stopped by the pre-merge-commit stub "
+              "(which runs no step and exits 2) with HEAD unmoved and MERGE_HEAD plus the staged result "
+              "left, and git commit concludes it as a two-parent merge through the pre-commit check, the "
+              "result compared with every parent: an -s ours drop of a merged branch's record and "
+              "counters refused (octopus included, each parent named), a resolution edit of a done "
+              "record body and a resolution rewrite of a release row, each held only by the merged "
+              "branch, refused against that parent (the unedited merge concluding and the same edit as "
+              "an ordinary commit refused, each a control), a reopen of an "
+              "unqualified-terminal record refused as terminal resurrection whether staged in the merge "
+              "resolution or carried by the merged branch, a clean merge keeping both sides' records "
+              "(and a merged branch's own non-terminal status change reaching a kept terminal state) "
+              "concluded, the first merge the stub stops (two branches each adding one file outside "
+              "the store) and the -s ours drop run again without the stubs committing; "
+              "merge observation fails closed "
+              "(a MERGE_HEAD the hook cannot validate, not hex, an unknown id, empty, whitespace alone "
+              "or a tree id, exits "
+              "2 at the hook, while an oversized MERGE_HEAD of valid ids, a parent commit holding no "
+              "store and an abbreviated commit id the hook resolves are doctor's named CANNOT-EVALUATE, "
+              "and the observer branches behind the hook's validation, an empty MERGE_HEAD, an "
+              "unreadable one, a full-length id resolving to no commit and a store path git cannot "
+              "report, are each the same named CANNOT-EVALUATE with doctor run over the planted merge "
+              "state directly, each observer case also holding its own branch's note), never an "
+              "unchecked merge; "
               "git commit over the staged snapshot refuses a staged tamper by "
               "doctor's finding, ignores an unstaged one, checks GIT_INDEX_FILE for commit PATH and -a, "
               "passes an unborn branch and a remote sync target; over an opf init store passes render "

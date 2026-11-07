@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "cabc902e4c2787e5ba10705f7d7db47d70d34afdda72c1f5a1e95b736da0f88d"
+tree-sha256 = "919c232d80058dbfacecd97d9a1b3703d33c9071c2ca3249cf424d26f22f8fe8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 580660
-sha256 = "57ab404132fe236fc27b251a97f1e7554ad9cdaef267ac6960ae8c334d7268a7"
+bytes = 585360
+sha256 = "9cbc0fa63d5711d20792b8376ee3fb4e1cea8346c4273c2fddc32776beb87957"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2521,13 +2521,13 @@ sha256 = "d073f5e3e09a55c716ad6f71b24a68eb9ec1c7f5c36bae68f7d8f3dc0f21d4c5"
 
 [[sources]]
 path = "opf/enforcement/precommit/install.sh"
-bytes = 27465
-sha256 = "cd48ca45fc01a32cf5c134e8b3e12a2509f0195ab6a299d5a1bda1fe984eec2a"
+bytes = 32900
+sha256 = "d99e9a516d6be1c2ecc9b8eec8ba96e77bbdfafdb7dd8eb3f59d90bd85416fff"
 
 [[sources]]
 path = "opf/enforcement/precommit/pre-commit"
-bytes = 11208
-sha256 = "c887f57f0c5e787b6f6422533304b2a4f448c7eb11fcd32873b1fafa56b041c6"
+bytes = 19943
+sha256 = "e90a402f420778f5ae768066896ae1c15a31b4c37849e00a0b775f4dcd6ac041"
 
 [[sources]]
 path = "opf/prompt-pack/adopt/SKILL.md"
@@ -3131,8 +3131,8 @@ sha256 = "46fc281172a82ade8fe5915f6b3a4db47e3929f05efef1ea4964bb97553b0e7d"
 
 [[sources]]
 path = "opf/tools/_opf_check.py"
-bytes = 913013
-sha256 = "24b882c1a72c5c85974753396a04a25bcc8530cb2f6230fc866a1e6e0ce5c521"
+bytes = 926313
+sha256 = "d0e4a424a337455713e7132b50b477aaecfda6d59681093c702b0fc3a50bbe50"
 
 [[sources]]
 path = "opf/tools/_opf_declaration.py"
@@ -3201,8 +3201,8 @@ sha256 = "6521884bddc8c14356e55877868f60351e9c7a1b5f7a099ab497bfc588acbec8"
 
 [[sources]]
 path = "opf/tools/_opf_observe.py"
-bytes = 123949
-sha256 = "626f44cc1335a70c9dfd9f81da3e9d05430389abbc5a5c68a61b04d2b74994a3"
+bytes = 128686
+sha256 = "6ab12652fb53aaa4684859363e5cb12b2a15ae5766a03ec3f66f8f9cfe6f3c59"
 
 [[sources]]
 path = "opf/tools/_opf_oplock.py"
@@ -3416,8 +3416,8 @@ sha256 = "363663005882dabe4f01b43e28926f4093bce4d718a4e67bfa13b7318a9a3247"
 
 [[sources]]
 path = "opf/tools/check_opf_doctor.py"
-bytes = 383508
-sha256 = "08d1577b1b2b374e4c36e47cb9deb6a80bdeb9b14c03d6f44d997a6b52b4473b"
+bytes = 430185
+sha256 = "6409b9c0ac6438090acfe9a94c35a53b5333b4260b4d5ad47101881bc5412398"
 
 [[sources]]
 path = "opf/tools/check_opf_drift.py"

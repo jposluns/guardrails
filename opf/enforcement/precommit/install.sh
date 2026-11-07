@@ -4,10 +4,12 @@
 #
 #   sh opf/enforcement/precommit/install.sh
 #
-# It writes a pre-commit stub into the hooks directory of the clone that holds this file: the untracked
-# hooks directory inside the clone's own git directory (for a linked worktree, the common git directory
-# its worktrees share). Git runs the stub from the top level of the working tree being committed, and the
-# stub runs the pre-commit hook beside this file, found at the same path in that working tree. It never
+# It writes a pre-commit stub and a pre-merge-commit stub into the hooks directory of the clone that holds
+# this file: the untracked hooks directory inside the clone's own git directory (for a linked worktree,
+# the common git directory its worktrees share). Git runs each stub from the top level of the working tree
+# being committed, and the stub runs the pre-commit hook beside this file, found at the same path in that
+# working tree; the pre-merge-commit stub runs it as pre-merge-commit, where it refuses the merge commit
+# git merge would record so that git commit concludes the merge through the pre-commit check. It never
 # sets core.hooksPath: a core.hooksPath naming this tracked directory would let any branch add a hook
 # (post-checkout, post-merge) that git runs on checkout, merge or pull.
 # Running it again is a no-op. It refuses (exit 2) and changes nothing when:
@@ -19,9 +21,11 @@
 #     git would not run a hook from the hooks directory there while it is set, and replacing it would
 #     stop the hooks it names; a worktree git directory that git cannot read, or a worktrees directory
 #     (the registry of linked worktrees) that this user cannot read and search, is refused too;
-#   - the hooks directory already holds a pre-commit hook other than this stub, byte for byte, as a
-#     regular executable file (a symbolic link is never taken as the stub): replacing it would stop it
-#     (other hooks there are left as they are and keep running);
+#   - the hooks directory already holds a pre-commit or a pre-merge-commit hook other than the stub of
+#     that name, byte for byte, as a regular executable file (a symbolic link is never taken as a stub):
+#     replacing it would stop it (other hooks there are left as they are and keep running). A stub that
+#     is already in place is kept, and only a missing one is written, so a clone that ran an earlier
+#     installer, which wrote the pre-commit stub alone, gains the pre-merge-commit stub;
 #   - the hooks directory is not a real directory (a symbolic link is refused: it could name another
 #     repository's hooks directory, or a directory of a working tree that a branch could fill) or is not
 #     one this user can read, search and write;
@@ -40,14 +44,15 @@
 #   - git is older than 2.32, the floor the hook needs (see pre-commit), or a command it needs (env, sed,
 #     dirname, git, cat, cmp, ln) fails (ln fails on a filesystem without hard links).
 # The only place it writes is the hooks directory of the clone's common git directory, resolved to its
-# physical path: with core.hooksPath unset, the only directory git runs hooks from. It writes the stub
+# physical path: with core.hooksPath unset, the only directory git runs hooks from. It writes each stub
 # in a private directory it creates there, checks it, and links it into place (ln never replaces a
 # file), checking that nothing is at the stub path just before the link and that the link itself is
 # there just after (a directory or a link to one that arrives in between would have ln link into it).
 # When a step fails (a write that stops partway on a full disk, say, a stub that does not read back as a
 # regular, readable, executable file with the exact stub text, or such an arrival), it removes only what
-# this run created, and the hooks directory if it created it, before it exits 2. It then looks again and
-# names what is at the hooks directory, the stub path and the private directory, by file type alone
+# this run created (a stub it placed before the failing one included), and the hooks directory if it
+# created it, before it exits 2. It then looks again and names what is at the hooks directory, the two
+# stub paths and the private directory, by file type alone
 # (never by a content comparison, which can fail), so the refusal states what it saw, not what it meant
 # to remove.
 # A hangup, interrupt or termination signal runs the same removal and report and exits 2, at any point.
@@ -77,14 +82,29 @@
 # at another repository or file, a `git -c` value (GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT) cannot read as
 # configuration, and no trace destination, inherited or configured, makes git write into another file.
 #
-# Residuals (spec 14.1, disclosed; pre-commit lists them in full): the stub is local to this clone. It is
-# not cloned or pushed, so every clone must run this installer; git commit --no-verify skips it; git runs
-# no pre-commit hook for cherry-pick, revert, rebase, am or a merge that commits without stopping; a
-# core.hooksPath set later, in any scope, stops the stub silently; the core.hooksPath check reads the
-# configuration this run sees, so one a later commit reads instead (another GIT_CONFIG_GLOBAL or
-# GIT_CONFIG_SYSTEM file, or an includeIf onbranch: for a branch checked out later) is not seen and stops
-# the stub silently too; and the stub runs the checked-out pre-commit and opf.py. CI (../ci/opf-ci.sh)
-# does not close these for the history checks: see pre-commit.
+# Residuals (spec 14.1, disclosed; pre-commit lists them in full): the stubs are local to this clone. They
+# are not cloned or pushed, so every clone must run this installer; git commit --no-verify and git merge
+# --no-verify skip them; git runs no pre-commit hook for cherry-pick, revert, rebase or am, nor for a
+# fast-forward git merge or git pull, which brings in commits with no hook run; a merge
+# concluded with git commit is compared with every parent (HEAD and each MERGE_HEAD commit) for dropped
+# records, lowered counters, changed immutable bodies (a created-terminal record the result keeps active
+# at the status that parent holds), rewritten or dropped release rows, changed or dropped imported
+# records (where the imported series is active) and terminal-status resurrection, so parents whose
+# release ledgers or imported records diverged refuse every result, but the survival comparison covers each
+# parent's typed record indexes (a worklog entry is not an indexed record, so a dropped worklog entry is
+# caught only as a lowered counter, and tied counters do not expose it), a record a parent holds at an
+# unqualified terminal state is held to that state only while it stays active in the result (one the
+# result archives is not status-compared against a parent; two parents holding one record at different
+# unqualified terminal states refuse every result that keeps it active; a merged parent record with an
+# unparseable status or an unsupported type is a named cannot-evaluate while the result keeps it
+# active), and a merge commit's non-terminal status changes are not graded; the pre-merge-commit stop
+# makes a scripted git merge or git pull (merge mode) exit 1 and leaves MERGE_HEAD and the staged
+# merge result behind, so a later git pull exits 128 until the merge is concluded with git commit or
+# abandoned with git merge --abort; a core.hooksPath set later, in any scope, stops the stubs silently; the
+# core.hooksPath check reads the configuration this run sees, so one a later commit reads instead
+# (another GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM file, or an includeIf onbranch: for a branch checked out
+# later) is not seen and stops the stubs silently too; and the stubs run the checked-out pre-commit and
+# opf.py. CI (../ci/opf-ci.sh) does not close these for the history checks: see pre-commit.
 set -u
 if [ "$#" -gt 0 ]; then
     echo "opf-pre-commit install: usage: sh install.sh (no operands)" >&2
@@ -311,8 +331,8 @@ done
 # hooks directory of the common git directory, so that is the one directory written. Its physical path is
 # used, it lies in no worktree's tracked paths (checked above), and the hooks entry must be a real
 # directory (checked below).
-stub=$hooks/pre-commit
-body="#!/bin/sh
+pc_stub=$hooks/pre-commit
+pc_body="#!/bin/sh
 # OPF pre-commit stub, written by $rel/install.sh (spec 1.3.0 (draft) 14.1). Git runs it from the
 # top level of the working tree being committed; it runs the pack hook checked out there, and exits 2
 # when that hook is missing or unreadable. Remove this file to uninstall.
@@ -327,20 +347,48 @@ case \"\$rc\" in
     0|1|2) exit \"\$rc\" ;;
 esac
 exit 2"
-# True when $1 is the stub: a regular, readable, executable file (not a symbolic link) holding the exact
-# stub text, compared byte for byte (a command substitution would drop trailing newlines).
+# The pre-merge-commit stub runs the same pack hook as pre-merge-commit, where it refuses the merge commit
+# git merge is about to record, so that git commit concludes the merge through the pre-commit stub.
+pmc_stub=$hooks/pre-merge-commit
+pmc_body="#!/bin/sh
+# OPF pre-merge-commit stub, written by $rel/install.sh (spec 1.3.0 (draft) 14.1). Git runs it from the
+# top level of the working tree before git merge records a merge commit; it runs the pack hook checked out
+# there as pre-merge-commit, which refuses that commit so that git commit concludes the merge through the
+# pre-commit stub, and exits 2 when that hook is missing or unreadable. Remove this file to uninstall.
+hook='./$rel/pre-commit'
+if [ ! -f \"\$hook\" ] || [ ! -r \"\$hook\" ]; then
+    printf '%s\\n' \"opf-pre-commit: cannot evaluate: \$hook is missing or not readable in this working tree\" >&2
+    exit 2
+fi
+sh \"\$hook\" pre-merge-commit
+rc=\$?
+case \"\$rc\" in
+    0|1|2) exit \"\$rc\" ;;
+esac
+exit 2"
+# True when $1 is the stub whose text is $2: a regular, readable, executable file (not a symbolic link)
+# holding that exact text, compared byte for byte (a command substitution would drop trailing newlines).
 is_stub() {
-    [ ! -L "$1" ] && [ -f "$1" ] && [ -r "$1" ] && [ -x "$1" ] && printf '%s\n' "$body" | cmp -s -- - "$1"
+    [ ! -L "$1" ] && [ -f "$1" ] && [ -r "$1" ] && [ -x "$1" ] && printf '%s\n' "$2" | cmp -s -- - "$1"
 }
 priv=$hooks/.opf-pre-commit-install.$$
+# The stub being placed: its path, its text, its temporary file and the name ln would use inside a
+# directory at its path. place sets them for each stub in turn; they start as the pre-commit stub's.
+stub=$pc_stub
+body=$pc_body
 tmp=$priv/.opf-pre-commit-stub.$$
 strayed=$stub/${tmp##*/}
 # made_dir and made_priv are set only once their mkdir has succeeded (a mkdir that fails leaves the
-# directory that arrived in its place alone); linking is set just before ln.
+# directory that arrived in its place alone); linking is set just before ln. placed_pc is set once this
+# run has placed the pre-commit stub, so a later failure removes it too; have_pc and have_pmc are set when
+# a stub was already in place before this run (it is kept, never removed).
 made_dir=
 made_priv=
 linking=
 linked=
+placed_pc=
+have_pc=
+have_pmc=
 # Add to seen what is at the path $1, by file type alone (-L first, so no link is followed), never by its
 # content: a comparison that cannot read a file must not read as its absence. Nothing is named only when
 # the directory $2 that would hold $1 is one this user can search.
@@ -360,23 +408,27 @@ at() {
     fi
     seen="$seen${seen:+;} $1: $what"
 }
-# Undo what this run created, and nothing else: the stub only while it is still this run's link (the
-# same file as the temporary one, or, once ln is checked and the temporary one removed, the exact stub
-# text), a link ln made inside a directory that arrived at the stub path only while it is the same file
-# as the temporary one, then the private directory and the hooks directory if this run's mkdir made
-# them. It then refuses, naming what is at the hooks directory and, while that is a real directory, at
-# the stub path, the private directory, and the name ln would use inside a directory at the stub path.
-# An rmdir that fails says nothing of its own: the report names what is there. The signals trapped below
-# are ignored while it runs.
+# Undo what this run created, and nothing else: the stub being placed only while it is still this run's
+# link (the same file as the temporary one, or, once ln is checked and the temporary one removed, the
+# exact stub text), a link ln made inside a directory that arrived at that stub path only while it is the
+# same file as the temporary one, the pre-commit stub this run placed before it only while it holds the
+# exact stub text, then the private directory and the hooks directory if this run's mkdir made them. It
+# then refuses, naming what is at the hooks directory and, while that is a real directory, at the two stub
+# paths, the private directory, and the name ln would use inside a directory at the path of the stub
+# being placed. An rmdir that fails says nothing of its own: the report names what is there. The signals
+# trapped below are ignored while it runs.
 rollback() {
     trap '' HUP INT TERM
     if [ -n "$linking" ]; then
-        if [ ! -L "$stub" ] && { [ "$stub" -ef "$tmp" ] || { [ -n "$linked" ] && [ ! -e "$tmp" ] && is_stub "$stub"; }; }; then
+        if [ ! -L "$stub" ] && { [ "$stub" -ef "$tmp" ] || { [ -n "$linked" ] && [ ! -e "$tmp" ] && is_stub "$stub" "$body"; }; }; then
             rm -f -- "$stub"
         fi
         if [ "$strayed" -ef "$tmp" ]; then
             rm -f -- "$strayed"
         fi
+    fi
+    if [ -n "$placed_pc" ] && is_stub "$pc_stub" "$pc_body"; then
+        rm -f -- "$pc_stub"
     fi
     if [ -n "$made_priv" ]; then
         rm -f -- "$tmp"
@@ -388,7 +440,8 @@ rollback() {
     seen=
     at "$hooks" "$common"
     if [ ! -L "$hooks" ] && [ -d "$hooks" ]; then
-        at "$stub" "$hooks"
+        at "$pc_stub" "$hooks"
+        at "$pmc_stub" "$hooks"
         at "$priv" "$hooks"
         if [ ! -L "$stub" ] && [ -d "$stub" ]; then
             at "$strayed" "$stub"
@@ -405,46 +458,71 @@ elif [ -e "$hooks" ]; then
     [ -d "$hooks" ] || fail "$hooks is not a directory, so no hook can be written there"
     [ -r "$hooks" ] && [ -x "$hooks" ] && [ -w "$hooks" ] || \
         fail "the hooks directory $hooks cannot be read, searched and written by this user"
-    if [ -e "$stub" ] || [ -L "$stub" ]; then
-        if is_stub "$stub"; then
-            trap '' PIPE
-            printf '%s\n' "opf-pre-commit install: already installed in this clone ($stub)"
-            exit 0
-        fi
-        fail "$stub is a pre-commit hook that installing would replace; remove it, or have it run ./$rel/pre-commit, first"
+    # Each stub path holds nothing or that exact stub, or nothing is written: a stub already in place is
+    # kept, and only a missing one is placed.
+    if [ -e "$pc_stub" ] || [ -L "$pc_stub" ]; then
+        is_stub "$pc_stub" "$pc_body" || \
+            fail "$pc_stub is a pre-commit hook that installing would replace; remove it, or have it run ./$rel/pre-commit, first"
+        have_pc=1
+    fi
+    if [ -e "$pmc_stub" ] || [ -L "$pmc_stub" ]; then
+        is_stub "$pmc_stub" "$pmc_body" || \
+            fail "$pmc_stub is a pre-merge-commit hook that installing would replace; remove it, or have it run ./$rel/pre-commit pre-merge-commit, first"
+        have_pmc=1
+    fi
+    if [ -n "$have_pc" ] && [ -n "$have_pmc" ]; then
+        trap '' PIPE
+        printf '%s\n' "opf-pre-commit install: already installed in this clone ($pc_stub, $pmc_stub)"
+        exit 0
     fi
 else
     mkdir -- "$hooks" || rollback "could not create the hooks directory $hooks"
     made_dir=1
 fi
-# The stub is written and checked in a private directory this run creates (mkdir never takes an
+# Each stub is written and checked in a private directory this run creates (mkdir never takes an
 # existing name, so everything in it is this run's), then linked into place: ln never replaces a file, so
 # a hook that appeared since the check above is kept, and git never runs a part-written stub.
 [ ! -e "$priv" ] && [ ! -L "$priv" ] || \
     rollback "the private directory $priv is already there (an earlier run left it; remove it)"
 mkdir -m 700 -- "$priv" || rollback "could not create the private directory $priv"
 made_priv=1
-( set -C; printf '%s\n' "$body" > "$tmp" ) || rollback "could not write the stub as $tmp"
-chmod 755 "$tmp" || rollback "could not make $tmp executable"
-is_stub "$tmp" || rollback "$tmp did not read back as a readable, executable file with the exact stub text"
-[ ! -e "$stub" ] && [ ! -L "$stub" ] || rollback "something appeared at $stub while the stub was being written (it is kept)"
-linking=1
-ln -- "$tmp" "$stub" || \
-    rollback "could not link the stub into place as $stub (anything there is kept; ln also fails on a filesystem without hard links)"
-# ln links into a directory, or a link to one, that arrived at the stub path since the check above,
-# rather than failing: the stub path is this run's only when it is now the same file as the temporary one.
-if [ ! -L "$stub" ] && [ "$stub" -ef "$tmp" ]; then
-    linked=1
-else
-    rollback "something arrived at $stub while the stub was being placed (it is kept)"
+# place PATH TEXT NAME: write the stub text TEXT as the temporary file .opf-NAME-stub.<pid> in the private
+# directory, check it, link it into place at PATH and check it there, then remove the temporary file.
+place() {
+    linking=
+    linked=
+    stub=$1
+    body=$2
+    tmp=$priv/.opf-$3-stub.$$
+    strayed=$stub/${tmp##*/}
+    ( set -C; printf '%s\n' "$body" > "$tmp" ) || rollback "could not write the stub as $tmp"
+    chmod 755 "$tmp" || rollback "could not make $tmp executable"
+    is_stub "$tmp" "$body" || rollback "$tmp did not read back as a readable, executable file with the exact stub text"
+    [ ! -e "$stub" ] && [ ! -L "$stub" ] || rollback "something appeared at $stub while the stub was being written (it is kept)"
+    linking=1
+    ln -- "$tmp" "$stub" || \
+        rollback "could not link the stub into place as $stub (anything there is kept; ln also fails on a filesystem without hard links)"
+    # ln links into a directory, or a link to one, that arrived at the stub path since the check above,
+    # rather than failing: the stub path is this run's only when it is now the same file as the temporary
+    # one.
+    if [ ! -L "$stub" ] && [ "$stub" -ef "$tmp" ]; then
+        linked=1
+    else
+        rollback "something arrived at $stub while the stub was being placed (it is kept)"
+    fi
+    is_stub "$stub" "$body" || rollback "the stub $stub did not read back as a readable, executable file with the exact stub text"
+    rm -f -- "$tmp" && [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || rollback "could not remove the temporary file $tmp"
+}
+if [ -z "$have_pc" ]; then
+    place "$pc_stub" "$pc_body" pre-commit
+    placed_pc=1
 fi
-is_stub "$stub" || rollback "the stub $stub did not read back as a readable, executable file with the exact stub text"
-rm -f -- "$tmp" && [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || rollback "could not remove the temporary file $tmp"
+[ -n "$have_pmc" ] || place "$pmc_stub" "$pmc_body" pre-merge-commit
 rmdir -- "$priv" || rollback "could not remove the private directory $priv"
 trap - HUP INT TERM
-# The stub is in place, so a message that cannot be written (stdout closed, or a pipe with no reader) must
-# not turn the status into a failure or a signal death.
+# The stubs are in place, so a message that cannot be written (stdout closed, or a pipe with no reader)
+# must not turn the status into a failure or a signal death.
 trap '' PIPE
-printf '%s\n' "opf-pre-commit install: installed for this clone and its linked worktrees ($stub runs ./$rel/pre-commit)."
-echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, cherry-pick, revert, rebase, am and a clean merge commit without the hook, and CI does not catch a history violation committed that way (see pre-commit)."
+printf '%s\n' "opf-pre-commit install: installed for this clone and its linked worktrees ($pc_stub runs ./$rel/pre-commit, and $pmc_stub runs it as pre-merge-commit, which refuses a merge commit git merge would record so that git commit concludes the merge through the check)."
+echo "opf-pre-commit install: other clones must run this installer too; git commit --no-verify, git merge --no-verify, cherry-pick, revert, rebase, am and a fast-forward merge or pull commit or bring in commits without the hook, a merge commit's non-terminal status changes are not graded (and a dropped worklog entry is caught only as a lowered counter: tied counters do not expose it), a scripted git merge or git pull (merge mode) now exits 1 at the stop and leaves MERGE_HEAD behind (the next pull exits 128 until git commit or git merge --abort), and CI does not catch a history violation committed that way (see pre-commit)."
 exit 0
