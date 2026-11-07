@@ -673,6 +673,9 @@ ALLOWLIST = (
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_interrupt", "shell", 1,
      _SAVED + " (the real Popen subclassed by the gc interrupt vector's double, whose wait raises"
      " KeyboardInterrupt once)"),
+    ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._evaluate_interrupt_unstoppable", "shell", 1,
+     _SAVED + " (the real Popen subclassed by the interrupted unstoppable-group vector's double, whose wait"
+     " raises KeyboardInterrupt once)"),
     ("tools/check_release_build.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_release_delta.py", "_self_test_main_isolated", "shell", 1, _SAVED),
     ("tools/check_mistakes_register.py", "self_test", "shell", 2,

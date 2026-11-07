@@ -355,15 +355,30 @@ def _setup_timeout(deadline, bound):
     return min(bound, remaining)
 
 
-# Files an interrupted `git gc` can leave in a repository: its lock (gc.pid) and the partial pack and
-# index files pack-objects/index-pack write before renaming them into place. After a killed gc they are
-# removed from the template so no per-probe copy of the template carries them.
-_GC_DEBRIS_GLOBS = ("gc.pid", "objects/pack/tmp_pack_*", "objects/pack/tmp_idx_*")
+# Files an interrupted `git gc` can leave in a repository: its lock (gc.pid), the temporary pack, index,
+# reverse-index, mtimes and bitmap files pack-objects/index-pack write under objects/pack before renaming
+# them into place (tmp_pack_*, tmp_idx_*, tmp_rev_*, tmp_mtimes_*, tmp_bitmap_*), and the
+# .tmp-<pid>-pack-* files `git repack` (run by gc) writes in objects/pack before moving them to their
+# final names. After a killed gc they are removed from the template so no per-probe copy of the template
+# carries them.
+_GC_DEBRIS_GLOBS = ("gc.pid", "objects/pack/tmp_pack_*", "objects/pack/tmp_idx_*", "objects/pack/tmp_rev_*",
+                    "objects/pack/tmp_mtimes_*", "objects/pack/tmp_bitmap_*", "objects/pack/.tmp-*-pack*")
+# The directories _remove_gc_debris globs through. Path.glob follows a symlinked directory, so each must
+# be a real directory (checked with lstat, never following) before anything is unlinked.
+_GC_DEBRIS_DIRS = ("", "objects", "objects/pack")
 
 
 def _remove_gc_debris(git_dir):
-    """Remove every _GC_DEBRIS_GLOBS entry under git_dir (never following a symlink: the entry itself is
-    unlinked). Raises OSError (fail-closed) when an entry cannot be removed or is a directory."""
+    """Remove every _GC_DEBRIS_GLOBS entry under git_dir. First, before any unlink, git_dir, objects and
+    objects/pack must each be a real directory (lstat, never following): a symlink there would lead the
+    glob outside the repository, so it raises OSError (fail-closed) instead. A matched entry is unlinked
+    itself, never followed. Raises OSError (fail-closed) when an entry cannot be removed or is a
+    directory."""
+    for rel in _GC_DEBRIS_DIRS:
+        path = Path(git_dir) / rel if rel else Path(git_dir)
+        if not stat.S_ISDIR(os.lstat(str(path)).st_mode):
+            raise OSError("{} is not a real directory after the killed template gc (a symlink is never "
+                          "followed for debris removal); fail-closed".format(path))
     for pattern in _GC_DEBRIS_GLOBS:
         for path in sorted(Path(git_dir).glob(pattern)):
             if stat.S_ISDIR(os.lstat(str(path)).st_mode):
@@ -454,9 +469,14 @@ def _materialize_git(template, real_root, deadline=None):
                 _remove_gc_debris(template / ".git")
                 return "gc overran its {:g} s bound; its process group was killed".format(timeout)
             except BaseException:
-                _load_bound._kill_group(proc, None)  # leader still unreaped: the group id names it
+                unsignalled = _load_bound._kill_group(proc, None)  # leader unreaped: the group id names it
                 proc.kill()
                 proc.wait()
+                if unsignalled:
+                    # The interrupt still propagates unchanged; the group that could not be signalled is
+                    # reported first, as the overrun path reports it.
+                    print("error: the interrupted template gc's process group could not be stopped ({}); a "
+                          "gc descendant may still be running".format(unsignalled), file=sys.stderr)
                 raise
         return "" if rc == 0 else "gc exited {}".format(rc)
 
@@ -495,17 +515,21 @@ def _materialize_git(template, real_root, deadline=None):
     # template/.git and race the per-call copytree. A gc failure or overrun is non-fatal: git writes a
     # pack (and its index) before deleting the loose objects it holds, so a gc that fails or is killed
     # leaves a repo that still works with loose objects, only slower. Two readbacks run AFTER the gc: the
-    # object-store walk below (every object reachable from every ref must be present and readable,
-    # whatever the gc did to the packs and loose objects) and the index readback after it (the gc never
-    # writes the index; that readback checks the tracked set).
+    # object-store walk below (every object reachable from every ref must be present, and with
+    # --verify-objects each one is also read and its content hashed, so a truncated or altered object
+    # fails the walk too; without that flag rev-list checks presence only) and the index readback after
+    # it (the gc never writes the index; that readback checks the tracked set).
     gc_outcome = gc()
     if gc_outcome:
         print("note: template {} (non-fatal: the template keeps its loose objects)".format(gc_outcome),
               file=sys.stderr)
-    walk = git(template, "rev-list", "--objects", "--all")
-    if walk.returncode != 0:
-        raise OSError("the template object store does not hold every reachable object after the gc "
-                      "(git rev-list --objects --all exit {}); fail-closed".format(walk.returncode))
+    # git (2.53 checked) prints "error: hash mismatch <oid>" for a corrupt object under --verify-objects
+    # yet still exits 0, so any stderr output fails the walk as well as a nonzero exit.
+    walk = git(template, "rev-list", "--objects", "--all", "--verify-objects")
+    if walk.returncode != 0 or walk.stderr.strip():
+        raise OSError("the template object store does not hold every reachable object intact after the gc "
+                      "(git rev-list --objects --all --verify-objects exit {}, stderr {!r}); fail-closed"
+                      .format(walk.returncode, walk.stderr[-300:].decode("utf-8", "replace")))
     # The materialized index MUST equal real_root's tracked set: any missing member is fail-closed.
     readback = git(template, "ls-files", "-z")
     if readback.returncode != 0:
@@ -1646,7 +1670,11 @@ _SELF_TEST_VECTORS = (
     "template gc launch failure",
     "template gc nonzero exit",
     "template gc interrupt",
+    "template gc interrupt unstoppable group",
+    "template object-store corrupt blob",
+    "template gc debris symlinked directory",
     "template setup deadline clamp",
+    "sweep setup deadline wiring",
     "injected setup vector",
     "injected None-fixture vector",
     "injected BaseException vector",
@@ -2382,8 +2410,9 @@ def _self_test_main_isolated():
         #     unique token, and the survivor scan and cleanup run on that token.
         #     - object-store check: a stand-in that deletes every loose object and exits 0 must fail the
         #       setup closed (the index readback alone reads the index, which still lists every path).
-        #     - gc debris: an overrunning stand-in that wrote gc.pid, tmp_pack_* and tmp_idx_* must leave
-        #       none of them in the template after the kill, and no survivor.
+        #     - gc debris: an overrunning stand-in that wrote gc.pid and one file per objects/pack debris
+        #       pattern (tmp_pack_*, tmp_idx_*, tmp_rev_*, tmp_mtimes_*, tmp_bitmap_*, .tmp-*-pack*) must
+        #       leave none of them in the template after the kill, and no survivor.
         #     - unstoppable group: with _load_bound._kill_group refusing, an overrun fails the setup
         #       closed and names the refusal (the descendant it could not stop is cleaned up here).
         #     - launch failure: a Popen that raises for the gc is a non-fatal note and the setup passes.
@@ -2436,19 +2465,22 @@ def _self_test_main_isolated():
                     _evaluate_object_store)
 
         def _evaluate_gc_debris(fixture):
+            # Named here, not read from _GC_DEBRIS_GLOBS, so a pattern dropped from that tuple is caught.
+            debris = ("gc.pid", "objects/pack/tmp_pack_standin", "objects/pack/tmp_idx_standin",
+                      "objects/pack/tmp_rev_standin", "objects/pack/tmp_mtimes_standin",
+                      "objects/pack/tmp_bitmap_standin", "objects/pack/.tmp-4242-pack",
+                      "objects/pack/.tmp-4242-pack-0123abcd.pack", "objects/pack/.tmp-4242-pack-0123abcd.idx")
             standin = _gc_standin(
-                "import os, time; open(\".git/gc.pid\", \"w\").write(\"1\"); "
-                "os.makedirs(\".git/objects/pack\", exist_ok=True); "
-                "open(\".git/objects/pack/tmp_pack_standin\", \"w\").write(\"x\"); "
-                "open(\".git/objects/pack/tmp_idx_standin\", \"w\").write(\"x\"); time.sleep(60)")
+                "import os, time; os.makedirs(\".git/objects/pack\", exist_ok=True); "
+                "[open(os.path.join(\".git\", p), \"w\").write(\"x\") for p in {}]; time.sleep(60)"
+                .format(repr(list(debris)).replace("'", "\"")))
             try:
                 raised, err = _materialize_with_standin(fixture, standin, 2)
                 survivors = _load_bound._alive_with(gc_branch_token)
             finally:
                 _cleanup_leaked_descendant(gc_branch_token, failures, cannot)
             git_dir = fixture[1] / ".git"
-            left = sorted(str(p.relative_to(git_dir)) for pattern in _GC_DEBRIS_GLOBS
-                          for p in git_dir.glob(pattern))
+            left = sorted(p for p in debris if os.path.lexists(str(git_dir / p)))
             if raised is not None or "gc overran its 2 s bound" not in err:
                 failures.append("template gc debris: an overrunning gc must stay non-fatal with its overrun "
                                 "note, got {!r}, stderr {!r}".format(raised, err))
@@ -2576,6 +2608,147 @@ def _self_test_main_isolated():
 
         _run_vector(cannot, failures, "template setup deadline clamp", _gc_branch_fixture("setup-clamp"),
                     _evaluate_setup_clamp)
+
+        #     - corrupt blob: a stand-in that halves every loose BLOB file (commits and trees intact) and
+        #       exits 0 must fail the setup closed; a presence-only walk still exits 0 on it.
+        def _evaluate_corrupt_blob(fixture):
+            standin = _gc_standin(
+                "import glob, os, zlib; blobs = [p for p in glob.glob(\".git/objects/??/*\") "
+                "if zlib.decompress(open(p, \"rb\").read()).startswith(b\"blob \")]; "
+                "[(os.chmod(p, 0o644), os.truncate(p, os.path.getsize(p) // 2)) for p in blobs]; "
+                "open(\".git/standin-blobs\", \"w\").write(str(len(blobs)))")
+            raised, err = _materialize_with_standin(fixture, standin, 60)
+            marker = fixture[1] / ".git" / "standin-blobs"
+            halved = marker.read_text() if marker.is_file() else None
+            if halved in (None, "0"):
+                cannot.append("template object-store corrupt blob: the stand-in halved no blob ({!r}), "
+                              "vector not evaluated".format(halved))
+            elif not isinstance(raised, OSError) or "object store" not in str(raised):
+                failures.append("template object-store corrupt blob: a gc that left every loose blob "
+                                "truncated must fail the setup closed (OSError naming the object store), "
+                                "got {!r}, stderr {!r}".format(raised, err))
+
+        _run_vector(cannot, failures, "template object-store corrupt blob", _gc_branch_fixture("gc-blob"),
+                    _evaluate_corrupt_blob)
+
+        #     - symlinked debris directory: an overrunning stand-in that replaces .git/objects/pack (and,
+        #       in a second fixture, .git/objects) with a symlink to a directory outside the template
+        #       holding a tmp_pack_* file must fail the setup closed, and the outside file and the
+        #       template's gc.pid must both survive (the refusal comes before any unlink).
+        def _symlinked_debris_fixtures():
+            return tuple((_gc_branch_fixture("gc-symlink-" + which)(), tmp / ("gc-symlink-outside-" + which))
+                         for which in ("pack", "objects"))
+
+        def _evaluate_symlinked_debris(fixtures):
+            moves = {
+                "pack": "os.rename(\".git/objects/pack\", out); os.symlink(out, \".git/objects/pack\"); "
+                        "victim = os.path.join(out, \"tmp_pack_victim\")",
+                "objects": "os.rename(\".git/objects\", out); os.symlink(out, \".git/objects\"); "
+                           "os.makedirs(os.path.join(out, \"pack\"), exist_ok=True); "
+                           "victim = os.path.join(out, \"pack\", \"tmp_pack_victim\")"}
+            for (fixture, outside), which in zip(fixtures, ("pack", "objects")):
+                standin = _gc_standin(
+                    "import os, time; out = \"{}\"; open(\".git/gc.pid\", \"w\").write(\"1\"); "
+                    "os.makedirs(\".git/objects/pack\", exist_ok=True); {}; "
+                    "open(victim, \"w\").write(\"x\"); time.sleep(60)".format(outside, moves[which]))
+                try:
+                    raised, err = _materialize_with_standin(fixture, standin, 2)
+                finally:
+                    _cleanup_leaked_descendant(gc_branch_token, failures, cannot)
+                victim = outside / "tmp_pack_victim" if which == "pack" else outside / "pack" / "tmp_pack_victim"
+                if not victim.exists():
+                    failures.append("template gc debris symlinked {}: the debris removal followed the "
+                                    "symlink and deleted {}".format(which, victim))
+                if (not isinstance(raised, OSError) or "not a real directory" not in str(raised)
+                        or not (fixture[1] / ".git" / "gc.pid").exists()):
+                    failures.append("template gc debris symlinked {}: the setup must fail closed before any "
+                                    "unlink, got {!r}, gc.pid present {!r}, stderr {!r}".format(
+                                        which, raised, (fixture[1] / ".git" / "gc.pid").exists(), err))
+
+        _run_vector(cannot, failures, "template gc debris symlinked directory", _symlinked_debris_fixtures,
+                    _evaluate_symlinked_debris)
+
+        #     - interrupt, unstoppable group: with _load_bound._kill_group refusing, a KeyboardInterrupt
+        #       out of the gc wait still propagates, and the refusal is reported on stderr first.
+        def _evaluate_interrupt_unstoppable(fixture):
+            global TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS
+            saved_gc = (TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS)
+            saved_popen = subprocess.Popen
+            saved_kill_group = _load_bound._kill_group
+            fired = {"n": 0}
+
+            class _InterruptedWait(saved_popen):
+                def wait(self, timeout=None):
+                    if timeout is not None and not fired["n"]:
+                        fired["n"] = 1
+                        time.sleep(0.5)  # the stand-in is launched by now; then the "terminal" interrupts
+                        raise KeyboardInterrupt()
+                    return super().wait(timeout)
+
+            def _interrupting_popen(cmd, *a, **kw):
+                if kw.get("start_new_session"):  # only the template gc launches in its own session
+                    return _InterruptedWait(cmd, *a, **kw)
+                return saved_popen(cmd, *a, **kw)
+
+            # The real _materialize_git is called here with its own stderr capture: the interrupt
+            # propagates past _materialize_with_standin's capture, which would discard the report.
+            interrupted, err = False, io.StringIO()
+            TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS = 60, _gc_standin("import time; time.sleep(60)")
+            subprocess.Popen = _interrupting_popen
+            _load_bound._kill_group = lambda proc, pidfd: "injected group-signal refusal"
+            try:
+                with redirect_stderr(err):
+                    _materialize_git(fixture[1], fixture[0])
+            except KeyboardInterrupt:
+                interrupted = True
+            finally:
+                subprocess.Popen = saved_popen
+                _load_bound._kill_group = saved_kill_group
+                TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS = saved_gc
+                _cleanup_leaked_descendant(gc_branch_token, failures, cannot)
+            text = err.getvalue()
+            if not interrupted:
+                failures.append("template gc interrupt unstoppable group: a KeyboardInterrupt out of the gc "
+                                "wait must propagate")
+            if "could not be stopped" not in text or "injected group-signal refusal" not in text:
+                failures.append("template gc interrupt unstoppable group: an interrupted gc whose process "
+                                "group cannot be signalled must report the refusal, stderr {!r}".format(text))
+
+        _run_vector(cannot, failures, "template gc interrupt unstoppable group",
+                    _gc_branch_fixture("gc-interrupt-unstoppable"), _evaluate_interrupt_unstoppable)
+
+        #     - sweep setup deadline wiring: sweep() hands its deadline to _materialize_git. With a clock
+        #       that is past the deadline from the first read after the deadline is set, the setup refuses
+        #       before git init (no template/.git) and the sweep names that setup refusal.
+        def _evaluate_sweep_setup_deadline(repo):
+            global _now, _materialize_git
+            clock_calls = {"n": 0}
+            seen = []
+
+            def _overrun_clock():
+                clock_calls["n"] += 1
+                return 0.0 if clock_calls["n"] == 1 else float(TOTAL_TIMEOUT) + 1000.0
+
+            def _spy_materialize_git(template, real_root, deadline=None):
+                try:
+                    return saved_materialize_git(template, real_root, deadline=deadline)
+                finally:
+                    seen.append((Path(template) / ".git").exists())
+
+            _now, _materialize_git = _overrun_clock, _spy_materialize_git
+            try:
+                rc_wired, text = sweep_captured(repo)
+            finally:
+                _now, _materialize_git = saved_now, saved_materialize_git
+            if (rc_wired != 2 or seen != [False] or "template sandbox setup failed" not in text
+                    or "backstop elapsed during the template setup" not in text):
+                failures.append("sweep setup deadline wiring: a sweep whose deadline has passed before the "
+                                "template setup must refuse that setup before git init (exit 2), got exit "
+                                "{!r}, .git created per setup call {!r}, output {!r}".format(rc_wired, seen,
+                                                                                            text))
+
+        _run_vector(cannot, failures, "sweep setup deadline wiring", lambda: _build_repo(
+            tmp / "setup-deadline", {"goodfile": _GOODFILE}), _evaluate_sweep_setup_deadline)
 
         # (s) The self-test verdict: a cannot-evaluate vector beside an assertion failure exits 2 (not 1)
         #     and names both; a cleanup or census error still prints every cannot line, before its own
