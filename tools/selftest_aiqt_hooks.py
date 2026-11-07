@@ -5763,48 +5763,56 @@ def _sleeper(seconds, result=(0, None, None)):
 
 # How long a deadline-path stub sleeps by its own clock: a 0.1-second deadline must cut it short.
 _DEADLINE_STUB_SECONDS = 0.8
-# Wall-clock seconds a deadline-path run may take from the stub's last clock read to main()'s return, both
-# read by the run itself. The span covers the deadline's firing and everything after it (building and
-# writing the refusal, restoring the timer) while leaving out the work before the stub's sleep, whose time
-# a loaded host inflates most; its floor is the 0.1-second test budget itself, since the stub reads the
-# clock as its sleep starts and the deadline fires about a budget later. Measured on one shared 80-CPU
-# host (2026-11-02): 460 firing runs (20 sweeps of the 22 modes and the slow-read case) at a one-minute
-# load average of 32 to 36 spanned 0.1001 to 0.1009 s, and 575 more (25 sweeps) with 8 busy loops added
-# (load average rising to 38) spanned 0.0998 to 0.1015 s. Busy loops left to the scheduler rarely land on
-# the test's CPU, so such runs understate contention: measured again on one shared 80-CPU host
-# (2026-11-07) with os.sched_setaffinity pinning the measuring process and all 8 busy loops to one CPU,
-# 414 firing runs (18 sweeps of the 22 modes and the slow-read case, one-minute load average 19 to 27)
-# spanned 0.1001 to 0.1189 s, every run logging a read and cutting its stub, while 230 unpinned runs with
-# no load added (10 sweeps, load average about 19 to 21) spanned 0.1001 to 0.1007 s; an earlier run of the
-# same pinned method measured spans up to 0.1288 s over 414 runs. The 0.17-second bound is 0.041 s above
-# the worst honest span measured (0.1288 s, pinned, the bound about 1.32 times it), and a run whose tail
-# takes twice the honest tail (at least 0.2 s, the honest tail's floor being the 0.1-second budget itself)
-# overshoots it by at least 0.03 s, so the bound separates an honest tail under pinned load from one twice
-# as slow with those stated margins. A loaded host may still inflate one run's span past the bound with no
-# stall in the run, so the bound judges no single run: like the CPU bounds of the timed rows, it judges
-# the median (_judged_half_fails, here always over exactly _DEADLINE_TAIL_RUNS spans, where that rule and
-# _judged agree) of the spans, each from a fresh run of the row (_deadline_row_problems,
-# _deadline_tail_problems). A stall on two
-# of the three runs, whichever two, or on all three fails the row; a stall on one run in three passes it,
-# as does contention that inflates one span. A run that logged no clock read gives no span and is no
-# evidence either way: it is replaced by a fresh run, up to _DEADLINE_TAIL_MAX_RUNS runs in all, and a row
-# left with fewer than _DEADLINE_TAIL_RUNS spans fails, its tail unmeasured.
+# Wall-clock seconds a deadline-path run may take from the arming of its deadline window to main()'s
+# return, both read by the run itself: the arming by a clock read _armed_window takes just before the take
+# that starts the 0.1-second budget's countdown, the return by a read right after main() gives back
+# control. The span covers the budget window, the deadline's firing and everything after it (building and
+# writing the refusal, restoring the timer); its floor is the budget itself, since the deadline fires a
+# budget after the arming and the arming read comes no later than the arming, so the payload read and the
+# handler dispatch, which run inside the window before the stub's first clock read, spend budget without
+# shrinking the span. Measured from the arming on one shared 80-CPU host (2026-11-07): 460 firing runs
+# (20 sweeps of the 22 modes and the slow-read case, no load added, one-minute load average 16 to 22)
+# spanned 0.1003 to 0.1009 s, and 276 runs (12 sweeps, the measuring process and 8 busy loops pinned by
+# os.sched_setaffinity to one CPU, load average 21 to 23) spanned 0.1002 to 0.1180 s, every run arming its
+# window and cutting its stub, the arming-to-first-read gap at most 0.00025 s. Spans in earlier records
+# were measured from the stub's last clock read instead, a read inside the window, so each sat under its
+# run's arming span by that run's arming-to-read gap, which none of them recorded: 460 firing runs
+# (2026-11-02, 20 sweeps, load average 32 to 36) spanned 0.1001 to 0.1009 s; 575 more from the same
+# session (25 sweeps, 8 busy loops left to the scheduler, load average rising to 38) spanned 0.0998 to
+# 0.1015 s, under the budget exactly because of that shrinkage; 414 pinned runs (2026-11-07, 18 sweeps,
+# load average 19 to 27) spanned 0.1001 to 0.1189 s; 230 unpinned runs from the same session with no load
+# added (10 sweeps, load average about 19 to 21) spanned 0.1001 to 0.1007 s; and an earlier run of the
+# same pinned method measured spans up to 0.1288 s over 414 runs, its date, load and span floor not
+# recorded. The 0.17-second bound is 0.052 s above the worst span measured from the arming (0.1180 s,
+# pinned), and 0.041 s above the worst from the older reference (0.1288 s, pinned, the bound about 1.32
+# times it) before adding that run's unrecorded arming-to-read gap; a run whose span doubles the honest
+# floor (at least 0.2 s, the floor being the 0.1-second budget itself) overshoots the bound by at least
+# 0.03 s, so the bound separates an honest span under pinned load from one twice the floor with those
+# stated margins. A loaded host may still inflate one run's span past the bound with no stall in the run,
+# so the bound judges no single run: like the CPU bounds of the timed rows, it judges the median
+# (_judged_half_fails, here always over exactly _DEADLINE_TAIL_RUNS spans, where that rule and _judged
+# agree) of the spans, each from a fresh run of the row (_deadline_row_problems, _deadline_tail_problems).
+# A stall on two of the three runs, whichever two, or on all three fails the row; a stall on one run in
+# three passes it, as does contention that inflates one span. A run that never logged its window's arming
+# gives no span and is no evidence either way: it is replaced by a fresh run, up to
+# _DEADLINE_TAIL_MAX_RUNS runs in all, and a row left with fewer than _DEADLINE_TAIL_RUNS spans fails, its
+# tail unmeasured.
 _DEADLINE_TAIL_SECONDS = 0.17
 # How many spans a row's tail is judged over, each from a fresh run; a cut fault, or any fault of the
 # deadline's behaviour, fails the row on the run that shows it, with no further run.
 _DEADLINE_TAIL_RUNS = 3
-# The most runs a row gets in all while it collects _DEADLINE_TAIL_RUNS spans, runs that logged no clock
-# read included.
+# The most runs a row gets in all while it collects _DEADLINE_TAIL_RUNS spans, runs whose window never
+# logged its arming included.
 _DEADLINE_TAIL_MAX_RUNS = 2 * _DEADLINE_TAIL_RUNS
 # Wall-clock seconds a whole deadline-path run must stay under, from before the payload is handed to
-# main() to its return. The tail bound above starts at the stub's last clock read, so it cannot see time
-# spent before the deadline window is armed (reading the payload, dispatching the handler): this bound
+# main() to its return. The tail bound above starts at the window's arming, so it cannot see time spent
+# before the window is armed (the dispatcher's probes and argument checks ahead of it): this bound
 # covers the whole run, so a stall anywhere in it counts. Each run of these rows had this same 0.8-second
 # single-run bound before they were judged over fresh re-runs; it is kept as it was and judged over EVERY
 # fresh run the row took (3 to 6 of them), on the median of an odd count of times and the upper middle of
 # an even count (_judged_half_fails), so a stall on half of the runs or more fails the row: a
-# run that logged no clock read gives no tail span and is replaced for the tail judgement, but its
-# wall-clock time still counts here, so a stall in such a run is not discarded
+# run that never logged its window's arming gives no tail span and is replaced for the tail judgement, but
+# its wall-clock time still counts here, so a stall in such a run is not discarded
 # (_deadline_total_problems). Honest whole runs measured with the spans above (2026-11-07) took 0.108 to
 # 0.130 s of wall-clock time each unpinned, and 0.136 to 0.749 s pinned to one CPU with the 8 busy loops:
 # a single pinned run can approach this bound, which is why no single run's time decides the row.
@@ -5831,6 +5839,28 @@ def _clocked_sleeper(seconds, reads, result=(0, None, None)):
     return handler
 
 
+@contextlib.contextmanager
+def _armed_window(reads):
+    """Patch aiqt_hooks._DeadlineWindow so a window the enclosed code arms logs in reads["armed"] a
+    time.monotonic read taken just before the take that arms its timer, the reference the budget's
+    countdown is set against: the read comes no later than the arming setitimer, so a span measured from
+    it is never shorter than one measured from the arming itself, and a stall inside the take only widens
+    it. The read is kept only when the take returns (the first one kept), so a window that never arms (a
+    fail-open window, or a take that raises before arming) logs nothing."""
+    saved = aiqt_hooks._DeadlineWindow
+
+    class _Window(saved):
+        def _take(self):
+            armed = time.monotonic()
+            saved._take(self)
+            reads.setdefault("armed", armed)
+    aiqt_hooks._DeadlineWindow = _Window
+    try:
+        yield
+    finally:
+        aiqt_hooks._DeadlineWindow = saved
+
+
 def _deadline_cut_problems(label, what, code, err, want, seconds, reads):
     """What one deadline-path run got wrong with its cut, as a list of phrases ([] for none): code and err
     its exit and stderr, want the text its stderr must hold, seconds its wall-clock time (reported only),
@@ -5855,35 +5885,34 @@ def _deadline_cut_problems(label, what, code, err, want, seconds, reads):
 
 
 def _deadline_tail_span(reads, returned):
-    """Seconds from the stub's last clock read to `returned`, a clock read taken right after main()
-    returned: from reads["reached"] when the stub's loop read the clock, else from the sleep's start,
-    recovered as reads["end"] minus the sleep length, when the cut came before the first loop read. None
-    when the deadline ended the run before the stub logged any read, which leaves nothing to measure the
-    span from: such a run is no evidence about the tail, and its row replaces it with a fresh run
-    (_deadline_row_problems)."""
-    if "reached" in reads:
-        return returned - reads["reached"]
-    if "end" in reads:
-        return returned - (reads["end"] - _DEADLINE_STUB_SECONDS)
+    """Seconds from the arming of the run's deadline window (reads["armed"], the clock read _armed_window
+    takes just before the take that arms the timer) to `returned`, a clock read taken right after main()
+    returned. The budget's countdown is set against the arming, so a firing run's span has the budget as
+    its floor however late the stub's first clock read comes: a delay between the arming and that read
+    spends budget and does not shrink the span. None when the run never logged its window's arming, which
+    leaves nothing to measure the span from: such a run is no evidence about the tail, and its row
+    replaces it with a fresh run (_deadline_row_problems)."""
+    if "armed" in reads:
+        return returned - reads["armed"]
     return None
 
 
 def _deadline_tail_problems(label, spans, runs):
     """What a row's tail got wrong, as a list of phrases ([] for none), judged over spans, the
-    _deadline_tail_span of each of its runs that logged a clock read, in run order, out of runs runs in all.
-    A row with fewer than _DEADLINE_TAIL_RUNS spans fails, its tail unmeasured: a run that logged no read
-    never counts as a pass. Otherwise the row fails when the judged span (_judged_half_fails: the median,
-    always of exactly _DEADLINE_TAIL_RUNS spans here) is over _DEADLINE_TAIL_SECONDS, that is when two of
-    the three spans or all three are over it, the rule the timed rows use for CPU time (see the bound's
-    comment for the measurements)."""
+    _deadline_tail_span of each of its runs that logged its window's arming, in run order, out of runs
+    runs in all. A row with fewer than _DEADLINE_TAIL_RUNS spans fails, its tail unmeasured: a run that
+    logged no arming never counts as a pass. Otherwise the row fails when the judged span
+    (_judged_half_fails: the median, always of exactly _DEADLINE_TAIL_RUNS spans here) is over
+    _DEADLINE_TAIL_SECONDS, that is when two of the three spans or all three are over it, the rule the
+    timed rows use for CPU time (see the bound's comment for the measurements)."""
     if len(spans) < _DEADLINE_TAIL_RUNS:
-        return ["({}) logged a clock read on {} of {} fresh runs, short of the {} spans the {:g}s tail bound "
-                "judges, so its tail was not measured".format(
+        return ["({}) logged its window's arming on {} of {} fresh runs, short of the {} spans the {:g}s "
+                "tail bound judges, so its tail was not measured".format(
                     label, len(spans), runs, _DEADLINE_TAIL_RUNS, _DEADLINE_TAIL_SECONDS)]
     if _judged_half_fails(spans) <= _DEADLINE_TAIL_SECONDS:
         return []
     # Spans are printed in full (repr), so a span just over the bound never reads as equal to it.
-    return ["({}) took {} seconds from the stub's last clock read to main()'s return over {} fresh runs, "
+    return ["({}) took {} seconds from its window's arming to main()'s return over {} fresh runs, "
             "the median span over the {:g}s tail bound".format(
                 label, ", ".join(repr(span) for span in spans), len(spans),
                 _DEADLINE_TAIL_SECONDS)]
@@ -5891,8 +5920,9 @@ def _deadline_tail_problems(label, spans, runs):
 
 def _deadline_total_problems(label, walls):
     """What a row's whole-run time got wrong, as a list of phrases ([] for none), judged over walls, the
-    wall-clock seconds of EVERY fresh run the row took, runs that logged no clock read included, 3 to 6 of
-    them: the row fails when the judged time (_judged_half_fails: the median of an odd count, the upper
+    wall-clock seconds of EVERY fresh run the row took, runs that never logged their window's arming
+    included, 3 to 6 of them: the row fails when the judged time (_judged_half_fails: the median of an odd
+    count, the upper
     middle of an even count, so a stall on half of the runs or more fails) is not under
     _DEADLINE_TOTAL_SECONDS, the same bound each single run had before the rows were judged over fresh
     re-runs (a run at exactly the bound is not under it)."""
@@ -5911,10 +5941,11 @@ def _deadline_row_problems(label, what, want, run_once):
     judgement is a wall-clock bound, the only evidence there is for a stall between the deadline's cut and
     its refusal reaching the caller, so no single span decides it: the row is run fresh until it has
     _DEADLINE_TAIL_RUNS spans, whatever an earlier span gave, and fails when their median is over the bound
-    (_deadline_tail_problems). A run with no span (_deadline_tail_span None) is no evidence about the tail,
-    neither a pass nor a fail: it is replaced by a fresh run, up to _DEADLINE_TAIL_MAX_RUNS runs in all.
+    (_deadline_tail_problems). A run with no span (_deadline_tail_span None, its window's arming never
+    logged) is no evidence about the tail, neither a pass nor a fail: it is replaced by a fresh run, up to
+    _DEADLINE_TAIL_MAX_RUNS runs in all.
     The whole-run judgement is a third, independent one: every run's wall-clock seconds, the replaced
-    unlogged runs' included, count toward the whole-run judgement, whose judged time (_judged_half_fails:
+    unarmed runs' included, count toward the whole-run judgement, whose judged time (_judged_half_fails:
     a stall on half of the runs or more fails) must stay under _DEADLINE_TOTAL_SECONDS
     (_deadline_total_problems), so a stall before the deadline window is armed, or in a run the tail
     judgement replaced, still fails the row."""
@@ -5940,17 +5971,19 @@ def _deadline_path_failures():
     and the input size; a deadline during the payload read exits 2 too; a fail-open mode keeps its result
     (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
     decision is written. A firing deadline is judged by whether it cut the stub's sleep short, single-run
-    and behavioural, by the time from the stub's last clock read to main()'s return, judged as
+    and behavioural, by the time from the window's arming (_armed_window) to main()'s return, judged as
     the median of _DEADLINE_TAIL_RUNS spans, each from a fresh run of the row (_deadline_row_problems),
     and by each run's whole wall-clock time, judged over every fresh run the row took under a rule that
     fails a stall on half of the runs or more (_deadline_total_problems, _judged_half_fails);
     (dl-cut-judged) recorded runs pin the cut judgement at the sleep's end,
-    (dl-tail-span) recorded reads pin the span's two measurements, (dl-tail-median) recorded spans pin the
+    (dl-tail-span) recorded reads pin the span's measurement from the arming, however late or absent the
+    stub's own reads, (dl-tail-median) recorded spans pin the
     median judgement at the bound's ends and a row short of spans, (dl-tail-rerun) recorded rows pin which
-    stall patterns fail, that a clean run ends no row early, and that a run with no clock read is replaced,
+    stall patterns fail, that a clean run ends no row early, that a delay before the stub's first read
+    shrinks no span, and that a run that never logged its window's arming is replaced,
     never a pass, (dl-total-median) recorded times pin the whole-run judgement at its bound's ends, and
     (dl-total-rerun) recorded rows pin that a stall before the window, a stall after the cut past both
-    bounds, a stall counted only through replaced unlogged runs, and a stall on half of an even count of
+    bounds, a stall counted only through replaced unarmed runs, and a stall on half of an even count of
     runs each fail, while one slow run in three, or stalls on two runs of five, pass."""
     out = []
     size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
@@ -5965,7 +5998,7 @@ def _deadline_path_failures():
 
         def fires_run(mode=mode):
             reads = {}
-            with _stub_handler(mode, _clocked_sleeper(_DEADLINE_STUB_SECONDS, reads)):
+            with _stub_handler(mode, _clocked_sleeper(_DEADLINE_STUB_SECONDS, reads)), _armed_window(reads):
                 code, err, seconds = _main_run(mode, budget=0.1)
                 returned = time.monotonic()
             return code, err, seconds, reads, returned
@@ -5981,7 +6014,7 @@ def _deadline_path_failures():
             def read(self):
                 _clocked_sleep(_DEADLINE_STUB_SECONDS, read_reads)
                 return _DEADLINE_PAYLOAD
-        with _stub_handler("diff_source_pretool", _sleeper(0)):
+        with _stub_handler("diff_source_pretool", _sleeper(0)), _armed_window(read_reads):
             code, err, seconds = _main_run("diff_source_pretool", SlowStdin(), budget=0.1)
             returned = time.monotonic()
         return code, err, seconds, read_reads, returned
@@ -6005,10 +6038,15 @@ def _deadline_path_failures():
 
     tail = _DEADLINE_TAIL_SECONDS
     for edge, reads, returned, want_span in (
-            ("from the stub's last loop read", {"end": 10.0, "reached": 9.0}, 9.25, 0.25),
-            ("from the sleep's start when the cut came before its first loop read", {"end": 10.0},
-             10.0 - _DEADLINE_STUB_SECONDS + 0.25, 0.25),
-            ("as None when the run logged no read", {}, 0.2, None)):
+            ("from the window's arming", {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.25, 0.25),
+            ("from the window's arming, unshrunk by a 0.08-second delay before the stub's first read",
+             {"armed": 9.0, "end": 9.88, "reached": 9.08}, 9.25, 0.25),
+            ("from the window's arming when the cut came before the stub's first loop read",
+             {"armed": 9.0, "end": 10.0}, 9.25, 0.25),
+            ("from the window's arming when the cut came before the stub logged any read",
+             {"armed": 9.0}, 9.25, 0.25),
+            ("as None when the run never logged its window's arming", {}, 0.2, None),
+            ("as None when only the stub's reads were logged", {"end": 10.0, "reached": 9.0}, 9.25, None)):
         span = _deadline_tail_span(reads, returned)
         ok = span is None if want_span is None else span is not None and abs(span - want_span) < 1e-9
         if not ok:
@@ -6037,11 +6075,16 @@ def _deadline_path_failures():
             ("its median exactly at the bound", [total + 1e-6, total, total - 1e-6], 1),
             ("one time of three over the bound", [total + 5.0, 0.15, 0.15], 0),
             ("half of four times over the bound", [0.15, 0.15, 1.0, 1.0], 1),
-            ("three of four times at or over the bound", [0.15, total, total + 5.0, total + 5.0], 1),
+            ("half of four times just over the bound, the other half just inside it",
+             [total - 1e-6, total - 1e-6, total + 1e-6, total + 1e-6], 1),
             ("the upper middle of four exactly at the bound", [0.15, total, total + 5.0, 0.15], 1),
             ("the upper middle of four just inside the bound", [0.15, 0.15, total - 1e-6, total + 5.0], 0),
             ("two of six times over the bound", [0.15, 0.15, 0.15, 0.15, 1.0, 1.0], 0),
-            ("half of six times over the bound", [0.15, 0.15, 0.15, 1.0, 1.0, 1.0], 1)):
+            ("half of six times over the bound", [0.15, 0.15, 0.15, 1.0, 1.0, 1.0], 1),
+            ("the upper middle of six exactly at the bound",
+             [0.15, 0.15, 0.15, total, total + 5.0, total + 5.0], 1),
+            ("the upper middle of six just inside the bound",
+             [0.15, 0.15, 0.15, total - 1e-6, total + 5.0, total + 5.0], 0)):
         lines = _deadline_total_problems("recorded", walls)
         if len(lines) != want_lines or (want_lines and "whole-run bound" not in lines[0]):
             out.append("(dl-total-median) a row whose whole-run times have {} must give {} line(s) holding "
@@ -6059,15 +6102,16 @@ def _deadline_path_failures():
             return run
         return run_once
 
-    # The exactly-at-the-bound span must subtract to exactly the bound, so its reached read is 0.0: with a
+    # The exactly-at-the-bound span must subtract to exactly the bound, so its armed read is 0.0: with a
     # nonzero base, (base + tail) - base rounds away from tail for a tail whose sum is not representable.
-    inside = (2, refusal, 0.15, {"end": 10.0, "reached": 9.0}, 9.0 + tail - 1e-6)
-    at_bound = (2, refusal, 0.15, {"end": 10.0, "reached": 0.0}, tail)
-    over = (2, refusal, 0.15, {"end": 10.0, "reached": 9.0}, 9.0 + tail + 1e-6)
-    over_recovered = (2, refusal, 0.15, {"end": 10.0}, 10.0 - _DEADLINE_STUB_SECONDS + tail + 1e-6)
-    unlogged = (2, refusal, 0.15, {}, 0.2)
-    ran_out = (2, refusal, 0.15, {"end": 10.0, "reached": 10.0}, 10.05)
-    bare = (2, "", 0.15, {"end": 10.0, "reached": 9.0}, 9.05)
+    inside = (2, refusal, 0.15, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + tail - 1e-6)
+    at_bound = (2, refusal, 0.15, {"armed": 0.0, "end": 1.0, "reached": 0.0}, tail)
+    over = (2, refusal, 0.15, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + tail + 1e-6)
+    late_read_over = (2, refusal, 0.15, {"armed": 9.0, "end": 9.88, "reached": 9.08}, 9.0 + tail + 1e-6)
+    no_read_over = (2, refusal, 0.15, {"armed": 9.0, "end": 9.85}, 9.0 + tail + 1e-6)
+    unarmed = (2, refusal, 0.15, {}, 0.2)
+    ran_out = (2, refusal, 0.15, {"armed": 9.0, "end": 10.0, "reached": 10.0}, 10.05)
+    bare = (2, "", 0.15, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.05)
     full, most = _DEADLINE_TAIL_RUNS, _DEADLINE_TAIL_MAX_RUNS
     for edge, runs, want_runs, want_lines, want_text in (
             ("every run just inside the tail bound", [inside] * full, full, 0, ""),
@@ -6080,21 +6124,23 @@ def _deadline_path_failures():
             ("a stall on run 1 only, the others exactly at the bound", [over, at_bound, at_bound], full, 0,
              ""),
             ("a stall on every run", [over] * full, full, 1, "median span"),
-            ("a stall on every run measured from the sleep's start", [over_recovered] * full, full, 1,
-             "median span"),
+            ("a stall on every run, each with a delay before the stub's first loop read",
+             [late_read_over] * full, full, 1, "median span"),
+            ("a stall on every run, each cut before the stub's first loop read", [no_read_over] * full,
+             full, 1, "median span"),
             ("a run over the bound then one whose sleep ran to its end", [over, ran_out], 2, 1,
              "run to its end"),
             ("a run over the bound then one without the refusal", [over, bare], 2, 1, "expected exit 2"),
             ("a clean run then one whose sleep ran to its end", [inside, ran_out], 2, 1, "run to its end"),
             ("a run whose sleep ran to its end, never re-run", [ran_out, inside, inside], 1, 1,
              "run to its end"),
-            ("a run over the bound, one that logged no read, one over the bound and one inside it",
-             [over, unlogged, over, inside], full + 1, 1, "median span"),
-            ("a run over the bound then one that logged no read, then clean runs",
-             [over, unlogged, inside, inside], full + 1, 0, ""),
-            ("no run that logged a read", [unlogged] * most, most, 1, "not measured"),
-            ("two clean runs among runs that logged no read",
-             [inside, unlogged, unlogged, inside, unlogged, unlogged], most, 1, "not measured")):
+            ("a run over the bound, one that never armed its window, one over the bound and one inside it",
+             [over, unarmed, over, inside], full + 1, 1, "median span"),
+            ("a run over the bound then one that never armed its window, then clean runs",
+             [over, unarmed, inside, inside], full + 1, 0, ""),
+            ("no run that armed its window", [unarmed] * most, most, 1, "not measured"),
+            ("two clean runs among runs that never armed their window",
+             [inside, unarmed, unarmed, inside, unarmed, unarmed], most, 1, "not measured")):
         ran.clear()
         lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
         bad = len(ran) != want_runs or len(lines) != want_lines
@@ -6105,11 +6151,11 @@ def _deadline_path_failures():
                        "holding {!r}, got {} run(s) and {!r}".format(
                            edge, want_runs, want_lines, want_text, len(ran), lines))
 
-    stalled_after = (2, refusal, 0.95, {"end": 10.0, "reached": 9.0}, 9.0 + 0.95)
-    after_cut_only = (2, refusal, 0.5, {"end": 10.0, "reached": 9.0}, 9.0 + 0.4)
-    stalled_before = (2, refusal, 1.1, {"end": 10.0, "reached": 9.0}, 9.0 + 0.05)
-    slow_unlogged = (2, refusal, 2.0, {}, 0.2)
-    slowish = (2, refusal, 0.9, {"end": 10.0, "reached": 9.0}, 9.0 + 0.05)
+    stalled_after = (2, refusal, 0.95, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + 0.95)
+    after_cut_only = (2, refusal, 0.5, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + 0.4)
+    stalled_before = (2, refusal, 1.1, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + 0.05)
+    slow_unarmed = (2, refusal, 2.0, {}, 0.2)
+    slowish = (2, refusal, 0.9, {"armed": 9.0, "end": 10.0, "reached": 9.0}, 9.0 + 0.05)
     for edge, runs, want_runs, want_texts in (
             ("a 0.85-second stall after the deadline's cut on every run", [stalled_after] * full, full,
              ("median span", "whole-run bound")),
@@ -6118,17 +6164,17 @@ def _deadline_path_failures():
             ("a 1-second stall before the deadline window is armed on every run", [stalled_before] * full,
              full, ("whole-run bound",)),
             ("a stall before the window on one run of three", [stalled_before, inside, inside], full, ()),
-            ("a whole-run median pushed over the bound only by two replaced unlogged runs' times",
-             [slow_unlogged, slow_unlogged, inside, inside, slowish], full + 2, ("whole-run bound",)),
-            ("a stall in a replaced unlogged run and one before the window, on two of four runs",
-             [slow_unlogged, stalled_before, inside, inside], full + 1, ("whole-run bound",)),
-            ("a stall in a replaced unlogged run and one after the deadline's cut, on two of four runs",
-             [slow_unlogged, stalled_after, inside, inside], full + 1, ("whole-run bound",)),
-            ("stalls counted only through replaced unlogged runs on three of six runs",
-             [slow_unlogged, slow_unlogged, slow_unlogged, inside, inside, inside], most,
+            ("a whole-run median pushed over the bound only by two replaced unarmed runs' times",
+             [slow_unarmed, slow_unarmed, inside, inside, slowish], full + 2, ("whole-run bound",)),
+            ("a stall in a replaced unarmed run and one before the window, on two of four runs",
+             [slow_unarmed, stalled_before, inside, inside], full + 1, ("whole-run bound",)),
+            ("a stall in a replaced unarmed run and one after the deadline's cut, on two of four runs",
+             [slow_unarmed, stalled_after, inside, inside], full + 1, ("whole-run bound",)),
+            ("stalls counted only through replaced unarmed runs on three of six runs",
+             [slow_unarmed, slow_unarmed, slow_unarmed, inside, inside, inside], most,
              ("whole-run bound",)),
-            ("stalls counted only through replaced unlogged runs on two of five runs",
-             [slow_unlogged, slow_unlogged, inside, inside, inside], full + 2, ())):
+            ("stalls counted only through replaced unarmed runs on two of five runs",
+             [slow_unarmed, slow_unarmed, inside, inside, inside], full + 2, ())):
         ran.clear()
         lines = _deadline_row_problems("recorded", "the refusal", "recorded refusal", scripted(runs))
         bad = len(ran) != want_runs or len(lines) != len(want_texts)
