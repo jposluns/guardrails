@@ -1739,10 +1739,14 @@ def _rdp_label_screen_sweep(ls):
 
 
 # The linear-time row (rdp/label-screen-linear-time). Each shape is (name, repeated unit, tail, ratio): the
-# ratio is the largest least-time ratio of the label screen to _rdp_reference_scan over the same brief that
-# two runs of seven rounds measured at 256 KiB, 512 KiB and 1 MiB (Python 3.14.4, x86_64), rounded up. A
-# shape passes the ratio bound when the screen's least time is under _RDP_TIMING_MARGIN times that ratio
-# times the reference's least time: a real screen may run 2.5 times slower against the reference (another
+# ratio is a typical least-time ratio of the label screen to _rdp_reference_scan over the same brief,
+# measured at 256 KiB, 512 KiB and 1 MiB (Python 3.14.4, x86_64). It is not an upper bound on what a run
+# measures: later runs on the same host measured up to about 1.05 times it (lookalike-between-marks 12.86
+# against 12.3, name-prefix-and-colon 13.68 against 13.5, short-lines 10.35 against 10, names-then-words
+# 16.31 against 16). A shape passes the ratio bound when the screen's least time is under
+# _RDP_TIMING_MARGIN times that ratio times the reference's least time, so the bound sits 2.5 times above
+# the typical ratio and about 2.39 times above the largest ratio measured (2.5 times 12.3 over 12.86): a
+# real screen may run about 2.39 times slower against the reference than the slowest measured run (another
 # host, another build) and still pass, while a screen 5 times slower, which this ratio bound exists to
 # catch, exceeds it with room to spare (5 times the least measured ratio of every shape is over 1.7 times
 # its bound).
@@ -1785,6 +1789,9 @@ def _rdp_timing_group(least, lengths, bound):
     A time of zero, below the clock's resolution, cannot show growth and fails."""
     sizes = sorted(lengths)
     faults = []
+    # The growth bound is the tightest of the row's bounds and, unlike the ratio bound, is not normalised by
+    # the reference, so load that lifts only the larger size's time counts against it in full (short-lines
+    # from 512 KiB to 1 MiB has measured 2.212 and 2.034 against the limit of about 2.828).
     for small, large in zip(sizes, sizes[1:]):
         t1, t2 = Fraction(least[("screen", small)]), Fraction(least[("screen", large)])
         if not t2 * t2 * lengths[small] ** 3 < t1 * t1 * lengths[large] ** 3:
@@ -1807,7 +1814,9 @@ def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMI
     Stray work only adds time, so each group keeps each (kind, size)'s least time over its own rounds, and
     the shape passes ("linear") when two groups pass (_rdp_timing_group) and fails ("not linear") when two
     fail: a pass needs two groups' rounds to agree, so one burst that lifts the small sizes' times in every
-    round of one group cannot pass a screen that grows too fast. A timing over runaway CPU seconds fails the
+    round of one group cannot pass a screen that grows too fast. Three groups always decide, since one of
+    the two counts then reaches two, so the third group is timed only after one pass and one fail, and an
+    AssertionError marks the unreachable end of the loop. A timing over runaway CPU seconds fails the
     shape at once ("runaway") and the shape is not timed again. A timing starts only while the row has spent
     under budget CPU seconds; once it has not, the shape and every later one fail untimed ("over budget")."""
     spent = 0.0
@@ -1840,7 +1849,8 @@ def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMI
                 return "linear"
             if len(failed) == 2:
                 return "not linear: " + "; ".join(failed)
-        return "undecided"
+        raise AssertionError("three groups of rounds always decide, yet {} passed and {} failed".format(
+            passed, len(failed)))
 
     for shape, lengths, bound in shapes:
         rows.append((shape, _shape(shape, lengths, bound)))
