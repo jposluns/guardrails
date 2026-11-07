@@ -6,8 +6,8 @@ For each declared adapter renderer (gen_agents, gen_adapters, gen_claude, gen_cu
 gen_worker_pack) this tool STATICALLY PARSES (ast, never import) the generator's module-level RENDERER_DECL
 literal ({"renderer-id": <str>, "semantics-revision": <int>}) and its GENSRC_OUTPUTS targets (recovered
 through gen_gensrc's own validated loader, the house import-reuse pattern), computes the ORDERED PACK-LOCAL
-IMPORT CLOSURE (the entrypoint plus every tools/<module>.py it transitively imports, entrypoint first then
-the rest bytewise), and computes a FRAMED generator-code digest over per-file records "<path>\\t<bytes>\\t
+IMPORT CLOSURE (the entrypoint plus every tools/<module>.py or opf/tools/<module>.py it transitively
+imports, a stem resolved in tools/ first, entrypoint first then the rest bytewise), and computes a FRAMED generator-code digest over per-file records "<path>\\t<bytes>\\t
 <sha256>\\n" in closure order, NEVER a raw concatenation (so a boundary-shifting edit stays detectable).
 Any edit anywhere in a closure changes the framed digest, forcing a declaration diff at the Step-4 delta
 gate; check_manifest.py recomputes the ARTIFACTS roster from these targets.
@@ -38,6 +38,8 @@ the closure is computed from statically-parsed Import/ImportFrom nodes only. A t
 import (importlib.import_module, __import__, or globals() manipulation) is beyond static analysis; it is
 not used by any declared generator today, and the delta gate's fail-closed-on-incomplete-closure leg is
 the backstop, but this generator does not detect that class and discloses it here rather than implying it.
+A stem is resolved in tools/ before opf/tools/ whatever order a generator puts the two on sys.path, so a
+module of the same name in both is read from tools/; no declared generator's closure holds such a name today.
 
   gen_renderers.py             regenerate .aiqt/core/renderers.toml
   gen_renderers.py --check     exit 1 if the committed file differs from a fresh regeneration; write nothing
@@ -601,16 +603,33 @@ def _declared_renderer_stems(tools_dir):
     return stems
 
 
+# The directories a pack-local import resolves against, in this order: tools/ first, then opf/tools/, the
+# shared home a generator reaches downward (tools/gen_skill.py imports opf/tools/_skill_frontmatter.py),
+# so an edit to such a module changes the code-digest of every generator whose closure reaches it.
+LOCAL_IMPORT_DIRS = ("tools", "opf/tools")
+
+
+def _resolve_local(stem, tools_dir):
+    """The repo-relative path of the pack-local module `stem` (the first LOCAL_IMPORT_DIRS entry holding
+    <stem>.py), or None when it is not pack-local."""
+    root = tools_dir.parent
+    for rel_dir in LOCAL_IMPORT_DIRS:
+        if (root / rel_dir / (stem + ".py")).is_file():
+            return "{}/{}.py".format(rel_dir, stem)
+    return None
+
+
 def _local_imports(path, tools_dir, where):
-    """The set of pack-local module stems (a tools/<stem>.py exists) directly imported by `path`. Parses
-    Import/ImportFrom nodes only. Fail-closed (GateError) on a relative import (level > 0) or a wildcard
-    `from <pack-local> import *`, both of which a static closure cannot resolve honestly."""
+    """The set of repo-relative paths of the pack-local modules (_resolve_local) directly imported by
+    `path`. Parses Import/ImportFrom nodes only. Fail-closed (GateError) on a relative import (level > 0)
+    or a wildcard `from <pack-local> import *`, both of which a static closure cannot resolve honestly."""
     tree = _parse_module(path, where, "its imports")
-    stems = set()
+    rels = set()
 
     def _consider(root):
-        if (tools_dir / (root + ".py")).is_file():
-            stems.add(root)
+        rel = _resolve_local(root, tools_dir)
+        if rel is not None:
+            rels.add(rel)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -622,29 +641,31 @@ def _local_imports(path, tools_dir, where):
                                 "(fail-closed)".format(where))
             root = (node.module or "").partition(".")[0]
             is_wildcard = any(alias.name == "*" for alias in node.names)
-            if is_wildcard and (tools_dir / (root + ".py")).is_file():
+            if is_wildcard and root and _resolve_local(root, tools_dir) is not None:
                 raise GateError("{}: a wildcard import of the pack-local module {!r} cannot be resolved "
                                 "into the closure (fail-closed)".format(where, root))
             if root:
                 _consider(root)
-    return stems
+    return rels
 
 
 def compute_closure(entry_stem, tools_dir):
     """The ordered pack-local import closure of tools/<entry_stem>.py: the entrypoint first, then every
-    transitively-imported tools/<module>.py bytewise by repo-relative path. Returns a list of repo-relative
-    paths ('tools/<stem>.py'). Fail-closed on an unresolvable import or unreadable member."""
+    transitively-imported pack-local module (tools/<module>.py or opf/tools/<module>.py, _resolve_local)
+    bytewise by repo-relative path. Returns a list of repo-relative paths. Fail-closed on an unresolvable
+    import or unreadable member."""
     entry_rel = "tools/{}.py".format(entry_stem)
-    seen = {entry_stem}
-    frontier = [entry_stem]
+    root = tools_dir.parent
+    seen = {entry_rel}
+    frontier = [entry_rel]
     while frontier:
-        stem = frontier.pop()
-        deps = _local_imports(tools_dir / (stem + ".py"), tools_dir, "tools/{}.py".format(stem))
+        rel = frontier.pop()
+        deps = _local_imports(root / rel, tools_dir, rel)
         for dep in sorted(deps):
             if dep not in seen:
                 seen.add(dep)
                 frontier.append(dep)
-    rest = sorted("tools/{}.py".format(s) for s in seen if s != entry_stem)
+    rest = sorted(r for r in seen if r != entry_rel)
     return [entry_rel] + rest
 
 
@@ -750,6 +771,8 @@ def main():
 # Synthetic generators in a tempdir prove this generator's own fail-closed invariants:
 #   (a) a conformant set generates then re-checks drift-clean, and two runs are byte-identical (determinism);
 #   (b) a helper edit inside a closure changes the framed code-digest (closure completeness);
+#   (b2) a module the entrypoint imports from opf/tools/ is listed in its closure, and an edit to it alone
+#       changes the framed code-digest;
 #   (c) a mutated renderers.toml is caught by --check (exit 1);
 #   (d) a wildcard import of a pack-local module fails closed (exit 2), an unresolvable-closure case;
 #   (e) a missing/malformed RENDERER_DECL fails closed (exit 2).
@@ -1267,6 +1290,26 @@ def self_test_main():
                             "back over the edited one expected the unchanged-code-digest failure (the "
                             "comparison branch itself, not only the rc branch, must be exercised)")
 
+        # (b2) the downward edge: the entrypoint imports a module that exists only under opf/tools/. Both
+        # generations must succeed, the closure must name that module by its opf/tools/ path, and the two
+        # outputs, which differ only in that module's bytes, must differ.
+        downward = []
+        for name, body in (("opf-base", "VALUE = 1\n"), ("opf-edited", "VALUE = 2\n")):
+            base = tmp / name
+            _fixture(base, _ENTRY_GOOD + "import opfhelper\n")
+            (base / "opf" / "tools").mkdir(parents=True)
+            (base / "opf" / "tools" / "opfhelper.py").write_text(body, encoding="utf-8")
+            rc = run_quiet(base, check=False)
+            downward.append((rc, (base / RENDERERS_REL).read_bytes() if rc == 0 else b""))
+        if [rc for rc, _out in downward] != [0, 0]:
+            failures.append("opf/tools closure: generation expected exit 0 twice, got {}".format(
+                [rc for rc, _out in downward]))
+        elif not all(b'"opf/tools/opfhelper.py"' in out for _rc, out in downward):
+            failures.append("opf/tools closure: the closure does not name opf/tools/opfhelper.py")
+        elif downward[0][1] == downward[1][1]:
+            failures.append("opf/tools closure: an edit to opf/tools/opfhelper.py alone did not change the "
+                            "code-digest")
+
         # (c) a mutated renderers.toml is caught by --check. The regeneration prerequisite records its own
         # failure: were it skipped silently, a drift-detection defect could escape whenever regeneration
         # fails, so the drift assertion runs only after a successful regeneration.
@@ -1594,7 +1637,8 @@ def self_test_main():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: a conformant renderer set generates and regenerates drift-clean and is "
-          "deterministic; a helper edit inside a closure changes the framed code-digest; a mutated "
+          "deterministic; a helper edit inside a closure changes the framed code-digest, a module imported "
+          "from opf/tools/ included; a mutated "
           "renderers.toml fails --check (exit 1); and a wildcard pack-local import, a missing "
           "RENDERER_DECL, a non-slug renderer-id, an unlisted generator declaring RENDERER_DECL, {} "
           "unsupported RENDERER_DECL binding or literal-name forms, 5 non-regular *.py entries, {} rebindings "

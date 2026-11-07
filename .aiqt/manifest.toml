@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "6c0665c1cac217ffe29d5bc4ffd0cf10b79724833c489d1bf32dbfc55b564a69"
+tree-sha256 = "8245d751cb2997acfb71a50a3e3bd650120a10ed38142b2adfef613d26259146"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -146,8 +146,8 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 
 [[sources]]
 path = ".aiqt/core/renderers.toml"
-bytes = 3068
-sha256 = "4eb4bd5abdd6e9f98e015a94f108ef0b65e4c79b22077cb273dab08965fb0b91"
+bytes = 3103
+sha256 = "57ae61066d50aad2053b7815f0af012477b24c2ae51e714003f48105f30cc6f1"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -4151,8 +4151,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 219010
-sha256 = "001fee4d31d04dadaadef8ec61e026c634ce3be25189195693b0f19ad200d8b7"
+bytes = 219092
+sha256 = "ec6df84c1b9c45f2e17756e3d2dd15c7fb9ebf98ff5bc0c1a007108b4ad2e818"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4396,8 +4396,8 @@ sha256 = "deac085d23bfdcd68eda1f88b5cf41da9683f9d79307d2c803107b69817dd9a3"
 
 [[sources]]
 path = "tools/check_skill_frontmatter.py"
-bytes = 21381
-sha256 = "45e47fc6c99b50814702ec101d437e1debdc819842c3cd56667af7e2a6ad4f80"
+bytes = 23937
+sha256 = "e33797dac950becb67144b0a81a6e0386770e084e348d023bf44957789415b8c"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
@@ -4536,8 +4536,8 @@ sha256 = "cda29f79cbd3004a6a80a45fc1f6dca27b1d0089fc73935119630f699138995f"
 
 [[sources]]
 path = "tools/gen_renderers.py"
-bytes = 104374
-sha256 = "54f698d13acd59da703a713a2dc68658bf145fe57f718e35181b07dabb64c8e2"
+bytes = 106999
+sha256 = "f18c9bae5c057fba9709a87da48f295a58f819c2f30804f0ac8602bd99d0c6fc"
 
 [[sources]]
 path = "tools/gen_roadmap.py"
@@ -4561,8 +4561,8 @@ sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 135934
-sha256 = "4e5ad4ada8003acff0db9ba5d7e660749a65c70fdbc3d7aff50e53a4d8c12542"
+bytes = 135935
+sha256 = "d1a7b719af6f90c266826f4dccad98d1788858431f1c1c9411c9de4b2fbdd77f"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"

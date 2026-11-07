@@ -930,7 +930,7 @@ def build_outputs(root, root_fd=None):
     verdict = _skill_frontmatter.evaluate_bytes(reserved_map["SKILL.md"].encode("utf-8"))
     if verdict.status != _skill_frontmatter.VALID:
         raise ValueError("the built SKILL.md frontmatter is not VALID: {}".format(verdict.describe()))
-    standalone =[(root.joinpath(*INSTRUCTIONS_PARTS), render_instructions(data))]
+    standalone = [(root.joinpath(*INSTRUCTIONS_PARTS), render_instructions(data))]
     # Both zips are written from the SAME bytes, so the version-numbered copy and the stable "latest" alias
     # are byte-identical by construction; gen_skill --check compares each to disk, so a divergence is caught.
     # The canonical LICENSE is packed into the archive (fail-closed: a missing, unreadable, linked or
