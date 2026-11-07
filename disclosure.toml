@@ -144,10 +144,6 @@ prefix = "opf/site/"
 label = "the site HTML pages (inline scripts included) and JavaScript under site/ and opf/site/"
 
 [[code]]
-prefix = "docs/_shell.html"
-label = "docs/_shell.html, an HTML shell page with an inline script"
-
-[[code]]
 prefix = ".preview/"
 label = "the preview hook scripts under .preview/"
 

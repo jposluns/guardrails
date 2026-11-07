@@ -389,7 +389,7 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_site.py",
       "sources": [
-        "docs/_shell.html",
+        "tools/gen_draft_site.py",
         "docs/development.md"
       ],
       "target": "site/development.html"
@@ -476,7 +476,7 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_enforcement_register.py",
       "sources": [
-        "docs/_shell.html",
+        "tools/gen_draft_site.py",
         ".aiqt/enforceability.json",
         ".aiqt/core/enforcement-roadmap.toml",
         ".aiqt/core/rules/"
@@ -487,7 +487,7 @@
       "kind": "file",
       "regenerate": "python3 tools/gen_site.py",
       "sources": [
-        "docs/_shell.html",
+        "tools/gen_draft_site.py",
         "docs/evidence.md"
       ],
       "target": "site/evidence.html"
@@ -565,6 +565,15 @@
         "site/draft-src/standard.toml"
       ],
       "target": "site/standard/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "docs/tech-details.md"
+      ],
+      "target": "site/tech-details.html"
     }
   ],
   "version": 1

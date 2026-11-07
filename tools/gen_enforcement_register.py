@@ -42,8 +42,8 @@ the same display labels, so it cannot disagree with the rows.
   gen_enforcement_register.py --check   fail (exit 1) on output drift; exit 2 on a bad or contradictory input
   gen_enforcement_register.py --self-test  assert the generator's own fail-closed invariants on synthetic trees
 
-Both views are WHOLE generated files. site/enforcement.html is composed from the shared themed site shell
-(docs/_shell.html, the same chrome the other site pages use) with the register content substituted in, so
+Both views are WHOLE generated files. site/enforcement.html is composed on the shared site template shell
+(gen_draft_site.compose_shell, the same chrome every template page carries) around the register content, so
 the ENTIRE page is generated and --check regenerates and compares the whole file: a hand edit anywhere on
 the page, chrome included, fails --check. The register itself never re-authors any chrome.
 
@@ -89,31 +89,29 @@ from _standards import dir_or_absent, dir_present, LINK_OUTSIDE_ROOT  # noqa: E4
 from gen_rules import load_corpus  # noqa: E402
 from gen_agents import sort_key  # noqa: E402  canonical AIQT-priority rule order (as gen_mappings uses)
 import gen_enforceability  # noqa: E402  reuse build_ledger so the register can never accept a stale ledger
-import gen_site  # noqa: E402  reuse the shared themed site shell and its validated token substitution
+import gen_draft_site  # noqa: E402  the shared site template shell every served page composes through
 
 MD_REL = "ENFORCEMENT.md"
 HTML_REL = "site/enforcement.html"
 LEDGER_REL = ".aiqt/enforceability.json"
 ROADMAP_REL = ".aiqt/core/enforcement-roadmap.toml"
 RULES_DIR_REL = ".aiqt/core/rules"
-SHELL_REL = gen_site.SHELL_REL  # docs/_shell.html: the shared themed site chrome
 
-# The head/nav metadata this page substitutes into the shared shell, one value per shell field token.
-# These are the enforcement page's own frontmatter, kept here (not in a TOML) because this page's body
-# is generated from the ledger, not authored as Markdown. Each value is escaped for its shell sink by
-# gen_site._escape_field, exactly as the Markdown site pages are.
+# The head metadata this page composes into the shared template shell. These are the enforcement page's
+# own frontmatter, kept here (not in a TOML) because this page's body is generated from the ledger, not
+# authored as Markdown. compose_shell escapes each value for its sink, exactly as the Markdown site
+# pages are.
 PAGE_DESCRIPTION = ("Every rule and the shipped mechanical controls linked to it. A link records that a "
                     "control exists, not complete coverage, and partial marks a rule its linked controls are "
                     "known to cover only in part; no control and pending both mean no shipped control cites "
                     "the rule yet.")
+# The canonical absolute URL the page is served at (check_overclaim derives the site origin from it);
+# the root-relative form of its path is the current-page URL the shell's top bar is composed with.
 PAGE_URL = "https://aiqt.ai/enforcement"
+PAGE_PATH = "/enforcement"
 PAGE_FIELDS = {
     "title": "Guardrail Enforcement Register",
     "description": PAGE_DESCRIPTION,
-    "canonical": PAGE_URL,
-    "og-title": "Guardrail Enforcement Register",
-    "og-description": PAGE_DESCRIPTION,
-    "og-url": PAGE_URL,
 }
 
 # The generated-note comment carried at the top of the page body, so a reader who opens the source sees
@@ -176,17 +174,18 @@ GENERATED_NOTE = (
     "by tools/gen_enforcement_register.py. Do not edit it by hand; change the source and regenerate.")
 
 # Declares this generator's outputs for the gensrc registry (tools/gen_gensrc.py); additive metadata only.
-# BOTH views are WHOLE generated files (kind file). site/enforcement.html is composed from the shared site
-# shell docs/_shell.html plus the ledger-derived content, so the whole page is generated and drift-gated;
-# its sources therefore include docs/_shell.html alongside the ledger, the enforcement roadmap, and the
-# rule corpus. ENFORCEMENT.md is the Markdown view over the same non-shell sources.
+# BOTH views are WHOLE generated files (kind file). site/enforcement.html is composed on the shared site
+# template shell (gen_draft_site.compose_shell) around the ledger-derived content, so the whole page is
+# generated and drift-gated; its sources therefore include tools/gen_draft_site.py alongside the ledger,
+# the enforcement roadmap, and the rule corpus. ENFORCEMENT.md is the Markdown view over the same
+# non-shell sources.
 GENSRC_OUTPUTS = (
     {"target": "ENFORCEMENT.md", "kind": "file",
      "sources": (".aiqt/enforceability.json", ".aiqt/core/enforcement-roadmap.toml",
                  ".aiqt/core/rules/"),
      "regenerate": "python3 tools/gen_enforcement_register.py"},
     {"target": "site/enforcement.html", "kind": "file",
-     "sources": ("docs/_shell.html", ".aiqt/enforceability.json",
+     "sources": ("tools/gen_draft_site.py", ".aiqt/enforceability.json",
                  ".aiqt/core/enforcement-roadmap.toml", ".aiqt/core/rules/"),
      "regenerate": "python3 tools/gen_enforcement_register.py"},
 )
@@ -571,10 +570,13 @@ def render_html(rows, roadmap, controls, enforced_union):
     out.append('        <p>{}</p>'.format(_t(EXPLAINER)))
     out.append('        <p class="lead">Summary: {}.</p>'.format("; ".join(
         '{}: <strong>{}</strong>'.format(_t(label), counts[label]) for label in STATUS_LABELS)))
-    out.append('        <div class="tablewrap">')
-    out.append('          <table class="dtable">')
-    out.append('            <thead><tr><th>Rule</th><th>Corpus ID</th><th>Status</th>'
-               '<th>{}</th></tr></thead>'.format(_t(COLUMN_HEADING)))
+    # Template markup only: a plain table inside a focusable scroll wrapper, a plain legend list, and plain
+    # details blocks, so every class the body carries is one the template stylesheet defines, except the
+    # residual blockquote's class (see the comment at that block).
+    out.append('        <div class="tablewrap" tabindex="0">')
+    out.append('          <table>')
+    out.append('            <thead><tr><th scope="col">Rule</th><th scope="col">Corpus ID</th>'
+               '<th scope="col">Status</th><th scope="col">{}</th></tr></thead>'.format(_t(COLUMN_HEADING)))
     out.append('            <tbody>')
     for cid, title, _fm in rows:
         row = roadmap[cid]
@@ -599,7 +601,7 @@ def render_html(rows, roadmap, controls, enforced_union):
     out.append('        </div>')
     out.append('        <h2>Mechanisms</h2>')
     classes_present = _classes_present(enforced_union, controls)
-    out.append('        <ul class="class-legend">')
+    out.append('        <ul>')
     for letter, desc in CLASS_LEGEND:
         if letter in classes_present:
             out.append('          <li>Class <code>{}</code>: {}</li>'.format(_t(letter), _t(desc)))
@@ -608,25 +610,30 @@ def render_html(rows, roadmap, controls, enforced_union):
         ctrl = controls[ref]
         residue = _residue_display(ctrl["residue"], "residue {}".format(ref))
         anchor = "mechanism-{}-{}".format(ctrl["kind"], ctrl["id"])
-        out.append('        <details class="more" id="{anchor}">'.format(anchor=_a(anchor)))
+        # The mechanism block is a plain details element; tools/check_overclaim.py's reverse leg treats
+        # every details element on this page as a mechanism block and validates it against this shape.
+        out.append('        <details id="{anchor}">'.format(anchor=_a(anchor)))
         out.append('          <summary><code>{ref}</code></summary>'.format(ref=_t(ref)))
-        out.append('          <div class="inner">')
-        out.append('            <ul>')
+        out.append('          <ul>')
         for label, key in _MECH_FIELDS:
-            out.append('              <li>{}: <code>{}</code></li>'.format(label, _t(ctrl[key])))
-        out.append('            </ul>')
+            out.append('            <li>{}: <code>{}</code></li>'.format(label, _t(ctrl[key])))
+        out.append('          </ul>')
         # The technical-limits residual is rendered VERBATIM from the ledger inside a labelled blockquote:
         # the residue is element text (HTML-escaped by _t), so a residue token shaped like a tag renders
         # as visible text, not markup. The data-mech attribute names the control this quotation declares.
         # The block carries no marketing exemption: the residue is kept
         # marketing-clean at its manifest source, so the overclaim gate scans this page plainly like any
         # other. The generation-time verbatim check below asserts this exact block ships byte-for-byte.
-        # A multi-line residue keeps its newlines here verbatim; the .ledger-residual style is white-space:
-        # pre-wrap (site/styles.css), so a multi-paragraph residue renders with its line breaks intact.
-        out.append('            <p class="ledger-residual-label">{}</p>'.format(_t(RESIDUAL_HEADING)))
-        out.append('            <blockquote class="ledger-residual" data-mech="{mech}">{text}</blockquote>'
+        # A multi-line residue keeps its newlines here verbatim in the page source; the template
+        # stylesheet styles it as a plain blockquote, so the byte checks below, not the styling,
+        # carry the fidelity guarantee.
+        # No stylesheet defines the ledger-residual class; it stays because 2 checks read it:
+        # _assert_display_fidelity below requires this exact block, class included, as a byte substring
+        # of the composed page, and tools/check_overclaim.py _validate_mech_html requires the residual
+        # blockquote to carry it.
+        out.append('          <p>{}</p>'.format(_t(RESIDUAL_HEADING)))
+        out.append('          <blockquote class="ledger-residual" data-mech="{mech}">{text}</blockquote>'
                    .format(mech=_a(ref), text=_t(residue)))
-        out.append('          </div>')
         out.append('        </details>')
     inner = "\n".join(out)
     # Reject an en/em dash anywhere in the emitted block (defence in depth over the per-field checks).
@@ -724,49 +731,39 @@ def _page_content(html_inner):
     return "\n".join([
         PAGE_GENERATED_COMMENT,
         "",
-        '<div class="wrap pagehead">',
-        '  <p class="eyebrow">Enforcement register</p>',
-        '  <h1>Guardrail Enforcement Register</h1>',
-        '  <p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
-        '    This page is generated from the enforceability ledger, so its linkage claims match the controls',
-        '    declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
-        '</div>',
+        '<div class="wrap"><div class="doc">',
+        '<p class="lbl first">Enforcement register</p>',
+        '<h1>Guardrail Enforcement Register</h1>',
+        '<div class="rail"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" '
+        'alt="A shield bearing a check mark, set on a guardrail"></div>',
+        '<p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
+        '  This page is generated from the enforceability ledger, so its linkage claims match the controls',
+        '  declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
         "",
         '<section id="register">',
-        '  <div class="wrap">',
         html_inner,
-        "  </div>",
+        '<nav aria-label="Project"><a href="/disclosure/">Disclosure</a></nav>',
         "</section>",
+        "</div></div>",
     ])
 
 
 def compose_page(root, html_inner):
-    """Compose the WHOLE site/enforcement.html from the shared themed shell (docs/_shell.html) and the
-    register content, so the entire page is generated and drift-gated. The shell is validated first (its
-    field tokens present exactly once and each sitting in the HTML sink its escaping assumes), so a
-    malformed or incomplete shell fails closed (SchemaError -> exit 2) rather than emitting a broken page.
-    Substitution is a single pass over the shell (gen_site's substitution contract), so a substituted
-    value is never re-scanned for another token. Reuses the shared shell and gen_site's own escaping and
-    substitution rather than duplicating any chrome here."""
-    shell = (root / SHELL_REL).read_text(encoding="utf-8")  # OSError/UnicodeError -> fail-closed in caller
-    gen_site._validate_shell_placeholders(shell, SHELL_REL)
-    gen_site._validate_token_sinks(shell, SHELL_REL)
-    substitutions = {"content": _page_content(html_inner)}
-    for field, (token, sink) in gen_site.FIELD_TO_TOKEN.items():
-        substitutions[token[2:-2]] = gen_site._escape_field(PAGE_FIELDS[field], sink)
-
-    def repl(match):
-        name = match.group(1)
-        if name in substitutions:
-            return substitutions[name]
-        raise ValueError("{}: shell carries an unexpected placeholder {}".format(SHELL_REL, match.group(0)))
-
-    return gen_site._TOKEN_RE.sub(repl, shell)
+    """Compose the WHOLE site/enforcement.html on the shared site template shell
+    (gen_draft_site.compose_shell), the same chrome every template page carries, so the entire page is
+    generated and drift-gated. The composer holds the composed page to the template's own code-style
+    refusals and link rules, so a register content edit that breaks them fails closed
+    (gen_draft_site.RefusedPage -> exit 2) rather than emitting a broken page. `root` stays in the
+    signature for the callers that pass the tree under test; the shell is code, not a file under it."""
+    del root  # the shell is composed from gen_draft_site, not read from the tree
+    site = next(s for s in gen_draft_site.SITES if s["key"] == "aiqt")
+    return gen_draft_site.compose_shell(site, PAGE_FIELDS["title"], PAGE_FIELDS["description"],
+                                        PAGE_PATH, _page_content(html_inner), label=HTML_REL)
 
 
 def build_views(root):
     """Return (md_text, html_page). html_page is the WHOLE composed site/enforcement.html. Raises
-    ValueError/OSError/gen_site.SchemaError on any malformed, unreadable, stale, or contradictory input
+    ValueError/OSError/gen_draft_site.RefusedPage on any malformed, unreadable, stale, or contradictory input
     (including a bad site shell or a display-fidelity failure); the caller maps those to exit 2."""
     rules_dir = root / RULES_DIR_REL
     # dir_or_absent (not is_dir): a corpus that is there but cannot be read as a directory (a
@@ -858,7 +855,7 @@ def page_content_strings(root):
 def run(root, check):
     try:
         md_text, html_page = build_views(root)
-    except (ValueError, OSError, gen_site.SchemaError) as exc:
+    except (ValueError, OSError, gen_draft_site.RefusedPage) as exc:
         print("error: cannot build the enforcement register ({}); fail-closed".format(exc),
               file=sys.stderr)
         return 2
@@ -1039,32 +1036,6 @@ status = "none"
 mechanisms = []
 """
 
-# A minimal but VALID shared site shell (docs/_shell.html) for the synthetic tree: each field token
-# present exactly once and in the HTML sink its escaping assumes (title in element text, the rest in
-# quoted attributes), plus the body `{{content}}`, so gen_site's shell validators pass. The generator
-# composes the whole site/enforcement.html from this, so a chrome edit to the generated page drifts.
-_SHELL = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>{{title}}</title>
-<meta name="description" content="{{description}}">
-<link rel="canonical" href="{{canonical}}">
-<meta property="og:title" content="{{og_title}}">
-<meta property="og:description" content="{{og_description}}">
-<meta property="og:url" content="{{og_url}}">
-</head>
-<body>
-<main id="main">
-
-{{content}}
-
-</main>
-</body>
-</html>
-"""
-
-
 def _build(base):
     """A conformant synthetic tree. Reuses gen_enforceability to write a matching ledger, so the register's
     own ledger byte-identity check has a clean baseline."""
@@ -1094,9 +1065,6 @@ def _build(base):
     (base / ".aiqt" / "enforceability.json").write_text(
         gen_enforceability.build_ledger(base), encoding="utf-8")
     (base / ".aiqt" / "core" / "enforcement-roadmap.toml").write_text(_ROADMAP, encoding="utf-8")
-    docs = base / "docs"
-    docs.mkdir(parents=True)
-    (docs / "_shell.html").write_text(_SHELL, encoding="utf-8")
     # site/ must exist for the generator to write the whole site/enforcement.html into it.
     (base / "site").mkdir(parents=True)
     return base
@@ -1220,8 +1188,9 @@ def self_test_main():
                       "Gate-linked (class c only): <strong>0</strong>"):
             if token not in html_page:
                 failures.append("conformant tree: {!r} missing from the generated page".format(token))
-        for chrome_token in ("<title>Guardrail Enforcement Register</title>",
-                             "<p class=\"eyebrow\">Enforcement register</p>"):
+        for chrome_token in ("<title>Guardrail Enforcement Register | AIQT.ai</title>",
+                             "<p class=\"lbl first\">Enforcement register</p>",
+                             "<div class=\"wrap\"><div class=\"doc\">"):
             if chrome_token not in html_page:
                 failures.append("conformant tree: {!r} missing from the generated page".format(chrome_token))
 
@@ -1337,7 +1306,7 @@ def self_test_main():
         else:
             page_text = page_path.read_text(encoding="utf-8")
             edited = page_text.replace(
-                "<title>Guardrail Enforcement Register</title>",
+                "<title>Guardrail Enforcement Register | AIQT.ai</title>",
                 "<title>Hand edited chrome</title>", 1)
             if edited == page_text:
                 failures.append("chrome-edit tree: expected a <title> chrome line to edit")
@@ -1453,11 +1422,13 @@ def self_test_main():
         # newline is a permitted control character in the multi-line sink; a tab has no faithful rendering.
         expect2("residue-tab",
                 lambda t: replace_in(t / GATES, "an ampersand,", "a\ttab,"))
-        # (s) A site shell missing the {{content}} token fails closed (the shell validator refuses it).
-        expect2("shell-missing-content",
-                lambda t: (t / "docs" / "_shell.html").write_text(
-                    (t / "docs" / "_shell.html").read_text("utf-8").replace("{{content}}", ""),
-                    encoding="utf-8"))
+        # (s) A register content edit that breaks the template shell's rules fails closed: the "what this
+        # is" framing passes the register's own cell validators but is one of the template's code-style
+        # refusals, so compose_shell refuses the composed page (RefusedPage -> exit 2).
+        expect2("shell-refuses-framing",
+                lambda t: replace_in(t / ROADMAP,
+                                     'description = "A self-test intended build for the apex rule."',
+                                     'description = "Explains what this is for the apex rule."'))
         # (t) An invalid-UTF-8 generated Markdown target fails closed (exit 2), via reconcile's decode.
         expect2("md-invalid-utf8",
                 lambda t: (t / MD_REL).write_bytes(b"\xff\xfe not utf-8"))

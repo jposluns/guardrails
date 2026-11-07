@@ -1,88 +1,76 @@
 +++
 title = "AIQT evidence and assurance: the proof behind the claims"
 description = "The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
-canonical = "https://aiqt.ai/evidence"
-og-title = "AIQT evidence and assurance: the proof behind the claims"
-og-description = "The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending."
-og-url = "https://aiqt.ai/evidence"
-sidebar-active = "evidence"
 +++
 
-<div class="wrap pagehead">
-  <p class="eyebrow">Evidence and assurance</p>
-  <h1>The proof behind the claims.</h1>
-  <p class="lead">AIQT asks your assistant to back a claim with evidence, so this page holds AIQT
-    to the same rule. Here is what is available now, what has been tested, and what is
-    documented. Where a fact is not yet published, it is marked pending rather than implied.</p>
-</div>
+<div class="wrap"><div class="doc">
+<p class="lbl first">Evidence and assurance</p>
+<h1>The proof behind the claims.</h1>
+<div class="rail"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" alt="A shield bearing a check mark, set on a guardrail"></div>
+<p class="lead">AIQT asks your assistant to back a claim with evidence, so this page holds AIQT
+  to the same rule. Here is what is available now, what has been tested, and what is
+  documented. Where a fact is not yet published, it is marked pending rather than implied.</p>
 
 <section id="release">
-  <div class="wrap">
-    <p class="eyebrow">The release</p>
-    <h2>AIQT 1.0.5</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Version:</b> 1.0.5, the chat-assistant Skill. The chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
-      <li><b style="color:var(--ink)">The artefact:</b> the packaged skill zip, plus a
-        portable instruction file, both on the <a href="/install">install page</a>.</li>
-      <li><b style="color:var(--ink)">Built from:</b> <span class="evidence-label">the exact source tag or commit: pending</span></li>
-      <li><b style="color:var(--ink)">Checksum:</b> <span class="evidence-label">pending</span></li>
-    </ul>
-  </div>
+<p class="lbl sec">The release</p>
+<h2>AIQT 1.0.5</h2>
+<ul>
+  <li><strong>Version:</strong> 1.0.5, the pack release. The chat-assistant Skill it ships is versioned on its own: the chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
+  <li><strong>The artefact:</strong> the packaged skill zip, plus a
+    portable instruction file, both on the <a href="/install">install page</a>.</li>
+  <li><strong>Built from:</strong> <em>the exact source tag or commit: pending</em></li>
+  <li><strong>Checksum:</strong> the SHA-256 of <a href="/downloads/aiqt-skill-1.0.6.zip">the Skill zip</a> (site/downloads/aiqt-skill-1.0.6.zip) is <code>d185bf6caa96a139b2b7c21fc83a03a04d5f214e39c93d16525362e11ab83a7e</code>. 1.0.5 itself was not released through the RELEASING.md protocol, so it has no recorded artefact digests.</li>
+</ul>
 </section>
 
 <section id="limits">
-  <div class="wrap">
-    <p class="eyebrow">Known limitations</p>
-    <h2>What AIQT does not do</h2>
-    <p class="lead">AIQT is a behavioural standard your assistant is required to follow, not a
-      control that technically prevents a model from erring. Results still depend on the model,
-      the platform, competing instructions, and the tools available in the conversation. AIQT
-      does not make an AI infallible, and it does not replace your judgement, your organization's
-      policy, or the law.</p>
-  </div>
+<p class="lbl sec">Known limitations</p>
+<h2>What AIQT does not do</h2>
+<p class="lead">AIQT is a behavioural standard your assistant is required to follow, not a
+  control that technically prevents a model from erring. Results still depend on the model,
+  the platform, competing instructions, and the tools available in the conversation. AIQT
+  does not make an AI infallible, and it does not replace your judgement, your organization's
+  policy, or the law.</p>
 </section>
 
 <section id="platform-tests">
-  <div class="wrap">
-    <p class="eyebrow">Platform test status</p>
-    <h2>What has been tested, and when</h2>
-    <div class="tablewrap"><table class="dtable">
-      <caption class="vh">Platform test status for AIQT 1.0.5</caption>
-      <thead><tr><th scope="col">Platform</th><th scope="col">Install method</th><th scope="col">Last tested</th><th scope="col">Result</th><th scope="col">Known constraints</th></tr></thead>
-      <tbody>
-        <tr><td>Claude</td><td>Skill upload</td><td class="pending">pending</td><td class="pending">pending</td><td>Desktop browser; mobile Skill upload not documented</td></tr>
-        <tr><td>ChatGPT</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
-        <tr><td>Gemini</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
-        <tr><td>Copilot</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
-      </tbody>
-    </table></div>
-    <p>An untested platform says so plainly. A tested one will carry its date and result here.</p>
-  </div>
+<p class="lbl sec">Platform test status</p>
+<h2>What has been tested, and when</h2>
+<div class="tablewrap" tabindex="0"><table>
+  <caption class="vh">Platform test status for AIQT 1.0.5</caption>
+  <thead><tr><th scope="col">Platform</th><th scope="col">Install method</th><th scope="col">Last tested</th><th scope="col">Result</th><th scope="col">Known constraints</th></tr></thead>
+  <tbody>
+    <tr><td>Claude</td><td>Skill upload</td><td>pending</td><td>pending</td><td>Desktop browser; mobile Skill upload not documented</td></tr>
+    <tr><td>ChatGPT</td><td>not yet tested</td><td>pending</td><td>pending</td><td>pending</td></tr>
+    <tr><td>Gemini</td><td>not yet tested</td><td>pending</td><td>pending</td><td>pending</td></tr>
+    <tr><td>Copilot</td><td>not yet tested</td><td>pending</td><td>pending</td><td>pending</td></tr>
+    <tr><td>Copilot Studio</td><td>not yet tested</td><td>pending</td><td>pending</td><td>pending</td></tr>
+  </tbody>
+</table></div>
+<p>An untested platform says so plainly. A tested one will carry its date and result here.</p>
 </section>
 
 <section id="cases">
-  <div class="wrap">
-    <p class="eyebrow">Documented cases</p>
-    <h2>Real calls from the GRC Library</h2>
-    <p class="lead">AIQT was built and tested on the GRC Library first. The
-      <a href="/standard/#st-3">examples on the standard page</a> narrate several real calls; each links here to its source
-      record when that record is public.</p>
-    <ul class="clean">
-      <li>A fixed retention baseline attributed to sources that prescribe no fixed interval, caught and corrected. <span class="evidence-label">Source record link: pending</span></li>
-      <li>A recycled backlog number that would have mis-resolved later citations, caught by a permanence check. <span class="evidence-label">Source record link: pending</span></li>
-      <li>A completeness check that read "the file exists" as "the delivery is complete", fixed at the class. <span class="evidence-label">Source record link: pending</span></li>
-    </ul>
-  </div>
+<p class="lbl sec">Documented cases</p>
+<h2>Real calls from the GRC Library</h2>
+<p class="lead">AIQT was built and tested on the GRC Library first. The
+  <a href="/standard/#st-3">examples on the standard page</a> narrate several real calls; each links here to its source
+  record when that record is public.</p>
+<ul>
+  <li>A fixed retention baseline attributed to sources that prescribe no fixed interval, caught and corrected. <em>Source record link: pending</em></li>
+  <li>A recycled backlog number that would have mis-resolved later citations, caught by a permanence check. <em>Source record link: pending</em></li>
+  <li>A completeness check that read "the file exists" as "the delivery is complete", fixed at the class. <em>Source record link: pending</em></li>
+</ul>
 </section>
 
 <section id="history">
-  <div class="wrap">
-    <p class="eyebrow">Change history</p>
-    <h2>What changed, and when</h2>
-    <p class="lead">Every substantive change to AIQT is recorded; the public change log is a
-      curated release-level view. <a href="https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">The public change log</a></p>
-    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
-      <a class="btn ghost" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View the source on GitHub</a>
-    </div>
-  </div>
+<p class="lbl sec">Change history</p>
+<h2>What changed, and when</h2>
+<p class="lead">Every substantive change to AIQT is recorded; the public change log is a
+  curated release-level view. <a href="https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">The public change log<span class="vh"> (opens in a new tab)</span></a></p>
+<p>
+  <a class="btn inline" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View the source on GitHub<span class="vh"> (opens in a new tab)</span></a>
+</p>
+<nav aria-label="Project"><a href="/disclosure/">Disclosure</a></nav>
 </section>
+</div></div>
