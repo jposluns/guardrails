@@ -49,7 +49,13 @@ reader is a positive grammar: it accepts exactly the shapes named here, and ever
                lines deeper than 4 under a job key other than steps:; steps under `steps:` starting
                `- ` at indent 6 with step keys at indent 8, each key given once per step; nested
                lines deeper than 8 under a step key other than name or run
-  scalars      a one-line name or run value that is single-quoted ('' doubling, no other quote),
+  open values  on every line read or skipped (top-level keys, lines before jobs:, job ids, job keys,
+               step keys and the opaque lines under with:, env: or any other key), a quoted scalar
+               (' or "), flow sequence ([) or flow mapping ({) opened where a value or key starts,
+               or anywhere inside a flow collection, closes on that same line (\\" and '' close
+               nothing); YAML would continue an open one onto the following lines, which this reader
+               would take as keys of their own, so it is refused
+  scalars     a one-line name or run value that is single-quoted ('' doubling, no other quote),
                double-quoted (no escapes, no inner quote), or plain starting with a letter,
                underscore, dot or slash and not a value YAML types (null, ~, true/false/yes/no/on/off
                in any case, an integer, float, hex, octal, binary or sexagesimal form with or without
@@ -229,6 +235,69 @@ def _scalar(value, where):
     return value
 
 
+def _quoted_end(text, start):
+    """The index just past the quote closing the YAML quoted scalar opened at text[start], or None when
+    it does not close on this line. A double-quoted scalar skips the character after each backslash
+    (so \\" closes nothing); a single-quoted one reads '' as one quote."""
+    quote, index = text[start], start + 1
+    while index < len(text):
+        char = text[index]
+        if quote == '"' and char == "\\":
+            index += 2
+            continue
+        if char == quote:
+            if quote == "'" and text[index + 1:index + 2] == "'":
+                index += 2
+                continue
+            return index + 1
+        index += 1
+    return None
+
+
+def _value_left_open(content):
+    """Whether one workflow line (indentation removed) opens a quoted scalar (' or "), a flow sequence
+    ([) or a flow mapping ({) at a place a YAML value or key starts, or anywhere inside a flow
+    collection, and does not close it on that line. YAML continues such a value onto the following
+    lines whatever their indentation, so a line this reader takes as a key of its own (a job key, a
+    job id, a top-level key) would be text inside the value, and what follows would be read under
+    another key than YAML reads it. A ' #' outside quotes starts a comment, so a flow collection still
+    open there is open. The reading is conservative: a quote anywhere inside a flow collection is read
+    as opening a quoted scalar."""
+    depth, at_start, index = 0, True, 0
+    while index < len(content):
+        char = content[index]
+        after = content[index + 1:index + 2]
+        if char == "#" and (index == 0 or content[index - 1] == " "):
+            break
+        if char in "\"'" and (at_start or depth):
+            end = _quoted_end(content, index)
+            if end is None:
+                return True
+            index, at_start = end, False
+            continue
+        if char in "[{" and (at_start or depth):
+            depth, at_start = depth + 1, True
+        elif char in "]}" and depth:
+            depth, at_start = depth - 1, False
+        elif char == "," and depth:
+            at_start = True
+        elif char == " ":
+            pass
+        elif char in "&!" and at_start:
+            # An anchor or tag: the node it marks starts after the next space.
+            while index < len(content) and content[index] != " ":
+                index += 1
+            continue
+        elif char in "-?" and at_start and after in ("", " "):
+            pass
+        elif char == ":" and (after in ("", " ") or (depth and after in ",[]{}")):
+            at_start = True
+        else:
+            at_start = False
+        index += 1
+    return depth > 0
+
+
 def workflow_run_steps(text, where=WORKFLOW):
     """The run: steps of a workflow as (job, step name, run text, line), in file order. The accepted
     grammar is stated in the module docstring; a character, line or value outside it is CannotEvaluate,
@@ -257,6 +326,12 @@ def workflow_run_steps(text, where=WORKFLOW):
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
+        # Every line read or skipped below, top-level keys, lines before jobs:, job ids, job keys, step
+        # keys and the opaque lines under with:, env: or any other nested key alike: a value left open
+        # here would make YAML read the following lines as part of it.
+        if _value_left_open(stripped):
+            raise CannotEvaluate("{}:{}: a quoted scalar or flow collection opened on this line does not "
+                                 "close on it; YAML would continue it onto the following lines".format(where, number))
         indent = len(line) - len(line.lstrip(" "))
         if indent == 0:
             flush()
@@ -728,6 +803,37 @@ def _rules(registry, workflow=FIXTURE_WORKFLOW, tracked=FIXTURE_TRACKED, sources
         return ("cannot-evaluate", str(exc))
 
 
+UNREGISTERED_PROBE = "      - name: Unregistered\n        run: python3 -I -B tools/probe.py\n"
+
+
+def _open_value_workflow(site, opener, closer):
+    """The fixture workflow with a value opened by opener on a line at site and closed by closer two lines
+    later. YAML continues the value over the line between, which this reader would take as a key of its
+    own, so YAML reads a run: step the reader would skip (job-key, step-key, with-line), files a step
+    under another job than the reader does (swallow-job-id), or reads another on: block (top-level);
+    without the open-value refusal the fixture registry passes every one."""
+    if site == "job-key":
+        # A job key swallowing a top-level key: the reader leaves jobs: and skips the steps: after it.
+        return FIXTURE_WORKFLOW + "  extra:\n    runs-on: {}\nenv:\n  {}\n    steps:\n".format(
+            opener, closer) + UNREGISTERED_PROBE
+    if site == "step-key":
+        # A step key other than name or run swallowing an indent-4 line the reader takes as a job key.
+        return FIXTURE_WORKFLOW + "        working-directory: {}\n    env:\n      {}\n".format(
+            opener, closer) + UNREGISTERED_PROBE
+    if site == "with-line":
+        return FIXTURE_WORKFLOW + "      - uses: actions/cache@v4\n        with:\n          key: {}\n    env:\n" \
+            "      {}\n".format(opener, closer) + UNREGISTERED_PROBE
+    if site == "swallow-job-id":
+        # A job key swallowing the next job id: YAML files the step under extra, the reader under other.
+        return FIXTURE_WORKFLOW + "  extra:\n    runs-on: {}\n  other:\n    env:\n      {}\n    steps:\n".format(
+            opener, closer) + UNREGISTERED_PROBE
+    if site == "top-level":
+        # A top-level key before jobs: swallowing an on: block.
+        return FIXTURE_WORKFLOW.replace("name: Fixture\n", "name: {}\non:\n  push:\n  {}\n".format(
+            opener, closer), 1)
+    raise ValueError(site)
+
+
 def _self_test():
     check("pass/fixture-clean", _rules(_registry()) == [], _rules(_registry()))
 
@@ -888,6 +994,40 @@ def _self_test():
                  workflow=FIXTURE_WORKFLOW.replace("tools/gate.py --self-test", "./tools/gate.py --self-test"))
     check("refuse/dot-slash-script-not-triggered", got == ["import-not-triggered"], got)
 
+    # A quoted scalar or flow collection left open across lines is cannot-evaluate on every line the
+    # reader reads or skips; the same values closed on their own line still pass.
+    # The escape forms (\" inside double quotes, '' inside single quotes) close nothing. The
+    # swallow-job-id registry names other / Unregistered, the job the reader would file the step under.
+    other_entry = _entry("other", "Unregistered", "probe", ["tools/probe.py"])
+    for name, site, opener, closer in (
+        ("cannot-evaluate/shape-open-double-quote-job-key", "job-key", '".', '"'),
+        ("cannot-evaluate/shape-open-double-quote-step-key", "step-key", '".', '"'),
+        ("cannot-evaluate/shape-open-double-quote-with-line", "with-line", '".', '"'),
+        ("cannot-evaluate/shape-open-single-quote-job-key", "job-key", "'.", "'"),
+        ("cannot-evaluate/shape-open-single-quote-step-key", "step-key", "'.", "'"),
+        ("cannot-evaluate/shape-open-single-quote-with-line", "with-line", "'.", "'"),
+        ("cannot-evaluate/shape-open-flow-sequence-job-key", "job-key", "[a,", "]"),
+        ("cannot-evaluate/shape-open-flow-sequence-step-key", "step-key", "[a,", "]"),
+        ("cannot-evaluate/shape-open-flow-sequence-with-line", "with-line", "[a,", "]"),
+        ("cannot-evaluate/shape-open-flow-mapping-job-key", "job-key", "{a: 1,", "}"),
+        ("cannot-evaluate/shape-open-flow-mapping-step-key", "step-key", "{a: 1,", "}"),
+        ("cannot-evaluate/shape-open-flow-mapping-with-line", "with-line", "{a: 1,", "}"),
+        ("cannot-evaluate/shape-open-double-quote-escaped-close", "step-key", '".\\"', '"'),
+        ("cannot-evaluate/shape-open-single-quote-doubled-close", "step-key", "'.''", "'"),
+        ("cannot-evaluate/shape-open-job-key-swallows-job-id", "swallow-job-id", '"ubuntu', '"'),
+        ("cannot-evaluate/shape-open-top-level-key", "top-level", '"Fixture', '"'),
+    ):
+        got = _rules(_registry(extra=other_entry if site == "swallow-job-id" else ""),
+                     workflow=_open_value_workflow(site, opener, closer))
+        check(name, tuple(got[:1]) == ("cannot-evaluate",), got)
+    closed = FIXTURE_WORKFLOW.replace("    name: Lint\n", "    name: Lint\n    runs-on: [ubuntu-latest, 'mac']\n"
+                                      "    env: {A: \"1\", B: '2'} # note\n").replace(
+        "          fetch-depth: 0\n", "          fetch-depth: 0\n          python-version: '3.14'\n"
+        "          ref: \"it\\\"s\"\n          tags: [main]\n").replace(
+        "        shell: bash\n", "        shell: 'bash'\n        if: \"x\" # note\n        env: {A: [1, 2]}\n")
+    got = _rules(_registry(), workflow=closed)
+    check("pass/open-value-closed-on-line", got == [], got)
+
     # Characters outside the accepted grammar, refused before any line is read, each naming its line
     # and character. First the line breaks YAML honours where a line reader does not: each would hide
     # one line inside another.
@@ -1009,7 +1149,9 @@ def _self_test():
           "MemoryError, a format-version of 2, true or 1.0, unreadable inputs, the {} workflow shapes "
           "tested (an unnamed step, a duplicate step name, no run steps, and compact, flow, off-indent, "
           "repeated or second-block steps, block run headers with a comment, keep or indent indicator, a "
-          "continued run or name, an untracked script, a folded, anchored or badly quoted name), every "
+          "continued run or name, an untracked script, a folded, anchored or badly quoted name, and a "
+          "quoted, flow sequence or flow mapping value left open across lines at a job key, a step key, "
+          "a line under with: or a top-level key; a closed one passes), every "
           "character outside the accepted grammar (a CR, NEL, U+2028 or U+2029 that would hide a line, a "
           "BOM, form feed, vertical tab, tab, NUL, C1 control or no-break space), a plain scalar or job id "
           "YAML types, a repeated job id, a dedented non-comment line under a run: block and a run path "
