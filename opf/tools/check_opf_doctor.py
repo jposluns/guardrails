@@ -1505,20 +1505,26 @@ def _self_test_isolated():
         def _head(root):
             return _git_out(root, "rev-parse", "-q", "--verify", "HEAD")
 
-        def _commit(root, *args):
-            # A real `git commit`, so git itself runs the installed hook with its own GIT_INDEX_FILE.
-            # Returns (exit status, combined output).
+        def _git_hooked(root, verb, *args):
+            # A real git command run with the fixture's identity and maintenance pins and no --no-verify,
+            # so git itself runs any installed hook. Returns (exit status, combined output). Every
+            # hook-exercising git run shares this one call site, so its deadline is declared once.
             try:
                 proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
                                        "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
                                        "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
                                        "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
-                                       "commit", "-q", "-m", "change"] + list(args),
+                                       verb] + list(args),
                                       cwd=str(root), env=_env(), stdout=subprocess.PIPE,
                                       stderr=subprocess.STDOUT, timeout=300)
             except (OSError, subprocess.TimeoutExpired) as exc:
-                raise OSError("could not run git commit in {} ({})".format(root, exc))
+                raise OSError("could not run git {} in {} ({})".format(verb, root, exc))
             return proc.returncode, proc.stdout.decode("utf-8", "replace")
+
+        def _commit(root, *args):
+            # A real `git commit`, so git itself runs the installed hook with its own GIT_INDEX_FILE.
+            # Returns (exit status, combined output).
+            return _git_hooked(root, "commit", "-q", "-m", "change", *args)
 
         def _refused(root, *args):
             # (refused, HEAD unchanged, refused BY doctor's resurrection finding over the snapshot) for one
@@ -2475,17 +2481,8 @@ def _self_test_isolated():
             _git(picked, home, "commit", "-q", "--no-verify", "-m", "tamper")
             _git(picked, home, "checkout", "-q", "main")
             before = _head(picked)
-            try:
-                proc = subprocess.run([git, "--no-replace-objects", "-C", str(picked),
-                                       "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
-                                       "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
-                                       "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
-                                       "cherry-pick", "side"],
-                                      env=_env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                      timeout=300)
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise OSError("could not run git cherry-pick in {} ({})".format(picked, exc))
-            expect("cherry-pick-skips-hook", (proc.returncode, _head(picked) != before), (EXIT_OK, True))
+            rc, _text = _git_hooked(picked, "cherry-pick", "side")
+            expect("cherry-pick-skips-hook", (rc, _head(picked) != before), (EXIT_OK, True))
 
             # Merge commits, through a real git merge and git commit. A merge git merge would record without
             # stopping (no conflict) is stopped by the pre-merge-commit stub with its message; the merge result
@@ -2496,17 +2493,7 @@ def _self_test_isolated():
                 # A real `git merge --no-edit ...` (default: `side`), so git itself runs the installed
                 # pre-merge-commit hook. Returns (exit status, combined output).
                 merge_args = list(args) if args else ["side"]
-                try:
-                    proc = subprocess.run([git, "--no-replace-objects", "-C", str(root),
-                                           "-c", "user.email=opf@example.invalid", "-c", "user.name=OPF Self Test",
-                                           "-c", "commit.gpgsign=false", "-c", "gc.auto=0",
-                                           "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
-                                           "merge", "--no-edit"] + merge_args,
-                                          cwd=str(root), env=_env(), stdout=subprocess.PIPE,
-                                          stderr=subprocess.STDOUT, timeout=300)
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    raise OSError("could not run git merge in {} ({})".format(root, exc))
-                return proc.returncode, proc.stdout.decode("utf-8", "replace")
+                return _git_hooked(root, "merge", "--no-edit", *merge_args)
 
             def _diverged(name, tamper=False, install=True):
                 # A fixture whose side branch adds SIDE.md (or tampers with a record) and whose main branch
