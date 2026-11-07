@@ -35,10 +35,21 @@ removed on any failure, an interrupt included (an interrupt can still leave a fi
 temporary file's or an O_PATH one held by the parent walk, open for the moment the interrupted process
 takes to exit; no directory entry is left behind). After the rename lands the card, the opened directory
 is checked again on the same descriptor; where that recheck refuses (for example the directory was renamed
-into a served assets directory after the checks and before the write), the card is unlinked through the
-descriptor and the write is refused. A window remains and is claimed nowhere narrower than this: a rename
-of the output directory that lands after the recheck has read the directory, its parents and its
-read-back path keeps the written card wherever the directory then sits, and nothing here removes it. The
+into a served assets directory after the checks and before the write), the card name is unlinked relative
+to that descriptor and the write is refused. The unlink is by name: it removes whatever file or symlink
+is at the card name when it runs, which is this write's card unless a file was swapped in at that name after the
+rename (that file is removed instead, and a card moved off the name first is not removed); a card that was
+at that name before this write is gone as well, because the rename already replaced it. A window remains
+and is claimed nowhere narrower than this: a rename of the output directory, or of any directory above
+it, that lands after the recheck has read the directory's path back from its descriptor keeps the written
+card wherever the directory then sits. Where the real path of a served assets directory does not itself
+contain site/assets or opf/site/assets as a run of whole components (for example where ROOT/site/assets
+or ROOT/opf/site/assets is itself a symlink to another directory; in this checkout both are real
+directories), the window opens earlier: a rename that lands after the recheck's parent walk has opened the
+output directory's first parent also keeps the card, because the walk follows the parents the directory
+had when the walk began and the read-back path then carries no served assets name. Nothing here removes a
+card so kept. The cards are written one at a time, so a refusal of a later card removes nothing written
+earlier in the run; its message says so and names each card already written. The
 O_NOFOLLOW on the directory open covers the final path component only: an existing output directory
 reached through a symlinked parent is opened (the parent symlink is followed, and the opened directory is
 then judged by its identity and read-back path), while a final component that is itself a symlink,
@@ -394,11 +405,20 @@ def _write_card(path, data):
     cleanup that uses only its name (a descriptor can still be left open for the moment an interrupted
     process takes to exit); None when the card is written. After the rename, the opened directory is
     rechecked on the same descriptor (its identity, each parent reached from it, and its read-back path);
-    a recheck that refuses, or that cannot be completed, unlinks the just-renamed card through the
-    descriptor and raises Refused, so a directory renamed into a served assets directory between the
-    checks and the rename does not keep the card. The window that remains: a rename of the directory that
-    lands after the recheck has read the directory, its parents and its read-back path keeps the card
-    wherever the directory then sits, and nothing here removes it."""
+    a recheck that refuses, or that cannot be completed, unlinks the card name relative to the descriptor
+    and raises Refused, so a directory renamed into a served assets directory between the checks and the
+    rename does not keep the card. The unlink is by name: it removes whatever file or symlink is at the
+    card name when it runs, which is this write's card unless a file was swapped in at that name after the rename
+    (that file is removed instead, and a card moved off the name first is not removed); a card that was at
+    that name before this write is gone as well, because the rename already replaced it. The window that
+    remains: a rename of the directory, or of any directory above it, that lands after the recheck has
+    read the directory's path back from its descriptor keeps the card wherever the directory then sits.
+    Where the real path of a served assets directory does not itself contain site/assets or
+    opf/site/assets as a run of whole components (for example where ROOT/site/assets or
+    ROOT/opf/site/assets is itself a symlink to another directory; in this checkout both are real
+    directories), a rename that lands after the recheck's parent walk has opened the directory's first
+    parent also keeps the card: the walk follows the parents the directory had when the walk began, and
+    the read-back path then carries no served assets name. Nothing here removes a card so kept."""
     directory = path.parent
     reason = _name_refusal(directory)
     if reason:
@@ -440,10 +460,12 @@ def _write_card(path, data):
         if reason:
             try:
                 os.unlink(path.name, dir_fd=dir_fd)
-                removal = "the card was removed through the held directory descriptor"
+                removal = ("the entry at the card name was unlinked by name through the held directory "
+                           "descriptor (this write's card, unless a file was swapped in at that name after "
+                           "the rename; a card at that name before this write was already replaced)")
             except OSError as exc:
-                removal = ("the card could not be removed through the held directory descriptor "
-                           "({})".format(exc))
+                removal = ("the entry at the card name could not be unlinked through the held directory "
+                           "descriptor ({})".format(exc))
             raise Refused(
                 "the output directory {} was refused when rechecked on its open descriptor after the "
                 "write ({}); {}".format(directory, reason, removal))
@@ -532,16 +554,33 @@ def main(argv=None):
               "them; name a scratch directory. Nothing rendered.".format(reason), file=sys.stderr)
         return 2
     code = 0
-    for (composition, _card), target in zip(CARDS, card_targets(out_dir)):
+    # The cards written so far in this run, by the path each was written at: a refusal of a later card
+    # names them, since nothing removes them.
+    written = []
+    for index, ((composition, _card), target) in enumerate(zip(CARDS, card_targets(out_dir))):
         try:
             error = render(ROOT / "tools" / "og-cards" / composition, target)
         except Refused as exc:
-            print("error: refused: {}. Nothing more rendered.".format(exc), file=sys.stderr)
+            print("error: refused: {}. Nothing more rendered.{}".format(
+                exc, _written_earlier_note(written) if index else ""), file=sys.stderr)
             return 2
         if error:
             print("error: {}".format(error), file=sys.stderr)
             code = 1
+        else:
+            written.append(target)
     return code
+
+
+def _written_earlier_note(written):
+    """The sentence a refusal of a later card adds to its message: the cards are written one at a time, and
+    a card already written earlier in the run is not removed when a later one is refused. Each is named
+    by the path it was written at; a card whose output directory has moved since moved with it."""
+    if not written:
+        return " No card was written earlier in this run."
+    return (" Cards already written earlier in this run are not removed: {} (each named by the path it was "
+            "written at; a card whose output directory has moved since moved with it).".format(
+                ", ".join(str(path) for path in written)))
 
 
 # The registered execution-suite identity (tools/selftest_checks.toml) and the executed-check-id record
@@ -968,8 +1007,8 @@ def _self_test():
         # The post-write recheck on the held descriptor: an accepted output directory renamed into a
         # served assets directory after the checks (here at the temporary-name moment, so the rename is
         # visible when the card is renamed into place) does not keep the card; the recheck refuses and the
-        # card is unlinked through the descriptor. A rename landing after the recheck is the window the
-        # docstrings state; it is not claimed closed and not tested here.
+        # card name is unlinked relative to the descriptor. A rename landing inside the window the
+        # docstrings state is not claimed closed and not tested here.
         moved_out = Path(tmp) / "moved-out"
         os.makedirs(moved_out)
         real_urandom = os.urandom
@@ -1062,6 +1101,37 @@ def _self_test():
                        ["--out", str(Path(tmp) / "mid" / "assets")])
         check("main/identity-refused-out-exit-2-before-chrome", got == 2 and calls == [], (got, calls))
 
+        # main(): the cards are written one at a time, so a later card refused (here by a stand-in render
+        # that writes the first card and refuses the second, as a directory moved after the first card's
+        # recheck would) leaves the first card in place, and the refusal message says so and names it.
+        # With the note removed, the same run's message no longer says it.
+        kept_out = Path(tmp) / "kept-out"
+        kept_targets = card_targets(str(kept_out))
+
+        def _write_first_refuse_later(source, target):
+            if target == kept_targets[0]:
+                Path(target).write_bytes(expected)
+                return None
+            raise Refused("{} stands in for a later card refused by the recheck".format(target))
+
+        def _later_refusal_run():
+            import contextlib
+            import io
+            err = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = _patched("CHROME", sys.executable, _patched, "render", _write_first_refuse_later, main,
+                                ["--out", str(kept_out)])
+            return code, err.getvalue()
+
+        got, message = _later_refusal_run()
+        check("main/later-card-refusal-names-earlier-cards-kept",
+              got == 2 and "Cards already written earlier in this run are not removed: {} (".format(
+                  kept_targets[0]) in message and kept_targets[0].read_bytes() == expected,
+              (got, message))
+        got, message = _patched("_written_earlier_note", lambda written: "", _later_refusal_run)
+        check("guard-removed/main/later-card-refusal-names-earlier-cards-kept",
+              got == 2 and "already written earlier" not in message, (got, message))
+
     if FAILURES:
         print("SELF-TEST FAIL: render_og_cards {} of {} check(s) failed".format(len(FAILURES), len(EXECUTED)))
         for failure in FAILURES:
@@ -1086,7 +1156,9 @@ def _self_test():
           "pre-render identity check, while missing components of an accepted directory are still created "
           "through checked parents; an ancestor the walk cannot open fails closed with the cause stated; "
           "a directory renamed into served assets after the checks is refused by the post-write recheck "
-          "and the card removed through the held descriptor; a .. across a symlink is refused while one "
+          "and the card name unlinked through the held descriptor; a later card refused after an earlier "
+          "card is written names the earlier card in its message and leaves it in place, and the message "
+          "check fails with that note removed; a .. across a symlink is refused while one "
           "across a real directory is folded and accepted; a symlink planted at a missing component and "
           "reported as ENOTDIR is refused as a symlink, not an I/O error; an existing directory behind a "
           "symlinked parent is opened while that symlink as the nearest existing ancestor of a missing "

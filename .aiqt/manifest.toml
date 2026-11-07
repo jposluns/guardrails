@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8e9d500014b1458ea5e7d510ff659d5d5e352a09c3482344db7f11d967c466c0"
+tree-sha256 = "326a24e1284fd26ff549241b50bae70e7e20f890e0b749a98c9c8733e3361016"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4671,8 +4671,8 @@ sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
 
 [[sources]]
 path = "tools/render_og_cards.py"
-bytes = 63518
-sha256 = "ffab7b0a381d7bc0a03a3e4cafeed42838ca1b1ad75fba3a4923a83de94b46a4"
+bytes = 68819
+sha256 = "72d5bd6390a456105c7bfc8ef9862d7ed16da259af9f079847946233334ec75d"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
@@ -4691,8 +4691,8 @@ sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 221185
-sha256 = "4e0bcd3ce48b2721230fa3ce7ab69b2007d57c5b9d326855409d4de1bba1054f"
+bytes = 221400
+sha256 = "defffe06cc7126d0af345a2c596fc6a91a2d5f4658b31f19cec575dedcc50187"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

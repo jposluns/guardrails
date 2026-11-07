@@ -5365,4 +5365,7 @@ expected-check-ids = [
   "bound/symlinked-parent-existing-dir-opened",
   "bound/symlinked-final-missing-component-refused",
   "main/identity-refused-out-exit-2-before-chrome",
+  # ---------- a later card refused: the cards already written are named and kept ----------
+  "main/later-card-refusal-names-earlier-cards-kept",
+  "guard-removed/main/later-card-refusal-names-earlier-cards-kept",
 ]
