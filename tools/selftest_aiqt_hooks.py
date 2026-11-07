@@ -3282,8 +3282,71 @@ _SPG_ORACLE_ROWS = (
     ("(spg-o1) bare python3 -", "python3 -", True),
     ("(spg-o2) python3 -I -", "python3 -I -", True),
     ("(spg-o3) a here-document", "python3 - <<'EOF'\nprint('fed')\nEOF", False),
-    ("(spg-o4) a pipe", "echo \"print('fed')\" | python3 -", False))
+    ("(spg-o4) a pipe", "echo \"print('fed')\" | python3 -", False),
+    ("(spg-o5) a here-string", "python3 - <<< \"print('fed')\"", False),
+    ("(spg-o6) a < redirect", "python3 - < /dev/null", False),
+    ("(spg-o7) a 0< redirect", "python3 - 0< /dev/null", False),
+    ("(spg-o8) a duplicated fd", "exec 3< /dev/null; python3 - <&3", False),
+    ("(spg-o9) a |& pipe", "echo \"print('fed')\" |& python3 -", False),
+    ("(spg-o10) a pipe into a group", "echo \"print('fed')\" | (python3 -)", False),
+    ("(spg-o11) an unfed group", "(cd /; python3 -)", True))
+# Rows for the forms the scan reads past a simple pipe or redirect: (label, command, whether the hook denies,
+# the flip in _spg_flips that removes the fix and turns the row red, whether the real-bash oracle runs it).
+# Interpreter names that may not be installed are read lexically only.
+_SPG_FIX_ROWS = (
+    ("(spg-x1) a newline after a pipe", "echo \"print('fed')\" |\npython3 -", False, "continue", True),
+    ("(spg-x2) blank lines and a comment after a pipe",
+     "echo \"print('fed')\" |  # feed it\n\n    python3 -", False, "continue", True),
+    ("(spg-x3) a newline after a pipe, then an unfed line", "echo \"print('fed')\" |\npython3 -\npython3 -",
+     True, None, True),
+    ("(spg-x4) a pipe into a ( ) group, python not first", "echo \"print('fed')\" | (cd /; python3 -)", False,
+     "group", True),
+    ("(spg-x5) a pipe into a { } group, python not first", "echo \"print('fed')\" | { cd /; python3 -; }", False,
+     "group", True),
+    ("(spg-x6) a pipe into a group after &&", "echo \"print('fed')\" | (cd / && python3 -)", False, "group", True),
+    ("(spg-x7) a command after a fed group closes", "echo \"print('fed')\" | (cd /); python3 -", True, None, True),
+    ("(spg-x8) an unfed { } group", "{ cd /; python3 -; }", True, None, True),
+    ("(spg-x9) a comment holding a separator", "echo ok # step; python3 -", False, "comment", True),
+    ("(spg-x10) apostrophes inside comments", "echo ok # it's here\npython3 -\n# that's all", True, "comment",
+     True),
+    ("(spg-x11) a background command", "python3 - &", False, "background", True),
+    ("(spg-x12) a background group", "(cd /; python3 -) &", False, "background", True),
+    ("(spg-x13) a process substitution fed by its writer", "echo \"print('fed')\" > >(python3 -)", False,
+     "procsubst", True),
+    ("(spg-x14) a process substitution as an argument", "python3 - <(echo x)", True, "procsubst", True),
+    ("(spg-x15) fd 00", "python3 - 00< /dev/null", False, "fd0", True),
+    ("(spg-x16) <&0", "python3 - <&0", True, "selfinput", True),
+    ("(spg-x17) 0<&0", "python3 - 0<&0", True, "selfinput", True),
+    ("(spg-x18) < /dev/stdin", "python3 - < /dev/stdin", True, "selfinput", True),
+    ("(spg-x19) an arithmetic shift", "x=$((1<<2))\npython3 -", True, "arith", True),
+    ("(spg-x20) a free-threaded python3.14t", "python3.14t -", True, "names", False),
+    ("(spg-x21) a free-threaded python3.13t", "python3.13t -I -", True, "names", False),
+    ("(spg-x22) python3-dbg", "python3-dbg -", True, "names", False),
+    ("(spg-x23) timeout infinity", "timeout infinity python3 -", True, "duration", True),
+    ("(spg-x24) an option CPython rejects", "python3 -Z -", False, "options", True),
+    ("(spg-x25) a long option CPython rejects", "python3 --frob -", False, "options", True),
+    ("(spg-x26) a non-ASCII digit before <", "python3 - ٠< /dev/null", False, "ascii", True))
 _SPG_ORACLE_WAIT = 4
+
+
+def _spg_flips():
+    """Each flip name of _SPG_FIX_ROWS mapped to the aiqt_hooks attributes that remove its fix; the comment
+    flip drops the comment group from the token pattern and the ascii flip compiles it without re.ASCII."""
+    pattern = aiqt_hooks._STDIN_PY_TOKEN_RE.pattern
+    return {
+        "continue": {"_STDIN_PY_CONTINUE_OPS": frozenset()},
+        "group": {"_STDIN_PY_GROUP_FEEDS": False},
+        "comment": {"_STDIN_PY_TOKEN_RE": re.compile(pattern.replace(r"|(?P<comment>#[^\n]*)", ""),
+                                                     re.S | re.ASCII)},
+        "background": {"_STDIN_PY_BACKGROUND": frozenset()},
+        "procsubst": {"_STDIN_PY_PROCSUBST": {}},
+        "fd0": {"_stdin_py_fd0": lambda prefix: prefix in ("", "0")},
+        "selfinput": {"_STDIN_PY_SELF_FDS": frozenset(), "_STDIN_PY_SELF_PATHS": frozenset()},
+        "arith": {"_stdin_py_skip_arith": lambda command, i: i},
+        "names": {"_STDIN_PY_NAME_RE": re.compile(r"python(?:[0-9]+(?:\.[0-9]+)?)?")},
+        "duration": {"_STDIN_PY_DURATIONS": frozenset()},
+        "options": {"_stdin_py_rejected": lambda word: False},
+        "ascii": {"_STDIN_PY_TOKEN_RE": re.compile(pattern, re.S)}}
 
 
 def _spg_oracle(failures, handler):
@@ -3293,7 +3356,9 @@ def _spg_oracle(failures, handler):
     if shutil.which("bash") is None or shutil.which("python3") is None:
         failures.append("(spg-oracle) the real-bash oracle needs bash and python3 on PATH")
         return
-    for label, command, expected in _SPG_ORACLE_ROWS:
+    rows = _SPG_ORACLE_ROWS + tuple((label, command, deny) for label, command, deny, _flip, oracle in _SPG_FIX_ROWS
+                                    if oracle)
+    for label, command, expected in rows:
         denied = _decision(handler, command) == "deny"
         read_end, write_end = os.pipe()
         try:
@@ -3314,6 +3379,35 @@ def _spg_oracle(failures, handler):
         if denied != blocked or blocked != expected:
             failures.append("{}: hook deny {} but real bash blocked {} (expected {}), exit {}".format(
                 label, denied, blocked, expected, proc.returncode))
+
+
+def _spg_fix_rows(failures, handler):
+    """Each _SPG_FIX_ROWS row must decide as stated, and with its flip applied (the aiqt_hooks attributes
+    patched, then restored) must go red: an allow row denies and a deny row allows."""
+    flips = _spg_flips()
+    if r"|(?P<comment>#[^\n]*)" not in aiqt_hooks._STDIN_PY_TOKEN_RE.pattern:
+        failures.append("(spg-flip-comment) the comment flip no longer matches the token pattern")
+    used = {flip for _label, _command, _deny, flip, _oracle in _SPG_FIX_ROWS if flip is not None}
+    if used != set(flips):
+        failures.append("(spg-flip-names) flips used by rows {} differ from flips defined {}".format(
+            sorted(used), sorted(flips)))
+    for label, command, deny, _flip, _oracle in _SPG_FIX_ROWS:
+        got = _decision(handler, command)
+        if got != ("deny" if deny else "allow"):
+            failures.append("{}: expected {}, got {}".format(label, "deny" if deny else "silent allow", got))
+    for flip, patches in sorted(flips.items()):
+        saved = {name: getattr(aiqt_hooks, name) for name in patches}
+        for name, value in patches.items():
+            setattr(aiqt_hooks, name, value)
+        try:
+            flipped = [(label, deny, _decision(handler, command))
+                       for label, command, deny, row_flip, _oracle in _SPG_FIX_ROWS if row_flip == flip]
+        finally:
+            for name, value in saved.items():
+                setattr(aiqt_hooks, name, value)
+        for label, deny, got in flipped:
+            if got != ("allow" if deny else "deny"):
+                failures.append("{}: with the {} fix removed this row must go red, got {}".format(label, flip, got))
 
 
 def _test_python_stdin_program(failures):
@@ -3356,6 +3450,7 @@ def _test_python_stdin_program(failures):
         if got != "deny":
             failures.append("{}: with the fed exception removed this allow row must go red (deny), got {}"
                             .format(label, got))
+    _spg_fix_rows(failures, handler)
     for label, data in (
             ("(spg-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
                                             "tool_input": {"command": "python3 -"}}),
@@ -5418,8 +5513,8 @@ _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
-    ("python_stdin_program", "stdin_py_after"), ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
-    ("protected_line", "procsubst_run_after")))
+    ("python_stdin_program", "stdin_py_after"), ("protected_line", "push_force_after"),
+    ("protected_line", "mirror_cfg_run_after"), ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose known outcome outside registry scope is a note, each within its bound:
 # a detach or detacher (fg_detach_after, fg_setsid_options), a construct left open at the end of the
 # scan (the repeated unclosed `$((` openers and the unterminated heredoc body), which the scan reports as

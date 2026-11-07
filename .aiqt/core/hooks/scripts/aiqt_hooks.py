@@ -18815,27 +18815,78 @@ def pgrep_self_match(data):
 # python3 - (or python3 -I -) reads its program from standard input until end of file. With no here-document,
 # here-string, < redirection or pipe feeding it, that input is the session's own, which the Bash tool holds open
 # and never closes, so the call waits until its timeout instead of running anything. The scan is lexical over
-# the raw text: a quoted string is one word, a here-document body is skipped, and every simple command is read,
-# one inside an unquoted $( ) or backticks included.
+# the raw text: a quoted string is one word, a comment is skipped, a here-document body is skipped, and every
+# simple command is read, one inside an unquoted $( ), backticks or a process substitution included.
 _STDIN_PY_TOKEN_RE = re.compile(
     r"(?P<space>[ \t\r\f\v]+|\\\n)"
     r"|(?P<redir>\d*(?:&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||[<>]))"
     r"|(?P<op>\|&|\|\||&&|;;|[|&;()`\n])"
+    r"|(?P<comment>#[^\n]*)"
     r"|(?P<word>(?:[^\s<>|&;()`'\"\\]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)"
     r"|(?P<stray>.)", re.S | re.ASCII)
 # The redirects that feed a command's standard input (fd 0, written or implied).
 _STDIN_PY_FEEDS = frozenset(("<", "<<", "<<-", "<<<", "<>", "<&"))
 _STDIN_PY_PIPES = frozenset(("|", "|&"))
-_STDIN_PY_NAME_RE = re.compile(r"python(?:[0-9]+(?:\.[0-9]+)?)?")
+# The operators after which a newline (with blank lines or comments after it) continues the same pipeline or
+# and-or list instead of ending it.
+_STDIN_PY_CONTINUE_OPS = frozenset(("|", "|&", "&&", "||"))
+# A command list ended by & runs in the background, where bash (job control off) gives it /dev/null as input.
+_STDIN_PY_BACKGROUND = frozenset(("&",))
+# A ( ) or { } group fed by a pipe feeds every simple command inside it until the group closes.
+_STDIN_PY_GROUP_FEEDS = True
+# A process substitution: >( ) reads what its writer writes and closes; <( ) is an argument, not a feed.
+_STDIN_PY_PROCSUBST = {">": True, "<": False}
+# Redirect targets that are the session's own input, so the redirect feeds nothing: <&0, and a file path that
+# reopens fd 0.
+_STDIN_PY_SELF_FDS = frozenset(("0",))
+_STDIN_PY_SELF_PATHS = frozenset(("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"))
+_STDIN_PY_NAME_RE = re.compile(r"python(?:[0-9]+(?:\.[0-9]+)?t?)?(?:-dbg)?")
 # Wrappers read past to the interpreter, with their options, a duration word and any word after an option.
 _STDIN_PY_WRAPPERS = frozenset(("env", "timeout", "command", "exec", "nohup", "nice", "stdbuf", "time", "sudo",
                                 "setsid", "ionice", "doas"))
+_STDIN_PY_DURATIONS = frozenset(("inf", "infinity"))
 # CPython options: the letters that take a value (glued or as the next word), and the letters whose value is
 # the program (-c, -m), so no program is read from standard input.
 _STDIN_PY_VALUE_LETTERS = frozenset("WX")
 _STDIN_PY_PROGRAM_LETTERS = frozenset("cm")
 _STDIN_PY_EXITING = frozenset(("-h", "-?", "--help", "-V", "--version", "--help-env", "--help-xoptions",
                                "--help-all"))
+# Every option letter some CPython 2 or 3 accepts, and the long options it accepts besides the exiting ones;
+# any other option makes CPython exit with status 2 before it reads a program.
+_STDIN_PY_LETTERS = frozenset("bBcdEhiIJmOPqQRsStUuvVWxX3?")
+_STDIN_PY_LONG_OPTIONS = frozenset(("--check-hash-based-pycs",))
+
+
+def _stdin_py_rejected(word):
+    """Whether the option word is one CPython rejects at once (an unknown long option, or an unknown letter
+    before any letter whose value ends the cluster)."""
+    if word.startswith("--"):
+        return word.split("=", 1)[0] not in _STDIN_PY_LONG_OPTIONS
+    for letter in word[1:]:
+        if letter in _STDIN_PY_PROGRAM_LETTERS or letter in _STDIN_PY_VALUE_LETTERS:
+            return False
+        if letter not in _STDIN_PY_LETTERS:
+            return True
+    return False
+
+
+def _stdin_py_fd0(prefix):
+    """Whether a redirect's file descriptor digits (empty when implied) name fd 0 (0, 00 and so on)."""
+    return not prefix.strip("0")
+
+
+def _stdin_py_skip_arith(command, i):
+    """The index just past the )) closing the arithmetic $(( whose second ( ends at i, or the end of the text
+    when it is not closed; its body holds no command, and << inside it is a shift, not a here-document."""
+    depth, n = 2, len(command)
+    while i < n and depth:
+        char = command[i]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        i += 1
+    return i
 
 
 def _stdin_py_reads_stdin(words):
@@ -18856,7 +18907,7 @@ def _stdin_py_reads_stdin(words):
         elif name in _STDIN_PY_WRAPPERS:
             wrapped, value = True, False
         elif value or word in _CMTIDN_RESERVED or _ENV_ASSIGN_RE.match(word) or (
-                wrapped and _PSM_DURATION_RE.fullmatch(word)):
+                wrapped and (_PSM_DURATION_RE.fullmatch(word) or word in _STDIN_PY_DURATIONS)):
             value = False
         else:
             return False
@@ -18870,7 +18921,7 @@ def _stdin_py_reads_stdin(words):
             return True
         if word == "--":
             return i < len(rest) and rest[i] == "-"
-        if word in _STDIN_PY_EXITING or not word.startswith("-"):
+        if word in _STDIN_PY_EXITING or not word.startswith("-") or _stdin_py_rejected(word):
             return False
         if word.startswith("--"):
             i += 0 if "=" in word or word != "--check-hash-based-pycs" else 1
@@ -18887,48 +18938,98 @@ def _stdin_py_reads_stdin(words):
 def _stdin_py_hit(command):
     """The first simple command of the raw command text that runs python with program `-` and no input fed to
     it (_stdin_py_reads_stdin), as its de-quoted words joined by blanks, or None. A command is fed when it
-    carries a <, <<, <<-, <<<, <> or <& redirect on fd 0 (written or implied), or stands after a | or |& (a
-    ( group opened right after the pipe keeps it). A here-document's body, from the newline after the
-    redirect to its delimiter line, is skipped as data."""
+    carries a <, <<, <<-, <<<, <> or <& redirect on fd 0 (written or implied) whose target is not the
+    session's own input (<&0, /dev/stdin), when it stands after a | or |& (a newline after the pipe, with blank
+    lines or comments, continues the pipeline), when it stands inside a ( ) or { } group a pipe feeds, or
+    inside a >( ) process substitution; a hit in a command list ended by & is dropped, since a background list
+    reads /dev/null. A here-document's body, from the newline after the redirect to its delimiter line, is
+    skipped as data, and so is the body of an arithmetic $(( )). Each open group or substitution is a stack
+    entry (whether it is fed, the enclosing command's state to restore at its close, its opener)."""
     n, i = len(command), 0
     words, fed, piped, pending, bodies = [], False, False, None, []
+    stack, held, cont, redir_text, fed_before = [], None, False, "", False
     while i < n:
         match = _STDIN_PY_TOKEN_RE.match(command, i)
         kind, i = match.lastgroup, match.end()
         if kind in ("word", "stray"):
-            word = match.group().translate(_PSM_UNQUOTE)
+            raw = match.group()
+            word = raw.translate(_PSM_UNQUOTE)
             if pending is not None:
                 if pending in ("<<", "<<-"):
                     bodies.append((word, pending == "<<-"))
+                elif word in (_STDIN_PY_SELF_FDS if pending == "<&" else
+                              _STDIN_PY_SELF_PATHS if pending in ("<", "<>") else ()):
+                    fed = fed_before
                 pending = None
+            elif raw == "{" and all(w in _CMTIDN_RESERVED for w in words):
+                top = _STDIN_PY_GROUP_FEEDS and (piped or bool(stack and stack[-1][0]))
+                stack.append((True, None, "{") if top else (False, None, "{"))
+                words, fed, piped, cont = [], False, False, False
+            elif raw == "}" and not words and stack and stack[-1][2] == "{":
+                stack.pop()
+                fed = piped = False
             else:
                 words.append(word)
-        elif kind == "redir":
+            continue
+        if kind == "redir":
             text = match.group()
             op = text.lstrip("0123456789")
-            if op in _STDIN_PY_FEEDS and text[:len(text) - len(op)] in ("", "0"):
+            fed_before = fed
+            if op in _STDIN_PY_FEEDS and _stdin_py_fd0(text[:len(text) - len(op)]):
                 fed = True
-            pending = op
-        elif kind == "op":
-            op = match.group()
-            if words or op != "(":
-                if not (fed or piped) and _stdin_py_reads_stdin(words):
-                    return " ".join(words)
-                piped = op in _STDIN_PY_PIPES
+            pending, redir_text = op, text
+            continue
+        if kind != "op":
+            continue                        # blanks, a line continuation and a comment end no command
+        op = match.group()
+        if op == "(":
+            if pending is not None and redir_text in _STDIN_PY_PROCSUBST:
+                fed = fed_before            # <( ) and >( ) are a path argument, not a redirect target
+                stack.append((_STDIN_PY_PROCSUBST[redir_text], (words + ["/dev/fd/63"], fed, piped), "("))
+            elif words and words[-1].endswith("$"):
+                if command.startswith("(", i):
+                    i = _stdin_py_skip_arith(command, i + 1)
+                    continue
+                stack.append((False, (words, fed, piped), "("))
+            elif all(w in _CMTIDN_RESERVED for w in words):
+                top = _STDIN_PY_GROUP_FEEDS and (piped or bool(stack and stack[-1][0]))
+                stack.append((True, None, "(") if top else (False, None, "("))   # shared constant entries
+            else:
+                if held is None and not (fed or piped or (stack and stack[-1][0])) and _stdin_py_reads_stdin(
+                        words):
+                    held = " ".join(words)
+                stack.append((False, None, "("))
+            words, fed, piped, pending, cont = [], False, False, None, False
+            continue
+        if op == "\n" and cont and not words and pending is None:
+            pass                            # a continuation line: the pipeline or and-or list goes on
+        else:
+            if held is None and not (fed or piped or (stack and stack[-1][0])) and _stdin_py_reads_stdin(words):
+                held = " ".join(words)
+            if op == ")":
+                saved = stack.pop()[1] if stack else None
+                words, fed, piped = saved if saved is not None else ([], False, False)
+                pending, cont = None, False
+                continue
+            if op in _STDIN_PY_BACKGROUND:
+                held = None
+            elif held is not None and op in (";", ";;", "\n", "&"):
+                return held
+            piped, cont = op in _STDIN_PY_PIPES, op in _STDIN_PY_CONTINUE_OPS
             words, fed, pending = [], False, None
-            if op == "\n":
-                for delimiter, tabs in bodies:
-                    while i < n:
-                        end = command.find("\n", i)
-                        end = n if end == -1 else end
-                        line = command[i:end]
-                        i = end + 1
-                        if (line.lstrip("\t") if tabs else line) == delimiter:
-                            break
-                bodies = []
-    if words and not (fed or piped) and _stdin_py_reads_stdin(words):
-        return " ".join(words)
-    return None
+        if op == "\n":
+            for delimiter, tabs in bodies:
+                while i < n:
+                    end = command.find("\n", i)
+                    end = n if end == -1 else end
+                    line = command[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if tabs else line) == delimiter:
+                        break
+            bodies = []
+    if held is None and words and not (fed or piped or (stack and stack[-1][0])) and _stdin_py_reads_stdin(words):
+        held = " ".join(words)
+    return held
 
 
 def python_stdin_program(data):
@@ -18967,7 +19068,7 @@ def python_stdin_program(data):
         "here-document or put the program in a file.")
 
 
-# --- secsec:an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
+# --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
 # A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
 # remain the real backstop), it moves the same high-signal detection to the moment a secret would be
 # written, so an accidental paste is caught before it ever lands on disk. The patterns are SINGLE-SOURCED
