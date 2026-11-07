@@ -3325,7 +3325,38 @@ _SPG_FIX_ROWS = (
     ("(spg-x23) timeout infinity", "timeout infinity python3 -", True, "duration", True),
     ("(spg-x24) an option CPython rejects", "python3 -Z -", False, "options", True),
     ("(spg-x25) a long option CPython rejects", "python3 --frob -", False, "options", True),
-    ("(spg-x26) a non-ASCII digit before <", "python3 - ٠< /dev/null", False, "ascii", True))
+    ("(spg-x26) a non-ASCII digit before <", "python3 - ٠< /dev/null", False, "ascii", True),
+    ("(spg-x27) a background pipeline holds the session input", "python3 - | cat & wait", True, "bgdrop", True),
+    ("(spg-x28) a fed background pipeline", "echo \"print('fed')\" | python3 - | cat & wait", False, None, True),
+    ("(spg-x29) a background pipeline into tee", "python3 - | tee /dev/null &", True, None, False),
+    ("(spg-x30) a |& background pipeline", "python3 - |& cat &", True, None, False),
+    ("(spg-x31) a background pipeline into a group", "python3 - | (cat) &", True, None, False),
+    ("(spg-x32) an & inside a ( ) group after a hit", "python3 - && (true &)", True, "bgdrop", True),
+    ("(spg-x33) a fed hit before an & inside a group", "echo \"print('fed')\" | python3 - && (true &)", False,
+     None, True),
+    ("(spg-x34) an & inside a { } group after a hit", "python3 - || { true & }", True, None, False),
+    ("(spg-x35) an & inside a substitution after a hit", "python3 - && x=$(true &)", True, None, False),
+    ("(spg-x36) an & inside a second group after a group hit", "(python3 -) && (true &)", True, None, False),
+    ("(spg-x37) an & inside backquotes after a hit", "python3 - && echo `true &`", True, None, False),
+    ("(spg-x38) a substitution expanded before the background redirect", "x=$(python3 -) &", True, "bgdrop",
+     True),
+    ("(spg-x39) a fed substitution in a background command", "x=$(echo \"print('fed')\" | python3 -) &", False,
+     None, True),
+    ("(spg-x40) an echoed substitution in a background command", "echo $(python3 -) &", True, None, False),
+    ("(spg-x41) a process substitution in a background command", "cat <(python3 -) &", True, None, False),
+    ("(spg-x42) a subshell in a $(( whose closers stand apart", "x=$((python3 -) )", True, "arithclose", True),
+    ("(spg-x43) a fed subshell in a $(( whose closers stand apart", "x=$((echo \"print('fed')\" | python3 -) )",
+     False, None, True),
+    ("(spg-x44) a $(( subshell with a command before the hit", "x=$((cd /; python3 -) )", True, None, False),
+    ("(spg-x45) a $(( subshell ended by a separator", "echo $((python3 -) ; true)", True, None, False),
+    ("(spg-x46) a literal ( inside ${ } in a fed group", "echo x | (echo ${v:-(}); python3 -", True, "brace",
+     True),
+    ("(spg-x47) a fed hit after a literal ( inside ${ }", "echo \"print('fed')\" | (echo ${v:-(}; python3 -)",
+     False, None, True),
+    ("(spg-x48) a # right after a closing substitution", "echo $(echo a)#; python3 -", True, "glue", True),
+    ("(spg-x49) a # standing apart after a substitution", "echo $(echo a) #; python3 -", False, None, True),
+    ("(spg-x50) a # right after a closing backquote", "echo `echo a`#; python3 -", True, None, False),
+    ("(spg-x51) a # right after an arithmetic $(( ))", "echo $((1))#; python3 -", True, None, False))
 _SPG_ORACLE_WAIT = 4
 
 
@@ -3346,7 +3377,11 @@ def _spg_flips():
         "names": {"_STDIN_PY_NAME_RE": re.compile(r"python(?:[0-9]+(?:\.[0-9]+)?)?")},
         "duration": {"_STDIN_PY_DURATIONS": frozenset()},
         "options": {"_stdin_py_rejected": lambda word: False},
-        "ascii": {"_STDIN_PY_TOKEN_RE": re.compile(pattern, re.S)}}
+        "ascii": {"_STDIN_PY_TOKEN_RE": re.compile(pattern, re.S)},
+        "bgdrop": {"_stdin_py_bg_drops": lambda stack, scopes, clean: True},
+        "arithclose": {"_STDIN_PY_ARITH_STRICT": False},
+        "brace": {"_stdin_py_brace": lambda raw, depth: 0},
+        "glue": {"_STDIN_PY_COMMENT_GLUE": False}}
 
 
 def _spg_oracle(failures, handler):

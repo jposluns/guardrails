@@ -18830,8 +18830,14 @@ _STDIN_PY_PIPES = frozenset(("|", "|&"))
 # The operators after which a newline (with blank lines or comments after it) continues the same pipeline or
 # and-or list instead of ending it.
 _STDIN_PY_CONTINUE_OPS = frozenset(("|", "|&", "&&", "||"))
-# A command list ended by & runs in the background, where bash (job control off) gives it /dev/null as input.
+# A command list ended by & runs in the background, where bash (job control off) gives it /dev/null as
+# input; _stdin_py_bg_drops decides whether that /dev/null reaches a held hit, since a background pipeline
+# still hands its first stage the session's input and a substitution is expanded before the redirect.
 _STDIN_PY_BACKGROUND = frozenset(("&",))
+# A $(( is arithmetic only when an adjacent )) closes it; $( (cmd) ) is a substitution holding a subshell.
+_STDIN_PY_ARITH_STRICT = True
+# A # right after the closing ) or backquote of a substitution continues that word; it opens no comment.
+_STDIN_PY_COMMENT_GLUE = True
 # A ( ) or { } group fed by a pipe feeds every simple command inside it until the group closes.
 _STDIN_PY_GROUP_FEEDS = True
 # A process substitution: >( ) reads what its writer writes and closes; <( ) is an argument, not a feed.
@@ -18889,6 +18895,48 @@ def _stdin_py_skip_arith(command, i):
     return i
 
 
+def _stdin_py_brace(raw, depth):
+    """The unquoted ${ } expansion depth after the raw word: each ${ opens one and each } closes one, a
+    backslash escaping the next character and a single-quoted stretch skipped; while one is open, bash reads
+    ( and ) as characters of the word, not as operators, until the closing }."""
+    i, n, quoted = 0, len(raw), False
+    while i < n:
+        char = raw[i]
+        if char == "\\":
+            i += 2
+        elif char == '"':
+            quoted = not quoted
+            i += 1
+        elif char == "'" and not quoted:
+            close = raw.find("'", i + 1)
+            i = n if close == -1 else close + 1
+        elif char == "$" and raw.startswith("{", i + 1):
+            depth += 1
+            i += 2
+        else:
+            if char == "}" and depth:
+                depth -= 1
+            i += 1
+    return depth
+
+
+def _stdin_py_bg_drops(stack, scopes, clean):
+    """Whether the background /dev/null reaches a held hit when a list ends with &: the hit is clean (not a
+    pipeline stage, no pipe since it, the backquote context unchanged), every scope still open also enclosed
+    the hit, and every scope of the hit closed since was a plain group, whose list the & backgrounds; a
+    substitution is expanded with the session's input before the background redirect, so a hit inside one
+    that has closed is kept, as is a hit a deeper & does not background."""
+    if not clean or len(stack) > len(scopes):
+        return False
+    for entry, scope in zip(stack, scopes):
+        if entry[3] != scope[0]:
+            return False
+    for _serial, substitution in scopes[len(stack):]:
+        if substitution:
+            return False
+    return True
+
+
 def _stdin_py_reads_stdin(words):
     """Whether the simple command words (de-quoted) run a python interpreter whose program argument is `-`: the
     command word past leading reserved words, VAR=value words and the wrappers in _STDIN_PY_WRAPPERS (with their
@@ -18941,13 +18989,18 @@ def _stdin_py_hit(command):
     carries a <, <<, <<-, <<<, <> or <& redirect on fd 0 (written or implied) whose target is not the
     session's own input (<&0, /dev/stdin), when it stands after a | or |& (a newline after the pipe, with blank
     lines or comments, continues the pipeline), when it stands inside a ( ) or { } group a pipe feeds, or
-    inside a >( ) process substitution; a hit in a command list ended by & is dropped, since a background list
-    reads /dev/null. A here-document's body, from the newline after the redirect to its delimiter line, is
-    skipped as data, and so is the body of an arithmetic $(( )). Each open group or substitution is a stack
-    entry (whether it is fed, the enclosing command's state to restore at its close, its opener)."""
-    n, i = len(command), 0
+    inside a >( ) process substitution; a hit in a command list ended by & is dropped only when
+    _stdin_py_bg_drops shows the background /dev/null reaches it. A here-document's body, from the newline
+    after the redirect to its delimiter line, is skipped as data, and so is the body of an arithmetic $(( ))
+    that an adjacent )) closes; a $(( whose closers stand apart is a substitution holding a subshell. A
+    literal ( or ) inside an unquoted ${ } is a character of the word, not an operator, and a # right after a
+    closing substitution continues its word instead of opening a comment. Each open group or substitution is
+    a stack entry (whether it is fed, the enclosing command's state to restore at its close, its opener, its
+    serial)."""
+    n, i, serial, brace, backquoted, glue = len(command), 0, 0, 0, False, -1
     words, fed, piped, pending, bodies = [], False, False, None, []
     stack, held, cont, redir_text, fed_before = [], None, False, "", False
+    held_scopes, held_clean, held_backquoted = (), True, False
     while i < n:
         match = _STDIN_PY_TOKEN_RE.match(command, i)
         kind, i = match.lastgroup, match.end()
@@ -18963,13 +19016,15 @@ def _stdin_py_hit(command):
                 pending = None
             elif raw == "{" and all(w in _CMTIDN_RESERVED for w in words):
                 top = _STDIN_PY_GROUP_FEEDS and (piped or bool(stack and stack[-1][0]))
-                stack.append((True, None, "{") if top else (False, None, "{"))
-                words, fed, piped, cont = [], False, False, False
+                serial += 1
+                stack.append((top, None, "{", serial))
+                words, fed, piped, cont, brace = [], False, False, False, 0
             elif raw == "}" and not words and stack and stack[-1][2] == "{":
                 stack.pop()
                 fed = piped = False
             else:
                 words.append(word)
+                brace = _stdin_py_brace(raw, brace)
             continue
         if kind == "redir":
             text = match.group()
@@ -18979,44 +19034,78 @@ def _stdin_py_hit(command):
                 fed = True
             pending, redir_text = op, text
             continue
+        if kind == "comment":
+            if _STDIN_PY_COMMENT_GLUE and match.start() == glue:
+                i = glue = match.start() + 1    # the # continues the word a substitution just closed
+                if words:
+                    words[-1] += "#"
+                else:
+                    words.append("#")
+            continue
         if kind != "op":
-            continue                        # blanks, a line continuation and a comment end no command
+            continue                        # blanks and a line continuation end no command
         op = match.group()
+        if brace and op in "()":            # a literal ( or ) inside an unquoted ${ }
+            if words:
+                words[-1] += op
+            else:
+                words.append(op)
+            continue
         if op == "(":
             if pending is not None and redir_text in _STDIN_PY_PROCSUBST:
                 fed = fed_before            # <( ) and >( ) are a path argument, not a redirect target
-                stack.append((_STDIN_PY_PROCSUBST[redir_text], (words + ["/dev/fd/63"], fed, piped), "("))
+                serial += 1
+                stack.append((_STDIN_PY_PROCSUBST[redir_text], (words + ["/dev/fd/63"], fed, piped), "(",
+                              serial))
             elif words and words[-1].endswith("$"):
+                arith = False
                 if command.startswith("(", i):
-                    i = _stdin_py_skip_arith(command, i + 1)
+                    end = _stdin_py_skip_arith(command, i + 1)
+                    arith = not _STDIN_PY_ARITH_STRICT or command[end - 2:end] == "))"
+                if arith:
+                    i = glue = end          # arithmetic only when an adjacent )) closes it
                     continue
-                stack.append((False, (words, fed, piped), "("))
+                serial += 1                 # otherwise $( opens a substitution and any ( a subshell inside it
+                stack.append((False, (words, fed, piped), "(", serial))
             elif all(w in _CMTIDN_RESERVED for w in words):
                 top = _STDIN_PY_GROUP_FEEDS and (piped or bool(stack and stack[-1][0]))
-                stack.append((True, None, "(") if top else (False, None, "("))   # shared constant entries
+                serial += 1
+                stack.append((top, None, "(", serial))
             else:
                 if held is None and not (fed or piped or (stack and stack[-1][0])) and _stdin_py_reads_stdin(
                         words):
-                    held = " ".join(words)
-                stack.append((False, None, "("))
-            words, fed, piped, pending, cont = [], False, False, None, False
+                    held, held_clean, held_backquoted = " ".join(words), True, backquoted
+                    held_scopes = tuple((entry[3], entry[1] is not None) for entry in stack)
+                serial += 1
+                stack.append((False, None, "(", serial))
+            words, fed, piped, pending, cont, brace = [], False, False, None, False, 0
             continue
         if op == "\n" and cont and not words and pending is None:
             pass                            # a continuation line: the pipeline or and-or list goes on
         else:
             if held is None and not (fed or piped or (stack and stack[-1][0])) and _stdin_py_reads_stdin(words):
-                held = " ".join(words)
+                held, held_clean, held_backquoted = " ".join(words), op not in _STDIN_PY_PIPES, backquoted
+                held_scopes = tuple((entry[3], entry[1] is not None) for entry in stack)
+            elif held is not None and op in _STDIN_PY_PIPES:
+                held_clean = False          # a later pipe may hold the session input past a background &
             if op == ")":
                 saved = stack.pop()[1] if stack else None
+                if saved is not None:
+                    glue = i                # a word may continue right after the closing ) of a substitution
                 words, fed, piped = saved if saved is not None else ([], False, False)
-                pending, cont = None, False
+                pending, cont, brace = None, False, 0
                 continue
-            if op in _STDIN_PY_BACKGROUND:
+            if op == "`":
+                if backquoted:
+                    glue = i                # a word may continue right after a closing backquote
+                backquoted = not backquoted
+            if op in _STDIN_PY_BACKGROUND and held is not None and _stdin_py_bg_drops(
+                    stack, held_scopes, held_clean and backquoted == held_backquoted):
                 held = None
             elif held is not None and op in (";", ";;", "\n", "&"):
                 return held
             piped, cont = op in _STDIN_PY_PIPES, op in _STDIN_PY_CONTINUE_OPS
-            words, fed, pending = [], False, None
+            words, fed, pending, brace = [], False, None, 0
         if op == "\n":
             for delimiter, tabs in bodies:
                 while i < n:
