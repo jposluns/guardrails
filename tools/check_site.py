@@ -380,10 +380,9 @@ def touch_icon_findings(label, page_rel, icons, page_dir, site_root, template=Fa
 
 # The link-preview card metas every generated template page carries (tools/gen_draft_site.py), and the
 # smallest card image the large link previews take.
-CARD_METAS = ("og:type", "og:title", "og:description", "og:url", "og:site_name", "og:image", "og:image:type",
-              "og:image:width", "og:image:height", "og:image:alt", "twitter:card", "twitter:image",
-              "twitter:image:alt")
-CARD_MIN_SIZE = (1200, 630)
+CARD_METAS = ("og:type", "og:title", "og:description", "og:url", "og:site_name", "og:image", "og:image:width",
+              "og:image:height", "og:image:alt", "twitter:card", "twitter:image")
+CARD_MIN_SIZE = (1200, 627)
 CARD_MAX_READ = 8 << 20
 
 
@@ -848,7 +847,7 @@ def _self_test():
         (draft / "assets" / "baseline" / "baseline.css").write_text("p{}", encoding="utf-8")
         (draft / "model" / "index.html").write_text(
             '<!doctype html><title>t</title>' + _card_head("opfiles.ai") + '<h2 id="box">B</h2>', encoding="utf-8")
-        (r / "opf" / "site" / "card.png").write_bytes(_png(1200, 630))
+        (r / "opf" / "site" / "card.png").write_bytes(_png(1200, 627))
         (draft / "index.html").write_text(
             '<!doctype html><title>t</title>' + _card_head("opfiles.ai") +
             '<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">'
@@ -922,7 +921,7 @@ def _self_test():
         card_host = {"site": "aiqt.ai", "opf/site": "opfiles.ai"}
         for subdir in COVERAGE_ROOTS:
             (r / subdir / "t.png").write_bytes(b"png")
-            (r / subdir / "card.png").write_bytes(_png(1200, 630))
+            (r / subdir / "card.png").write_bytes(_png(1200, 627))
             (r / subdir / "index.html").write_text(
                 '<!doctype html><title>t</title><link rel="apple-touch-icon" href="/t.png">'
                 + _card_head(card_host[subdir]), encoding="utf-8")
@@ -1134,10 +1133,9 @@ def _card_head(host):
     values = (("property", "og:type", "website"), ("property", "og:title", "T"),
               ("property", "og:description", "D"), ("property", "og:url", "https://{}/".format(host)),
               ("property", "og:site_name", "S"), ("property", "og:image", image),
-              ("property", "og:image:type", "image/png"),
-              ("property", "og:image:width", "1200"), ("property", "og:image:height", "630"),
+              ("property", "og:image:width", "1200"), ("property", "og:image:height", "627"),
               ("property", "og:image:alt", "A"), ("name", "twitter:card", "summary_large_image"),
-              ("name", "twitter:image", image), ("name", "twitter:image:alt", "A"))
+              ("name", "twitter:image", image))
     return "".join('<meta {}="{}" content="{}">'.format(*value) for value in values)
 
 
@@ -1155,33 +1153,31 @@ def _jpeg(width, height):
 
 def _card_self_test(quiet):
     """The link-preview card check: a generated page passes only with every card meta and an og:image naming
-    a PNG or JPEG inside the root of at least 1200x630, whose stated size matches; a live page is not held to
+    a PNG or JPEG inside the root of at least 1200x627, whose stated size matches; a live page is not held to
     it; the scan and the real tree agree."""
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         base = Path(d)
         root = base / "site"
         (root / "assets").mkdir(parents=True)
-        for name, data in (("card.png", _png(1200, 630)), ("wide.png", _png(1201, 631)),
-                           ("narrow.png", _png(1199, 630)), ("short.png", _png(1200, 629)),
-                           ("card.jpg", _jpeg(1200, 630)), ("small.jpg", _jpeg(600, 315)),
+        for name, data in (("card.png", _png(1200, 627)), ("wide.png", _png(1201, 628)),
+                           ("narrow.png", _png(1199, 627)), ("short.png", _png(1200, 626)),
+                           ("card.jpg", _jpeg(1200, 627)), ("small.jpg", _jpeg(600, 315)),
                            ("card.gif", b"GIF89a" + b"\x00" * 20), ("card.svg", b"<svg/>")):
             (root / "assets" / name).write_bytes(data)
-        (base / "outside.png").write_bytes(_png(1200, 630))
+        (base / "outside.png").write_bytes(_png(1200, 627))
         site_root = root.resolve()
         hosts = {"aiqt.ai", "www.aiqt.ai"}
 
         def metas(changes=None):
             got = {"og:type": "website", "og:title": "T", "og:description": "D", "og:url": "https://aiqt.ai/",
                    "og:site_name": "AIQT.ai", "og:image": "https://aiqt.ai/assets/card.png",
-                   "og:image:type": "image/png",
-                   "og:image:width": "1200", "og:image:height": "630", "og:image:alt": "A",
-                   "twitter:card": "summary_large_image", "twitter:image": "https://aiqt.ai/assets/card.png",
-                   "twitter:image:alt": "A"}
+                   "og:image:width": "1200", "og:image:height": "627", "og:image:alt": "A",
+                   "twitter:card": "summary_large_image", "twitter:image": "https://aiqt.ai/assets/card.png"}
             got.update(changes or {})
             return {key: value for key, value in got.items() if value is not None}
 
-        def image(url, width="1200", height="630"):
+        def image(url, width="1200", height="627"):
             return card_findings("a.html", metas({"og:image": url, "twitter:image": url,
                                                   "og:image:width": width, "og:image:height": height}),
                                  site_root, hosts)
@@ -1193,13 +1189,11 @@ def _card_self_test(quiet):
                           ("og:url", "card/missing-og-url-fails"),
                           ("og:site_name", "card/missing-og-site_name-fails"),
                           ("og:image", "card/missing-og-image-fails"),
-                          ("og:image:type", "card/missing-og-image-type-fails"),
                           ("og:image:width", "card/missing-og-image-width-fails"),
                           ("og:image:height", "card/missing-og-image-height-fails"),
                           ("og:image:alt", "card/missing-og-image-alt-fails"),
                           ("twitter:card", "card/missing-twitter-card-fails"),
-                          ("twitter:image", "card/missing-twitter-image-fails"),
-                          ("twitter:image:alt", "card/missing-twitter-image-alt-fails")):
+                          ("twitter:image", "card/missing-twitter-image-fails")):
             covered.append(key)
             got = card_findings("a.html", metas({key: None}), site_root, hosts)
             check(name, len(got) == 1 and "missing or empty <meta> " + key in got[0], got)
@@ -1216,15 +1210,15 @@ def _card_self_test(quiet):
             got = card_findings("a.html", metas({"og:url": url}), site_root, hosts)
             check(name, len(got) == 1 and "og:url" in got[0], got)
         check("card/exact-minimum-passes", image("https://aiqt.ai/assets/card.png") == [], None)
-        check("card/above-minimum-passes", image("https://aiqt.ai/assets/wide.png", "1201", "631") == [], None)
+        check("card/above-minimum-passes", image("https://aiqt.ai/assets/wide.png", "1201", "628") == [], None)
         check("card/jpeg-passes", image("https://aiqt.ai/assets/card.jpg") == [], None)
-        for name, url, width, height in (("card/one-pixel-narrow-fails", "narrow.png", "1199", "630"),
-                                         ("card/one-pixel-short-fails", "short.png", "1200", "629"),
+        for name, url, width, height in (("card/one-pixel-narrow-fails", "narrow.png", "1199", "627"),
+                                         ("card/one-pixel-short-fails", "short.png", "1200", "626"),
                                          ("card/small-jpeg-fails", "small.jpg", "600", "315")):
             got = image("https://aiqt.ai/assets/" + url, width, height)
-            check(name, len(got) == 1 and "below 1200x630" in got[0], got)
+            check(name, len(got) == 1 and "below 1200x627" in got[0], got)
         got = image("https://aiqt.ai/assets/wide.png")
-        check("card/stated-size-mismatch-fails", len(got) == 1 and "the file is 1201x631" in got[0], got)
+        check("card/stated-size-mismatch-fails", len(got) == 1 and "the file is 1201x628" in got[0], got)
         for name, url in (("card/gif-fails", "card.gif"), ("card/svg-fails", "card.svg")):
             got = image("https://aiqt.ai/assets/" + url)
             check(name, len(got) == 1 and "not a PNG or JPEG" in got[0], got)

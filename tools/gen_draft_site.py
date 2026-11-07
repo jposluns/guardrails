@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the template sites (shared site template, baseline 1.10.0) at each site's root, plus the /draft/
+"""Generate the template sites (shared site template, baseline 1.11.1) at each site's root, plus the /draft/
 placeholder page each keeps (noindex, linking the root).
 
   gen_draft_site.py              write every registered page
@@ -84,11 +84,12 @@ ASSETS = "assets/baseline/"
 # meta that every page carried while staging.
 DRAFT_DIR = "draft/"
 MAX_PAGE_BYTES = 1 << 20
-# The link-preview card each site's pages name as og:image and twitter:image: a PNG under the site's live root
-# (built by .baseline/build_card.js from the site's data file, .baseline/<site>-card.toml), at the path and size
-# the whole site family publishes (/images/<site>-card.png, 1200 by 630).
-CARD = "images/{}-card.png"
-CARD_WIDTH, CARD_HEIGHT = 1200, 630
+# The link-preview card each site's pages name as og:image and twitter:image: the owner-approved PNG under the
+# site's live root (/assets/<site>-og.png, 1200 by 627, rendered by tools/render_og_cards.py from tools/og-cards/),
+# with its alt text; the image and its copy change only on the owner's instruction, so these values are not
+# derived from the card builder's data files.
+CARD = "assets/{}-og.png"
+CARD_WIDTH, CARD_HEIGHT = 1200, 627
 # The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,
 # before the stylesheets, with data-cfasync="false" before src and no defer or async, so a stored scheme
 # applies before the first paint; the button is the last child of header.mast, after nav.nav, and stays
@@ -207,7 +208,6 @@ OPF_KEPT_LIVE_PATHS = (
 # page, discovered by listing it), its output root, its live root (where its kept live paths must exist),
 # its base path ("/draft/" while staging, "/" at its own promotion; both sites are promoted), its asset
 # base (the URL folder holding assets/baseline/, kept at "/draft/" where the files are served), its key and name, its logo alt text,
-# its card tagline (the hero tagline its home page carries, named in the card image's alt text),
 # its kept live paths and its nav. Nav items are the site's own pages, then GitHub last; Disclosure and
 # Licence are not in the bar (the home page's About region links them). An internal nav item is emitted
 # only once its page's data file is registered, so every nav link resolves while the pages land one at a
@@ -217,7 +217,6 @@ SITES = (
     {"key": "aiqt", "name": "AIQT", "src": "site/draft-src", "root": "site", "live": "site",
      "base": "/", "assets": DRAFT_BASE, "control": True,
      "logo-alt": "A shield bearing a check mark, set on a guardrail",
-     "tagline": "Rules your AI follows. Controls that catch what slips.",
      "github": "https://github.com/jposluns/guardrails",
      "kept": KEPT_LIVE_PATHS,
      "nav": (("install/", "Install"), ("standard/", "The standard"), ("rules/", "The 5 rules"),
@@ -225,7 +224,6 @@ SITES = (
     {"key": "opfiles", "name": "OPFiles", "src": "opf/site/draft-src", "root": "opf/site",
      "live": "opf/site", "base": "/", "assets": DRAFT_BASE, "control": False,
      "logo-alt": "A machine-written source record and its generated view, joined by a drift gate",
-     "tagline": "Operational records, governed like code.",
      "github": "https://github.com/jposluns/guardrails/tree/main/opf",
      "kept": OPF_KEPT_LIVE_PATHS,
      "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Technical details"),
@@ -268,19 +266,16 @@ def _social_metas(site, page):
     """The Open Graph and Twitter card metas: the page's absolute URL and full title, the site name, and the
     site's card image with its size and alt text."""
     image = "{}/{}".format(_origin(site), CARD.format(site["key"]))
-    alt = "{}.ai: {}".format(site["name"], site["tagline"])
     values = (("property", "og:type", "website"),
               ("property", "og:title", "{} | {}.ai".format(page["title"], site["name"])),
               ("property", "og:url", _origin(site) + _page_url(site, page["rel"])),
               ("property", "og:site_name", site["name"] + ".ai"),
               ("property", "og:image", image),
-              ("property", "og:image:type", "image/png"),
               ("property", "og:image:width", str(CARD_WIDTH)),
               ("property", "og:image:height", str(CARD_HEIGHT)),
-              ("property", "og:image:alt", alt),
+              ("property", "og:image:alt", "{}.ai: {}".format(site["name"], site["logo-alt"])),
               ("name", "twitter:card", "summary_large_image"),
-              ("name", "twitter:image", image),
-              ("name", "twitter:image:alt", alt))
+              ("name", "twitter:image", image))
     return ['<meta {}="{}" content="{}">'.format(kind, key, _attr(value)) for kind, key, value in values]
 
 
@@ -333,6 +328,11 @@ def _footer(site):
                     '<span class="vh"> (opens in a new tab)</span></a>').format(domain, image, name)
         cards.append('<li class="slice slice-{}">{}</li>'.format(number, link))
     newtab = '<span class="vh"> (opens in a new tab)</span>'
+    # The seventh card (template 1.11.0, specification 7.19): vendorreplies.ai, outside the rainbow cycle,
+    # always last after the 6 rotated cards, with its PNG logo; it is never the current site here.
+    cards.append('<li class="slice slice-vr"><a class="card" href="https://vendorreplies.ai/" target="_blank" '
+                 'rel="noopener noreferrer"><img src="{}" alt=""><span class="cname">VendorReplies<span '
+                 'class="tld">.ai</span></span>{}</a></li>'.format(_asset(site, "logos/vendorreplies.png"), newtab))
     tail = (
         '<li class="tile tile-1"><a class="card" href="https://github.com/jposluns" target="_blank" '
         'rel="noopener noreferrer"><img class="only-light" src="{}" alt=""><img class="only-dark" src="{}" '
@@ -347,7 +347,7 @@ def _footer(site):
            'rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new '
            'tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span>'
            '<span class="post"> Project</span></a></div>')
-    return ('<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project '
+    return ('<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 7 project '
             'sites">{}</ul><ul class="tail" aria-label="Jeff Posluns elsewhere">{}</ul>{}</div></footer>').format(
                 "".join(cards), tail, sig)
 
@@ -1720,23 +1720,27 @@ def _self_test():
             built_site = next(s for s in built_sites if target.startswith(s["root"] + "/"))
             rel = target[len(built_site["root"]) + 1:]
             origin = {"aiqt": "https://aiqt.ai", "opfiles": "https://opfiles.ai"}[built_site["key"]]
-            card = '{}/images/{}-card.png'.format(origin, built_site["key"])
+            card = '{}/assets/{}-og.png'.format(origin, built_site["key"])
             title = re.search(r"<title>(.* \| [A-Za-z]+\.ai)</title>", built).group(1)
-            alt = '{}.ai: {}'.format(built_site["name"], _attr(built_site["tagline"]))
             wanted = ['<meta property="og:type" content="website">',
                       '<meta property="og:title" content="{}">'.format(title),
                       '<meta property="og:url" content="{}{}">'.format(origin, _page_url(built_site, rel)),
                       '<meta property="og:site_name" content="{}.ai">'.format(built_site["name"]),
                       '<meta property="og:image" content="{}">'.format(card),
-                      '<meta property="og:image:type" content="image/png">',
                       '<meta property="og:image:width" content="1200">',
-                      '<meta property="og:image:height" content="630">',
-                      '<meta property="og:image:alt" content="{}">'.format(alt),
+                      '<meta property="og:image:height" content="627">',
+                      '<meta property="og:image:alt" content="{}.ai: {}">'.format(
+                          built_site["name"], _attr(built_site["logo-alt"])),
                       '<meta name="twitter:card" content="summary_large_image">',
-                      '<meta name="twitter:image" content="{}">'.format(card),
-                      '<meta name="twitter:image:alt" content="{}">'.format(alt)]
+                      '<meta name="twitter:image" content="{}">'.format(card)]
             head = built.split("</head>", 1)[0].split("\n")
-            expect("meta/card-metas " + target, all(head.count(meta) == 1 for meta in wanted), head)
+            # Exactly the owner-approved card metas: each wanted line once, and no other og: or twitter: meta
+            # beside og:description (checked above), so no image type or second alt text the approved cards
+            # do not carry.
+            social = [line for line in head if line.startswith(('<meta property="og:', '<meta name="twitter:'))
+                      and not line.startswith('<meta property="og:description"')]
+            expect("meta/card-metas " + target,
+                   all(head.count(meta) == 1 for meta in wanted) and sorted(social) == sorted(wanted), head)
     expect("meta/card-url-home", '<meta property="og:url" content="https://opfiles.ai/">'
            in live_outputs["opf/site/index.html"], live_outputs["opf/site/index.html"][:2000])
     expect("meta/card-url-staged", '<meta property="og:url" content="https://aiqt.ai/draft/install/">'
@@ -1758,6 +1762,10 @@ def _self_test():
         '<p class="vh" id="copy-status" role="status" aria-live="polite"></p>\n</body>\n</html>\n'))
     slices = re.findall(r'<li class="slice slice-(\d)">', page)
     expect("footer/aiqt-first-cycle", slices == ["5", "6", "1", "2", "3", "4"], slices)
+    expect("footer/seventh-card-last", re.findall(r'<li class="slice slice-(\w+)">', page)[-1:] == ["vr"]
+           and page.count('<li class="slice slice-vr">') == 1
+           and '<img src="/draft/assets/baseline/logos/vendorreplies.png" alt="">' in page
+           and 'aria-label="The 7 project sites"' in page)
     expect("footer/current-card", page.count('aria-current="page"><img src="/draft/assets/baseline/logos/aiqt.svg"') == 1)
     navs = [re.search(r'<nav class="nav" aria-label="Site">(.*?)</nav>', outputs["site/draft/" + rel]).group(1)
             for rel in ("index.html", "disclosure/index.html", "license/index.html")]
@@ -2231,6 +2239,10 @@ def _self_test():
            '<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/opfiles-touch.png">' in home)
     opf_slices = re.findall(r'<li class="slice slice-(\d)">', home)
     expect("opfiles/footer-cycle", opf_slices == ["2", "3", "4", "5", "6", "1"], opf_slices)
+    expect("opfiles/footer-seventh-card-last",
+           re.findall(r'<li class="slice slice-(\w+)">', home)[-1:] == ["vr"]
+           and home.count('<li class="slice slice-vr">') == 1
+           and 'aria-label="The 7 project sites"' in home)
     expect("opfiles/footer-current-card",
            home.count('aria-current="page"><img src="/draft/assets/baseline/logos/opfiles.svg"') == 1)
     opf_nav = re.search(r'<nav class="nav" aria-label="Site">(.*?)</nav>',

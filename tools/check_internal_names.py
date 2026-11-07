@@ -67,7 +67,7 @@ internal-allow marker and no other skip-by-name (the gate's own
 source is scanned like any other shipped file; its self-test vectors are assembled at run time); the
 path-only allowlists are TRACKER_LABEL_FROZEN (relpath plus sha256 pairs, exempt only while the file's RAW
 BYTES still hash to the record), which holds one pinned vendored file, the template's card builder
-(.baseline/build_card.js, bound to its sha256 in .baseline/pin.toml at baseline 1.10.0, kept
+(.baseline/build_card.js, bound to its sha256 in .baseline/pin.toml at baseline 1.11.1, kept
 byte-identical to the template package), and TRACKER_LABEL_HISTORY, which ships EMPTY; a changed byte in
 the frozen file re-enters the ratchet at its baseline entry (none, so zero). FAIL CLOSED (exit 2): a
 missing or unparseable manifest, a manifest with no [[sources]] array, a listed path that is absent or
@@ -299,7 +299,7 @@ WOFF2_SIGNATURE = b"wOF2"
 MAX_WOFF2_FILE_SIZE = 8 * 1024 * 1024  # a latin-subset web font is well under 1 MiB
 # PINNED VENDOR BINARIES: tracked binary files the role rule could not otherwise evaluate, each keyed to its
 # exact path AND the sha256 of its raw bytes. Every entry is a file copied unchanged from the shared site
-# template and pinned in .baseline/pin.toml (the hash here is the one recorded there at baseline 1.10.0, and
+# template and pinned in .baseline/pin.toml (the hash here is the one recorded there at baseline 1.11.1, and
 # tools/check_baseline_pin.py holds the copy to that record). A listed path whose raw bytes hash to its
 # record is scanned whole as binary, as an accepted .woff2 is (each byte above 0x7F read as a character that
 # is not part of a word, no internal-allow exemption), so a hit is still a finding (exit 1). This is not a
@@ -400,11 +400,11 @@ TRACKER_SHAPE_KEYS = ("fix-id", "review-round", "qa-round", "reviewer-source")
 # zero); a history relpath exempts a history record that has to quote a label. There is no exemption by
 # pattern and no per-line marker for this layer. The one frozen pair is the template's card builder, a
 # pinned vendored copy kept byte-identical to the template package, whose own wording matches the
-# review-round shape; its hash is the one .baseline/pin.toml records at baseline 1.10.0, so a pin move to
+# review-round shape; its hash is the one .baseline/pin.toml records at baseline 1.11.1, so a pin move to
 # new bytes re-enters the ratchet until this pair is updated in the same reviewed change. The history list
 # ships EMPTY.
 TRACKER_LABEL_FROZEN = (    # (relpath, sha256) pairs
-    (".baseline/build_card.js", "3d0cecc8851ff6a2e1cab8c3c7dfdbcebc35c8f02260581cbfcf47ad70d990df"),
+    (".baseline/build_card.js", "fc05c9aeb646620034cb014cd9afb752e6aca4b448df48d3d369cbd447ec5c8a"),
 )
 TRACKER_LABEL_HISTORY = ()  # relpaths
 TRACKER_MANIFEST_RELPATH = ".aiqt/manifest.toml"
