@@ -1,0 +1,151 @@
+# The OPF consumer-switch list: every tool under tools/ that reads this project's records, each with the
+# disposition it takes when the project's records move into the OPF store. tools/check_record_readers.py
+# holds this list against a static scan of tools/: a reader that is not listed fails, and a listed file
+# that is gone or no longer detected as a reader fails. A later switch flips one entry's disposition.
+#
+# [detect] declares what the scan looks for (see the gate's docstring for each rule):
+#   names    record file names, matched as a whole string constant or as its last path component
+#   keys     orchestration-registry keys that name a record, matched as subscript or .get reads
+#   flags    command-line flags that take a record path
+#   modules  record-reading modules; importing one makes the importer an indirect reader
+#
+# Each [[reader]] has path, records, disposition and reason. Dispositions:
+#   switch               reads records that move into the store; switched in a later step
+#   stays-outside-store  reads records that stay outside the store for the reason given
+#   fixture-only         only writes or names record fixtures in its own self-test
+#   not-a-reader         detected by a rule but reads no project record (the reason says why)
+#   indirect-via:<path>  reads only through another listed entry
+
+format-version = 1
+
+[detect]
+names = ["TODO.md", "changelog.toml", "roadmap.toml", "pending-fixes.toml", "orchestration.json", "orchestration.local.json"]
+keys = ["mistakes_register", "attestations", "pending_decisions", "handoff"]
+flags = ["--backlog"]
+modules = ["aiqt_hooks", "check_mistakes_register"]
+
+[[reader]]
+path = "tools/aei_backlog_md.py"
+records = ["backlog"]
+disposition = "switch"
+reason = "It parses the backlog file named by --backlog, and backlog items move into the store."
+
+[[reader]]
+path = "tools/orch_doctor.py"
+records = ["backlog", "mode record"]
+disposition = "switch"
+reason = "It reads the backlog and the mode record through the hook library, which finds them through the orchestration registry; backlog items move into the store."
+
+[[reader]]
+path = "tools/orch_preflight.py"
+records = ["backlog", "pending decisions", "attestations"]
+disposition = "switch"
+reason = "It reads what the stop guard reads, through the hook library, which finds each record through the orchestration registry; backlog items move into the store."
+
+[[reader]]
+path = "tools/_qa_adapter.py"
+records = ["backlog"]
+disposition = "switch"
+reason = "It checks that the backlog file exists and is readable, without parsing it; after the switch that file is the store's rendered backlog view."
+
+[[reader]]
+path = "tools/check_record_drift.py"
+records = ["findings register", "changelog refs"]
+disposition = "switch"
+reason = "It reads the findings register named in the orchestration registry, and findings move into the store."
+
+[[reader]]
+path = "tools/check_mistakes_register.py"
+records = ["mistakes register", "attestations"]
+disposition = "stays-outside-store"
+reason = "The OPF spec has no record type for a mistakes register or an attestation register."
+
+[[reader]]
+path = "tools/orch_register.py"
+records = ["mistakes register", "attestations"]
+disposition = "stays-outside-store"
+reason = "It appends to and projects the mistakes and attestation registers, and the OPF spec has no record type for either."
+
+[[reader]]
+path = "tools/gen_changelog.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It renders CHANGELOG.md from changelog.toml through the shared driver tools/opf_render.py, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/gen_roadmap.py"
+records = ["roadmap.toml"]
+disposition = "stays-outside-store"
+reason = "It renders ROADMAP.md from roadmap.toml through the shared driver tools/opf_render.py, beside the changelog renderer, whose OPF home awaits the maintainer's ruling; no OPF home for roadmap.toml has been chosen."
+
+[[reader]]
+path = "tools/gen_draft_site.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_artifact_checksums.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_versions.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_site_versions.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_version_monotonicity.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml at the head, the base and each tag, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_release_cut.py"
+records = ["changelog.toml", "pending-fixes.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml and the optional, untracked pending-fix list, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_release_delta.py"
+records = ["changelog.toml"]
+disposition = "stays-outside-store"
+reason = "It reads changelog.toml, and where changelog.toml lives in OPF awaits the maintainer's ruling."
+
+[[reader]]
+path = "tools/check_release_build.py"
+records = ["changelog.toml"]
+disposition = "fixture-only"
+reason = "It writes changelog.toml only into the git fixtures its self-test builds; its live check reads no project record."
+
+[[reader]]
+path = "tools/gen_gensrc.py"
+records = ["backlog view"]
+disposition = "fixture-only"
+reason = "It names a backlog view path only as a self-test target, to prove a store working path is refused."
+
+[[reader]]
+path = "tools/selftest_aiqt_hooks.py"
+records = ["record fixtures"]
+disposition = "fixture-only"
+reason = "It is the hook library's self-test and reads only the record fixtures it writes."
+
+[[reader]]
+path = "tools/selftest_orch_hooks.py"
+records = ["record fixtures"]
+disposition = "fixture-only"
+reason = "It is the orchestration hooks' self-test and reads only the record fixtures it writes."
+
+[[reader]]
+path = "tools/check_relied_exit_pipes.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It imports the hook library only for its shell lexer and reads no project record."

@@ -270,6 +270,8 @@ run_gate "opf-declaration-selftest" python3 -I -B tools/check_selftest_execution
 run_gate "opf-declaration" python3 -I -B tools/check_opf_declaration.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test
 run_gate "record-drift"          python3 -I -B tools/check_record_drift.py
+run_gate "record-readers-selftest" python3 -I -B tools/check_selftest_execution.py --suite record-readers-selftest
+run_gate "record-readers" python3 -I -B tools/check_record_readers.py
 run_gate "record-sections-selftest" python3 -I -B tools/check_record_sections.py --self-test
 run_gate "mistakes-register-selftest" python3 -I -B tools/check_mistakes_register.py --self-test
 run_gate "mistakes-register"          python3 -I -B tools/check_mistakes_register.py

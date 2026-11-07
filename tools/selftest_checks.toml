@@ -5040,6 +5040,52 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "record-readers-selftest"
+runner = "tools/check_record_readers.py"
+expected-check-ids = [
+  "pass/clean-fixture",
+  "detect/unlisted-name-reader",
+  "nonvacuity/name-rule-removed-passes",
+  "detect/unlisted-key-reader",
+  "nonvacuity/key-rule-removed-passes",
+  "detect/unlisted-flag-reader",
+  "nonvacuity/flag-rule-removed-passes",
+  "detect/unlisted-module-reader",
+  "nonvacuity/module-rule-removed-passes",
+  "detect/unlisted-shell-reader",
+  "nonvacuity/shell-rule-removed-passes",
+  "ignore/outside-scan-root",
+  "refuse/listed-file-gone",
+  "refuse/listed-file-no-longer-reads",
+  "ignore/vendor-dir",
+  "ignore/near-miss-strings",
+  "refuse/fifo-source-cannot-evaluate",
+  "refuse/unreadable-source-cannot-evaluate",
+  "refuse/symlinked-source-cannot-evaluate",
+  "refuse/non-utf8-source-cannot-evaluate",
+  "refuse/syntax-error-cannot-evaluate",
+  "refuse/listed-unparseable-not-stale",
+  "refuse/missing-list-cannot-evaluate",
+  "refuse/malformed-list-not-toml",
+  "refuse/malformed-list-not-utf8",
+  "refuse/malformed-list-bad-version",
+  "refuse/malformed-list-unknown-field",
+  "refuse/malformed-list-entry-field",
+  "refuse/malformed-list-empty-records",
+  "refuse/malformed-list-detect-missing",
+  "refuse/malformed-list-path-outside",
+  "refuse/deep-list-recursion",
+  "refuse/duplicate-entry",
+  "refuse/unknown-disposition",
+  "refuse/indirect-via-unlisted",
+  "parse-site/handles-recursionerror",
+  "parse-site/handles-memoryerror",
+  "parse-site/handles-valueerror",
+  "refuse/unrecognized-argument",
+  "live/real-tree-passes",
+]
+
+[[suite]]
 id = "sitemap-selftest"
 runner = "tools/check_sitemap.py"
 expected-check-ids = [
