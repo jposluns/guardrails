@@ -861,6 +861,7 @@ tools/check_newtab.py text eol=lf
 tools/check_no_dashes.py text eol=lf
 tools/check_opf_declaration.py text eol=lf
 tools/check_opf_enforce_platforms.py text eol=lf
+tools/check_opf_enforce_residuals.py text eol=lf
 tools/check_opf_standalone_closure.py text eol=lf
 tools/check_overclaim.py text eol=lf
 tools/check_portability.py text eol=lf
