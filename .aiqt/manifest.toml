@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0fac8b7f08fb38369309eb942fe5a3810378a36f578e28d69fb9786ad82163dd"
+tree-sha256 = "e6395466164c4d2ec6e839740f869152638629028bffc7599d711532b599fea9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 580660
-sha256 = "57ab404132fe236fc27b251a97f1e7554ad9cdaef267ac6960ae8c334d7268a7"
+bytes = 581721
+sha256 = "619b4915008b99a0bc3f48e6028e7f722167fcbd7bdd184cf2fa92bccb9288d5"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -4071,8 +4071,8 @@ sha256 = "e0c35587f4c6f13238f36a2ae33889ac5f179e84769f9b016061c63969a48503"
 
 [[sources]]
 path = "tools/_qa_adapter.py"
-bytes = 147420
-sha256 = "941c4ce9e5c931cc6cc70ea2a17a758e2641dddb7a78f9d9e1291fc11887b4bf"
+bytes = 154809
+sha256 = "f55f19ed95b91717e18ffe340850319f1293b45b35c81ae3b33cfa234a369f49"
 
 [[sources]]
 path = "tools/_release_schema.py"
@@ -4111,8 +4111,8 @@ sha256 = "f2292eb511e960d9c38881a54bee92d0fc5c7b5cbe0c7b5cb002cb78da08245f"
 
 [[sources]]
 path = "tools/audit_reference.py"
-bytes = 21327
-sha256 = "299893be5ce5a75ed2e378694dfabe807dfbb2db945598861b0a9818b11b93be"
+bytes = 23632
+sha256 = "41a7916102ba0aa6956259b46da5441f6d623038fe70e3b3aef601725a716804"
 
 [[sources]]
 path = "tools/check_applies.py"
