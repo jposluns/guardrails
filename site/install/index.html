@@ -3,19 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="Give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project&#x27;s records. Using a chat assistant? Download the skill.">
-<meta property="og:description" content="Give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project&#x27;s records. Using a chat assistant? Download the skill.">
+<meta name="description" content="Give your development assistant 1 prompt and it prepares an adoption plan, with OPFiles for your project&#x27;s records, and installs AIQT once you approve it. Using a chat assistant? Download the Skill.">
+<meta property="og:description" content="Give your development assistant 1 prompt and it prepares an adoption plan, with OPFiles for your project&#x27;s records, and installs AIQT once you approve it. Using a chat assistant? Download the Skill.">
 <meta property="og:type" content="website">
 <meta property="og:title" content="Install | AIQT.ai">
 <meta property="og:url" content="https://aiqt.ai/install/">
 <meta property="og:site_name" content="AIQT.ai">
 <meta property="og:image" content="https://aiqt.ai/assets/aiqt-og.png">
+<meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="627">
 <meta property="og:image:alt" content="AIQT.ai: A shield bearing a check mark, set on a guardrail">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Install | AIQT.ai">
+<meta name="twitter:description" content="Give your development assistant 1 prompt and it prepares an adoption plan, with OPFiles for your project&#x27;s records, and installs AIQT once you approve it. Using a chat assistant? Download the Skill.">
 <meta name="twitter:image" content="https://aiqt.ai/assets/aiqt-og.png">
+<meta name="twitter:image:alt" content="AIQT.ai: A shield bearing a check mark, set on a guardrail">
 <title>Install | AIQT.ai</title>
+<link rel="canonical" href="https://aiqt.ai/install/">
 <link rel="icon" href="/draft/assets/baseline/logos/aiqt-favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/draft/assets/baseline/logos/aiqt-touch.png">
 <script data-cfasync="false" src="/draft/assets/baseline/scheme.js"></script>
@@ -31,21 +36,21 @@
 <div class="wrap"><div class="doc"><p class="lbl first">Install</p>
 <h1>Add AIQT to your AI development assistant</h1>
 <div class="rail"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" alt="A shield bearing a check mark, set on a guardrail"></div>
-<p class="meta">Give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project's records. Using a chat assistant? Download the skill.</p>
+<p class="meta">Give your development assistant 1 prompt and it prepares an adoption plan, with OPFiles for your project's records, and installs AIQT once you approve it. Using a chat assistant? Download the Skill.</p>
 <p class="lbl blk">Copy this prompt</p>
 <pre id="install-prompt" class="hascopy prompt-block" tabindex="0"><button class="copy" type="button" data-copy="install-prompt" hidden>Copy</button>Install AIQT Guardrails in this project and walk me through adopting it. Read https://aiqt.ai/llms.txt and the repository https://github.com/jposluns/guardrails first. Propose an adoption plan: the AIQT rules, hooks, and checks that fit this project's languages and tools, and OPFiles (https://opfiles.ai/llms.txt) for the project's operational records unless I opt out. Before building any new guardrail, check whether jposluns/guardrails already has one that fits. Name every file you would create or change, and why. Change nothing until I approve the plan.</pre>
-<p class="code-note">Paste it into Claude Code, Codex, Antigravity CLI, Gemini CLI, Cursor, Copilot, or any other development assistant.</p>
+<p class="code-note">Paste it into Claude Code, Codex, Antigravity CLI, Gemini CLI, Cursor, Copilot, or any other development assistant. The developer tooling is in preview: the generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release.</p>
 <p>Google announced that from 18 June 2026 Gemini CLI would stop serving Google AI Pro and Ultra subscribers and free users, who are directed to Antigravity CLI, whose command is <code>agy</code>. Gemini CLI remains available with Gemini Code Assist Standard or Enterprise, with Google Cloud, and with paid Gemini or Gemini Enterprise Agent Platform API keys. Paste the prompt into whichever of the 2 CLIs your Google plan or key supports (sources: <a href="https://github.com/google-gemini/gemini-cli/discussions/27274" target="_blank" rel="noopener noreferrer">Gemini CLI notice<span class="vh"> (opens in a new tab)</span></a> and <a href="https://antigravity.google/docs/skills" target="_blank" rel="noopener noreferrer">Antigravity skills<span class="vh"> (opens in a new tab)</span></a>).</p>
 <p class="lbl sec">Chat assistants</p>
-<h2 id="skill">Or add the skill</h2>
-<p><a href="/downloads/aiqt-skill-1.0.6.zip">Download the AIQT skill</a> (zip, 28 KB) and install it the way your AI assistant installs any skill. <a href="/install/details/">Step-by-step instructions for each assistant</a>, and the instruction file for assistants without skills.</p>
+<h2 id="skill">Or add the Skill</h2>
+<p><a href="/downloads/aiqt-skill-1.0.6.zip">Download the AIQT Skill</a> (zip, 28 KB) and install it the way your AI assistant installs any Skill. <a href="/install/details/">Step-by-step instructions for each assistant</a>, and the instruction file for assistants without Skills.</p>
 <p class="lbl sec">Included</p>
 <h2 id="opf">OPFiles keeps your project's records straight</h2>
-<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions, and handoffs in one machine-written source, generates the readable versions from it, and fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open, and it significantly cuts errors.</p><p>An AIQT adoption sets up OPF by default. It is optional: say so in your plan review and the adoption skips it, and you can add it later.</p>
+<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions, and handoffs in one machine-written source, generates the readable versions from it, and, where the drift check is configured as a required commit or CI check, fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open.</p><p>An AIQT adoption plan includes OPF by default. It is optional: say so in your plan review and the plan skips it, and you can add it later. The reference OPF tooling cannot apply or complete an adoption yet: its apply and complete stages refuse to run, so your assistant prepares the plan and stops at the approval step rather than doing the missing stages by hand.</p>
 <p class="lbl sec">Requirements</p>
 <h2 id="code">What it needs</h2>
-<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat skill needs no Python.</p>
-<p>Planning for a team? See <a href="/future/">what is coming for teams and enterprises</a>.</p>
+<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat Skill needs no Python.</p>
+<p>Planning for a team? See <a href="/future/">ideas for teams and enterprises</a>.</p>
 <div class="next"><p class="lbl">Next</p><p>What AIQT holds your assistant to.</p><a class="start" href="/standard/">The standard <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
 </div></div>
 </main>

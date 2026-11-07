@@ -1,143 +1,110 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="site-aiqt">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AIQT evidence and assurance: the proof behind the claims</title>
 <meta name="description" content="The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending.">
-<script>(function(){var t;try{t=localStorage.getItem("aiqt-theme");}catch(e){}if(t!=="light"&&t!=="dark"){t=(window.matchMedia&&matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark";}document.documentElement.setAttribute("data-theme",t);})();</script>
-<link rel="stylesheet" href="/styles.css?v=20260918a">
-<script src="/theme.js"></script>
-<link rel="canonical" href="https://aiqt.ai/evidence">
-<link rel="icon" href="/favicon.svg" type="image/svg+xml">
-<link rel="apple-touch-icon" href="/assets/baseline/logos/aiqt-touch.png">
-<meta property="og:type" content="website">
-<meta property="og:title" content="AIQT evidence and assurance: the proof behind the claims">
 <meta property="og:description" content="The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="AIQT evidence and assurance: the proof behind the claims | AIQT.ai">
 <meta property="og:url" content="https://aiqt.ai/evidence">
-<meta name="twitter:card" content="summary">
+<meta property="og:site_name" content="AIQT.ai">
+<meta property="og:image" content="https://aiqt.ai/assets/aiqt-og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="627">
+<meta property="og:image:alt" content="AIQT.ai: A shield bearing a check mark, set on a guardrail">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="AIQT evidence and assurance: the proof behind the claims | AIQT.ai">
+<meta name="twitter:description" content="The evidence behind AIQT: the 1.0.5 release and its source, the known limitations, platform test status, documented cases from the GRC Library, and the change history. Facts not yet published are marked pending.">
+<meta name="twitter:image" content="https://aiqt.ai/assets/aiqt-og.png">
+<meta name="twitter:image:alt" content="AIQT.ai: A shield bearing a check mark, set on a guardrail">
+<title>AIQT evidence and assurance: the proof behind the claims | AIQT.ai</title>
+<link rel="canonical" href="https://aiqt.ai/evidence">
+<link rel="icon" href="/draft/assets/baseline/logos/aiqt-favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/aiqt-touch.png">
+<script data-cfasync="false" src="/draft/assets/baseline/scheme.js"></script>
+<link rel="stylesheet" href="/draft/assets/baseline/fonts.css">
+<link rel="stylesheet" href="/draft/assets/baseline/palettes.css">
+<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">
 </head>
 <body>
-<a class="skip" href="#main">Skip to content</a>
-
-<header class="topbar">
-  <button class="navtoggle" type="button" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false" onclick="toggleNav()">&#9776;</button>
-  <a class="logo" href="/" aria-label="AIQT home"><svg class="logomark" viewBox="0 0 100 100" width="30" height="30" aria-hidden="true"><text x="34" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">A</text><text x="66" y="45" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">I</text><text x="34" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent)" text-anchor="middle">Q</text><text x="66" y="88" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-weight="800" font-size="42" fill="var(--accent-2)" text-anchor="middle">T</text></svg><span class="logotext">AIQT™</span></a>
-  <div class="topformula" aria-label="AIQT priority ordering: Accuracy Integrity Quality Trust first, then Progress, Speed, Cost">(<span class="tier">Accuracy = Integrity = Quality = Trust</span>) &gt; <span class="t2">Progress</span> &gt; <span class="t3">Speed</span> &gt; <span class="t4">Cost</span></div>
-</header>
-<div class="navbackdrop" id="navbackdrop" onclick="toggleNav()"></div>
-<div class="layout">
-<nav class="sidebar" id="sidebar" aria-label="Main navigation">
-  <h4>Start</h4>
-  <a class="navlink" href="/">Home</a>
-  <h4>Chat assistants</h4>
-  <a class="navlink" href="/install/">All assistants</a>
-  <a class="navlink" href="/install/details/#claude">Claude</a>
-  <a class="navlink" href="/install/details/#chatgpt">ChatGPT</a>
-  <a class="navlink" href="/install/details/#gemini">Gemini</a>
-  <a class="navlink" href="/install/details/#copilot">Copilot</a>
-  <a class="navlink" href="/install/details/#copilotstudio">Copilot Studio</a>
-  <a class="navlink" href="/install/details/#other">Any other</a>
-  <h4>Developers &amp; teams</h4>
-  <a class="navlink" href="/development">Developers &amp; Coding</a>
-  <a class="navlink" href="/tech-details">Technical details</a>
-  <h4>Learn more</h4>
-  <a class="navlink" href="/standard/">The Standard</a>
-  <a class="navlink" href="/mappings/">Mappings</a>
-  <a class="navlink active" href="/evidence" aria-current="page">Evidence</a>
-  <h4>The five rules</h4>
-  <a class="navlink" href="/rules/">The five rules</a>
-  <h4>Project</h4>
-  <a class="navlink" href="/disclosure/">Disclosure</a>
-  <a class="navlink" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View on GitHub</a>
-  <button id="themebtn" class="themetoggle sb-theme" type="button" onclick="toggleTheme()">Theme</button>
-</nav>
-<div class="content">
-
-<main id="main">
-
-<div class="wrap pagehead">
-  <p class="eyebrow">Evidence and assurance</p>
-  <h1>The proof behind the claims.</h1>
-  <p class="lead">AIQT asks your assistant to back a claim with evidence, so this page holds AIQT
-    to the same rule. Here is what is available now, what has been tested, and what is
-    documented. Where a fact is not yet published, it is marked pending rather than implied.</p>
-</div>
+<a class="skip" href="#main-content">Skip to content</a>
+<header class="mast"><a class="brand" href="/"><span class="name">AIQT<span class="tld">.ai</span></span><span class="rule" aria-hidden="true"></span></a><nav class="nav" aria-label="Site"><a href="/install/">Install</a><a href="/standard/">The standard</a><a href="/rules/">The 5 rules</a><a href="/mappings/">Mappings</a><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a></nav><button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden><svg class="moon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg><svg class="sun" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><span class="vh">Dark mode</span></button></header>
+<main id="main-content">
+<div class="wrap"><div class="doc">
+<p class="lbl first">Evidence and assurance</p>
+<h1>The proof behind the claims.</h1>
+<div class="rail"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" alt="A shield bearing a check mark, set on a guardrail"></div>
+<p class="lead">AIQT asks your assistant to back a claim with evidence, so this page holds AIQT
+  to the same rule. Here is what is available now, what has been tested, and what is
+  documented. Where a fact is not yet published, it is marked pending rather than implied.</p>
 
 <section id="release">
-  <div class="wrap">
-    <p class="eyebrow">The release</p>
-    <h2>AIQT 1.0.5</h2>
-    <ul class="clean">
-      <li><b style="color:var(--ink)">Version:</b> 1.0.5, the chat-assistant Skill. The chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
-      <li><b style="color:var(--ink)">The artefact:</b> the packaged skill zip, plus a
-        portable instruction file, both on the <a href="/install">install page</a>.</li>
-      <li><b style="color:var(--ink)">Built from:</b> <span class="evidence-label">the exact source tag or commit: pending</span></li>
-      <li><b style="color:var(--ink)">Checksum:</b> <span class="evidence-label">pending</span></li>
-    </ul>
-  </div>
+<p class="lbl sec">The release</p>
+<h2>AIQT 1.0.5</h2>
+<ul>
+  <li><strong>Version:</strong> 1.0.5, the pack release. The chat-assistant Skill it ships is versioned on its own: the chat skill now served from the install page is 1.0.6 under the Apache License 2.0.</li>
+  <li><strong>The artefact:</strong> the packaged skill zip, plus a
+    portable instruction file, both on the <a href="/install">install page</a>.</li>
+  <li><strong>Built from:</strong> <em>the exact source tag or commit: pending</em></li>
+  <li><strong>Checksum:</strong> the SHA-256 of <a href="/downloads/aiqt-skill-1.0.6.zip">the Skill zip</a> (site/downloads/aiqt-skill-1.0.6.zip) is <code>d185bf6caa96a139b2b7c21fc83a03a04d5f214e39c93d16525362e11ab83a7e</code>. 1.0.5 itself was not released through the RELEASING.md protocol, so it has no recorded artefact digests.</li>
+</ul>
 </section>
 
 <section id="limits">
-  <div class="wrap">
-    <p class="eyebrow">Known limitations</p>
-    <h2>What AIQT does not do</h2>
-    <p class="lead">AIQT is a behavioural standard your assistant is required to follow, not a
-      control that technically prevents a model from erring. Results still depend on the model,
-      the platform, competing instructions, and the tools available in the conversation. AIQT
-      does not make an AI infallible, and it does not replace your judgement, your organization's
-      policy, or the law.</p>
-  </div>
+<p class="lbl sec">Known limitations</p>
+<h2>What AIQT does not do</h2>
+<p class="lead">AIQT is a behavioural standard your assistant is required to follow, not a
+  control that technically prevents a model from erring. Results still depend on the model,
+  the platform, competing instructions, and the tools available in the conversation. AIQT
+  does not make an AI infallible, and it does not replace your judgement, your organization's
+  policy, or the law.</p>
 </section>
 
 <section id="platform-tests">
-  <div class="wrap">
-    <p class="eyebrow">Platform test status</p>
-    <h2>What has been tested, and when</h2>
-    <div class="tablewrap"><table class="dtable">
-      <caption class="vh">Platform test status for AIQT 1.0.5</caption>
-      <thead><tr><th scope="col">Platform</th><th scope="col">Install method</th><th scope="col">Last tested</th><th scope="col">Result</th><th scope="col">Known constraints</th></tr></thead>
-      <tbody>
-        <tr><td>Claude</td><td>Skill upload</td><td class="pending">pending</td><td class="pending">pending</td><td>Desktop browser; mobile Skill upload not documented</td></tr>
-        <tr><td>ChatGPT</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
-        <tr><td>Gemini</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
-        <tr><td>Copilot</td><td class="pending">not yet tested</td><td class="pending">pending</td><td class="pending">pending</td><td class="pending">pending</td></tr>
-      </tbody>
-    </table></div>
-    <p>An untested platform says so plainly. A tested one will carry its date and result here.</p>
-  </div>
+<p class="lbl sec">Platform test status</p>
+<h2>What has been tested, and when</h2>
+<div class="tablewrap" tabindex="0"><table>
+  <caption class="vh">Platform test status for AIQT 1.0.5</caption>
+  <thead><tr><th scope="col">Platform</th><th scope="col">Install method</th><th scope="col">Last tested</th><th scope="col">Result</th><th scope="col">Known constraints</th></tr></thead>
+  <tbody>
+    <tr><td>Claude</td><td>Skill upload</td><td>pending</td><td>pending</td><td>Desktop browser; mobile Skill upload not documented</td></tr>
+    <tr><td>ChatGPT</td><td>not yet tested</td><td>pending</td><td>pending</td><td>pending</td></tr>
+    <tr><td>Gemini</td><td>not yet tested</td><td>pending</td><td>pending</td><td>pending</td></tr>
+    <tr><td>Copilot</td><td>not yet tested</td><td>pending</td><td>pending</td><td>pending</td></tr>
+    <tr><td>Copilot Studio</td><td>not yet tested</td><td>pending</td><td>pending</td><td>pending</td></tr>
+  </tbody>
+</table></div>
+<p>An untested platform says so plainly. A tested one will carry its date and result here.</p>
 </section>
 
 <section id="cases">
-  <div class="wrap">
-    <p class="eyebrow">Documented cases</p>
-    <h2>Real calls from the GRC Library</h2>
-    <p class="lead">AIQT was built and tested on the GRC Library first. The
-      <a href="/standard/#st-3">examples on the standard page</a> narrate several real calls; each links here to its source
-      record when that record is public.</p>
-    <ul class="clean">
-      <li>A fixed retention baseline attributed to sources that prescribe no fixed interval, caught and corrected. <span class="evidence-label">Source record link: pending</span></li>
-      <li>A recycled backlog number that would have mis-resolved later citations, caught by a permanence check. <span class="evidence-label">Source record link: pending</span></li>
-      <li>A completeness check that read "the file exists" as "the delivery is complete", fixed at the class. <span class="evidence-label">Source record link: pending</span></li>
-    </ul>
-  </div>
+<p class="lbl sec">Documented cases</p>
+<h2>Real calls from the GRC Library</h2>
+<p class="lead">AIQT was built and tested on the GRC Library first. The
+  <a href="/standard/#st-3">examples on the standard page</a> narrate several real calls; each links here to its source
+  record when that record is public.</p>
+<ul>
+  <li>A fixed retention baseline attributed to sources that prescribe no fixed interval, caught and corrected. <em>Source record link: pending</em></li>
+  <li>A recycled backlog number that would have mis-resolved later citations, caught by a permanence check. <em>Source record link: pending</em></li>
+  <li>A completeness check that read "the file exists" as "the delivery is complete", fixed at the class. <em>Source record link: pending</em></li>
+</ul>
 </section>
 
 <section id="history">
-  <div class="wrap">
-    <p class="eyebrow">Change history</p>
-    <h2>What changed, and when</h2>
-    <p class="lead">Every substantive change to AIQT is recorded; the public change log is a
-      curated release-level view. <a href="https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">The public change log</a></p>
-    <div class="cta" style="justify-content:flex-start; margin-top:1.2rem">
-      <a class="btn ghost" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View the source on GitHub</a>
-    </div>
-  </div>
+<p class="lbl sec">Change history</p>
+<h2>What changed, and when</h2>
+<p class="lead">Every substantive change to AIQT is recorded; the public change log is a
+  curated release-level view. <a href="https://github.com/jposluns/guardrails/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">The public change log<span class="vh"> (opens in a new tab)</span></a></p>
+<p>
+  <a class="btn inline" href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">View the source on GitHub<span class="vh"> (opens in a new tab)</span></a>
+</p>
+<nav aria-label="Project"><a href="/disclosure/">Disclosure</a></nav>
 </section>
-
+</div></div>
 </main>
-
-</div>
-</div>
+<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project sites"><li class="slice slice-5"><a class="card" href="/" aria-current="page"><img src="/draft/assets/baseline/logos/aiqt.svg" alt=""><span class="cname">AIQT<span class="tld">.ai</span></span><span class="vh"> (this site)</span></a></li><li class="slice slice-6"><a class="card" href="https://grclibrary.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/grclibrary.svg" alt=""><span class="cname">GRCLibrary<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-1"><a class="card" href="https://secureconfig.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/secureconfig.svg" alt=""><span class="cname">SecureConfig<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-2"><a class="card" href="https://opfiles.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/opfiles.svg" alt=""><span class="cname">OPFiles<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-3"><a class="card" href="https://auditthis.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/auditthis.svg" alt=""><span class="cname">AuditThis<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-4"><a class="card" href="https://cleanlanguage.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/cleanlanguage.svg" alt=""><span class="cname">CleanLanguage<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li></ul><ul class="tail" aria-label="Jeff Posluns elsewhere"><li class="tile tile-1"><a class="card" href="https://github.com/jposluns" target="_blank" rel="noopener noreferrer"><img class="only-light" src="/draft/assets/baseline/marks/github-invertocat-black.svg" alt=""><img class="only-dark" src="/draft/assets/baseline/marks/github-invertocat-white.svg" alt=""><span class="cname vh">GitHub</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-2"><a class="card" href="https://www.linkedin.com/in/jposluns/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/linkedin-in-bug.png" alt=""><span class="cname vh">LinkedIn</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-3"><a class="card" href="https://orcid.org/0009-0000-7775-2233" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/orcid-id.svg" alt=""><span class="cname vh">ORCID</span><span class="vh"> (opens in a new tab)</span></a></li></ul><div class="tile sigtile"><a class="sig" href="https://posluns.ca/" target="_blank" rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span><span class="post"> Project</span></a></div></div></footer>
+<p class="vh" id="copy-status" role="status" aria-live="polite"></p>
 </body>
 </html>

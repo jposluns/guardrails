@@ -6,16 +6,21 @@
 <meta name="description" content="Your assistant sounds just as confident when it is guessing as when it knows. AIQT 1.0.5 guides it toward a stated standard. Pick the AI you use, get the file it needs, and follow a short guide; choosing one hides the other assistants&#x27; steps.">
 <meta property="og:description" content="Your assistant sounds just as confident when it is guessing as when it knows. AIQT 1.0.5 guides it toward a stated standard. Pick the AI you use, get the file it needs, and follow a short guide; choosing one hides the other assistants&#x27; steps.">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Install the skill | AIQT.ai">
+<meta property="og:title" content="Install the Skill | AIQT.ai">
 <meta property="og:url" content="https://aiqt.ai/install/details/">
 <meta property="og:site_name" content="AIQT.ai">
 <meta property="og:image" content="https://aiqt.ai/assets/aiqt-og.png">
+<meta property="og:image:type" content="image/png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="627">
 <meta property="og:image:alt" content="AIQT.ai: A shield bearing a check mark, set on a guardrail">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Install the Skill | AIQT.ai">
+<meta name="twitter:description" content="Your assistant sounds just as confident when it is guessing as when it knows. AIQT 1.0.5 guides it toward a stated standard. Pick the AI you use, get the file it needs, and follow a short guide; choosing one hides the other assistants&#x27; steps.">
 <meta name="twitter:image" content="https://aiqt.ai/assets/aiqt-og.png">
-<title>Install the skill | AIQT.ai</title>
+<meta name="twitter:image:alt" content="AIQT.ai: A shield bearing a check mark, set on a guardrail">
+<title>Install the Skill | AIQT.ai</title>
+<link rel="canonical" href="https://aiqt.ai/install/details/">
 <link rel="icon" href="/draft/assets/baseline/logos/aiqt-favicon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="/draft/assets/baseline/logos/aiqt-touch.png">
 <script data-cfasync="false" src="/draft/assets/baseline/scheme.js"></script>
@@ -29,21 +34,21 @@
 <header class="mast"><a class="brand" href="/"><span class="name">AIQT<span class="tld">.ai</span></span><span class="rule" aria-hidden="true"></span></a><nav class="nav" aria-label="Site"><a href="/install/">Install</a><a href="/standard/">The standard</a><a href="/rules/">The 5 rules</a><a href="/mappings/">Mappings</a><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a></nav><button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden><svg class="moon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg><svg class="sun" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><span class="vh">Dark mode</span></button></header>
 <main id="main-content">
 <div class="wrap"><div class="doc"><p class="lbl first">You and your chat assistant</p>
-<h1>Install the AIQT skill, step by step</h1>
+<h1>Install the AIQT Skill, step by step</h1>
 <div class="rail"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" alt="A shield bearing a check mark, set on a guardrail"></div>
 <p class="meta">Your assistant sounds just as confident when it is guessing as when it knows. AIQT 1.0.5 guides it toward a stated standard. Pick the AI you use, get the file it needs, and follow a short guide; choosing one hides the other assistants' steps.</p>
 <dl class="control"><div><dt>Document</dt><dd>aiqt.ai</dd></div><div><dt>Version</dt><dd>AIQT 1.0.5</dd></div><div><dt>Status</dt><dd>Published 2026-09-15</dd></div><div><dt>Source</dt><dd><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">jposluns/guardrails<span class="vh"> (opens in a new tab)</span></a></dd></div><div><dt>Licence</dt><dd><a href="/license/">Apache 2.0, see NOTICE</a></dd></div></dl>
 <p class="lbl blk">Scope</p>
-<p>Both shipped files are prose instructions and reference material only, with no executable code and no network calls. Claude loads a Skill when it judges the Skill relevant; an always-on instruction line instructs the assistant to apply AIQT on each turn. Results still depend on the platform and the model, and you stay in charge.</p>
+<p>The shipped artefacts, the Skill and the instruction files, are prose instructions and reference material only, with no executable code and no network calls. Claude loads a Skill when it judges the Skill relevant; an always-on instruction line instructs the assistant to apply AIQT on each turn. Results still depend on the platform and the model, and you stay in charge.</p>
 <p>Every platform's last verified date is pending, and ChatGPT, Gemini, Copilot, and Copilot Studio have not yet been tested against AIQT. The 30 Claude Code hooks ship as an opt-in plugin; the generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release.</p>
 <p class="lbl blk" id="pick">Pick your assistant</p>
 <ul class="picker" data-picker><li><a href="#claude" data-family-link="claude">Claude</a></li><li><a href="#chatgpt" data-family-link="chatgpt">ChatGPT</a></li><li><a href="#gemini" data-family-link="gemini">Gemini</a></li><li><a href="#copilot" data-family-link="copilot">Copilot</a></li><li><a href="#copilotstudio" data-family-link="copilotstudio">Copilot Studio</a></li><li><a href="#other" data-family-link="other">Any other</a></li></ul><button class="btn picker-reset" type="button" data-picker-reset hidden>Show all assistants</button><p class="vh" role="status" aria-live="polite" data-picker-status></p>
 <p class="lbl sec">Get AIQT</p>
 <h2 id="download">Get the file your assistant needs</h2>
 <p class="lbl blk">The Skill</p>
-<div class="download"><p class="file"><a href="/downloads/aiqt-skill-1.0.6.zip">aiqt-skill-1.0.6.zip</a></p><p class="lbl size">zip, 28 KB</p><p>For assistants that accept Skills, such as Claude and paid ChatGPT. Do not unzip it. The Skill carries its own version, 1.0.6, which ships under AIQT pack release 1.0.5.</p></div>
+<div class="download"><p class="file"><a href="/downloads/aiqt-skill-1.0.6.zip">aiqt-skill-1.0.6.zip</a></p><p class="lbl size">zip, 28 KB</p><p>For assistants that accept Skills, such as Claude and paid ChatGPT. Do not unzip it. The Skill and the instruction files carry their own version, 1.0.6, which ships under AIQT pack release 1.0.5. To verify the download, compare its SHA-256 digest: <code>aiqt-skill-1.0.6.zip</code> is <code>d185bf6caa96a139b2b7c21fc83a03a04d5f214e39c93d16525362e11ab83a7e</code>.</p></div>
 <p class="lbl blk">The instruction file</p>
-<div class="download"><p class="file"><a href="/downloads/aiqt-instructions.txt">aiqt-instructions.txt</a></p><p class="lbl size">text, full, 16 KB</p><p>For assistants that cannot use Skills. The standard as prose, in 4 sizes: the full and 8k files carry the standard in full, the 5k trims the finer detail, and the 1.5k is a compact pointer. The other sizes are <a href="/downloads/aiqt-instructions-8k.txt">compact, 8k</a>; <a href="/downloads/aiqt-instructions-5k.txt">condensed, 5k</a>; and <a href="/downloads/aiqt-instructions-1_5k.txt">pointer, 1.5k</a>.</p></div>
+<div class="download"><p class="file"><a href="/downloads/aiqt-instructions.txt">aiqt-instructions.txt</a></p><p class="lbl size">text, full, 16 KB</p><p>For assistants that cannot use Skills. The standard as prose, in 4 sizes: the full file carries the standard in full, the 8k and 5k are condensed variants that carry less of the finer detail, and the 1.5k is a compact pointer. The other sizes are <a href="/downloads/aiqt-instructions-8k.txt">condensed, 8k</a>; <a href="/downloads/aiqt-instructions-5k.txt">condensed, 5k</a>; and <a href="/downloads/aiqt-instructions-1_5k.txt">pointer, 1.5k</a>.</p></div>
 <p class="lbl blk">Which file</p>
 <div class="wide"><div class="register"><p class="reg-cap"><b>Register 1</b><span>Which file each assistant uses</span><span class="count">6 assistants</span></p><div class="tablewrap" tabindex="0"><table class=""><caption class="vh">Which file each assistant uses</caption><thead><tr><th>Assistant</th><th>Uses</th></tr></thead><tbody><tr><td>Claude</td><td>the Skill (.zip)</td></tr><tr><td>ChatGPT</td><td>the Skill (.zip) on a paid plan; otherwise attach the full instruction file to a chat</td></tr><tr><td>Gemini</td><td>the full instruction file, pasted into a Gem</td></tr><tr><td>Copilot</td><td>the 8k instruction file, pasted into a Copilot agent</td></tr><tr><td>Copilot Studio</td><td>the Skill (.zip), uploaded as a Skill</td></tr><tr><td>Any other assistant</td><td>the full instruction file</td></tr></tbody></table></div></div></div>
 <section id="claude" data-family-section="claude">
@@ -83,7 +88,7 @@
 <p class="lbl sec">Copilot Studio</p>
 <h2>Add AIQT to Copilot Studio</h2>
 <p class="verified">Last verified: pending</p>
-<p><strong>Copilot Studio takes AIQT as a Skill.</strong> The zip holds a single SKILL.md at its root, the layout Copilot Studio reads.</p>
+<p><strong>Copilot Studio takes AIQT as a Skill.</strong> The zip holds SKILL.md and the licence text at its root, the layout Copilot Studio reads.</p>
 <ol class="steps"><li><span><strong>Open or create a Skills-capable agent.</strong></span></li><li><span><strong>Add the Skill to that agent.</strong> Upload the zip in the agent's Skills.</span></li><li><span><strong>Build and link</strong> the agent to your business processes as you would any other.</span></li></ol>
 <p>AIQT's behaviour on Copilot Studio has not yet been through conformance testing; the <a href="/evidence">evidence page</a> carries the current test status.</p>
 </section>
@@ -96,7 +101,7 @@
 </section>
 <p class="lbl sec">Confirm</p>
 <h2 id="verify">Check that it is on</h2>
-<p>In a new chat, ask <em>"Which standard are you applying, and what does it require of you?"</em> A set-up assistant names AIQT and summarizes the ordering. This shows the text loaded; it is not proof the assistant will follow it.</p>
+<p>In a new chat, ask <em>"Which standard are you applying, and what does it require of you?"</em> Once set up, the assistant names AIQT and summarizes the ordering. This is a basic recognition check: it shows that AIQT text loaded, not which file or version, and it is not proof the assistant will follow it.</p>
 <p>Then a behaviour check: ask it for <em>"the exact default timeout of a library you have not shown it."</em> Applying AIQT, it should say it cannot know rather than inventing a number.</p>
 <div class="next"><p class="lbl">Next</p><p>The short version, and the prompt for your development assistant.</p><a class="start" href="/install/">Back to Install <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
 </div></div>
