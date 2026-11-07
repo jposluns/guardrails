@@ -36753,8 +36753,11 @@ class _DeadlineWindow:
         `armed` False and `refused_active` True, because no relative re-arm could put such a timer back
         exactly. A cancel that still returns an active value (another thread armed the timer between the
         read and the cancel) puts it back at once, marks the window broken and raises ItimerError, so the
-        caller fails closed. Anything that raises once the timer is taken gives it back, with the
-        disposition, before the exception goes on."""
+        caller fails closed. The window's own arm is read the same way: an active value returned by the
+        arming setitimer (another thread armed the timer between the cancel and the arm, and the arm
+        replaced it) puts that timer back at once, with the caller's disposition first, marks the window
+        broken and raises ItimerError. Anything that raises once the timer is taken gives it back, with
+        the disposition, before the exception goes on."""
         if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
             self.refused_active = True
             return
@@ -36776,7 +36779,20 @@ class _DeadlineWindow:
                 self.pending_at_entry = True  # not the window's expiry: its timer is not armed yet
                 self._give_back()
                 raise _HookDeadline(self)
-            signal.setitimer(signal.ITIMER_REAL, self.seconds)
+            replaced = signal.setitimer(signal.ITIMER_REAL, self.seconds)
+            if replaced != (0.0, 0.0):
+                # Another thread armed the timer between the cancel and this arm, and the arm replaced
+                # it: the arm's own return carries that timer, so it goes back at once on the same
+                # fail-closed path as the cancel's race above, after the caller's disposition.
+                self.armed = False
+                self.broken = True
+                self._unheard = False
+                signal.signal(signal.SIGALRM, self._handler)
+                value, interval = replaced
+                signal.setitimer(signal.ITIMER_REAL, value if value > 0 else interval, interval)
+                raise signal.ItimerError(
+                    "ITIMER_REAL became active between the take's cancel and the window's arm; the "
+                    "borrow is refused and the timer put back")
             self._unheard = True  # from here on an expiry of the window's timer can be pending at the restore
             self._live = True
         except BaseException:
@@ -36848,6 +36864,22 @@ def _pending_alarm_message(handler_name, seconds):
             "deadline was being set, so the deadline ended at once; failing closed.".format(handler_name, seconds))
 
 
+def _refused_borrow_message(handler_name, seconds):
+    """The stderr refusal main() writes when the window refused to borrow this process's active
+    ITIMER_REAL and main() is running inside another program: the budget cannot be held there (no
+    process-global timer may be taken, and no watchdog may end the calling process), so the check did
+    not run and the call fails closed."""
+    return ("AIQT guardrail: the {} check did not run: its {:g}-second deadline needs this process's "
+            "ITIMER_REAL, which is already active, so the borrow was refused and the timer left "
+            "untouched; failing closed.".format(handler_name, seconds))
+
+
+# True only in the process whose entry point this module is (the entry line below sets it before main
+# runs), where ending the process on a blown budget ends only the hook call. A program that imports this
+# module and calls main() in-process keeps it False, so no path here may end that program's process.
+_HOOK_PROCESS = False
+
+
 class _BudgetWatchdog:
     """The PreToolUse budget for a check whose _DeadlineWindow refused the borrow because this process
     inherited an active ITIMER_REAL (`refused_active`): entered right after the window, it enforces the
@@ -36857,26 +36889,37 @@ class _BudgetWatchdog:
     waits on an Event for the budget and, when the check has not finished by then, writes the same stderr
     refusal the window's deadline gets (_deadline_message, over `payload`, which main() sets once the
     payload is read) and ends the process with os._exit(2), the fail-closed exit, skipping the
-    interpreter-exit flush as the entry line does. It sends and consumes no signal at all, so the merged
+    interpreter-exit flush as the entry line does. A refusal note that cannot be built (a payload whose
+    encode raises) gets a fixed note in its place, exactly as main()'s own deadline path does, so the
+    exit 2 is never lost to the note. It sends and consumes no signal at all, so the merged
     deliveries a SIGALRM-based watchdog would add (its SIGALRM pending with one from elsewhere, or with
     the inherited timer's own expiry, the kernel keeping one pending instance and delivering them as one)
     cannot arise, and the inherited timer, its phase, its disposition and any pending SIGALRM are left
-    untouched on every path. Exiting the context sets the Event, which ends the thread; a window that
-    borrowed (armed), or refused for any other reason (a fail-open window's None budget, a call off the
-    main thread, a caller that blocks SIGALRM, a platform with no setitimer), starts no thread, so every
-    such mode keeps the posture it had."""
-    __slots__ = ("window", "handler_name", "payload", "_done")
+    untouched on every path. Exiting the context sets the Event, which ends the thread.
+    The thread may end only the hook's own process, so it starts only where _HOOK_PROCESS is True (this
+    module is the process's entry point). Where main() runs in-process inside another program and the
+    borrow was refused over an active timer, no faithful budget is left (no process-global timer may be
+    taken, and os._exit would end the calling program), so `refused_unenforced` is set and main() fails
+    the call closed at once, without running the check body. A window that borrowed (armed), or refused
+    for any other reason (a fail-open window's None budget, a call off the main thread, a caller that
+    blocks SIGALRM, a platform with no setitimer), starts no thread and sets nothing, so every such mode
+    keeps the posture it had."""
+    __slots__ = ("window", "handler_name", "payload", "refused_unenforced", "_done")
 
     def __init__(self, window, handler_name):
         self.window, self.handler_name = window, handler_name
         self.payload = None
+        self.refused_unenforced = False
         self._done = None
 
     def __enter__(self):
         window = self.window
         if window.refused_active and not window.armed and window.seconds is not None:
-            self._done = threading.Event()
-            threading.Thread(target=self._expire, name="aiqt-budget-watchdog", daemon=True).start()
+            if _HOOK_PROCESS:
+                self._done = threading.Event()
+                threading.Thread(target=self._expire, name="aiqt-budget-watchdog", daemon=True).start()
+            else:
+                self.refused_unenforced = True
         return self
 
     def __exit__(self, exc_type, exc, tb):
@@ -36893,7 +36936,13 @@ class _BudgetWatchdog:
         done = self._done
         if done is None or done.wait(self.window.seconds) or done.is_set():
             return
-        _stderr_note(_deadline_message(self.handler_name, self.window.seconds, self.payload))
+        # Built inside a guard like main()'s own deadline note, so a note that cannot be built (a
+        # payload whose encode raises, a MemoryError) still leaves the os._exit(2).
+        try:
+            note = _deadline_message(self.handler_name, self.window.seconds, self.payload)
+        except BaseException:
+            note = "AIQT guardrail: a PreToolUse check could not reach a decision within its budget; failing closed."
+        _stderr_note(note)
         os._exit(2)
 
 
@@ -37041,15 +37090,21 @@ def main(argv):
     # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
     # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
     # An inherited active ITIMER_REAL refuses the window's borrow (no relative re-arm could put the
-    # caller's timer back exactly); the watchdog then holds the same fail-closed budget without touching
-    # any signal state, so the check loses none of its coverage. It sends no SIGALRM at all, so the
-    # pending-signal merge a SIGALRM-based watchdog would add (one pending instance standing for both its
-    # expiry and another's) cannot arise; its class docstring has the detail.
+    # caller's timer back exactly). In the hook's own process (_HOOK_PROCESS) the watchdog then holds
+    # the same fail-closed budget without touching any signal state, so the check loses none of its
+    # coverage; it sends no SIGALRM at all, so the pending-signal merge a SIGALRM-based watchdog would
+    # add (one pending instance standing for both its expiry and another's) cannot arise; its class
+    # docstring has the detail. In-process, inside another program, neither holds (the watchdog's
+    # os._exit would end that program), so the refused borrow fails the call closed at once below,
+    # before the payload read, and the check body never runs under an unenforced budget.
     window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
     watchdog = _BudgetWatchdog(window, handler_name)
     payload = None
     try:
         with window, watchdog:
+            if watchdog.refused_unenforced:
+                _stderr_note(_refused_borrow_message(handler_name, window.seconds))
+                return 2
             try:
                 payload = sys.stdin.read()
                 watchdog.payload = payload
@@ -37164,6 +37219,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    _HOOK_PROCESS = True  # this module is the process's entry point: a blown budget may end the process
     # os._exit, not sys.exit: main() has already written and flushed its output best-effort, so the
     # interpreter-exit flush of the std streams could only hurt here (a stream that buffered a failed
     # write raises again in that flush and the interpreter exits 120, a status the platform treats as

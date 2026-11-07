@@ -5709,13 +5709,17 @@ def _deadline_restore_failures():
     frame, where a relative re-arm would come back late by the stall; a caller deadline due inside a
     refused window is delivered at its own time, to the caller's handler, with no _HookDeadline; an
     expired periodic timer read (0, interval) is refused with its phase kept; a timer armed by another
-    thread between the take's read and its cancel is put back, with the window broken and ItimerError
-    raised; an inactive caller timer is borrowed (the window arms its deadline) and stays inactive after;
-    main() on an inherited active timer keeps its decision (exit 0) with the timer untouched, and keeps
-    its fail-closed budget through the watchdog (exit 2 at the budget, run in a child process, since the
-    watchdog ends the process); an enclosing window's deadline reaches its owner through a refused inner
-    borrow (dl-nested-outer); and a caller that blocks SIGALRM, or a call off the main thread, gets no
-    deadline and keeps its state."""
+    thread between the take's read and its cancel, or between that cancel and the window's own arm, is
+    put back, with the window broken and ItimerError raised; an inactive caller timer is borrowed (the
+    window arms its deadline) and stays inactive after; an in-process main() on an inherited active timer
+    fails closed at once with the timer untouched and no check body run (no budget can be held there:
+    no process-global timer may be taken and no watchdog may end the calling program's process), while
+    the hook's own process (_HOOK_PROCESS, the entry line's stand-in set in a child) keeps its fail-closed
+    budget through the watchdog (exit 2 at the budget, run in a child process, since the watchdog ends
+    the process) even when the refusal note cannot be built; an enclosing window's deadline reaches its
+    owner past a refused inner call (dl-nested-outer), and an inner in-process call under an armed outer
+    window ends only itself (dl-nested-inner); and a caller that blocks SIGALRM, or a call off the main
+    thread, gets no deadline and keeps its state."""
     out = []
     fired = []
 
@@ -5882,6 +5886,55 @@ def _deadline_restore_failures():
                    "{}, broken {}, armed {}, calls {!r}, handler {!r}".format(
                        escaped, window.broken, window.armed, calls, handler))
 
+    class _ArmRaceSignal:
+        """aiqt_hooks.signal whose reads and cancel see an inactive timer and whose window arm returns an
+        active value, as when another thread arms the timer between the take's cancel and the window's own
+        arm (the arm replaced that timer, and its return carries it); no real timer is touched."""
+
+        def __init__(self, log, reading):
+            self._log, self._reading = log, reading
+
+        def __getattr__(self, name):
+            return getattr(signal, name)
+
+        def getitimer(self, which):
+            return (0.0, 0.0)
+
+        def setitimer(self, which, *args):
+            self._log.append(("setitimer", which) + args)
+            return self._reading if args == (5.0,) else (0.0, 0.0)
+
+    # Both active shapes of the gap: a plain countdown, and an expired periodic reading (0, interval)
+    # whose verbatim re-arm would disarm, so it goes back as the interval the kernel would arm next.
+    for reading, want_back in (((3600.0, 0.0), (3600.0, 0.0)), ((0.0, 30.0), (30.0, 30.0))):
+        fired.clear()
+        arm_log = []
+        signal.signal(signal.SIGALRM, caller_alarm)
+        window = aiqt_hooks._DeadlineWindow(5.0)
+        escaped = None
+        try:
+            aiqt_hooks.signal = _ArmRaceSignal(arm_log, reading)
+            try:
+                with window:
+                    pass
+            except signal.ItimerError:
+                escaped = "ItimerError"
+            except BaseException as exc:
+                escaped = type(exc).__name__
+        finally:
+            aiqt_hooks.signal = signal
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        put_back = [entry for entry in arm_log if entry[2:] == want_back]
+        if not (escaped == "ItimerError" and window.broken and not window.armed and put_back
+                and handler is caller_alarm and not fired):
+            out.append("(dl-refuse-thread-race-arm) a timer read {!r} armed by another thread between the "
+                       "take's cancel and the window's arm must be put back as {!r} with the window broken "
+                       "and ItimerError raised, got escaped {}, broken {}, armed {}, setitimer calls {!r}, "
+                       "handler {!r}".format(reading, want_back, escaped, window.broken, window.armed,
+                                             arm_log, handler))
+
     signal.signal(signal.SIGALRM, caller_alarm)
     window = aiqt_hooks._DeadlineWindow(5.0)
     with window:
@@ -5913,21 +5966,24 @@ def _deadline_restore_failures():
                    .format(code, after))
 
     fired.clear()
+    ran = []
     signal.signal(signal.SIGALRM, caller_alarm)
     signal.setitimer(signal.ITIMER_REAL, 3600.0)
     try:
-        with _stub_handler("diff_source_pretool", _sleeper(0.0)):
-            code, _err, _seconds = _main_run("diff_source_pretool")
+        with _stub_handler("diff_source_pretool", lambda _data: ran.append(True) or (0, None, None)):
+            code, err, seconds = _main_run("diff_source_pretool")
         after = signal.getitimer(signal.ITIMER_REAL)
         handler = signal.getsignal(signal.SIGALRM)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    if not (code == 0 and 3590.0 < after[0] <= 3600.0 and after[1] == 0.0 and handler is caller_alarm
-            and not fired):
-        out.append("(dl-main-active-caller) main() on an inherited active timer must keep its decision "
-                   "with the timer untouched, got exit {}, timer {!r}, handler {!r}, fired {}".format(
-                       code, after, handler, len(fired)))
+    if not (code == 2 and "did not run" in err and "refused" in err and "failing closed" in err
+            and not ran and seconds < 0.5 and 3590.0 < after[0] <= 3600.0 and after[1] == 0.0
+            and handler is caller_alarm and not fired):
+        out.append("(dl-main-active-caller) an in-process main() on an inherited active timer must fail "
+                   "closed at once with the timer untouched and no check body run, got exit {!r} after "
+                   "{:.2f}s, stderr {!r}, body ran {}, timer {!r}, handler {!r}, fired {}".format(
+                       code, seconds, err, bool(ran), after, handler, len(fired)))
 
     code = ("import sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
             "m._deadline_watchdog_budget_child()")
@@ -5945,51 +6001,80 @@ def _deadline_restore_failures():
                    "still exit 2 at the budget, got exit {} after {:.2f}s, stdout {!r}, stderr {!r}".format(
                        returncode, used, out_text[:200], err_text[-300:]))
 
-    # The inner call's body reads the process timer, then sleeps 60 s, so once that read is made only a
-    # deadline ends the body: a sleep that returns means the outer deadline did not end the inner call.
-    # The inner (refused) borrow leaves the outer window's countdown in place, so the body reads that
-    # countdown, armed before `entered`. A host stall of over 0.3 s before that read lets the outer
-    # deadline end the run with nothing read; such a run is not judged on the countdown or the sleep, and
-    # the case runs again, up to three runs, failing when none reaches the read. In every run the outer
-    # deadline must reach its owner and the timer and the disposition must be left as found. (The old
-    # inner-deadline-while-nested case is gone with the nested borrow itself: an inner window refuses when
-    # the outer's timer is active, and the budget then holds as dl-main-active-caller-budget shows.)
-    for run in range(1, 4):
-        outer = aiqt_hooks._DeadlineWindow(0.3)
-        seen, slept = [], []
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); import selftest_aiqt_hooks as m; "
+            "m._deadline_watchdog_note_child()")
+    began = time.monotonic()
+    try:
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parent)],
+                              capture_output=True, text=True, timeout=120)
+        returncode, out_text, err_text = proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired:
+        returncode, out_text, err_text = "none (no exit within 120s)", "", ""
+    used = time.monotonic() - began
+    if not (returncode == 2 and "could not reach a decision within its budget; failing closed." in err_text
+            and "returned" not in out_text and used < 60.0):
+        out.append("(dl-watchdog-note-unbuildable) a watchdog refusal note that cannot be built must still "
+                   "end the hook process with exit 2 and the fixed note, got exit {} after {:.2f}s, stdout "
+                   "{!r}, stderr {!r}".format(returncode, used, out_text[:200], err_text[-300:]))
 
-        def outlives(_data):
-            seen.append((time.monotonic(), signal.getitimer(signal.ITIMER_REAL)))
+    # The inner in-process call must fail closed at once (its borrow of the outer window's active timer
+    # is refused, and in-process no watchdog may end this program's process), its check body never
+    # running; the body of the outer window then sleeps 60 s, so only the outer deadline can end it, and
+    # that deadline must reach its owner with the timer and the disposition left as found. The 2-second
+    # outer budget leaves a loaded host room to finish the inner call before the deadline.
+    outer = aiqt_hooks._DeadlineWindow(2.0)
+    inner_ran, returned = [], []
+
+    def never_runs(_data):
+        inner_ran.append(True)
+        return (0, None, None)
+
+    began = time.monotonic()
+    try:
+        with outer:
+            with _stub_handler("diff_source_pretool", never_runs):
+                returned.append(_main_run("diff_source_pretool"))
             time.sleep(60.0)
-            slept.append(True)
-            return (0, None, None)
+            caught = "slept on"
+    except aiqt_hooks._HookDeadline as exc:
+        caught = "outer" if exc.args[:1] == (outer,) else "another window"
+    except BaseException as exc:
+        caught = "raised {}".format(type(exc).__name__)
+    used = time.monotonic() - began
+    inner = returned[0] if returned else (None, "", None)
+    if (caught != "outer" or inner_ran or not returned or inner[0] != 2
+            or "did not run" not in inner[1] or "refused" not in inner[1] or used >= 5.0
+            or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
+            or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
+        out.append("(dl-nested-outer) an enclosing window's deadline must reach its owner past a refused "
+                   "inner call that failed closed at once with no check body run, and leave the timer as "
+                   "found, got {} after {:.2f}s, inner exit {!r} with stderr {!r}, inner body ran {}".format(
+                       caught, used, inner[0], inner[1], bool(inner_ran)))
 
-        began = entered = time.monotonic()
-        try:
-            with outer:
-                entered = time.monotonic()
-                with _stub_handler("diff_source_pretool", outlives):
-                    caught = "returned {}".format(_main_run("diff_source_pretool")[0])
-        except aiqt_hooks._HookDeadline as exc:
-            caught = "outer" if exc.args[:1] == (outer,) else "another window"
-        used = time.monotonic() - began
-        if (caught != "outer" or slept or len(seen) > 1
-                or seen and not (seen[0][1][1] == 0.0
-                                 and 0.0 < seen[0][1][0] <= 0.3 - (seen[0][0] - entered) + 1e-6)
-                or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
-                or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
-            problem = ("got {} after {:.2f}s in run {}, countdown read {!r}, sleep returned {}".format(
-                caught, used, run, seen, bool(slept)))
-            break
-        if seen:
-            problem = None
-            break
-    else:
-        problem = ("none of 3 runs reached the inner body's countdown read before the outer deadline (the last "
-                   "ended after {:.2f}s), so the countdown was never judged".format(used))
-    if problem:
-        out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner through "
-                   "a refused inner borrow and leave the timer as found, {}".format(problem))
+    # The inner in-process call under an armed outer window (an active ITIMER_REAL the inner window
+    # refuses) must end only itself: exit 2 at once with the refused borrow named, no check body run and
+    # no thread left behind that could end this (the calling) process, the outer window keeping its
+    # countdown and its owner running on; the 0.3 s pause past the inner call's 0.1 s budget gives any
+    # such leftover thread its chance to show before the judgment.
+    inner_ran = []
+
+    def sleeps_past(_data):
+        inner_ran.append(True)
+        time.sleep(1.0)
+        return (0, None, None)
+
+    with aiqt_hooks._DeadlineWindow(5.0):
+        with _stub_handler("diff_source_pretool", sleeps_past):
+            code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
+        inside = signal.getitimer(signal.ITIMER_REAL)
+        time.sleep(0.3)
+    if (code != 2 or "did not run" not in err or "refused" not in err or inner_ran or seconds >= 0.8
+            or not 4.0 < inside[0] <= 5.0 or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
+            or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
+        out.append("(dl-nested-inner) an inner in-process call must fail closed at once and end only "
+                   "itself, giving the outer window its countdown back, got exit {!r} after {:.2f}s, "
+                   "stderr {!r}, body ran {}, outer timer {!r}".format(
+                       code, seconds, err, bool(inner_ran), inside))
 
     old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
     try:
@@ -6018,15 +6103,36 @@ class _CallerAlarm(Exception):
 
 
 def _deadline_watchdog_budget_child():
-    """The dl-main-active-caller-budget run, in this (child) process: an inherited active ITIMER_REAL plus
-    a check stalled past the budget must still end the call at the budget with the deadline refusal and
-    exit 2. The watchdog ends the whole process (os._exit), which is why this runs in a child; main() must
-    never return here, so nothing is written to stdout."""
+    """The dl-main-active-caller-budget run, in this (child) process, standing in for the hook's own
+    process (_HOOK_PROCESS True, as the entry line sets it): an inherited active ITIMER_REAL plus a check
+    stalled past the budget must still end the call at the budget with the deadline refusal and exit 2.
+    The watchdog ends the whole process (os._exit), which is why this runs in a child; main() must never
+    return here, so nothing is written to stdout."""
+    aiqt_hooks._HOOK_PROCESS = True
     signal.signal(signal.SIGALRM, lambda signum, frame: None)
     signal.setitimer(signal.ITIMER_REAL, 3600.0)
     aiqt_hooks.HANDLERS["diff_source_pretool"] = _sleeper(30.0)
     aiqt_hooks.PRETOOL_BUDGET_SECONDS = 0.2
     sys.stdin = io.StringIO(_DEADLINE_PAYLOAD)
+    sys.stdout.write("returned {}".format(aiqt_hooks.main(["diff_source_pretool"])))
+
+
+def _deadline_watchdog_note_child():
+    """The dl-watchdog-note-unbuildable run, in this (child) process, standing in for the hook's own
+    process (_HOOK_PROCESS True): a refusal note the watchdog cannot build (a payload whose encode raises
+    MemoryError) must still end the process with os._exit(2) and the fixed failing-closed note, never a
+    watchdog thread that dies on the note and leaves the stalled check running. main() must never return
+    here, so nothing is written to stdout."""
+    class _RaisingEncode(str):
+        def encode(self, *args, **kwargs):
+            raise MemoryError("note payload")
+
+    aiqt_hooks._HOOK_PROCESS = True
+    signal.signal(signal.SIGALRM, lambda signum, frame: None)
+    signal.setitimer(signal.ITIMER_REAL, 3600.0)
+    aiqt_hooks.HANDLERS["diff_source_pretool"] = _sleeper(30.0)
+    aiqt_hooks.PRETOOL_BUDGET_SECONDS = 0.2
+    sys.stdin = types.SimpleNamespace(read=lambda: _RaisingEncode(_DEADLINE_PAYLOAD))
     sys.stdout.write("returned {}".format(aiqt_hooks.main(["diff_source_pretool"])))
 
 
@@ -6677,6 +6783,9 @@ def _deadline_rearm_failures():
     (dl-refuse-due-in-window), a caller handler whose exception must leave the frame it fires in still fails
     a PreToolUse call closed (dl-caller-raises), and the old delayed-exit concern (the window arming its own
     timer again past its deadline) is held red here by logging every setitimer the window makes. Both
+    vectors also pass on the pinned base commit: over an inactive caller timer the old restore re-armed
+    nothing either, so they do not discriminate the refusal change; what they guard is the no-re-arm ground
+    itself, red against any future re-arm, discard or delivery resurrected into the restore. Both
     vectors run over an inactive caller timer, a raising caller handler installed, and aiqt_hooks.signal
     replaced by a logging pass-through, and both fail on any setitimer that is not the plain cancel
     (setitimer(ITIMER_REAL, 0)) or the window's own one arming call, on any SIG_IGN installed from the
@@ -7873,30 +7982,36 @@ def _deadline_window_error_failures():
     """(dl-caller-raises, dl-enter-raises, dl-enter-raises-fail-open) Any exception out of the window fails
     a PreToolUse call closed with exit 2 and a stderr note, and a fail-open mode warns on exit 0. A caller
     timer whose handler raises RuntimeError is armed (one shot, 30 seconds) before an in-process PreToolUse
-    call, so the window refuses the borrow and leaves that timer and the caller's disposition exactly as
-    inherited; the stub handler then queues a SIGALRM with signal.raise_signal, so the caller's own handler
-    runs at once, in the stub's own frame, with nothing of the hook's between them (the old shape of this
-    case, the borrowed caller timer's expiry delivered at the restore, is removed with the take on an
-    active caller: a due caller deadline inside a refused window is dl-refuse-due-in-window). The call must
-    exit 2 naming the RuntimeError, run the caller's handler once and leave the caller's disposition and
-    its still-armed timer untouched, the countdown run on only by the time the call took. A window whose
-    __enter__ raises signal.ItimerError must exit 2 on a PreToolUse mode and warn on exit 0 on a fail-open
-    one."""
+    call whose stub handler runs its body inside an except Exception branch that allows, as several
+    handlers do on a cannot-evaluate (the stub would queue a SIGALRM with signal.raise_signal, running the
+    caller's handler in its own frame, and swallow the RuntimeError into an allow). The refused borrow must
+    fail the call closed BEFORE any of that: in-process, a refused active timer leaves no way to hold the
+    budget (no process-global timer may be taken, and no watchdog may end the calling program's process),
+    so the check body never runs and no except branch in it can catch anything and decide. The call must
+    exit 2 naming the refused borrow, run no handler, deliver nothing to the caller's handler, and leave
+    the caller's disposition and its still-armed timer untouched, the countdown run on only by the time
+    the call took. A window whose __enter__ raises signal.ItimerError must exit 2 on a PreToolUse mode and
+    warn on exit 0 on a fail-open one."""
     out = []
     calls = []
+    ran = []
 
     def raising(signum, frame):
         calls.append(signum)
         raise RuntimeError("caller alarm")
 
-    def raises_caller(_data):
-        signal.raise_signal(signal.SIGALRM)
+    def allows_on_error(_data):
+        try:
+            ran.append(True)
+            signal.raise_signal(signal.SIGALRM)
+        except Exception:
+            return (0, None, None)
         return (0, None, None)
 
     signal.signal(signal.SIGALRM, raising)
     signal.setitimer(signal.ITIMER_REAL, 30.0)
     try:
-        with _stub_handler("diff_source_pretool", raises_caller):
+        with _stub_handler("diff_source_pretool", allows_on_error):
             try:
                 code, err, _seconds = _main_run("diff_source_pretool")
             except BaseException as exc:
@@ -7905,13 +8020,14 @@ def _deadline_window_error_failures():
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, signal.SIG_DFL)
-    if not (code == 2 and "RuntimeError: caller alarm" in err and "failing closed" in err
-            and calls == [signal.SIGALRM] and handler is raising and timer[1] == 0.0
+    if not (code == 2 and "did not run" in err and "refused" in err and "failing closed" in err
+            and not ran and not calls and handler is raising and timer[1] == 0.0
             and 29.0 < timer[0] <= 30.0):
-        out.append("(dl-caller-raises) a caller handler raising during an in-process PreToolUse call must "
-                   "fail it closed with exit 2 and leave the refused caller timer armed, got exit {!r}, "
-                   "stderr {!r}, deliveries {}, handler {!r}, timer {!r}".format(
-                       code, err, len(calls), handler, timer))
+        out.append("(dl-caller-raises) an in-process PreToolUse call under a refused caller timer must "
+                   "fail closed at once, with no check body run for its except branches to decide in and "
+                   "no delivery, leaving the refused timer armed, got exit {!r}, stderr {!r}, body ran {}, "
+                   "deliveries {}, handler {!r}, timer {!r}".format(
+                       code, err, bool(ran), len(calls), handler, timer))
 
     class EnterRaises(aiqt_hooks._DeadlineWindow):
         __slots__ = ()
