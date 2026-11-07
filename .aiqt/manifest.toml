@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ddc3f095bbf2d50b304d7438b0d36a01531bd2d9af0e4343cee53639cf46a9d7"
+tree-sha256 = "ffe18a76642c15511462c01c1d302c326c7e8a4509a164d11a6a2f58eb6f66f3"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4426,8 +4426,8 @@ sha256 = "fdd61f58fb504cc82fac35ba74f65ce87c45d2e0e2d0db40eb1614267cc51b0c"
 
 [[sources]]
 path = "tools/ci_checks.toml"
-bytes = 343911
-sha256 = "91c4e5e9833918c37fa727354d1d93bbe0887de65aeac8e4ab3e8218ebe528e5"
+bytes = 339101
+sha256 = "96e03ab06e66d5552d07e18bd086eb16bb0ff261a86ef31e135ea7e4bbb1b487"
 
 [[sources]]
 path = "tools/ci_site_scope.py"
