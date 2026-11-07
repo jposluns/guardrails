@@ -12452,11 +12452,71 @@ def _main_isolated(report_path=None):
             aiqt_hooks._orch_mode_classify = _rec_classify
         check("ask/json-mode-record-unattended-read-by-mode", (_rec_token, _rec_seen),
               ("unattended", ["unattended; overnight"]))
-        # absent mode record fails open (no marker): the fixture DELETES the file, so this tests ABSENCE
+        # A DECLARED mode path whose file is ABSENT fails CLOSED to guards-armed, and the deny names the missing
+        # declared path: the fixture DELETES the real file its registry declares, so this tests ABSENCE.
+        h_reg_path = h.root / ".aiqt" / "orchestration.local.json"
+        h_reg_text = h_reg_path.read_text(encoding="utf-8")
+        h_absent_why = "the declared mode file {!r} is absent".format(str(h.mode))
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
                           extra={"tool_use_id": "tu-2"})
-        check("ask/absent-mode-fails-open", _verdict(ask()), "allow")
+        h_res = ask()
+        h_reason = (h_res[1].get("hookSpecificOutput") or {}).get("permissionDecisionReason", "") if isinstance(
+            h_res[1], dict) else ""
+        check("ask/declared-absent-mode-denies-armed-naming-path",
+              (_verdict(h_res), h_absent_why in h_reason,
+               aiqt_hooks._orch_mode_detail(json.loads(h_reg_text), str(h.root))[0]),
+              ("deny", True, "unattended"))
+        # A symlink at the declared path whose target is missing reports not found and fails closed alike.
+        os.symlink(str(h.root / "no-such-mode-target.md"), str(h.mode))
+        g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
+                          extra={"tool_use_id": "tu-2d"})
+        h_res = ask()
+        h_reason = (h_res[1].get("hookSpecificOutput") or {}).get("permissionDecisionReason", "") if isinstance(
+            h_res[1], dict) else ""
+        check("ask/declared-dangling-symlink-mode-denies-armed-naming-path",
+              (_verdict(h_res), h_absent_why in h_reason), ("deny", True))
+        h.mode.unlink()
+        # An UNDECLARED mode path stays inert, the file being absent too: no `mode` object, a `mode` object
+        # without a path, and an empty path each read (None, None) and the ask is allowed.
+        h_undeclared = []
+        for h_mode_decl in ("drop", {}, {"path": ""}):
+            h_reg = json.loads(h_reg_text)
+            if h_mode_decl == "drop":
+                h_reg.pop("mode", None)
+            else:
+                h_reg["mode"] = h_mode_decl
+            h_reg_path.write_text(json.dumps(h_reg), encoding="utf-8")
+            g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
+                              extra={"tool_use_id": "tu-2e"})
+            h_undeclared.append((aiqt_hooks._orch_mode_detail(h_reg, str(h.root)), _verdict(ask())))
+        h_reg_path.write_text(h_reg_text, encoding="utf-8")
+        check("ask/undeclared-mode-path-stays-inert", h_undeclared, [((None, None), "allow")] * 3)
+        # A declared file that is EMPTY or whitespace-only (a lone byte-order mark included) stays inert: it is
+        # present and readable, and a shared file with no text is the no-declaration case, like prose.
+        h_empty = []
+        for h_text in ("", " \n\t\r\n", "\N{ZERO WIDTH NO-BREAK SPACE}"):
+            h.mode.write_text(h_text, encoding="utf-8")
+            g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
+                              extra={"tool_use_id": "tu-2f"})
+            h_empty.append((aiqt_hooks._orch_mode_detail(json.loads(h_reg_text), str(h.root)), _verdict(ask())))
+        check("ask/declared-empty-mode-file-stays-inert", h_empty, [((None, None), "allow")] * 3)
+        # A SYMLINKED mode file is followed to its regular-file target: an attended target is read as attended
+        # (allowed, the fixture backlog being empty) and an unattended one as armed (denied, with no read-failure
+        # reason), so the target, not the link, decides.
+        h_target = h.root / "mode-target.md"
+        h.mode.unlink()
+        os.symlink(str(h_target), str(h.mode))
+        h_link = []
+        for h_text in ("Operating-mode: attended\n", "Operating-mode: unattended\n"):
+            h_target.write_text(h_text, encoding="utf-8")
+            g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
+                              extra={"tool_use_id": "tu-2g"})
+            h_link.append((aiqt_hooks._orch_mode_detail(json.loads(h_reg_text), str(h.root)), _verdict(ask())))
+        h.mode.unlink()
+        h_target.unlink()
+        check("ask/symlinked-mode-file-followed", h_link,
+              [(("attended", None), "allow"), (("unattended", None), "deny")])
         # a PRESENT but unreadable mode record fails CLOSED to guards-armed (distinct from the absent file
         # above). A directory at the mode path raises an OSError that is NOT FileNotFoundError when opened,
         # a hermetic proxy for an unreadable present file that holds on any uid, including root.

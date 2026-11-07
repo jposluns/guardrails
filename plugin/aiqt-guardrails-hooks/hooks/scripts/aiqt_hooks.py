@@ -21864,7 +21864,9 @@ def _orch_mode_read(path):
     The path must encode as strict UTF-8, before any open: a path that is not (a lone surrogate, which is
     also how a surrogate-escaped non-UTF-8 name arrives) is refused as bad, fail-closed, even where the OS
     could open it, and so is a path with a NUL character. The open is os.open(O_RDONLY | O_NONBLOCK |
-    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting. A socket is refused
+    O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead of waiting; it carries no
+    O_NOFOLLOW, so a symlink is followed to its target (why: _orch_mode_detail), and a symlink whose target
+    is missing reports not found, which the caller fails closed for a declared path. A socket is refused
     at that open (it reports ENXIO on Linux, so the reason is the open's OSError), and so is any node the
     open itself fails on (a regular file without read permission, /dev/tty with no controlling terminal);
     after a successful open the descriptor is fstat'ed and anything not a regular file (a FIFO, a device such
@@ -21926,16 +21928,25 @@ def _orch_mode_detail(reg, root):
     fails closed for that (else None). The token comes from the declared mode record, parsed by ONE sound
     reader (never an incremental regex-plus-substring scan). The mode file is a SHARED text file: either a
     state-record file carrying an `Operating-mode:` line amid prose, or a peer JSON mode file. Contract:
-      - None when NO marker is present, preserving the fail-open answer for the ask blocker (the file is
-        shared, so prose must NOT arm): an undeclared mode path, a genuinely absent file (FileNotFoundError),
-        an empty or whitespace-only file, or prose with no `Operating-mode:` declaration line and no JSON
-        marker (including a sentence that merely mentions attended or unattended);
-      - _ORCH_MODE_ARMED (the guards-armed `unattended` posture) when a marker IS present but cannot yield a
-        recognized value, so the guard fails CLOSED rather than silently disarming: every outcome of
-        _orch_mode_read other than not found or a read text (a path with a NUL character or one that is
-        not strict UTF-8, a file that cannot be opened or read (a socket included), one that is not a
-        regular file, one larger than the bound, or one whose bytes are not valid UTF-8), which also returns
-        the reason;
+      - (None, None) when NO mode path is declared (the registry has no `mode` object, or its `path` is not
+        a non-empty string): nothing is declared, so nothing is missing and the guard stays inert;
+      - (None, None) when the declared file is read as text but carries NO marker, preserving the fail-open
+        answer for the ask blocker (the file is shared, so prose must NOT arm): an empty or whitespace-only
+        file (a leading byte-order mark ignored), or prose with no `Operating-mode:` declaration line and no
+        JSON marker (including a sentence that merely mentions attended or unattended). An empty or
+        whitespace-only file stays inert on purpose: it is present and readable, so the declared resource is
+        not absent or unusable, and a shared file holding no text is the same no-declaration case as a
+        shared file holding only prose, which must not arm;
+      - (_ORCH_MODE_ARMED, reason) when a mode path IS declared but its file is absent (the open reports not
+        found, a dangling symlink included): a declared resource that is missing is a failure, not a silent
+        skip, so the guard fails CLOSED to the guards-armed posture and the reason names the missing declared
+        path for the ask guard's deny;
+      - (_ORCH_MODE_ARMED, reason) for every other outcome of _orch_mode_read that is not a read text (a path
+        with a NUL character or one that is not strict UTF-8, a file that cannot be opened or read (a socket
+        included), one that is not a regular file, one larger than the bound, or one whose bytes are not
+        valid UTF-8), the reason naming why;
+      - (_ORCH_MODE_ARMED, None) when a marker IS present in the read text but cannot yield a recognized
+        value, so the guard fails CLOSED rather than silently disarming:
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
@@ -21944,9 +21955,14 @@ def _orch_mode_detail(reg, root):
         `set_at` of their stated types) whose `mode` string begins with attended or unattended (a scalar, an
         array, an object with another key or a wrong-typed value or a malformed `set_at`, or an object whose
         `mode` is absent, non-string, or an unrecognized value all fail closed here);
-      - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
-        `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
-        the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
+      - ("attended", None) when a recognized attended marker is present: a non-None value that does NOT
+        contain `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask
+        against the fresh backlog (_orch_ask_attended) rather than taking the unattended deny;
+      - (_ORCH_MODE_ARMED, None) when a recognized unattended marker is present.
+    A symlinked mode file IS followed (the open has no O_NOFOLLOW): the declared path is operator-authored and
+    may already name any absolute location, so a symlink adds no redirection a direct declaration could not,
+    and the target must still pass every check of _orch_mode_read (a regular file, within the bound, strict
+    UTF-8). A symlink whose target is missing reports not found and, being declared, fails closed as above.
     Soundness rules the reader enforces (each closing a fail-open leg an incremental scan leaked):
       1. A leading byte-order mark is stripped ONCE at the top, so every later check sees BOM-free text and a
          BOM-prefixed declaration OR JSON marker is classified rather than missed.
@@ -21965,7 +21981,9 @@ def _orch_mode_detail(reg, root):
         return (None, None)
     status, text = _orch_mode_read(path)
     if status == "absent":
-        return (None, None)               # no marker file present: unchanged no-marker default (fail open)
+        # a DECLARED mode file that is missing is a failure, not a silent skip: fail closed, naming the path
+        return (_ORCH_MODE_ARMED, "the declared mode file {!r} is absent (its open reports not found)".format(
+            path))
     if status != "ok":
         return (_ORCH_MODE_ARMED, text)   # any other read outcome fails closed to guards-armed, with a reason
     return (_orch_mode_classify_text(text), None)
@@ -23227,7 +23245,8 @@ def orch_ask_guard(data):
     declaration is parsed on its own PHYSICAL line (its value must begin with attended or unattended, compound
     annotations allowed, never a substring, or it fails closed); a JSON marker must be exactly
     {"mode": "<attended|unattended...>"} with no extra or duplicate keys or it fails closed. A mode marker that
-    is present but unreadable (a socket, refused at the open, included), not a regular file (a FIFO or a
+    is declared but absent (its open reports not found, a dangling symlink included), present but
+    unreadable (a socket, refused at the open, included), not a regular file (a FIFO or a
     device included, opened without waiting), larger than _ORCH_MODE_MAX_BYTES, or non-UTF-8, a mode path
     holding a NUL or not strict UTF-8 (each such
     read outcome names its reason in the deny), a present-but-unrecognized `Operating-mode:` declaration
@@ -23235,7 +23254,7 @@ def orch_ask_guard(data):
     "mode" key (a scalar, an array, an object with extra keys, or an object without a string "mode"), or, with no
     declaration line present, a JSON-shaped marker (content beginning with `{`, `[`, or `"`) that is malformed
     (an unterminated string, trailing garbage, or duplicate keys) fails CLOSED to the guards-armed (unattended)
-    posture, so the blocker arms rather than silently disarming; only a genuinely absent file, an empty/whitespace
+    posture, so the blocker arms rather than silently disarming; only an undeclared mode path, an empty/whitespace
     file, or content with no declaration line that does not parse as JSON and whose first non-whitespace character
     is not `{`, `[`, or `"` (ordinary prose, for example `42 items done` or `true trailing`, so prose beginning
     with a number or word does not arm) is the fail-OPEN no-marker default (this guards one mistake shape, not a
@@ -23256,7 +23275,7 @@ def orch_ask_guard(data):
     if mode is None:
         if not _orch_guard_event(
                 root, "ask-guard", "fail-open",
-                "mode record absent, empty, or prose with no declaration or JSON marker"):
+                "mode path undeclared, or mode record empty or prose with no declaration or JSON marker"):
             # the fail-open stands; only the failed guard-events row is surfaced, never a silent loss
             return _allow_note("AIQT guardrail: the ask guard failed open (no operating-mode record it "
                                "could read as a declaration), and the guard-events row recording that "

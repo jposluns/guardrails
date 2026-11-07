@@ -110,8 +110,15 @@ def main():
     else:
         findings.append("no enumerator declared: the stop guard will fail open with findings on "
                         "every yield (stop) and deny scheduling (schedule_idle)")
-    if reg.get("mode") and aiqt_hooks._orch_mode(reg, root) is None:
-        findings.append("declared mode record carries no readable Operating-mode line")
+    if reg.get("mode"):
+        # a declared mode file that is absent or unreadable reads as guards-armed (a token, not None), so its
+        # reason is what reports it here
+        mode_token, mode_unread = aiqt_hooks._orch_mode_detail(reg, root)
+        if mode_token is None:
+            findings.append("declared mode record carries no readable Operating-mode line")
+        elif mode_unread is not None:
+            findings.append("declared mode record carries no readable Operating-mode line: {}".format(
+                mode_unread))
     if findings:
         print("DOCTOR: {} finding(s):".format(len(findings)))
         for f in findings:
