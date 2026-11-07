@@ -5,8 +5,7 @@ family: security
 facet: SECA
 secondary: [INTEG]
 slug: verified-restore-path
-map-nist-80053-tight: [CP-9(2)]
-map-nist-80053-broad: [CP-9, CP-9(1), CP-10]
+map-nist-80053-broad: [CP-9, CP-9(1), CP-9(2), CP-10]
 map-csa-ccm-broad: [BCR-08]
 map-csa-aicm-broad: [BCR-08]
 ---

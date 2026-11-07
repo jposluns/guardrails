@@ -2,11 +2,11 @@
 # full, then the record indexes and the files around them, 1 line each. The section and heading ids are
 # the 20 short-link anchors of opf/site/_redirects, so every kept anchor resolves on this page.
 path = "core-files/index.html"
-title = "Core files"
+title = "Technical details"
 kind = "document"
 label = "Reference"
-heading = "Core store files"
-meta = "The store's control and ledger files: the manifest that declares the store, the ID counters, the version ledger, the worklog (appended per change, correctable until released, then frozen), and the concurrency lease. The record indexes and the files around them follow, 1 line each."
+heading = "Technical details: the store and the tooling"
+meta = "The store's control and ledger files: the manifest that declares the store, the ID counters, the version ledger, the worklog (appended per change, correctable until released, then frozen), and the concurrency lease. The record indexes and the files around them follow, 1 line each, then the reference tooling: its commands, what it checks, and how to verify it."
 
 [[body]]
 component = "section"
@@ -17,7 +17,7 @@ rail = "The store manifest"
 
 [[body]]
 component = "lead"
-html = "The store's control document and discovery marker: declarations for its schema, types, views, modules, and enforcement posture. Closed keysets throughout: an unknown key in any base section is a validation finding."
+html = '''The store's control document and discovery marker: declarations for its schema, types, views, modules, and enforcement posture. Closed keysets throughout: an unknown key in any base section is a validation finding. The base <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code>, the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:'''
 
 [[body]]
 component = "code"
@@ -52,7 +52,9 @@ component = "table"
 caption = "The top-level tables of the store manifest"
 head = ["Table", "Holds"]
 rows = [
-  ["<code>[opf]</code>", "standard, spec_version, homes (2), layout (inline or per-record), posture (off, warn or required), import_status (none, partial or complete)"],
+  # The trailing space in this first cell is deliberate: with the tags stripped, it keeps "[opf]" and
+  # "standard" apart, so the row reads as the pinned text check_opf_homes.py holds this page to.
+  ["<code>[opf]</code> ","standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)"],
   ["<code>[store]</code>", "sync_target (empty under the in-repo default)"],
   ["<code>[modules]</code>", "governance, delivery_assurance, operational_policy, concurrent_operation"],
   ["<code>[profiles.*]</code>", "additive requirement bundles; may only add requirements"],
@@ -154,7 +156,7 @@ heading = "Completion receipts"
 
 [[body]]
 component = "prose"
-html = "<p>A durable completion receipt, created in its single terminal state and immutable from birth.</p>"
+html = "<p>A durable completion receipt, created in its single terminal state and immutable from birth.</p><p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>"
 
 [[body]]
 component = "subhead"
@@ -247,6 +249,14 @@ component = "prose"
 html = "<p>4 optional modules, default-off.</p>"
 
 [[body]]
+component = "prose"
+html = '''<p><strong>Reserved namespace</strong> No module toggle: the standard reserves <code>LF</code> unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.</p><p><strong>(none)</strong> <code>LF</code> reserved unassigned; the reference tooling still recognizes <code>legacy_fragment</code> (<code>quarantined &#8594; resolved | ignored</code>) in stores holding such records from its retired import path.</p>'''
+
+[[body]]
+component = "prose"
+html = '''<p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.</p><p>Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.</p><p>Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.</p><p>A new store's counters file has no <code>LF</code> namespace; a store scaffolded by earlier reference tooling may carry <code>LF</code> (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.</p>'''
+
+[[body]]
 component = "section"
 lbl = "Around the records"
 id = "pointer"
@@ -274,6 +284,63 @@ heading = "The decisions projection"
 [[body]]
 component = "prose"
 html = "<p>The machine projection, generated at <code>.working/DECISIONS.toml</code> and rendered from the 4 decision types.</p>"
+
+[[body]]
+component = "section"
+lbl = "Tooling"
+heading = "The reference tooling"
+id = "tooling"
+rail = "Tooling"
+
+[[body]]
+component = "prose"
+html = '''<p>The <code>opf</code> reference CLI is 1 implementation of the standard's 10 command verbs. It implements 5 in full (init, render, doctor, absorb, and record) and adopt in part; upgrade and the ordinary import modes refuse with exit 2, and migrate and sync are planned. A base adopter can use their own tooling instead, or adopt by hand.</p>'''
+
+[[body]]
+component = "table"
+caption = "The command verbs"
+head = ["Verb", "What it does"]
+rows = [
+  ["<code>init</code>", "Scaffolds validated store sources and the committed pointer; surfaces, never absorbs, anything already at the store location."],
+  ["<code>render</code>", "Regenerates the declared views. <code>--check</code> compares bytes read-only and exits 1 on drift."],
+  ["<code>doctor</code>", "Runs the whole-store integrity layer read-only: exit 0 valid, 1 on a finding, 2 when it cannot evaluate. <code>--require-store</code> makes a missing store a cannot-evaluate for CI. <code>--store-identity</code> instead compares the committed pointer's target and the SHA-256 of the store's <code>init.toml</code> with the values pinned in <code>.github/opf-store-identity.toml</code> (<code>schema = 1</code>, <code>target</code>, <code>init_sha256</code>), and treats a <code>.opf.local.toml</code> override as a mismatch only when every other input evaluates; otherwise the result is cannot-evaluate."],
+  ["<code>absorb</code>", "Drafts changelog entries for human curation, or computes a curated entry's freeze digest; writes no files."],
+  ["<code>record</code>", "Authors 1 record change at a time and leaves it uncommitted for your review."],
+  ["<code>adopt</code>", "Plan, approve, reconcile, and status run; apply and complete refuse, so adoption cannot finish yet."],
+  ["<code>upgrade</code>", "Refuses with exit 2 and writes nothing: the reference tooling defines no store upgrade."],
+  ["<code>import</code>", "The ordinary modes are retired and refuse with exit 2; clean-start adoption is the intake."],
+  ["<code>migrate</code>", "Planned: relocate the whole store, keeping git history and the worklog."],
+  ["<code>sync</code>", "Planned: the pull and push step of the store consistency contract."],
+]
+
+[[body]]
+component = "section"
+lbl = "Coverage"
+heading = "What doctor checks"
+id = "doctor-checks"
+
+[[body]]
+component = "prose"
+html = '''<p>Schema validity; ID uniqueness and counter monotonicity; bidirectional index reconciliation; transition legality where observations suffice; byte drift for the declared baseline views; the root release-version file; worklog span tiling and frozen digests; changelog coverage and freeze; archive integrity; the tracked-store requirement; pointer and sync-target agreement; and path containment. At the strictest posture, an unreadable, unparseable, or unresolvable declared input is a failure, never an empty or clean result.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Integrity"
+heading = "Verify what you install"
+id = "integrity"
+
+[[body]]
+component = "prose"
+html = '''<p>Before applying a downloaded pack, compare its digest with the reference published for that release at <a href="https://posluns.dev/hashes.txt" target="_blank" rel="noopener noreferrer">posluns.dev/hashes.txt<span class="vh"> (opens in a new tab)</span></a>, and refuse on a mismatch. The tooling also checks its own declaration file, <code>opf/tools/opf-declaration.toml</code>, against a shipped digest before it touches a store, and refuses with exit 2 if the file is missing or altered. <code>python3 -I -B opf/tools/opf.py --declaration</code> runs that check alone.</p>'''
+
+[[body]]
+component = "code"
+id = "declaration"
+file = "opf/tools/opf-declaration.toml"
+text = '''release = "1.0.5"
+spec_version = "1.2.0"
+homes = 1
+worklog = 1'''
 
 [[body]]
 component = "next"

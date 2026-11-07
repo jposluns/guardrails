@@ -21096,6 +21096,13 @@ _ORCH_STATES = frozenset(("open", "closed", "proposed"))
 _ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FINDINGS
 _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
+# Enumerator-supplied text reaches a deny message only through _orch_clip, so each named field is one bounded
+# line: an id, a title, and a reason or detail field are each cut to these many characters (mark included).
+_ORCH_NAMED_ID_MAX = 80
+_ORCH_NAMED_TITLE_MAX = 120
+_ORCH_NAMED_REASON_MAX = 200
+_ORCH_CLIP_MARK = "[...]"
+_ORCH_CLIP_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f" "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
 # The `Operating-mode:` declaration is parsed per PHYSICAL line (the reader splits on newlines first, so the
 # value can never cross a line boundary): optional leading horizontal whitespace, then the key, then the value
 # is the REST OF THAT LINE ONLY. A present declaration whose value does not classify (empty or unrecognized)
@@ -21107,6 +21114,11 @@ _ORCH_MODE_DECL_LINE_RE = re.compile(r"^[ \t]*Operating-mode:[ \t]*(.*)$")
 # `attended (ipad); continuous mode` begin with the mode word and classify. Order: unattended before attended.
 _ORCH_MODE_UNATTENDED_RE = re.compile(r"unattended(\b|$)")
 _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
+# The structured operating-mode record a JSON mode file may carry instead of the bare {"mode": ...} object:
+# its keys include `mode` and are otherwise drawn only from these, and its `set_at` is a UTC time written
+# YYYY-MM-DDTHH:MM:SSZ in ASCII digits (matched whole, so a trailing newline or offset does not pass).
+_ORCH_MODE_RECORD_KEYS = frozenset(("mode", "phase", "set_by", "set_at"))
+_ORCH_MODE_SET_AT_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 # The guards-armed posture a present-but-unusable mode marker fails closed to: it carries the `unattended`
 # token, so the ask blocker arms on it and _orch_scope_live reads it as a live (non-None) mode. A recognized
 # mode value carries the `attended`/`unattended` family token (so both `unattended` and `attended` spellings,
@@ -21818,6 +21830,33 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_object_ok(obj):
+    """True when a parsed JSON object is a mode marker whose `mode` string the reader classifies: the bare
+    {"mode": str} object, or a structured operating-mode record whose keys include `mode` and are otherwise
+    drawn only from `phase`, `set_by` and `set_at` (_ORCH_MODE_RECORD_KEYS), with `mode` a string, `phase`
+    null or a string, `set_by` a string, and `set_at` a string of the form YYYY-MM-DDTHH:MM:SSZ that names a
+    real calendar time. False for anything else (another key, a wrong type, a malformed or impossible
+    `set_at`), which the caller fails closed to guards-armed. A duplicate key never reaches here: the parse
+    refuses it first (_orch_reject_duplicate_keys)."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("mode"), str):
+        return False
+    if not set(obj) <= _ORCH_MODE_RECORD_KEYS:
+        return False
+    if "phase" in obj and obj["phase"] is not None and not isinstance(obj["phase"], str):
+        return False
+    if "set_by" in obj and not isinstance(obj["set_by"], str):
+        return False
+    if "set_at" in obj:
+        m = _ORCH_MODE_SET_AT_RE.fullmatch(obj["set_at"]) if isinstance(obj["set_at"], str) else None
+        if m is None:
+            return False
+        try:
+            datetime.datetime(*(int(part) for part in m.groups()))
+        except ValueError:
+            return False                  # the form matched but the time does not exist (month 13, 24:00:00)
+    return True
+
+
 def _orch_mode_read(path):
     """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
     ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
@@ -21900,9 +21939,11 @@ def _orch_mode_detail(reg, root):
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
-        keys), or that parses to anything other than a dict with EXACTLY the single key `mode` whose value is a
-        string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
-        object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
+        keys), or that parses to anything other than an accepted mode object (_orch_mode_object_ok: the bare
+        {"mode": str} object, or a structured operating-mode record that adds only `phase`, `set_by` and
+        `set_at` of their stated types) whose `mode` string begins with attended or unattended (a scalar, an
+        array, an object with another key or a wrong-typed value or a malformed `set_at`, or an object whose
+        `mode` is absent, non-string, or an unrecognized value all fail closed here);
       - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
         `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
         the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
@@ -21915,8 +21956,9 @@ def _orch_mode_detail(reg, root):
       3. The value and the JSON `mode` string are classified by the word-anchored mode grammar
          (_orch_mode_classify), a prefix match at the start, never a substring, so `disattended` and
          `not-attended` do NOT match `attended`.
-      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and an exactly-{"mode": str} shape,
-         so duplicate keys, extra keys, and non-object or non-string-mode values all fail closed."""
+      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and a closed shape (the bare
+         {"mode": str} object or the structured record of _orch_mode_object_ok), so duplicate keys, other
+         keys, wrong-typed record fields, and non-object or non-string-mode values all fail closed."""
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
@@ -21952,11 +21994,11 @@ def _orch_mode_classify_text(text):
         # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
         # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
-    if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
+    if _orch_mode_object_ok(obj):
         classified = _orch_mode_classify(obj["mode"])
         return classified if classified is not None else _ORCH_MODE_ARMED
-    # Any other JSON (a scalar, an array, an object with extra keys, or a dict without a string `mode`) is a
-    # present-but-unrecognized marker and fails CLOSED to guards-armed.
+    # Any other JSON (a scalar, an array, an object with a key outside the record keys or a value of the wrong
+    # type, or a dict without a string `mode`) is a present-but-unrecognized marker and fails CLOSED.
     return _ORCH_MODE_ARMED
 
 
@@ -22138,6 +22180,17 @@ def _orch_escape_active(reg, root):
     return (True, None)
 
 
+def _orch_clip(value, limit):
+    """value as one bounded line for a deny message: every control character (LF and CR included) and
+    every Unicode line or paragraph separator becomes a space, and text longer than limit is cut to
+    exactly limit characters ending in _ORCH_CLIP_MARK, so enumerator-supplied text can neither split a
+    reason across lines nor grow it without bound."""
+    text = _ORCH_CLIP_CONTROL_RE.sub(" ", str(value))
+    if len(text) > limit:
+        text = text[:limit - len(_ORCH_CLIP_MARK)] + _ORCH_CLIP_MARK
+    return text
+
+
 def validate_enumeration(obj):
     """AEI v1 strict validation: (items, None) on a valid enumeration, (None, detail) otherwise. A
     duplicate id, a malformed item or field, an unknown version, a missing envelope, or a non-dict
@@ -22147,7 +22200,8 @@ def validate_enumeration(obj):
         return (None, "payload is not a JSON object")
     version = obj.get("version")
     if type(version) is not int or version != 1:
-        return (None, "unknown AEI version {!r} (an exact integer 1 is required)".format(version))
+        return (None, "unknown AEI version {} (an exact integer 1 is required)".format(
+            _orch_clip(repr(version), _ORCH_NAMED_REASON_MAX)))
     gen = obj.get("generated_at_utc")
     gen_ts = _orch_parse_utc(gen) if isinstance(gen, str) else None
     if gen_ts is None:
@@ -22168,29 +22222,31 @@ def validate_enumeration(obj):
         iid = raw.get("id")
         if not isinstance(iid, str) or not iid:
             return (None, "an item has no string id")
+        named_iid = _orch_clip(iid, _ORCH_NAMED_ID_MAX)
         if iid in seen:
-            return (None, "duplicate item id {!r}".format(iid))
+            return (None, "duplicate item id {}".format(_orch_clip(repr(iid), _ORCH_NAMED_ID_MAX)))
         seen.add(iid)
         title = raw.get("title")
         if title is not None and not isinstance(title, str):
-            return (None, "item {} has a non-string title".format(iid))
+            return (None, "item {} has a non-string title".format(named_iid))
         state = raw.get("state")
         if state not in _ORCH_STATES:
-            return (None, "item {} has invalid state {!r}".format(iid, state))
+            return (None, "item {} has invalid state {}".format(
+                named_iid, _orch_clip(repr(state), _ORCH_NAMED_REASON_MAX)))
         granted = raw.get("granted")
         if not isinstance(granted, bool):
-            return (None, "item {} has a non-boolean granted".format(iid))
+            return (None, "item {} has a non-boolean granted".format(named_iid))
         blocker = raw.get("blocker")
         if blocker is not None:
             if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
                     or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
-                return (None, "item {} has a malformed blocker".format(iid))
+                return (None, "item {} has a malformed blocker".format(named_iid))
             ev = blocker.get("evidence")
             obs = blocker.get("observed_at_utc")
             if (ev is not None and not isinstance(ev, str)) \
                     or (obs is not None and not isinstance(obs, str)):
                 return (None, "item {} has a malformed blocker field (evidence/observed_at_utc)"
-                        .format(iid))
+                        .format(named_iid))
         out.append({"id": iid, "title": title if isinstance(title, str) and title else iid,
                     "state": state, "granted": granted, "blocker": blocker})
     return (out, None)
@@ -22216,10 +22272,12 @@ def _orch_enumerate(reg, root):
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
     except (OSError, subprocess.SubprocessError) as exc:
-        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(exc))
+        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(
+            _orch_clip(exc, _ORCH_NAMED_REASON_MAX)))
     if result.returncode != 0:
         return ("ENUMERATOR_ERROR",
-                "enumerator exit {}: {}".format(result.returncode, (result.stderr or "")[:200]))
+                "enumerator exit {}: {}".format(result.returncode,
+                                                _orch_clip(result.stderr or "", _ORCH_NAMED_REASON_MAX)))
     try:
         payload = json.loads(result.stdout)
     except ValueError as exc:
@@ -22506,7 +22564,8 @@ def decide_yield(ctx):
         # the unevaluable items are NAMED here exactly as on the stop path below, so a
         # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
         # correct, not only that one exists
-        named_sched = ", ".join(i for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
+        named_sched = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
         if len(sched_cannot) > _ORCH_MAX_NAMED:
             named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
@@ -22530,12 +22589,14 @@ def decide_yield(ctx):
             return ("DENY",
                     "wake hygiene: a permitted idle must name the item or blocker it will recheck; "
                     "pending: {}".format(
-                        ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
+                        ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                  for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
             cannot_items = ctx.get("cannot_evaluate", [])
             # the unevaluable items are NAMED (bounded), so a scope-level cannot-evaluate such as
             # lease:max_age_hours tells the operator WHAT to correct, not only that one exists
-            named_cannot = ", ".join(i for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
+            named_cannot = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                     for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
             if len(cannot_items) > _ORCH_MAX_NAMED:
                 named_cannot += "; and {} more".format(len(cannot_items) - _ORCH_MAX_NAMED)
             return ("DENY",
@@ -22557,7 +22618,9 @@ def decide_yield(ctx):
                 .format(ctx["schedule_denials"]), disposition)
     named = ctx["actionable"][:_ORCH_MAX_NAMED]
     more = len(ctx["actionable"]) - len(named)
-    listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
+    listing = "; ".join("{} ({}: {})".format(_orch_clip(i, _ORCH_NAMED_ID_MAX),
+                                             _orch_clip(t, _ORCH_NAMED_TITLE_MAX),
+                                             _orch_clip(w, _ORCH_NAMED_REASON_MAX)) for i, t, w in named)
     if more > 0:
         listing += "; and {} more".format(more)
     if kind == "ask":
@@ -22566,7 +22629,8 @@ def decide_yield(ctx):
         if held:
             # the mixed backlog names BOTH sets in one reason: the actionable items above carry the
             # two exits, and the held items are named so the operator knows what to repair
-            named_held = ", ".join(i for i, _c, _p in held[:_ORCH_MAX_NAMED])
+            named_held = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                   for i, _c, _p in held[:_ORCH_MAX_NAMED])
             if len(held) > _ORCH_MAX_NAMED:
                 named_held += "; and {} more".format(len(held) - _ORCH_MAX_NAMED)
             held_note = (" Additionally, a proof source for {} open item(s) is unreadable "

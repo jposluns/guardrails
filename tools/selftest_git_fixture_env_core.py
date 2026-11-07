@@ -1964,8 +1964,8 @@ def _member_bound_checks(roster):
     check("config/member-roster-figures",
           (problems, len(SIZING_ACCOUNT_ROSTER), SIZING_ACCOUNT_TIMED, len(SIZING_MEASURED),
            len(SIZING_MALFORMED_MEASURED), hashlib.sha256(frozen.encode("utf-8")).hexdigest()),
-          ([], 100, 88, 10, 9,
-           "6b596b82f5be854c1c969a19c8a1991598bc078ba9f07385a3325d79eddba0f0"))
+          ([], 98, 88, 10, 9,
+           "aab3007c03d0392a2c99a57d440bd774b1b3f20b5842a296cb15898dfc1cb741"))
     # The oracle recomputes every live figure from the roster and the frozen constants, so an
     # expectation no longer inherits a drifted figure through the baseline above. It is not an
     # independent derivation: every expression but members mirrors _roster_figures's, so an

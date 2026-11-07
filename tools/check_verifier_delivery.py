@@ -431,6 +431,7 @@ import html.entities
 import json
 import os
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -2338,6 +2339,30 @@ def _mixed(pin, replace=None, **options):
     return _delivery(pin, *(answers[number] for number in sorted(answers)), **options)
 
 
+def _fixture_root(make=tempfile.mkdtemp):
+    """The self-test's fixture directory, drawn through `make` (tempfile.mkdtemp) by
+    _input_declarations.verbatim_tempdir: a fixture brief names a path under it on an INPUT line, so it
+    must render exactly as written; a root or draw the reading would render differently is CannotEvaluate.
+    self_test draws the directory here through _marked_first_draw, and a check reads FIXTURE_DRAWS."""
+    return Path(_input_declarations.verbatim_tempdir("verifier-delivery-selftest-", CannotEvaluate, make=make))
+
+
+# (prefix, directory) for every draw _marked_first_draw made, in order
+FIXTURE_DRAWS = []
+
+
+def _marked_first_draw(prefix):
+    """tempfile.mkdtemp, its first draw always a name holding marks (as a real draw can), so the
+    c1/declared-input-fixture-verbatim check sees every draw self_test made, and a self_test that draws
+    its fixture directory with plain mkdtemp fails that check on every run, not only on an unlucky draw."""
+    if FIXTURE_DRAWS:
+        directory = tempfile.mkdtemp(prefix=prefix)
+    else:
+        directory = tempfile.mkdtemp(prefix=prefix + "_", suffix="_")
+    FIXTURE_DRAWS.append((prefix, directory))
+    return directory
+
+
 class _Fixture:
     """A throwaway repository with FIXTURE_FILES committed, plus brief and delivery files beside it."""
 
@@ -2450,6 +2475,18 @@ def _self_test_cases(fx):
         (_mixed(sha, {3: "Q3. UNVERIFIABLE: " + spaced + " could not be listed."}),
          BRIEF_MIXED.replace("BRIEF-PIN: {pin}\n", "BRIEF-PIN: {pin}\nINPUT: \"" + spaced + "\"\n")))],
           ["NO_VOTE"] * 5)
+    # the fixture path the INPUT line above names renders verbatim: a mkdtemp draw the reading renders as
+    # emphasis names a path without the marks; self_test drew the fixture directory through
+    # _marked_first_draw, its marked draws were removed and drawn again, and the path reads back as written
+    marked = fx.base / "draw-_k9b51z_"
+    check("c1/declared-input-fixture-verbatim", (
+        _input_declarations.read("INPUT: {}/docs/gamma.md\n".format(marked)) == (
+            [(1, "{}/docs/gamma.md".format(marked))], []),
+        len(FIXTURE_DRAWS) > 1, set(prefix for prefix, _ in FIXTURE_DRAWS),
+        [os.path.lexists(directory) for _, directory in FIXTURE_DRAWS[:-1]] == [False] * (len(FIXTURE_DRAWS) - 1),
+        Path(FIXTURE_DRAWS[-1][1]) == fx.base if FIXTURE_DRAWS else None,
+        _input_declarations.read("INPUT: " + in_repo + "\n")),
+        (False, True, {"verifier-delivery-selftest-"}, True, True, ([(1, in_repo)], [])))
     # what a reader shows as INPUT: declares, exactly as the brief lint's P6 reads it: underscore and
     # asterisk emphasis, a numbered list item, an escaped or character-referenced colon, a fullwidth or
     # confusable-spelt label, a combining character the fold removes, strikethrough, a code-span path,
@@ -3875,8 +3912,12 @@ def self_test(report_path=None):
         _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     from _git_fixture_env import fixture_git_lifecycle
     try:
-        with fixture_git_lifecycle(), tempfile.TemporaryDirectory(prefix="verifier-delivery-selftest-") as raw:
-            _self_test_cases(_Fixture(Path(raw)))
+        with fixture_git_lifecycle():
+            base = _fixture_root(make=_marked_first_draw)
+            try:
+                _self_test_cases(_Fixture(base))
+            finally:
+                shutil.rmtree(base)
     except (CannotEvaluate, OSError, RuntimeError, subprocess.SubprocessError) as exc:
         print("SELF-TEST HARNESS ERROR: {}".format(exc), file=sys.stderr)
         return 2

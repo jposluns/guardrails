@@ -456,13 +456,15 @@ EXCLUDED_TREES = (".github/", "opf/tools/_vendor/", ".baseline/")
 SKIPPED_DIR_NAMES = {".git", "__pycache__", ".venv", "venv", "node_modules"}
 # The git index mode of a gitlink (a submodule's commit), as git ls-files -s prints it.
 GITLINK_MODE = b"160000"
-DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install.html",
-                     "opf/site/adopt.md", "opf/site/adopt.html", "opf/spec/OPF-QUICKSTART.md",
+# The install and adopt pages are generated (tools/gen_draft_site.py), each an index.html under its
+# page directory.
+DECLARATION_FILES = ("README.md", "docs/development.md", "site/development.html", "site/install/index.html",
+                     "opf/site/adopt.md", "opf/site/adopt/index.html", "opf/spec/OPF-QUICKSTART.md",
                      ".preview/README.md")
 # How many times a declaration file states the floor phrase, where that is more than once: each copy is
 # counted, so changing or removing one of them is a finding.
 # .preview/README.md states it once and quotes it once in the hooks' refusal line.
-DECLARATION_COPIES = {".preview/README.md": 2, "opf/site/adopt.html": 2}
+DECLARATION_COPIES = {".preview/README.md": 2}
 # A separator the claims leg reads between words: whitespace, or a no-break space and its HTML forms.
 CLAIM_SEP = r"(?:\s|&nbsp;|&#160;)"
 # A version operator: >=, =>, ~=, ==, >, the sign U+2265, and their HTML forms.
@@ -3926,7 +3928,7 @@ def _self_test_cases(base):
         "<!-- Python 3.14 or newer -->\n<p>The hooks require Python 3.11 or newer.</p>\n")}))
     check("claims/older-beside-phrase-finding",
           (code, [line for line in lines if "names Python" in line]),
-          (1, ["FAIL: site/install.html:2: names Python 3.11, below the floor 3.14; a declaration may "
+          (1, ["FAIL: site/install/index.html:2: names Python 3.11, below the floor 3.14; a declaration may "
                "not state an older version"]))
     forms = ("Requires Python 3.14 or newer.\nCPython 3.13\npython3.12\nPython\n3.10\nPython&nbsp;3.9\n"
              "Python versions 3.12\nruns on 3.11+\nor 3.13 or later\nPython 2.7\nPython\u00a03.8\n")
@@ -3944,17 +3946,17 @@ def _self_test_cases(base):
     check("claims/oversized-version-cannot-evaluate", evaluate(_fixture(base, files={
         DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nPython 3." + "1" * 5000 + "\n"}))[0], 2)
     # A file holding two copies of the phrase: one copy changed, or removed, is a finding.
-    adopt = "opf/site/adopt.html"
+    twice = ".preview/README.md"
     code, lines = evaluate(_fixture(base, files={
-        adopt: "<p>Requires Python 3.14 or newer.</p>\n<p>Requires Python 3.14 or later.</p>\n"}))
+        twice: "<p>Requires Python 3.14 or newer.</p>\n<p>Requires Python 3.14 or later.</p>\n"}))
     check("documentation/copies-one-changed-finding", (code, lines),
           (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
-               .format(adopt), "FAIL: {}:2: states the floor as 'Python 3.14 or later', not as "
-               "'Python 3.14 or newer'".format(adopt)]))
-    code, lines = evaluate(_fixture(base, files={adopt: "<p>Requires Python 3.14 or newer.</p>\n"}))
+               .format(twice), "FAIL: {}:2: states the floor as 'Python 3.14 or later', not as "
+               "'Python 3.14 or newer'".format(twice)]))
+    code, lines = evaluate(_fixture(base, files={twice: "<p>Requires Python 3.14 or newer.</p>\n"}))
     check("documentation/copies-one-removed-finding", (code, lines),
           (1, ["FAIL: {}: states 'Python 3.14 or newer' 1 time(s), not the 2 in DECLARATION_COPIES"
-               .format(adopt)]))
+               .format(twice)]))
     code, lines = evaluate(_fixture(base, files={
         DECLARATION_FILES[0]: "Requires Python 3.14 or newer.\nThe hooks need python 3.14 and later.\n"}))
     check("documentation/variant-wording-finding", (code, lines),

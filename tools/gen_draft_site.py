@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Generate the staged draft sites (shared site template, baseline 1.7.0) under each site's draft/ root.
+"""Generate the template sites (shared site template, baseline 1.7.0) at each site's root, plus the /draft/
+placeholder page each keeps (noindex, linking the root).
 
   gen_draft_site.py              write every registered page
-  gen_draft_site.py --check      exit 1 if any target differs from a fresh build, 2 if one cannot be read
+  gen_draft_site.py --check      exit 1 if any target differs from a fresh build or a page folder holds an
+                                 unlisted page, 2 if one cannot be read or a root-relative link resolves
+                                 to nothing the site serves (both checks also run on a normal run)
   gen_draft_site.py --self-test  assert the shell, the components, the refusals and the base-path rules
 
 Every page is built from 1 shell (template specification section 5): `<html lang="en" class="site-<name>">`,
@@ -14,7 +17,9 @@ shows it; section 7.33),
 `main#main-content`, the family footer (section 7.19) and the `#copy-status` live region. The home page
 carries the "About this project" region (section 7.24), the one place that links the Disclosure and Licence
 pages. Each site's base (SITES) is the one base path for every internal href and src of that site; it
-becomes "/" at that site's promotion, and the robots meta goes with it. A page is refused (exit 2, nothing written) if it carries an
+becomes "/" at that site's promotion, and the robots meta goes with it (a page under draft/ keeps it). Asset
+URLs follow the site's separate asset base ("assets" in SITES), which stays "/draft/" after promotion, so
+the pinned copy is served where it was staged. A page is refused (exit 2, nothing written) if it carries an
 en or em dash, an inline style or script, an `on*` attribute, or "what this is" framing. The baseline
 files under assets/baseline/ are a pinned copy, not generated here (tools/check_baseline_pin.py).
 
@@ -56,6 +61,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import html as _html
 import os
 import re
+import shutil
 import stat
 import tempfile
 import tomllib
@@ -74,7 +80,14 @@ from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order fo
 # The staging base path; each site's own base (SITES) is this while staging and "/" at its promotion.
 DRAFT_BASE = "/draft/"
 ASSETS = "assets/baseline/"
+# The draft folder of a promoted site: a page under it (the /draft/ placeholder) keeps the robots noindex
+# meta that every page carried while staging.
+DRAFT_DIR = "draft/"
 MAX_PAGE_BYTES = 1 << 20
+# The link-preview card each site's pages name as og:image and twitter:image: a PNG under the site's live root
+# (rendered by tools/render_og_cards.py from tools/og-cards/), at the size the link previews ask for.
+CARD = "assets/{}-og.png"
+CARD_WIDTH, CARD_HEIGHT = 1200, 627
 # The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,
 # before the stylesheets, with data-cfasync="false" before src and no defer or async, so a stored scheme
 # applies before the first paint; the button is the last child of header.mast, after nav.nav, and stays
@@ -90,53 +103,65 @@ SCHEME_BUTTON = (
     '<span class="vh">Dark mode</span></button>')
 
 GENSRC_OUTPUTS = (
-    {"target": "site/draft/index.html", "kind": "file",
+    {"target": "site/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "site/draft/404.html", "kind": "file",
+    {"target": "site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/404.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "site/draft/disclosure/index.html", "kind": "file",
+    {"target": "site/draft/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/draft.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/disclosure/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/disclosure.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "site/draft/install/index.html", "kind": "file",
+    {"target": "site/future/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/future.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/install/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/install.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "site/draft/license/index.html", "kind": "file",
+    {"target": "site/install/details/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "site/draft/mappings/index.html", "kind": "file",
+    {"target": "site/mappings/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/mappings.toml",
                  ".aiqt/standards/", ".aiqt/core/rules/"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "site/draft/rules/index.html", "kind": "file",
+    {"target": "site/rules/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/rules.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "site/draft/standard/index.html", "kind": "file",
+    {"target": "site/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/standard.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/index.html", "kind": "file",
+    {"target": "opf/site/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/home.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/404.html", "kind": "file",
+    {"target": "opf/site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/404.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/adopt/index.html", "kind": "file",
+    {"target": "opf/site/adopt/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/adopt.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/core-files/index.html", "kind": "file",
+    {"target": "opf/site/core-files/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/core-files.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/disclosure/index.html", "kind": "file",
+    {"target": "opf/site/draft/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/draft.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/disclosure/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/disclosure.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/license/index.html", "kind": "file",
+    {"target": "opf/site/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/license.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/model/index.html", "kind": "file",
+    {"target": "opf/site/model/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/model.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
-    {"target": "opf/site/draft/standard/index.html", "kind": "file",
+    {"target": "opf/site/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
 )
@@ -179,26 +204,27 @@ OPF_KEPT_LIVE_PATHS = (
 
 # The per-site context; aiqt.ai first. Each site has its own page data directory ("src", 1 TOML file per
 # page, discovered by listing it), its output root, its live root (where its kept live paths must exist),
-# its base path ("/draft/" while staging, "/" at its own promotion), its key and name, its logo alt text,
+# its base path ("/draft/" while staging, "/" at its own promotion; both sites are promoted), its asset
+# base (the URL folder holding assets/baseline/, kept at "/draft/" where the files are served), its key and name, its logo alt text,
 # its kept live paths and its nav. Nav items are the site's own pages, then GitHub last; Disclosure and
 # Licence are not in the bar (the home page's About region links them). An internal nav item is emitted
 # only once its page's data file is registered, so every nav link resolves while the pages land one at a
 # time. Only a site with "control" set renders the document control strip (template specification 7.7:
 # aiqt.ai only), so no other site's page can carry the AIQT VERSION as its own release.
 SITES = (
-    {"key": "aiqt", "name": "AIQT", "src": "site/draft-src", "root": "site/draft", "live": "site",
-     "base": DRAFT_BASE, "control": True,
+    {"key": "aiqt", "name": "AIQT", "src": "site/draft-src", "root": "site", "live": "site",
+     "base": "/", "assets": DRAFT_BASE, "control": True,
      "logo-alt": "A shield bearing a check mark, set on a guardrail",
      "github": "https://github.com/jposluns/guardrails",
      "kept": KEPT_LIVE_PATHS,
      "nav": (("install/", "Install"), ("standard/", "The standard"), ("rules/", "The 5 rules"),
              ("mappings/", "Mappings"))},
-    {"key": "opfiles", "name": "OPFiles", "src": "opf/site/draft-src", "root": "opf/site/draft",
-     "live": "opf/site", "base": DRAFT_BASE, "control": False,
+    {"key": "opfiles", "name": "OPFiles", "src": "opf/site/draft-src", "root": "opf/site",
+     "live": "opf/site", "base": "/", "assets": DRAFT_BASE, "control": False,
      "logo-alt": "A machine-written source record and its generated view, joined by a drift gate",
-     "github": "https://github.com/jposluns/guardrails",
+     "github": "https://github.com/jposluns/guardrails/tree/main/opf",
      "kept": OPF_KEPT_LIVE_PATHS,
-     "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Core files"),
+     "nav": (("model/", "The model"), ("standard/", "The standard"), ("core-files/", "Technical details"),
              ("adopt/", "Adopt"))},
 )
 
@@ -212,7 +238,12 @@ def _url(site, path=""):
 
 
 def _asset(site, path):
-    return site["base"] + ASSETS + path
+    return site["assets"] + ASSETS + path
+
+
+def _asset_folder(site):
+    """The site's template asset folder under its live root, the one its asset URLs name."""
+    return "{}/{}{}".format(site["live"], site["assets"].lstrip("/"), ASSETS)
 
 
 def _page_url(site, rel):
@@ -222,6 +253,28 @@ def _page_url(site, rel):
     if rel.endswith("/index.html"):
         return _url(site, rel[:-len("index.html")])
     return _url(site, rel)
+
+
+def _origin(site):
+    """The site's https origin, from its FAMILY domain."""
+    return "https://" + next(domain for key, _word, domain, _n in FAMILY if key == site["key"])
+
+
+def _social_metas(site, page):
+    """The Open Graph and Twitter card metas: the page's absolute URL and full title, the site name, and the
+    site's card image with its size and alt text."""
+    image = "{}/{}".format(_origin(site), CARD.format(site["key"]))
+    values = (("property", "og:type", "website"),
+              ("property", "og:title", "{} | {}.ai".format(page["title"], site["name"])),
+              ("property", "og:url", _origin(site) + _page_url(site, page["rel"])),
+              ("property", "og:site_name", site["name"] + ".ai"),
+              ("property", "og:image", image),
+              ("property", "og:image:width", str(CARD_WIDTH)),
+              ("property", "og:image:height", str(CARD_HEIGHT)),
+              ("property", "og:image:alt", "{}.ai: {}".format(site["name"], site["logo-alt"])),
+              ("name", "twitter:card", "summary_large_image"),
+              ("name", "twitter:image", image))
+    return ['<meta {}="{}" content="{}">'.format(kind, key, _attr(value)) for kind, key, value in values]
 
 
 def _t(value):
@@ -1002,12 +1055,16 @@ def _page_from_doc(doc, where):
     """A validated page model from one parsed data file."""
     if not isinstance(doc, dict):
         raise RefusedPage("{}: the page must be a TOML table".format(where))
-    spec = _need(doc, where, ("path", "title", "kind", "body"), ("label", "heading", "meta"))
+    spec = _need(doc, where, ("path", "title", "kind", "body"), ("label", "heading", "meta", "description"))
     rel = _text(spec, where, "path")
     if REL_RE.fullmatch(rel) is None:
         raise RefusedPage("{}: {!r} is not a safe page path".format(where, rel))
     title = _text(spec, where, "title")
     meta = _text(spec, where, "meta") if "meta" in spec else None
+    # A head-only description, for a page that shows no meta line (the home and 404 pages).
+    description = _text(spec, where, "description") if "description" in spec else None
+    if meta is not None and description is not None:
+        raise RefusedPage("{}: set meta or description, not both".format(where))
     kind = _text(spec, where, "kind")
     if kind not in KINDS:
         raise RefusedPage("{}: kind must be one of {}".format(where, ", ".join(KINDS)))
@@ -1039,7 +1096,7 @@ def _page_from_doc(doc, where):
         if name == "about" and kind == "document" and position != len(body):
             raise RefusedPage("{}: the About region closes a document page".format(comp_where))
     return {"rel": rel, "title": title, "kind": kind, "label": spec.get("label"),
-            "heading": spec.get("heading"), "meta": meta, "body": body, "rail": rail,
+            "heading": spec.get("heading"), "meta": meta, "description": description, "body": body, "rail": rail,
             "where": where}
 
 
@@ -1240,11 +1297,41 @@ def _link_findings(site, html, scripts=(), scheme_src=None):
     return guard.found
 
 
+class _PlainText(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_data(self, data):
+        self.parts.append(data)
+
+
+def _description(site, page):
+    """The page's description, or else its meta, as plain text (its inline markup reduced to the text,
+    character references decoded, whitespace runs folded to 1 space), or "" for a page with neither."""
+    source = page.get("description") or page["meta"]
+    if not source:
+        return ""
+    reader = _PlainText()
+    reader.feed(_inline(site, source))
+    reader.close()
+    return " ".join("".join(reader.parts).split())
+
+
 def render_page(site, pages, page):
     rel, title = page["rel"], page["title"]
     head = ['<meta charset="utf-8">', '<meta name="viewport" content="width=device-width, initial-scale=1">']
-    if site["base"] == DRAFT_BASE:
+    if site["base"] == DRAFT_BASE or (site["base"] == "/" and rel.startswith(DRAFT_DIR)):
         head.append('<meta name="robots" content="noindex, nofollow">')
+    # The page's meta text, as plain text, is also its search and link-preview description. Specification
+    # section 5 does not place these metas; they join the other metas before the title, where every
+    # reference page keeps its robots meta, so the elements section 5 lists keep their order.
+    description = _description(site, page)
+    if description:
+        head.append('<meta name="description" content="{}">'.format(_attr(description)))
+        head.append('<meta property="og:description" content="{}">'.format(_attr(description)))
+    # The link-preview card metas follow the description metas, on every page.
+    head.extend(_social_metas(site, page))
     head.append("<title>{} | {}.ai</title>".format(_t(title), site["name"]))
     head.append('<link rel="icon" href="{}" type="image/svg+xml">'.format(
         _asset(site, "logos/{}-favicon.svg".format(site["key"]))))
@@ -1343,12 +1430,25 @@ def _kept_live_missing(site):
     return missing
 
 
-def build(pages=None, sites=SITES):
+def promoted_sites(sites=SITES):
+    """Each site as it stands at its promotion: base "/" and its pages written to its live root."""
+    return tuple(dict(site, base="/", root=site["live"]) for site in sites)
+
+
+def staged_sites(sites=SITES):
+    """Each site as it stood before its promotion: base "/draft/" and its pages written under its live
+    root's draft/ folder. The self-test builds this form too, so the staging rules stay proven."""
+    return tuple(dict(site, base=DRAFT_BASE, root=site["live"] + "/draft") for site in sites)
+
+
+def build(pages=None, sites=SITES, registered=True):
     """{target path: text} for every registered output. Each site is loaded from its own data directory
     and rendered with its own context; with the default page sets, the built set must match the
     GENSRC_OUTPUTS declaration, so a page cannot land or vanish without its registry entry. A given
     `pages` list (a fixture) is rendered for every site in `sites`. Every kept live path of a site must
-    exist under its live root before anything renders, and no 2 sites may build the same output path."""
+    exist under its live root before anything renders, and no 2 sites may build the same output path.
+    `registered` false skips the declaration match, for a fixture build of the declared pages at another
+    base (promoted_sites)."""
     declared = pages is None
     outputs = {}
     for site in sites:
@@ -1362,12 +1462,117 @@ def build(pages=None, sites=SITES):
             if target in outputs:
                 raise RefusedPage("{}: built by more than 1 site".format(target))
             outputs[target] = render_page(site, site_pages, page)
-    if declared:
+    if declared and registered:
         targets = {entry["target"] for entry in GENSRC_OUTPUTS}
         if set(outputs) != targets:
             raise RefusedPage("built outputs {} differ from GENSRC_OUTPUTS {}".format(
                 sorted(outputs), sorted(targets)))
     return outputs
+
+
+# The ASCII whitespace a browser strips from both ends of a URL attribute value.
+_URL_SPACE = "\t\n\f\r "
+
+
+class _RootLinks(HTMLParser):
+    """Every root-relative href and src value a page writes (one leading "/", not a "//host" URL, once the
+    whitespace a browser strips is set aside), as written."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.found = []
+
+    def handle_starttag(self, tag, attrs):
+        for name, value in attrs:
+            if name in ("href", "src") and isinstance(value, str) and value.strip(_URL_SPACE).startswith("/") \
+                    and not value.strip(_URL_SPACE).startswith("//"):
+                self.found.append(value)
+
+
+def _asset_file(asset_dir, rest):
+    """True only when `rest` (the URL path after the asset folder's URL) names a file inside asset_dir: it
+    must be relative, with no empty, "." or ".." segment (also after one percent-decoding, as a browser reads
+    %2e), and must resolve inside the folder."""
+    if any(unquote(segment) in ("", ".", "..") for segment in rest.split("/")):
+        return False
+    folder = Path(asset_dir).resolve()
+    candidate = (folder / rest).resolve()
+    return candidate.is_relative_to(folder) and candidate != folder and candidate.is_file()
+
+
+def _redirect_sources(path):
+    """The source path (the first field) of every rule line of a _redirects file; none when it is absent.
+    OSError or UnicodeDecodeError when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        return frozenset()
+    return frozenset(line.split()[0] for line in text.splitlines()
+                     if line.strip() and not line.lstrip().startswith("#"))
+
+
+def unresolved_links(outputs, sites=SITES, tree=ROOT):
+    """Every root-relative href or src on a built page that resolves to none of: a page the same site
+    generates, a file under the site's template asset folder (in `tree`), one of its kept live paths, or the
+    source of a rule in its live root's _redirects file. The path is compared without its #fragment or
+    ?query, so it holds at any base: the generated page URLs, the asset folder and the redirects all follow
+    the site's own base and root. A value with leading or trailing whitespace is refused, as is an asset path
+    that is absolute, has an empty or dot segment, or resolves outside the asset folder (_asset_file)."""
+    found = []
+    for site in sites:
+        prefix = site["root"] + "/"
+        rels = sorted(target[len(prefix):] for target in outputs if target.startswith(prefix))
+        pages = {_page_url(site, rel) for rel in rels}
+        asset_url = site["assets"] + ASSETS
+        asset_dir = Path(tree) / _asset_folder(site)
+        redirects = _redirect_sources(Path(tree) / site["live"] / "_redirects")
+        for rel in rels:
+            parser = _RootLinks()
+            parser.feed(outputs[prefix + rel])
+            parser.close()
+            for value in parser.found:
+                if value != value.strip(_URL_SPACE):
+                    found.append("{}{}: {!r} has leading or trailing whitespace".format(prefix, rel, value))
+                    continue
+                path, sep, frag = value.partition("#")
+                path = path.split("?", 1)[0]
+                if path in pages or path in redirects or _kept_live(site, path + sep + frag):
+                    continue
+                if path.startswith(asset_url) and _asset_file(asset_dir, path[len(asset_url):]):
+                    continue
+                found.append("{}{}: {} resolves to no generated page, template asset, kept live path or "
+                             "redirect".format(prefix, rel, value))
+    return found
+
+
+def stray_outputs(tree, sites=SITES, targets=None):
+    """Every .html file (the extension in any case) in a folder that holds a generated page of a site (the
+    folder of a target) that the targets (GENSRC_OUTPUTS by default) do not list, apart from a kept live
+    path's own file. Only those
+    folders are listed, not their subfolders, so the asset folder and a promoted root's other folders (its
+    downloads, its draft placeholder) are not read; a page in a folder holding no generated page is not
+    found here."""
+    if targets is None:
+        targets = {entry["target"] for entry in GENSRC_OUTPUTS}
+    found = []
+    for site in sites:
+        prefix = site["root"] + "/"
+        kept = set()
+        for path in site["kept"]:
+            live = "{}/{}".format(site["live"], path.lstrip("/"))
+            kept.update((live, live + ".html"))
+        for folder in sorted({target.rsplit("/", 1)[0] for target in targets if target.startswith(prefix)}):
+            try:
+                with os.scandir(Path(tree) / folder) as entries:
+                    names = sorted(entry.name for entry in entries if not entry.is_dir(follow_symlinks=False))
+            except FileNotFoundError:
+                continue
+            for name in names:
+                rel = "{}/{}".format(folder, name)
+                if name.lower().endswith(".html") and rel not in targets and rel not in kept:
+                    found.append(rel)
+    return found
 
 
 def _existing(path):
@@ -1382,11 +1587,23 @@ def _existing(path):
         return handle.read()
 
 
-def run(root, check):
+def run(root, check, outputs=None):
+    """Write (or with `check`, compare) the built pages under root. `outputs` (a self-test's prebuilt pages)
+    defaults to build()."""
     try:
-        outputs = build()
+        if outputs is None:
+            outputs = build()
     except RefusedPage as exc:
         print("error: refused: {}".format(exc), file=sys.stderr)
+        return 2
+    try:
+        unresolved = unresolved_links(outputs)
+    except (OSError, ValueError) as exc:
+        print("error: cannot read a redirects file ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    if unresolved:
+        for finding in unresolved:
+            print("error: refused: {}".format(finding), file=sys.stderr)
         return 2
     drift = False
     for rel, text in sorted(outputs.items()):
@@ -1411,10 +1628,16 @@ def run(root, check):
         with open(path, "wb") as handle:
             handle.write(data)
         print("wrote {}".format(rel))
+    try:
+        stray = stray_outputs(root)
+    except OSError as exc:
+        print("error: cannot list a page folder ({}); fail-closed".format(exc), file=sys.stderr)
+        return 2
+    for rel in stray:
+        print("stray: {} is in a generated page folder but not in GENSRC_OUTPUTS".format(rel))
     if drift:
         print("run tools/gen_draft_site.py to regenerate")
-        return 1
-    return 0
+    return 1 if drift or stray else 0
 
 
 def _self_test():
@@ -1432,8 +1655,12 @@ def _self_test():
         failures.append("{}: expected a refusal".format(name))
         return ""
 
-    site = SITES[0]
-    outputs = build()
+    # The declared build is the promoted one (base "/", pages at each live root); most fixtures below are
+    # the same pages built in their staged form (staged_sites), so the staging rules keep their cases.
+    live_outputs = build()
+    staged_ = staged_sites()
+    site = staged_[0]
+    outputs = build(sites=staged_, registered=False)
     page = outputs["site/draft/index.html"]
     expect("shell/html-class", '<html lang="en" class="site-aiqt">' in page)
     expect("shell/title", "<title>Home | AIQT.ai</title>" in page)
@@ -1444,7 +1671,7 @@ def _self_test():
     # once, as the last child of header.mast right after nav.nav.
     scheme_tag = '<script data-cfasync="false" src="{}"></script>'
     for target, built in sorted(outputs.items()):
-        built_site = next(s for s in SITES if target.startswith(s["root"] + "/"))
+        built_site = next(s for s in staged_ if target.startswith(s["root"] + "/"))
         tag = scheme_tag.format(_asset(built_site, SCHEME_SCRIPT))
         head = built.split("</head>", 1)[0]
         expect("shell/scheme-script-once " + target, built.count(tag) == 1 and tag in head)
@@ -1452,6 +1679,62 @@ def _self_test():
                -1 < head.find(tag) < head.find('<link rel="stylesheet"'))
         expect("shell/scheme-button-last-in-mast " + target, built.count(SCHEME_BUTTON) == 1
                and re.search(r'<header class="mast">.*?</nav>' + re.escape(SCHEME_BUTTON) + "</header>", built))
+    # Every page of both sites: each head line in render_page's order (the description metas after the
+    # robots meta and before the title), and the 2 description metas, each on its own line, exactly on the
+    # pages whose data carries a meta, with that meta's plain text.
+    head_order = ('<meta charset="utf-8">', '<meta name="viewport" ', '<meta name="robots" ',
+                  '<meta name="description" ', '<meta property="og:description" ', '<meta property="og:',
+                  '<meta name="twitter:', "<title>",
+                  '<link rel="icon" ', '<link rel="apple-touch-icon" ', '<script data-cfasync="false" ',
+                  '<link rel="stylesheet" ', '<script src="')
+    described = {}
+    for built_site in staged_:
+        for model_page in _load_pages(ROOT / built_site["src"]):
+            described[built_site["root"] + "/" + model_page["rel"]] = _description(built_site, model_page)
+    expect("meta/description-every-page", sorted(described) == sorted(outputs), sorted(described))
+    expect("meta/description-every-page-has-one", all(described.values()), described)
+    for target, built in sorted(outputs.items()):
+        lines = built.split("<head>\n", 1)[1].split("\n</head>", 1)[0].split("\n")
+        ranks = [next((rank for rank, start in enumerate(head_order) if line.startswith(start)), None)
+                 for line in lines]
+        expect("shell/head-order " + target, None not in ranks and ranks == sorted(ranks), lines)
+        text = described.get(target, "")
+        metas = ['<meta name="description" content="{}">'.format(_attr(text)),
+                 '<meta property="og:description" content="{}">'.format(_attr(text))]
+        if text:
+            expect("meta/description-present " + target,
+                   all(lines.count(meta) == 1 and built.count(meta) == 1 for meta in metas), lines)
+        else:
+            expect("meta/description-absent " + target, "description" not in built.split("</head>", 1)[0])
+    # Every page of both sites, staged and promoted: each card meta once, naming the page's absolute URL on
+    # its own site's domain, the page title and the site's card image.
+    for built_outputs, built_sites in ((outputs, staged_), (live_outputs, SITES)):
+        for target, built in sorted(built_outputs.items()):
+            built_site = next(s for s in built_sites if target.startswith(s["root"] + "/"))
+            rel = target[len(built_site["root"]) + 1:]
+            origin = {"aiqt": "https://aiqt.ai", "opfiles": "https://opfiles.ai"}[built_site["key"]]
+            card = '{}/assets/{}-og.png'.format(origin, built_site["key"])
+            title = re.search(r"<title>(.* \| [A-Za-z]+\.ai)</title>", built).group(1)
+            wanted = ['<meta property="og:type" content="website">',
+                      '<meta property="og:title" content="{}">'.format(title),
+                      '<meta property="og:url" content="{}{}">'.format(origin, _page_url(built_site, rel)),
+                      '<meta property="og:site_name" content="{}.ai">'.format(built_site["name"]),
+                      '<meta property="og:image" content="{}">'.format(card),
+                      '<meta property="og:image:width" content="1200">',
+                      '<meta property="og:image:height" content="627">',
+                      '<meta property="og:image:alt" content="{}.ai: {}">'.format(
+                          built_site["name"], _attr(built_site["logo-alt"])),
+                      '<meta name="twitter:card" content="summary_large_image">',
+                      '<meta name="twitter:image" content="{}">'.format(card)]
+            head = built.split("</head>", 1)[0].split("\n")
+            expect("meta/card-metas " + target, all(head.count(meta) == 1 for meta in wanted), head)
+    expect("meta/card-url-home", '<meta property="og:url" content="https://opfiles.ai/">'
+           in live_outputs["opf/site/index.html"], live_outputs["opf/site/index.html"][:2000])
+    expect("meta/card-url-staged", '<meta property="og:url" content="https://aiqt.ai/draft/install/">'
+           in outputs["site/draft/install/index.html"])
+    mappings_head = outputs["site/draft/mappings/index.html"].split("</head>", 1)[0]
+    expect("meta/mappings-parenthetical", mappings_head.count(
+        "frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA)") == 2, mappings_head)
     expect("shell/scheme-button-hidden", SCHEME_BUTTON.startswith(
         '<button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden>')
            and SCHEME_BUTTON.endswith('<span class="vh">Dark mode</span></button>'))
@@ -1735,7 +2018,7 @@ def _self_test():
     expect("refuse/kept-bad-fragment", "kept live path" in refused(
         "refuse/kept-bad-fragment", rendered, 'component = "next"\ntext = "T"\nhref = "/evidence#a b"\n'))
     expect("links/kept-fragment-passes", _link_findings(site, '<a href="/evidence#limits">x</a>') == [])
-    expect("links/kept-is-per-site", _link_findings(SITES[1], '<a href="/evidence#limits">x</a>') != [])
+    expect("links/kept-is-per-site", _link_findings(staged_[1], '<a href="/evidence#limits">x</a>') != [])
 
     # The data model refuses what it does not know, with every key named.
     expect("refuse/unknown-component", "unknown component" in refused(
@@ -1884,13 +2167,13 @@ def _self_test():
     except RefusedPage as exc:
         expect("refuse/kept-missing-build", "kept live path" in str(exc), str(exc))
     try:
-        build([plain], sites=(site, dict(SITES[1], root=site["root"])))
+        build([plain], sites=(site, dict(staged_[1], root=site["root"])))
         expect("refuse/shared-output-path", False)
     except RefusedPage as exc:
         expect("refuse/shared-output-path", "more than 1 site" in str(exc), str(exc))
 
     # Promotion is per site: 1 site rebuilt at "/" while the other stays under /draft/.
-    promoted_set = build(sites=(dict(site, base="/"), SITES[1]))
+    promoted_set = build(sites=(dict(site, base="/", assets="/"), staged_[1]), registered=False)
     promoted = promoted_set["site/draft/index.html"]
     expect("base/promotion-drops-robots", "noindex" not in promoted)
     expect("base/promotion-root-paths", 'href="/assets/baseline/fonts.css"' in promoted
@@ -1898,14 +2181,40 @@ def _self_test():
     still = promoted_set["opf/site/draft/index.html"]
     expect("base/other-site-stays-draft", still == outputs["opf/site/draft/index.html"]
            and 'href="/draft/assets/baseline/fonts.css"' in still and "noindex" in still)
+    # The declared build: both sites at "/", their pages at the live roots, the asset URLs still under
+    # /draft/assets/baseline/ (the asset base stays where the files are served), the robots meta gone from
+    # every page but the /draft/ placeholder.
+    expect("base/live-targets-at-root", sorted(live_outputs) == sorted(e["target"] for e in GENSRC_OUTPUTS)
+           and all("/draft/" not in rel or rel.endswith("/draft/index.html") for rel in live_outputs),
+           sorted(live_outputs))
+    for rel, text in sorted(live_outputs.items()):
+        placeholder = rel.endswith("/draft/index.html")
+        expect("base/live-robots " + rel, ("noindex" in text) == placeholder)
+        expect("base/live-assets-stay " + rel, '<link rel="stylesheet" href="/draft/assets/baseline/fonts.css">'
+               in text and 'href="/assets/baseline/' not in text)
+        expect("base/live-page-urls-at-root " + rel, re.search(r'href="/draft/(?!assets/baseline/)', text)
+               is None or placeholder)
+    # Failing on purpose: a promoted page under draft/ with its robots meta dropped is caught by the check
+    # above, and so is a page outside draft/ that kept it.
+    flipped = dict(live_outputs)
+    flipped["site/draft/index.html"] = flipped["site/draft/index.html"].replace(
+        '<meta name="robots" content="noindex, nofollow">\n', "", 1)
+    flipped["site/install/index.html"] = flipped["site/install/index.html"].replace(
+        "<title>", '<meta name="robots" content="noindex, nofollow">\n<title>', 1)
+    expect("base/live-robots-flip-caught", [rel for rel, text in sorted(flipped.items())
+                                            if ("noindex" in text) != rel.endswith("/draft/index.html")]
+           == ["site/draft/index.html", "site/install/index.html"])
+    expect("base/live-placeholder-home-link", '<a href="/">home page</a>' in live_outputs["site/draft/index.html"]
+           and '<a href="/">home page</a>' in live_outputs["opf/site/draft/index.html"])
 
     # opfiles.ai: its own page set, chrome, footer cycle and nav, with no control strip.
-    opf = SITES[1]
+    opf = staged_[1]
     home = outputs["opf/site/draft/index.html"]
     expect("opfiles/outputs", sorted(rel for rel in outputs if rel.startswith("opf/site/draft/")) == [
         "opf/site/draft/404.html", "opf/site/draft/adopt/index.html", "opf/site/draft/core-files/index.html",
-        "opf/site/draft/disclosure/index.html", "opf/site/draft/index.html", "opf/site/draft/license/index.html",
-        "opf/site/draft/model/index.html", "opf/site/draft/standard/index.html"], sorted(outputs))
+        "opf/site/draft/disclosure/index.html", "opf/site/draft/draft/index.html", "opf/site/draft/index.html",
+        "opf/site/draft/license/index.html", "opf/site/draft/model/index.html",
+        "opf/site/draft/standard/index.html"], sorted(outputs))
     expect("opfiles/html-class", '<html lang="en" class="site-opfiles">' in home)
     expect("opfiles/title", "<title>Home | OPFiles.ai</title>" in home)
     expect("opfiles/favicon", '<link rel="icon" href="/draft/assets/baseline/logos/opfiles-favicon.svg"' in home)
@@ -1919,10 +2228,10 @@ def _self_test():
                         outputs["opf/site/draft/model/index.html"]).group(1)
     expect("opfiles/nav", opf_nav.startswith(
         '<a href="/draft/model/" aria-current="page">The model</a><a href="/draft/standard/">The standard</a>'
-        '<a href="/draft/core-files/">Core files</a><a href="/draft/adopt/">Adopt</a>'
-        '<a href="https://github.com/jposluns/guardrails" target="_blank"'), opf_nav)
+        '<a href="/draft/core-files/">Technical details</a><a href="/draft/adopt/">Adopt</a>'
+        '<a href="https://github.com/jposluns/guardrails/tree/main/opf" target="_blank"'), opf_nav)
     expect("opfiles/nav-order", [label for _path, label in opf["nav"]] == [
-        "The model", "The standard", "Core files", "Adopt"], opf["nav"])
+        "The model", "The standard", "Technical details", "Adopt"], opf["nav"])
     expect("opfiles/about", home.count(_about(opf)) == 1)
     expect("opfiles/no-control-strip", all('class="control"' not in outputs[rel] for rel in outputs
                                            if rel.startswith("opf/")))
@@ -2118,6 +2427,27 @@ def _self_test():
             name, model, page_head + line + page_body))
     metad = model(page_head + 'title = "T"\nmeta = "M <code>c</code>"\n' + page_body)
     expect("page/meta-renders", '<p class="meta">M <code>c</code></p>' in render_page(site, [metad], metad))
+    # The description metas carry the meta escaped for a double-quoted attribute: the markup reduced to its
+    # text, character references decoded and escaped again, no raw quote, the base token rendered, and
+    # whitespace runs folded; each sits on its own head line, after the robots meta and before the title.
+    quoted = model(page_head + 'title = "T"\nmeta = """Say "a" &amp; &lt;b&gt; it\'s\n<code>c</code> $BASE/x"""\n'
+                   + page_body)
+    quoted_lines = render_page(site, [quoted], quoted).split("</head>", 1)[0].split("\n")
+    content = "Say &quot;a&quot; &amp; &lt;b&gt; it&#x27;s c /draft/x"
+    escaped_metas = ['<meta name="description" content="{}">'.format(content),
+                     '<meta property="og:description" content="{}">'.format(content)]
+    expect("meta/description-escaped", all(quoted_lines.count(meta) == 1 for meta in escaped_metas), quoted_lines)
+    card_metas = _social_metas(site, quoted)
+    positions = [quoted_lines.index(line) if line in quoted_lines else -1 for line in
+                 ['<meta name="robots" content="noindex, nofollow">'] + escaped_metas + card_metas
+                 + ["<title>T | AIQT.ai</title>"]]
+    expect("meta/description-order", -1 not in positions
+           and positions == list(range(positions[0], positions[0] + len(positions))), positions)
+    titled = model(page_head + 'title = "Say \\"a\\" & <b>"\n' + page_body)
+    expect("meta/card-title-escaped", '<meta property="og:title" content="Say &quot;a&quot; &amp; &lt;b&gt; | AIQT.ai">'
+           in render_page(site, [titled], titled))
+    plain = model(page_head + 'title = "T"\n' + page_body)
+    expect("meta/description-none-without-meta", "description" not in render_page(site, [plain], plain))
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
         with open(Path(tmp) / "home.toml", "w", encoding="utf-8") as handle:
             handle.write(page_head + "title = 3\n" + page_body)
@@ -2225,11 +2555,120 @@ def _self_test():
     adopt_page = outputs["opf/site/draft/adopt/index.html"]
     expect("opfiles/adopt-kept-links", '<a href="/llms.txt"><code>/llms.txt</code></a>' in adopt_page
            and '<a href="/adopt.md"><code>/adopt.md</code></a>' in adopt_page
-           and "https://opfiles.ai/" not in adopt_page and '<ol class="steps">' in adopt_page)
+           and 'href="https://opfiles.ai/' not in adopt_page and '<ol class="steps">' in adopt_page
+           and '<pre id="adopt-prompt" class="hascopy prompt-block" tabindex="0">' in adopt_page)
     core_page = outputs["opf/site/draft/core-files/index.html"]
     expect("opfiles/core-files-components", '<dl class="record">' in core_page and "<blockquote>" in core_page
            and '<p class="lbl file">.working/toml/manifest.toml</p>' in core_page
            and '<h3 id="done">' in core_page)
+
+    # Link resolution and stray outputs, staged (base /draft/, the declared build) and promoted (the same
+    # pages built at base "/" into each site's live root, in a fixture tree holding the asset folder and the
+    # redirects files at their promoted places).
+    expect("links/resolve-staged-clean", unresolved_links(outputs, staged_) == [],
+           unresolved_links(outputs, staged_))
+    promoted_sites_ = promoted_sites(staged_)
+    promoted = build(sites=promoted_sites_, registered=False)
+    expect("links/promoted-targets-at-live-root", sorted(promoted) == sorted(
+        entry["target"] for entry in GENSRC_OUTPUTS) and promoted == live_outputs, sorted(promoted))
+    expect("links/resolve-live-clean", unresolved_links(live_outputs) == [], unresolved_links(live_outputs))
+    staged_home, opf_home = "site/draft/index.html", "opf/site/draft/index.html"
+
+    def with_link(built, target, markup):
+        changed = dict(built)
+        changed[target] = changed[target].replace("</main>", markup + "</main>", 1)
+        return changed
+
+    for name, target, markup, want in (
+            ("links/staged-missing-page-flagged", staged_home, '<a href="/draft/absent/">x</a>', 1),
+            ("links/staged-missing-asset-flagged", staged_home, '<img src="/draft/assets/baseline/absent.svg">', 1),
+            ("links/staged-asset-folder-itself-flagged", staged_home, '<a href="/draft/assets/baseline/">x</a>', 1),
+            ("links/staged-live-only-path-flagged", staged_home, '<a href="/install">x</a>', 1),
+            ("links/staged-other-site-page-flagged", opf_home, '<a href="/draft/install/">x</a>', 1),
+            ("links/staged-promoted-url-flagged", staged_home, '<a href="/install/">x</a>', 1),
+            ("links/staged-page-with-fragment-passes", staged_home, '<a href="/draft/install/#x">x</a>', 0),
+            ("links/staged-redirect-source-passes", staged_home, '<a href="/rule1">x</a>', 0),
+            ("links/staged-kept-live-passes", staged_home, '<a href="/development">x</a>', 0),
+            ("links/staged-protocol-relative-not-root-relative", staged_home, '<a href="//example.com/">x</a>', 0),
+            ("links/staged-asset-file-passes", staged_home, '<img src="/draft/assets/baseline/baseline.css">', 0),
+            ("links/staged-asset-absolute-remainder-flagged", staged_home,
+             '<img src="/draft/assets/baseline//etc/passwd">', 1),
+            ("links/staged-asset-dot-segments-to-tool-flagged", staged_home,
+             '<img src="/draft/assets/baseline/../../../../tools/gen_draft_site.py">', 1),
+            ("links/staged-asset-dot-segments-to-readme-flagged", staged_home,
+             '<img src="/draft/assets/baseline/../../../../README.md">', 1),
+            ("links/staged-asset-dot-segment-back-inside-flagged", staged_home,
+             '<img src="/draft/assets/baseline/../baseline/baseline.css">', 1),
+            ("links/staged-asset-single-dot-segment-flagged", staged_home,
+             '<img src="/draft/assets/baseline/./baseline.css">', 1),
+            ("links/staged-asset-encoded-dot-segment-flagged", staged_home,
+             '<img src="/draft/assets/baseline/%2e/baseline.css">', 1),
+            ("links/staged-asset-empty-segment-flagged", staged_home,
+             '<img src="/draft/assets/baseline/fonts//baseline.css">', 1),
+            ("links/staged-asset-trailing-slash-flagged", staged_home,
+             '<img src="/draft/assets/baseline/fonts/">', 1),
+            ("links/staged-kept-live-with-query-passes", staged_home, '<a href="/development?x">x</a>', 0),
+            ("links/staged-kept-live-with-query-and-fragment-passes", staged_home,
+             '<a href="/development?x#top">x</a>', 0),
+            ("links/staged-missing-page-with-query-flagged", staged_home, '<a href="/draft/absent/?x=1">x</a>', 1),
+            ("links/staged-leading-space-flagged", staged_home, '<a href=" /draft/install/">x</a>', 1),
+            ("links/staged-trailing-space-flagged", staged_home, '<a href="/draft/install/ ">x</a>', 1),
+            ("links/staged-leading-tab-kept-live-flagged", staged_home, '<a href="\t/development">x</a>', 1)):
+        got = unresolved_links(with_link(outputs, target, markup), staged_)
+        expect(name, len(got) == want, got)
+    got = unresolved_links(with_link(outputs, staged_home, '<a href=" /development">x</a>'), staged_)
+    expect("links/staged-whitespace-named", len(got) == 1 and "leading or trailing whitespace" in got[0], got)
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-bare-") as bare:
+        for site_ in SITES:
+            os.makedirs(Path(bare) / site_["live"])
+            shutil.copyfile(ROOT / site_["live"] / "_redirects", Path(bare) / site_["live"] / "_redirects")
+        expect("links/promoted-without-assets-flagged", unresolved_links(promoted, promoted_sites_, bare) != [])
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-promoted-") as tmp:
+        for site_ in SITES:
+            shutil.copytree(ROOT / _asset_folder(site_), Path(tmp) / _asset_folder(site_))
+            shutil.copyfile(ROOT / site_["live"] / "_redirects", Path(tmp) / site_["live"] / "_redirects")
+        found = unresolved_links(promoted, promoted_sites_, tmp)
+        expect("links/resolve-promoted-clean", found == [], found)
+        promoted_home = "site/index.html"
+        for name, markup, want in (
+                ("links/promoted-missing-page-flagged", '<a href="/absent/">x</a>', 1),
+                ("links/promoted-staged-url-flagged", '<a href="/draft/install/">x</a>', 1),
+                ("links/promoted-missing-asset-flagged", '<img src="/assets/baseline/absent.svg">', 1),
+                ("links/promoted-asset-at-root-flagged", '<img src="/assets/baseline/baseline.css">', 1),
+                ("links/promoted-asset-at-asset-base-passes", '<img src="/draft/assets/baseline/baseline.css">', 0),
+                ("links/promoted-placeholder-passes", '<a href="/draft/">x</a>', 0),
+                ("links/promoted-deleted-page-flagged", '<a href="/teams">x</a>', 1),
+                ("links/promoted-page-passes", '<a href="/install/">x</a>', 0),
+                ("links/promoted-redirect-source-passes", '<a href="/rule1">x</a>', 0),
+                ("links/promoted-kept-live-passes", '<a href="/development">x</a>', 0)):
+            got = unresolved_links(with_link(promoted, promoted_home, markup), promoted_sites_, tmp)
+            expect(name, len(got) == want, got)
+        for rel, text in promoted.items():
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        promoted_targets = set(promoted)
+        expect("stray/promoted-clean", stray_outputs(tmp, promoted_sites_, promoted_targets) == [])
+        for rel in ("site/development.html", "site/draft/index.html", "site/assets/baseline/x.html",
+                    "site/robots.txt"):
+            os.makedirs((Path(tmp) / rel).parent, exist_ok=True)
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("x")
+        got = stray_outputs(tmp, promoted_sites_, promoted_targets)
+        expect("stray/promoted-kept-placeholder-assets-and-other-files-pass", got == [], got)
+        for rel in ("site/old.html", "site/install/extra.html", "opf/site/model/old.html"):
+            with open(Path(tmp) / rel, "w", encoding="utf-8") as handle:
+                handle.write("x")
+        got = stray_outputs(tmp, promoted_sites_, promoted_targets)
+        expect("stray/promoted-unlisted-pages-flagged", sorted(got) == [
+            "opf/site/model/old.html", "site/install/extra.html", "site/old.html"], got)
+        with open(Path(tmp) / "site/install/UPPER.HTML", "w", encoding="utf-8") as handle:
+            handle.write("x")
+        got = stray_outputs(tmp, promoted_sites_, promoted_targets)
+        expect("stray/promoted-upper-case-extension-flagged", "site/install/UPPER.HTML" in got, got)
+        got = stray_outputs(tmp, staged_, set(outputs))
+        expect("stray/promoted-staged-targets-see-none", got == [], got)
+    expect("stray/tree-clean", stray_outputs(ROOT) == [], stray_outputs(ROOT))
 
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
         first = run(tmp, check=True)
@@ -2240,17 +2679,32 @@ def _self_test():
             handle.write(b"\n")
         fourth = run(tmp, check=True)
         os.unlink(target)
-        os.symlink(Path(tmp) / "site/draft/license/index.html", target)
+        os.symlink(Path(tmp) / "site/license/index.html", target)
         fifth = run(tmp, check=True)
-    expect("check/codes", [first, second, third, fourth, fifth] == [1, 0, 0, 1, 2],
-           [first, second, third, fourth, fifth])
+        os.unlink(target)
+        sixth = run(tmp, check=False)
+        with open(Path(tmp) / "site/install/old.html", "w", encoding="utf-8") as handle:
+            handle.write("x")
+        seventh = run(tmp, check=True)
+        eighth = run(tmp, check=False)
+    codes = [first, second, third, fourth, fifth, sixth, seventh, eighth]
+    expect("check/codes", codes == [1, 0, 0, 1, 2, 0, 1, 1], codes)
+    # An unresolved link refuses both the check and the normal run (exit 2) before anything is written; the
+    # same prebuilt pages without it only drift against the empty tree.
+    broken = with_link(live_outputs, "site/index.html", '<a href="/absent/">x</a>')
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-unresolved-") as tmp:
+        codes = [run(tmp, check=True, outputs=broken), run(tmp, check=False, outputs=broken)]
+        written = sorted(os.listdir(tmp))
+        codes.append(run(tmp, check=True, outputs=live_outputs))
+    expect("check/unresolved-link-refused", codes == [2, 2, 1] and written == [], (codes, written))
 
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
         for failure in failures:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: gen_draft_site (shell order, the scheme script and switch, robots meta, footer "
+    print("SELF-TEST PASS: gen_draft_site (shell and head order, the scheme script and switch, robots meta, "
+          "the description metas (presence, escaping and order), the link-preview card metas, footer "
           "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "

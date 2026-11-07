@@ -230,10 +230,6 @@ run_gate "reference-facts-selftest" python3 -I -B tools/check_reference_facts.py
 run_gate "reference-facts" python3 -I -B tools/check_reference_facts.py
 run_gate "disclosure-selftest" python3 -I -B tools/gen_disclosure.py --self-test
 run_gate "disclosure-drift"    python3 -I -B tools/gen_disclosure.py --check
-run_gate "install-selftest" python3 -I -B tools/gen_install.py --self-test
-run_gate "install-drift"    python3 -I -B tools/gen_install.py --check
-run_gate "install-page-selftest" python3 -I -B tools/check_install_page.py --self-test
-run_gate "install-page" python3 -I -B tools/check_install_page.py
 run_gate "sized-instructions-selftest" python3 -I -B tools/check_sized_instructions.py --self-test
 run_gate "sized-instructions" python3 -I -B tools/check_sized_instructions.py
 run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_budget.py --self-test

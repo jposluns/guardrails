@@ -1267,6 +1267,13 @@ def _config_poison_fixture(base):
 # say whether this member was among its timed ones, so neither removing it nor moving the count
 # would be known to be right. Whatever the account recorded for it was a direct launch at commit
 # e5191908; no lane time of the suite launch is known.
+# Two account members, tools/check_install_page.py --self-test and tools/gen_install.py
+# --self-test, were later removed with the install page when aiqt.ai cut over to the template
+# site, so the account constants omit them: 98 account members, 10 measured in the combined lane
+# and 9 in the malformed lane. The account names neither, so it does not say whether either was
+# among its timed members: SIZING_ACCOUNT_TIMED stays 88, as for the relaunched member above, and
+# may overstate the timed members still registered by up to two, so the count of members with no
+# recorded time may understate by up to two. The runs and times recorded here are unchanged.
 # NOT MEASURED, though these bounds govern those reruns all the same: the system lane; the
 # malformed lane's configuration for every member of that lane outside SIZING_MALFORMED_MEASURED;
 # and the fsmonitor pass's own configuration (fsmonitor set in both config files, ignore and
@@ -1474,7 +1481,6 @@ SIZING_ACCOUNT_ROSTER = frozenset({
     ("tools/check_gensrc_failclose.py", "--self-test"),
     ("tools/check_git_option_table.py", "--self-test"),
     ("tools/check_hooks_preview.py", "--self-test"),
-    ("tools/check_install_page.py", "--self-test"),
     ("tools/check_instruction_budget.py",),
     ("tools/check_instruction_budget.py", "--self-test"),
     ("tools/check_internal_names.py", "--self-test"),
@@ -1519,7 +1525,6 @@ SIZING_ACCOUNT_ROSTER = frozenset({
     ("tools/gen_first_pin_demo.py", "--self-test"),
     ("tools/gen_gensrc.py", "--self-test"),
     ("tools/gen_hooks.py", "--self-test"),
-    ("tools/gen_install.py", "--self-test"),
     ("tools/gen_manifest.py", "--self-test"),
     ("tools/gen_reference_facts.py", "--self-test"),
     ("tools/gen_renderers.py", "--self-test"),

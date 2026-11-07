@@ -26,7 +26,7 @@ heading = "What the product is made of"
 rail = "What the product is made of"
 claim = '''The 1.0.5 chat artefacts, the Claude Skill and the portable instruction files, are prose instructions and reference material only, with no executable code and no network calls. The repository that ships them also carries code, each file listed in the 1.0.5 release manifest: the Python and shell tooling under tools/ and opf/tools/; the opf enforcement hooks (the pre-commit hook and the Claude Code deny hook), the pre-commit installer, and the CI template and script under opf/enforcement/; the site HTML pages (inline scripts included) and JavaScript under site/ and opf/site/; docs/_shell.html, an HTML shell page with an inline script; the preview hook scripts under .preview/; the generated Claude Code hooks plugin under plugin/ and its source under .aiqt/core/hooks/; and .baseline/check_palette.py, the palette contrast gate vendored from the site template. This repository's own CI code under .github/, outside that manifest, runs the quality gates on GitHub on each push to main and on a pull request targeting main when a label is added to it, which the maintainer's merge process does only for the merge-train pull request that carries a batch of changes (a process rule the workflow does not enforce), so the gates run on each batch before it merges rather than on each change in it; a message-leak scan runs on every pull request targeting main and each push to main, and a separate scheduled workflow runs the offline standards-currency audit monthly and on manual dispatch. On your machine none of it runs on its own: each piece runs only when you run a tool or check, install the plugin or an enforcement hook, or open the site in a browser.'''
 limitation = '''Instructions cannot do anything your assistant platform cannot already do. The 1.1.0 design adds a guided install and a setup doctor around that tooling, each documented before it ships.'''
-evidence = '''<a href="$BASE/install/#pick">What the files are</a> <a href="/tech-details#directory">The 1.1.0 directory</a>'''
+evidence = '''<a href="$BASE/install/details/#pick">What the files are</a> <a href="/tech-details#directory">The 1.1.0 directory</a>'''
 
 [[body]]
 component = "entry"
@@ -55,7 +55,7 @@ id = "d-5"
 heading = "Standards mappings"
 rail = "Standards mappings"
 claim = '''AIQT publishes a navigational crosswalk from the pack's rules to identifiers in security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA), each pinned to a stated edition, with every mapped identifier validated against that edition before it can ship.'''
-limitation = '''A mapping asserts a relationship of ideas, not certification, attestation, audit evidence, or proof that you meet a standard. No framework publisher endorses, sponsors, or is affiliated with the pack. The absence of a mapping means none has been asserted yet, and a pinned edition may lag the newest release.'''
+limitation = '''A mapping asserts a relationship of ideas, not certification, attestation, audit evidence, or proof that you meet a standard. No framework publisher endorses, sponsors, or is affiliated with the pack. The absence of a mapping means none is currently asserted (the rule and identifier pair may be unassessed, judged not to fit, or removed after review), and a pinned edition may lag the newest release.'''
 evidence = '''<a href="$BASE/mappings/#methodology">How the crosswalk is built</a> <a href="$BASE/mappings/#registry">The framework registry</a>'''
 
 [[body]]
@@ -76,7 +76,7 @@ heading = "Data handling"
 rail = "Data handling"
 claim = '''The 1.0.5 chat artefacts send nothing anywhere: they are instructions your assistant reads, with no code and no network calls. The 1.0.5 release is wider than those artefacts: its repository ships code, each file listed in the release manifest and named under What the product is made of, and on your machine none of it runs on its own. What you type still goes to your assistant's vendor under that vendor's terms, exactly as it would without AIQT. In the 1.1.0 design, routine checks run locally and send nothing to a model.'''
 limitation = '''The shipped repository code is not network-free when run: some of the checks and tools make network requests when run. Among them: the link-liveness check that verifies published framework URLs, the CWE importer (tools/import_cwe.py), which fetches the catalogue it vendors, and tools/ci-status.sh, which reads CI results through the GitHub CLI. The 1.1.0 substantive and delicate review tiers will send content to model providers. The providers, credentials, retention, and cost stay marked pending until they are documented before 1.1.0 ships. AIQT cannot intercept, encrypt, or block data that your assistant platform itself sends.'''
-evidence = '''<a href="$BASE/install/#pick">What the 1.0.5 files are</a> <a href="/tech-details#qa-where">The data flow, by tier</a>'''
+evidence = '''<a href="$BASE/install/details/#pick">What the 1.0.5 files are</a> <a href="/tech-details#qa-where">The data flow, by tier</a>'''
 
 [[body]]
 component = "entry"

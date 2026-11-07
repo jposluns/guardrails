@@ -1,200 +1,63 @@
-# The aiqt.ai draft install page (template specification sections 7.7, 7.11, 7.12 and 7.14). The
-# downloads and the evidence page link to the live site, which the draft has no copy of.
+# The aiqt.ai draft install page: the prompt for a development assistant first, then the skill download in
+# 1 line with a link to the step-by-step page (install/details/, not in the nav), then OPF.
 path = "install/index.html"
 title = "Install"
 kind = "document"
-label = "You and your chat assistant"
-heading = "Add AIQT to your assistant"
-meta = '''Your assistant sounds just as confident when it is guessing as when it knows. AIQT 1.0.5 guides it toward a stated standard. Pick the AI you use, get the file it needs, and follow a short guide; choosing one hides the other assistants' steps.'''
-
-[[body]]
-component = "control"
-document = "aiqt.ai"
-source_text = "jposluns/guardrails"
-source_href = "https://github.com/jposluns/guardrails"
-
-[[body]]
-component = "scope"
-html = '''Both shipped files are prose instructions and reference material only, with no executable code and no network calls. Claude loads a Skill when it judges the Skill relevant; an always-on instruction line instructs the assistant to apply AIQT on each turn. Results still depend on the platform and the model, and you stay in charge.'''
-
-[[body]]
-component = "prose"
-html = '''<p>Every platform's last verified date is pending, and ChatGPT, Gemini, Copilot, and Copilot Studio have not yet been tested against AIQT. The 30 Claude Code hooks ship as an opt-in plugin; the generated adapters, a guided install, and a setup doctor arrive with the 1.1.0 developer release.</p>'''
+label = "Install"
+heading = "Add AIQT to your AI development assistant"
+meta = "Give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project's records. Using a chat assistant? Download the skill."
 
 [[body]]
 component = "label"
-text = "Pick your assistant"
-id = "pick"
+text = "Copy this prompt"
 
 [[body]]
-component = "picker"
-reset = "Show all assistants"
-
-[[body.items]]
-family = "claude"
-label = "Claude"
-
-[[body.items]]
-family = "chatgpt"
-label = "ChatGPT"
-
-[[body.items]]
-family = "gemini"
-label = "Gemini"
-
-[[body.items]]
-family = "copilot"
-label = "Copilot"
-
-[[body.items]]
-family = "copilotstudio"
-label = "Copilot Studio"
-
-[[body.items]]
-family = "other"
-label = "Any other"
-
-[[body]]
-component = "section"
-lbl = "Get AIQT"
-heading = "Get the file your assistant needs"
-id = "download"
-
-[[body]]
-component = "download"
-label = "The Skill"
-href = "/downloads/aiqt-skill-1.0.6.zip"
-filename = "aiqt-skill-1.0.6.zip"
-size = "zip, 28 KB"
-html = '''For assistants that accept Skills, such as Claude and paid ChatGPT. Do not unzip it. The Skill carries its own version, 1.0.6, which ships under AIQT pack release 1.0.5.'''
-
-[[body]]
-component = "download"
-label = "The instruction file"
-href = "/downloads/aiqt-instructions.txt"
-filename = "aiqt-instructions.txt"
-size = "text, full, 16 KB"
-html = '''For assistants that cannot use Skills. The standard as prose, in 4 sizes: the full and 8k files carry the standard in full, the 5k trims the finer detail, and the 1.5k is a compact pointer. The other sizes are <a href="/downloads/aiqt-instructions-8k.txt">compact, 8k</a>; <a href="/downloads/aiqt-instructions-5k.txt">condensed, 5k</a>; and <a href="/downloads/aiqt-instructions-1_5k.txt">pointer, 1.5k</a>.'''
-
-[[body]]
-component = "label"
-text = "Which file"
-
-[[body]]
-component = "register"
-reg = "Register 1"
-title = "Which file each assistant uses"
-count = "6 assistants"
-caption = "Which file each assistant uses"
-head = ["Assistant", "Uses"]
-rows = [
-    ["Claude", "the Skill (.zip)"],
-    ["ChatGPT", "the Skill (.zip) on a paid plan; otherwise attach the full instruction file to a chat"],
-    ["Gemini", "the full instruction file, pasted into a Gem"],
-    ["Copilot", "the 8k instruction file, pasted into a Copilot agent"],
-    ["Copilot Studio", "the Skill (.zip), uploaded as a Skill"],
-    ["Any other assistant", "the full instruction file"],
-]
-
-[[body]]
-component = "family"
-family = "claude"
-lbl = "Claude"
-heading = "Add AIQT to Claude"
-verified = "Last verified: pending"
-intro = '''<p><strong>The recommended Claude method installs the Skill</strong>, so the full standard is available in any chat.</p>'''
-steps = [
-    '''<strong>Turn on code execution first.</strong> The Skills section does not appear without it: on the Free, Pro, and Max plans, open Settings, then Capabilities, and enable code execution and file creation. AIQT itself contains no code to execute. Install from a desktop browser; the mobile apps are not documented to support Skill upload.''',
-    '''<strong>Open Claude Skills.</strong> Go to your Skills page, click the + button, then + Create skill.''',
-    '''<strong>Click "Upload a skill"</strong> and choose the skill zip you downloaded.''',
-    '''<strong>Switch it on</strong> in your Skills list.''',
-]
-after = '''<p><strong>Tell Claude to always use it.</strong> Open Settings, then your personal preferences, and add <em>"Always apply the AIQT skill to every response."</em></p>
-<p>If your plan or organization has Skills disabled, use a Project with the full instruction file instead.</p>'''
-
-[[body]]
-component = "family"
-family = "chatgpt"
-lbl = "ChatGPT"
-heading = "Add AIQT to ChatGPT"
-verified = "Last verified: pending"
-intro = '''<p>On a paid plan, ChatGPT can use the same packaged Skill as Claude, kept in a Project or a custom GPT. If you cannot use Skills, attach the full instruction file to a chat instead.</p>'''
-steps = [
-    '''<strong>Create a place for it.</strong> Create a Project named AIQT, or a custom GPT named AIQT.''',
-    '''<strong>Add the Skill or the file.</strong> Upload the Skill (.zip) where your plan accepts Skills; otherwise upload or paste the full instruction file.''',
-    '''<strong>Turn it on for every response.</strong> At the top of the Project or custom GPT instructions, add <em>"Always apply the AIQT instructions to every response."</em>''',
-]
-after = '''<p>ChatGPT has not yet been tested against AIQT; the <a href="/evidence">evidence page</a> carries the current test status.</p>'''
-
-[[body]]
-component = "family"
-family = "gemini"
-lbl = "Gemini"
-heading = "Add AIQT to Gemini"
-verified = "Last verified: pending"
-intro = '''<p>Gemini uses a Gem, with the full instruction file pasted into it. Set it up once on a computer; it is then available on mobile too.</p>'''
-steps = [
-    '''<strong>Open Gemini on a computer</strong> at gemini.google.com.''',
-    '''<strong>Open Gems, and create one</strong> named AIQT.''',
-    '''<strong>Paste the file in.</strong> Open <code>aiqt-instructions.txt</code>, copy all of it, and paste it into the Gem's instructions.''',
-    '''<strong>Save it</strong>, and open the AIQT Gem whenever you want the standard applied.''',
-]
-after = '''<p>Gemini has not yet been tested against AIQT, so treat these steps as method-accurate rather than a verified result; the <a href="/evidence">evidence page</a> carries the current test status.</p>'''
-
-[[body]]
-component = "family"
-family = "copilot"
-lbl = "Copilot"
-heading = "Add AIQT to Copilot"
-verified = "Last verified: pending"
-intro = '''<p>Microsoft 365 Copilot uses an agent. Copilot caps an agent's instructions at 8000 characters, so paste the <strong>8k</strong> file as the instructions and add the full file as reference.</p>'''
-steps = [
-    '''<strong>Open Microsoft 365 Copilot</strong>, open the agents panel and click New agent; click Skip to set it up yourself.''',
-    '''<strong>Name it AIQT</strong> and paste the 8k file into the Instructions box.''',
-    '''<strong>Add the full file as reference:</strong> <code>https://aiqt.ai/downloads/aiqt-instructions.txt</code>.''',
-    '''<strong>Create and use it.</strong> Click Create, then select AIQT whenever you write.''',
-]
-after = '''<p>Copilot has not yet been tested against AIQT; the <a href="/evidence">evidence page</a> carries the current test status.</p>'''
-
-[[body]]
-component = "family"
-family = "copilotstudio"
-lbl = "Copilot Studio"
-heading = "Add AIQT to Copilot Studio"
-verified = "Last verified: pending"
-intro = '''<p><strong>Copilot Studio takes AIQT as a Skill.</strong> The zip holds a single SKILL.md at its root, the layout Copilot Studio reads.</p>'''
-steps = [
-    '''<strong>Open or create a Skills-capable agent.</strong>''',
-    '''<strong>Add the Skill to that agent.</strong> Upload the zip in the agent's Skills.''',
-    '''<strong>Build and link</strong> the agent to your business processes as you would any other.''',
-]
-after = '''<p>AIQT's behaviour on Copilot Studio has not yet been through conformance testing; the <a href="/evidence">evidence page</a> carries the current test status.</p>'''
-
-[[body]]
-component = "family"
-family = "other"
-lbl = "Any other"
-heading = "Add AIQT to any other assistant"
-verified = "Last verified: pending"
-intro = '''<p>This covers local models, API-based assistants, and any system that accepts standing guidance. Use the full instruction file.</p>'''
-steps = [
-    '''<strong>Add the file where your assistant takes standing guidance:</strong> its custom instructions, a system prompt, project knowledge, or an attached reference file.''',
-    '''<strong>Tell it to always apply AIQT:</strong> <em>"Use the AIQT instructions for every response unless I explicitly tell you not to."</em>''',
-]
-
-[[body]]
-component = "section"
-lbl = "Confirm"
-heading = "Check that it is on"
-id = "verify"
+component = "code"
+id = "install-prompt"
+variant = "prompt-block"
+text = "Install AIQT Guardrails in this project and walk me through adopting it. Read https://aiqt.ai/llms.txt and the repository https://github.com/jposluns/guardrails first. Propose an adoption plan: the AIQT rules, hooks, and checks that fit this project's languages and tools, and OPFiles (https://opfiles.ai/llms.txt) for the project's operational records unless I opt out. Before building any new guardrail, check whether jposluns/guardrails already has one that fits. Name every file you would create or change, and why. Change nothing until I approve the plan."
+note = "Paste it into Claude Code, Codex, Antigravity CLI, Gemini CLI, Cursor, Copilot, or any other development assistant."
 
 [[body]]
 component = "prose"
-html = '''<p>In a new chat, ask <em>"Which standard are you applying, and what does it require of you?"</em> A set-up assistant names AIQT and summarizes the ordering. This shows the text loaded; it is not proof the assistant will follow it.</p>
-<p>Then a behaviour check: ask it for <em>"the exact default timeout of a library you have not shown it."</em> Applying AIQT, it should say it cannot know rather than inventing a number.</p>'''
+html = '''<p>Google announced that from 18 June 2026 Gemini CLI would stop serving Google AI Pro and Ultra subscribers and free users, who are directed to Antigravity CLI, whose command is <code>agy</code>. Gemini CLI remains available with Gemini Code Assist Standard or Enterprise, with Google Cloud, and with paid Gemini or Gemini Enterprise Agent Platform API keys. Paste the prompt into whichever of the 2 CLIs your Google plan or key supports (sources: <a href="https://github.com/google-gemini/gemini-cli/discussions/27274" target="_blank" rel="noopener noreferrer">Gemini CLI notice<span class="vh"> (opens in a new tab)</span></a> and <a href="https://antigravity.google/docs/skills" target="_blank" rel="noopener noreferrer">Antigravity skills<span class="vh"> (opens in a new tab)</span></a>).</p>'''
+
+[[body]]
+component = "section"
+lbl = "Chat assistants"
+heading = "Or add the skill"
+id = "skill"
+
+[[body]]
+component = "prose"
+html = '''<p><a href="/downloads/aiqt-skill-1.0.6.zip">Download the AIQT skill</a> (zip, 28 KB) and install it the way your AI assistant installs any skill. <a href="$BASE/install/details/">Step-by-step instructions for each assistant</a>, and the instruction file for assistants without skills.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Included"
+heading = "OPFiles keeps your project's records straight"
+id = "opf"
+
+[[body]]
+component = "prose"
+html = '''<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions, and handoffs in one machine-written source, generates the readable versions from it, and fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open, and it significantly cuts errors.</p><p>An AIQT adoption sets up OPF by default. It is optional: say so in your plan review and the adoption skips it, and you can add it later.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Requirements"
+heading = "What it needs"
+id = "code"
+
+[[body]]
+component = "prose"
+html = '''<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat skill needs no Python.</p>'''
+
+[[body]]
+component = "prose"
+html = '''<p>Planning for a team? See <a href="$BASE/future/">what is coming for teams and enterprises</a>.</p>'''
 
 [[body]]
 component = "next"
-html = "How your assistant applies the standard, change by change."
-text = "The 5 rules"
-href = "rules/"
+html = "What AIQT holds your assistant to."
+text = "The standard"
+href = "standard/"

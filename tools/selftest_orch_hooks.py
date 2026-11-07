@@ -11771,6 +11771,149 @@ def _record_surface_cases(tmp, hooks=aiqt_hooks, hooks_file=None):
         check(cid, (len(want), got[1] == got[0], got[2] == got[0]), (len(starts), True, True))
 
 
+# Enumerator-supplied text in the stop-family reasons: each named id, title and reason field is one line and
+# cut to its fixed maximum with a visible mark, so a reason stays bounded however long or however many lines
+# that text has. Every row below fails with aiqt_hooks._orch_clip replaced by plain str.
+_NAMED_TEXT_TOTAL_MAX = 6000  # characters: the stated ceiling on one reason built from 256 maximum-length items
+_NAMED_TEXT_BREAKS = "\n\r\x0b\x0c\x1c\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}"  # what str.splitlines breaks on
+
+
+class _EnumeratorRunStub:
+    """Stands in for the hooks module's subprocess so _orch_enumerate sees a chosen run outcome."""
+    SubprocessError = subprocess.SubprocessError
+
+    def __init__(self, run):
+        self.run = run
+
+
+def _one_line(text):
+    return len(text.splitlines()) == 1
+
+
+def _named_field_kept(hooks, reason, fill, length, limit):
+    """True when a field of `length` copies of `fill` appears in reason exactly as the clip renders it: whole
+    up to limit, else cut to limit characters ending in the clip mark, with no longer run of fill present."""
+    mark = hooks._ORCH_CLIP_MARK
+    kept = length if length <= limit else limit - len(mark)
+    rendered = fill * kept + ("" if length <= limit else mark)
+    return rendered in reason and fill * (kept + 1) not in reason
+
+
+def _named_text_cases(hooks):
+    """(check id, got, want) rows for the bounded named-text checks, built against hooks."""
+    base = {"kind": "stop", "escape": False, "loop_signal": False, "counter": 0,
+            "enum_status": "ok", "enum_detail": "", "actionable": [], "waiting": [],
+            "blocked": [], "proposed": [], "wake_named": None,
+            "schedule_denials": 0, "basis_unchanged": False}
+    id_max, title_max = hooks._ORCH_NAMED_ID_MAX, hooks._ORCH_NAMED_TITLE_MAX
+    reason_max, brk = hooks._ORCH_NAMED_REASON_MAX, _NAMED_TEXT_BREAKS
+    kinds = ("stop", "schedule_idle", "ask")
+    rows = []
+
+    def reason(**kw):
+        return hooks.decide_yield(dict(base, **kw))[1]
+
+    def limits(fill, limit, build):
+        # just inside, exactly at, and one over the field limit
+        return tuple(_named_field_kept(hooks, build(fill * n), fill, n, limit)
+                     for n in (limit - 1, limit, limit + 1))
+
+    def bounded(r):
+        return (len(r) <= _NAMED_TEXT_TOTAL_MAX, _one_line(r), "; and 246 more" in r)
+
+    def ids(n):
+        return ["{:03d}".format(j) + "~" * (n - 3) for j in range(256)]
+
+    for kind in kinds:
+        k = {"kind": kind}
+        r = reason(actionable=[("A" + brk + "B", "t" + brk, "w" + brk)], **k)
+        rows.append(("core/named-text-one-line-actionable-" + kind,
+                     (_one_line(r), "A" + " " * len(brk) + "B" in r, "Two" in r), (True, True, True)))
+        r = reason(actionable=[("A", "^" * 2048, "w")], **k)
+        rows.append(("core/named-text-2kb-title-cut-" + kind,
+                     (_named_field_kept(hooks, r, "^", 2048, title_max), len(r) < 2048), (True, True)))
+        for field, fill, limit in (("id", "~", id_max), ("title", "^", title_max),
+                                   ("reason", "@", reason_max)):
+            def build(v, field=field, k=k):
+                entry = dict({"id": "I", "title": "T", "reason": "W"}, **{field: v})
+                return reason(actionable=[(entry["id"], entry["title"], entry["reason"])], **k)
+            rows.append(("core/named-text-{}-limit-{}".format(field, kind),
+                         limits(fill, limit, build), (True, True, True)))
+        sizes = []
+        for n_id, n_text in ((id_max, title_max), (4096, 4096)):
+            act = [(i, "^" * n_text, "@" * max(n_text, reason_max)) for i in ids(n_id)]
+            held = [(i, "cannot-evaluate", "held") for i in ids(n_id)] if kind == "ask" else []
+            sizes.append(bounded(reason(actionable=act, cannot_evaluate=held, **k)))
+        rows.append(("core/named-text-256-items-bounded-" + kind, sizes, [(True, True, True)] * 2))
+        r = reason(cannot_evaluate=[("C" + brk + "E", "cannot-evaluate", "held")], **k)
+        rows.append(("core/named-text-one-line-cannot-evaluate-" + kind,
+                     (_one_line(r), "(cannot-evaluate)" in r), (True, True)))
+        rows.append(("core/named-text-cannot-evaluate-id-limit-" + kind,
+                     limits("~", id_max, lambda v, k=k: reason(
+                         cannot_evaluate=[(v, "cannot-evaluate", "held")], **k)), (True, True, True)))
+        rows.append(("core/named-text-256-cannot-evaluate-bounded-" + kind,
+                     [bounded(reason(cannot_evaluate=[(i, "cannot-evaluate", "held") for i in ids(n)], **k))
+                      for n in (id_max, 4096)], [(True, True, True)] * 2))
+    held_ctx = {"kind": "ask", "actionable": [("A", "T", "W")]}
+    r = reason(cannot_evaluate=[("H" + brk + "D", "cannot-evaluate", "held")], **held_ctx)
+    rows.append(("core/named-text-one-line-held-ask", (_one_line(r), "Additionally" in r), (True, True)))
+    rows.append(("core/named-text-held-id-limit-ask",
+                 limits("~", id_max, lambda v: reason(
+                     cannot_evaluate=[(v, "cannot-evaluate", "held")], **held_ctx)), (True, True, True)))
+    pend = {"kind": "schedule_idle", "wake_named": False}
+    r = reason(waiting=[("P" + brk + "D", "tracked-task", "t9")], **pend)
+    rows.append(("core/named-text-one-line-pending-schedule_idle",
+                 (_one_line(r), r.startswith("wake hygiene")), (True, True)))
+    rows.append(("core/named-text-pending-id-limit-schedule_idle",
+                 limits("~", id_max, lambda v: reason(waiting=[(v, "tracked-task", "t9")], **pend)),
+                 (True, True, True)))
+    # the enumerator-error detail: the two named formats, then their raw-id and raw-text siblings
+    envelope = {"version": 1, "generated_at_utc": now_iso(0), "source": {"locator": "selftest"}}
+    long_id = ("~" + brk) * 400
+    detail_max = id_max + reason_max + 60
+
+    def detail(**fields):
+        raw = dict({"id": "X", "title": "t", "state": "open", "granted": True, "blocker": None}, **fields)
+        return hooks.validate_enumeration(dict(envelope, items=[raw]))[1]
+    d = detail(id=long_id, state="s" + brk * 400)
+    rows.append(("core/enum-detail-invalid-state-one-line-bounded",
+                 ("invalid state" in d, _one_line(d), len(d) <= detail_max,
+                  [_one_line(reason(kind=kind, enum_status="ENUMERATOR_ERROR", enum_detail=d))
+                   for kind in kinds]),
+                 (True, True, True, [True, True, True])))
+    dup = {"id": long_id, "title": "t", "state": "open", "granted": True}
+    siblings = [detail(id=long_id, title=7), detail(id=long_id, granted="yes"),
+                detail(id=long_id, blocker={"kind": "bogus"}),
+                detail(id=long_id, blocker={"kind": "external", "ref": "r", "evidence": 7}),
+                hooks.validate_enumeration(dict(envelope, items=[dup, dict(dup)]))[1],
+                hooks.validate_enumeration(dict(envelope, version="v" * 4096, items=[]))[1]]
+    rows.append(("core/enum-detail-raw-id-formats-one-line-bounded",
+                 [(_one_line(x), len(x) <= detail_max) for x in siblings], [(True, True)] * 6))
+
+    def fail_run(*_a, **_k):
+        raise OSError("enumerator " + ("x" + brk) * 1000)
+
+    def exit_run(argv, **_k):
+        return subprocess.CompletedProcess(argv, 3, "", ("e" + brk) * 1000)
+    for name, run in (("core/enum-detail-failed-to-run-one-line-bounded", fail_run),
+                      ("core/enum-detail-exit-stderr-one-line-bounded", exit_run)):
+        saved = hooks.subprocess
+        hooks.subprocess = _EnumeratorRunStub(run)
+        try:
+            status, d = hooks._orch_enumerate({"enumerator": {"argv": ["selftest-enumerator"]}}, ".")
+        finally:
+            hooks.subprocess = saved
+        rows.append((name, (status, _one_line(d), len(d) <= detail_max), ("ENUMERATOR_ERROR", True, True)))
+    # keyed by check id so the call site can name every id literally; a repeated id would let one
+    # row silently replace another, so it is a failure here
+    table = {}
+    for name, got, want in rows:
+        if name in table:
+            FAILURES.append("named-text case id {!r} built twice".format(name))
+        table[name] = (got, want)
+    return table
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -12238,6 +12381,52 @@ def _main_isolated(report_path=None):
                  '{"mode": "attended", "x": 1}\n', "deny"),
                 ("ask/json-object-trailing-garbage-denies-armed",
                  '{"mode": "attended"} trailing\n', "deny"),
+                # The structured operating-mode record (mode plus only phase, set_by and set_at) is read by its
+                # mode exactly as the bare object is. The attended vectors prove the record is accepted (a refused
+                # record arms and denies); the unattended vector pins the deny but cannot prove acceptance, since a
+                # refused record denies alike, so ask/json-mode-record-unattended-read-by-mode below proves it:
+                ("ask/json-mode-record-unattended-denies",
+                 '{"mode": "unattended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-attended-allows",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "allow"),
+                ("ask/json-mode-record-attended-compound-phase-allows",
+                 '{"mode": "attended (iPad); continuous mode", "phase": "review", "set_by": "operator",'
+                 ' "set_at": "2026-11-04T23:59:59Z"}\n', "allow"),
+                ("ask/json-mode-record-attended-subset-allows",
+                 '{"mode": "attended", "set_at": "2026-11-04T00:00:00Z"}\n', "allow"),
+                # A record that breaks the shape fails CLOSED to armed even with an attended mode:
+                ("ask/json-mode-record-extra-key-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z", "note": "x"}\n', "deny"),
+                ("ask/json-mode-record-mode-not-string-denies-armed",
+                 '{"mode": 1, "phase": null, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-phase-number-denies-armed",
+                 '{"mode": "attended", "phase": 2, "set_by": "operator", "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-phase-nested-object-denies-armed",
+                 '{"mode": "attended", "phase": {"mode": "attended"}, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-set-by-null-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": null, "set_at": "2026-11-04T17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-set-at-malformed-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator", "set_at": "2026-11-04 17:47:04Z"}\n',
+                 "deny"),
+                ("ask/json-mode-record-set-at-offset-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T17:47:04+00:00"}\n', "deny"),
+                ("ask/json-mode-record-set-at-trailing-newline-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T17:47:04Z\\n"}\n', "deny"),
+                ("ask/json-mode-record-set-at-hour-24-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-11-04T24:00:00Z"}\n', "deny"),
+                ("ask/json-mode-record-set-at-month-13-denies-armed",
+                 '{"mode": "attended", "set_at": "2026-13-04T17:47:04Z"}\n', "deny"),
+                ("ask/json-mode-record-set-at-number-denies-armed",
+                 '{"mode": "attended", "set_at": 1793814424}\n', "deny"),
+                ("ask/json-mode-record-duplicate-key-denies-armed",
+                 '{"mode": "attended", "phase": null, "set_by": "operator",'
+                 ' "set_at": "2026-11-04T17:47:04Z", "set_at": "2026-11-04T17:47:05Z"}\n', "deny"),
                 # Prose merely MENTIONING a mode word, with no declaration line and no JSON, stays fail-open:
                 ("ask/prose-mentions-mode-allows",
                  "Yesterday we worked unattended; today attended.\n", "allow"),
@@ -12249,6 +12438,20 @@ def _main_isolated(report_path=None):
                               {"questions": [{"question": "pick one"}]},
                               extra={"tool_use_id": "tu-1"})
             check(check_id, _verdict(ask()), want)
+        # An accepted unattended record and a refused one both read as the guards-armed `unattended` token, so
+        # the reader is observed at its classifier: an accepted record hands its own `mode` string to it, while
+        # a refused record fails closed before the classifier sees anything.
+        _rec_seen = []
+        _rec_classify = aiqt_hooks._orch_mode_classify
+        try:
+            aiqt_hooks._orch_mode_classify = lambda value: (_rec_seen.append(value), _rec_classify(value))[1]
+            _rec_token = aiqt_hooks._orch_mode_classify_text(
+                '{"mode": "unattended; overnight", "phase": null, "set_by": "operator",'
+                ' "set_at": "2026-11-04T17:47:04Z"}\n')
+        finally:
+            aiqt_hooks._orch_mode_classify = _rec_classify
+        check("ask/json-mode-record-unattended-read-by-mode", (_rec_token, _rec_seen),
+              ("unattended", ["unattended; overnight"]))
         # absent mode record fails open (no marker): the fixture DELETES the file, so this tests ABSENCE
         h.mode.unlink()
         g_ask = h.payload("PreToolUse", "AskUserQuestion", {"questions": []},
@@ -16505,6 +16708,53 @@ def _main_isolated(report_path=None):
         check("core/ask-enum-error-with-actionable-cap-still-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed, actionable=[]))
         check("core/ask-cannot-evaluate-only-cap-relieves", v, "ALLOW_WITH_FINDINGS")
+        # every id is a literal row so check_selftest_execution.py can resolve it statically; the
+        # listed ids must equal the ids _named_text_cases builds, so a case added, renamed or
+        # dropped on one side only fails the suite
+        _named_text = _named_text_cases(aiqt_hooks)
+        _named_text_listed = []
+        for (name,) in (("core/named-text-one-line-actionable-stop",),
+                        ("core/named-text-2kb-title-cut-stop",),
+                        ("core/named-text-id-limit-stop",),
+                        ("core/named-text-title-limit-stop",),
+                        ("core/named-text-reason-limit-stop",),
+                        ("core/named-text-256-items-bounded-stop",),
+                        ("core/named-text-one-line-cannot-evaluate-stop",),
+                        ("core/named-text-cannot-evaluate-id-limit-stop",),
+                        ("core/named-text-256-cannot-evaluate-bounded-stop",),
+                        ("core/named-text-one-line-actionable-schedule_idle",),
+                        ("core/named-text-2kb-title-cut-schedule_idle",),
+                        ("core/named-text-id-limit-schedule_idle",),
+                        ("core/named-text-title-limit-schedule_idle",),
+                        ("core/named-text-reason-limit-schedule_idle",),
+                        ("core/named-text-256-items-bounded-schedule_idle",),
+                        ("core/named-text-one-line-cannot-evaluate-schedule_idle",),
+                        ("core/named-text-cannot-evaluate-id-limit-schedule_idle",),
+                        ("core/named-text-256-cannot-evaluate-bounded-schedule_idle",),
+                        ("core/named-text-one-line-actionable-ask",),
+                        ("core/named-text-2kb-title-cut-ask",),
+                        ("core/named-text-id-limit-ask",),
+                        ("core/named-text-title-limit-ask",),
+                        ("core/named-text-reason-limit-ask",),
+                        ("core/named-text-256-items-bounded-ask",),
+                        ("core/named-text-one-line-cannot-evaluate-ask",),
+                        ("core/named-text-cannot-evaluate-id-limit-ask",),
+                        ("core/named-text-256-cannot-evaluate-bounded-ask",),
+                        ("core/named-text-one-line-held-ask",),
+                        ("core/named-text-held-id-limit-ask",),
+                        ("core/named-text-one-line-pending-schedule_idle",),
+                        ("core/named-text-pending-id-limit-schedule_idle",),
+                        ("core/enum-detail-invalid-state-one-line-bounded",),
+                        ("core/enum-detail-raw-id-formats-one-line-bounded",),
+                        ("core/enum-detail-failed-to-run-one-line-bounded",),
+                        ("core/enum-detail-exit-stderr-one-line-bounded",)):
+            _named_text_listed.append(name)
+            if name in _named_text:
+                check(name, *_named_text[name])
+        if set(_named_text_listed) != set(_named_text):
+            FAILURES.append("named-text ids drift: listed but not built {}; built but not listed {}".format(
+                sorted(set(_named_text_listed) - set(_named_text)),
+                sorted(set(_named_text) - set(_named_text_listed))))
 
         # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
         # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued

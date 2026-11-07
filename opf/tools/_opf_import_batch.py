@@ -81,9 +81,9 @@ names, a `history` row carries a schema field name and a verbatim source `value`
 source text, never a typed record reference, spec 8.3), `actor.id` names an actor, and no
 other baseline member holds a record id. A `scopes` entry spelling a minted placeholder is refused by
 name (scopes resolve no batch-local key: a scope names a record that already exists in the store, never a
-row of its own batch). The importer-only
-legacy_fragment type is refused (spec 8.1/8.2: new imports use the imported series, never LF
-quarantine), and a module-tier type is refused in this release (the first
+row of its own batch). The
+legacy_fragment type is refused (spec 8.1: the standard defines no such type and reserves LF
+unassigned), and a module-tier type is refused in this release (the first
 imported-series release supports baseline types only).
 
 Outcome model (single-sourced from _opf_store): CANNOT-EVALUATE for an input this unit cannot read under
@@ -733,8 +733,10 @@ def parse_batch(data):
             elif t == "worklog":
                 findings.append("{} a worklog row belongs in [[worklog]], never in [[record]]".format(where))
             elif t in store.IMPORTER_TYPES:
-                findings.append("{} type {!r} is the importer-only LF quarantine type, which the "
-                                "imported series refuses (spec 8.1/8.2)".format(where, t))
+                findings.append("{} type {!r} is not an OPF record type: the standard defines none and "
+                                "reserves {} unassigned, so no record type uses it in "
+                                "either series, and unmappable imported text stays verbatim in "
+                                "`unparsed` (spec 8.1/8.3)".format(where, t, store.IMPORTER_TYPES[t]))
             elif t in store.MODULE_TYPES:
                 findings.append("{} type {!r} is a module-tier type: the first imported-series release "
                                 "supports baseline types only (decision D6)".format(where, t))
@@ -1099,10 +1101,11 @@ def self_test():
               and len(got.findings) == 1
               and not any("not a well-formed id" in f for f in got.findings))
 
-        # Row types: the LF quarantine, a module-tier type (decision D6), an unknown type, and the two
-        # worklog placements.
+        # Row types: legacy_fragment on the unassigned LF namespace, a module-tier type (decision D6), an
+        # unknown type, and the two worklog placements.
         got = parse_batch(_edited('type = "backlog_item"', 'type = "legacy_fragment"'))
-        check("lf-type-refused", _refuses(got, INVALID, "importer-only LF quarantine type"))
+        check("lf-type-refused", _refuses(got, INVALID, "is not an OPF record type: the standard defines "
+                                          "none and reserves LF unassigned"))
         module_type = sorted(store.MODULE_TYPES)[0]
         got = parse_batch(_edited('type = "backlog_item"', 'type = "{}"'.format(module_type)))
         check("module-type-refused", _refuses(got, INVALID, "baseline types only"))
