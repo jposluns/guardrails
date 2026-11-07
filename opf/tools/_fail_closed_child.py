@@ -2,7 +2,10 @@
 """The shared fail-closed child contract, first slice: code that a gate or OPF command must load is run
 in a CHILD process, and the parent reads a pass only from the child's settled, recorded verdict, never
 from an exit status alone, so an os._exit, a SystemExit, or a fault in a thread, destructor, atexit
-callback or the exit flush cannot read as a pass.
+callback or the exit flush cannot read as a pass, except through loaded code that replaces or deletes
+the reporting machinery itself (a hook, a stream object or the file on fd 2) and restores it between
+checks, or a fault after the record exists whose report does not reach fd 2, the residuals disclosed
+in NOT YET COVERED below.
 
 THE CHILD SIDE (ported from tools/_selftest_exit_report.py): the parent launches
 [python, -I, -B, -c, _CHILD_SHIM, <this module's directory>, <payload>, <record>, <nonce>], and
@@ -15,8 +18,12 @@ whose code property lies about the slot cannot pass; an audit hook (which cannot
 as a fault every thread started through _thread directly, outside threading (a start is threading's
 own only when its target is exactly a bound method of threading.Thread._bootstrap on a real
 threading.Thread, read through the method type's own slots), every unraisable exception (a destructor's
-or an atexit callback's; CPython raises the sys.unraisablehook event before it calls whichever hook is
-installed, so a replaced hook, a no-op or a collecting one, still leaves the fault recorded), the
+or an atexit callback's; while a hook is installed CPython raises the sys.unraisablehook event before
+it calls whichever hook is installed, so a replaced hook, a no-op or a collecting one, still leaves the
+fault recorded; a DELETED hook, del sys.unraisablehook, instead sends the report to CPython's default
+printer and raises NO event, measured on CPython 3.14.4, so a fault while the hook is absent is
+recorded nowhere, the finalizer refuses a hook that is absent at exit, and a deletion restored between
+checks is the disclosed replaced-reporting-machinery residual), the
 creation of another interpreter
 where its documented event arrives (measured on CPython 3.14.4, _interpreters.create() delivered no
 cpython.PyInterpreterState_New event to an installed hook, so interpreter creation from Python is
@@ -24,8 +31,11 @@ actually caught by the _interpreters refusals and the import fault, and the even
 for deliveries that do occur) and the import of an interpreter-creating module; and _install
 replaces every non-query function of _interpreters with a refusal that records a fault first, so code
 in another interpreter, which no hook of this interpreter can observe, is refused at the attempt.
-sys.unraisablehook is wrapped too, and the finalizer records as a fault a hook that is no longer that
-wrapper, so a hook replaced with one that reports nothing is a fault even when nothing raised.
+sys.unraisablehook is wrapped too, and the finalizer records as a fault a hook that is absent or no
+longer that wrapper, so a hook deleted, or replaced with one that reports nothing, is a fault even when
+nothing raised; the finalizer likewise requires back, by identity, the threading.excepthook wrapper, the
+sys.stderr and sys.__stderr__ objects present at install, and (by fstat, device and inode) the file that
+was open on fd 2 at install, so a reporting channel still diverted at exit is itself a recorded fault.
 
 THE RECORD: the parent passes the record path and a fresh nonce on the child's argv. The loaded code
 settles its verdict only through exit_with(code), which records the decided code (an int in 0 to 255;
@@ -75,8 +85,11 @@ tools/_selftest_exit_report.py; its bytecode-cache-refusing runner loader and it
 the exit callbacks are not yet observed here. The reporting path RETURNS instead of ending with
 os._exit(decided_code), trading away the no-loaded-code-runs-after-the-record property: interpreter
 teardown (destructors of objects still alive) runs after the record exists, and deliberately hostile
-code there could still end the process with a matching os._exit, or replace sys.unraisablehook there
-and then fault silently (a fault recorded after the record exists reaches no record); in exchange the record no longer
+code there could still end the process with a matching os._exit, or fault there silently: ANY fault
+after the record exists reaches no record and is refused only where its report reaches fd 2, so code
+that first replaces the reporting machinery during teardown (sys.unraisablehook, or the sys.stderr and
+sys.__stderr__ objects the finalizer's identity checks saw only before the record was written) can
+still fault unreported; in exchange the record no longer
 fixes the exit status by construction, so a spoofed confirmation is contradicted by the real exit
 status at the parent whenever that status differs from the decided code, which the os._exit form
 could not refuse. A spoofed confirmation whose later exit carries the MATCHING status (a caught
@@ -85,6 +98,12 @@ or falling off the end) still reads as the decided code; that residual is not cl
 vector pins the disclosed behaviour. Deliberately hostile loaded code
 forging the record (the nonce is readable in process) or replacing this module's state in the child
 is the reporting-machinery residual the stronger contracts disclose; it is not closed here either.
+Neither is loaded code that deletes or replaces sys.unraisablehook (a deletion raises no
+sys.unraisablehook event, so a fault while it is absent is recorded nowhere and reported only to
+sys.stderr), threading.excepthook, sys.stderr, sys.__stderr__ or the file open on fd 2 and RESTORES
+each before the finalizer's identity checks run: those checks see only the state at exit, so every
+such restored channel is the same loaded-code-replacing-the-reporting-machinery residual, and the
+deleted-hook-restored vector pins the disclosed pass.
 
   _fail_closed_child.py --self-test   the contract's real-child vectors, each paired with one flip of
                                       this module observed red (the flipped copy runs real children
@@ -143,7 +162,8 @@ _BOOTSTRAP = threading.Thread._bootstrap   # every thread threading starts runs 
 _SYSTEM_EXIT_CODE = SystemExit.__dict__["code"]
 _STATE = {"installed": False, "armed": False, "armed_pid": None, "decided": None, "raised": None,
           "confirmed": None, "main_ident": None, "record_path": None, "nonce": None, "check_ids": [],
-          "faults": [], "thread_hook": None, "unraisable_hook": None}
+          "faults": [], "thread_hook": None, "unraisable_hook": None, "start_stderr": None,
+          "start_dunder_stderr": None, "start_fd2": None}
 # The child bootstrap the parent launches: sys.argv is [-c, <module dir>, <payload>, <record>, <nonce>].
 _CHILD_SHIM = ("import sys; sys.path.insert(0, sys.argv[1]); "
                "import _fail_closed_child; _fail_closed_child._child_main()")
@@ -346,10 +366,14 @@ def _refuse_interp_entries():
 
 
 def _install():
-    """Install the observation hooks; idempotent. _child_main calls this before any loaded code runs,
-    so nothing the payload executes precedes them. The audit hook cannot be removed; replacing the
-    threading excepthook or this module's state afterwards is loaded code replacing the reporting
-    machinery, the disclosed residual. A replaced sys.unraisablehook is not: the finalizer refuses it."""
+    """Install the observation hooks and record the reporting channels; idempotent. _child_main calls
+    this before any loaded code runs, so nothing the payload executes precedes them. The audit hook
+    cannot be removed; replacing this module's state afterwards is loaded code replacing the reporting
+    machinery, the disclosed residual. A sys.unraisablehook or threading.excepthook replaced or
+    deleted, a sys.stderr or sys.__stderr__ replaced, or an fd 2 re-opened and still so at exit is
+    not: the finalizer requires each back by identity (fd 2 by fstat device and inode, so a process
+    whose fd 2 cannot be identified here is refused there too) and records a fault otherwise; only a
+    channel diverted AND restored before those checks run remains the disclosed residual."""
     if _STATE["installed"]:
         return
     _refuse_interp_entries()
@@ -359,17 +383,29 @@ def _install():
     threading.excepthook = _thread_hook
     _STATE["unraisable_hook"] = sys.unraisablehook
     sys.unraisablehook = _unraisable_hook
+    _STATE["start_stderr"] = sys.stderr
+    _STATE["start_dunder_stderr"] = sys.__stderr__
+    try:
+        fd2 = os.fstat(2)
+        _STATE["start_fd2"] = (fd2.st_dev, fd2.st_ino)
+    except OSError:
+        _STATE["start_fd2"] = None
     sys.addaudithook(_audit)
 
 
 def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collect, _dump=json.dump,
-              _exit=os._exit, _getpid=os.getpid, _note=_note, _GC_PASSES=_GC_PASSES, sys=sys,
-              _wrapper=_unraisable_hook, _unraisable_fault=_unraisable_fault,
-              open=open, list=list, range=range, BaseException=BaseException):
+              _exit=os._exit, _getpid=os.getpid, _fstat=os.fstat, _note=_note, _GC_PASSES=_GC_PASSES,
+              sys=sys, threading=threading, _wrapper=_unraisable_hook, _thread_wrapper=_thread_hook,
+              _unraisable_fault=_unraisable_fault, getattr=getattr, open=open, list=list, range=range,
+              OSError=OSError, BaseException=BaseException):
     """The exit handler, the process's first atexit registration so it runs after every other exit
     callback: refuse outright in any process other than the one that armed (a forked process inherits
     this registration and the nonce, and its record would pass as the original's), run the bounded
-    collection, flush the four stream objects, and, ONLY when a decided code was settled through
+    collection, flush the four stream objects, require back by identity the reporting channels
+    recorded at install (both hook wrappers, where an absent hook is the same fault as a replaced
+    one; the sys.stderr and sys.__stderr__ objects; and, by fstat device and inode, the file open on
+    fd 2, so a channel still diverted here is a fault the record carries), and, ONLY when a decided
+    code was settled through
     exit_with and that very exception ended the process, create the record exclusively and RETURN,
     deferring to the interpreter's own exit status so a record whose decided code the real status
     contradicts is refused at the parent. Every refusing path (another process, nothing settled, a
@@ -385,9 +421,28 @@ def _finalize(record_path, nonce, executed, *, _STATE=_STATE, _collect=gc.collec
         for stream in (sys.stdout, sys.stderr, sys.__stdout__, sys.__stderr__):
             if stream is not None:
                 stream.flush()
-        if sys.unraisablehook is not _wrapper:
-            _unraisable_fault("sys.unraisablehook is no longer the installed wrapper, so a destructor "
-                              "or atexit fault could have gone unreported")
+        if getattr(sys, "unraisablehook", None) is not _wrapper:
+            _unraisable_fault("sys.unraisablehook is no longer the installed wrapper (replaced, or "
+                              "deleted so faults went to the default printer and raised no event), so "
+                              "a destructor or atexit fault could have gone unreported")
+        if getattr(threading, "excepthook", None) is not _thread_wrapper:
+            _STATE["faults"].append("threading.excepthook is no longer the installed wrapper, so a "
+                                    "thread fault could have gone unreported")
+        if sys.stderr is not _STATE["start_stderr"]:
+            _STATE["faults"].append("sys.stderr is no longer the stream recorded at install, so a "
+                                    "fault report could have been diverted from fd 2")
+        if sys.__stderr__ is not _STATE["start_dunder_stderr"]:
+            _STATE["faults"].append("sys.__stderr__ is no longer the stream recorded at install, so "
+                                    "a fault report could have been diverted from fd 2")
+        try:
+            fd2 = _fstat(2)
+            fd2_same = (_STATE["start_fd2"] is not None
+                        and (fd2.st_dev, fd2.st_ino) == _STATE["start_fd2"])
+        except OSError:
+            fd2_same = False
+        if not fd2_same:
+            _STATE["faults"].append("fd 2 is no longer the file that was open at install, so a fault "
+                                    "report could not have reached the parent's stderr capture")
         settled =(_STATE["decided"] is not None and _STATE["raised"] is not None
                    and _STATE["confirmed"] is _STATE["raised"])
         decided = _STATE["decided"] if settled else None
@@ -840,6 +895,66 @@ gc.collect()
 sys.unraisablehook = installed
 fcc.exit_with(0)
 """
+_DELETED_HOOK = _UNRAISABLE_PREFIX + """import io
+real = sys.stderr
+sys.stderr = io.StringIO()
+del sys.unraisablehook
+obj = Boom()
+obj.cycle = obj
+del obj
+gc.collect()
+sys.stderr = real
+fcc.exit_with(0)
+"""
+_DELETED_HOOK_RESTORED = _UNRAISABLE_PREFIX + """import io
+real = sys.stderr
+saved = sys.unraisablehook
+sys.stderr = io.StringIO()
+del sys.unraisablehook
+obj = Boom()
+obj.cycle = obj
+del obj
+gc.collect()
+sys.unraisablehook = saved
+sys.stderr = real
+fcc.exit_with(0)
+"""
+_THREAD_HOOK_REPLACED = """import threading
+import _fail_closed_child as fcc
+threading.excepthook = lambda args: None
+worker = threading.Thread(target=lambda: 1 / 0)
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
+_STDERR_REPLACED = """import io
+import sys
+import _fail_closed_child as fcc
+sys.stderr = io.StringIO()
+fcc.exit_with(0)
+"""
+_DUNDER_STDERR_REPLACED = """import io
+import sys
+import _fail_closed_child as fcc
+sys.__stderr__ = io.StringIO()
+fcc.exit_with(0)
+"""
+_FD2_REDIRECTED = """import os
+import _fail_closed_child as fcc
+fd = os.open(os.devnull, os.O_WRONLY)
+os.dup2(fd, 2)
+os.close(fd)
+fcc.exit_with(0)
+"""
+_FORGED_SYMLINK_RECORD = """import json
+import os
+import _fail_closed_child as fcc
+target = fcc._STATE["record_path"] + ".target"
+with open(target, "x", encoding="utf-8") as handle:
+    json.dump({"nonce": fcc._STATE["nonce"], "decided_code": 0, "check_ids": [], "faults": []}, handle)
+os.symlink(target, fcc._STATE["record_path"])
+os._exit(0)
+"""
 
 
 def _sized_record(total):
@@ -1008,8 +1123,20 @@ FLIPS = {
         '        if event == _UNRAISABLE' '_EVENT:',
         '        if False and event == _UNRAISABLE_EVENT:'),
     "replaced-unraisable-hook-accepted": (
-        '        if sys.unraisablehook is not _wrap' 'per:',
-        '        if False and sys.unraisablehook is not _wrapper:'),
+        '        if getattr(sys, "unraisablehook", None) is not _wrap' 'per:',
+        '        if False and getattr(sys, "unraisablehook", None) is not _wrapper:'),
+    "replaced-thread-excepthook-accepted": (
+        '        if getattr(threading, "excepthook", None) is not _thread_wrap' 'per:',
+        '        if False and getattr(threading, "excepthook", None) is not _thread_wrapper:'),
+    "replaced-stderr-accepted": (
+        '        if sys.stderr is not _STATE["start_std' 'err"]:',
+        '        if False and sys.stderr is not _STATE["start_stderr"]:'),
+    "replaced-dunder-stderr-accepted": (
+        '        if sys.__stderr__ is not _STATE["start_dunder_std' 'err"]:',
+        '        if False and sys.__stderr__ is not _STATE["start_dunder_stderr"]:'),
+    "redirected-fd2-accepted": (
+        '        if not fd2_' 'same:',
+        '        if False and not fd2_same:'),
     "record-cap-inclusive": (
         '    if len(raw) > _RECORD_C' 'AP:',
         '    if len(raw) >= _RECORD_CAP:'),
@@ -1109,8 +1236,29 @@ VECTORS = (
      "replaced-unraisable-hook-accepted"),
     ("contract/unraisable-hook-restored-refused", _HOOK_RESTORED, None, (2, True, True, None),
      "unraisable-audit-ignored"),
+    # the reporting channels required back by identity at the finalizer: a deleted unraisable hook
+    # (its fault raises no event and reaches only the replaced stderr), a replaced threading
+    # excepthook, a replaced sys.stderr or sys.__stderr__ and a re-opened fd 2 are each a recorded
+    # fault, while the deleted hook RESTORED under a redirected-then-restored stderr is the disclosed
+    # replaced-reporting-machinery residual its vector pins (it does not endorse it)
+    ("contract/deleted-unraisable-hook-refused", _DELETED_HOOK, None, (2, True, True, None),
+     "replaced-unraisable-hook-accepted"),
+    ("contract/deleted-hook-restored-disclosed", _DELETED_HOOK_RESTORED, None, (0, True, False, None),
+     "record-write-broken"),
+    ("contract/replaced-thread-excepthook-refused", _THREAD_HOOK_REPLACED, None, (2, True, True, None),
+     "replaced-thread-excepthook-accepted"),
+    ("contract/replaced-stderr-refused", _STDERR_REPLACED, None, (2, True, True, None),
+     "replaced-stderr-accepted"),
+    ("contract/replaced-dunder-stderr-refused", _DUNDER_STDERR_REPLACED, None, (2, True, True, None),
+     "replaced-dunder-stderr-accepted"),
+    ("contract/redirected-fd2-refused", _FD2_REDIRECTED, None, (2, True, True, None),
+     "redirected-fd2-accepted"),
     # the record read bound at each end: exactly the cap is read, one byte over is refused, and a
-    # large sparse record is refused by the bound under an address-space limit, not by running out
+    # large sparse record is refused by the bound under an address-space limit, not by running out.
+    # The sparse, FIFO-type and device-symlink vectors pin the diagnostic label only: their verdict
+    # is 2 with or without the flipped guard (such a record never parses as a pass), the no-blocking
+    # bound is pinned by the fifo-not-waited-on vector, and the forged-symlink vector pins the
+    # verdict itself (its flip reads a forged regular record through the symlink as a pass)
     ("contract/record-at-cap-read", _RECORD_AT_CAP, None, (0, True, False, None),
      "record-cap-inclusive"),
     ("contract/record-cap-plus-one-refused", _RECORD_CAP_PLUS_ONE, None,
@@ -1123,7 +1271,11 @@ VECTORS = (
      (2, True, False, "record-not-regular"), "record-type-unchecked"),
     ("contract/dev-zero-symlink-refused", _DEV_ZERO_SYMLINK, None,
      (2, True, False, "record-unreadable"), "record-open-follows-symlink"),
-    # the stream capture bound at each end: exactly the cap is kept, one byte over is refused as such
+    ("contract/record-symlink-to-forged-refused", _FORGED_SYMLINK_RECORD, None,
+     (2, True, False, "record-unreadable"), "record-open-follows-symlink"),
+    # the stream capture bound at each end: exactly the cap is kept, one byte over is refused as
+    # such; both vectors pin the over-cap diagnostic label and the memory bound only, since in this
+    # byte-empty-streams mode any stream byte already reads verdict 2 with or without the cap guard
     ("contract/stdout-at-cap-kept", _STDOUT_AT_CAP, None, (2, True, False, None),
      "stream-cap-inclusive"),
     ("contract/stdout-cap-plus-one-refused", _STDOUT_CAP_PLUS_ONE, None,
@@ -1234,13 +1386,15 @@ def self_test():
           "start, a wrong nonce, a record already present, stderr noise, a settle from a forked "
           "process, a caught exit, a spoofed confirmation before a raw exit 1, a thread's settle "
           "rethrown from main, a record too deep to parse, a record one byte over the size cap, a "
-          "large sparse record under an address-space limit, a FIFO or a symlink to /dev/zero at the "
-          "record path, stdout one byte over the capture cap, an atexit or destructor fault under a "
-          "no-op or collecting unraisable hook, a replaced hook and a fault under a hook later "
-          "restored each read 2; a record and stdout exactly at their caps are kept; a spoofed "
-          "confirmation whose later exit carries the matching status reads the decided code, the "
-          "disclosed residual this suite pins along with its docstring text; every paired flip of "
-          "this module is red)".format(len(results)))
+          "large sparse record under an address-space limit, a FIFO, a symlink to /dev/zero or to a "
+          "forged record at the record path, stdout one byte over the capture cap, an atexit or "
+          "destructor fault under a no-op or collecting unraisable hook, a replaced hook, a fault "
+          "under a hook later restored, a deleted unraisable hook, a replaced threading excepthook, "
+          "a replaced sys.stderr or sys.__stderr__ and a re-opened fd 2 each read 2; a record and "
+          "stdout exactly at their caps are kept; a spoofed confirmation whose later exit carries "
+          "the matching status, and a destructor fault under a deleted hook with every channel "
+          "restored before exit, each read the disclosed verdict this suite pins along with its "
+          "docstring text; every paired flip of this module is red)".format(len(results)))
     return 0
 
 
