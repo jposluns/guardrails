@@ -199,7 +199,11 @@ start this file, which fails first with Python's own exit.
 
 DEADLINE (PreToolUse): every PreToolUse mode that is not fail-open reads its payload and runs its check
 inside one _DeadlineWindow of PRETOOL_BUDGET_SECONDS (8 seconds: HOOK_TIMEOUT_SECONDS, the 10-second
-hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload read. A check that has
+hooks.json timeout tools/gen_hooks.py renders, less 2), armed before the payload read. The window borrows
+ITIMER_REAL only when it is inactive: a process that inherits an active ITIMER_REAL keeps that timer
+untouched (no relative re-arm could put it back exactly), and the same budget then holds through
+_BudgetWatchdog, a thread with every signal blocked in itself that waits out the budget on an Event and
+fails the call closed with the same stderr refusal and exit 2, touching no signal state. A check that has
 not decided by then is interrupted by _HookDeadline, a BaseException that no handler's except Exception
 branch catches, and the call fails CLOSED with exit 2 and a stderr line naming the handler, the budget and
 the input size and asking for smaller calls or long content moved into a file; the timer is cancelled
@@ -36425,21 +36429,25 @@ class _HookDeadline(BaseException):
 
 
 class _DeadlineWindow:
-    """The one shared, nesting-safe borrow of the process real-time timer (ITIMER_REAL and its SIGALRM
-    disposition), used as `with _DeadlineWindow(seconds):` once per instance. Inside the window,
-    _HookDeadline is raised when `seconds` have passed, or earlier when a timer the caller had already
-    set comes due first (the window never outlives the caller's own deadline).
+    """The one shared borrow of the process real-time timer (ITIMER_REAL and its SIGALRM disposition),
+    used as `with _DeadlineWindow(seconds):` once per instance, taken only when that timer is inactive.
+    Inside an armed window, _HookDeadline is raised when `seconds` have passed.
 
-    The caller's timer is restored elapsed-aware, never verbatim: its countdown is taken with
-    setitimer(ITIMER_REAL, 0) and the time of the take is read from time.monotonic, the clock the kernel
-    counts ITIMER_REAL in, so on exit an active caller timer is re-armed with what it had left minus the
-    time the window used (to the microsecond setitimer resolves), keeping its repeat interval; an inactive
-    one stays inactive; one that came due during the window is delivered once its handler is back (a
-    periodic one is first re-armed at the phase it would have reached, its expiries inside the window
-    delivered as the one notification the kernel itself would have left pending). A periodic timer taken
-    between an expiry and the delivery of its signal reads (0, interval), and the kernel no longer re-arms
-    it once taken, so the window counts it as due one interval after the take. A nested window is just
-    such a caller, so nesting restores each level.
+    A caller timer read active is never borrowed: a relative re-arm computed before setitimer runs
+    cannot restore such a timer exactly (it comes back late by the gap between the restore's clock read
+    and the re-arm, which a stall of the process in that gap stretches by its whole length, and early by
+    the same gap on the take side), so where the caller's deadline cannot be kept exactly the borrow is
+    refused rather than approximated. The take reads getitimer(ITIMER_REAL) first, before any other
+    state is touched: any reading other than (0.0, 0.0) (a (0, interval) reading is a periodic timer
+    between an expiry and the delivery of its signal, still the caller's, its phase kept) leaves
+    everything alone, with `armed` False and `refused_active` True, and the window runs with no deadline
+    of its own. The caller's timer, disposition, phase and pending notification are then exactly as they
+    would have been with no window, and a caller deadline that comes due inside the window is delivered
+    at its own time, to the caller's own handler. A nested window is just such a caller (the enclosing
+    window's timer is active), so an inner window refuses the borrow and the enclosing deadline alone
+    bounds both. main() keeps its fail-closed budget over a refused borrow with _BudgetWatchdog, a
+    deadline that is not process-global. An inactive caller timer stays inactive: the restore re-arms
+    nothing.
 
     The take and the restore each run with every maskable signal blocked (signal.pthread_sigmask over
     signal.valid_signals()). A signal sent to the main thread while the mask is held (a caller expiry, an
@@ -36454,37 +36462,38 @@ class _DeadlineWindow:
     handler can run, so a handler that raises then raises from that call with the mask already back, and a
     handler left pending behind it runs when Python next runs pending handlers.
 
-    The take (_take) records the caller's disposition, reads the clock, takes the caller's timer, installs
-    the window's handler and arms the window's timer, each once and in that order. A SIGALRM pending once
-    the window's handler is installed, before its timer is armed, cannot be the window's own: the caller's
-    timer came due at or before the take, or the signal was sent while the caller's disposition was in
-    place. The window then counts the caller's timer as due, sets `pending_at_entry`, and ends at once: it
-    gives everything back, the caller's handler receives that SIGALRM once as the mask is put back, and
-    __enter__ raises this window's _HookDeadline (or what that handler raised in its place). An enclosing
-    window's expiry that lands before an inner window's take is such a signal, so its deadline reaches its
-    owner.
+    The take (_take) reads the caller's timer and refuses the borrow when it is active (above); on an
+    inactive reading it records the caller's disposition, cancels the (inactive) timer, installs the
+    window's handler and arms the window's timer, each once and in that order. A cancel that returns an
+    active value even so (another thread armed the timer between the read and the cancel) puts that value
+    straight back (the one verbatim re-arm left, microseconds wide, on a path that fails closed), marks
+    the window broken and raises ItimerError, so main() fails closed rather than run on a caller deadline
+    it may have disturbed. A SIGALRM pending once the window's handler is installed, before its timer is
+    armed, cannot be the window's own: it was sent while the caller's disposition was in place. The window
+    sets `pending_at_entry` and ends at once: it gives everything back, the caller's handler receives that
+    SIGALRM once as the mask is put back, and __enter__ raises this window's _HookDeadline (or what that
+    handler raised in its place). An enclosing window's expiry that lands after that window's one-shot
+    timer ran out, before an inner window's take, is such a signal, so its deadline reaches its owner.
 
     The restore (_give_back) cancels the window's timer, reading what it had left; installs SIG_IGN, which
     discards a pending SIGALRM, only when that timer had run out and the window's own expiry has not been
     delivered since the timer was armed (`_unheard`, which _fire clears as below), so the SIGALRM pending is
-    that expiry and it never reaches the caller; reinstalls the caller's disposition; reads the clock and
-    decides, once, whether the caller's timer came due; re-arms the caller's timer; and, for a due expiry,
-    queues a SIGALRM with signal.raise_signal unless one is pending already, so the expiry is delivered
-    once, to the caller's handler, as the mask is put back.
+    that expiry and it never reaches the caller; reinstalls the caller's disposition; re-arms nothing (the
+    caller's timer was inactive at the take, and an active one was never borrowed); and, for a SIGALRM
+    that was pending at the take (`pending_at_entry`), queues one with signal.raise_signal unless one is
+    pending already, so that signal is delivered once, to the caller's handler, as the mask is put back.
     Any other SIGALRM pending at the restore (one sent while the mask was held, say) is left pending and
     reaches the caller's handler the same way, except where the restore takes it for the window's own
     expiry: when the window's timer had run out, read by a cancel whose first run returned, and `_unheard` is
     still set, the SIGALRM pending is discarded as that expiry even when it came from elsewhere (the paragraph
     on _fire's reads below states the residual case). The kernel keeps at most one pending instance of a
     standard signal, which leaves two merges: a SIGALRM from elsewhere pending with the window's own expiry
-    (in either order) is discarded with it, and a caller expiry that came due and another SIGALRM pending at
-    the restore reach the caller's handler as one delivery. A re-armed periodic timer whose next expiry also
-    falls due before the mask is put back adds no second delivery: the kernel can hold one SIGALRM pending for
+    (in either order) is discarded with it, and a SIGALRM pending at the take and another SIGALRM pending at
+    the restore reach the caller's handler as one delivery (the kernel can hold one SIGALRM pending for
     the process and one for the thread, both are delivered on return from the call that puts the mask back,
     before Python runs any handler, and Python runs a signal's handler once for all the deliveries it has
-    received since it last ran handlers (observed on Linux with Python 3.14.4: a timer expiry and a
-    raise_signal both pending ran the handler once). An enclosing window's expiry that falls due during the
-    restore is delivered the same way, after the inner window has fully finished. The restore discards nothing
+    received since it last ran handlers; observed on Linux with Python 3.14.4: a timer expiry and a
+    raise_signal both pending ran the handler once). The restore discards nothing
     in these cases: after an arming setitimer that raised (`_unheard` is set only once it has returned), after
     a cancel whose first run raised (_twice says why), or after a read in _fire that raised; a window's own
     expiry then pending reaches the caller's handler. Nothing in the hook installs SIG_DFL for SIGALRM:
@@ -36501,16 +36510,16 @@ class _DeadlineWindow:
     leaves the process where its restore stopped, and nothing restores the caller's state after that: a
     failed cancel leaves the window's timer running and its handler installed (that expiry then ends
     nothing), with the caller's disposition and timer not back; a failed discard or reinstall leaves the
-    window's handler, or SIG_IGN, in place of the caller's, with the caller's timer inactive; a failed re-arm
-    leaves the caller's handler back and its timer inactive; and a failed pending check or queue leaves a
-    due expiry undelivered. The ItimerError (an OSError) that a broken window raises therefore reports a
+    window's handler, or SIG_IGN, in place of the caller's, with the caller's timer inactive; and a failed
+    pending check or queue leaves a SIGALRM that was pending at the take undelivered. The ItimerError (an
+    OSError) that a broken window raises therefore reports a
     timer state that is no longer the caller's, and a caller must let it go on, never swallow it: main()
     turns it into exit 2 on a PreToolUse mode and a non-blocking warning on a fail-open one.
 
     The window's own expiry is delivered in whatever frame is running while the window is live, the entry
     of __exit__ before its first statement included, so _fire closes the window (the restore above) and
-    then raises this window's _HookDeadline. A caller expiry that came due is delivered to the caller's
-    handler as _fire puts the mask back. An enclosing window's _HookDeadline from that handler goes on as
+    then raises this window's _HookDeadline. A SIGALRM left pending for the caller is delivered to the
+    caller's handler as _fire puts the mask back. An enclosing window's _HookDeadline from that handler goes on as
     it is, to its owner; any other exception it raises is held while the body unwinds on this window's
     _HookDeadline, so no except branch in the body can catch it and decide on it, and __exit__ (or
     __enter__'s cleanup) raises it in place of the deadline. Once the window's exit has begun, its own
@@ -36575,10 +36584,11 @@ class _DeadlineWindow:
     it is checked as well, so a borrow never starts without it), a thread other than the main thread
     (Python runs signal handlers only there, and the mask it sets would not be the main thread's), a caller
     that blocks SIGALRM (a deadline could not fire, and its pending notification could not be kept apart
-    from ours), or a SIGALRM disposition not installed from Python (getsignal returns None, which cannot be
-    reinstalled)."""
-    __slots__ = ("seconds", "armed", "broken", "pending_at_entry", "_live", "_ending", "_unheard", "_handler",
-                 "_timer", "_began", "_held")
+    from ours), a SIGALRM disposition not installed from Python (getsignal returns None, which cannot be
+    reinstalled), or a caller ITIMER_REAL read active at the take (`refused_active` True, the opening
+    paragraphs above), which no relative re-arm could put back exactly."""
+    __slots__ = ("seconds", "armed", "broken", "pending_at_entry", "refused_active", "_live", "_ending",
+                 "_unheard", "_handler", "_held")
     # Every signal the take and the restore hold back (the kernel never blocks SIGKILL or SIGSTOP).
     _EVERY_SIGNAL = frozenset(signal.valid_signals()) if hasattr(signal, "valid_signals") else frozenset()
     # The C function signal.pthread_sigmask wraps, which puts the mask back before any Python handler runs.
@@ -36586,8 +36596,9 @@ class _DeadlineWindow:
 
     def __init__(self, seconds):
         self.seconds = seconds
-        self.armed = self.broken = self.pending_at_entry = self._live = self._ending = self._unheard = False
-        self._handler = self._timer = self._began = self._held = None
+        self.armed = self.broken = self.pending_at_entry = self.refused_active = False
+        self._live = self._ending = self._unheard = False
+        self._handler = self._held = None
 
     def _fire(self, signum, frame):
         # Whether the SIGALRM handled is the window's own expiry, read as the class docstring describes: a
@@ -36636,11 +36647,6 @@ class _DeadlineWindow:
         held, self._held = self._held, None
         if held is not None:
             raise held
-
-    @staticmethod
-    def _as_taken(timer):
-        value, interval = timer
-        return (interval, interval) if value <= 0 < interval else timer
 
     def _can_borrow(self):
         seconds = self.seconds
@@ -36741,24 +36747,36 @@ class _DeadlineWindow:
             self._SET_MASK(signal.SIG_SETMASK, mask)
 
     def _take(self):
-        """The take, run with every maskable signal blocked, in the order the class docstring gives. The
-        clock is read just before the take, so the take itself counts as time the window used. That does
-        not keep the restore from being late: _give_back says by how much a caller timer can come back late.
-        Anything that raises once the timer is taken gives it back, with the disposition, before the
-        exception goes on."""
+        """The take, run with every maskable signal blocked, in the order the class docstring gives: the
+        caller's timer is read before any clock read or setitimer, and an active reading (anything other
+        than (0.0, 0.0), a (0, interval) reading included) refuses the borrow with nothing touched,
+        `armed` False and `refused_active` True, because no relative re-arm could put such a timer back
+        exactly. A cancel that still returns an active value (another thread armed the timer between the
+        read and the cancel) puts it back at once, marks the window broken and raises ItimerError, so the
+        caller fails closed. Anything that raises once the timer is taken gives it back, with the
+        disposition, before the exception goes on."""
+        if signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+            self.refused_active = True
+            return
         handler = signal.getsignal(signal.SIGALRM)
-        began = time.monotonic()
-        timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
-        (self._handler, self._timer, self._began, self.pending_at_entry, self._unheard, self._ending,
-         self.broken, self.armed) = (handler, timer, began, False, False, False, False, True)
+        taken = signal.setitimer(signal.ITIMER_REAL, 0)
+        if taken != (0.0, 0.0):
+            self.broken = True
+            value, interval = taken
+            # The one verbatim re-arm left, microseconds after the take, on a path that fails closed: a
+            # (0, interval) value would disarm, so it goes back as the interval the kernel would arm next.
+            signal.setitimer(signal.ITIMER_REAL, value if value > 0 else interval, interval)
+            raise signal.ItimerError(
+                "ITIMER_REAL became active during the take; the borrow is refused and the timer put back")
+        (self._handler, self.pending_at_entry, self._unheard, self._ending,
+         self.broken, self.armed) = (handler, False, False, False, False, True)
         try:
             signal.signal(signal.SIGALRM, self._fire)
             if signal.SIGALRM in signal.sigpending():
                 self.pending_at_entry = True  # not the window's expiry: its timer is not armed yet
                 self._give_back()
                 raise _HookDeadline(self)
-            left = timer[0]
-            signal.setitimer(signal.ITIMER_REAL, self.seconds if left <= 0 else min(self.seconds, left))
+            signal.setitimer(signal.ITIMER_REAL, self.seconds)
             self._unheard = True  # from here on an expiry of the window's timer can be pending at the restore
             self._live = True
         except BaseException:
@@ -36766,13 +36784,12 @@ class _DeadlineWindow:
             raise
 
     def _give_back(self):
-        """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
-        operation through _twice, the clock read once to decide whether the caller's timer came due and what
-        it has left, and a due expiry queued last. setitimer counts the countdown from the moment the re-arm
-        runs, so a caller timer comes back late by the time between that clock read and the re-arm (normally
-        microseconds; a stall of the process in between adds its whole length) plus up to a microsecond from
-        setitimer rounding up; a relative re-arm computed before it runs cannot avoid this. `armed` is False
-        when it returns or raises."""
+        """The restore, run with every maskable signal blocked, in the order the class docstring gives:
+        each operation through _twice. The caller's timer was inactive at the take (an active one refuses
+        the borrow in _take), so nothing is re-armed and no clock is read: the window's timer is cancelled,
+        the window's own pending expiry (and only that, as the class docstring says) is discarded, the
+        caller's disposition is reinstalled, and a SIGALRM that was pending at the take is queued when it
+        is no longer pending. `armed` is False when it returns or raises."""
         self._live = False
         if not self.armed:
             return
@@ -36785,14 +36802,7 @@ class _DeadlineWindow:
                 self._twice(errors, signal.signal, signal.SIGALRM, signal.SIG_IGN)
             self._unheard = False
             self._twice(errors, signal.signal, signal.SIGALRM, self._handler)
-            value, interval = self._timer
-            left = value - (time.monotonic() - self._began)
-            due = self.pending_at_entry or (value > 0 and left <= 0)
-            if left > 0:
-                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, left, interval)
-            elif due and interval > 0:
-                self._twice(errors, signal.setitimer, signal.ITIMER_REAL, interval - (-left % interval), interval)
-            if due and signal.SIGALRM not in self._twice(errors, signal.sigpending):
+            if self.pending_at_entry and signal.SIGALRM not in self._twice(errors, signal.sigpending):
                 self._twice(errors, signal.raise_signal, signal.SIGALRM)
         except BaseException:
             self.broken = True
@@ -36836,6 +36846,55 @@ def _pending_alarm_message(handler_name, seconds):
     pending (pending_at_entry): the check did not run, so nothing about the input or the budget applies."""
     return ("AIQT guardrail: the {} check did not run: a SIGALRM was already pending when its {:g}-second "
             "deadline was being set, so the deadline ended at once; failing closed.".format(handler_name, seconds))
+
+
+class _BudgetWatchdog:
+    """The PreToolUse budget for a check whose _DeadlineWindow refused the borrow because this process
+    inherited an active ITIMER_REAL (`refused_active`): entered right after the window, it enforces the
+    same `seconds` budget with a deadline that is not process-global, so an inherited caller timer costs
+    the check none of its fail-closed coverage while that timer stays exactly as inherited. A daemon
+    thread blocks every maskable signal in itself (a signal sent to the process is never taken by it),
+    waits on an Event for the budget and, when the check has not finished by then, writes the same stderr
+    refusal the window's deadline gets (_deadline_message, over `payload`, which main() sets once the
+    payload is read) and ends the process with os._exit(2), the fail-closed exit, skipping the
+    interpreter-exit flush as the entry line does. It sends and consumes no signal at all, so the merged
+    deliveries a SIGALRM-based watchdog would add (its SIGALRM pending with one from elsewhere, or with
+    the inherited timer's own expiry, the kernel keeping one pending instance and delivering them as one)
+    cannot arise, and the inherited timer, its phase, its disposition and any pending SIGALRM are left
+    untouched on every path. Exiting the context sets the Event, which ends the thread; a window that
+    borrowed (armed), or refused for any other reason (a fail-open window's None budget, a call off the
+    main thread, a caller that blocks SIGALRM, a platform with no setitimer), starts no thread, so every
+    such mode keeps the posture it had."""
+    __slots__ = ("window", "handler_name", "payload", "_done")
+
+    def __init__(self, window, handler_name):
+        self.window, self.handler_name = window, handler_name
+        self.payload = None
+        self._done = None
+
+    def __enter__(self):
+        window = self.window
+        if window.refused_active and not window.armed and window.seconds is not None:
+            self._done = threading.Event()
+            threading.Thread(target=self._expire, name="aiqt-budget-watchdog", daemon=True).start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        done, self._done = self._done, None
+        if done is not None:
+            done.set()
+        return False
+
+    def _expire(self):
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, _DeadlineWindow._EVERY_SIGNAL)
+        except BaseException:
+            pass  # an unblockable set only widens which signals this thread may take, never the budget
+        done = self._done
+        if done is None or done.wait(self.window.seconds) or done.is_set():
+            return
+        _stderr_note(_deadline_message(self.handler_name, self.window.seconds, self.payload))
+        os._exit(2)
 
 
 def _dispatcher_fail_open_warn(handler_name, detail):
@@ -36981,12 +37040,19 @@ def main(argv):
     # the unreadable-payload and handler-crash paths are written inside it, and both paths exit 2 even
     # when the deadline interrupts the note. A fail-open mode gets a window with no deadline, so its
     # error posture is unchanged. Any other exception out of the window keeps the mode's posture too.
+    # An inherited active ITIMER_REAL refuses the window's borrow (no relative re-arm could put the
+    # caller's timer back exactly); the watchdog then holds the same fail-closed budget without touching
+    # any signal state, so the check loses none of its coverage. It sends no SIGALRM at all, so the
+    # pending-signal merge a SIGALRM-based watchdog would add (one pending instance standing for both its
+    # expiry and another's) cannot arise; its class docstring has the detail.
     window = _DeadlineWindow(None if is_fail_open else PRETOOL_BUDGET_SECONDS)
+    watchdog = _BudgetWatchdog(window, handler_name)
     payload = None
     try:
-        with window:
+        with window, watchdog:
             try:
                 payload = sys.stdin.read()
+                watchdog.payload = payload
                 data = json.loads(payload)
                 if not isinstance(data, dict):
                     raise ValueError("payload is not a JSON object")
