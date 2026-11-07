@@ -11,13 +11,18 @@ produce them and refuses to write over them.
 
 DIR is required; each candidate is written as DIR/aiqt-og.png and DIR/opfiles-og.png. An output path that
 resolves (every symlink followed, a relative path taken from the working directory, real paths compared) to
-either served card, or into site/assets/ or opf/site/assets/, or whose case-folded components end in
-site/assets or opf/site/assets (any checkout's served assets directory, not only this one's), is refused with
-exit 2 before Chrome is started, and each card path is checked again just before it is written. The write
-never opens the card name: the directory is opened without following a final symlink and refused when its
-device and inode match a served assets directory or any ancestor of one, and the bytes are renamed onto the
-card name from a new exclusively created temporary file, so a hard link or a planted symlink at that name is
-replaced as a directory entry, never written through. Each card is a 1200 by 627 PNG below 1 MB; a render
+either served card or into site/assets/ or opf/site/assets/, or whose case-folded components, as typed
+(after normpath) or fully resolved, contain site/assets or opf/site/assets as a run of whole components
+anywhere (any checkout's served assets directory or anything inside one, not only this one's), is refused
+with exit 2 before Chrome is started, and each card path is checked again just before it is written. The
+output directory is also opened before any render and again by each write, without following a final
+symlink, and refused when its device and inode match a served assets directory or an ancestor of one up to
+the repository root (never a directory above the root), or when any parent reached from that open
+descriptor (an openat of "..", no path re-resolution, so a parent swapped in after the path checks cannot
+hide it) matches a served assets directory. The write never opens the card name: the bytes are renamed onto
+the card name from a new exclusively created temporary file, so a hard link or a planted symlink at that
+name is replaced as a directory entry, never written through; the temporary file is removed on any failure,
+an interrupt included. Each card is a 1200 by 627 PNG below 1 MB; a render
 that gives another size or a larger file is refused (exit 1) and nothing is kept. Exit 2 when
 /usr/bin/google-chrome is missing or not executable (checked before any render); a Chrome launch that then
 fails (an OSError or a timeout from the subprocess) is reported and exits 1, like any other failed render.
@@ -60,28 +65,33 @@ SERVED_ASSETS = ("site/assets", "opf/site/assets")
 
 
 class Refused(Exception):
-    """An output path that resolves to a served card or into a served assets directory, ends in a served
-    assets directory name, or names a directory whose identity is a served assets directory or an ancestor."""
+    """An output path that resolves to a served card or into a served assets directory, contains a served
+    assets directory name among its components, or names a directory whose identity, or a parent's read
+    from the open descriptor, is a served assets directory or an ancestor of one under the repository root."""
 
 
-def _suffix_refusal(path):
-    """None when the case-folded components of path, after normpath, do not end in site/assets or
-    opf/site/assets, otherwise the plain reason it is refused. The comparison is textual and by whole
-    components, so it refuses another checkout's served assets directories, which no real-path comparison
-    against this checkout's ROOT can see; a component that merely shares the prefix (assets-candidates,
-    mysite) does not match."""
+def _name_refusal(path):
+    """None when the case-folded components of path, after normpath and with no symlink resolved, do not
+    contain site/assets or opf/site/assets as a run of whole components, otherwise the plain reason it is
+    refused. The comparison is textual, anywhere in the path and by whole components, so it refuses another
+    checkout's served assets directories and anything inside one (x/site/assets/sub), which no real-path
+    comparison against this checkout's ROOT can see; a component that merely shares the prefix
+    (assets-candidates, mysite) does not match."""
     parts = tuple(part.casefold() for part in Path(os.path.normpath(os.fspath(path))).parts)
-    for suffix in (("opf", "site", "assets"), ("site", "assets")):
-        if parts[-len(suffix):] == suffix:
-            return "{} ends in the served assets directory name {}".format(path, "/".join(suffix))
+    for run in (("opf", "site", "assets"), ("site", "assets")):
+        for start in range(len(parts) - len(run) + 1):
+            if parts[start:start + len(run)] == run:
+                return "{} contains the served assets directory name {}".format(path, "/".join(run))
     return None
 
 
 def path_refusal(path):
-    """None when path resolves outside both served cards and both served assets directories and does not end
-    in a served assets directory name, otherwise the plain reason it is refused. Real paths are compared
-    first: every symlink is resolved, and a relative path is taken from the working directory; the trailing
-    component comparison is textual, so another checkout's site/assets or opf/site/assets is refused too."""
+    """None when path resolves outside both served cards and both served assets directories and neither
+    path as typed nor its real path contains a served assets directory name among its components, otherwise
+    the plain reason it is refused. Real paths are compared first: every symlink is resolved, and a
+    relative path is taken from the working directory; the component comparison is textual, so a path into
+    another checkout's site/assets or opf/site/assets is refused too, even reached through a symlink or
+    with a trailing sub/.. that the typed form folds away before the components are read."""
     try:
         real = Path(os.path.realpath(path))
         served = [Path(os.path.realpath(ROOT / card)) for _composition, card in CARDS]
@@ -93,24 +103,89 @@ def path_refusal(path):
     for directory in assets:
         if real.is_relative_to(directory):
             return "{} resolves into the served assets directory {}".format(path, directory)
-    return _suffix_refusal(path)
+    return _name_refusal(path) or _name_refusal(real)
 
 
 def _assets_identities():
-    """The (st_dev, st_ino) of each served assets directory under ROOT and of every ancestor of each, for
-    those that exist. A device-and-inode match refuses an output directory that is a served assets directory
-    (or an ancestor holding one) reached through a bind mount, a hard-linked alias or any other second path
-    that no path comparison can see."""
-    identities = set()
-    for directory in SERVED_ASSETS:
-        resolved = Path(os.path.realpath(ROOT / directory))
+    """(directories, held): the (st_dev, st_ino) of each served assets directory under ROOT, then the same
+    identities with every ancestor of each added, up to and including the repository root and never above
+    it, so a directory that merely holds the repository is not refused; only identities that stat. A
+    device-and-inode match refuses an output directory that is a served assets directory (or an ancestor
+    holding one under the repository root) reached through a bind mount, a hard-linked alias or any other
+    second path that no path comparison can see; the parents walked from an open descriptor are compared
+    against the served assets directories alone."""
+    directories = set()
+    held = set()
+    root = Path(os.path.realpath(ROOT))
+    for served in SERVED_ASSETS:
+        resolved = Path(os.path.realpath(ROOT / served))
         for candidate in [resolved] + list(resolved.parents):
             try:
                 status = os.stat(candidate)
             except OSError:
-                continue
-            identities.add((status.st_dev, status.st_ino))
-    return identities
+                pass
+            else:
+                held.add((status.st_dev, status.st_ino))
+                if candidate == resolved:
+                    directories.add((status.st_dev, status.st_ino))
+            if candidate == root:
+                break
+    return directories, held
+
+
+# The parent walk opens each ".." with O_PATH where the platform has it: the identity read needs only
+# fstat, and an ancestor of the output directory may be traversable but not readable.
+_WALK_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY
+
+
+def _opened_dir_refusal(dir_fd, directory):
+    """None when neither the directory open as dir_fd nor any parent reached from that descriptor is a
+    refused identity, otherwise the plain reason. The directory itself is refused when its device and inode
+    match a served assets directory or an ancestor of one up to the repository root; each parent, reached
+    by an openat of ".." from the descriptor (never a path, so a parent swapped in after the path checks
+    cannot redirect the walk), is refused when it matches a served assets directory, which refuses a write
+    anywhere inside one. The walk ends at the filesystem root, where ".." is the directory itself."""
+    directories, held = _assets_identities()
+    status = os.fstat(dir_fd)
+    if (status.st_dev, status.st_ino) in held:
+        return ("{} is a served assets directory or an ancestor of one under the repository root (same "
+                "device and inode), whatever path reaches it".format(directory))
+    fd = os.open("..", _WALK_FLAGS, dir_fd=dir_fd)
+    try:
+        while True:
+            parent = os.fstat(fd)
+            if (parent.st_dev, parent.st_ino) == (status.st_dev, status.st_ino):
+                return None
+            if (parent.st_dev, parent.st_ino) in directories:
+                return ("{} is inside a served assets directory (a parent has its device and inode), "
+                        "whatever path reaches it".format(directory))
+            status = parent
+            above = os.open("..", _WALK_FLAGS, dir_fd=fd)
+            previous, fd = fd, above
+            os.close(previous)
+    finally:
+        os.close(fd)
+
+
+def _out_dir_identity_refusal(out_dir):
+    """The identity refusal for out_dir, created when missing and opened exactly as each write opens it, or
+    None when it is accepted; run before any render, so a refused output directory never starts Chrome. A
+    directory that cannot be created, opened or walked is refused with the failure as the reason: a render
+    could only fail the same way later."""
+    directory = Path(out_dir)
+    try:
+        os.makedirs(directory, exist_ok=True)
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or (exc.errno == errno.ENOTDIR and os.path.islink(directory)):
+            return "{} is a symlink, not opened as the output directory".format(directory)
+        return "cannot open the output directory {} ({})".format(directory, exc)
+    try:
+        return _opened_dir_refusal(dir_fd, directory)
+    except OSError as exc:
+        return "cannot walk the parents of the output directory {} ({})".format(directory, exc)
+    finally:
+        os.close(dir_fd)
 
 
 def card_targets(out_dir):
@@ -141,25 +216,29 @@ def _write_card(path, data):
     temporary file created exclusively inside the directory and are renamed onto the card name, so a hard
     link or a symlink planted at that name (even between the last check and the write) is replaced as a
     directory entry, never followed or truncated. The directory is created only after the path refusals have
-    passed, opened without following a final symlink, and refused when its device and inode match a served
-    assets directory or any ancestor of one. Raises Refused for a refused directory; returns an error string
-    for a plain I/O failure, or None when the card is written."""
+    passed, opened without following a final symlink, and refused when its identity, or a parent's reached
+    from the open descriptor, is a served assets directory, or when its own identity is an ancestor of one
+    up to the repository root. Raises Refused for a refused directory; returns an error string for a plain
+    I/O failure; re-raises any other failure (an interrupt included) with the temporary file removed; None
+    when the card is written."""
     directory = path.parent
-    reason = _suffix_refusal(directory)
+    reason = _name_refusal(directory)
     if reason:
         raise Refused(reason)
     os.makedirs(directory, exist_ok=True)
     try:
         dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
-        if exc.errno == errno.ELOOP:
+        if exc.errno == errno.ELOOP or (exc.errno == errno.ENOTDIR and os.path.islink(directory)):
             raise Refused("{} is a symlink, not opened as the output directory".format(directory)) from exc
         return "cannot open the output directory {} ({})".format(directory, exc)
     try:
-        status = os.fstat(dir_fd)
-        if (status.st_dev, status.st_ino) in _assets_identities():
-            raise Refused("{} is a served assets directory or an ancestor of one (same device and inode), "
-                          "whatever path reaches it".format(directory))
+        try:
+            reason = _opened_dir_refusal(dir_fd, directory)
+        except OSError as exc:
+            return "cannot walk the parents of the output directory {} ({})".format(directory, exc)
+        if reason:
+            raise Refused(reason)
         temp_name = ".{}.{}.tmp".format(path.name, os.urandom(8).hex())
         try:
             fd = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644,
@@ -181,6 +260,12 @@ def _write_card(path, data):
             except OSError:
                 pass
             return "cannot write {} through its directory {} ({})".format(path.name, directory, exc)
+        except BaseException:
+            try:
+                os.unlink(temp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            raise
         return None
     finally:
         os.close(dir_fd)
@@ -259,6 +344,11 @@ def main(argv=None):
         return 2
     if not os.access(CHROME, os.X_OK):
         print("error: {} is not an executable; nothing rendered".format(CHROME), file=sys.stderr)
+        return 2
+    reason = _out_dir_identity_refusal(out_dir)
+    if reason:
+        print("error: refused: {}. The served cards are the owner-approved PNGs and this script never writes "
+              "them; name a scratch directory. Nothing rendered.".format(reason), file=sys.stderr)
         return 2
     code = 0
     for (composition, _card), target in zip(CARDS, card_targets(out_dir)):
@@ -435,9 +525,9 @@ def _self_test():
         finally:
             subprocess.run = real_run
 
-        # The textual trailing-component refusal: another checkout's served assets directory, which no
-        # real-path comparison against this checkout's ROOT can see, is refused by name, case-folded and by
-        # whole components; a component that merely shares the prefix is not a match.
+        # The textual component refusal: another checkout's served assets directory, which no real-path
+        # comparison against this checkout's ROOT can see, is refused by name, case-folded and by whole
+        # components; a component that merely shares the prefix is not a match.
         other = Path(tmp) / "other-checkout" / "site" / "assets"
         os.makedirs(other)
         reasons = [output_refusal(str(other)), output_refusal(str(other) + os.sep),
@@ -450,6 +540,25 @@ def _self_test():
         reasons = [output_refusal(str(Path(tmp) / "mysite" / "assets")),
                    output_refusal(str(Path(tmp) / "site" / "assets2"))]
         check("bound/suffix-component-boundary-accepted", reasons == [None, None], reasons)
+
+        # The same directory reached so that the typed components never name it: through a symlink, with a
+        # trailing sub/.. the typed form folds away before its components are read (the refusal then comes
+        # from the real path), and a path one level inside such a directory (the run is no longer at the
+        # end); each is refused.
+        os.symlink(Path(tmp) / "other-checkout" / "site", Path(tmp) / "lnk")
+        reason = output_refusal(str(Path(tmp) / "lnk" / "assets"))
+        check("refuse/symlinked-other-checkout-assets",
+              isinstance(reason, str) and "served assets directory name" in reason, reason)
+        reason = output_refusal(str(Path(tmp) / "lnk" / "assets" / "sub" / ".."))
+        check("refuse/symlinked-other-checkout-assets-dotdot",
+              isinstance(reason, str) and "served assets directory name" in reason, reason)
+        reasons = [output_refusal(str(Path(tmp) / "x" / "site" / "assets" / "sub")),
+                   output_refusal(os.path.join("site", "assets", "sub"))]
+        check("refuse/inside-other-checkout-assets",
+              all(isinstance(reason, str) and "served assets directory" in reason for reason in reasons),
+              reasons)
+        reason = _patched("path_refusal", lambda path: None, output_refusal, str(Path(tmp) / "lnk" / "assets"))
+        check("guard-removed/refuse/symlinked-other-checkout-assets", reason is None, reason)
 
         # The write path: the bytes are renamed onto the card name from a new exclusive temporary file
         # through the directory's descriptor, so an entry planted at the card name is replaced, never
@@ -500,6 +609,81 @@ def _self_test():
         finally:
             subprocess.run = real_run
 
+        # The write-time guards, driven through _write_card directly (no Chrome, and where noted with the
+        # path checks stubbed out, as a race past them would leave things): a parent swapped in between the
+        # last path check and the directory open redirects the open into a served assets subdirectory, and
+        # the walk from the descriptor refuses it; a directory above the repository root is accepted (the
+        # ancestor identities stop at the root); a directory named like served assets is refused before it
+        # is created; a symlinked output directory is never followed; an interrupted write removes its
+        # temporary file and re-raises.
+        expected = _fake_png()
+        inside = fixture / SERVED_ASSETS[0] / "sub"
+        os.makedirs(inside)
+        swap = Path(tmp) / "swap"
+        os.makedirs(swap / "sub")
+
+        def _write_to(card_path):
+            try:
+                return _write_card(card_path, expected)
+            except Refused as exc:
+                return exc
+
+        def _swap_then_pass(path):
+            if not os.path.islink(swap):
+                os.rename(swap, Path(tmp) / "swapped")
+                os.symlink(fixture / SERVED_ASSETS[0], swap)
+            return None
+
+        got = _patched("ROOT", fixture, _patched, "_name_refusal", _swap_then_pass, _write_to,
+                       swap / "sub" / served.name)
+        check("write/parent-swapped-into-assets-subdir-refused-by-inode",
+              isinstance(got, Refused) and "device and inode" in str(got) and os.listdir(inside) == [],
+              (got, os.listdir(inside)))
+
+        got = _patched("ROOT", fixture, _write_to, Path(tmp) / served.name)
+        check("bound/dir-above-root-accepted",
+              got is None and (Path(tmp) / served.name).read_bytes() == expected, (got,))
+
+        named = Path(tmp) / "elsewhere" / "site" / "assets"
+        got = _patched("ROOT", fixture, _write_to, named / served.name)
+        check("write/dir-named-assets-refused-by-name",
+              isinstance(got, Refused) and "served assets directory name" in str(got)
+              and not os.path.exists(named), (got,))
+
+        plain = Path(tmp) / "plain-out"
+        os.makedirs(plain)
+        os.symlink(plain, Path(tmp) / "dirlink")
+        got = _patched("ROOT", fixture, _write_to, Path(tmp) / "dirlink" / served.name)
+        check("write/symlinked-out-dir-not-followed",
+              isinstance(got, Refused) and "symlink" in str(got) and os.listdir(plain) == [],
+              (got, os.listdir(plain)))
+
+        clean_dir = Path(tmp) / "clean-out"
+        os.makedirs(clean_dir)
+        real_fsync = os.fsync
+
+        def _interrupting_fsync(fd):
+            raise KeyboardInterrupt
+
+        os.fsync = _interrupting_fsync
+        try:
+            try:
+                got = _patched("ROOT", fixture, _write_to, clean_dir / served.name)
+            except KeyboardInterrupt:
+                got = KeyboardInterrupt
+        finally:
+            os.fsync = real_fsync
+        check("write/temp-removed-on-interrupt",
+              got is KeyboardInterrupt and os.listdir(clean_dir) == [], (got, os.listdir(clean_dir)))
+
+        # main(): an output directory whose identity is a served assets directory, reached under a name the
+        # path checks cannot refuse, exits 2 before render (the only place Chrome is started) is called.
+        calls.clear()
+        got = _patched("ROOT", fixture, _patched, "CHROME", sys.executable, _patched, "path_refusal",
+                       lambda path: None, _patched, "render", _record, _main_exit,
+                       ["--out", str(Path(tmp) / "mid" / "assets")])
+        check("main/identity-refused-out-exit-2-before-chrome", got == 2 and calls == [], (got, calls))
+
     if FAILURES:
         print("SELF-TEST FAIL: render_og_cards {} of {} check(s) failed".format(len(FAILURES), len(EXECUTED)))
         for failure in FAILURES:
@@ -510,10 +694,14 @@ def _self_test():
           "relative path into assets and the assets directory itself are each refused, and each is accepted "
           "with the decision removed; an ordinary scratch directory and a prefix-sharing sibling are accepted; "
           "an empty or missing output directory and an unrecognized argument exit 2; a refused output directory "
-          "exits 2 before Chrome; a card path redirected to a served card is refused before Chrome and again "
-          "before the write; another checkout's assets directory is refused by its trailing components; a hard "
-          "link or a late-planted symlink at a card name is replaced by the rename, the served card unchanged; "
-          "an aliased assets directory and an ancestor of one are refused by device and inode; Chrome is never "
+          "exits 2 before Chrome, by path and by directory identity; a card path redirected to a served card is "
+          "refused before Chrome and again before the write; another checkout's assets directory is refused by "
+          "its components anywhere in the path, as typed or resolved through a symlink or a folded sub/..; a "
+          "hard link or a late-planted symlink at a card name is replaced by the rename, the served card "
+          "unchanged; an aliased assets directory, an ancestor of one and a parent swapped into an assets "
+          "subdirectory are refused by device and inode; a directory above the repository root is accepted; a "
+          "directory named like served assets is refused before it is created; a symlinked output directory is "
+          "never followed; an interrupted write removes its temporary file; Chrome is never "
           "started)".format(len(EXECUTED)))
     return 0
 

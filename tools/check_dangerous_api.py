@@ -665,8 +665,10 @@ ALLOWLIST = (
      " list, no shell"),
     ("tools/check_byte_canon.py", "self_test_main", "shell", 1, _SAVED),
     ("tools/render_og_cards.py", "_self_test", "shell", 1,
-     _SAVED + " (the saved real run the fake-Chrome write-path vectors replace with a fixture-PNG"
-     " stand-in and the finally restores; Chrome is never started)"),
+     "self-test stub: keeps the real subprocess.run only so each finally can restore it after the"
+     " fake-Chrome write-path vectors patch in stand-ins that never delegate: each reads the"
+     " --screenshot path from the argv it is handed and writes a fixture PNG there, so Chrome is"
+     " never started, and no call in this file turns shell on"),
     ("tools/check_ci_parity.py", "_stubs_prepared_before_pool", "shell", 1, _SAVED),
     ("tools/check_ci_parity.py", "self_test", "shell", 1, _SAVED),
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._check_no_maintenance", "shell", 1,

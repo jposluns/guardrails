@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "66410ea8f22f3960bcbb56c78d3a47a5ddc28bd7a59df7f12a0e8b38c060e48f"
+tree-sha256 = "190335eeff9c661c3a37ca2313df5ad33dad406894521c9bc819567d648a58da"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4216,8 +4216,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 198009
-sha256 = "2ecc4ba024da0f0a8ee16ac99ea1a6c95760b5a5da87e5ca72d595000f8b0b66"
+bytes = 198196
+sha256 = "b6ebaa16007385cbfa9c33cfa2f733c17e0e3a9175bd131fbd5c24456f2c264c"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -4381,8 +4381,8 @@ sha256 = "1062f2cdf038f39b3a88bb1a124c4e9d6bc58d89e5aa3b4b8855dadf04d8c447"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 170281
-sha256 = "77df81394de8598c7bfbd71a7938c4b9edc518909de9c6317215b000197c4451"
+bytes = 170512
+sha256 = "b44e909384151e80c727682103897cde13aebc2cf4f61a9f58e612de643f43ce"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -4671,8 +4671,8 @@ sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
 
 [[sources]]
 path = "tools/render_og_cards.py"
-bytes = 29520
-sha256 = "c83321e193ef8104cf368094486f088f1f822db195ebd2ada922f5b6305db14d"
+bytes = 40306
+sha256 = "804c437c86c2fcdfbd17f79f69a7e670bd49147ecd75c00ad56eca70e8eb3c0f"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
@@ -4691,8 +4691,8 @@ sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 219757
-sha256 = "42176e3f26bc1caa2dbc89dabd84506b0c5cd5eeb5565725bbf1a164d9ca7eac"
+bytes = 220321
+sha256 = "fee8df9b476c30f5a2f6c4db3c5b8c72ded8d54de91e5f735295641b3c4046fb"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
