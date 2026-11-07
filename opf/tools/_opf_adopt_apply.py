@@ -5959,7 +5959,8 @@ def _init_store_run(op_row, context):
                                   _init_store_intent_ops(members))
             result = init_op.run_init_operation(str(product_root), ancestral=ancestral, recover=recover,
                                                 admitted=admitted, operation_id=operation_id,
-                                                admitted_dirs=admitted_dirs)
+                                                admitted_dirs=admitted_dirs,
+                                                homes2=store.init_writes_homes2())
             recovered += _init_mutex_removed(result)
             if result.status != init_op.VIEWS_READY:
                 failure = "the coupled-init substrate ended {} ({})".format(
@@ -22114,6 +22115,87 @@ def _init_store_git_checks(check, ctx, refused):
               refused(res, "foreign")
               and init_op._read_or_none(os.path.join(root, ".working", "TODO.md"))
               == foreign_view and txn_state(root, run) == "open")
+
+        # ONE HOMES RULE FOR BOTH INIT PATHS: the init this engine composes and plain `opf init` pick
+        # the homes generation of a fresh store through the one rule store.init_writes_homes2, so with
+        # SUPPORTED_HOMES at 1 and at 2 both write the same spec_version. Each path is stopped at its
+        # generation choice: the substrate call is recorded (its homes2 bound against the real
+        # signature, so an omitted argument reads as the substrate's default) and answered REFUSED,
+        # which reverses the scaffold; plain init's manifest model call is recorded and raises, which
+        # plain init reports before any write. The flip drops homes2 from the recorded substrate call,
+        # the shape of a call site that omits the argument, and must turn the comparison red at 2.
+        import contextlib
+        import inspect
+        import io
+        import opf as _opf_cli
+
+        class _HomesProbeStop(Exception):
+            pass
+
+        real_model = _opf_init._manifest_model
+        real_sig = inspect.signature(real_run)
+        if _opf_cli._bootstrap() != 0:
+            check("init-homes-rule-plain-init-bootstrapped", False)
+
+        def homes_spec(homes, seen):
+            if len(seen) != 1:
+                return None
+            with mock.patch.object(store, "SUPPORTED_HOMES", homes):
+                return real_model(homes2=seen[0])["opf"]["spec_version"]
+
+        def adoption_spec(homes, fixture, omit=False):
+            seen = []
+
+            def record(*a, **k):
+                if omit:
+                    k.pop("homes2", None)
+                call = real_sig.bind(*a, **k)
+                call.apply_defaults()
+                seen.append(call.arguments["homes2"])
+                stopped = init_op.InitResult()
+                stopped.status = init_op.REFUSED
+                stopped.primary_failure = dict(code=init_op.REFUSED, detail="the homes probe stops here")
+                return stopped
+
+            root_ = init_op._plain_repo(os.path.join(base, fixture), env)
+            with mock.patch.object(store, "SUPPORTED_HOMES", homes), \
+                    mock.patch.object(init_op, "run_init_operation", record):
+                res_ = dispatch(row, ctx(root_, run_id=rid()))
+            return homes_spec(homes, seen), res_.status == cannot_ and op_ids(root_) == []
+
+        def plain_spec(homes, fixture):
+            seen = []
+
+            def record(homes2=False):
+                seen.append(homes2)
+                raise _HomesProbeStop("the homes probe stops here")
+
+            root_ = init_op._plain_repo(os.path.join(base, fixture), env)
+            quiet = io.StringIO()
+            with mock.patch.object(store, "SUPPORTED_HOMES", homes), \
+                    mock.patch.object(_opf_init, "_manifest_model", record), \
+                    contextlib.redirect_stdout(quiet), contextlib.redirect_stderr(quiet):
+                rc = _opf_oplock._st_with_git_lifecycle(
+                    lambda: _opf_cli._cmd_init(["--root", root_]))
+            return homes_spec(homes, seen), (rc != 0 and not os.path.lexists(
+                os.path.join(root_, store.WORKING_DIRNAME)))
+
+        cannot_ = store.CANNOT_EVALUATE
+        homes_rows = {}
+        for homes in (1, 2):
+            homes_rows[homes] = (adoption_spec(homes, "homesrule-adopt-{}".format(homes)),
+                                 plain_spec(homes, "homesrule-plain-{}".format(homes)),
+                                 adoption_spec(homes, "homesrule-flip-{}".format(homes), omit=True))
+        check("init-homes-rule-both-paths-stopped-before-writing",
+              all(a[1] and p[1] and f[1] for a, p, f in homes_rows.values()), observed=homes_rows)
+        check("init-homes-rule-shared-by-both-paths",
+              all(a[0] == p[0] for a, p, _f in homes_rows.values())
+              and homes_rows[1][1][0] == store.SUPPORTED_SPEC_VERSION
+              and homes_rows[2][1][0] == store.HOMES2_SPEC_VERSION
+              and store.SUPPORTED_SPEC_VERSION != store.HOMES2_SPEC_VERSION, observed=homes_rows)
+        check("init-homes-rule-omitted-argument-flip-red",
+              homes_rows[1][2][0] == homes_rows[1][1][0]
+              and homes_rows[2][2][0] != homes_rows[2][1][0], observed=homes_rows)
 
         # THE OCCUPIED MACHINE PATH COMPOSITION (codex round 2, spec 14.2: "After the archival
         # the destination is an ordinary managed path"): the shell archives the occupying

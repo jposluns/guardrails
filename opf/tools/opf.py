@@ -18735,9 +18735,10 @@ def _init_main(rest):
         working = _opf_store.WORKING_DIRNAME
         machine = working + "/" + _opf_store.DEFAULT_MACHINE_SUBDIR
         # The one bootstrap builder the init operation also uses, over the manifest model of the
-        # homes generation this tooling activates. A generation-2 model adds .working/.gitignore as
+        # homes generation this tooling activates, chosen by the rule the adoption-coupled init also
+        # reads (_opf_store.init_writes_homes2). A generation-2 model adds .working/.gitignore as
         # the FIRST payload, so its ignore rules exist before any store file (spec 4.2).
-        model = _opf_init._manifest_model(homes2=_opf_store.SUPPORTED_HOMES >= 2)
+        model = _opf_init._manifest_model(homes2=_opf_store.init_writes_homes2())
         gitignore = None
         if _opf_store.homes_generation(model) == 2:
             gitignore = working + "/.gitignore"

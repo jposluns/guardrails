@@ -109,6 +109,15 @@ STORE_ROOT_CONTROL_DIRS = (".git", ".aiqt")
 # SUPPORTED_HOMES is the highest homes generation this tooling activates; until homes 2 activates,
 # every store, whatever it declares, keeps its legacy grading (generation 1).
 SUPPORTED_HOMES = 1
+
+
+def init_writes_homes2():
+    """True when a fresh store is created at homes generation 2: the one rule plain `opf init` and the
+    init an adoption composes both read, so the two never write different spec versions. Read at call
+    time, so a raised SUPPORTED_HOMES is seen; False at the shipped SUPPORTED_HOMES 1."""
+    return SUPPORTED_HOMES >= 2
+
+
 # Worklog 2 remains test-only until schema, doctor, and release support land.
 SUPPORTED_WORKLOG = 1
 EVIDENCE_INVENTORY_FORMAT = "opf.evidence.inventory/v1"  # spec 4.2

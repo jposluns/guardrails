@@ -195,7 +195,7 @@ _ROUTE_ALLOWED_REFS = dict(
         "_opf_oplock.release_init_holder", "_opf_oplock.release_operation",
         "_opf_store.DEFAULT_MACHINE_SUBDIR", "_opf_store.LOCAL_POINTER_REL",
         "_opf_store.NOT_ADOPTED", "_opf_store.POINTER_REL",
-        "_opf_store.RESOLVED", "_opf_store.SUPPORTED_HOMES",
+        "_opf_store.RESOLVED", "_opf_store.init_writes_homes2",
         "_opf_store.WORKING_DIRNAME", "_opf_store._close_fd_exc_safe",
         "_opf_store._journal", "_opf_store._journal._close_fd_quietly",
         "_opf_store._open_dir_nofollow", "_opf_store.homes_generation",
