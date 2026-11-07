@@ -114,7 +114,7 @@ jobs:
   # opf-tooling-a, opf-tooling-b, opf-tooling-c, opf-host-patch and selftest-execution run the
   # self-tests of tools under tools/ and opf/tools/ over synthetic fixtures those modules build
   # themselves (opf-tooling-b also runs the source-only init gate, check_opf_init.py, whose default
-  # entry runs the same fixture suite), with these site-tree verdict inputs. The whole-repository
+  # entry runs the same fixture suite); their site-tree verdict inputs follow. The whole-repository
   # live gates those jobs once held run in the always-run tree-gates job below, among them
   # opf/tools/check_opf_homes.py, which reads the five excluded homes pages, so a site-only change
   # that turns that live gate red fails every lane. Its self-test (opf-tooling-a and the
@@ -1709,11 +1709,13 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_byte_canon.py
 
-  # Whole-repository live gates, held out of the selectable jobs so they run in every run: each
-  # reads the tree as a whole (the OPF homes contract pages, the prompt-pack manifest, the OPF
-  # stores, platform coverage declarations, rendered output drift, the init contract records,
-  # entry-point classifications and probe placements), so no changed-path selection can bound its
-  # inputs. Every gate command below is byte-identical to the step it replaces in a selectable
+  # Whole-repository live gates, held out of the selectable jobs so they run in every run. Between
+  # them they read the OPF homes contract pages, the prompt-pack manifest, the OPF stores, platform
+  # coverage declarations, rendered output, the init contract records, entry-point classifications
+  # and probe placements. Each gate runs here in every run as a conservative placement, whatever
+  # scope its draft entry in tools/ci_checks.toml declares (some declare a narrower sub-tree or
+  # per-file scope, and one is undetermined), so no changed-path selection decides whether it
+  # runs. Every gate command below is byte-identical to the step it replaces in a selectable
   # job. The child-status probe step replaces no step: it is this job's own probe, as in every
   # other job. On a site-only train and on a labelled pull request that is not a train, where the
   # selectable jobs are skipped, these gates now run where they were skipped before. The

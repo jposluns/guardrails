@@ -136,11 +136,11 @@ reads them, now runs in the always-run `tree-gates` job, so for that live gate t
 a deliberate conservative margin, but its self-test also reads those pages live and runs only in
 skippable jobs, so for the self-test they are still load-bearing; `opf/site/tooling.html` stays
 excluded as a deliberate conservative margin even though `tools/check_opf_declaration.py`, which
-reads it and decodes every `.md` and `.html` file in the tree, also runs (live gate and
-self-test) in the always-run `site` job; and
-`tools/check_python_floor.py` (which reads `site/development.html`, `site/install.html`,
-`opf/site/adopt.md` and `opf/site/adopt.html`) runs live in the always-run registry job in every
-run. What the fast lane deliberately gives up for a site-only train is every check in the eleven
+reads it and decodes every `.md` and `.html` file in the tree, has its live gate and its
+execution-reconciled suite run in the always-run `site` job; and `tools/check_python_floor.py`
+(which reads `site/development.html`, `site/install.html`, `opf/site/adopt.md` and
+`opf/site/adopt.html`) runs live in the always-run registry job in every run.
+What the fast lane deliberately gives up for a site-only train is every check in the eleven
 heavy jobs named above: every step of those jobs is skipped. Of their commands, only the
 child-status probe (`opf/tools/_child_status.py`), the opf-declaration `selftest-execution`
 suite, and `tools/check_byte_canon.py` (live gate and self-test) also run, as the same command,

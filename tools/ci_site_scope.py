@@ -126,11 +126,11 @@ SITE_REGENERATED = frozenset({
 # always-run sibling, so for the self-test they are still load-bearing, and all five are
 # retained. tools/check_opf_declaration.py (live gate and self-test) reads
 # opf/site/tooling.html as a declaration surface AND walks the whole tree decoding every .md and
-# .html file (restating_documents), site pages included; because of that whole-tree walk, the
-# opf-declaration live gate and its self-test also run in the always-run site job, so a
-# site-only change that turns them red fails every lane (the execution-reconciled registration
-# stays in the selftest-execution job), and the tooling.html exclusion is retained as a
-# deliberate conservative margin, not because an always-run read is missing.
+# .html file (restating_documents), site pages included; because of that whole-tree walk, its
+# live gate and its execution-reconciled suite run in the always-run site job, so a site-only
+# change that turns either red fails every lane (the suite's registration stays in the
+# selftest-execution job), and the tooling.html exclusion is retained as a deliberate
+# conservative margin, not because an always-run read is missing.
 # tools/check_python_floor.py reads site/development.html, site/install.html, opf/site/adopt.md
 # and opf/site/adopt.html; its live gate runs in the always-run registry job in every run and in
 # two of the three config lanes (the malformed lane excludes the bare launch, which stays in the
