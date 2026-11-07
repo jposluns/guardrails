@@ -14,7 +14,8 @@ THE CHILD SIDE (ported from tools/_selftest_exit_report.py): the parent launches
 _child_main installs the observation hooks BEFORE any loaded code runs, arms the finalizer as the
 process's FIRST atexit registration (atexit runs last-registered first, so it runs after every other
 callback), and only then runs the payload as __main__. The hooks: threading.excepthook is wrapped so a
-thread ending in any exception other than a clean SystemExit is a fault, the SystemExit's code read
+thread ending in any exception other than a clean SystemExit (one that is, by identity, the exception
+the thread is handling, as below) is a fault, the SystemExit's code read
 from SystemExit's own code slot (SystemExit.__dict__["code"]), never through getattr, so a subclass
 whose code property lies about the slot cannot pass; an audit hook (which cannot be removed) records
 as a fault every thread started through _thread directly, outside threading (a start is threading's
@@ -49,8 +50,15 @@ at the thread's construction are exempt, since each is read only when the live h
 replaced or raising, itself a recorded fault), and threading.ExceptHookArgs (the constructor the genuine
 _invoke_excepthook reads from threading's globals to build what the excepthook receives) is required
 back by identity at each thread's start and end and at exit, so a replacement there left in place, or
-restored only after the join, is a fault; the _bootstrap_inner wrapper is required back by identity at
-exit like the hooks; and the finalizer refuses a recorded sys.stderr or sys.__stderr__ object that no
+restored from another thread only after the join, is a fault; a replacement the checked thread
+restores itself before the end check (a fake that puts the genuine constructor back as it is called,
+or a destructor that runs when the run leg drops the traceback after the handoff) passes those
+identity checks and is refused instead by the excepthook wrapper, which reads a clean SystemExit as
+clean only when it is, by identity, the exception the thread is handling (read through the
+sys.exception bound at import), so forged args that reach the wrapper are a fault however the
+constructor was restored, while a restored fake whose forged args never reach it (one that raises a
+SystemExit, which the thread machinery drops silently) is the restored-channel residual below; the
+_bootstrap_inner wrapper is required back by identity at exit like the hooks; and the finalizer refuses a recorded sys.stderr or sys.__stderr__ object that no
 longer resolves write or flush to the type-level method it resolved at install, at the object itself
 and at each layer below it reached through .buffer and then .raw (an instance attribute shadowing
 either name at any recorded layer, a replaced type-level method, a changed type, or a layer object no
@@ -129,9 +137,14 @@ threading.Thread._bootstrap_inner, a thread's own _invoke_excepthook slot with i
 threading.ExceptHookArgs, sys.stderr, sys.__stderr__, the write or flush member resolved at any
 recorded layer of either stream (the object, its buffer, its raw file), or the file open on fd 2;
 what remains of the class after this slice is a diversion of any of these restored, from another
-thread or a C caller, inside the window between the checks that bracket it (the finalizer's identity
-and member checks see only the state at exit, and a thread's _invoke_excepthook, its cells and
-threading.ExceptHookArgs are read only as the thread starts and again after it ran), the two exempt
+thread, a C caller or the checked thread itself (a replacement that puts the genuine object back as
+it is called, or a destructor that runs after the thread's exception was handed off and before the
+end check), inside the window between the checks that bracket it (the finalizer's identity and
+member checks see only the state at exit, and a thread's _invoke_excepthook, its cells and
+threading.ExceptHookArgs are read only as the thread starts and again after it ran; for
+threading.ExceptHookArgs this remainder is only a restored fake whose forged args never reach the
+excepthook wrapper, since the wrapper refuses a clean SystemExit that is not the exception the thread
+is handling), the two exempt
 fallback cells named above, and any mutable state these functions read that the list above does not
 pin (state of the io objects below the recorded members, or the C-level printers the default hooks
 fall back to, which no Python-level identity pin can bracket): every such restored channel, and loaded
@@ -215,6 +228,10 @@ _EXCEPT_HOOK_ARGS = threading.ExceptHookArgs
 # SystemExit's own code slot, read through the base descriptor so that a subclass's code property
 # (code the exception controls) never runs while a thread's end is classified.
 _SYSTEM_EXIT_CODE = SystemExit.__dict__["code"]
+# The exception the calling thread is handling, read through the function bound here at import, never
+# through sys's live name (loaded code can rebind that): the thread excepthook wrapper requires the
+# exception it was handed to be this one by identity before it reads a clean SystemExit as clean.
+_HANDLED_EXCEPTION = sys.exception
 _STATE = {"installed": False, "armed": False, "armed_pid": None, "decided": None, "raised": None,
           "confirmed": None, "main_ident": None, "record_path": None, "nonce": None, "check_ids": [],
           "faults": [], "thread_hook": None, "unraisable_hook": None, "start_stderr": None,
@@ -313,19 +330,31 @@ def _clean_status(code, *, type=type, int=int):
 
 
 def _thread_hook(args, *, _STATE=_STATE, _SYSTEM_EXIT_CODE=_SYSTEM_EXIT_CODE,
-                 _clean_status=_clean_status, issubclass=issubclass, type=type,
-                 SystemExit=SystemExit, BaseException=BaseException):
+                 _clean_status=_clean_status, _handled_exception=_HANDLED_EXCEPTION,
+                 issubclass=issubclass, type=type, SystemExit=SystemExit,
+                 BaseException=BaseException):
     """threading.excepthook while installed: record every thread exception except a clean SystemExit,
     then defer to the hook it replaced. The end is classified by the exception's real type and
     SystemExit's own code slot, so no code the exception controls runs (a failure to classify is a
-    fault); the fault is recorded FIRST with a fixed message."""
+    fault); the fault is recorded FIRST with a fixed message. A clean SystemExit counts only when it
+    is, by identity, the exception the calling thread is actually handling, read through the
+    sys.exception bound at import: the genuine _invoke_excepthook runs inside the except clause of
+    the thread's run leg and builds its args from that very exception, so args carrying any other
+    exception were forged on the way (a replaced threading.ExceptHookArgs, even one that puts the
+    genuine constructor back before any identity check reads it) or handed to this hook outside a
+    thread's end, and either is a fault."""
+    handled = _handled_exception()
     try:
         exc = args.exc_value
         clean = (issubclass(type(exc), SystemExit)
                  and _clean_status(_SYSTEM_EXIT_CODE.__get__(exc, SystemExit)))
     except BaseException:
-        clean = False
-    if not clean:
+        exc, clean = None, False
+    if clean and exc is not handled:
+        _STATE["faults"].append("threading.excepthook was handed a clean SystemExit that is not the "
+                                "exception the thread was handling, so a thread fault could have "
+                                "been disguised as a clean exit")
+    elif not clean:
         _STATE["faults"].append("a thread ended with an exception other than a clean SystemExit")
         try:
             name = args.thread.name if args.thread is not None else "<unknown>"
@@ -1276,6 +1305,90 @@ worker.join()
 threading.ExceptHookArgs = real
 fcc.exit_with(0)
 """
+# The same disguise restored by the checked thread itself, so the identity checks at the thread's end
+# and at exit both find the genuine constructor back: once by the fake as it is called (it puts the
+# genuine constructor back before building the args), once by a destructor of a local the thread's
+# run held, which runs when the run leg drops the traceback after the handoff.
+_EXCEPTHOOKARGS_SELF_RESTORING = """import threading
+import _fail_closed_child as fcc
+real = threading.ExceptHookArgs
+
+
+def disguise(seq):
+    threading.ExceptHookArgs = real
+    return real([SystemExit, SystemExit(0), None, seq[3]])
+
+
+def run():
+    threading.ExceptHookArgs = disguise
+    raise RuntimeError("swallowed")
+
+
+worker = threading.Thread(target=run)
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
+_EXCEPTHOOKARGS_DESTRUCTOR_RESTORED = """import threading
+import _fail_closed_child as fcc
+real = threading.ExceptHookArgs
+
+
+class Restore:
+    def __del__(self):
+        threading.ExceptHookArgs = real
+
+
+def run():
+    keeper = Restore()
+    threading.ExceptHookArgs = lambda seq: real([SystemExit, SystemExit(0), None, seq[3]])
+    raise RuntimeError("swallowed")
+
+
+worker = threading.Thread(target=run)
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
+# A fake that RAISES a SystemExit instead of returning args: the raise escapes the genuine
+# _invoke_excepthook (it catches Exception only) and the thread machinery drops a SystemExit
+# silently, so the excepthook wrapper never runs and only the identity check (here at the thread's
+# end and at exit) or the closure-cell check (here at the thread's start and end) observes it.
+_EXCEPTHOOKARGS_RAISING = """import threading
+import _fail_closed_child as fcc
+
+
+def disguise(seq):
+    raise SystemExit(0)
+
+
+threading.ExceptHookArgs = disguise
+worker = threading.Thread(target=lambda: 1 / 0)
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
+_INVOKE_CELL_RAISING = """import sys
+import threading
+import _fail_closed_child as fcc
+
+
+def raising():
+    raise SystemExit(0)
+
+
+worker = threading.Thread(target=lambda: 1 / 0)
+for cell in worker._invoke_excepthook.__closure__:
+    try:
+        held = cell.cell_contents
+    except ValueError:
+        continue
+    if held is sys.exc_info:
+        cell.cell_contents = raising
+worker.start()
+worker.join()
+fcc.exit_with(0)
+"""
 _EXC_INFO_CAPTURED = """import sys
 import threading
 import _fail_closed_child as fcc
@@ -1630,6 +1743,22 @@ FLIPS = {
     "replaced-excepthookargs-accepted": (
         '    if _THREADING_DICT.get("ExceptHookArgs") is _EXCEPT_HOOK' '_ARGS:\n        return',
         '    if True:\n        return'),
+    "handed-exception-unchecked": (
+        '    if clean and exc is not hand' 'led:',
+        '    if False and clean and exc is not handled:'),
+    # forged args that reach the excepthook wrapper are refused by two layers each alone (the
+    # identity or closure-cell check, and the wrapper's comparison with the exception being
+    # handled), so a vector of that shape is observed red only with both removed
+    "excepthookargs-and-handed-exception-accepted": (
+        ('    if _THREADING_DICT.get("ExceptHookArgs") is _EXCEPT_HO' 'OK_ARGS:\n        return',
+         '    if True:\n        return'),
+        ('    if clean and exc is not han' 'dled:',
+         '    if False and clean and exc is not handled:')),
+    "invoke-cells-and-handed-exception-unchecked": (
+        ('            if checked and cell.cell_contents is not ca' 'ptured:',
+         '            if False and cell.cell_contents is not captured:'),
+        ('    if clean and exc is not ha' 'ndled:',
+         '    if False and clean and exc is not handled:')),
     "invoke-closure-cells-unchecked": (
         '            if checked and cell.cell_contents is not cap' 'tured:',
         '            if False and cell.cell_contents is not captured:'),
@@ -1796,12 +1925,27 @@ VECTORS = (
     # the captured cell rebound in place afterwards; each is a recorded fault at the thread's start
     # or end (the constructor at exit too)
     ("contract/replaced-excepthookargs-refused", _EXCEPTHOOKARGS_REPLACED, None, (2, True, True, None),
-     "replaced-excepthookargs-accepted"),
+     "excepthookargs-and-handed-exception-accepted"),
     ("contract/restored-excepthookargs-refused", _EXCEPTHOOKARGS_RESTORED, None, (2, True, True, None),
+     "excepthookargs-and-handed-exception-accepted"),
+    # a fake that raises a SystemExit never lets args reach the excepthook wrapper, so while it
+    # stays in place the identity check alone refuses it
+    ("contract/raising-excepthookargs-refused", _EXCEPTHOOKARGS_RAISING, None, (2, True, True, None),
      "replaced-excepthookargs-accepted"),
+    # the same disguise restored by the checked thread itself before the end check reads the name
+    # (by the fake as it is called, or by a destructor when the run leg drops the traceback), which
+    # only the thread excepthook wrapper's comparison with the exception being handled refuses
+    ("contract/self-restoring-excepthookargs-refused", _EXCEPTHOOKARGS_SELF_RESTORING, None,
+     (2, True, True, None), "handed-exception-unchecked"),
+    ("contract/destructor-restored-excepthookargs-refused", _EXCEPTHOOKARGS_DESTRUCTOR_RESTORED, None,
+     (2, True, True, None), "handed-exception-unchecked"),
     ("contract/captured-exc-info-refused", _EXC_INFO_CAPTURED, None, (2, True, True, None),
-     "invoke-closure-cells-unchecked"),
+     "invoke-cells-and-handed-exception-unchecked"),
     ("contract/rebound-invoke-cell-refused", _INVOKE_CELL_REBOUND, None, (2, True, True, None),
+     "invoke-cells-and-handed-exception-unchecked"),
+    # a rebound cell that raises a SystemExit never lets args reach the excepthook wrapper, so the
+    # closure-cell check alone refuses it
+    ("contract/raising-invoke-cell-refused", _INVOKE_CELL_RAISING, None, (2, True, True, None),
      "invoke-closure-cells-unchecked"),
     # the per-thread _invoke_excepthook (what _bootstrap_inner calls instead of threading.excepthook,
     # so a replacement there never reaches the installed wrapper), replaced before the start or from
@@ -1837,17 +1981,22 @@ def _summary(verdict, detail):
     return verdict, detail["record_present"], listed, detail.get("problem")
 
 
-def _load_mutant(tmp, key, source, old, new):
+def _load_mutant(tmp, key, source, flip):
     """Load a copy of this module with one flip applied, written to its own scratch directory (the
     copy carries the inline child-status guard, so its children import nothing else from there):
-    (module, None), or (None, the reason) when the flip does not match the source exactly once."""
-    if source.count(old) != 1:
-        return None, "flip {} matches {} times, not once".format(key, source.count(old))
+    (module, None), or (None, the reason) when a replacement does not match exactly once. A flip is
+    one (old, new) pair, or a tuple of such pairs applied in order, for a fault two layers each
+    refuse alone."""
+    pairs = flip if type(flip[0]) is tuple else (flip,)
+    for old, new in pairs:
+        if source.count(old) != 1:
+            return None, "flip {} matches {} times, not once".format(key, source.count(old))
+        source = source.replace(old, new)
     mutant_dir = os.path.join(tmp, "flip-" + key)
     os.makedirs(mutant_dir)
     path = os.path.join(mutant_dir, "_fail_closed_child.py")
     with open(path, "x", encoding="utf-8") as handle:
-        handle.write(source.replace(old, new))
+        handle.write(source)
     spec = importlib.util.spec_from_file_location("_fail_closed_child_flip_" + key.replace("-", "_"),
                                                   path)
     module = importlib.util.module_from_spec(spec)
@@ -1864,8 +2013,8 @@ def self_test_results():
         source = handle.read()
     with tempfile.TemporaryDirectory(prefix="fail-closed-child-selftest-") as tmp:
         mutants = {}
-        for key, (old, new) in sorted(FLIPS.items()):
-            mutants[key] = _load_mutant(tmp, key, source, old, new)
+        for key, flip in sorted(FLIPS.items()):
+            mutants[key] = _load_mutant(tmp, key, source, flip)
         for index, (check_id, payload_source, sidecar, expected, flip_key) in enumerate(VECTORS):
             vector_dir = os.path.join(tmp, "vector-{}".format(index))
             os.makedirs(vector_dir)
@@ -1938,7 +2087,9 @@ def self_test():
           "under a hook later restored, a deleted unraisable hook, a replaced threading excepthook, "
           "a replaced sys.stderr or sys.__stderr__, a write or flush shadowed on either recorded "
           "stream object or on its buffer or raw layer, a replaced threading.ExceptHookArgs (left "
-          "in place or restored only after the join), a sys.exc_info captured by a thread's closure "
+          "in place, restored only after the join, or restored by the checked thread itself as the "
+          "fake is called or from a destructor after the handoff), a sys.exc_info captured by a "
+          "thread's closure "
           "while swapped, a rebound closure cell, a thread started or ended with an "
           "_invoke_excepthook that is not the one threading set, a replaced "
           "Thread._bootstrap_inner wrapper and a re-opened fd 2 each read "
