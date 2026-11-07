@@ -78,6 +78,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import collections.abc
 import datetime
+import hashlib
 import operator
 import os
 import posixpath
@@ -197,8 +198,9 @@ MODULE_TYPES = {
     "tier_assessment": ("TA", "operational_policy"),
     "session_lease": ("SL", "concurrent_operation"),
 }
-# Importer-only quarantine type: a known, namespace-bound type gated by no module toggle (created only
-# by an importer, never scaffolded, spec 8.1).
+# legacy_fragment is not an OPF record type: the standard reserves LF unassigned, no record type uses it,
+# and unmappable imported text stays verbatim in `unparsed` (spec 8.1/8.3). The name stays known here,
+# gated by no module toggle and never scaffolded, so the tools name it when they refuse or defer it.
 IMPORTER_TYPES = {
     "legacy_fragment": "LF",
 }
@@ -340,7 +342,7 @@ IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose store
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
 # The namespaces the imported series admits: the baseline and module-tier bindings, never the
-# importer-only legacy_fragment (LF), the reserved-excluded transaction (TX), or the unassigned CL
+# unassigned LF (no record type uses it), the reserved-excluded transaction (TX), or the unassigned CL
 # (spec 8.1/8.2). _opf_schema.IMPORTED_NAMESPACES is built from these SAME taxonomy maps (that module
 # imports this one, so the set is mirrored here rather than imported); the opf-check self-test
 # reconciles the two rosters so they cannot drift.
@@ -378,7 +380,7 @@ def imported_leaf_names(enabled_types):
     `<type>.imported.index.toml` per enabled non-ledger type, and worklog.imported.toml for the worklog
     ledger, whose imported home is a worklog-shaped ledger file, not an index (spec 4.2; the first
     imported-series release keeps these leaves inline in either layout). A type whose normative
-    namespace lies outside _IMPORTED_SERIES_NAMESPACES -- the importer-only legacy_fragment (LF) -- and
+    namespace lies outside _IMPORTED_SERIES_NAMESPACES -- legacy_fragment, on the unassigned LF -- and
     a name outside the section-8.1 roster contribute NO leaf (fail-closed), so the leaf roster derives
     from the same namespace set as the imported id and counter grammar and the two cannot drift
     (spec 8.2)."""
@@ -1385,6 +1387,272 @@ def resolve_store_fd(product_root_fd, product_root, allowance=None):
     return Resolution(NOT_ADOPTED, "no store found ({}); opf init is the remedy".format(detail),
                       store_root=product_root, pointer_source=source,
                       product_root=product_root), None
+
+
+# --- store identity for CI (spec 14.1 completion check 4) --------------------------------------------
+#
+# The identity is the committed pointer's [store].target string together with the SHA-256 of the raw bytes of
+# the discovered machine store's init.toml, which coupled init writes once and nothing rewrites. The expected
+# values are pinned OUTSIDE the store, in IDENTITY_REL at the product root: a fixed committed path that no
+# argument or environment variable can redirect, so a run can never be pointed at a file that agrees with it.
+
+IDENTITY_REL = ".github/opf-store-identity.toml"   # the pinned expected identity, relative to the PRODUCT root
+IDENTITY_KEYS = frozenset({"schema", "target", "init_sha256"})
+SUPPORTED_IDENTITY_SCHEMA = 1
+INIT_NAME = "init.toml"                            # the bootstrap provenance a coupled init writes (spec 9)
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+IDENTITY_MATCH = "MATCH"
+IDENTITY_MISMATCH = "MISMATCH"                     # a readable value differs, or an override is present
+
+
+class StoreIdentity:
+    __slots__ = ("status", "notes")
+
+    def __init__(self, status, notes):
+        self.status = status              # IDENTITY_MATCH / IDENTITY_MISMATCH / CANNOT_EVALUATE
+        self.notes = notes                # one line per value compared, refused, or not evaluated
+
+
+def identity_exit_code(result):
+    """0 when both values match, 1 when a readable value differs or an override is present, 2 otherwise."""
+    if result.status == IDENTITY_MATCH:
+        return 0
+    if result.status == IDENTITY_MISMATCH:
+        return 1
+    return 2
+
+
+def _parse_identity(data):
+    """The (target, init_sha256) pair of a parsed IDENTITY_REL document, or StoreError naming the first
+    malformation. The keys are exactly schema, target and init_sha256; schema is the integer 1 (a bool is
+    not an integer here); target is a non-empty string, kept exactly as decoded; init_sha256 is 64
+    lowercase hexadecimal digits."""
+    keys = set(data)    # a parsed TOML document: every key is a str, so the sets sort as they are
+    if keys != IDENTITY_KEYS:
+        raise StoreError("{} must hold exactly the keys {} (missing: {}; unknown: {})".format(
+            IDENTITY_REL, ", ".join(sorted(IDENTITY_KEYS)),
+            _safe_display(sorted(IDENTITY_KEYS - keys)), _safe_display(sorted(keys - IDENTITY_KEYS))))
+    schema = data["schema"]
+    if type(schema) is not int or schema != SUPPORTED_IDENTITY_SCHEMA:
+        raise StoreError("{} schema must be the integer {}, not {}".format(
+            IDENTITY_REL, SUPPORTED_IDENTITY_SCHEMA, _safe_display(schema)))
+    target = data["target"]
+    if type(target) is not str or not target:
+        raise StoreError("{} target must be a non-empty string, not {}".format(IDENTITY_REL, _safe_display(target)))
+    digest = data["init_sha256"]
+    if type(digest) is not str or not _SHA256_HEX_RE.fullmatch(digest):
+        raise StoreError("{} init_sha256 must be 64 lowercase hexadecimal digits, not {}".format(
+            IDENTITY_REL, _safe_display(digest)))
+    return target, digest
+
+
+def _read_identity_inputs(product_root_fd):
+    """Read the product-root inputs through the held descriptor, no-follow: the pinned expectation, the
+    presence of the local override, and the committed pointer's decoded [store].target string. Returns
+    (expected_target, expected_digest, override_present, pointer_target). The committed pointer is read
+    whether or not an override is present, so an override never hides a pointer that cannot be evaluated.
+    StoreError when a required input is absent, malformed or unreadable, or when the override cannot be
+    inspected: a missing input never compares equal."""
+    raw = _read_store_bytes_contained(product_root_fd, IDENTITY_REL)
+    if raw is None:
+        raise StoreError("{} is absent: no expected store identity is pinned".format(IDENTITY_REL))
+    expected_target, expected_digest = _parse_identity(_parse_store_toml(IDENTITY_REL, raw))
+    override_present, pointer_target = _read_pointer_inputs(product_root_fd)
+    return expected_target, expected_digest, override_present, pointer_target
+
+
+def _read_pointer_inputs(product_root_fd):
+    """The presence of the local override and the committed pointer's decoded [store].target string, read
+    through the held product-root descriptor, no-follow. Returns (override_present, pointer_target).
+    StoreError when the override cannot be inspected, or the pointer is absent, malformed or unreadable."""
+    try:
+        override = _journal._lstat_contained(product_root_fd, LOCAL_POINTER_REL)
+    except (_journal.JournalError, OSError) as exc:
+        _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+        raise StoreError("cannot inspect {} ({})".format(LOCAL_POINTER_REL, exc))
+    # Any entry under that name (a file, a link, a directory) is an override shape, refused uninspected:
+    # the identity is the COMMITTED pointer's, and an override would substitute its own target for it.
+    override_present = override is not None
+    pointer = _read_toml_contained(product_root_fd, POINTER_REL)
+    if pointer is None:
+        raise StoreError("{} is absent: the identity names the committed pointer's target, and default "
+                         "discovery is not a substitute".format(POINTER_REL))
+    store = pointer.get("store")
+    if not isinstance(store, dict) or type(store.get("target")) is not str:
+        raise StoreError("{} has no string [store].target".format(POINTER_REL))
+    return override_present, store["target"]
+
+
+def _verify_held_root(fd, path, what):
+    """Confirm a held directory descriptor still names the object at its path: the descriptor's fstat
+    identity (st_dev, st_ino) must equal a no-follow lstat of the path. Both roots are opened O_NOFOLLOW,
+    so the path named a real directory when the descriptor opened; a path that is now absent, or that
+    names a different object, means the held directory was renamed away or swapped by path while the
+    identity was evaluated. StoreError naming the moved root (a cannot-evaluate); never raises OSError.
+    A point check: a root moved and restored before it runs is not detected (disclosed residual)."""
+    try:
+        held = os.fstat(fd)
+        now = os.lstat(str(path))
+    except OSError as exc:
+        raise StoreError("{} is no longer the directory its path names: {} was renamed or removed while "
+                         "the identity was evaluated ({})".format(what, path, exc))
+    if (held.st_dev, held.st_ino) != (now.st_dev, now.st_ino):
+        raise StoreError("{} was swapped by path while the identity was evaluated: {} no longer names "
+                         "the held directory".format(what, path))
+
+
+def _read_committed_init_digest(target, product_root, product_root_fd):
+    """Resolve the committed pointer's target string to its store root the way resolve_store resolves a
+    committed pointer (never the override, never default discovery), discover the single machine store
+    through that store-root descriptor, and hash init.toml beneath the SAME descriptor, so a store root
+    swapped by path after discovery is never the one hashed; after the read, the store-root path must
+    still name the held descriptor (_verify_held_root), so the swap itself is refused rather than graded.
+    A store-root path beneath the product-root path (a relative dir: target) moves with the product root,
+    so the held product root (product_root_fd) is confirmed first and a product root that moved is named
+    as itself, never as the store root it carried. Returns (machine_rel, digest): the SHA-256 hex
+    digest of the raw bytes of init.toml, read no-follow, singly-linked and capped. StoreError when the
+    target does not resolve to exactly one machine store, init.toml is absent or unreadable, or a root
+    moved."""
+    store_root = _target_store_root(classify_target(target), product_root)
+    beneath_product = store_root.parts[:len(Path(product_root).parts)] == Path(product_root).parts
+    try:
+        store_root_fd = _open_store_root_fd(store_root, True)
+    except OSError as exc:
+        _journal._fd_release_fault(exc)    # the no-follow walk's close: raised as itself, never a cannot-evaluate
+        raise StoreError("cannot open store root {} ({})".format(store_root, exc))
+    try:
+        status, machine_dir, detail = discover_machine_store(store_root_fd, store_root)
+        if status != "one":
+            raise StoreError("pointer resolves to {} but {}".format(store_root, detail))
+        machine_rel = "{}/{}".format(WORKING_DIRNAME, machine_dir)
+        relpath = "{}/{}".format(machine_rel, INIT_NAME)
+        data = _read_store_bytes_contained(store_root_fd, relpath)
+        # init.toml was read beneath the HELD store-root descriptor, but the root was resolved by PATH
+        # once: a store root renamed away or swapped by path after it opened would grade a directory the
+        # path no longer names, so the path must still name the held root. A store-root path beneath the
+        # product-root path fails that check whenever the product root moved, so the product root is
+        # confirmed first and the report names the root that actually moved.
+        if beneath_product:
+            _verify_held_root(product_root_fd, product_root, "product root")
+        _verify_held_root(store_root_fd, store_root, "store root")
+    finally:
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(store_root_fd)   # in THIS frame, so the frame test sees what is in flight
+        except OSError:
+            raise                       # raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
+    if data is None:
+        raise StoreError("{} is absent at {}".format(relpath, store_root))
+    return machine_rel, hashlib.sha256(data).hexdigest()
+
+
+def check_store_identity(product_root):
+    """Compare the store identity at a product root with the values pinned in IDENTITY_REL (spec 14.1
+    completion check 4; the identity of OPF-IMPLEMENTATION-PROMPT.md open point 18). Never raises for an
+    expected outcome; returns a StoreIdentity, graded by identity_exit_code.
+
+    Evaluation runs before any mismatch verdict, and the first input that cannot be evaluated ends it: the
+    expectation file is read and strictly validated; a `.opf.local.toml` that cannot be inspected is
+    cannot-evaluate; `.opf.toml`'s decoded [store].target is compared with the pinned target exactly, with no
+    normalization; that target must resolve to a single machine store as a committed pointer does (default
+    discovery and the override are never a substitute); and the raw bytes of the machine store's init.toml
+    are hashed and compared with the pinned digest. Any value absent, malformed, unreadable or unresolvable
+    is CANNOT-EVALUATE, which outranks every difference, a present `.opf.local.toml` included. Only when
+    every input evaluates is a present override a mismatch (an override must not stand in for the committed
+    pointer), beside any differing value.
+
+    The pointer and the override are read through the held product-root descriptor, and init.toml beneath
+    the store-root descriptor discovery ran through. After init.toml is hashed, the pointer and the
+    override's presence are read again through the same product-root descriptor: a pointer that no longer
+    evaluates, a decoded target that differs from the first read, or an override that appeared or
+    disappeared is CANNOT-EVALUATE, naming what changed. Each root was resolved by PATH once, so after the
+    hash each held descriptor must still be the directory its path names (fstat identity against a
+    no-follow lstat, _verify_held_root): a product root or store root renamed away or swapped by path
+    after its descriptor opened is CANNOT-EVALUATE naming which root moved (a store root beneath the
+    product-root path, as a relative dir: target resolves, is confirmed after the product root, so a
+    product root that moved is never reported as the store root moving). Residual (disclosed): the
+    pinned expectation file is read once, before the digest, so a pin rewritten after that read grades
+    against the first read; the machine directory and init.toml are found by name beneath the
+    held store-root descriptor, so a rename inside the store between discovery and the read is not
+    detected; the pointer and the override are compared at two reads, not held between them, so a
+    change undone before the second read, a pointer rewritten to the same decoded target, or a change after
+    the second read is not detected; and the root confirmations are point checks, so a root moved and
+    restored before its check runs is likewise not detected."""
+    product_root = Path(product_root)
+    notes = []
+    try:
+        product_root = Path(os.path.abspath(product_root))
+    except OSError as exc:
+        return StoreIdentity(CANNOT_EVALUATE, ["cannot resolve product root to an absolute path ({})".format(exc)])
+    if not _containment.probe():
+        return StoreIdentity(CANNOT_EVALUATE, ["race-free containment primitive absent; fail-closed"])
+    try:
+        product_root_fd = _open_root_fd(product_root)
+    except OSError as exc:
+        return StoreIdentity(CANNOT_EVALUATE, ["cannot open product root {} ({})".format(product_root, exc)])
+    try:
+        try:
+            expected_target, expected_digest, override, target = _read_identity_inputs(product_root_fd)
+        except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+            return StoreIdentity(CANNOT_EVALUATE, [str(exc)])
+        target_ok = target == expected_target
+        notes.append("target: {} (pinned {}, committed {})".format(
+            "match" if target_ok else "DIFFERS", _safe_display(expected_target), _safe_display(target)))
+        if override:
+            notes.append("{} is present: an override must not substitute for the committed pointer {}".format(
+                LOCAL_POINTER_REL, POINTER_REL))
+        try:
+            machine_rel, digest = _read_committed_init_digest(target, product_root, product_root_fd)
+        except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+            notes.append("init_sha256: {}".format(exc))
+            return StoreIdentity(CANNOT_EVALUATE, notes)
+        digest_ok = digest == expected_digest
+        notes.append("init_sha256: {} (pinned {}, {}/{} {})".format(
+            "match" if digest_ok else "DIFFERS", expected_digest, machine_rel, INIT_NAME, digest))
+        # The digest resolved a relative dir: target against the product-root PATH while the pointer was
+        # read through the held descriptor, so the path must still name the held product root: renamed
+        # away or swapped by path after it opened, and still moved when this check runs, is refused, never
+        # graded. A point check: a root moved and restored before it runs is not detected (disclosed residual).
+        try:
+            _verify_held_root(product_root_fd, product_root, "product root")
+        except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+            notes.append(str(exc))
+            return StoreIdentity(CANNOT_EVALUATE, notes)
+        # Read the pointer and the override again through the same descriptor: a pointer rewritten, removed or
+        # corrupted, or an override created or removed, while the store was read never grades as the first read.
+        # Two point reads, not a hold: a rewrite to the same decoded target, or a change undone before the
+        # second read, still grades as the first read (disclosed residual).
+        try:
+            override_again, target_again = _read_pointer_inputs(product_root_fd)
+        except StoreError as exc:
+            _journal._fd_release_fault(exc)    # a close's exception is raised as itself, never a cannot-evaluate
+            notes.append("re-read after hashing {}: {}".format(INIT_NAME, exc))
+            return StoreIdentity(CANNOT_EVALUATE, notes)
+        changed = []
+        if target_again != target:
+            changed.append("{} changed while the identity was evaluated (committed {}, then {})".format(
+                POINTER_REL, _safe_display(target), _safe_display(target_again)))
+        if override_again != override:
+            changed.append("{} {} while the identity was evaluated".format(
+                LOCAL_POINTER_REL, "appeared" if override_again else "disappeared"))
+        if changed:
+            notes.extend("{} (fail-closed)".format(c) for c in changed)
+            return StoreIdentity(CANNOT_EVALUATE, notes)
+    finally:
+        inflight = _journal._in_flight_in(sys._getframe())
+        try:
+            _close_fd_exc_safe(product_root_fd)   # in THIS frame, so the frame test sees what is in flight
+        except OSError:
+            raise                       # raised only with nothing in flight here
+        except BaseException as exc:    # noqa: BLE001  the first interrupt propagates as itself
+            _journal._yield_close_exceptions(inflight, [exc])
+    return StoreIdentity(IDENTITY_MATCH if target_ok and digest_ok and not override else IDENTITY_MISMATCH,
+                         notes)
 
 
 # --- SemVer and base_compat helpers (spec 9.1) -------------------------------------------------------
@@ -5077,8 +5345,8 @@ def self_test():
 
         # OPF-IMPORTED-SERIES IS-2: imported_leaf_names derives the imported machine-store leaf names
         # from an enabled-type roster: one <type>.imported.index.toml per non-ledger type, the worklog
-        # ledger worklog.imported.toml, NO leaf for the importer-only legacy_fragment (its LF
-        # namespace is outside the imported series, spec 8.2), and NO leaf for a name outside the
+        # ledger worklog.imported.toml, NO leaf for legacy_fragment (the standard reserves LF
+        # unassigned, so the imported series carries no LF, spec 8.1/8.2), and NO leaf for a name outside the
         # section-8.1 roster (fail-closed). The agreement with _opf_schema.IMPORTED_NAMESPACES is
         # reconciled in the opf-check self-test, beside the containment vectors that consume this
         # roster.
@@ -5148,6 +5416,379 @@ def self_test():
             got_kind, got_text = recursion_refusal(_ST_LONG_KEY_TOML, MemoryError)
         check("recursion-many-part-key-memory-independent-of-underlying-cap",
               got_kind == "MemoryError" and got_text.startswith(rec_head))
+
+        # Store identity (check_store_identity): each vector builds a product root whose committed pointer
+        # names a companion store, and pins the expected identity in IDENTITY_REL at the product root.
+        id_init = b'format = "opf.init.bootstrap/v1"\nsource_digest = "0"\n'
+        id_seq = [0]
+
+        def id_fixture(machine=DEFAULT_MACHINE_SUBDIR, init=id_init, target=None, pin_target=None,
+                       pin_digest=None, pin_text=None, pointer_text=None):
+            id_seq[0] += 1
+            prod = base / "identity-{:02d}".format(id_seq[0])
+            store = base / "identity-store-{:02d}".format(id_seq[0])
+            mdir = store / WORKING_DIRNAME / machine
+            mdir.mkdir(parents=True)
+            (mdir / MANIFEST_NAME).write_text(manifest_text(), encoding="utf-8")
+            if init is not None:
+                (mdir / INIT_NAME).write_bytes(init)
+            (prod / ".github").mkdir(parents=True)
+            target = "dir:{}".format(store) if target is None else target
+            if pointer_text is None:
+                pointer_text = '[store]\ntarget = "{}"\n'.format(target)
+            (prod / POINTER_REL).write_text(pointer_text, encoding="utf-8")
+            if pin_text is None:
+                pin_text = 'schema = 1\ntarget = "{}"\ninit_sha256 = "{}"\n'.format(
+                    target if pin_target is None else pin_target,
+                    hashlib.sha256(id_init).hexdigest() if pin_digest is None else pin_digest)
+            if pin_text is not False:
+                (prod / IDENTITY_REL).write_text(pin_text, encoding="utf-8")
+            return prod, store, mdir
+
+        def id_code(prod):
+            return _guard(lambda: identity_exit_code(check_store_identity(prod)))
+
+        def id_says(prod, text):
+            got = _guard(lambda: check_store_identity(prod))
+            return got != "RAISED" and got.status == CANNOT_EVALUATE and any(text in n for n in got.notes)
+
+        check("identity-path-fixed", IDENTITY_REL == ".github/opf-store-identity.toml")
+        check("identity-exit-codes", [identity_exit_code(StoreIdentity(s, [])) for s in (
+            IDENTITY_MATCH, IDENTITY_MISMATCH, CANNOT_EVALUATE, RESOLVED)] == [0, 1, 2, 2])
+        prod, _store, mdir = id_fixture()
+        check("identity-exact-match", id_code(prod) == 0)
+        (mdir / INIT_NAME).write_bytes(id_init[:-2] + b"1\n")
+        check("identity-init-byte-differs", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture(pin_digest="0" * 64)
+        check("identity-pinned-digest-differs", id_code(prod) == 1)
+        prod, store, _mdir = id_fixture(machine="data")
+        got = _guard(lambda: check_store_identity(prod))
+        check("identity-non-default-machine-dir",
+              got != "RAISED" and got.status == IDENTITY_MATCH
+              and any("{}/data/{}".format(WORKING_DIRNAME, INIT_NAME) in n for n in got.notes))
+        # The target compares as the exact decoded string: each pointer below resolves the same store as the
+        # pin names, so only a normalizing comparison would call it a match.
+        for label, pointed in (("trailing-slash", "dir:{}/"), ("leading-space", " dir:{}"),
+                               ("trailing-space", "dir:{} "), ("bare-path", "{}")):
+            prod, store, _mdir = id_fixture()
+            (prod / POINTER_REL).write_text('[store]\ntarget = "{}"\n'.format(pointed.format(store)),
+                                            encoding="utf-8")
+            check("identity-target-exact-{}-resolves".format(label),
+                  resolve_store(prod).status == RESOLVED)
+            check("identity-target-exact-{}".format(label), id_code(prod) == 1)
+        prod, store, _mdir = id_fixture(pin_target="dir:{}/".format(base / "elsewhere"))
+        check("identity-target-differs", id_code(prod) == 1)
+        # Raw bytes: CRLF line endings hash as written, never as text normalized to LF.
+        crlf = id_init.replace(b"\n", b"\r\n")
+        prod, _store, _mdir = id_fixture(init=crlf)
+        check("identity-crlf-against-lf-pin", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture(init=crlf, pin_digest=hashlib.sha256(crlf).hexdigest())
+        check("identity-crlf-against-crlf-pin", id_code(prod) == 0)
+        prod, _store, _mdir = id_fixture(init=id_init + b"\n")
+        check("identity-trailing-newline-differs", id_code(prod) == 1)
+        # A present override is a mismatch, whatever its shape; one that cannot be inspected is
+        # cannot-evaluate (an injected lstat fault, never permission bits).
+        prod, store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        check("identity-override-present", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).mkdir()
+        check("identity-override-directory", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).write_text("not toml {{\n", encoding="utf-8")
+        check("identity-override-malformed", id_code(prod) == 1)
+        prod, _store, _mdir = id_fixture()
+        real_lstat = _journal._lstat_contained
+
+        def lstat_fault(root_fd, relpath, *args, **kwargs):
+            if relpath == LOCAL_POINTER_REL:
+                raise OSError(5, "injected lstat fault")
+            return real_lstat(root_fd, relpath, *args, **kwargs)
+        _journal._lstat_contained = lstat_fault
+        try:
+            check("identity-override-uninspectable", id_says(prod, "cannot inspect {}".format(LOCAL_POINTER_REL)))
+        finally:
+            _journal._lstat_contained = real_lstat
+        # A present override never hides an input that cannot be evaluated: evaluation continues past the
+        # override up to the FIRST input that cannot be evaluated (a malformed pointer ends it before the
+        # digest is read), and cannot-evaluate outranks the override's mismatch.
+        prod, store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        os.unlink(str(prod / POINTER_REL))
+        check("identity-override-pointer-absent", id_says(prod, "default discovery is not a substitute"))
+        prod, store, _mdir = id_fixture(init=None)
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        check("identity-override-init-missing", id_code(prod) == 2)
+        prod, store, _mdir = id_fixture(pointer_text="not toml {{\n")
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        check("identity-override-pointer-unparseable", id_code(prod) == 2)
+        prod, store, _mdir = id_fixture(pin_target="dir:{}".format(base / "elsewhere"))
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        got = _guard(lambda: check_store_identity(prod))
+        check("identity-override-with-differing-target",
+              got != "RAISED" and got.status == IDENTITY_MISMATCH
+              and any(n.startswith("target: DIFFERS") for n in got.notes)
+              and any(LOCAL_POINTER_REL in n for n in got.notes))
+        # init.toml is read beneath the store root discovery ran through, and after the read the store-root
+        # path must still name that held root: a store root swapped by path right after discovery, for one
+        # whose init.toml matches the pin, is never the one hashed, and the swap itself is cannot-evaluate
+        # naming the moved root; a matching store root renamed away after discovery is refused the same way,
+        # never graded as a match of a store its path no longer names.
+        prod, store, _mdir = id_fixture(init=id_init + b"#\n")
+        _prod2, swap_in, _mdir2 = id_fixture()
+        real_discover = discover_machine_store
+
+        def discover_then_swap(store_root_fd, store_root):
+            found = real_discover(store_root_fd, store_root)
+            os.rename(str(store), str(base / "identity-swapped-out"))
+            os.rename(str(swap_in), str(store))
+            return found
+        globals()["discover_machine_store"] = discover_then_swap
+        try:
+            check("identity-store-root-swapped-after-discovery",
+                  id_says(prod, "store root was swapped by path"))
+        finally:
+            globals()["discover_machine_store"] = real_discover
+        prod, store, _mdir = id_fixture()
+
+        def discover_then_move(store_root_fd, store_root):
+            found = real_discover(store_root_fd, store_root)
+            os.rename(str(store), str(base / "identity-store-moved-{:02d}".format(id_seq[0])))
+            return found
+        globals()["discover_machine_store"] = discover_then_move
+        try:
+            check("identity-store-root-renamed-after-discovery",
+                  id_says(prod, "store root is no longer the directory"))
+        finally:
+            globals()["discover_machine_store"] = real_discover
+        # The pointer and the override are read again after init.toml is hashed: each change below, made right
+        # after the first read of the inputs, is cannot-evaluate naming what changed, never the first read's MATCH.
+        real_inputs = _read_identity_inputs
+
+        def id_changed_after_read(change, text):
+            prod, store, _mdir = id_fixture()
+
+            def inputs_then_change(product_root_fd):
+                got = real_inputs(product_root_fd)
+                change(prod, store)
+                return got
+            globals()["_read_identity_inputs"] = inputs_then_change
+            try:
+                return id_says(prod, text)
+            finally:
+                globals()["_read_identity_inputs"] = real_inputs
+
+        def id_repoint(prod, _store):
+            _prod2, other, _mdir2 = id_fixture()
+            (prod / POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(other), encoding="utf-8")
+        check("identity-pointer-rewritten-after-read",
+              id_changed_after_read(id_repoint, "{} changed while the identity".format(POINTER_REL)))
+        check("identity-pointer-removed-after-read", id_changed_after_read(
+            lambda prod, _store: os.unlink(str(prod / POINTER_REL)),
+            "re-read after hashing {}: {} is absent".format(INIT_NAME, POINTER_REL)))
+        check("identity-pointer-corrupted-after-read", id_changed_after_read(
+            lambda prod, _store: (prod / POINTER_REL).write_text("not toml {{\n", encoding="utf-8"),
+            "re-read after hashing {}".format(INIT_NAME)))
+        check("identity-override-created-after-read", id_changed_after_read(
+            lambda prod, store: (prod / LOCAL_POINTER_REL).write_text(
+                '[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8"),
+            "{} appeared".format(LOCAL_POINTER_REL)))
+        # An override present at the first read that disappears before the second is cannot-evaluate too,
+        # never the first read's mismatch: a hidden override is as undecidable as an injected one.
+        prod, store, _mdir = id_fixture()
+        (prod / LOCAL_POINTER_REL).write_text('[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8")
+        unprod = prod
+
+        def inputs_then_unoverride(product_root_fd):
+            got = real_inputs(product_root_fd)
+            os.unlink(str(unprod / LOCAL_POINTER_REL))
+            return got
+        globals()["_read_identity_inputs"] = inputs_then_unoverride
+        try:
+            check("identity-override-removed-after-read",
+                  id_says(prod, "{} disappeared".format(LOCAL_POINTER_REL)))
+        finally:
+            globals()["_read_identity_inputs"] = real_inputs
+        # After the hash, each held root must still be the directory its path names: a product root renamed
+        # away (its pointer still reads through the held descriptor) or swapped by path for one holding a
+        # matching store (a relative dir: target resolves against the PATH) is cannot-evaluate naming the
+        # moved root, never a MATCH graded across two different roots.
+        check("identity-product-root-renamed-after-read", id_changed_after_read(
+            lambda prod, _store: os.rename(str(prod), str(base / "identity-prod-moved-{:02d}".format(id_seq[0]))),
+            "product root is no longer the directory"))
+
+        def id_rel_fixture():
+            id_seq[0] += 1
+            prod = base / "identity-rel-{:02d}".format(id_seq[0])
+            mdir = prod / "st" / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR
+            mdir.mkdir(parents=True)
+            (mdir / MANIFEST_NAME).write_text(manifest_text(), encoding="utf-8")
+            (mdir / INIT_NAME).write_bytes(id_init)
+            (prod / ".github").mkdir()
+            (prod / POINTER_REL).write_text('[store]\ntarget = "dir:st"\n', encoding="utf-8")
+            (prod / IDENTITY_REL).write_text('schema = 1\ntarget = "dir:st"\ninit_sha256 = "{}"\n'.format(
+                hashlib.sha256(id_init).hexdigest()), encoding="utf-8")
+            return prod
+        prod = id_rel_fixture()
+        check("identity-relative-target-match", id_code(prod) == 0)
+        prod = id_rel_fixture()
+        swap_prod = id_rel_fixture()
+
+        def inputs_then_swap_root(product_root_fd):
+            got = real_inputs(product_root_fd)
+            os.rename(str(prod), str(base / "identity-prod-swapped-out"))
+            os.rename(str(swap_prod), str(prod))
+            return got
+        globals()["_read_identity_inputs"] = inputs_then_swap_root
+        try:
+            check("identity-product-root-swapped-after-read",
+                  id_says(prod, "product root was swapped by path"))
+        finally:
+            globals()["_read_identity_inputs"] = real_inputs
+
+        # A relative dir: store root lies beneath the product-root path, so a product root renamed away or
+        # swapped by path after the store root opened also fails the store-root check: the report names the
+        # product root, never the store root its move carried.
+        def id_product_root_named(prod, move, text):
+            def discover_then_move_product(store_root_fd, store_root):
+                found = real_discover(store_root_fd, store_root)
+                move()
+                return found
+            globals()["discover_machine_store"] = discover_then_move_product
+            try:
+                got = _guard(lambda: check_store_identity(prod))
+            finally:
+                globals()["discover_machine_store"] = real_discover
+            return (got != "RAISED" and got.status == CANNOT_EVALUATE and any(text in n for n in got.notes)
+                    and not any("store root" in n for n in got.notes))
+        prod = id_rel_fixture()
+        check("identity-product-root-renamed-after-store-opened", id_product_root_named(
+            prod, lambda: os.rename(str(prod), str(base / "identity-prod-moved-{:02d}".format(id_seq[0]))),
+            "product root is no longer the directory"))
+        prod = id_rel_fixture()
+        swap_prod = id_rel_fixture()
+
+        def swap_product_root():
+            os.rename(str(prod), str(base / "identity-prod-swapped-out-{:02d}".format(id_seq[0])))
+            os.rename(str(swap_prod), str(prod))
+        check("identity-product-root-swapped-after-store-opened",
+              id_product_root_named(prod, swap_product_root, "product root was swapped by path"))
+        # The re-read runs AFTER the digest: a pointer removed or an override created in the instant the
+        # digest returns is still cannot-evaluate, so a re-read moved before the digest fails here.
+        real_digest = _read_committed_init_digest
+
+        def id_changed_after_digest(change, text):
+            prod, store, _mdir = id_fixture()
+
+            def digest_then_change(target, product_root, product_root_fd):
+                got = real_digest(target, product_root, product_root_fd)
+                change(prod, store)
+                return got
+            globals()["_read_committed_init_digest"] = digest_then_change
+            try:
+                return id_says(prod, text)
+            finally:
+                globals()["_read_committed_init_digest"] = real_digest
+        check("identity-pointer-removed-after-digest", id_changed_after_digest(
+            lambda prod, _store: os.unlink(str(prod / POINTER_REL)),
+            "re-read after hashing {}: {} is absent".format(INIT_NAME, POINTER_REL)))
+        check("identity-override-created-after-digest", id_changed_after_digest(
+            lambda prod, store: (prod / LOCAL_POINTER_REL).write_text(
+                '[store]\ntarget = "dir:{}"\n'.format(store), encoding="utf-8"),
+            "{} appeared".format(LOCAL_POINTER_REL)))
+        # The committed pointer: malformed, or absent while a default store is discoverable, is
+        # cannot-evaluate (default discovery never stands in for the committed pointer).
+        for label, text in (("unparseable", "not toml {{\n"), ("no-target", '[store]\nother = "x"\n'),
+                            ("int-target", "[store]\ntarget = 5\n"), ("no-store", 'target = "x"\n')):
+            prod, _store, _mdir = id_fixture(pointer_text=text)
+            check("identity-pointer-{}".format(label), id_code(prod) == 2)
+            if label == "int-target":
+                check("identity-pointer-int-target-refused-here", id_says(prod, "no string [store].target"))
+        prod, _store, _mdir = id_fixture(target="dir:{}".format(base / "identity-missing-store"))
+        check("identity-pointer-unresolvable", id_code(prod) == 2)
+        prod, store, mdir = id_fixture()
+        os.unlink(str(prod / POINTER_REL))
+        (prod / WORKING_DIRNAME).mkdir()
+        shutil.copytree(str(mdir), str(prod / WORKING_DIRNAME / DEFAULT_MACHINE_SUBDIR))
+        dres = resolve_store(prod)
+        check("identity-pointer-absent-default-resolves",
+              dres.status == RESOLVED and dres.pointer_source == "default")
+        check("identity-pointer-absent-default-store", id_says(prod, "default discovery is not a substitute"))
+        # init.toml absent is cannot-evaluate, even against the digest of empty bytes.
+        prod, _store, _mdir = id_fixture(init=None)
+        check("identity-init-missing", id_code(prod) == 2)
+        prod, _store, _mdir = id_fixture(init=None, pin_digest=hashlib.sha256(b"").hexdigest())
+        check("identity-init-missing-never-equal-empty", id_code(prod) == 2)
+        # The expectation file: absent, unparseable, and each field missing, unknown or malformed.
+        prod, _store, _mdir = id_fixture(pin_text=False)
+        check("identity-expectation-missing", id_says(prod, "no expected store identity is pinned"))
+        prod, _store, _mdir = id_fixture(pin_text=False)
+        os.rmdir(str(prod / ".github"))
+        check("identity-expectation-dir-missing", id_code(prod) == 2)
+        good_digest = hashlib.sha256(id_init).hexdigest()
+        for label, body in (
+                ("unparseable", "schema = 1\ntarget = \n"),
+                ("empty", ""),
+                ("no-schema", 'target = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("no-target", 'schema = 1\ninit_sha256 = "{d}"\n'),
+                ("no-digest", 'schema = 1\ntarget = "{t}"\n'),
+                ("unknown-key", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{d}"\nextra = 1\n'),
+                ("unknown-table", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{d}"\n[x]\n'),
+                ("schema-2", 'schema = 2\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("schema-0", 'schema = 0\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("schema-bool", 'schema = true\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("schema-float", 'schema = 1.0\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("schema-str", 'schema = "1"\ntarget = "{t}"\ninit_sha256 = "{d}"\n'),
+                ("target-empty", 'schema = 1\ntarget = ""\ninit_sha256 = "{d}"\n'),
+                ("target-int", 'schema = 1\ntarget = 1\ninit_sha256 = "{d}"\n'),
+                ("target-array", 'schema = 1\ntarget = ["{t}"]\ninit_sha256 = "{d}"\n'),
+                ("digest-upper", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{u}"\n'),
+                ("digest-63", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{s}"\n'),
+                ("digest-65", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{d}0"\n'),
+                ("digest-nonhex", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{g}"\n'),
+                ("digest-newline", 'schema = 1\ntarget = "{t}"\ninit_sha256 = "{d}\\n"\n'),
+                ("digest-int", 'schema = 1\ntarget = "{t}"\ninit_sha256 = 1\n')):
+            store = base / "identity-store-{:02d}".format(id_seq[0] + 1)
+            text = body.format(t="dir:{}".format(store), d=good_digest, u=good_digest.upper(),
+                               s=good_digest[:63], g="g" + good_digest[1:])
+            prod, _store, _mdir = id_fixture(pin_text=text)
+            check("identity-expectation-{}-store-named".format(label), _store == store)
+            check("identity-expectation-{}".format(label), id_code(prod) == 2)
+        # Symlinked, multiply-linked and special-file inputs are refused, never followed or opened.
+        for label, rel in (("expectation", IDENTITY_REL), ("pointer", POINTER_REL), ("init", INIT_NAME)):
+            for shape in ("symlink", "hardlink", "fifo"):
+                prod, _store, mdir = id_fixture()
+                path = (mdir / INIT_NAME) if rel == INIT_NAME else (prod / rel)
+                kept = base / "identity-kept-{:02d}".format(id_seq[0])
+                if shape == "fifo":
+                    os.unlink(str(path))
+                    os.mkfifo(str(path))
+                else:
+                    os.rename(str(path), str(kept))
+                    if shape == "symlink":
+                        os.symlink(str(kept), str(path))
+                    else:
+                        os.link(str(kept), str(path))
+                check("identity-{}-{}".format(label, shape), id_code(prod) == 2)
+        prod, _store, _mdir = id_fixture()
+        os.rename(str(prod / ".github"), str(prod / "github-real"))
+        os.symlink("github-real", str(prod / ".github"))
+        check("identity-expectation-parent-symlink", id_code(prod) == 2)
+        # Unreadable inputs, by an injected read fault on each one in turn.
+        real_read = _journal._read_contained
+        for label, rel in (("expectation", IDENTITY_REL), ("pointer", POINTER_REL), ("init", INIT_NAME)):
+            prod, _store, _mdir = id_fixture()
+
+            def read_fault(root_fd, relpath, *args, _rel=rel, **kwargs):
+                if relpath == _rel or relpath.endswith("/" + _rel):
+                    raise _journal.JournalError("injected read fault on {}".format(relpath))
+                return real_read(root_fd, relpath, *args, **kwargs)
+            _journal._read_contained = read_fault
+            try:
+                check("identity-{}-unreadable".format(label), id_code(prod) == 2)
+            finally:
+                _journal._read_contained = real_read
+            check("identity-{}-readable-after-fault".format(label), id_code(prod) == 0)
 
     finally:
         shutil.rmtree(base, ignore_errors=True)

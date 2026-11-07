@@ -207,6 +207,9 @@ store, the tooling checks the installed copy of that file against that digest an
 build. A copy that is absent, unreadable, altered, malformed, or contradictory refuses the command
 with exit 2 before any store is resolved. `python3 -I -B opf/tools/opf.py --declaration` runs that
 check alone and prints the report: the declaration as shipped, both digests, and the runtime result.
+The runtime result is `pass` only where the run performed a store operation, `fail` where a run
+the check allowed performed none (so a read-only `opf doctor` or `--declaration` run reports
+`fail`), and `cannot_evaluate` where the check did not yield ok, which also exits 2.
 `opf doctor` appends the same report.
 
 The reference tooling requires Python 3.14 or newer.
