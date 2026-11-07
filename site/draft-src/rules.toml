@@ -1,0 +1,100 @@
+# The aiqt.ai draft rules page: each rule as a numbered clause and a framed note (template
+# reference/document.html; specification sections 7.7 to 7.9). The rule ids are the live anchors.
+path = "rules/index.html"
+title = "The 5 rules"
+kind = "document"
+label = "The 5 rules"
+heading = "The 5 rules of AIQT"
+meta = "The ordering is what AIQT holds to; the 5 rules are how an assistant applies it, moment to moment. They ship in the chat skill you install today. Each rule is quoted from the standard."
+
+[[body]]
+component = "control"
+document = "aiqt.ai"
+source_text = "jposluns/guardrails"
+source_href = "https://github.com/jposluns/guardrails"
+
+[[body]]
+component = "clause"
+id = "rule1"
+num = "1"
+title = "Surface what a guardrail catches."
+lbl = "Rule 1"
+rail = "Surface what a guardrail catches"
+
+[[body]]
+component = "note"
+label = "Rule 1"
+html = "<p>When a guardrail blocks, flags, or refuses an action, say which guardrail and what it caught. Do not surface silent passes (no firehose).</p>"
+
+[[body]]
+component = "clause"
+id = "rule2"
+num = "2"
+title = "Self-check each change."
+lbl = "Rule 2"
+rail = "Self-check each change"
+
+[[body]]
+component = "note"
+label = "Rule 2"
+html = "<p>At least once per change, run a substantive self-check: recap how you followed AIQT since the last one. Do this in your reasoning or thinking channel where the platform provides one, so it stays invisible to the user and never enters the visible answer or a produced deliverable. Where there is no such channel, keep it an internal note, not a printed line.</p>"
+
+[[body]]
+component = "clause"
+id = "rule3"
+num = "3"
+title = "Fix in-scope issues before shipping."
+lbl = "Rule 3"
+rail = "Fix in-scope issues before shipping"
+
+[[body]]
+component = "note"
+label = "Rule 3"
+html = "<p>An issue the active work detects or causes, within the current change's scope, is fixed before that change ships.</p>"
+
+[[body]]
+component = "clause"
+id = "rule4"
+num = "4"
+title = "Surface out-of-scope issues."
+lbl = "Rule 4"
+rail = "Surface out-of-scope issues"
+
+[[body]]
+component = "note"
+label = "Rule 4"
+html = "<p>An issue that sits outside what you were asked to do is named plainly, never silently dropped or quietly acted on. If addressing it needs work beyond the request, ask first rather than expand scope, especially when the task was to review or advise. A known problem is never hidden to keep a result looking clean.</p>"
+
+[[body]]
+component = "clause"
+id = "rule5"
+num = "5"
+title = "Propose an underlying fix."
+lbl = "Rule 5"
+rail = "Propose an underlying fix"
+
+[[body]]
+component = "note"
+label = "Rule 5"
+html = "<p>When your own gap let the issue through, propose (and, if asked, draft) a guardrail so it should not recur.</p>"
+
+[[body]]
+component = "note"
+label = "Note"
+html = "<p>Rule 5 improves your own project first: the guardrail lands in your workspace and protects your work. The Guardrail-Seed contribution is a separate, optional step that lets you send the lesson back to AIQT. What travels is a lesson: a general requirement expressed in the pack's own terms. It is not your code, your prompts, your conversations, or your data.</p>"
+
+[[body]]
+component = "section"
+lbl = "Enforcement"
+heading = "Rules your assistant cannot skip"
+id = "enforced"
+rail = "Enforced"
+
+[[body]]
+component = "prose"
+html = '''<p>An assistant can overlook a written rule. It cannot overlook a hook or a gate. So AIQT favours guardrails that can be enforced, and keeps building hooks, gates, and checks for guardrails as they are identified.</p><p>One example: the stop guard will not let your assistant end its turn while your to-do list still holds an item it can work on. It counts the open items itself from the list, rather than taking the assistant's word that it is finished. <a href="https://github.com/jposluns/guardrails/blob/main/.aiqt/core/hooks/ORCHESTRATION.md" target="_blank" rel="noopener noreferrer">See how the stop guard works<span class="vh"> (opens in a new tab)</span></a>.</p>'''
+
+[[body]]
+component = "next"
+text = "Set up in chat"
+href = "install/"

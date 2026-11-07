@@ -237,8 +237,19 @@ cleanup() {
 trap 'cleanup || exit 2' EXIT
 trap 'exit 2' HUP INT TERM
 : > "$snap/remotes" || fail "could not write the remote list"
+# Each push URL is kept exactly as opf doctor reads it: a trailing x keeps command substitution from
+# stripping the URL's own trailing newlines, then the x and git's one line ending are removed. The list
+# holds one value per line, so a URL that still holds a line break cannot be carried into the snapshot
+# and exits 2 here (opf doctor refuses such a URL when it ends in one; spec 5.6).
+nl='
+'
 for name in $remotes; do
-    url=$(git remote get-url --push "$name") || fail "could not read the push URL of remote $name"
+    url=$(git remote get-url --push "$name" && printf x) || fail "could not read the push URL of remote $name"
+    url=${url%x}
+    url=${url%"$nl"}
+    case $url in
+        *"$nl"*) fail "the push URL of remote $name holds a line break, which the snapshot cannot carry" ;;
+    esac
     printf '%s\n%s\n' "$name" "$url" >> "$snap/remotes" || fail "could not write the remote list"
 done
 

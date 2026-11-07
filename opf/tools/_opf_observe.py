@@ -789,7 +789,9 @@ def _observe_remote(git, store_root, notes):
     """`actual_remote`: the store repository's real push URL. Returns the URL string, "" (an OBSERVED
     no-remote, which C-SYNC-AGREE needs as a present empty string), or None (omit + note). Zero remotes is
     the empty string; exactly one remote is its push URL; MORE than one omits the key (which remote is
-    authoritative is not git's to guess); any git error omits the key with a note."""
+    authoritative is not git's to guess); any git error omits the key with a note. The push URL is kept as
+    git prints it less the one line ending: whitespace is significant in a filesystem path, so it is never
+    trimmed here (C-SYNC-AGREE refuses a path with leading or trailing whitespace as ambiguous)."""
     listing = _run_git(git, store_root, ["remote"])
     if not listing.completed:
         notes.append("actual_remote: could not run git remote ({}); the remote observation is omitted".format(
@@ -816,7 +818,8 @@ def _observe_remote(git, store_root, notes):
         notes.append("actual_remote: git could not read the push URL of remote {!r} (rc {}); the remote "
                      "observation is omitted".format(names[0], url.rc))
         return None
-    return url.out.decode("utf-8", "replace").strip()
+    out = url.out.decode("utf-8", "replace")
+    return out[:-1] if out.endswith("\n") else out
 
 
 def _show_toml(git, store_root, prefix, relpath, disp, notes, omitted="the prior committed snapshot is omitted",
@@ -1323,7 +1326,8 @@ def self_test():
 
 def self_test_isolated():
     """Exercise gather over synthetic git repositories built in a tempdir (removed in a finally, for
-    test-hermeticity). Covered: tracked vs untracked manifest; zero / one / multiple remotes; a prior
+    test-hermeticity). Covered: tracked vs untracked manifest; zero / one / multiple remotes, and a
+    local-path remote whose trailing whitespace is kept; a prior
     extracted from a committed HEAD (records and the immutable-body digest matching the engine's own
     _record_digest over the same committed content); a HEAD manifest whose base table is named [devprocess]
     rather than [opf] -> the whole prior OMITTED with a note; an unborn HEAD -> the honest empty prior; a
@@ -1589,6 +1593,14 @@ def self_test_isolated():
         _git_setup(one_remote, home, "remote", "add", "origin", "https://example.invalid/store.git")
         obs, notes = gather(_Res(one_remote, machine_rel))
         check("one-remote-url", obs.get("actual_remote") == "https://example.invalid/store.git")
+        # A local-path remote keeps a trailing space: whitespace is significant in a path, so only git's
+        # line ending is removed and C-SYNC-AGREE sees the spelling git pushes to.
+        padded_remote = base / "padded-remote"
+        padded_remote.mkdir()
+        _git_setup(padded_remote, home, "init")
+        _git_setup(padded_remote, home, "remote", "add", "origin", "/srv/opf-store ")
+        obs, notes = gather(_Res(padded_remote, machine_rel))
+        check("one-remote-path-whitespace-kept", obs.get("actual_remote") == "/srv/opf-store ")
 
         # 4. Multiple remotes -> the remote field OMITTED with a note.
         multi_remote = base / "multi-remote"

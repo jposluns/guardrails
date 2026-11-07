@@ -1,0 +1,48 @@
+# The opfiles.ai draft home page: the hero, the entry tiles, the value paragraph and the About region
+# (template specification sections 7.2 to 7.4 and 7.24).
+path = "index.html"
+title = "Home"
+kind = "landing"
+description = "OPFiles (OPF) is a neutral standard for a project's operational records. It pairs TOML sources with generated human-readable views and defines drift checks for use in a required commit or CI gate."
+
+[[body]]
+component = "hero"
+kicker = "Record, render, check, commit."
+statement = "Operational records, <em>governed like code.</em>"
+intro = "Project records kept in chat logs and hand-edited Markdown drift from what the tools did, so nobody can cite them in a review, an audit, or a handover. OPFiles pairs machine-written TOML records with generated human-readable views. A drift gate, configured as a required check, re-renders the declared views and fails the build when a view and its sources disagree."
+start_text = "See how it holds together"
+start_href = "model/"
+
+[[body]]
+component = "entries"
+
+[[body.items]]
+href = "model/"
+title = "See the model"
+n = "3 parts"
+d = "Source, view, and drift gate in 1 diagram, with a TOML record beside the Markdown it generates."
+
+[[body.items]]
+href = "standard/"
+title = "Read the standard"
+n = "spec"
+d = "What the specification defines, its conformance language, and its draft status."
+
+[[body.items]]
+href = "core-files/"
+title = "Know the core store files"
+n = "5 files"
+d = "The manifest, the ID counters, the version ledger, the worklog, and the lease."
+
+[[body.items]]
+href = "adopt/"
+title = "Adopt it"
+n = "10 verbs"
+d = "Ask your assistant for a plan, review it, then authorize; the 10 command verbs and their status."
+
+[[body]]
+component = "value"
+html = "OPFiles keeps each record in a fixed, machine-written form and generates the readable version from it; a check, set as a required step, fails the moment the 2 disagree. The standard forbids reusing a record's number or deleting a record. OPFiles is part of <a href=\"https://aiqt.ai\" target=\"_blank\" rel=\"noopener noreferrer\">AIQT Guardrails<span class=\"vh\"> (opens in a new tab)</span></a>, and both live in 1 repository: an AIQT adoption sets OPFiles up by default, and you can adopt OPFiles on its own. It is <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. The specification is a working draft; 2 of its 10 commands are not yet implemented, and adoption cannot finish yet."
+
+[[body]]
+component = "about"

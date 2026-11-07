@@ -1,0 +1,49 @@
+# The aiqt.ai draft home page: the hero, the entry tiles, the value paragraph and the About region
+# (template specification sections 7.2 to 7.4 and 7.24).
+path = "index.html"
+title = "Home"
+kind = "landing"
+description = "AIQT Guardrails holds your AI assistant to one standard: Accuracy, Integrity, Quality, and Trust, ahead of Progress, Speed, and Cost. In chat, your assistant answers to that standard. In your codebase, technical controls block, flag, or refuse the mistakes they are built to catch. Open source."
+
+[[body]]
+component = "hero"
+kicker = "Rules for your chat assistant, enforcement controls for your codebase."
+statement = "Rules your AI follows. <em>Controls that catch what slips.</em>"
+two = true
+intro = "An assistant sounds just as confident when it guesses as when it knows, and \"done\" often means the happy path ran once. AIQT holds it to 1 standard, Accuracy, Integrity, Quality, and Trust, above progress, speed, and cost: claims are checked or labelled, shortcuts are surfaced, and done means the stated bar was met. In Claude Code, an opt-in plugin of 30 hooks blocks or warns on the actions it is built to catch.<span class=\"ordering\"><span class=\"tier\">(Accuracy = Integrity = Quality = Trust)</span> &gt; <span class=\"p\">Progress</span> &gt; <span class=\"s\">Speed</span> &gt; <span class=\"c\">Cost</span></span>"
+start_text = "Set up in chat"
+start_href = "install/"
+
+[[body]]
+component = "entries"
+
+[[body.items]]
+href = "install/"
+title = "Set up in chat"
+n = "6 assistants"
+d = "Claude, ChatGPT, Gemini, Copilot, Copilot Studio, or any other assistant; the Skill or the instruction file."
+
+[[body.items]]
+href = "standard/"
+title = "Read the standard"
+n = "4 facets"
+d = "The 4 facets and the 1 ordering that decides every close call."
+
+[[body.items]]
+href = "rules/"
+title = "The 5 rules"
+n = "5 rules"
+d = "How an assistant applies the standard, change by change, quoted from the standard."
+
+[[body.items]]
+href = "mappings/"
+title = "Framework mappings"
+n = "17 frameworks"
+d = "How the rules relate to ISO, NIST, OWASP, MITRE and CSA frameworks, and the enforcement register."
+
+[[body]]
+component = "value"
+html = "You cannot tell from the tone whether an assistant knows or is guessing. AIQT gives it 1 written standard: every claim is checked or marked as unchecked, shortcuts are reported, and done means the bar you set was met. You can then ask it to show its evidence and hold it to the answer. It installs in Claude, ChatGPT, Gemini, Copilot, and Copilot Studio, <a href=\"$BASE/license/\">open source under the Apache License 2.0</a>, except vendored third-party material, which remains under its own terms. Results depend on the assistant and the model you use. Its 30 Claude Code hooks ship as an opt-in plugin; a guided install and setup doctor arrive with 1.1.0."
+
+[[body]]
+component = "about"
