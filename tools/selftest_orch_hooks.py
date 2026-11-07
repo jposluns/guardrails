@@ -60,6 +60,7 @@ import threading
 import time
 import datetime
 import hashlib
+import math
 import unicodedata
 from pathlib import Path
 try:
@@ -1744,11 +1745,18 @@ def _rdp_label_screen_timing(ls):
     reaches deep into a name), a letter and a look-alike, repeated (a NUL at every other character), a
     short line, repeated (the most lines), a whole name and a word, repeated on one line that ends in a
     colon (a name ended at every word), a letter and a look-alike between two marks, repeated (every mark a
-    colon the look-alike test passes over), and a mark, repeated (a colon at every character). At 1 MiB
-    each takes under a second of this process's CPU time, and each grows less than eightfold from 256 KiB
-    (about fourfold is linear, about sixteenfold quadratic). Stray work only adds time, so the 256 KiB brief
-    is timed three times and the least time kept, and the 1 MiB brief up to five times until its least time
-    passes; a 256 KiB time over a second ends the row's timing for that shape."""
+    colon the look-alike test passes over), and a mark, repeated (a colon at every character). Each shape
+    is timed in this process's CPU time at 256 KiB, 512 KiB and 1 MiB (the default brief cap), and the row
+    passes when its growth exponent, the least-squares slope of the logarithm of the time against the
+    logarithm of the size, is under 1.5 (about 1 is linear, about 2 quadratic; 1.5 is the old bound of
+    eightfold growth from 256 KiB to 1 MiB). The decision is a ratio of times taken in
+    the same run, so it holds on a fast or a slow host. Stray work from other load only adds time, so the
+    sizes are timed in rounds, each round timing every size once (ascending, then descending in the next
+    round, so a burst of load falls on small and large briefs alike), and each size keeps its least time
+    over the rounds: at least three rounds and at most nine, ending at the first round from the third on
+    whose least times give an exponent under 1.5. A single timing over 10 seconds is a runaway, not a
+    measurement: that size and the larger ones are not timed again and the row fails, whatever the
+    exponent over the smaller sizes, so a screen that blows up only at the largest size cannot pass."""
     labels = ls.binding["labels"]
     lead = _rdp_screen_text(ls, [])
 
@@ -1759,27 +1767,47 @@ def _rdp_label_screen_timing(ls):
 
     def _brief(unit, tail, size):
         return lead + unit * ((size - len(lead) - len(tail.encode())) // len(unit.encode())) + tail + "\n"
+
+    def _exponent(least):
+        """The least-squares slope of log(time) against log(size) over the sizes in least, or None with
+        fewer than two sizes; a time of zero (below the clock's resolution) counts as one microsecond."""
+        points = [(math.log(size), math.log(max(took, 1e-6))) for size, took in sorted(least.items())]
+        if len(points) < 2:
+            return None
+        mean_x = sum(x for x, _y in points) / len(points)
+        mean_y = sum(y for _x, y in points) / len(points)
+        return (sum((x - mean_x) * (y - mean_y) for x, y in points)
+                / sum((x - mean_x) ** 2 for x, _y in points))
     shapes = (("backtick-fence-line", "`", "x`"), ("name-prefix-and-colon", "reviewpa\u0435:", ""),
               ("lookalike-pairs", "r\u0435", ":"), ("short-lines", "a:\n", ""),
               ("names-then-words", "reviewpath x ", ":"), ("lookalike-between-marks", "r\u0301\u0435\u0300", ":"),
               ("marks", "\u0903", ""))
     rows = []
     for shape, unit, tail in shapes:
-        small = _cpu(_brief(unit, tail, 262144))
-        for _attempt in range(2):
-            if small > 1.0:
+        texts = {size: _brief(unit, tail, size) for size in (262144, 524288, 1048576)}
+        least = {}
+        cut = None
+        for round_number in range(9):
+            order = sorted(size for size in texts if cut is None or size < cut)
+            for size in order if round_number % 2 == 0 else order[::-1]:
+                if cut is not None and size >= cut:
+                    continue
+                took = _cpu(texts[size])
+                if took > 10.0:
+                    cut = size
+                    continue
+                least[size] = min(least.get(size, took), took)
+            least = {size: took for size, took in least.items() if cut is None or size < cut}
+            exponent = _exponent(least)
+            if exponent is None or (round_number >= 2 and exponent < 1.5):
                 break
-            small = min(small, _cpu(_brief(unit, tail, 262144)))
-        big = None
-        if small <= 1.0:
-            text = _brief(unit, tail, 1048576)
-            for _attempt in range(5):
-                took = _cpu(text)
-                big = took if big is None else min(big, took)
-                if big < min(1.0, 8 * small + 0.01) or big > 8.0:
-                    break
-        rows.append((shape, big is not None and big < 1.0, big is not None and big < 8 * small + 0.01))
-    check("rdp/label-screen-linear-time", rows, [(shape, True, True) for shape, _unit, _tail in shapes])
+        exponent = _exponent(least)
+        rows.append((shape, "linear" if cut is None and exponent is not None and exponent < 1.5 else (
+            "growth exponent {}{} over least CPU seconds {}".format(
+                None if exponent is None else round(exponent, 2),
+                "" if cut is None else ", runaway at {} bytes".format(cut),
+                {size: round(took, 4) for size, took in sorted(least.items())}))))
+    check("rdp/label-screen-linear-time", rows, [(shape, "linear") for shape, _unit, _tail in shapes])
 
 
 def _rwh_iso(hours=0):
