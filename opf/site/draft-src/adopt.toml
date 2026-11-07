@@ -1,5 +1,6 @@
 # The opfiles.ai draft adopt page (template reference/document.html): the assistant-led path in 3 steps,
-# then the 10 command verbs and their status as the reference CLI dispatches them.
+# then the store files the plan creates; the 10 command verbs and their status are on the core files
+# page (#tooling).
 path = "adopt/index.html"
 title = "Adopt"
 kind = "document"

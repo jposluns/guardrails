@@ -186,7 +186,8 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_enforcement_register.py"},
     {"target": "site/enforcement.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", ".aiqt/enforceability.json",
-                 ".aiqt/core/enforcement-roadmap.toml", ".aiqt/core/rules/"),
+                 ".aiqt/core/enforcement-roadmap.toml", ".aiqt/core/rules/",
+                 "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_enforcement_register.py"},
 )
 
@@ -726,8 +727,14 @@ def _assert_display_fidelity(html_page, md_text, controls, enforced_union):
 
 def _page_content(html_inner):
     """The page body substituted into the shell's `{{content}}`: a generated-note comment, the page head
-    band, and the register section wrapping the rendered inner. The head band and section wrapper are the
-    only page structure this generator authors; every other chrome byte comes from the shared shell."""
+    band, a release-anchored meta line, and the register section wrapping the rendered inner. The head
+    band, that line, and the section wrapper are the only page structure this generator authors; every
+    other chrome byte comes from the shared shell. The meta line reads VERSION and changelog.toml through
+    gen_draft_site._version_and_status (both are declared sources of site/enforcement.html), so a version
+    with no dated changelog entry fails the build instead of rendering a stale line; it is release-anchored
+    rather than a wall-clock date, which would break the byte-identity drift gate."""
+    version, status = gen_draft_site._version_and_status()
+    date = status[len("Published "):]
     return "\n".join([
         PAGE_GENERATED_COMMENT,
         "",
@@ -739,6 +746,8 @@ def _page_content(html_inner):
         '<p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
         '  This page is generated from the enforceability ledger, so its linkage claims match the controls',
         '  declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
+        '<p class="meta">Generated from the main branch source. Latest release: {}, published {}.</p>'.format(
+            _t(version), _t(date)),
         "",
         '<section id="register">',
         html_inner,

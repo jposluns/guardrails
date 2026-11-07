@@ -9,10 +9,12 @@
 For each site root (site/ for aiqt.ai, opf/site/ for opfiles.ai) the indexable pages are every *.html
 file under the root except a 404.html and anything under the root's draft/ or downloads/ directory;
 a page maps to its served URL (index.html to the directory, x.html to /x). The root's sitemap.xml must
-list each indexable page exactly once and nothing else, every <url> with a <loc> on the root's own
-https origin and a <lastmod> that is a valid YYYY-MM-DD date, and no draft URL (the path /draft or a
-path under /draft/; a path such as /drafty or /drafts/old is not a draft URL and is refused as having
-no page); the root's robots.txt must carry `Sitemap: https://<host>/sitemap.xml` exactly once. A
+list each indexable page exactly once, plus each of the root's declared non-HTML extras
+(EXTRA_URL_PATHS, each backed by a regular file under the root) exactly once, and nothing else, every
+<url> with a <loc> on the root's own https origin and a <lastmod> that is a valid YYYY-MM-DD date, and
+no draft URL (the path /draft or a path under /draft/; a path such as /drafty or /drafts/old is not a
+draft URL and is refused as having no page); the root's robots.txt must carry
+`Sitemap: https://<host>/sitemap.xml` exactly once. A
 missing sitemap or robots file, a sitemap or robots path that is not a regular file, and each of
 those defects are findings (exit 1). An input that cannot be stat'ed or read, an unwalkable
 directory, a root with no indexable page, an input over MAX_BYTES, a non-UTF-8 input (decoded
@@ -51,6 +53,13 @@ SITE_ROOTS = (
 )
 # Top-level directories of a site root whose pages are never indexed: the staged draft and the downloads.
 UNINDEXED_DIRS = ("draft", "downloads")
+# Declared non-HTML sitemap members, per site root: the root-relative URL paths of the non-HTML files the
+# root's sitemap lists on purpose (the machine-readable entry points). Each declared path must exist as a
+# regular file under the root (the URL /x maps to the file x) and be listed exactly once; an undeclared
+# URL with no page is still refused.
+EXTRA_URL_PATHS = {
+    "opf/site": ("/adopt.md", "/llms.txt"),
+}
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
@@ -148,7 +157,7 @@ def valid_date(value):
     return True
 
 
-def judge_sitemap(pairs, pages, host, where):
+def judge_sitemap(pairs, pages, host, where, extras=()):
     findings = []
     origin = "https://{}".format(host)
     listed = []
@@ -165,13 +174,16 @@ def judge_sitemap(pairs, pages, host, where):
         if path in listed:
             findings.append("{}: lists {} more than once".format(where, loc))
         listed.append(path)
-        if path not in pages and not is_draft:
+        if path not in pages and path not in extras and not is_draft:
             findings.append("{}: {} has no page".format(where, loc))
         if not valid_date(lastmod):
             findings.append("{}: lastmod {!r} of {} is not a valid date".format(where, lastmod, loc))
     for path in pages:
         if path not in listed:
             findings.append("{}: indexable page {}{} is missing".format(where, origin, path))
+    for path in extras:
+        if path not in listed:
+            findings.append("{}: declared extra URL {}{} is missing".format(where, origin, path))
     return findings
 
 
@@ -198,11 +210,23 @@ def scan(root):
         if not pages:
             errors.append("{}: no indexable page found".format(site))
             continue
+        extras = EXTRA_URL_PATHS.get(site, ())
+        for extra in extras:
+            try:
+                mode = os.lstat(site_dir / extra.lstrip("/")).st_mode
+            except FileNotFoundError:
+                findings.append("{}: declared extra URL path {} has no file".format(site, extra))
+                continue
+            except OSError as exc:
+                errors.append("{}: cannot stat declared extra {} ({})".format(site, extra, exc))
+                continue
+            if not stat.S_ISREG(mode):
+                findings.append("{}: declared extra URL path {} is not a regular file".format(site, extra))
         try:
             text = _read_input(site_dir / "sitemap.xml", site + "/sitemap.xml", findings)
             if text is not None:
                 pairs = parse_sitemap(text, site + "/sitemap.xml")
-                findings.extend(judge_sitemap(pairs, pages, host, site + "/sitemap.xml"))
+                findings.extend(judge_sitemap(pairs, pages, host, site + "/sitemap.xml", extras))
         except CannotEvaluate as exc:
             errors.append(str(exc))
         try:
@@ -269,7 +293,11 @@ def _fixture(tmp, overrides=None):
     for site, host in SITE_ROOTS:
         for page in _PAGES:
             files["{}/{}".format(site, page)] = "<!doctype html><title>x</title>\n"
-        files[site + "/sitemap.xml"] = _sitemap(host, _ENTRIES)
+        extras = EXTRA_URL_PATHS.get(site, ())
+        for extra in extras:
+            files["{}/{}".format(site, extra.lstrip("/"))] = "x\n"
+        files[site + "/sitemap.xml"] = _sitemap(host, _ENTRIES + tuple(
+            (extra, "2026-01-01") for extra in extras))
         files[site + "/robots.txt"] = _robots(host)
     files.update(overrides or {})
     for rel, body in files.items():
@@ -361,8 +389,24 @@ def _self_test():
     result = _scan_case({"site/sitemap.xml": _sitemap("aiqt.ai", _ENTRIES + (("/about", "2026-01-01"),))})
     check("refuse/duplicate-url", _one_finding(result, "more than once"), result)
 
+    # Declared non-HTML extras: listed beside the pages and backed by a real file is clean; a declared
+    # extra whose file is absent fails; an undeclared non-page URL is still refused even when its file
+    # exists under the root.
+    extra_entries = tuple((path, "2026-01-01") for path in EXTRA_URL_PATHS["opf/site"])
+    result = _scan_case({"opf/site/sitemap.xml": _sitemap("opfiles.ai", _ENTRIES + extra_entries)})
+    check("extras/listed-ok", result == ([], []), result)
+
+    result = _scan_case({"opf/site/adopt.md": None})
+    check("extras/missing-file", _one_finding(result, "declared extra URL path /adopt.md has no file"),
+          result)
+
+    result = _scan_case({"site/sitemap.xml": _sitemap("aiqt.ai", _ENTRIES + (("/adopt.md", "2026-01-01"),)),
+                         "site/adopt.md": "x\n"})
+    check("extras/undeclared-refused", _one_finding(result, "https://aiqt.ai/adopt.md has no page"), result)
+
+    # 3 wrong-origin entries, 3 missing pages, and the root's 2 missing declared extras.
     result = _scan_case({"opf/site/sitemap.xml": _sitemap("aiqt.ai", _ENTRIES)})
-    check("refuse/wrong-origin", result[1] == [] and len(result[0]) == 6
+    check("refuse/wrong-origin", result[1] == [] and len(result[0]) == 8
           and all("not on https://opfiles.ai" in line or "is missing" in line for line in result[0]), result)
 
     # The date check at its ends: the last day of February 2026 passes; the next two do not exist.
@@ -464,7 +508,9 @@ def _self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: check_sitemap {} checks (exact sitemaps and robots lines pass, with 404, draft/ "
-          "and downloads/ pages not indexed; a page missing from the sitemap, a URL with no page (/drafty "
+          "and downloads/ pages not indexed and declared non-HTML extras listed beside the pages; a page "
+          "missing from the sitemap, a declared extra with no file or missing from the sitemap, an "
+          "undeclared non-page URL, a URL with no page (/drafty "
           "and /drafts/old included), a duplicate URL, a foreign origin, an invalid or non-date lastmod, a "
           "/draft or /draft/ URL, a robots file lacking, mis-hosting or repeating its Sitemap line, a "
           "missing sitemap or robots file and a non-regular sitemap each fail; an input that cannot be "

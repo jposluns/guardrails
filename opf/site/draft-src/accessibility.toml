@@ -1,0 +1,18 @@
+# The opfiles.ai accessibility statement (not in the nav): no conformance claim, the untested status,
+# and a feedback route.
+path = "accessibility/index.html"
+title = "Accessibility"
+kind = "document"
+label = "Accessibility"
+heading = "Accessibility statement"
+meta = "This statement covers opfiles.ai. The site has not been tested for accessibility, so it makes no conformance claim. If something on this site is hard to use, please tell us."
+
+[[body]]
+component = "prose"
+html = '''<p>opfiles.ai has not been tested against any accessibility standard, including the Web Content Accessibility Guidelines (WCAG). It has not been tested with assistive technology or by people with disabilities. It therefore claims no level of conformance.</p><p>To report a barrier, use the contact route published at <a href="https://posluns.ca/security/" target="_blank" rel="noopener noreferrer">posluns.ca/security<span class="vh"> (opens in a new tab)</span></a>, or the project repository on <a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a>. Name the page and what you were trying to do.</p>'''
+
+[[body]]
+component = "next"
+html = "Back to the start."
+text = "Home"
+href = ""

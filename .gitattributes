@@ -529,6 +529,7 @@ opf/site/.well-known/security.txt text eol=lf
 opf/site/404.html text eol=lf
 opf/site/_headers text eol=lf
 opf/site/_redirects text eol=lf
+opf/site/accessibility/index.html text eol=lf
 opf/site/adopt.md text eol=lf
 opf/site/adopt/index.html text eol=lf
 opf/site/assets/baseline/logos/opfiles-touch.png binary
@@ -536,6 +537,7 @@ opf/site/assets/opfiles-og.png binary
 opf/site/core-files/index.html text eol=lf
 opf/site/disclosure/index.html text eol=lf
 opf/site/draft-src/404.toml text eol=lf
+opf/site/draft-src/accessibility.toml text eol=lf
 opf/site/draft-src/adopt.toml text eol=lf
 opf/site/draft-src/core-files.toml text eol=lf
 opf/site/draft-src/disclosure.toml text eol=lf
@@ -708,6 +710,7 @@ site/.well-known/security.txt text eol=lf
 site/404.html text eol=lf
 site/_headers text eol=lf
 site/_redirects text eol=lf
+site/accessibility/index.html text eol=lf
 site/assets/aiqt-og.png binary
 site/assets/baseline/logos/aiqt-touch.png binary
 site/development.html text eol=lf
@@ -724,6 +727,7 @@ site/downloads/aiqt/provenance.md text eol=lf
 site/downloads/mappings.csv text eol=lf
 site/downloads/mappings.json text eol=lf
 site/draft-src/404.toml text eol=lf
+site/draft-src/accessibility.toml text eol=lf
 site/draft-src/disclosure.toml text eol=lf
 site/draft-src/draft.toml text eol=lf
 site/draft-src/future.toml text eol=lf

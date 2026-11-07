@@ -109,6 +109,9 @@ GENSRC_OUTPUTS = (
     {"target": "site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/404.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "site/accessibility/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/accessibility.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/draft/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/draft.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
@@ -143,6 +146,9 @@ GENSRC_OUTPUTS = (
     {"target": "opf/site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/404.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
+    {"target": "opf/site/accessibility/index.html", "kind": "file",
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/accessibility.toml"),
+     "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/adopt/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/adopt.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
@@ -162,7 +168,8 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/model.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/standard/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml"),
+     "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml",
+                 "VERSION", "changelog.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
 )
 
@@ -192,6 +199,7 @@ KEPT_LIVE_PATHS = (
     "/downloads/mappings.json",
     "/enforcement",
     "/evidence",
+    "/llms.txt",
     "/tech-details",
 )
 
@@ -353,9 +361,21 @@ def _footer(site):
            'rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new '
            'tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span>'
            '<span class="post"> Project</span></a></div>')
+    # The site-policy row: every page of both sites carries the accessibility, licence and privacy links;
+    # aiqt.ai also links its teams page, the enforcement register and its machine-readable entry point.
+    links = ['<a href="{}">Accessibility</a>'.format(_url(site, "accessibility/")),
+             '<a href="{}">Licence</a>'.format(_url(site, "license/"))]
+    if site["key"] == "aiqt":
+        links += ['<a href="{}">Plans for teams</a>'.format(_url(site, "future/")),
+                  '<a href="/enforcement">Enforcement register</a>',
+                  '<a href="/llms.txt">llms.txt</a>']
+    links += [_external("https://posluns.ca/privacy/", "Privacy"),
+              _external("https://posluns.ca/security/", "Security")]
+    dot = '<span class="dot" aria-hidden="true">&middot;</span> '
+    policy = '<nav class="policy" aria-label="Site policies"><p>{}</p></nav>'.format(dot.join(links))
     return ('<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project '
-            'sites">{}</ul><ul class="tail" aria-label="Jeff Posluns elsewhere">{}</ul>{}</div></footer>').format(
-                "".join(cards), tail, sig)
+            'sites">{}</ul><ul class="tail" aria-label="Jeff Posluns elsewhere">{}</ul>{}{}</div></footer>').format(
+                "".join(cards), tail, sig, policy)
 
 
 def _about(site):
@@ -547,6 +567,21 @@ def _c_control(site, doc, where):
             '<div><dt>Source</dt><dd>{}</dd></div><div><dt>Licence</dt><dd>{}</dd></div></dl>').format(
                 _t(_text(spec, where, "document")), _t(version), _t(status),
                 _external(source_href, _t(_text(spec, where, "source_text"))), licence)
+
+
+def _c_release(site, doc, where):
+    """The opfiles.ai release line (the counterpart of aiqt.ai's control strip): what version the OPFiles
+    pages belong to, stated without claiming a protocol release. VERSION and changelog.toml supply the
+    pack version and its recorded date through _version_and_status, so a stale line cannot render; the
+    base and tooling versions restate the scope facts of the standard page."""
+    if site["key"] != "opfiles":
+        raise RefusedPage("{}: the release line belongs to opfiles.ai only".format(where))
+    _need(doc, where, ("component",))
+    version, status = _version_and_status()
+    date = status[len("Published "):]
+    return ('<p class="meta">OPFiles has no release of its own: it is versioned with the {} pack, whose '
+            'change log records that version on {}. The specification is base 2.0.0; the reference '
+            'tooling initializes 1.2.0 stores.</p>').format(_t(version), _t(date))
 
 
 def _c_clause(site, doc, where):
@@ -1049,7 +1084,7 @@ def _checked_id(spec, where):
 
 COMPONENTS = {
     "hero": _c_hero, "entries": _c_entries, "region": _c_region, "value": _c_value, "about": _c_about,
-    "control": _c_control, "clause": _c_clause, "clauses": _c_clauses, "note": _c_note,
+    "control": _c_control, "release": _c_release, "clause": _c_clause, "clauses": _c_clauses, "note": _c_note,
     "callout": _c_callout, "figures": _c_figures, "table": _c_table, "register": _c_register,
     "code": _c_code, "picker": _c_picker, "family": _c_family, "download": _c_download, "plan": _c_plan,
     "scope": _c_scope, "next": _c_next, "lead": _c_lead, "label": _c_label, "section": _c_section,
@@ -1803,6 +1838,15 @@ def _self_test():
     slices = re.findall(r'<li class="slice slice-(\d)">', page)
     expect("footer/aiqt-first-cycle", slices == ["5", "6", "1", "2", "3", "4"], slices)
     expect("footer/current-card", page.count('aria-current="page"><img src="/draft/assets/baseline/logos/aiqt.svg"') == 1)
+    expect("footer/policy-links", page.count('<nav class="policy" aria-label="Site policies">') == 1
+           and '<a href="/draft/accessibility/">Accessibility</a>' in page
+           and '<a href="/draft/license/">Licence</a>' in page
+           and '<a href="/draft/future/">Plans for teams</a>' in page
+           and '<a href="/enforcement">Enforcement register</a>' in page
+           and '<a href="/llms.txt">llms.txt</a>' in page)
+    expect("footer/privacy-every-page", bool(outputs) and all(
+        'href="https://posluns.ca/privacy/"' in out for out in outputs.values()), sorted(
+            rel for rel, out in outputs.items() if 'href="https://posluns.ca/privacy/"' not in out))
     navs = [re.search(r'<nav class="nav" aria-label="Site">(.*?)</nav>', outputs["site/draft/" + rel]).group(1)
             for rel in ("index.html", "disclosure/index.html", "license/index.html")]
     # The unregistered set is derived from the site nav against the loaded pages, so the check follows
@@ -1842,7 +1886,8 @@ def _self_test():
                and "<title>{} | AIQT.ai</title>".format(title) in inner)
     hrefs = re.findall(r'(?:href|src)="([^"]*)"', page)
     internal = [h for h in hrefs if not h.startswith("https://") and not h.startswith("#")]
-    expect("base/every-internal-path", internal and all(h.startswith(DRAFT_BASE) for h in internal), internal)
+    expect("base/every-internal-path", internal and all(
+        h.startswith(DRAFT_BASE) or h in site["kept"] for h in internal), internal)
     externals = re.findall(r'<a [^>]*href="https://[^"]*"[^>]*>', page)
     expect("base/external-newtab", externals and all('target="_blank" rel="noopener noreferrer"' in a for a in externals))
     expect("refuse/clean-page-passes", refusals_for(page) == [], refusals_for(page))
@@ -2264,7 +2309,8 @@ def _self_test():
     opf = staged_[1]
     home = outputs["opf/site/draft/index.html"]
     expect("opfiles/outputs", sorted(rel for rel in outputs if rel.startswith("opf/site/draft/")) == [
-        "opf/site/draft/404.html", "opf/site/draft/adopt/index.html", "opf/site/draft/core-files/index.html",
+        "opf/site/draft/404.html", "opf/site/draft/accessibility/index.html", "opf/site/draft/adopt/index.html",
+        "opf/site/draft/core-files/index.html",
         "opf/site/draft/disclosure/index.html", "opf/site/draft/draft/index.html", "opf/site/draft/index.html",
         "opf/site/draft/license/index.html", "opf/site/draft/model/index.html",
         "opf/site/draft/standard/index.html"], sorted(outputs))
@@ -2600,7 +2646,7 @@ def _self_test():
     expect("links/opfiles-kept-plain", opf_kept == (
         '<div class="next"><p class="lbl">Next</p><a class="start" href="/adopt.md">Guide '
         '<span class="arrow" aria-hidden="true">&rarr;</span></a></div>'), opf_kept)
-    expect("links/opfiles-kept-not-aiqt", _link_findings(site, '<a href="/llms.txt">x</a>') != []
+    expect("links/llms-kept-both-sites", _link_findings(site, '<a href="/llms.txt">x</a>') == []
            and _link_findings(opf, '<a href="/llms.txt">x</a>') == [])
     expect("refuse/opfiles-kept-prefix", "kept live path" in refused(
         "refuse/opfiles-kept-prefix", COMPONENTS["next"], opf,
@@ -2616,6 +2662,14 @@ def _self_test():
     expect("opfiles/core-files-components", '<dl class="record">' in core_page and "<blockquote>" in core_page
            and '<p class="lbl file">.working/toml/manifest.toml</p>' in core_page
            and '<h3 id="done">' in core_page)
+    opf_standard_page = outputs["opf/site/draft/standard/index.html"]
+    expect("opfiles/release-line", opf_standard_page.count(
+        '<p class="meta">OPFiles has no release of its own: it is versioned with the ') == 1
+        and "The specification is base 2.0.0; the reference tooling initializes 1.2.0 stores.</p>"
+        in opf_standard_page)
+    expect("refuse/release-line-not-aiqt", "belongs to opfiles.ai only" in refused(
+        "refuse/release-line-not-aiqt", COMPONENTS["release"], site, {"component": "release"},
+        "fixture.body[1]"))
 
     # Link resolution and stray outputs, staged (base /draft/, the declared build) and promoted (the same
     # pages built at base "/" into each site's live root, in a fixture tree holding the asset folder and the

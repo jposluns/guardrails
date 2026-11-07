@@ -11,3 +11,4 @@ OPFiles is a neutral operational-files standard: lowercase TOML sources paired w
 - [Technical details](/core-files/): the manifest, the ID counters, the version ledger, the durable worklog, and the single-writer lease; the record indexes and the files around them follow, 1 line each.
 - [Disclosure](/disclosure/): what OPFiles claims, the limit of each claim, and the evidence for both.
 - [Licence](/license/): OPFiles is published under the Apache License 2.0, except vendored third-party material, which remains under its own terms; the licence text is the authority.
+- [Accessibility](/accessibility/): the site has not been tested for accessibility and makes no conformance claim; how to report a barrier.

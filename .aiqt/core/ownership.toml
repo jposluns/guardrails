@@ -322,6 +322,10 @@ path = "site/404.html"
 class = "pack-immutable"
 
 [[release-class]]
+path = "site/accessibility/index.html"
+class = "pack-immutable"
+
+[[release-class]]
 path = "site/_redirects"
 class = "pack-immutable"
 
