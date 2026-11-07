@@ -1,4 +1,4 @@
-"""The homes-1 adoption control area and the bounded adoption state the doctor reads (OPF-SPEC 4.2, 11, 14.2, 17).
+"""The adoption control area and the bounded adoption state the doctor reads (OPF-SPEC 4.2, 11, 14.2, 17), on homes 1.
 
 A store that has adopted (its `.working/imported/adoption/` home exists) registers, on homes 1, each ADMITTED
 run AT FILE LEVEL: the paths its committed inventories list, the base inventory's rows and, once its
