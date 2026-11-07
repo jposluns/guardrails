@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "388fe9fe18e6da899a9e610c014efa0f660724dc4f6d4322b5065ad79e8076e4"
+tree-sha256 = "fd5133459882024b714b36faaa29df0cdca616170d991923f06845e29a3f266b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -852,7 +852,7 @@ sha256 = "142b4ac57f326c4d30a677e45e6c4daddf3661259b0714f1747db59c3f8ff7dd"
 [[sources]]
 path = ".aiqt/standards/README.md"
 bytes = 10986
-sha256 = "b8cf8c7af089d896ea5111c8de9f230d9133f902706968f289454701cf1bc5e2"
+sha256 = "3e812ebb5e7183d5358d2a7588189ed4a66a66f61237afb6c7dd2737b6ad9e8f"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"
@@ -4246,8 +4246,8 @@ sha256 = "f71af857e298779f7134566dfb5411b25ffa5c84222569bea667358eda53df71"
 
 [[sources]]
 path = "tools/check_mappings.py"
-bytes = 16816
-sha256 = "8a872483eb1da337dab06968bd9fdbafa5f5809f933af725d440d3e3126f967e"
+bytes = 20975
+sha256 = "63902bb6d3098492781660326c60848ae8d9b83cf54b10f63d29ffafcd3201d3"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
@@ -4426,8 +4426,8 @@ sha256 = "5c11ec76c34975264d4070560859c8d77d451af47eb2ca655cb24a5a6d25b94d"
 
 [[sources]]
 path = "tools/conformance.py"
-bytes = 98474
-sha256 = "5372e39d67b2393a0bd9f32910e57a750e1cfdf053d26ae832fb53a56e5d31d4"
+bytes = 98769
+sha256 = "7db80a651d640832137af56df93e7ea3e541bfabd3c7bb3d3a4caf3acb098127"
 
 [[sources]]
 path = "tools/doctor.py"
@@ -4646,8 +4646,8 @@ sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 217099
-sha256 = "4e62e6fe53d75573ffefb62cf705684f4f53d8c2b8b6edab65e3b50be336159d"
+bytes = 217268
+sha256 = "7ad08185f069b3bb24aab3c7a722233933d9d891885682674b5693e13f3dbb4a"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

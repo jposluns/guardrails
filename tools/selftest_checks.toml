@@ -5278,6 +5278,7 @@ expected-check-ids = [
   "refuse/incorporated-not-string",
   "refuse/incorporated-into-self",
   "refuse/incorporated-into-withdrawn",
+  "refuse/incorporated-into-empty",
   "refuse/status-case-variant",
   "refuse/status-whitespace-variant",
   "refuse/unknown-id-key-recased-status",
@@ -5288,5 +5289,8 @@ expected-check-ids = [
   "refuse/gen-rules-withdrawn-id",
   "refuse/gen-draft-site-withdrawn-id",
   "pass/generators-render-same-id-not-withdrawn",
+  "totals/gen-mappings-ids-total-active-only",
+  "totals/notice-count-active-only",
+  "totals/every-id-counted-when-none-withdrawn",
   "refuse/unrecognized-argument",
 ]

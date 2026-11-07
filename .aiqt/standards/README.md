@@ -43,8 +43,8 @@ residual are in the docstring of `tools/check_cited_standards.py`.
   the corpus against its manifest: the id must match the manifest `id-pattern` and appear verbatim in
   the manifest's id set, and must not be marked withdrawn there. It also enforces per-list hygiene (no
   duplicates, natural-sorted order) and mutual exclusivity (an id is not asserted both tight and broad
-  for one rule+framework). A malformed manifest fails closed (exit 2). Both are stdlib-only and offline: CI never reaches the network or the
-  private source catalogues.
+  for one rule+framework). A malformed manifest fails closed (exit 2). Both are stdlib-only and offline:
+  CI never reaches the network or the private source catalogues.
 - `tools/check_cited_standards.py` (a CI gate, and part of `run_all_checks.sh`) scans the rule corpus for
   numbered standard designators in its grammar's spellings and fails on one that no manifest's `name` or
   `edition` carries and no recorded exclusion covers. This repository's CI and `run_all_checks.sh` pass

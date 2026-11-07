@@ -16,7 +16,8 @@ An id its manifest marks withdrawn (status = "withdrawn" on its [[id]]) stays a 
 rule mapping to it is a finding; a status value other than "withdrawn", and an [[id]] key outside the
 closed set _standards.ID_KEYS, fail closed. The self-test also drives every generator that renders a
 mapping id (gen_mappings, gen_draft_site's mappings data and gen_rules), each of which must refuse a
-withdrawn id through the same _standards.withdrawn_finding test.
+withdrawn id through the same _standards.withdrawn_finding test, and checks that the published totals
+of a full catalogue (gen_mappings' ids_total and gen_notice's entry count) count active ids only.
 """
 import sys
 
@@ -187,6 +188,53 @@ def _generators(st02_fields):
     return results
 
 
+# A verified attribution block for the fixture's publisher, so gen_notice renders the fixture's NOTICE.
+_ATTRIBUTION = ('[publisher."AIQT self-test"]\nlegal-name = "AIQT self-test"\nlicence = "fixture licence"\n'
+                'licence-url = "https://example.invalid/licence"\nbasis = "A fixture basis."\n'
+                'attribution = "A fixture attribution."\nverified = true\n')
+
+
+def _totals(st02_fields):
+    """(the ids_total gen_mappings.run publishes for fx in mappings.json or None, the NOTICE text
+    gen_notice.build renders with its whitespace folded to single spaces) over a tempdir root whose full
+    catalogue manifest gives ST02 the fields st02_fields and whose one rule (on disk) maps ST01."""
+    import contextlib
+    import io
+    import json
+    import gen_mappings
+    import gen_notice
+    from _standards import map_keys
+    with tempfile.TemporaryDirectory(prefix="mappings-selftest-totals-") as tmp:
+        root = Path(tmp)
+        for parts in ((".aiqt", "standards"), (".aiqt", "core", "rules"), ("site", "downloads")):
+            os.makedirs(root.joinpath(*parts))
+        with open(root / ".aiqt" / "standards" / "fx.toml", "w", encoding="utf-8") as handle:
+            handle.write(_FIXTURE_HEAD + st02_fields + _FIXTURE_TAIL)
+        with open(root / ".aiqt" / "core" / "rules" / _RULE_NAME, "w", encoding="utf-8") as handle:
+            handle.write(_RULE_SOURCE.replace("map-fx-tight: [ST02]", "map-fx-tight: [ST01]"))
+        with open(root / ".aiqt" / "attribution.toml", "w", encoding="utf-8") as handle:
+            handle.write(_ATTRIBUTION)
+        saved = (gen_rules.MAP_KEYS, gen_rules.SEQ_KEYS)
+        gen_rules.MAP_KEYS = map_keys(root)
+        gen_rules.SEQ_KEYS = {"secondary"} | gen_rules.MAP_KEYS
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                code = gen_mappings.run(root, False)
+            json_path = root / "site" / "downloads" / "mappings.json"
+            total = None
+            if code == 0 and json_path.exists():
+                with open(json_path, encoding="utf-8") as handle:
+                    total = json.load(handle)["frameworks"]["fx"]["ids_total"]
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    notice = " ".join(gen_notice.build(root).split())
+            except (SystemExit, ValueError, OSError, KeyError) as exc:
+                notice = "error: NOTICE not rendered: {!r}".format(exc)
+        finally:
+            gen_rules.MAP_KEYS, gen_rules.SEQ_KEYS = saved
+    return total, notice
+
+
 def _self_test():
     code, out = _case(_WITHDRAWN, ["ST02"])
     check("refuse/mapping-to-withdrawn-id", code == 1 and "fixture-rule.md: map-fx-tight: id 'ST02' is "
@@ -215,6 +263,10 @@ def _self_test():
     code, out = _case('status = "withdrawn"\nincorporated-into = "ST03"\n', ["ST01"], 'status = "withdrawn"\n')
     check("refuse/incorporated-into-withdrawn", code == 2 and "error: fx.toml: incorporated-into for 'ST02' "
           "names 'ST03', which is not an active id" in out, (code, out))
+    # An empty successor is refused by its own non-empty test, not only by the later active-id test.
+    code, out = _case('status = "withdrawn"\nincorporated-into = ""\n', ["ST01"])
+    check("refuse/incorporated-into-empty", code == 2 and "error: fx.toml: incorporated-into for 'ST02' "
+          "must be a non-empty string" in out, (code, out))
 
     # The status value is compared exactly: no case or whitespace folding.
     got = [_case(fields, ["ST01"]) for fields in ('status = "Withdrawn"\n', 'status = "WITHDRAWN"\n')]
@@ -254,6 +306,21 @@ def _self_test():
           and rendered["gen_rules"][0] == 0 and "map-fx-tight: [ST02]" in (rendered["gen_rules"][2] or "")
           and rendered["gen_draft_site"][:2] == (0, "ST02"), rendered)
 
+    # Published totals count active ids only: over a full catalogue of three ids with ST02 withdrawn (and
+    # unmapped), the mappings.json ids_total and the NOTICE's "all N entries" both read 2; with no id
+    # withdrawn, both read 3.
+    def clause(notice):
+        """The NOTICE's completeness sentence for fx (or the whole text when it is missing)."""
+        start = notice.find("For Self-test fx")
+        return notice if start < 0 else notice[start:start + 80]
+    total, notice = _totals(_WITHDRAWN)
+    check("totals/gen-mappings-ids-total-active-only", total == 2, total)
+    check("totals/notice-count-active-only", "For Self-test fx it lists all 2 entries (the complete list);"
+          in notice, clause(notice))
+    total, notice = _totals("")
+    check("totals/every-id-counted-when-none-withdrawn", total == 3 and "For Self-test fx it lists all 3 "
+          "entries (the complete list);" in notice, (total, clause(notice)))
+
     got = [_main_exit(argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
                                          ["--execution-report", "relative/report"])]
     check("refuse/unrecognized-argument", got == [2, 2, 2], got)
@@ -266,9 +333,10 @@ def _self_test():
     print("SELF-TEST PASS: check_mappings {} checks (a mapping to a withdrawn id fails naming the rule, key "
           "and id; the same id not withdrawn passes; a withdrawn id no rule maps passes; a status other than "
           "\"withdrawn\" (a case or whitespace variant included), an [[id]] key outside the closed set, and an "
-          "incorporated-into without it, naming no active id (itself or another withdrawn id) or not a string, "
-          "fail closed; gen_mappings, gen_draft_site and gen_rules refuse a withdrawn id with nothing written "
-          "and render it when active; an unrecognized argument exits 2)".format(len(EXECUTED)))
+          "incorporated-into without it, empty, naming no active id (itself or another withdrawn id) or not a "
+          "string, fail closed; gen_mappings, gen_draft_site and gen_rules refuse a withdrawn id with nothing "
+          "written and render it when active; the mappings.json ids_total and the NOTICE entry count of a full "
+          "catalogue exclude a withdrawn id; an unrecognized argument exits 2)".format(len(EXECUTED)))
     return 0
 
 
