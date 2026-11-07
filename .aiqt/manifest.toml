@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "231f03f70a00e8226560745c2a6d00d6fd040eada32be95ace399d6dd1e3eafc"
+tree-sha256 = "4917b537535bd6252210c0d5dd247d64c2e9177a725b5f35d4a6491fbb6666c8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2636,13 +2636,13 @@ sha256 = "d3fdf33ff292a4665b42e306a2734a9ade48c24e27d6d1873252ee6498cb3dff"
 
 [[sources]]
 path = "opf/site/adopt.md"
-bytes = 9103
-sha256 = "3c5b77e331d439a478a1f64d080eb30a7f4f729411b1696ba6f439e9d4268d05"
+bytes = 9310
+sha256 = "089ad98932083f58317ba5d7a010e73baa4e4edf944de7083a3a1363ea38750a"
 
 [[sources]]
 path = "opf/site/adopt/index.html"
-bytes = 13506
-sha256 = "9332aa3fc78fcb29259baad88307cabc8fd10f78d372881652ed672454a075aa"
+bytes = 13768
+sha256 = "dc0e0ab7d694557119d94e5c92129f613cf3f14b2b98bd8df853ca4860a227ae"
 
 [[sources]]
 path = "opf/site/assets/baseline/logos/opfiles-touch.png"
@@ -2671,8 +2671,8 @@ sha256 = "83300f415d883b1132d54d2ef2d21aa375094650e6fdc93fc7bb6f1354028865"
 
 [[sources]]
 path = "opf/site/draft-src/adopt.toml"
-bytes = 6878
-sha256 = "97426529ed415b1bbe3f138220cb7627a59b6e9454f85c05329eb3a55c03d1ba"
+bytes = 7140
+sha256 = "8573626b1d9699e81f6ca1fd2d1340ed2c3ba602a87bfff2f5cbf14140d3e35f"
 
 [[sources]]
 path = "opf/site/draft-src/core-files.toml"
@@ -3426,8 +3426,8 @@ sha256 = "6ad4c80a38549a287e6f2f0fb913566c07a5f239c093995daed7f0a1fb8baaa1"
 
 [[sources]]
 path = "opf/tools/check_opf_homes.py"
-bytes = 743960
-sha256 = "125d8e6c0b8299fc9ae8e62d34592397f1c6ca01513e5e92e1acd7073e3d935c"
+bytes = 744124
+sha256 = "05ad768bcb82cc48db7545ae61495c227c9870fee2543c0404eee6f97df059f4"
 
 [[sources]]
 path = "opf/tools/check_opf_init.py"
