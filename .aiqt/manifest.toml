@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a944931294861d4d97d960020adc1212082cab8778560284715b89da477dcf29"
+tree-sha256 = "4fef1f731d3326927c406f93d74170b1cda4c258ecf530de47ad8e65ee7ccf98"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -42,7 +42,7 @@ sha256 = "15d8d9d85050558c0be30c9b5b591818f94d9a2aca057db681aa3ff0ba069c75"
 [[sources]]
 path = ".aiqt/core/clauses.toml"
 bytes = 313958
-sha256 = "40298d251d99ecc7ce15e82b6fd0dcdfbfc24b5264a75627a43aa6cf4d65d06b"
+sha256 = "b7e2d7fe1e1298d19b246e40b1a7b75e92e2a77dd2234d4df91c5cf25026fddf"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -91,8 +91,8 @@ sha256 = "5abcd3d73c58dad02c8bc2bdf6bfd297c01ee14dd6fc3aa672b9f372d146f084"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 2439842
-sha256 = "3bca004555f7a08671b0b72ce117abbc0222a7b6eabc6f2348a608dfd4241f4b"
+bytes = 2441644
+sha256 = "98d7541b631912f6ffc204af13d1eefebc1203a376b307d9177af489e175fae3"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -452,7 +452,7 @@ sha256 = "aa32523af6c8b44dd81bf8ac87fec8c5265d817a035d8df3130d6333f680823f"
 [[sources]]
 path = ".aiqt/core/rules/quali-surface-counterproductive-instructions.md"
 bytes = 615
-sha256 = "719222158b013eeb041ea718feea6dc909c665417eed79ac67b8d0ec0d6e4533"
+sha256 = "c9833d62db95e68321edc4e7766c02222fe31b01ceaf7ba7fc6b632caed641f7"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-test-hermeticity.md"
@@ -482,7 +482,7 @@ sha256 = "3887d72029fda00c8045e62f17f1400a012d3209d4dadd08a9a616c8178639d4"
 [[sources]]
 path = ".aiqt/core/rules/security-secc-data-boundary.md"
 bytes = 712
-sha256 = "aaf4d13f27000bc88021c0c3dbcaf9d523e9f97a487a7cf4f3cf1e0667726cc9"
+sha256 = "27f7ee1833bd5d0f21699ea9c1c4f7b8e93ad448861b509f08154ab5cb37ceca"
 
 [[sources]]
 path = ".aiqt/core/rules/security-secc-egress-destinations.md"
@@ -612,7 +612,7 @@ sha256 = "735f5fe67281bc175484c7cee60bbd4be18a8b79d9ecad45c83f64943ea32106"
 [[sources]]
 path = ".aiqt/core/rules/security-seci-poisoning-resistance.md"
 bytes = 1118
-sha256 = "48590dd48d9c95cae0ec7807fcedce6e80b16e8a610ff39ee3423f79a4b45160"
+sha256 = "bba736af77e64df4e79104edbd84631c97db5bce09103f9f7ae1da741e9c332b"
 
 [[sources]]
 path = ".aiqt/core/rules/security-seci-prefer-removing-a-path.md"
@@ -1257,7 +1257,7 @@ sha256 = "aa32523af6c8b44dd81bf8ac87fec8c5265d817a035d8df3130d6333f680823f"
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
 bytes = 615
-sha256 = "719222158b013eeb041ea718feea6dc909c665417eed79ac67b8d0ec0d6e4533"
+sha256 = "c9833d62db95e68321edc4e7766c02222fe31b01ceaf7ba7fc6b632caed641f7"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-test-hermeticity.md"
@@ -1402,7 +1402,7 @@ sha256 = "3887d72029fda00c8045e62f17f1400a012d3209d4dadd08a9a616c8178639d4"
 [[sources]]
 path = ".claude/rules/security/SECC-data-boundary.md"
 bytes = 712
-sha256 = "aaf4d13f27000bc88021c0c3dbcaf9d523e9f97a487a7cf4f3cf1e0667726cc9"
+sha256 = "27f7ee1833bd5d0f21699ea9c1c4f7b8e93ad448861b509f08154ab5cb37ceca"
 
 [[sources]]
 path = ".claude/rules/security/SECC-egress-destinations.md"
@@ -1532,7 +1532,7 @@ sha256 = "735f5fe67281bc175484c7cee60bbd4be18a8b79d9ecad45c83f64943ea32106"
 [[sources]]
 path = ".claude/rules/security/SECI-poisoning-resistance.md"
 bytes = 1118
-sha256 = "48590dd48d9c95cae0ec7807fcedce6e80b16e8a610ff39ee3423f79a4b45160"
+sha256 = "bba736af77e64df4e79104edbd84631c97db5bce09103f9f7ae1da741e9c332b"
 
 [[sources]]
 path = ".claude/rules/security/SECI-prefer-removing-a-path.md"
@@ -2441,8 +2441,8 @@ sha256 = "42db2862ae33cce674febff7be58c91263cd2932b69d641157c46f08a6eac398"
 
 [[sources]]
 path = "TODO.md"
-bytes = 20299
-sha256 = "9af1151703862da7069a443e22ac98c82ad43afc46d99f74513211227d6e8c68"
+bytes = 20468
+sha256 = "6e2497d0c1519713e1a42337f633ddcd3ea2b649752e33a801ed3d45e3a38bd1"
 
 [[sources]]
 path = "VERSION"
@@ -3046,8 +3046,8 @@ sha256 = "dc856ac19c1f38e695163c165622c168dcf36bb6286ff17c80b12f730124a2d5"
 
 [[sources]]
 path = "opf/spec/OPF-QUICKSTART.md"
-bytes = 18975
-sha256 = "91849f2ebf5e48e8d35bde832979ec6d471810a104a30b7b1905fea23547f063"
+bytes = 19249
+sha256 = "a1b76e6f1dfcfa36572ca60e8e7dac0559c2b93ff5b7c30f54fb26cb54909402"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
@@ -3501,8 +3501,8 @@ sha256 = "4c734ec904247a0b33d0ee7a5f0c2abcb4b80de3e308ce4d04b92da5b256f6c2"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 2439842
-sha256 = "3bca004555f7a08671b0b72ce117abbc0222a7b6eabc6f2348a608dfd4241f4b"
+bytes = 2441644
+sha256 = "98d7541b631912f6ffc204af13d1eefebc1203a376b307d9177af489e175fae3"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3597,12 +3597,12 @@ sha256 = "bac47d1a3f4543cb63b8d74d99823cf93caaf303e17648c67810189d4c884702"
 [[sources]]
 path = "site/downloads/mappings.csv"
 bytes = 239654
-sha256 = "8fb1860bc0e41c2f0e48ac34368285a030cba9ab679d2118f4395396beff0f87"
+sha256 = "c2cfb3524f019f3ebb7b3d8b1ffab359b1d77b425a3d9c26748c725349aaf059"
 
 [[sources]]
 path = "site/downloads/mappings.json"
 bytes = 379393
-sha256 = "4e0ab89b78465c3825b2aa311ae97a63b1cb378b103e3e11a3d3ebb1c517fde2"
+sha256 = "e0f8bb8dda16039213a4370e6814f4d15fbfbc5fb7e0a0f690df0f0ca2cf9cdc"
 
 [[sources]]
 path = "site/draft-src/404.toml"
@@ -3992,7 +3992,7 @@ sha256 = "e2c0ad81cb930b1905771b95eb0d8d1bd63b4e5098bab4472e555ac62c18d6b0"
 [[sources]]
 path = "site/mappings/index.html"
 bytes = 410630
-sha256 = "1cc386f17a2b2dd35f685af4cfca8f8593cc83f2c466ec323b3f8293948f01b0"
+sha256 = "9fb0bce5e6b3c8b2fd543b29678b2a36bf4a52eec3626d715245d3b8d8a290df"
 
 [[sources]]
 path = "site/robots.txt"
@@ -4631,13 +4631,13 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2141443
-sha256 = "3c7e73a39157097bd517503fb85433ab42216d79d6806da9439a63545af30227"
+bytes = 2178697
+sha256 = "cc0464c20f62e7c83131c52c90ff9eafa40bcdd2f425fa158496c83e326a9b7c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 217981
-sha256 = "4b1d32706a7610066d2624ee9ddc31263812020cbde30fc2be3176ab877793ec"
+bytes = 219640
+sha256 = "e0da814f7efc6e53a12e0967cab47e5095b9af93d0be9b64b03e3c2ef2ecc809"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4676,8 +4676,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1146054
-sha256 = "7d2d21c22cb569d06ebef30575b71332a7afba14b7a2b8343cf93b94ff4622f6"
+bytes = 1157627
+sha256 = "a89a0c284bb0f8a7f28b3906eb58b234642cace7546309ad6ea3fa5c16af2f21"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
@@ -5041,7 +5041,7 @@ sha256 = "aa32523af6c8b44dd81bf8ac87fec8c5265d817a035d8df3130d6333f680823f"
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
 path = ".claude/rules/aiqt/10-QUALI-surface-counterproductive-instructions.md"
 kind = "file"
-sha256 = "719222158b013eeb041ea718feea6dc909c665417eed79ac67b8d0ec0d6e4533"
+sha256 = "c9833d62db95e68321edc4e7766c02222fe31b01ceaf7ba7fc6b632caed641f7"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-test-hermeticity.md"
@@ -5215,7 +5215,7 @@ sha256 = "3887d72029fda00c8045e62f17f1400a012d3209d4dadd08a9a616c8178639d4"
 artifact-id = "rules:.claude/rules/security/SECC-data-boundary.md"
 path = ".claude/rules/security/SECC-data-boundary.md"
 kind = "file"
-sha256 = "aaf4d13f27000bc88021c0c3dbcaf9d523e9f97a487a7cf4f3cf1e0667726cc9"
+sha256 = "27f7ee1833bd5d0f21699ea9c1c4f7b8e93ad448861b509f08154ab5cb37ceca"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/security/SECC-egress-destinations.md"
@@ -5371,7 +5371,7 @@ sha256 = "735f5fe67281bc175484c7cee60bbd4be18a8b79d9ecad45c83f64943ea32106"
 artifact-id = "rules:.claude/rules/security/SECI-poisoning-resistance.md"
 path = ".claude/rules/security/SECI-poisoning-resistance.md"
 kind = "file"
-sha256 = "48590dd48d9c95cae0ec7807fcedce6e80b16e8a610ff39ee3423f79a4b45160"
+sha256 = "bba736af77e64df4e79104edbd84631c97db5bce09103f9f7ae1da741e9c332b"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/security/SECI-prefer-removing-a-path.md"
