@@ -2600,7 +2600,7 @@ triggers = [
 reviewed = false
 
 [[check]]
-job = "tree-gates"
+job = "opf-tooling-b"
 step = "OPF source-only init gate"
 categories = ["opf"]
 scope = "whole-repo"
@@ -8822,14 +8822,6 @@ triggers = [
   "tools/selftest_git_fixture_env_config_system.py",
   "tools/selftest_git_fixture_env_core.py",
 ]
-reviewed = false
-
-[[check]]
-job = "tree-gates"
-step = "OPF declaration gate"
-categories = ["ci"]
-scope = "whole-repo"
-triggers = ["**"]
 reviewed = false
 
 [[check]]

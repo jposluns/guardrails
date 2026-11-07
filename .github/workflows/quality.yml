@@ -113,14 +113,20 @@ jobs:
   # Coverage account (gate discipline), from each heavy job's own steps and the files its suites read:
   # opf-tooling-a, opf-tooling-b, opf-tooling-c, opf-host-patch and selftest-execution run the
   # self-tests of tools under tools/ and opf/tools/ over synthetic fixtures those modules build
-  # themselves. The whole-repository live gates those jobs once held run in the always-run
-  # tree-gates job below, among them opf/tools/check_opf_homes.py, which reads the five excluded
-  # homes pages, and tools/check_opf_declaration.py, which reads opf/site/tooling.html and walks
-  # the whole tree decoding every .md and .html file, site pages included, so a site-only change
-  # that turns either red fails every lane; the opf-declaration live gate and its
-  # execution-reconciled suite also run in the always-run site job below (the suite's registration
-  # stays in selftest-execution). The five homes exclusions and the tooling.html exclusion are
-  # retained as a deliberate conservative margin, not because an always-run read is missing.
+  # themselves (opf-tooling-b also runs the source-only init gate, check_opf_init.py, whose default
+  # entry runs the same fixture suite), with these site-tree verdict inputs. The whole-repository
+  # live gates those jobs once held run in the always-run tree-gates job below, among them
+  # opf/tools/check_opf_homes.py, which reads the five excluded homes pages, so a site-only change
+  # that turns that live gate red fails every lane. Its self-test (opf-tooling-a and the
+  # git-fixture-env config lanes) also reads those five pages live (each surface pin must occur
+  # exactly once and each retired sentence must be absent) and has no always-run sibling, so the
+  # five homes exclusions are retained: for the live gate they are now a deliberate conservative
+  # margin, and for the self-test they are still load-bearing. tools/check_opf_declaration.py
+  # reads opf/site/tooling.html and walks the whole tree decoding every .md and .html file, site
+  # pages included; its live gate and its execution-reconciled suite run in the always-run site
+  # job below (the suite's registration stays in selftest-execution), so a site-only change that
+  # turns either red fails every lane, and the tooling.html exclusion is retained as a deliberate
+  # conservative margin, not because an always-run read is missing.
   # git-fixture-env-core runs the core suite, whose inputs are tools/ modules and generated
   # fixtures, never site/ or opf/site/; git-fixture-env-core-host-patch is that same core suite
   # repeated on the pinned host Python. The three git-fixture-env config host jobs rerun the
@@ -138,12 +144,16 @@ jobs:
   # step of those jobs is skipped, and of their commands only the child-status probe, the
   # opf-declaration suite, and check_byte_canon.py (live gate and self-test) also run, as the
   # same command, in an always-run job, so every other command in them runs nowhere else in CI
-  # on such a train (among them the OPF tooling self-tests, the opf.py self-test,
-  # check_selftest_execution.py --self-test and its other suites there, every
-  # git-fixture-env suite, and check_python_host_pin.py beyond the registry job's --jobs-only
-  # run); the whole-repository live gates those jobs once held (the seven OPF tooling live
-  # gates, check_entry_guard.py, check_child_status_coverage.py and the opf-declaration live
-  # gate) run in the always-run tree-gates job in every run instead. It also gives up the host, configuration and platform repetitions of the checks above:
+  # on such a train (among them the OPF tooling self-tests, the source-only init gate
+  # check_opf_init.py, the opf.py self-test, check_selftest_execution.py --self-test and its
+  # other suites there, every git-fixture-env suite, and check_python_host_pin.py beyond the
+  # registry job's --jobs-only run). Those jobs no longer hold the whole-repository live gates:
+  # six OPF tooling live gates (check_opf_homes.py, check_opf_prompt_pack.py,
+  # check_opf_doctor.py, check_opf_enforce_platforms.py, check_opf_drift.py and
+  # check_opf_init_contract.py), check_entry_guard.py and check_child_status_coverage.py run in
+  # the always-run tree-gates job in every run, and the opf-declaration live gate runs in the
+  # always-run site job. It also gives up the host, configuration and platform repetitions of
+  # the checks above:
   # the host-patch jobs' exact host Python, the config lanes' hostile git configurations
   # and byte-canon-matrix's platforms. The three regenerated records are
   # validated by the always-run registry and release jobs (gen_manifest.py --check,
@@ -576,6 +586,10 @@ jobs:
       - name: OPF source-only init gate self-test
         shell: bash
         run: python3 -I -B opf/tools/check_opf_init.py --self-test
+
+      - name: OPF source-only init gate
+        shell: bash
+        run: python3 -I -B opf/tools/check_opf_init.py
 
       - name: OPF init Keep-contract validator self-test
         shell: bash
@@ -1696,11 +1710,16 @@ jobs:
         run: python3 -I -B tools/check_byte_canon.py
 
   # Whole-repository live gates, held out of the selectable jobs so they run in every run: each
-  # reads the tree as a whole (the OPF homes contract pages, the tooling.html declaration surface
-  # and every .md and .html file, rendered output drift, platform coverage declarations, entry-point
-  # classifications and probe placements), so no changed-path selection can bound its inputs. Every
-  # command below is byte-identical to the step it replaces in a selectable job; only the job
-  # holding it changed, so the set of commands CI runs is unchanged.
+  # reads the tree as a whole (the OPF homes contract pages, the prompt-pack manifest, the OPF
+  # stores, platform coverage declarations, rendered output drift, the init contract records,
+  # entry-point classifications and probe placements), so no changed-path selection can bound its
+  # inputs. Every gate command below is byte-identical to the step it replaces in a selectable
+  # job. The child-status probe step replaces no step: it is this job's own probe, as in every
+  # other job. On a site-only train and on a labelled pull request that is not a train, where the
+  # selectable jobs are skipped, these gates now run where they were skipped before. The
+  # opf-declaration live gate runs in the always-run site job instead, beside its
+  # execution-reconciled suite, and the source-only init gate (check_opf_init.py), a fixture
+  # suite rather than a read of the tree, stays in opf-tooling-b.
   tree-gates:
     name: Whole-repository live gates
     runs-on: ubuntu-latest
@@ -1735,10 +1754,6 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_opf_enforce_platforms.py
 
-      - name: OPF source-only init gate
-        shell: bash
-        run: python3 -I -B opf/tools/check_opf_init.py
-
       - name: OPF render-drift gate
         shell: bash
         run: python3 -I -B opf/tools/check_opf_drift.py
@@ -1754,10 +1769,6 @@ jobs:
       - name: Child-status coverage
         shell: bash
         run: python3 -I -B tools/check_child_status_coverage.py
-
-      - name: OPF declaration gate
-        shell: bash
-        run: python3 -I -B tools/check_opf_declaration.py
 
   # The one required status of this workflow. GitHub reads a SKIPPED required job as passing, so
   # a plain needs: dependency is not enough: when a needed job fails or is cancelled, a job without

@@ -131,23 +131,32 @@ same-repository train can still edit the workflow itself, which no pull_request 
 so this ordering is merge-lane discipline, not isolation from a hostile train.
 
 Checks kept for a site-only train: every always-run job still runs. The five OPF homes contract
-pages are excluded from the allowlist because `opf/tools/check_opf_homes.py`, which reads them,
-runs only in skippable jobs; `opf/site/tooling.html` stays excluded as a deliberate conservative
-margin even though `tools/check_opf_declaration.py`, which reads it and decodes every `.md` and
-`.html` file in the tree, also runs (live gate and self-test) in the always-run `site` job; and
+pages stay excluded from the allowlist: the live gate of `opf/tools/check_opf_homes.py`, which
+reads them, now runs in the always-run `tree-gates` job, so for that live gate the exclusions are
+a deliberate conservative margin, but its self-test also reads those pages live and runs only in
+skippable jobs, so for the self-test they are still load-bearing; `opf/site/tooling.html` stays
+excluded as a deliberate conservative margin even though `tools/check_opf_declaration.py`, which
+reads it and decodes every `.md` and `.html` file in the tree, also runs (live gate and
+self-test) in the always-run `site` job; and
 `tools/check_python_floor.py` (which reads `site/development.html`, `site/install.html`,
 `opf/site/adopt.md` and `opf/site/adopt.html`) runs live in the always-run registry job in every
 run. What the fast lane deliberately gives up for a site-only train is every check in the eleven
 heavy jobs named above: every step of those jobs is skipped. Of their commands, only the
-child-status probe (`opf/tools/_child_status.py`), the opf-declaration live gate and its
-`selftest-execution` suite, and `tools/check_byte_canon.py` (live gate and self-test) also run,
-as the same command, in an always-run job. Every other command in those jobs runs nowhere else
-in CI on such a train, among them the OPF tooling live gates and self-tests of the three
-`opf-tooling-*` jobs (for example `check_opf_homes.py`, `check_opf_doctor.py`,
-`check_opf_drift.py` and `check_opf_record.py`), the `opf.py` self-test,
-`tools/check_selftest_execution.py --self-test` and the other `selftest-execution` suites,
-`tools/check_entry_guard.py`, `tools/check_child_status_coverage.py`, every git-fixture-env
-suite, and `tools/check_python_host_pin.py` beyond the registry job's `--jobs-only` run. It also
+child-status probe (`opf/tools/_child_status.py`), the opf-declaration `selftest-execution`
+suite, and `tools/check_byte_canon.py` (live gate and self-test) also run, as the same command,
+in an always-run job. Every other command in those jobs runs nowhere else in CI on such a train,
+among them the OPF tooling self-tests of the three `opf-tooling-*` jobs (for example
+`check_opf_homes.py --self-test`, `check_opf_doctor.py --self-test`, `check_opf_drift.py
+--self-test` and `check_opf_record.py --self-test`), the source-only init gate
+`opf/tools/check_opf_init.py` (a fixture suite in `opf-tooling-b`), the `opf.py` self-test,
+`tools/check_selftest_execution.py --self-test` and the other `selftest-execution` suites, every
+git-fixture-env suite, and `tools/check_python_host_pin.py` beyond the registry job's
+`--jobs-only` run. Those jobs no longer hold the whole-repository live gates: the live gates of
+`check_opf_homes.py`, `check_opf_prompt_pack.py`, `check_opf_doctor.py`,
+`tools/check_opf_enforce_platforms.py`, `check_opf_drift.py` and `check_opf_init_contract.py`,
+`tools/check_entry_guard.py` and `tools/check_child_status_coverage.py` run in the always-run
+`tree-gates` job in every run, and the opf-declaration live gate runs in the always-run `site`
+job. It also
 gives up the skipped jobs' host, configuration and platform repetitions: the host-patch jobs'
 exact host Python, the config lanes' hostile git configurations, and `byte-canon-matrix`'s
 platforms.

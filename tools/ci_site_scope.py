@@ -119,10 +119,12 @@ SITE_REGENERATED = frozenset({
     ".aiqt/release/announce-snippet.txt",
 })
 # Site-tree files a suite that can be SKIPPED reads as a verdict input, enumerated by the
-# gate-discipline coverage account recorded with this change: opf/tools/check_opf_homes.py (live
-# gate and self-test, the opf-tooling-a job and the git-fixture-env config lanes) reads the five
-# OPF homes contract pages and has no always-run sibling, so those five exclusions are
-# load-bearing. tools/check_opf_declaration.py (live gate and self-test) reads
+# gate-discipline coverage account recorded with this change: opf/tools/check_opf_homes.py reads
+# the five OPF homes contract pages. Its live gate runs in the always-run tree-gates job, so for
+# the live gate those five exclusions are a deliberate conservative margin; its self-test (the
+# opf-tooling-a job and the git-fixture-env config lanes) also reads them live and has no
+# always-run sibling, so for the self-test they are still load-bearing, and all five are
+# retained. tools/check_opf_declaration.py (live gate and self-test) reads
 # opf/site/tooling.html as a declaration surface AND walks the whole tree decoding every .md and
 # .html file (restating_documents), site pages included; because of that whole-tree walk, the
 # opf-declaration live gate and its self-test also run in the always-run site job, so a
@@ -137,13 +139,18 @@ SITE_REGENERATED = frozenset({
 # (opf-tooling-a, opf-tooling-b, opf-tooling-c, selftest-execution, git-fixture-env-core,
 # opf-host-patch, the four git-fixture-env host-patch jobs and byte-canon-matrix): every step of
 # those jobs is skipped, and of their commands only the child-status probe, the opf-declaration
-# live gate and its selftest-execution suite, and check_byte_canon.py (live gate and self-test)
-# also run, as the same command, in an always-run job. Every other command in them runs nowhere
-# else in CI on such a train: the OPF tooling live gates and self-tests of the three
-# opf-tooling jobs, the opf.py self-test, check_selftest_execution.py --self-test and every
-# other selftest-execution suite those jobs run, check_entry_guard.py,
-# check_child_status_coverage.py, every git-fixture-env suite, and check_python_host_pin.py
-# beyond the registry job's --jobs-only run. It also gives up the skipped jobs' host,
+# selftest-execution suite, and check_byte_canon.py (live gate and self-test) also run, as the
+# same command, in an always-run job. Every other command in them runs nowhere else in CI on
+# such a train: the OPF tooling self-tests of the three opf-tooling jobs, the source-only init
+# gate check_opf_init.py (a fixture suite in opf-tooling-b), the opf.py self-test,
+# check_selftest_execution.py --self-test and every other selftest-execution suite those jobs
+# run, every git-fixture-env suite, and check_python_host_pin.py beyond the registry job's
+# --jobs-only run. Those jobs no longer hold the whole-repository live gates: the live gates of
+# check_opf_homes.py, check_opf_prompt_pack.py, check_opf_doctor.py,
+# check_opf_enforce_platforms.py, check_opf_drift.py and check_opf_init_contract.py,
+# check_entry_guard.py and check_child_status_coverage.py run in the always-run tree-gates job
+# in every run, and the opf-declaration live gate runs in the always-run site job. It also gives
+# up the skipped jobs' host,
 # configuration and platform repetitions: the host-patch jobs' exact host Python, the config
 # lanes' hostile git configurations, and byte-canon-matrix's platforms.
 SITE_HEAVY_READ = frozenset({
