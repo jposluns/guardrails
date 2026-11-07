@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "0a45a6a0ff82195f0076cce7c5c5fdd449e188f71754eab8917a9e6b2f007c82"
+tree-sha256 = "b89a9c333deb2299f40feffbac9ccfaecd8023b4b73284164035f62d48e9c3c0"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4171,8 +4171,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 197781
-sha256 = "9cf6f0b62099d76ced752cfb9e7f9fa28fc536efd2098480cc7673212fb731f0"
+bytes = 198226
+sha256 = "724fb83a11c0857f6969aee58c476070080970f38d3741b599f55990ae9dd214"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -4191,8 +4191,8 @@ sha256 = "86cfa0e2453c22a9887cc47ee6eded2d2774a32fc3e47b8e886a863ab26bd9b2"
 
 [[sources]]
 path = "tools/check_gensrc_failclose.py"
-bytes = 162482
-sha256 = "075e0c6f5a63d8f5f49387acbbcc8a8a7eff22d469e320c0ca202c645cb2cdf6"
+bytes = 178651
+sha256 = "1707f772dce4c257232381a9c9b4b94fa688fc944e0e719dfb6dc9338ef0263c"
 
 [[sources]]
 path = "tools/check_git_option_table.py"
