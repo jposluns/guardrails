@@ -420,7 +420,9 @@ def iso(epoch):
 def workflow_run(run_id, status, conclusion, name, head_sha, created=COMMIT_TIME + 600,
                  event=None, pull_requests=None, path=QUALITY_PATH):
     # event and pull_requests appear only when given: without --require-base the script never reads
-    # them, and the pre-option fixtures prove that by omitting them entirely. Every read requires a
+    # pull_requests and reads event only to tell an advisory run (schedule or workflow_dispatch) apart,
+    # an absent event being judged as before, and the pre-option fixtures prove that by omitting them
+    # entirely. Every read requires a
     # completed successful quality.yml run, so path defaults to that file; path=None omits the key.
     run = {
         "created_at": iso(created),
@@ -1746,6 +1748,36 @@ def _run_checks():
                                                timeout="90")
             running.append((rc, calls, advisory_note in output, "TIMEOUT" in output))
         check("ci/advisory-run-in-progress-keeps-no-wait", running, [(0, 5, True, False)] * 2)
+
+        # An advisory run's id is outside the --wait settle fingerprint: a failed scheduled or manual
+        # run that appears on the third read beside a successful push run leaves the settle count
+        # running, so the wait settles green on five reads. The control: a second push run appearing
+        # the same way is a merge-path run and restarts the window (seven reads).
+        late_push = workflow_run(929, "completed", "success", "Quality", head_sha,
+                                 event="push", pull_requests=[])
+        fingerprint = []
+        for late in [workflow_run(925, "completed", "failure", "Quality", head_sha, event=event,
+                                  pull_requests=[]) for event in ("schedule", "workflow_dispatch")
+                     ] + [late_push]:
+            polls = [[page([plain_push])]] * 2 + [[page([late, plain_push])]]
+            rc, output, calls = fixture.invoke(polls, wait=True)
+            fingerprint.append((rc, calls))
+        check("ci/advisory-run-outside-settle-fingerprint", fingerprint,
+              [(0, 5), (0, 5), (0, 7)])
+
+        # An advisory run is outside the RESULT line's run count: beside a successful push run a
+        # failed scheduled or manual run reads as one successful run with one advisory run not
+        # counted, never as two successful runs.
+        counted = []
+        for event in ("schedule", "workflow_dispatch"):
+            advisory_failed = workflow_run(925, "completed", "failure", "Quality", head_sha,
+                                           event=event, pull_requests=[])
+            rc, output, calls = fixture.invoke([[page([plain_push, advisory_failed])]], wait=True)
+            counted.append((rc, calls,
+                            "RESULT: all 1 observed workflow run(s) successful (1 advisory run(s) "
+                            "not counted); settle observation 1/5" in output,
+                            "all 2 observed" in output))
+        check("ci/advisory-run-outside-result-count", counted, [(0, 5, True, False)] * 2)
 
         # A second positional rev is refused (exit 2) before any git or API
         # read, never read last-wins: a stray positional that resolves (a branch name, say)

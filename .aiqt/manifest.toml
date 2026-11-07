@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "a9b34fd5ca8397f2b3ff0644fadd7178be33d9e621484ee8b3cbfd3ffd890f9c"
+tree-sha256 = "2e9303c97dafc1b8dfe871bb5e1ed22558b46dfcd278dab2092eecf823a8a72b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4266,8 +4266,8 @@ sha256 = "56785e426df723ccd984201cfe1df6264c319a09343af90e2c326683b040fa14"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
-bytes = 468090
-sha256 = "53875ffede2ed642b51dcd14207c8ee4197b19cdf92927a969b8e20ffcd7a09d"
+bytes = 468211
+sha256 = "30dfcd1a9ce4b65577e70df7b91d4be4d30f5084d20e403063da008be765cdd7"
 
 [[sources]]
 path = "tools/check_cited_standards.py"
@@ -4456,8 +4456,8 @@ sha256 = "1062f2cdf038f39b3a88bb1a124c4e9d6bc58d89e5aa3b4b8855dadf04d8c447"
 
 [[sources]]
 path = "tools/check_release_cut.py"
-bytes = 174428
-sha256 = "ec86ea14709bfd37d28d77fa1a824507030b65350a3b176bbcbdf05111a29d7f"
+bytes = 174525
+sha256 = "db490fe2c7a362df9e2ba1b0c63e96343ff7945752913c970df72fa6903aba58"
 
 [[sources]]
 path = "tools/check_release_delta.py"
@@ -4536,8 +4536,8 @@ sha256 = "7a1d4b43ed1953ae2efb555354f5e2f1661a9fa47ed83459a071abfc0c3f7c75"
 
 [[sources]]
 path = "tools/ci-status.sh"
-bytes = 105708
-sha256 = "99a9ea867ff870940ae3c136c345b84ba86c77c319a1dcf3711b65dc5adf7234"
+bytes = 106585
+sha256 = "10e1345f55f4b7be0b53b87cb6bb66426576ee638e17528d415a2f00efd79270"
 
 [[sources]]
 path = "tools/ci_site_scope.py"
@@ -4751,13 +4751,13 @@ sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 214043
-sha256 = "f6267280ced3868fb114c9784ac1346baf7a8dd13c0d184eec62399936cd9990"
+bytes = 214133
+sha256 = "355a64b2e8b4c1f0053a32ec42c03add1ba186be5e3556f7237dcf6b85fb519a"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
-bytes = 230234
-sha256 = "4a291a525c0068583ce1a2f10a9309538a6cf8d3b38459c56f8fac1107c56c9f"
+bytes = 232418
+sha256 = "a6fd8ef45f66bf09553b17b4c45a7a638a9ea920f39cfd562e0ac00fb27d981b"
 
 [[sources]]
 path = "tools/selftest_git_fixture_env.py"

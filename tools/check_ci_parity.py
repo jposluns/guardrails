@@ -970,9 +970,10 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_branch_root.py --protected <ref:origin/${GITHUB_REF_NAME}> --max-lag 200",
         "reason": (
-            "The push-to-main CI job self-checks the protected line against its "
-            "runtime-derived origin ref; there is no local equivalent of the "
-            "protected-ref comparison."
+            "The CI job's leg for a push to main, a workflow_dispatch or a "
+            "schedule run checks HEAD against the runtime-derived origin ref of "
+            "the ref the run is for (on a push, a self-check of the protected "
+            "line); there is no local equivalent of the protected-ref comparison."
         ),
         "backlog": "GD-123",
     },

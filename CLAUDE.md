@@ -181,9 +181,11 @@ stays out of the checkout's git config (no job pushes or fetches after its check
 without it; a workflow outside that reader's conservative YAML subset is cannot-evaluate (exit 2),
 never skipped.
 `tools/ci-status.sh` requires a completed successful run of `.github/workflows/quality.yml` on every
-read, with or without `--require-base` and `--wait`, so a head with none (a member head) reads as missing
-(exit 1), never as passing. It also refuses a commit with any non-success run, a cancelled one included,
-so a cancelled run on a live head (a label added while its run is in progress, the `merge-train` label
+read, with or without `--require-base` and `--wait`, other than an advisory run (a run of any workflow
+whose event is `schedule` or `workflow_dispatch`: it is listed and named on a NOTE line, never counts as
+that run, never refuses the commit and keeps no `--wait` polling), so a head with none (a member head)
+reads as missing (exit 1), never as passing. It also refuses a commit with any non-success run other
+than an advisory one, a cancelled one included, so a cancelled run on a live head (a label added while its run is in progress, the `merge-train` label
 re-applied included, or a push back to an earlier head) needs a new head commit, labelled again.
 
 The maintainer authorized on 2026-10-25 what member heads no longer get from CI; each still runs once, on

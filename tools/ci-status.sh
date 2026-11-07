@@ -27,7 +27,9 @@
 # Every invocation requires a completed successful run of the workflow file
 # .github/workflows/quality.yml on the commit (see THE REQUIRED WORKFLOW below), except --match-tree,
 # which requires one on a commit with the same TREE and refuses that tree when any completed run of
-# that file on it, within the window THE TREE MATCH below states, concluded otherwise.
+# that file on it, within the window THE TREE MATCH below states, concluded otherwise. In every mode a
+# run whose event is schedule or workflow_dispatch is advisory (THE ADVISORY RUNS below): it never
+# satisfies that requirement and never refuses the commit or the tree.
 #
 # Usage:
 #   tools/ci-status.sh                              # current HEAD, report once
@@ -49,7 +51,9 @@
 #                                                   # .github/workflows/quality.yml whose head commit
 #                                                   # has the TREE of REV (default HEAD), each NAME
 #                                                   # concluded success in that run, and no completed
-#                                                   # run of it on that tree concluded otherwise. The
+#                                                   # run of it on that tree concluded otherwise,
+#                                                   # an advisory run (THE ADVISORY RUNS) being
+#                                                   # neither that run nor a refusal. The
 #                                                   # window: up to 5 listing pages, all read in full,
 #                                                   # with trees read for the newest 20 distinct head
 #                                                   # commits; a non-success run on one of them with
@@ -525,7 +529,9 @@ SETTLE_OBSERVATIONS=5
 # head is pushed (whether a later passing run on the same commit clears it is not verified). Manual
 # full runs of quality.yml belong on main only. Such a run is
 # listed and named on a NOTE line, then left out of every rule below, in every mode: a failed,
-# cancelled or still-running advisory run is no veto and keeps no --wait polling, and a successful one
+# cancelled or still-running advisory run is no veto and keeps no --wait polling, its id is left out
+# of the --wait settle fingerprint (a new advisory run does not restart the five-read settle window)
+# and out of the run count on the RESULT line, and a successful one
 # does not satisfy THE REQUIRED WORKFLOW, so a head whose only runs are advisory reads as missing
 # (exit 1). Under --require-base it is neither unmet nor conforming. THE TREE MATCH skips it too: it is
 # neither a candidate nor a veto. A run whose event is absent or any other value is judged as before
@@ -1580,13 +1586,15 @@ while :; do
   advisory_names=()
   while IFS=$'\t' read -r status concl base_state base_detail wf_state path id name url; do
     report "$status" "$concl" "$name" "$url"
-    run_ids+=("$id")
     # THE ADVISORY RUNS (see above): a scheduled or manual run is listed, never judged. Only the
     # exact token "advisory" skips the rules below; any other token is judged as a merge-path run.
+    # The skip comes before run_ids, so an advisory run's id is neither in the --wait settle
+    # fingerprint (a new advisory run does not restart the settle window) nor in the RESULT count.
     if [ "$base_state" = "advisory" ]; then
       advisory_names+=("${name} (${status}/${concl})")
       continue
     fi
+    run_ids+=("$id")
     # The gating tokens come from the jq program's fixed sets ("-", "met", "unmet" for the base
     # requirement; "match", "other" for the required workflow), never from a display field;
     # anything other than "met" (under --require-base) or "match" fails closed, so an unexpected
@@ -1713,7 +1721,11 @@ while :; do
       SETTLE_FINGERPRINT="$fingerprint"
       SETTLE_COUNT=1
     fi
-    last_summary="all ${#run_ids[@]} observed workflow run(s) successful; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
+    last_summary="all ${#run_ids[@]} observed workflow run(s) successful"
+    if [ "${#advisory_names[@]}" -ne 0 ]; then
+      last_summary+=" (${#advisory_names[@]} advisory run(s) not counted)"
+    fi
+    last_summary+="; settle observation ${SETTLE_COUNT}/${SETTLE_OBSERVATIONS}"
     if [ "$missing_required" -eq 1 ]; then
       last_summary+=" (no completed successful run of the workflow file ${REQUIRE_WORKFLOW} yet)"
     fi

@@ -840,7 +840,7 @@ def test_cases():
                  "push-before-narrowed", "push-before-missing", "push-before-invalid",
                  "push-ref-name-missing", "push-ref-type-tag"):
         add(name, 2, after=cut, tweak=name)
-    for name in ("event-dispatch", "event-merge-group", "event-missing"):
+    for name in ("event-merge-group", "event-missing"):
         add(name, 2, tweak=name)
     for event in ("dispatch", "schedule"):
         add("tip-" + event, 0, tweak="tip-" + event)
@@ -1199,8 +1199,7 @@ def observe(script, root, tweak, env):
         args += ["--base", resolve(root, "refs/heads/main")]
     if tweak and tweak.startswith("event-"):
         env.update({"GITHUB_ACTIONS": "true", "GITHUB_BASE_REF": "", "GITHUB_EVENT_NAME": {
-            "event-dispatch": "workflow_dispatch", "event-merge-group": "merge_group",
-            "event-missing": "",
+            "event-merge-group": "merge_group", "event-missing": "",
         }[tweak]})
     result = subprocess.run(args, capture_output=True, env=env, timeout=TIMEOUT)
     require(result.returncode in (0, 1, 2) and not result.stderr,
@@ -2685,6 +2684,8 @@ def _self_test_isolated(red_on_revert):
                            "tip-schedule-bare"):
                 check(case_id + "-refusal", "requires explicit --protected and refuses --base"
                       in report["detail"])
+            if case_id in ("event-merge-group", "event-missing"):
+                check(case_id + "-refusal", "unsupported GitHub Actions event" in report["detail"])
             if case_id in ("tip-dispatch-identity", "tip-schedule-identity"):
                 check(case_id + "-identity", "--protected must equal" in report["detail"])
             if case_id in ("tip-dispatch-target-mismatch", "tip-schedule-target-mismatch"):
