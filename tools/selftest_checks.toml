@@ -5289,3 +5289,35 @@ expected-check-ids = [
   "bound/size-over",
   "live/real-tree-passes",
 ]
+
+[[suite]]
+id = "mappings-selftest"
+runner = "tools/check_mappings.py"
+expected-check-ids = [
+  "refuse/mapping-to-withdrawn-id",
+  "pass/same-id-not-withdrawn",
+  "pass/withdrawn-id-unmapped",
+  "refuse/malformed-status-value",
+  "refuse/malformed-status-type",
+  "refuse/malformed-status-empty",
+  "refuse/incorporated-without-withdrawn",
+  "refuse/incorporated-unknown-id",
+  "refuse/incorporated-not-string",
+  "refuse/incorporated-into-self",
+  "refuse/incorporated-into-withdrawn",
+  "refuse/incorporated-into-empty",
+  "refuse/status-case-variant",
+  "refuse/status-whitespace-variant",
+  "refuse/unknown-id-key-recased-status",
+  "refuse/unknown-id-key-withdrawn-flag",
+  "refuse/unknown-id-key-state",
+  "refuse/unknown-id-key-underscore-successor",
+  "refuse/gen-mappings-withdrawn-id",
+  "refuse/gen-rules-withdrawn-id",
+  "refuse/gen-draft-site-withdrawn-id",
+  "pass/generators-render-same-id-not-withdrawn",
+  "totals/gen-mappings-ids-total-active-only",
+  "totals/notice-count-active-only",
+  "totals/every-id-counted-when-none-withdrawn",
+  "refuse/unrecognized-argument",
+]

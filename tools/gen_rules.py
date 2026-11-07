@@ -6,7 +6,8 @@ path is DERIVED from that frontmatter per the two-axis taxonomy (aiqt/ numbered 
 coded CIA+P). The updater's write root is `.aiqt/core/`; CI runs this in --check so the read tree can never
 silently drift (including orphaned generated files with no source). Vendored `external/` trees are untouched.
   gen_rules.py           regenerate .claude/rules/{aiqt,security}/
-  gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or a read/write failure
+  gen_rules.py --check   fail (exit 1) on drift; exit 2 on a malformed source or manifest, a rule mapping
+                         to an id its manifest marks withdrawn, or a read/write failure
   gen_rules.py --self-test  assert an invalid-UTF-8 generated target, a source path that is not a
                             directory or a symlink to a directory inside the root, and a .claude/, a
                             .claude/rules or a family directory symlinked outside the root fail closed
@@ -33,7 +34,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root  # noqa: E402
-from _standards import dir_chain_or_absent, dir_or_absent, dir_present, map_keys  # noqa: E402
+from _standards import (dir_chain_or_absent, dir_or_absent, dir_present, load_manifests, map_keys,  # noqa: E402
+                        withdrawn_mappings)
 
 TIER_FACETS = {"10": {"ACCUR", "INTEG", "QUALI", "TRUST"}, "20": {"PROGR"},
                "30": {"SPEED"}, "40": {"COST"}}
@@ -269,7 +271,14 @@ def run(root, check):
             print("error: {} {} (cannot evaluate)".format(src_dir, problem))
             return 2
         if dir_present(src_dir, root=root):
-            for src, _fm, rel in load_corpus(src_dir):
+            corpus = load_corpus(src_dir)
+            # Each source is copied whole, mapping ids included, so a rule mapping to an id its manifest
+            # marks withdrawn is refused here (exit 2, naming the rule, the key and the id), never written.
+            withdrawn = withdrawn_mappings(corpus, load_manifests(root / ".aiqt" / "standards", root=root))
+            if withdrawn:
+                print("error: {}".format("; ".join(withdrawn)))
+                return 2
+            for src, _fm, rel in corpus:
                 desired[rel] = src.read_text(encoding="utf-8")
     except (ValueError, OSError) as exc:
         print("error: {}".format(exc))
