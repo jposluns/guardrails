@@ -1,0 +1,10 @@
+# Reviewed per-site decisions for the read-and-launch inventory (tools/ci_inputs.py). Each row names
+# one unresolved call site by file, qualname and fingerprint, the sha256 of ast.dump of the call node,
+# so a line shift keeps a row current and any edit to the expression makes it stale. kind is one of:
+# scratch (the path is a temporary location), repo-paths (the site's real inputs; paths is a nonempty
+# array of repository-relative globs that join the step's data), whole-repo (forces the ** input), or
+# not-a-read (the call never reads a repository input). rationale says why, in plain terms. The table
+# is empty today: no registry entry is reviewed = true yet, and the gate's unresolved-input rule only
+# consults this file for reviewed entries.
+
+format-version = 1
