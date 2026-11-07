@@ -58,6 +58,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import ast
 import html as _html
 import os
 import re
@@ -169,7 +170,7 @@ GENSRC_OUTPUTS = (
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "opf/site/standard/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "opf/site/draft-src/standard.toml",
-                 "VERSION", "changelog.toml"),
+                 "VERSION", "changelog.toml", "opf/tools/_opf_store.py"),
      "regenerate": "python3 tools/gen_draft_site.py"},
 )
 
@@ -550,6 +551,79 @@ def _version_and_status():
     raise RefusedPage("changelog.toml: no dated release entry for VERSION {}".format(version))
 
 
+# The reference tooling module whose constants decide the spec_version that opf init writes into a new
+# store's manifest. The init command builds its manifest model with homes2 = (SUPPORTED_HOMES >= 2), and that
+# model takes HOMES2_SPEC_VERSION when homes2 holds and SUPPORTED_SPEC_VERSION otherwise; _init_store_version
+# applies the same selection to the same 3 constants, so the release line follows the tooling.
+OPF_STORE_SOURCE = "opf/tools/_opf_store.py"
+_OPF_STORE_PATH = ROOT / OPF_STORE_SOURCE
+_STORE_CONSTANTS = (("SUPPORTED_HOMES", int), ("SUPPORTED_SPEC_VERSION", str), ("HOMES2_SPEC_VERSION", str))
+_SPEC_VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
+
+
+def _store_constants(data, where):
+    """The literal values of _STORE_CONSTANTS in the module source `data` (bytes), read by parsing it to an
+    AST and evaluating only each binding's literal (ast.literal_eval); the module is never imported or run.
+    RefusedPage (fail closed) when the source cannot be parsed, when a name is not bound exactly once at
+    module level by a plain assignment to that name alone, or when its value is not a literal of the
+    expected type."""
+    try:
+        tree = ast.parse(data, filename=where)
+    except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
+        raise RefusedPage("{}: cannot parse it ({}: {})".format(where, type(exc).__name__, exc)) from exc
+    wanted = {name for name, _type in _STORE_CONSTANTS}
+    bindings = {name: [] for name in wanted}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            for name_node in ast.walk(target):
+                if isinstance(name_node, ast.Name) and name_node.id in wanted:
+                    plain = isinstance(node, ast.Assign) and len(node.targets) == 1 and target is name_node
+                    bindings[name_node.id].append(node.value if plain else None)
+    values = {}
+    for name, kind in _STORE_CONSTANTS:
+        found = bindings[name]
+        if len(found) != 1 or found[0] is None:
+            raise RefusedPage("{}: {} must be bound exactly once at module level by a plain assignment "
+                              "(found {} binding(s))".format(where, name, len(found)))
+        try:
+            value = ast.literal_eval(found[0])
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError) as exc:
+            raise RefusedPage("{}: {} is not a literal ({}: {})".format(
+                where, name, type(exc).__name__, exc)) from exc
+        if type(value) is not kind:
+            raise RefusedPage("{}: {} must be a literal {}, not {!r}".format(where, name, kind.__name__, value))
+        values[name] = value
+    return values
+
+
+def _init_store_version():
+    """The spec_version the reference tooling's opf init writes into a new store: HOMES2_SPEC_VERSION when
+    SUPPORTED_HOMES is 2 or more, else SUPPORTED_SPEC_VERSION, read from _OPF_STORE_PATH. RefusedPage (fail
+    closed) when the file cannot be read, a constant cannot be recovered (_store_constants), SUPPORTED_HOMES
+    is below 1, or the selected version is not a MAJOR.MINOR.PATCH string."""
+    where = OPF_STORE_SOURCE
+    try:
+        with open(_OPF_STORE_PATH, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        raise RefusedPage("{}: cannot read it ({})".format(where, exc)) from exc
+    values = _store_constants(data, where)
+    homes = values["SUPPORTED_HOMES"]
+    if homes < 1:
+        raise RefusedPage("{}: SUPPORTED_HOMES must be 1 or more, not {!r}".format(where, homes))
+    name = "HOMES2_SPEC_VERSION" if homes >= 2 else "SUPPORTED_SPEC_VERSION"
+    version = values[name]
+    if not _SPEC_VERSION_RE.match(version):
+        raise RefusedPage("{}: {} must be a MAJOR.MINOR.PATCH version, not {!r}".format(where, name, version))
+    return version
+
+
 def _c_control(site, doc, where):
     if not site.get("control"):
         raise RefusedPage("{}: the document control strip belongs to aiqt.ai only".format(where))
@@ -573,7 +647,9 @@ def _c_release(site, doc, where):
     """The opfiles.ai release line (the counterpart of aiqt.ai's control strip): what version the OPFiles
     pages belong to, stated without claiming a protocol release. VERSION and changelog.toml supply the
     pack version and its recorded date through _version_and_status, so a stale line cannot render; the
-    base and tooling versions restate the scope facts of the standard page."""
+    base version restates the scope facts of the standard page, and the store version the reference
+    tooling initializes comes from that tooling's own constants (_init_store_version), so the line follows
+    a tooling change instead of going stale."""
     if site["key"] != "opfiles":
         raise RefusedPage("{}: the release line belongs to opfiles.ai only".format(where))
     _need(doc, where, ("component",))
@@ -581,7 +657,7 @@ def _c_release(site, doc, where):
     date = status[len("Published "):]
     return ('<p class="meta">OPFiles has no release of its own: it is versioned with the {} pack, whose '
             'change log records that version on {}. The specification is base 2.0.0; the reference '
-            'tooling initializes 1.2.0 stores.</p>').format(_t(version), _t(date))
+            'tooling initializes {} stores.</p>').format(_t(version), _t(date), _t(_init_store_version()))
 
 
 def _c_clause(site, doc, where):
@@ -2663,10 +2739,80 @@ def _self_test():
            and '<p class="lbl file">.working/toml/manifest.toml</p>' in core_page
            and '<h3 id="done">' in core_page)
     opf_standard_page = outputs["opf/site/draft/standard/index.html"]
+    store_version = _init_store_version()
+    store_tail = "The specification is base 2.0.0; the reference tooling initializes {} stores.</p>"
     expect("opfiles/release-line", opf_standard_page.count(
         '<p class="meta">OPFiles has no release of its own: it is versioned with the ') == 1
-        and "The specification is base 2.0.0; the reference tooling initializes 1.2.0 stores.</p>"
-        in opf_standard_page)
+        and store_tail.format(store_version) in opf_standard_page, store_version)
+
+    # The store version in the release line is the one opf init writes, read from the tooling's constants
+    # in opf/tools/_opf_store.py. Each case below renders the release line over a copy of that source with
+    # chosen constant values, so a different value changes the rendered line and a constant that cannot be
+    # recovered refuses the page.
+    with open(_OPF_STORE_PATH, "rb") as handle:
+        store_source = handle.read()
+    store_values = _store_constants(store_source, OPF_STORE_SOURCE)
+    store_anchors = {
+        "SUPPORTED_HOMES": "\nSUPPORTED_HOMES = {}\n".format(store_values["SUPPORTED_HOMES"]),
+        "SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "{}"'.format(store_values["SUPPORTED_SPEC_VERSION"]),
+        "HOMES2_SPEC_VERSION": '\nHOMES2_SPEC_VERSION = "{}"'.format(store_values["HOMES2_SPEC_VERSION"]),
+    }
+    expect("release/store-anchors-found", all(
+        store_source.count(anchor.encode("utf-8")) == 1 for anchor in store_anchors.values()), store_anchors)
+
+    def store_copy(**lines):
+        source = store_source
+        for name, line in lines.items():
+            source = source.replace(store_anchors[name].encode("utf-8"), line.encode("utf-8"), 1)
+        return source
+
+    def release_over(source):
+        saved = globals()["_OPF_STORE_PATH"]
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-store-") as store_tmp:
+            path = Path(store_tmp) / "_opf_store.py"
+            if source is not None:
+                with open(path, "wb") as handle:
+                    handle.write(source)
+            globals()["_OPF_STORE_PATH"] = path
+            try:
+                return COMPONENTS["release"](opf, {"component": "release"}, "fixture.body[1]")
+            finally:
+                globals()["_OPF_STORE_PATH"] = saved
+
+    expect("release/store-shipped-copy-same-line", store_tail.format(store_version) in release_over(store_source))
+    spec_flip = '\nSUPPORTED_SPEC_VERSION = "9.8.7"'
+    homes2_flip = '\nHOMES2_SPEC_VERSION = "7.6.5"'
+    for name, homes, want in (("release/store-flip-homes-1-spec-version", 1, "9.8.7"),
+                              ("release/store-flip-homes-2-homes2-version", 2, "7.6.5"),
+                              ("release/store-flip-homes-3-homes2-version", 3, "7.6.5")):
+        line = release_over(store_copy(SUPPORTED_HOMES="\nSUPPORTED_HOMES = {}\n".format(homes),
+                                       SUPPORTED_SPEC_VERSION=spec_flip, HOMES2_SPEC_VERSION=homes2_flip))
+        expect(name, store_tail.format(want) in line and store_tail.format(store_version) not in line, line)
+    for name, lines, needle in (
+            ("refuse/store-homes-0", {"SUPPORTED_HOMES": "\nSUPPORTED_HOMES = 0\n"}, "1 or more"),
+            ("refuse/store-homes-bool", {"SUPPORTED_HOMES": "\nSUPPORTED_HOMES = True\n"}, "literal int"),
+            ("refuse/store-homes-text", {"SUPPORTED_HOMES": '\nSUPPORTED_HOMES = "1"\n'}, "literal int"),
+            ("refuse/store-spec-missing", {"SUPPORTED_SPEC_VERSION": '\nOTHER_SPEC_VERSION = "1.0.0"'},
+             "found 0 binding"),
+            ("refuse/store-spec-duplicate", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "1.0.0"'
+                                             '\nSUPPORTED_SPEC_VERSION = "1.0.0"'}, "found 2 binding"),
+            ("refuse/store-spec-augmented", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "1.0.0"'
+                                             '\nSUPPORTED_SPEC_VERSION += ""'}, "found 2 binding"),
+            ("refuse/store-spec-tuple", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION, _x = "1.0.0", 0'},
+             "plain assignment"),
+            ("refuse/store-spec-computed", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "1." + "0.0"'},
+             "not a literal"),
+            ("refuse/store-spec-not-semver", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "1.2"'},
+             "MAJOR.MINOR.PATCH"),
+            ("refuse/store-spec-leading-zero", {"SUPPORTED_SPEC_VERSION": '\nSUPPORTED_SPEC_VERSION = "01.2.0"'},
+             "MAJOR.MINOR.PATCH"),
+            ("refuse/store-homes2-not-semver", {"SUPPORTED_HOMES": "\nSUPPORTED_HOMES = 2\n",
+                                                "HOMES2_SPEC_VERSION": '\nHOMES2_SPEC_VERSION = "2.0.0\\n"'},
+             "MAJOR.MINOR.PATCH")):
+        expect(name, needle in refused(name, release_over, store_copy(**lines)), needle)
+    expect("refuse/store-unparsable", "cannot parse" in refused(
+        "refuse/store-unparsable", release_over, store_source + b"\n)\n"))
+    expect("refuse/store-unreadable", "cannot read" in refused("refuse/store-unreadable", release_over, None))
     expect("refuse/release-line-not-aiqt", "belongs to opfiles.ai only" in refused(
         "refuse/release-line-not-aiqt", COMPONENTS["release"], site, {"component": "release"},
         "fixture.body[1]"))
@@ -2817,7 +2963,8 @@ def _self_test():
           "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
-          "switch, text-field escaping, the structural link guard, the checked title and meta keys and "
+          "switch, text-field escaping, the structural link guard, the checked title and meta keys, the "
+          "release line's store version read from the tooling's constants and "
           "--check exit codes)")
     return 0
 

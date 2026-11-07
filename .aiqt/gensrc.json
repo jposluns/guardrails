@@ -356,7 +356,8 @@
         "tools/gen_draft_site.py",
         "opf/site/draft-src/standard.toml",
         "VERSION",
-        "changelog.toml"
+        "changelog.toml",
+        "opf/tools/_opf_store.py"
       ],
       "target": "opf/site/standard/index.html"
     },
