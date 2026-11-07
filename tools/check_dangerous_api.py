@@ -664,6 +664,9 @@ ALLOWLIST = (
      "self-test precondition: __import__('subprocess').run with a literal git --version argv"
      " list, no shell"),
     ("tools/check_byte_canon.py", "self_test_main", "shell", 1, _SAVED),
+    ("tools/render_og_cards.py", "_self_test", "shell", 1,
+     _SAVED + " (the saved real run the fake-Chrome write-path vectors replace with a fixture-PNG"
+     " stand-in and the finally restores; Chrome is never started)"),
     ("tools/check_ci_parity.py", "_stubs_prepared_before_pool", "shell", 1, _SAVED),
     ("tools/check_ci_parity.py", "self_test", "shell", 1, _SAVED),
     ("tools/check_gensrc_failclose.py", "_self_test_main_isolated._check_no_maintenance", "shell", 1,

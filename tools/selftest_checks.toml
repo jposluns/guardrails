@@ -5331,4 +5331,12 @@ expected-check-ids = [
   "main/scratch-out-reaches-render",
   "render/recheck-refuses-before-write",
   "render/recheck-refuses-before-chrome",
+  # ---------- another checkout's assets directory by name; the rename-based write ----------
+  "refuse/other-checkout-assets-suffix",
+  "guard-removed/refuse/other-checkout-assets-suffix",
+  "bound/suffix-component-boundary-accepted",
+  "write/hard-link-to-served-card-left-unchanged",
+  "write/symlink-planted-after-last-check-left-unchanged",
+  "write/aliased-assets-dir-refused-by-inode",
+  "write/assets-ancestor-dir-refused-by-inode",
 ]
