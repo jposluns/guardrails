@@ -81,24 +81,34 @@ def _states_path_limit(text):
 
 
 # The hand-start route in OPF-QUICKSTART.md gives the exact starting bytes of each file it creates,
-# one left-margin fenced block per shared payload, opened by _STARTER_INFO and the space-separated
-# names of the files that start with it ("<type>" standing for each baseline index type). The
-# expected bytes come from the shipped builders and emitter, never from text kept here, so a
+# one left-margin fenced block per shared payload, opened by _STARTER_INFO (a machine-store TOML
+# file) or _STARTER_MD_INFO (the root CHANGELOG.md) and the space-separated names of the files
+# that start with it ("<type>" standing for each baseline index type). The expected bytes come from
+# the tooling's own model, builders, emitter and init payload, never from text kept here, so a
 # documented payload that drifts from what the tooling writes, a file the route creates that has
-# no documented payload, or a return to the zero-byte "empty" wording is a finding.
+# no documented payload, or a return to the zero-byte "empty to start" wording (which also covers
+# the earlier "all empty to start") is a finding.
 _STARTER_INFO = "```toml opf-starter "
+_STARTER_MD_INFO = "```markdown opf-starter "
 _STARTER_CLOSE = "```"
-_STARTER_RETIRED = "all empty to start"
+_STARTER_RETIRED = "empty to start"
 _STARTER_TYPE = "<type>"
 
 
 def _quickstart_starter_expected():
-    """{file name: canonical text} of every file the quickstart's 2.0.0 hand start creates, built
-    by the shipped builders: the init manifest's [opf] keys with the homes-2 pair and its type
-    registrations, the zero clean and imported counter rows of each baseline type, and the empty
-    ledgers, indexes and imported leaves."""
+    """{file name: canonical text} of every file the quickstart's 2.0.0 hand start creates.
+
+    The manifest and counters are built here from the init manifest model
+    (_opf_init._manifest_model) and emitted with _opf_emit.emit_checked, because the shipped
+    _opf_init manifest and counter builders refuse homes 2 while this tooling's supported homes
+    generation is below 2: the manifest is the model's [opf] keys with the homes-2 pair set here
+    and its type registrations, and the counters are the zero clean and imported rows of each
+    baseline type. The empty ledgers, indexes and imported leaves come from the shipped _opf_init
+    builders, and the root CHANGELOG.md from the payload opf init writes
+    (_opf_init_operation._CHANGELOG_PAYLOAD)."""
     import _opf_emit
     import _opf_init
+    import _opf_init_operation
     import _opf_schema
     import _opf_store
     model = _opf_init._manifest_model()
@@ -119,60 +129,68 @@ def _quickstart_starter_expected():
     for tname in sorted(_opf_store.BASELINE_TYPES):
         for name in _opf_store.imported_leaf_names((tname,)):
             expected[name] = _opf_init.build_imported_leaf(tname)
+    expected[_opf_init_operation.CHANGELOG_RELPATH] = (
+        _opf_init_operation._CHANGELOG_PAYLOAD.decode("ascii"))
     return expected
 
 
 def _quickstart_starter_blocks(text):
-    """[(names, body)] of the starter blocks in `text`: each opened by a line that starts with
-    _STARTER_INFO and closed by the next line that is exactly _STARTER_CLOSE. The body keeps every
-    character between them, each line with its LF; a block never closed has body None."""
+    """[(info, names, body)] of the starter blocks in `text`: each opened by a line that starts
+    with _STARTER_INFO or _STARTER_MD_INFO (`info`, the prefix it starts with) and closed by the
+    next line that is exactly _STARTER_CLOSE. The body keeps every character between them, each
+    line with its LF; a block never closed has body None."""
     blocks = []
     lines = text.split("\n")
     i = 0
     while i < len(lines):
-        if lines[i].startswith(_STARTER_INFO):
-            names = lines[i][len(_STARTER_INFO):].split(" ")
+        info = next((p for p in (_STARTER_INFO, _STARTER_MD_INFO) if lines[i].startswith(p)), None)
+        if info is not None:
+            names = lines[i][len(info):].split(" ")
             body = []
             i += 1
             while i < len(lines) and lines[i] != _STARTER_CLOSE:
                 body.append(lines[i] + "\n")
                 i += 1
-            blocks.append((names, "".join(body) if i < len(lines) else None))
+            blocks.append((info, names, "".join(body) if i < len(lines) else None))
         i += 1
     return blocks
 
 
 def _quickstart_starter_findings(text):
-    """Findings for the hand-start payloads `text` documents: each block parses, is its own
-    canonical emission and equals what the shipped builders write for every file it names; every
-    file the route creates is documented exactly once; and the zero-byte wording is gone."""
+    """Findings for the hand-start payloads `text` documents: each TOML block parses and is its
+    own canonical emission, the Markdown block names only CHANGELOG.md and every TOML block names
+    none, and each block equals what the tooling writes for every file it names; every file the
+    route creates is documented exactly once; and the zero-byte wording is gone."""
     import tomllib
     import _opf_emit
     import _opf_init
+    import _opf_init_operation
     expected = _quickstart_starter_expected()
+    changelog = _opf_init_operation.CHANGELOG_RELPATH
     findings = []
     if _STARTER_RETIRED in " ".join(text.split()):
         findings.append("retired: the quickstart still says the files are {!r}".format(
             _STARTER_RETIRED))
     documented = set()
-    for names, body in _quickstart_starter_blocks(text):
+    for info, names, body in _quickstart_starter_blocks(text):
         label = " ".join(names)
         if body is None:
             findings.append("unterminated: starter block {!r} is never closed".format(label))
             continue
-        try:
-            parsed = tomllib.loads(body)
-        except (ValueError, RecursionError, MemoryError) as exc:
-            findings.append("unparsed: starter block {!r} does not parse: {}".format(
-                label, type(exc).__name__))
-            continue
-        try:
-            canonical = _opf_emit.emit(parsed)
-        except _opf_emit.EmitError:
-            canonical = None
-        if canonical != body:
-            findings.append("noncanonical: starter block {!r} is not its canonical emission".format(
-                label))
+        if info == _STARTER_INFO:
+            try:
+                parsed = tomllib.loads(body)
+            except (ValueError, RecursionError, MemoryError) as exc:
+                findings.append("unparsed: starter block {!r} does not parse: {}".format(
+                    label, type(exc).__name__))
+                continue
+            try:
+                canonical = _opf_emit.emit(parsed)
+            except _opf_emit.EmitError:
+                canonical = None
+            if canonical != body:
+                findings.append("noncanonical: starter block {!r} is not its canonical "
+                                "emission".format(label))
         for name in names:
             files = ([name.replace(_STARTER_TYPE, t) for t in _opf_init.INDEX_TYPES]
                      if _STARTER_TYPE in name else [name])
@@ -182,10 +200,14 @@ def _quickstart_starter_findings(text):
                                     "does not create".format(label, fname))
                 elif fname in documented:
                     findings.append("duplicate: {!r} is documented more than once".format(fname))
+                elif (fname == changelog) != (info == _STARTER_MD_INFO):
+                    documented.add(fname)
+                    findings.append("kind: starter block {!r} documents {!r} in the wrong block "
+                                    "kind ({!r})".format(label, fname, info))
                 elif body != expected[fname]:
                     documented.add(fname)
-                    findings.append("differs: the documented {!r} is not what the shipped builders "
-                                    "write".format(fname))
+                    findings.append("differs: the documented {!r} is not what the tooling "
+                                    "writes".format(fname))
                 else:
                     documented.add(fname)
     for fname in sorted(set(expected) - documented):
@@ -1240,6 +1262,7 @@ def _suite_isolated(invoke):
         from pathlib import PureWindowsPath
         import _opf_check
         import _opf_init_observe
+        import _opf_init_operation
         import _opf_observe
         import _opf_oplock
         import _opf_release
@@ -1294,6 +1317,33 @@ def _suite_isolated(invoke):
         check("quickstart flip: a repeated or unknown file name is a finding",
               {"duplicate", "unknown"} <= qs_kinds(qs_text + "\n" + qs_version.replace(
                   "version.toml\n", "version.toml nosuch.toml\n", 1)))
+        check("quickstart flip: the shorter zero-byte wording is a finding",
+              "retired" in qs_kinds(qs_text + "\neach empty\n  to start\n"))
+        qs_changelog = "{}CHANGELOG.md\n{}{}\n".format(
+            _STARTER_MD_INFO, qs_expected["CHANGELOG.md"], _STARTER_CLOSE)
+        check("quickstart: the root CHANGELOG.md payload is opf init's own payload constant",
+              qs_expected.get("CHANGELOG.md") == _opf_init_operation._CHANGELOG_PAYLOAD.decode(
+                  "ascii") and qs_changelog in qs_text)
+        saved_payload = _opf_init_operation._CHANGELOG_PAYLOAD
+        try:
+            _opf_init_operation._CHANGELOG_PAYLOAD = b"# Changes\n"
+            check("quickstart flip: the CHANGELOG.md payload follows opf init's constant",
+                  _quickstart_starter_expected()["CHANGELOG.md"] == "# Changes\n"
+                  and "differs" in qs_kinds(qs_text))
+        finally:
+            _opf_init_operation._CHANGELOG_PAYLOAD = saved_payload
+        check("quickstart flip: an undocumented CHANGELOG.md is a finding",
+              "missing: no starter block documents 'CHANGELOG.md'" in
+              _quickstart_starter_findings(qs_text.replace(qs_changelog, "", 1)))
+        check("quickstart flip: a different CHANGELOG.md payload differs",
+              "differs" in qs_kinds(qs_text.replace(qs_changelog, qs_changelog.replace(
+                  "# Changelog\n", "# Changelog\n\n", 1), 1)))
+        check("quickstart flip: CHANGELOG.md in a TOML block, or a TOML file in the Markdown "
+              "block, is a finding",
+              "kind" in qs_kinds(qs_text.replace(qs_changelog, qs_changelog.replace(
+                  _STARTER_MD_INFO, _STARTER_INFO, 1), 1))
+              and "kind" in qs_kinds(qs_text.replace(_STARTER_INFO + "version.toml\n",
+                                                     _STARTER_MD_INFO + "version.toml\n", 1)))
 
         def fd_capture(runner):
             # QA round 8 (codex MAJOR): capture at the DESCRIPTOR level.

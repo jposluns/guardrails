@@ -65,16 +65,26 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    imported counter row of each enabled type beside its clean row), `version.toml`,
    `worklog.toml`, the eleven baseline `<type>.index.toml` files (worklog is the
    exempt ledger listed above, not an index), the eleven `<type>.imported.index.toml` leaves, and
-   `worklog.imported.toml`, each holding exactly the starting contents under "Hand-start file
+   `worklog.imported.toml`, and create the root `CHANGELOG.md` (a required public deliverable,
+   specification section 5.8), each holding exactly the starting contents under "Hand-start file
    contents" below, never a zero-byte file; specification sections 4, 8 and 9 give the full file
    baseline. This release's tooling grades every store under specification 1.2.0, so a 2.0.0 hand
-   start does not yet reach VALID: its `opf doctor --require-store` refuses the imported counter
-   rows in `counters.toml` and reports the imported leaves as unregistered paths. Until the
-   tooling implements 2.0.0, `opf init` in a new repository is the route that reaches VALID with
-   this release: commit the paths it creates, run `opf render --write`, and commit the rendered
-   views. The reference tooling's `opf init` does not scaffold this store yet: its
-   scaffold still writes a 1.2.0 store, a format the specification's validation refuses
-   (specification section 9.2). A `[profiles.aiqt]` table is optional and is ignored by base-only tooling.
+   start does not yet reach VALID: once those files are committed, its
+   `opf doctor --require-store` grades the store CANNOT-EVALUATE (exit 2), with C-COUNTERS
+   findings for the imported counter rows in `counters.toml`, C-CONTAINMENT findings for the
+   imported leaves as unregistered paths, and its three history checks (C-HISTORY-APPEND-ONLY,
+   C-HISTORY-COUNTERS and C-HISTORY-RESURRECTION) not evaluated, and its `opf render --write`
+   refuses the store; without the root `CHANGELOG.md` it adds a C-CHANGELOG-GATES finding. Until
+   the tooling implements 2.0.0, `opf init` in a new repository is the route that this release's
+   1.2.0 tooling grades VALID: commit the paths it creates (its root `CHANGELOG.md` included), run
+   `opf render --write`, and commit the rendered views. That VALID is this release's 1.2.0 grade,
+   not conformance to the specification. The reference tooling's `opf init` does not scaffold this
+   store yet: its scaffold still writes a 1.2.0 store, a format the specification's validation
+   refuses (specification section 9.2). Neither the specification nor the reference tooling
+   defines an upgrade of such a store into 2.0.0 (specification section 9.2; the reference
+   tooling's `opf upgrade` refuses every invocation), so what an adopter on this route must do
+   later to hold a conforming 2.0.0 store is not yet defined. A `[profiles.aiqt]` table is
+   optional and is ignored by base-only tooling.
    Anything already sitting in `.working/` takes a per-file disposition in the adoption plan
    (`opf adopt`; a fresh `opf init` refuses an existing `.working/` directory and an existing root
    `CHANGELOG.md` or `VERSION`): keep it, migrate it for a later post-adoption import, move it, or
@@ -218,11 +228,13 @@ The reference tooling requires Python 3.14 or newer.
 
 ## Hand-start file contents
 
-Each file that step 1 of "Getting started" creates starts with exactly the bytes below: every
-required key, no records and no releases, in the canonical form the reference tooling's emitter
-writes. That emitter ends every file with one LF, so a zero-byte file is never in canonical form,
-and under specification section 5.7 `opf doctor` refuses a machine-store TOML file that is not in
-canonical form. The info string of each block names the files that start with it; `<type>`
+Each file that step 1 of "Getting started" creates starts with exactly the bytes below: each
+machine-store TOML file holds every required key, no records and no releases, in the canonical
+form the reference tooling's emitter writes, and the root `CHANGELOG.md` holds the one heading line
+`opf init` writes. That emitter ends every file with one LF, so a zero-byte file is never in
+canonical form, and under specification section 5.7 `opf doctor` refuses a machine-store TOML file
+that is not in canonical form. The info string of each block names the files that start with it
+(`CHANGELOG.md` in the repository root, every other file in `.working/toml/`); `<type>`
 stands for each of the eleven baseline index types: `autonomous_decision`, `backlog_item`,
 `block`, `contribution`, `done`, `finding`, `handoff`, `maintainer_decision`,
 `pending_decision`, `preference_pattern` and `reference`. The manifest carries the required
@@ -324,6 +336,10 @@ schema = 1
 ```toml opf-starter <type>.index.toml <type>.imported.index.toml
 record = []
 schema = 1
+```
+
+```markdown opf-starter CHANGELOG.md
+# Changelog
 ```
 
 ---
