@@ -303,7 +303,7 @@ head = ["Verb", "What it does"]
 rows = [
   ["<code>init</code>", "Scaffolds validated store sources and the committed pointer; surfaces, never absorbs, anything already at the store location."],
   ["<code>render</code>", "Regenerates the declared views. <code>--check</code> compares bytes read-only and exits 1 on drift."],
-  ["<code>doctor</code>", "Runs the whole-store integrity layer read-only: exit 0 valid, 1 on a finding, 2 when it cannot evaluate."],
+  ["<code>doctor</code>", "Runs the whole-store integrity layer read-only: exit 0 valid, 1 on a finding, 2 when it cannot evaluate. <code>--require-store</code> makes a missing store a cannot-evaluate for CI. <code>--store-identity</code> instead compares the committed pointer's target and the SHA-256 of the store's <code>init.toml</code> with the values pinned in <code>.github/opf-store-identity.toml</code> (<code>schema = 1</code>, <code>target</code>, <code>init_sha256</code>), and treats a <code>.opf.local.toml</code> override as a mismatch only when every other input evaluates; otherwise the result is cannot-evaluate."],
   ["<code>absorb</code>", "Drafts changelog entries for human curation, or computes a curated entry's freeze digest; writes no files."],
   ["<code>record</code>", "Authors 1 record change at a time and leaves it uncommitted for your review."],
   ["<code>adopt</code>", "Plan, approve, reconcile, and status run; apply and complete refuse, so adoption cannot finish yet."],

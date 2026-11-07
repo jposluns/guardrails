@@ -5952,6 +5952,84 @@ class _Later:
         return getattr(time, name)
 
 
+class _Clocked(_Later):
+    """_Later that also keeps, in order, every value its monotonic() returned (`reads`)."""
+
+    def __init__(self, ahead):
+        super().__init__(ahead)
+        self.reads = []
+
+    def monotonic(self):
+        value = super().monotonic()
+        self.reads.append(value)
+        return value
+
+
+class _Stalled(_Clocked):
+    """_Clocked that, at its second read (a window's restore; the first is its take), sleeps `stall` seconds
+    after keeping the value and before returning it, so that time passes between the restore's clock read
+    and its re-arm."""
+
+    def __init__(self, ahead, stall):
+        super().__init__(ahead)
+        self.stall = stall
+
+    def monotonic(self):
+        value = super().monotonic()
+        if len(self.reads) == 2:
+            time.sleep(self.stall)
+        return value
+
+
+class _TimedSignal:
+    """A stand-in for aiqt_hooks.signal: the signal module, with each setitimer call kept, in order, in
+    `calls` as (its arguments, the time.monotonic read just before it, the one just after it)."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        return getattr(signal, name)
+
+    def setitimer(self, *args):
+        before = time.monotonic()
+        try:
+            return signal.setitimer(*args)
+        finally:
+            self.calls.append((args, before, time.monotonic()))
+
+
+def _countdown_within(low, high, countdown):
+    """Whether countdown is inside the bound (low, high] that _caller_countdown_bounds gives."""
+    return low < countdown <= high
+
+
+def _caller_countdown_bounds(holder, reads, armed, started, finished):
+    """(low, high, problem) for the countdown of a caller's 30-second timer, armed between the time.monotonic
+    reads started[0] and started[1] and read back by getitimer between finished[0] and finished[1], under the
+    elapsed-aware restore of holder, the window that borrowed it (aiqt_hooks.time a _Clocked whose reads are
+    `reads`, aiqt_hooks.signal a _TimedSignal whose setitimer calls are `armed`): the countdown is right when
+    _countdown_within(low, high, countdown), and problem is "" unless what holder recorded at its take is
+    itself out of bounds. A holder that took nothing leaves the timer running from the arming to the read.
+    One that took it re-arms it, with the last setitimer call, at the countdown its take read
+    (holder._timer[0]) less the time from its take's clock read (holder._began) to its restore's (the last of
+    reads); the bound is that countdown less the time from the re-arm to the getitimer, as the clock reads
+    either side of each of those two calls bracket it, so it is only as wide as the two calls take, and a
+    stall anywhere between them moves both ends together. Time between the restore's clock read and its
+    re-arm is not counted: a restore that re-arms late by it is accepted. setitimer rounds a countdown up to
+    the microsecond and getitimer reads one rounded down, so the low end allows the microsecond the read
+    loses and, after a re-arm, the high end the microsecond setitimer adds (the 30-second arming is exact)."""
+    if holder._began is None:
+        return 30.0 - (finished[1] - started[0]) - 1e-6, 30.0 - (finished[0] - started[1]), ""
+    taken, began, restored = holder._timer[0], holder._began, reads[-1]
+    problem = ""
+    if not _countdown_within(30.0 - (restored - started[0]) - 1e-6, 30.0 - (began - started[1]), taken):
+        problem = "the take read {!r}, outside the countdown between its clock reads".format(taken)
+    left = taken - (restored - began)
+    _args, before, after = armed[-1]
+    return left - (finished[1] - before) - 1e-6, left - (finished[0] - after) + 1e-6, problem
+
+
 def _window_codes():
     """The code objects of _DeadlineWindow's own functions (its methods and static methods)."""
     cls = aiqt_hooks._DeadlineWindow
@@ -6250,10 +6328,17 @@ def _deadline_defer_failures():
     disposition (its handler, its countdown) or not holding them at all (the caller's handler and timer); a
     raising handler's exception must leave the with statement (in the nested case with the caller's timer
     due, it or the outer deadline, whichever Python raises last), and otherwise the due deadline; the
-    caller must get back its handler and periodic timer with the deliveries due; and no window may be left
-    armed or broken. Not swept: the instructions of __exit__ before its first statement and the return
-    instruction of __enter__, where no code of the window can run (the class docstring states that
-    limit)."""
+    caller must get back its handler and periodic timer with the deliveries due (with none due, at the
+    countdown the restore's own clock read gives, less the time from its re-arm to the final read:
+    _caller_countdown_bounds); and no window may be left armed or broken. Unlike dl-defer-countdown, the
+    rows judge every run whatever its bound's width: a host stall inside a bracketed timer call widens that
+    run's bound by the stall, and a restore off by less than it can pass that run (direction and position
+    in the bound decide): widening can hide a wrong restore in that run but need not, since an error the
+    widened bound does not cover is still refused (dl-defer-countdown and dl-defer-countdown-stall judge
+    only a run whose bound is narrower than the
+    window's time, the stall variant only one whose window time is below the stall). Not swept: the
+    instructions of __exit__ before its first statement and the return instruction of __enter__, where no
+    code of the window can run (the class docstring states that limit)."""
     out = []
     calls = []
     exit_code = aiqt_hooks._DeadlineWindow.__exit__.__code__
@@ -6274,7 +6359,11 @@ def _deadline_defer_failures():
         seen = {}
         counted = [0]
         signal.signal(signal.SIGALRM, counting)
+        clock = aiqt_hooks.time = _Clocked(0.0)
+        timed = aiqt_hooks.signal = _TimedSignal()
+        started = (time.monotonic(),)
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+        started += (time.monotonic(),)
         outer = aiqt_hooks._DeadlineWindow(600.0) if nested else None
         window = aiqt_hooks._DeadlineWindow(5.0)
         interval = 0.0 if nested else 30.0
@@ -6347,11 +6436,15 @@ def _deadline_defer_failures():
                            else "the window's deadline" if exc.args[:1] == (window,) else "another deadline")
             except BaseException as exc:
                 escaped = type(exc).__name__
-            final = (signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL))
+            handler = signal.getsignal(signal.SIGALRM)
+            finished = (time.monotonic(),)
+            final = (handler, signal.getitimer(signal.ITIMER_REAL))
+            finished += (time.monotonic(),)
         finally:
             stop()
             sys.settrace(None)
             aiqt_hooks.time = time
+            aiqt_hooks.signal = signal
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             for signum, handler in saved.items():
@@ -6371,9 +6464,15 @@ def _deadline_defer_failures():
             problems.append("handler runs {!r} (True: the window fully held or fully given back)".format(seen))
         if escaped not in want:
             problems.append("escaped {}, want {}".format(escaped, " or ".join(map(str, want))))
-        if not (handler is counting and timer[1] == 30.0
-                and (0 < timer[0] <= 30.0 if fired else 29.0 < timer[0] <= 30.0)):
-            problems.append("caller left {!r} with {!r}".format(handler, timer))
+        # With no expiry due, the caller's countdown is the one the restore's own clock read gives, less the
+        # time from its re-arm to the final read; time between that clock read and the re-arm is not counted
+        # (_caller_countdown_bounds).
+        low, high, countdown = (0.0, 30.0, "") if fired else _caller_countdown_bounds(
+            outer if nested else window, clock.reads, timed.calls, started, finished)
+        if not (handler is counting and timer[1] == 30.0 and 0 < timer[0] <= 30.0
+                and _countdown_within(low, high, timer[0]) and not countdown):
+            problems.append("caller left {!r} with {!r}, want a countdown in ({!r}, {!r}]{}".format(
+                handler, timer, low, high, countdown and "; " + countdown))
         if calls != ([signal.SIGALRM] if fired else []):
             problems.append("caller deliveries {}".format(len(calls)))
         if window.armed or getattr(window, "broken", False) or (outer is not None and outer.armed):
@@ -6410,6 +6509,156 @@ def _deadline_defer_failures():
     finally:
         sys.settrace(None)
         aiqt_hooks.time = time
+        aiqt_hooks.signal = signal
+    return out
+
+
+def _deadline_defer_countdown_failures(stall=0.0):
+    """(dl-defer-countdown) The caller's countdown bound the dl-defer rows apply (_caller_countdown_bounds)
+    accepts a correct restore in a run that takes over a second, which a fixed lower bound of 29 seconds
+    refused, and is narrow enough to refuse that countdown moved by the window's time either way, the
+    countdown errors a restore that did not subtract the window's time or subtracted it twice would make. A
+    5-second window under a caller with a counting SIGALRM handler and a periodic 30-second timer, with 0.9
+    seconds slept before the window and 0.6 seconds in its body: the caller's timer comes back under 29
+    seconds and inside the bound, with no delivery and the window closed. A run whose bound is not narrower
+    than the window's time cannot tell those apart; such a run is not judged, and the vector takes another
+    (at most 3 in all), judges the first run that can tell them apart, and fails, naming each run's bound,
+    when none can. The edge checks put each end, one microsecond inside, exactly at and one microsecond
+    outside, through _countdown_within, the check the dl-defer rows make.
+    (dl-defer-countdown-stall) The same with `stall` seconds slept between the restore's clock read and its
+    re-arm (aiqt_hooks.time a _Stalled), judging only a run whose measured window time is also below the
+    stall: a run the window outran is retried like one whose bound is too wide, and the vector fails,
+    naming each run's bound and time, when none of the 3 qualifies. The bound is anchored on that read and
+    on the re-arm, so it stays as narrow as its two timer calls take: a restore off by the window's time
+    is refused, and the correct one, re-armed late by the stall, is accepted when some run's window time is
+    under the stall; when none of the 3 is, the vector fails as cannot-tell. A bound as wide as the time
+    from the restore's clock read to the final read is at least the stall wide, so it is never narrower
+    than a judged run's window time: no run under it qualifies, and the vector fails instead of passing.
+    Which runs are taken and which is judged is _countdown_judged's, which dl-defer-countdown-judging drives
+    with recorded runs."""
+    out = []
+    calls = []
+    label = "dl-defer-countdown-stall" if stall else "dl-defer-countdown"
+
+    def counting(signum, frame):
+        calls.append(signum)
+
+    def attempt():
+        calls.clear()
+        window = aiqt_hooks._DeadlineWindow(5.0)
+        clock = aiqt_hooks.time = _Stalled(0.0, stall) if stall else _Clocked(0.0)
+        timed = aiqt_hooks.signal = _TimedSignal()
+        try:
+            signal.signal(signal.SIGALRM, counting)
+            started = (time.monotonic(),)
+            signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
+            started += (time.monotonic(),)
+            time.sleep(0.9)
+            with window:
+                time.sleep(0.6)
+            handler = signal.getsignal(signal.SIGALRM)
+            finished = (time.monotonic(),)
+            timer = signal.getitimer(signal.ITIMER_REAL)
+            finished += (time.monotonic(),)
+        finally:
+            aiqt_hooks.time = time
+            aiqt_hooks.signal = signal
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, signal.SIG_DFL)
+        low, high, problem = _caller_countdown_bounds(window, clock.reads, timed.calls, started, finished)
+        used = clock.reads[-1] - window._began if window._began is not None else 0.0
+        return window, handler, timer, low, high, problem, used, len(calls)
+
+    _runs, low, high, problems = _countdown_judged(attempt, stall, counting)
+    edges = [(low - 1e-6, False), (low, False), (low + 1e-6, True),
+             (high - 1e-6, True), (high, True), (high + 1e-6, False)]
+    wrong = [value for value, want in edges if _countdown_within(low, high, value) != want]
+    if wrong:
+        problems.append("the bound ({!r}, {!r}] must hold just inside each end and the high end itself, and "
+                        "refuse the low end itself and just outside each, got wrong {!r}".format(low, high, wrong))
+    if problems:
+        out.append("({}) {}".format(label, "; ".join(problems)))
+    return out
+
+
+def _countdown_judged(attempt, stall, counting):
+    """The judging of dl-defer-countdown (stall 0) and dl-defer-countdown-stall: runs from attempt(), each
+    (window, handler, timer, low, high, problem, used, delivered), are taken until one can tell a correct
+    restore from one off by the window's time (at most 3), and the first such run is judged, its caller
+    handler to be counting. Returns the runs taken, the bound judged (the last run's when none could tell)
+    and the problems found."""
+
+    def can_tell(run):
+        # A bound as wide as the stall can be narrower than an outrun window's time, so the stall variant
+        # judges only a run whose window time stayed below the stall.
+        return run[4] - run[3] < run[6] and (not stall or run[6] < stall)
+
+    runs = []
+    while len(runs) < 3 and not any(can_tell(run) for run in runs):
+        runs.append(attempt())
+    telling = [run for run in runs if can_tell(run)]
+    problems = []
+    if not telling:
+        outran = ", or a window not under the {!r}-second stall".format(stall) if stall else ""
+        problems.append("none of {} runs could tell a correct restore from one off by the window's time (a bound "
+                        "not narrower than it{}): {}".format(len(runs), outran, "; ".join(
+                            "bound ({!r}, {!r}] against {!r} seconds".format(run[3], run[4], run[6])
+                            for run in runs)))
+        low, high = runs[-1][3:5]
+    else:
+        window, handler, timer, low, high, problem, used, delivered = telling[0]
+        if not (handler is counting and timer[1] == 30.0 and timer[0] < 29.0
+                and _countdown_within(low, high, timer[0]) and not problem and delivered == 0
+                and not window.armed and not window.broken):
+            problems.append("a correct restore in a run of over a second must come back under 29 seconds and "
+                            "inside the bound, got {!r} with {!r}, bound ({!r}, {!r}]{}, caller deliveries "
+                            "{}".format(handler, timer, low, high, problem and "; " + problem, delivered))
+        elif not (used >= 0.6 and not _countdown_within(low, high, timer[0] + used)
+                  and not _countdown_within(low, high, timer[0] - used)):
+            problems.append("the bound ({!r}, {!r}] must refuse the countdown {!r} moved by the window's {!r} "
+                            "seconds either way".format(low, high, timer[0], used))
+    return runs, low, high, problems
+
+
+def _deadline_defer_countdown_judging_failures():
+    """(dl-defer-countdown-judging) _countdown_judged under a 1-second stall, driven with recorded runs (no
+    clock is read, nothing sleeps): three runs whose window outran the stall, each under a bound as wide as
+    the time from the restore's clock read to the final read (wider than the stall, narrower than the
+    window's time) with its countdown inside, are none judged and fail as cannot-tell after 3; a run that
+    outran the stall with its countdown outside its bound, then a run under the stall with a correct
+    countdown, pass on the second; a run whose window time is exactly the stall, or one microsecond over
+    it, with its countdown outside a 0.2-millisecond bound is not judged, and the correct run after it
+    passes on the second; one a microsecond under the stall with that countdown is judged, and refused, on
+    the first."""
+    out = []
+
+    def counting(signum, frame):
+        pass
+
+    closed = types.SimpleNamespace(armed=False, broken=False)
+
+    def run(low, width, countdown, used):
+        return closed, counting, (countdown, 30.0), low, low + width, "", used, 0
+
+    overrun = run(27.85, 1.0002, 28.35, 1.1002)
+    right = run(28.4, 2e-4, 28.4001, 0.6001)
+    cases = [
+        ("three runs the window outran", [overrun] * 3, 3, "none of 3 runs could tell"),
+        ("an outrun run with a wrong countdown, then a correct run",
+         [run(27.85, 1.0002, 28.95, 1.1002), right, right], 2, ""),
+        ("a window time exactly the stall with a wrong countdown, then a correct run",
+         [run(28.0, 2e-4, 28.95, 1.0), right, right], 2, ""),
+        ("a window time a microsecond over the stall with a wrong countdown, then a correct run",
+         [run(28.0, 2e-4, 28.95, 1.000001), right, right], 2, ""),
+        ("a window time a microsecond under the stall with a wrong countdown",
+         [run(28.0, 2e-4, 28.95, 0.999999), right, right], 1, "a correct restore in a run"),
+    ]
+    for name, recorded, taken, want in cases:
+        runs, _low, _high, problems = _countdown_judged(iter(recorded).__next__, 1.0, counting)
+        got = "; ".join(problems)
+        if len(runs) != taken or (not got.startswith(want) if want else got):
+            out.append("(dl-defer-countdown-judging) {}: want {} runs taken and {}, got {} and {!r}".format(
+                name, taken, repr(want) if want else "a pass", len(runs), got))
     return out
 
 
@@ -7803,7 +8052,9 @@ def _deadline_child(tmp):
     """The deadline checks that set timers and dispositions, plus the shape timings, in this (child)
     process; returns their failures."""
     return (_deadline_path_failures() + _deadline_restore_failures() + _deadline_race_failures()
-            + _deadline_take_failures() + _deadline_defer_failures() + _deadline_enclosing_restore_failures()
+            + _deadline_take_failures() + _deadline_defer_failures() + _deadline_defer_countdown_failures()
+            + _deadline_defer_countdown_failures(1.0) + _deadline_defer_countdown_judging_failures()
+            + _deadline_enclosing_restore_failures()
             + _deadline_rearm_failures() + _deadline_discard_failures() + _deadline_alarm_failures()
             + _deadline_mask_failures() + _deadline_mask_thread_failures() + _deadline_no_c_mask_failures()
             + _deadline_outer_deadline_failures() + _deadline_restore_fault_failures()

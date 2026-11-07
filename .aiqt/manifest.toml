@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ad657183cba3daef55c1a9a425a57c900cc03251c43e490c55d0a30bda863dfb"
+tree-sha256 = "a944931294861d4d97d960020adc1212082cab8778560284715b89da477dcf29"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2656,8 +2656,8 @@ sha256 = "2c831447dc1a2ec7fb7e69cb6025ff00dd27a7710e74076270153da0f75cb32e"
 
 [[sources]]
 path = "opf/site/core-files/index.html"
-bytes = 21762
-sha256 = "42b751133393dec880c319fab34f8b816f7464507274988ad8b87946913733fa"
+bytes = 22261
+sha256 = "9fe4a388fd506a8ce3e95b74a5034b5f896f702ae50d970289f13f07e3c36769"
 
 [[sources]]
 path = "opf/site/disclosure/index.html"
@@ -2676,8 +2676,8 @@ sha256 = "4575ce3f47135ab388198037452760c0d2caf4d7f88b0428212931b6be09fba5"
 
 [[sources]]
 path = "opf/site/draft-src/core-files.toml"
-bytes = 15262
-sha256 = "6497db8d6224378dd4292360b1c69b4b8bb47211e39c833253cce888a424d249"
+bytes = 15761
+sha256 = "cbbed07c94f7c5123929ebacf073c3611809164b0034c387f81c8ce4ec498891"
 
 [[sources]]
 path = "opf/site/draft-src/disclosure.toml"
@@ -3236,8 +3236,8 @@ sha256 = "d52153e0beba31eb14719713348e4a471231a35d503fee0d7ed337d784ded216"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 326015
-sha256 = "a910638fb935b3b4097166bd3a7086c6609858686b98cbf03c12fb5455a7e6b1"
+bytes = 366846
+sha256 = "f1e1166431f7d029b1e93a73a2af0d698aa9fe453b0d983c24112cfdb167c3b0"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
@@ -3471,8 +3471,8 @@ sha256 = "5f13d71937d37efa09894c7176e98c1a94dbb2271143f155a56e051562b121bc"
 
 [[sources]]
 path = "opf/tools/opf.py"
-bytes = 1389958
-sha256 = "4b47c83e47d7b7e20c245f1be793fb6c3fe6d91bfddc383c4ab191a57e36e648"
+bytes = 1404341
+sha256 = "0388638a99b5ae6aa7fb963324acc4365dd7bc27c51d4977e1b3ac1d79e92e24"
 
 [[sources]]
 path = "opf/tools/run_all_checks.sh"
@@ -4631,8 +4631,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2126695
-sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
+bytes = 2141443
+sha256 = "3c7e73a39157097bd517503fb85433ab42216d79d6806da9439a63545af30227"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
