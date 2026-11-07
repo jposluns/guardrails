@@ -136,6 +136,7 @@ guarded-surfaces = [
     "tools/check_no_dashes.py",
     "tools/check_opf_declaration.py",
     "tools/check_opf_enforce_platforms.py",
+    "tools/check_opf_enforce_residuals.py",
     "tools/check_opf_standalone_closure.py",
     "tools/check_overclaim.py",
     "tools/check_portability.py",
