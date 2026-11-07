@@ -808,6 +808,7 @@ SCOPE_JOB = (
     "          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}",
     "          BASE_REPO: ${{ github.repository }}",
     "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+    "          CHECKS_REGISTRY: ${{ runner.temp }}/ci_checks_base.toml",
     "        run: |",
     "          set -euo pipefail",
     '          decided="no"',
@@ -820,6 +821,29 @@ SCOPE_JOB = (
     '            echo "site_only=false" >> "${GITHUB_OUTPUT}"',
     '            echo "site_only=false (the base commit has no readable scope tool)"',
     "          fi",
+    # The CI selection plan in SHADOW MODE, inside the same step so the base-copy extraction
+    # still runs before any step that runs the checkout's own code: the base tree's registry is
+    # extracted the same way as the tool, the plan goes to the log and the step summary, and
+    # every failure path (a missing or malformed base registry, a selector that exits nonzero)
+    # prints a cannot-evaluate line and never fails or changes the run. The plan writes no
+    # output: site_only stays this job's one output, and nothing reads the plan.
+    '          planned="no"',
+    '          if git --no-replace-objects show "HEAD^1:tools/ci_checks.toml" > '
+    '"${RUNNER_TEMP}/ci_checks_base.toml"; then',
+    '            if [ "${decided}" = "yes" ]; then',
+    '              planned="yes"',
+    "            fi",
+    "          fi",
+    '          if [ "${planned}" = "yes" ]; then',
+    '            if ! python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-select '
+    "--shadow; then",
+    '              echo "ci-select shadow plan: cannot evaluate (the selector exited nonzero); '
+    'the plan is advisory and the run is unchanged"',
+    "            fi",
+    "          else",
+    '            echo "ci-select shadow plan: cannot evaluate (the base commit has no readable '
+    'scope tool or registry); the full suite runs"',
+    "          fi",
     "      - name: Child exit status observable (after the scope decision)",
     "        " + STEP_SHELL_LINE,
     "        run: python3 -I -B opf/tools/_child_status.py",
@@ -831,17 +855,30 @@ SCOPE_JOB = (
 # as written because the SCOPE_JOB pin holds them in place: the base-copy extraction
 # (a git show with a redirect, replace refs disabled), the base-copy launch (a
 # runtime-derived target path)
-# and the fail-closed fallback write. The git show line names tools/ci_site_scope.py,
-# so that path is recorded as this line's extraction origin for the shadow scan; the
-# step contributes no parity member (the tool's self-test member comes from its own
-# step, and no local leg runs --ci-decide).
+# and the fail-closed fallback write, plus the shadow-selection lines (the base
+# registry's extraction, another git show with a redirect, and the guarded shadow
+# launch, whose if ! keeps a selector failure from ending the step red; the shadow
+# plan is advisory, writes no output, and skips or adds no job). The first git show
+# line names tools/ci_site_scope.py, so that path is recorded as this line's
+# extraction origin for the shadow scan (the registry show line names only a .toml,
+# which that scan does not track); the step contributes no parity member (the tool's
+# self-test member comes from its own step, and no local leg runs --ci-decide or
+# --ci-select).
 SCOPE_DECIDE_SHOW_LINE = (
     'if git --no-replace-objects show "HEAD^1:tools/ci_site_scope.py" > '
     '"${RUNNER_TEMP}/ci_site_scope_base.py"; then')
+SCOPE_SELECT_SHOW_LINE = (
+    'if git --no-replace-objects show "HEAD^1:tools/ci_checks.toml" > '
+    '"${RUNNER_TEMP}/ci_checks_base.toml"; then')
+SCOPE_SELECT_LAUNCH_LINE = (
+    'if ! python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-select '
+    "--shadow; then")
 SCOPE_DECIDE_RUN_LINES = frozenset({
     SCOPE_DECIDE_SHOW_LINE,
     'python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
     'echo "site_only=false" >> "${GITHUB_OUTPUT}"',
+    SCOPE_SELECT_SHOW_LINE,
+    SCOPE_SELECT_LAUNCH_LINE,
 })
 
 # The members that may run only in a job carrying the pinned HEAVY_JOB_IF_LINE
@@ -8986,7 +9023,25 @@ def self_test():
              "      - name: Site fast-lane scope decision\n",
              "      - name: Extra gate\n        shell: bash\n"
              "        run: python3 tools/a.py\n"
-             "      - name: Site fast-lane scope decision\n")):
+             "      - name: Site fast-lane scope decision\n"),
+            # the shadow-selection lines are pinned too: dropping the base registry's
+            # extraction, the guarded shadow launch or its cannot-evaluate fallback, or the
+            # CHECKS_REGISTRY env line, each departs from the pin
+            ("a dropped registry extraction line",
+             '          if git --no-replace-objects show "HEAD^1:tools/ci_checks.toml" > '
+             '"${RUNNER_TEMP}/ci_checks_base.toml"; then\n',
+             ""),
+            ("a dropped shadow selection launch",
+             '            if ! python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" '
+             "--ci-select --shadow; then\n",
+             ""),
+            ("a dropped shadow cannot-evaluate fallback",
+             '            echo "ci-select shadow plan: cannot evaluate (the base commit has '
+             'no readable scope tool or registry); the full suite runs"\n',
+             ""),
+            ("a dropped CHECKS_REGISTRY env line",
+             "          CHECKS_REGISTRY: ${{ runner.temp }}/ci_checks_base.toml\n",
+             "")):
         mutated_ci = lane_ci().replace(old, new, 1)
         count += 1
         if mutated_ci == lane_ci():
