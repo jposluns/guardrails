@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "afec50e4d7d928b80a5548d7679bfcf3f5913bbdb7764a529a6b20a74de0c0ea"
+tree-sha256 = "7b7ebbb9dbed64320f2e6ef38b4851d2b5bb5658feca3a569353e78ab86a439e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4636,8 +4636,8 @@ sha256 = "b949e30385d99c2397a4e0499351045c784d687d747c37cdffe1e16a00c02a5e"
 
 [[sources]]
 path = "tools/og-cards/card.css"
-bytes = 930
-sha256 = "8c6f85a8225a7fbe4e1c7dc5aad1a2263c0a695c8acb97835776121bd8d76e19"
+bytes = 1174
+sha256 = "10c8b546829bd523f86b66400eb2bff058f2ed6ab8110b5330ace6d27f2ee92d"
 
 [[sources]]
 path = "tools/og-cards/opfiles-og.html"
@@ -4671,13 +4671,13 @@ sha256 = "285900b1c1f1459b723346fa16fe6e34270a1a8eff834b44dffcc4681082096c"
 
 [[sources]]
 path = "tools/render_og_cards.py"
-bytes = 6125
-sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
+bytes = 19866
+sha256 = "73574d32e15ce03c9213833816f9cb1a87e28cf772e47bbef2190467e2bae514"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 29250
-sha256 = "d9976c36b4011f452b237e0e427f667dd3f3efd7c78c4f6f701bb50c07f39ada"
+bytes = 29353
+sha256 = "749c0c4b8da2d658a23c20c96dd3265b31dc8707d4d90ddadb62474a5fe43011"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4691,8 +4691,8 @@ sha256 = "e8df1fcaaa5857283157a4642cac731a67dd8dd962957daa29cd4a906c9ac732"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 218017
-sha256 = "0aa5f1f0aa3ba7f368053955664f271c920636d2400a1bc2374b1cf300b7bd86"
+bytes = 219316
+sha256 = "b5207b36aed711339718313f4630e6d59ec05cb2a3739c1bb5557d7d617d3488"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

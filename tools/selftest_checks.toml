@@ -5299,3 +5299,36 @@ expected-check-ids = [
   "bound/size-over",
   "live/real-tree-passes",
 ]
+
+[[suite]]
+id = "og-cards-selftest"
+runner = "tools/render_og_cards.py"
+expected-check-ids = [
+  # ---------- the output-path decision: each refusal, then each with the decision removed ----------
+  "served/aiqt-card-refused",
+  "served/opfiles-card-refused",
+  "assets/aiqt-path-refused",
+  "assets/opfiles-path-refused",
+  "symlink/out-entry-to-served-card-refused",
+  "symlink/out-dir-into-assets-refused",
+  "relative/into-assets-refused",
+  "bound/assets-dir-itself-refused",
+  "guard-removed/served/aiqt-card-refused",
+  "guard-removed/served/opfiles-card-refused",
+  "guard-removed/assets/aiqt-path-refused",
+  "guard-removed/assets/opfiles-path-refused",
+  "guard-removed/symlink/out-entry-to-served-card-refused",
+  "guard-removed/symlink/out-dir-into-assets-refused",
+  "guard-removed/relative/into-assets-refused",
+  "guard-removed/bound/assets-dir-itself-refused",
+  "scratch/ordinary-dir-accepted",
+  "bound/assets-prefix-sibling-accepted",
+  "bound/assets-child-refused",
+  "refuse/empty-out-refused",
+  # ---------- the command line and the write path, Chrome never started ----------
+  "refuse/unrecognized-argument",
+  "main/refused-out-exit-2-before-chrome",
+  "main/scratch-out-reaches-render",
+  "render/recheck-refuses-before-write",
+  "render/recheck-refuses-before-chrome",
+]

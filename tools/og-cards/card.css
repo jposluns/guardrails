@@ -1,5 +1,7 @@
-/* The 1200 by 627 link-preview card: the site's card artwork beside its name and tagline, on the site's
-   light palette (palettes.css), rendered by tools/render_og_cards.py. */
+/* A 1200 by 627 candidate link-preview card: the site's card artwork beside its name and tagline, on the
+   site's light palette (palettes.css). tools/render_og_cards.py renders candidates from it into a directory
+   the caller names, for the owner's review. The served cards, site/assets/aiqt-og.png and
+   opf/site/assets/opfiles-og.png, are the owner-approved PNGs from pull request #973 and are not produced by it. */
 html, body { margin: 0; padding: 0; }
 body {
   width: 1200px;
