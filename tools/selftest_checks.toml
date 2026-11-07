@@ -4877,6 +4877,21 @@ expected-check-ids = [
   "woff2/utf8-without-signature-refused",
   "woff2/woff1-suffix-unevaluable",
   "woff2/file-size-bound-ends",
+  # ---------- the pinned-vendor exemptions: path and sha256 bound, each vector and its flip ----------
+  "pinned-binary/pinned-bytes-pass",
+  "pinned-binary/pinned-bytes-pass-flip",
+  "pinned-binary/byte-changed-unevaluable",
+  "pinned-binary/byte-changed-unevaluable-flip",
+  "pinned-binary/other-path-unevaluable",
+  "pinned-binary/other-path-unevaluable-flip",
+  "pinned-binary/pinned-bytes-scanned",
+  "pinned-binary/pinned-bytes-scanned-flip",
+  "tracker/frozen-pinned-vendor-passes",
+  "tracker/frozen-pinned-vendor-passes-flip",
+  "tracker/frozen-pinned-vendor-byte-changed",
+  "tracker/frozen-pinned-vendor-byte-changed-flip",
+  "tracker/frozen-pinned-vendor-other-path",
+  "tracker/frozen-pinned-vendor-other-path-flip",
 ]
 
 [[suite]]

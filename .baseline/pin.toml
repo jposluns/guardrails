@@ -1,17 +1,25 @@
 # The pinned copy of the shared site template (baseline package), in the package README's format:
 # the baseline version, then each copied runtime or licence file's path and SHA-256, and the template's
-# palette gate, copied to .baseline/check_palette.py outside the served tree.
+# build tools, copied outside the served tree: the palette gate (.baseline/check_palette.py) and the
+# link-preview card builder (.baseline/build_card.js) with its Inter fonts and their SIL OFL 1.1 licence
+# file (.baseline/card-fonts/). The 2 card data files (.baseline/<site>-card.toml) are this site's own
+# inputs, not template files, so they are not pinned.
 # tools/check_baseline_pin.py checks the copy against this file offline (no network).
 # Update it only together with the copied files, when the pin moves to a new baseline version.
 # Not copied: matrix.js, the template's matrix-table script, because no page of this site uses it;
 # copy and pin it here before any page loads it.
-version = "1.7.0"
+version = "1.11.1"
 
 [files]
-".baseline/check_palette.py" = "cae71e9a43e87c5687bc50dc75784e83b3a5b643a4e9a07298294b9d270971a4"
+".baseline/build_card.js" = "fc05c9aeb646620034cb014cd9afb752e6aca4b448df48d3d369cbd447ec5c8a"
+".baseline/card-fonts/Inter-Bold.otf" = "00fd6f4691ee8884a33b46bf45851b341927c37c30064f558e1befb242971c49"
+".baseline/card-fonts/Inter-ExtraBold.otf" = "2012ceaf1470372c415f95c00495a1ad1ebdcd1cd6a6225808f011d459a9b12a"
+".baseline/card-fonts/Inter-Regular.otf" = "be6d709dcb730ddaf050cbdae6fe89bd56d5d14dc66885639bbf6f06bd03521b"
+".baseline/card-fonts/inter-LICENSE.txt" = "262481e844521b326f5ecd053e59b98c8b2da78c8ee1bdbb6e8174305e54935a"
+".baseline/check_palette.py" = "fd6a41d816e25076cb54cabb50d04d959fdb5072fee3b937d9be89a186d8c8c1"
 "site/draft/assets/baseline/LICENSE" = "a2010f343487d3f7618affe54f789f5487602331c0a8d03f49e9a7c547cf0499"
-"site/draft/assets/baseline/NOTICE.md" = "deeffb1a277a0b1f591feea15ecc10fbf4fc916cf0db07885625a288cc6e3b1e"
-"site/draft/assets/baseline/baseline.css" = "8a902e09bc770744e4f1a15066a0c5ef33095d829a5dc59486a502c567dac777"
+"site/draft/assets/baseline/NOTICE.md" = "a84715f2a3d6ee761ca2cbd8a8656fa204f45b6f0df120dfb3ae557eef472dc8"
+"site/draft/assets/baseline/baseline.css" = "fbc97a3cbcda9bf0df3a914485720d008fdefe702592fab4bb2b12ce4661c3be"
 "site/draft/assets/baseline/copy.js" = "9bf99b50471889b768c795af5a4f84f526cecf7622a1f1265ca3d088b31339a4"
 "site/draft/assets/baseline/fonts.css" = "a309a8ff4026a67fb5d10dea2c02e5b9ea2c1b32d4b18d7892015e038397396a"
 "site/draft/assets/baseline/fonts/dancing-script-LICENSE.txt" = "c02c0002d3bbd41a16933c162888c400469c7029f1362ca9d60d5ed20ea7d157"
@@ -55,12 +63,13 @@ version = "1.7.0"
 "site/draft/assets/baseline/logos/secureconfig-mono.svg" = "5fd490079642b41ab12863bc1692e5481a737cc4f8f764319dd31f13a2037b86"
 "site/draft/assets/baseline/logos/secureconfig-touch.png" = "5897da9f6f9a556358584faee1d33b210a96de56b7ef6177d32a5bd940f0c0c7"
 "site/draft/assets/baseline/logos/secureconfig.svg" = "a74c1604acb4032e763afe0cf0a9ed9b4e5f4bdb76790d24a3de16a48eda5c1b"
+"site/draft/assets/baseline/logos/vendorreplies.png" = "24c965ca0568376ea505b80aee61faf03428acb968cbca8f364236feb9cf990e"
 "site/draft/assets/baseline/marks/NOTICE.md" = "b39a747fb9f73ec9373bd2329060af372e14185fcdc7f91fa67ea2cda3b6dd20"
 "site/draft/assets/baseline/marks/github-invertocat-black.svg" = "693d7abe6f899646cc2e96856723b45e95f71885a54910b2749f6decdf7e1ee1"
 "site/draft/assets/baseline/marks/github-invertocat-white.svg" = "ccd84c89b1056345608fc3489357f8acc7397e49a3cdc2d418b6c8016911d47b"
 "site/draft/assets/baseline/marks/linkedin-in-bug.png" = "3c0149f26168b5fe0f43e68664abe40341a6443b3cd435d18a73e12f64f8b600"
 "site/draft/assets/baseline/marks/orcid-id.svg" = "195be086656233fc1a0089086d9190d28dc6abce39c2290612d1893233e1f166"
-"site/draft/assets/baseline/palettes.css" = "cf4bed49e0c3c16fcc8272acbf8263753e2f392db6dcdac96313540b0da220f2"
+"site/draft/assets/baseline/palettes.css" = "9a83e8a2f690b36a9dd40913d0cda90e9b824860effa1c49dd2cff1a263fe01f"
 "site/draft/assets/baseline/rail.js" = "36535faf2df8637e694ff2a57af982b9c67c9f410f80d4dfceb193c4f2d601ca"
 "site/draft/assets/baseline/scheme.js" = "39d035d986f53c987cbe92516b9a5fd499af5c7fcdda701ea896c63c45ef1634"
 "site/draft/assets/baseline/search.js" = "ff39a504d988c51510be466b2ad7e5eb2edf8299eead35b4070a20ac768359bb"

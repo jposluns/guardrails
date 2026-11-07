@@ -190,7 +190,14 @@
 .aiqt/standards/owasp-proactive.toml text eol=lf
 .aiqt/standards/owasp-web.toml text eol=lf
 .aiqt/tracker-label-baseline.toml text eol=lf
+.baseline/aiqt-card.toml text eol=lf
+.baseline/build_card.js text eol=lf
+.baseline/card-fonts/Inter-Bold.otf binary
+.baseline/card-fonts/Inter-ExtraBold.otf binary
+.baseline/card-fonts/Inter-Regular.otf binary
+.baseline/card-fonts/inter-LICENSE.txt text eol=lf
 .baseline/check_palette.py text eol=lf
+.baseline/opfiles-card.toml text eol=lf
 .baseline/opfiles-pin.toml text eol=lf
 .baseline/pin.toml text eol=lf
 .claude/RULES-INDEX.md text eol=lf
@@ -590,6 +597,7 @@ opf/site/draft/assets/baseline/logos/secureconfig-favicon.svg text eol=lf
 opf/site/draft/assets/baseline/logos/secureconfig-mono.svg text eol=lf
 opf/site/draft/assets/baseline/logos/secureconfig-touch.png binary
 opf/site/draft/assets/baseline/logos/secureconfig.svg text eol=lf
+opf/site/draft/assets/baseline/logos/vendorreplies.png binary
 opf/site/draft/assets/baseline/marks/NOTICE.md text eol=lf
 opf/site/draft/assets/baseline/marks/github-invertocat-black.svg text eol=lf
 opf/site/draft/assets/baseline/marks/github-invertocat-white.svg text eol=lf
@@ -780,6 +788,7 @@ site/draft/assets/baseline/logos/secureconfig-favicon.svg text eol=lf
 site/draft/assets/baseline/logos/secureconfig-mono.svg text eol=lf
 site/draft/assets/baseline/logos/secureconfig-touch.png binary
 site/draft/assets/baseline/logos/secureconfig.svg text eol=lf
+site/draft/assets/baseline/logos/vendorreplies.png binary
 site/draft/assets/baseline/marks/NOTICE.md text eol=lf
 site/draft/assets/baseline/marks/github-invertocat-black.svg text eol=lf
 site/draft/assets/baseline/marks/github-invertocat-white.svg text eol=lf
