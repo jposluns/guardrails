@@ -119,7 +119,10 @@ lower case only) goes through the PNG rule, verify_png (stated beside TRACKED_PN
 2, named with its reason. In a .png it accepts, the text of every textual chunk (tEXt, zTXt, iTXt) is
 scanned as a text file's text is; the iCCP profile name and profile, and every chunk the rule cannot
 classify, are scanned as binary (no internal-allow exemption, a byte above 0x7F never part of a word); and
-the pixel data, PLTE and the standard non-text ancillary chunks are unread.
+the pixel data, PLTE and the standard non-text ancillary chunks are unread. Every tracked file whose suffix
+is TRACKED_WOFF2_SUFFIX (.woff2, in lower case only) goes through the WOFF2 rule, verify_woff2 (stated
+beside TRACKED_WOFF2_SUFFIX): a .woff2 over its size bound or without the wOF2 signature CANNOT BE EVALUATED
+and fails closed at exit 2; one it accepts is scanned whole as binary, as a binary PNG chunk is.
 Any other non-UTF-8 tracked file whatever its suffix (a
 malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
 tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
@@ -275,6 +278,19 @@ _PNG_SKIPPED_SIZES = {
 }
 # The skipped types that may occur more than once (one fcTL per animation frame); every other may occur once.
 _PNG_REPEATABLE = frozenset((b"IDAT", b"fcTL", b"fdAT"))
+# The suffix of the WOFF2 web font (the site's self-hosted fonts), a third binary format the role rule
+# evaluates, matched exactly as the PNG suffix is: ".WOFF2", ".woff" and every other binary suffix still cannot
+# be evaluated. Every tracked file under it goes through verify_woff2 whether or not its bytes decode as UTF-8,
+# with the PNG rule's posture: the read stops one byte past MAX_WOFF2_FILE_SIZE and a file over it is refused,
+# and a file whose first 4 bytes are not the WOFF2 signature (wOF2) cannot be evaluated (exit 2), never
+# skipped. A file the rule accepts is scanned whole as binary, as the PNG rule scans a binary chunk: each byte
+# above 0x7F read as a character that is not part of a word, and no internal-allow exemption. A hit is a
+# finding (exit 1). RESIDUAL: WOFF2 stores its font tables and its metadata block Brotli-compressed and the
+# standard library has no Brotli decoder, so text inside them (the name table among them) is not seen; only
+# the bytes as stored are read (the header, the table directory, the compressed stream and the private block).
+TRACKED_WOFF2_SUFFIX = ".woff2"
+WOFF2_SIGNATURE = b"wOF2"
+MAX_WOFF2_FILE_SIZE = 8 * 1024 * 1024  # a latin-subset web font is well under 1 MiB
 HASHES_RELPATH = ("tools", "internal-name-hashes.txt")
 
 # The QA-suite shipped surfaces this gate is responsible for keeping genericized. Files are scanned
@@ -941,6 +957,28 @@ def verify_png(path):
     return png_sections(data)
 
 
+def woff2_sections(data):
+    """The WOFF2 rule (see TRACKED_WOFF2_SUFFIX) over a file's bytes: returns [(where, text, is_text)] with one
+    binary entry, the whole file (each byte above 0x7F replaced, never exempt); raises CannotEvaluate on a file
+    over MAX_WOFF2_FILE_SIZE or one that does not start with the WOFF2 signature."""
+    if len(data) > MAX_WOFF2_FILE_SIZE:
+        raise check_leaks.CannotEvaluate("a WOFF2 font of more than MAX_WOFF2_FILE_SIZE ({}) bytes; the read "
+                                         "stopped at {} bytes and the rest was not read".format(
+                                             MAX_WOFF2_FILE_SIZE, len(data)))
+    if data[:4] != WOFF2_SIGNATURE:
+        raise check_leaks.CannotEvaluate("the first 4 bytes are not the WOFF2 signature (wOF2)")
+    return [("font bytes", data.decode("ascii", "replace"), False)]
+
+
+def verify_woff2(path):
+    """The WOFF2 rule for a tracked file: its bytes read through one descriptor, stopping one byte past
+    MAX_WOFF2_FILE_SIZE, then woff2_sections. Raises CannotEvaluate or, on a read error, OSError. Like
+    verify_png it makes no stat probe: the caller classifies the path before the open."""
+    with path.open("rb") as handle:
+        data = handle.read(MAX_WOFF2_FILE_SIZE + 1)
+    return woff2_sections(data)
+
+
 def scan_role_text(text, honour_marker=True):
     """(line, label) role-name and review-round label findings in `text`. A line carrying an `internal-allow`
     marker is exempt; the marker exempts that line only, never the rest of the file. A binary PNG chunk is
@@ -973,6 +1011,19 @@ def scan_tracked_roles(root, relpaths):
     cannot = "; the role-name and review-round label rule cannot evaluate it"
     for rel in relpaths:
         path = root / rel
+        if path.suffix == TRACKED_WOFF2_SUFFIX:
+            try:
+                sections = verify_woff2(path) if _present(path) else None
+            except check_leaks.CannotEvaluate as exc:
+                unevaluable.append("{}: tracked .woff2 fails the WOFF2 rule ({}){}".format(rel, exc, cannot))
+                continue
+            if sections is None:
+                unevaluable.append("{}: tracked file is absent from the working tree{}".format(rel, cannot))
+                continue
+            for where, text, is_text in sections:
+                for number, label in scan_role_text(text, honour_marker=is_text):
+                    findings.append("{}:{}:{}: {}".format(rel, where, number, label))
+            continue
         if path.suffix == TRACKED_PNG_SUFFIX:
             try:
                 sections = verify_png(path) if _present(path) else None
@@ -3118,6 +3169,69 @@ def _self_test(caller_env=None):
                     wired.append("{}: expected exit {} with {!r}, got rc={} {!r}".format(
                         name, want_rc, want, rc, report))
             check("png/wired-gate-exit-codes", not wired, wired)
+
+            # The WOFF2 rule, verify_woff2, over tracked .woff2 files: each paired vector has a flip, a scratch
+            # copy of this gate with that check removed (anchors concatenated so they do not match themselves),
+            # which must give the vector another verdict; then the size bound one unit inside, at and outside.
+            woff2_head = WOFF2_SIGNATURE + b"\x00\x01\x00\x00\xff\xfe"
+            clean_woff2 = woff2_head + plain_text
+            woff2_rule = ": tracked .woff2 fails the WOFF2 rule ("
+            bad_signature = "the first 4 bytes are not the WOFF2 signature (wOF2))"
+            wdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-woff2-mutant-"))
+            try:
+                for check_id, flip_id, relname, data, expect, mutations in (
+                        ("woff2/clean-minimal", "woff2/clean-minimal-flip", "font.woff2", clean_woff2, "clean",
+                         (("if path.suffix == " + "TRACKED_WOFF2_SUFFIX:", "if False:"),)),
+                        ("woff2/bad-signature", "woff2/bad-signature-flip", "font.woff2",
+                         b"wOFF" + clean_woff2[4:], "font.woff2" + woff2_rule + bad_signature,
+                         (("if data[:4] != " + "WOFF2_SIGNATURE:", "if False:"),)),
+                        ("woff2/binary-finding", "woff2/binary-finding-flip", "font.woff2",
+                         woff2_head + b"\xc0" + role_word + b"\xff", "font.woff2:font bytes:1: " + role,
+                         (('return [("font bytes", data.' + 'decode("ascii", "replace"), False)]',
+                           'return [("font bytes", data.decode("latin-1"), False)]'),)),
+                        ("woff2/marker-ignored", "woff2/marker-ignored-flip", "font.woff2",
+                         woff2_head + marker + b" \x01\x02 " + role_text, "font.woff2:font bytes:1: " + role,
+                         (("scan_role_text(text, " + "honour_marker=is_text)", "scan_role_text(text)"),)),
+                        ("woff2/other-case-suffix-refused", "woff2/other-case-suffix-refused-flip", "font.WOFF2",
+                         clean_woff2, "font.WOFF2" + not_utf8,
+                         (("if path.suffix == " + "TRACKED_WOFF2_SUFFIX:",
+                           "if path.suffix.lower() == " + "TRACKED_WOFF2_SUFFIX:"),))):
+                    got = tracked_verdict(this, relname, data)
+                    check(check_id, png_holds(expect, got), (expect, got))
+                    source, faults = gate_source, []
+                    for anchor, replacement in mutations:
+                        if source.count(anchor) != 1:
+                            faults.append("anchor {!r} occurs {} times".format(anchor, source.count(anchor)))
+                        source = source.replace(anchor, replacement)
+                    flipped = None
+                    if not faults:
+                        module = _load_ratchet_mutant(source, wdir, flip_id.replace("/", "_").replace("-", "_"))
+                        flipped = tracked_verdict(module, relname, data)
+                        if (flipped == expect) if expect == "clean" else (expect in flipped):
+                            faults.append("the vector still holds with its check removed")
+                    check(flip_id, not faults, (faults, flipped))
+            finally:
+                shutil.rmtree(wdir, ignore_errors=True)
+            # A .woff2 whose bytes decode as UTF-8 but carry another signature is still refused, never read as
+            # text, and a .woff (WOFF 1) is not under the rule.
+            for check_id, relname, data, expect in (
+                    ("woff2/utf8-without-signature-refused", "font.woff2", b"plain text\n",
+                     "font.woff2" + woff2_rule + bad_signature),
+                    ("woff2/woff1-suffix-unevaluable", "font.woff", b"wOFF\x00\x01\xff\xfe",
+                     "font.woff" + not_utf8)):
+                got = tracked_verdict(this, relname, data)
+                check(check_id, png_holds(expect, got), (expect, got))
+            saved, seen = MAX_WOFF2_FILE_SIZE, []
+            try:
+                for value in (len(clean_woff2) + 1, len(clean_woff2), len(clean_woff2) - 1):
+                    setattr(this, "MAX_WOFF2_FILE_SIZE", value)
+                    seen.append(tracked_verdict(this, "font.woff2", clean_woff2))
+            finally:
+                setattr(this, "MAX_WOFF2_FILE_SIZE", saved)
+            reason = "a WOFF2 font of more than MAX_WOFF2_FILE_SIZE ({}) bytes; the read stopped at {} bytes".format(
+                len(clean_woff2) - 1, len(clean_woff2))
+            check("woff2/file-size-bound-ends",
+                  seen[:2] == ["clean", "clean"] and "font.woff2" + woff2_rule + reason in seen[2], seen)
         finally:
             shutil.rmtree(pngdir, ignore_errors=True)
     finally:
@@ -3272,7 +3386,11 @@ def _self_test(caller_env=None):
           "to every byte from 0x7F to 0xFF and in an iCCP profile after 0xC0 and an iCCP profile name "
           "before 0xFF, still cannot evaluate a .PNG or a .gif, holds the "
           "file-size, chunk-count and inflate bounds one unit inside, at and outside, and each of its "
-          "twenty-seven paired checks, removed in a copy of the gate, turns its vector red.")
+          "twenty-seven paired checks, removed in a copy of the gate, turns its vector red; and the WOFF2 "
+          "rule passes a clean tracked .woff2, refuses (exit 2) another signature (UTF-8 text included), "
+          "finds the role name next to a byte above 0x7F and past an internal-allow marker, still cannot "
+          "evaluate a .WOFF2 or a .woff, holds the file-size bound one unit inside, at and outside, and each "
+          "of its five paired checks, removed in a copy of the gate, turns its vector red.")
     return 0
 
 

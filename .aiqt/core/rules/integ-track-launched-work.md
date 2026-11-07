@@ -8,7 +8,6 @@ secondary: [QUALI]
 slug: track-launched-work
 map-nist-airmf-broad: [MANAGE 4.3]
 map-iso-42001-broad: [A.6.2.6]
-map-iso-23894-broad: [6.7]
 ---
 
 # A launched task stays observable

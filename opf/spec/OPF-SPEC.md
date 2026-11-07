@@ -1,13 +1,11 @@
 # OPFiles: the operational-files standard
 
 Formal name: AIQT Development Operational Standard. Public brand: OPFiles
-(opfiles.ai). Base discovery token: `opf`. Status: draft (specification only;
-schemas and the reference tooling, the scaffolder `opf init`, the adopter `opf adopt`,
-the post-adoption importer `opf import`, the validator `opf doctor`, the renderer `opf render`,
-the relocator `opf migrate`, the
-synchronizer `opf sync`, the schema-upgrader `opf upgrade`, the absorber `opf absorb`, and the
-record author `opf record`,
-ship in later releases).
+(opfiles.ai). Base discovery token: `opf`. Status: this specification is a draft. The
+reference tooling's status in this build is the generated status note that follows, also published
+in opf/README.md, on opfiles.ai, and in opf/site/llms.txt (generated from VERB_STATUS in
+opf/tools/opf.py):
+Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
 Date: 2026-10-24 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache
@@ -521,17 +519,18 @@ anywhere, repeatedly, and each move is one recorded, verified, history-preservin
 ### 5.5 Target syntax
 
 The canonical form of a target, in the pointer and as the argument to `opf migrate --store`, is a
-git URL or a filesystem path. This form is universal for clone and sync: git already speaks every
-transport it needs, and the host in a remote URL already distinguishes GitHub, GitLab, Gitea, and
-any self-hosted forge, so the standard defines no per-host syntax for synchronization.
+git URL or a filesystem path. Git already speaks every transport it needs to clone and sync such a
+form, and the host in a remote URL already distinguishes GitHub, GitLab, Gitea, and any self-hosted
+forge, so the standard defines no per-host syntax for synchronization. A dedicated sync target names
+a filesystem repository only as `git:<absolute path>` (section 5.6).
 
 Explicit typing exists only where git cannot infer what to do, which is creating a new remote and
 authenticating that creation:
 
 | Form | Example | Git infers sync? | Provider needed for |
 |---|---|---|---|
-| `dir:<path>` or a bare path | `dir:../product-ops-store` | yes (file transport) | creating the local repository |
-| `git:<url>` or a bare git URL | `git@git.example.com:acme/ops.git` | yes | nothing; the remote must already exist |
+| `dir:<path>` or a bare path | `dir:../product-ops-store` | git can sync to a path, but OPF does not: this form is a store location, never a sync target (section 5.6) | creating the local repository |
+| `git:<url>`, `git:<absolute path>` or a bare git URL, other than a `file://` URL (refused as a sync target, section 5.6) | `git@git.example.com:acme/ops.git` | yes | nothing; the remote must already exist |
 | `github:<owner/repo>` | `github:acme/product-ops` | yes, after creation | creating the remote and authenticating creation through the host API |
 | `gitlab:<owner/repo>` | `gitlab:acme/product-ops` | yes, after creation | same, for GitLab |
 
@@ -547,7 +546,28 @@ manifest. Each provider is a handler covering some or all of three roles: `creat
 store location), `auth` (authenticate creation with the host), and `sync` (clone, fetch, push).
 
 - `local-directory` and `generic-git-remote` ship as the universal fallbacks and cover every
-  target between them: any local path and any git URL on any host.
+  target between them: any local path and any git URL on any host. A dedicated sync target (the
+  manifest's `[store] sync_target`, section 9) is synced as a git remote, so it names a filesystem
+  repository only as `git:<absolute path>`; a `dir:` or bare-path form is a store location for the
+  pointer and `opf migrate --store`, never a sync target, and validation refuses it as one
+  (section 11). Validation likewise refuses a relative `git:` path and a `file://` URL as a sync
+  target, and refuses as ambiguous a `git:` absolute path, or an actual remote path compared against
+  one, with leading or trailing whitespace, since whitespace is significant in a path. A `dir:`
+  sync target is classified as a `dir:` form first; any other value containing `://` is a URL, for
+  the sync target and the actual remote alike, because git reads `://` as a scheme separator:
+  `/srv/a://repo` is never a filesystem path. Git reads such an actual remote as an unsupported
+  protocol (or as a bundle file at the path it spells, which takes no push), so against a
+  `git:<absolute path>` target whose path differs from that spelled path it is a mismatch; where the
+  two paths are the same (`git:/srv/a:/repo` against `/srv/a://repo`) validation reports it as
+  cannot-evaluate (a disclosed residual). A URL sync target or actual remote with leading or
+  trailing whitespace is refused the same way, since git does not trim it. With a dedicated sync
+  target, an actual remote that is present but blank (whitespace only) is refused as naming no
+  remote; a relocated local-only store, which declares no sync target, reads such a remote as
+  absent. An actual remote spelled as a `file://` URL is not compared against a
+  `git:<absolute path>` target, even where git pushes to the same repository through it: validation
+  reports it as cannot-evaluate (a disclosed residual). The pre-commit hook carries each push URL as
+  validation reads it and exits 2 (cannot-evaluate) for a push URL that holds a line break, which
+  its snapshot cannot carry.
 - `github` and `gitlab` plug in only for their create and auth API conveniences; their sync is
   ordinary git. Further hosts join by registering a provider, never by extending the target
   grammar.

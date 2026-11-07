@@ -5,7 +5,7 @@ Each release ships its declaration (its release identity and the spec_version, h
 storage generation it supports) as one file, the declaration file DECLARATION_NAME, beside opf.py. Apart from
 that file, this module carries the SHA-256 digest of that file's bytes as the release ships them, the
 shipped-file digest SHIPPED_DECLARATION_SHA256, and the release documentation states that place
-(opf/site/tooling.html, opf/spec/OPF-QUICKSTART.md and RELEASING.md; tools/check_opf_declaration.py holds
+(opf/spec/OPF-QUICKSTART.md and RELEASING.md; tools/check_opf_declaration.py holds
 each restatement byte-equal to the file).
 
 runtime_check(path) is the runtime check. It reads the installed copy at `path` alone and yields one state:

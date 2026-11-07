@@ -78,7 +78,10 @@ reader whatever you chose. The target is just a path or git URL; `github:owner/r
    removes the lease and releases the lock before it reports success; while another OPF run holds
    the lock, `opf init` refuses. A run that stopped partway can leave a partial `.working/` and
    its lock record behind: once that `.working/` is moved aside, `opf init --recover` clears a
-   record whose holder is confirmed dead, and refuses a record whose holder may still be live.
+   record whose holder is confirmed dead and that plain `opf init` left (recorded operation
+   `opf-init-plain`). It refuses a record whose holder may still be live, and it refuses and keeps
+   a record that another operation left, even when that holder is confirmed dead, the init an
+   `opf adopt` run performs (`opf-init`) included; the refusal names the next step.
    `opf init` also refuses when the git
    history of HEAD's first-parent line shows a prior store (specification section 8.2: counters
    never restart, so record ids are never reissued). That scan follows the first-parent line only: a store that never reached a tree on
@@ -200,6 +203,9 @@ store, the tooling checks the installed copy of that file against that digest an
 build. A copy that is absent, unreadable, altered, malformed, or contradictory refuses the command
 with exit 2 before any store is resolved. `python3 -I -B opf/tools/opf.py --declaration` runs that
 check alone and prints the report: the declaration as shipped, both digests, and the runtime result.
+The runtime result is `pass` only where the run performed a store operation, `fail` where a run
+the check allowed performed none (so a read-only `opf doctor` or `--declaration` run reports
+`fail`), and `cannot_evaluate` where the check did not yield ok, which also exits 2.
 `opf doctor` appends the same report.
 
 The reference tooling requires Python 3.14 or newer.

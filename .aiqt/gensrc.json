@@ -269,6 +269,87 @@
       "target": "VERSION"
     },
     {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/404.toml"
+      ],
+      "target": "opf/site/404.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/adopt.toml"
+      ],
+      "target": "opf/site/adopt/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/core-files.toml"
+      ],
+      "target": "opf/site/core-files/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/disclosure.toml"
+      ],
+      "target": "opf/site/disclosure/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/draft.toml"
+      ],
+      "target": "opf/site/draft/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/home.toml"
+      ],
+      "target": "opf/site/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/license.toml"
+      ],
+      "target": "opf/site/license/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/model.toml"
+      ],
+      "target": "opf/site/model/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "opf/site/draft-src/standard.toml"
+      ],
+      "target": "opf/site/standard/index.html"
+    },
+    {
       "kind": "block",
       "regenerate": "python3 tools/gen_secret_patterns.py",
       "sources": [
@@ -297,12 +378,12 @@
     },
     {
       "kind": "file",
-      "regenerate": "python3 tools/gen_site.py",
+      "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "docs/_shell.html",
-        "docs/about.md"
+        "tools/gen_draft_site.py",
+        "site/draft-src/404.toml"
       ],
-      "target": "site/about.html"
+      "target": "site/404.html"
     },
     {
       "kind": "file",
@@ -314,12 +395,13 @@
       "target": "site/development.html"
     },
     {
-      "kind": "block",
-      "regenerate": "python3 tools/gen_disclosure.py",
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "disclosure.toml"
+        "tools/gen_draft_site.py",
+        "site/draft-src/disclosure.toml"
       ],
-      "target": "site/disclosure.html"
+      "target": "site/disclosure/index.html"
     },
     {
       "kind": "file",
@@ -383,6 +465,15 @@
     },
     {
       "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/draft.toml"
+      ],
+      "target": "site/draft/index.html"
+    },
+    {
+      "kind": "file",
       "regenerate": "python3 tools/gen_enforcement_register.py",
       "sources": [
         "docs/_shell.html",
@@ -403,73 +494,77 @@
     },
     {
       "kind": "file",
-      "regenerate": "python3 tools/gen_site.py",
+      "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "docs/_shell.html",
-        "docs/examples.md"
+        "tools/gen_draft_site.py",
+        "site/draft-src/future.toml"
       ],
-      "target": "site/examples.html"
-    },
-    {
-      "kind": "block",
-      "regenerate": "python3 tools/gen_install.py",
-      "sources": [
-        ".aiqt/core/skill/skill-source.md"
-      ],
-      "target": "site/install.html"
+      "target": "site/future/index.html"
     },
     {
       "kind": "file",
-      "regenerate": "python3 tools/gen_site.py",
+      "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "docs/_shell.html",
-        "docs/learn.md"
+        "tools/gen_draft_site.py",
+        "site/draft-src/home.toml"
       ],
-      "target": "site/learn.html"
+      "target": "site/index.html"
     },
     {
-      "kind": "block",
-      "regenerate": "python3 tools/gen_mappings.py",
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/install-details.toml"
+      ],
+      "target": "site/install/details/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/install.toml"
+      ],
+      "target": "site/install/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/license.toml"
+      ],
+      "target": "site/license/index.html"
+    },
+    {
+      "kind": "file",
+      "regenerate": "python3 tools/gen_draft_site.py",
+      "sources": [
+        "tools/gen_draft_site.py",
+        "site/draft-src/mappings.toml",
         ".aiqt/standards/",
         ".aiqt/core/rules/"
       ],
-      "target": "site/mappings.html"
-    },
-    {
-      "kind": "block",
-      "regenerate": "python3 tools/gen_roadmap.py",
-      "sources": [
-        "roadmap.toml"
-      ],
-      "target": "site/roadmap.html"
+      "target": "site/mappings/index.html"
     },
     {
       "kind": "file",
-      "regenerate": "python3 tools/gen_site.py",
+      "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "docs/_shell.html",
-        "docs/rules.md"
+        "tools/gen_draft_site.py",
+        "site/draft-src/rules.toml"
       ],
-      "target": "site/rules.html"
+      "target": "site/rules/index.html"
     },
     {
       "kind": "file",
-      "regenerate": "python3 tools/gen_site.py",
+      "regenerate": "python3 tools/gen_draft_site.py",
       "sources": [
-        "docs/_shell.html",
-        "docs/standard.md"
+        "tools/gen_draft_site.py",
+        "site/draft-src/standard.toml"
       ],
-      "target": "site/standard.html"
-    },
-    {
-      "kind": "file",
-      "regenerate": "python3 tools/gen_site.py",
-      "sources": [
-        "docs/_shell.html",
-        "docs/teams.md"
-      ],
-      "target": "site/teams.html"
+      "target": "site/standard/index.html"
     }
   ],
   "version": 1

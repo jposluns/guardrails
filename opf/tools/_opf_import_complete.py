@@ -132,8 +132,9 @@ from _opf_emit import emit_checked   # noqa: E402
 VALID, INVALID, CANNOT_EVALUATE = store.VALID, store.INVALID, store.CANNOT_EVALUATE
 # The imported managed leaves (spec 4.2, 8.3), inline in the machine store in either layout: one index per
 # enabled type other than worklog (spec 4.2: the same enabled-type roster as the clean series), and the
-# imported worklog on its own number line. The tooling's importer-only legacy_fragment type is not in
-# IMPORTED_TYPES: its LF namespace is outside records.IMPORTED_NAMESPACES, so it has no imported leaf.
+# imported worklog on its own number line. This tooling's legacy_fragment type is not in IMPORTED_TYPES:
+# the standard reserves LF unassigned (spec 8.1), so LF is outside records.IMPORTED_NAMESPACES and
+# legacy_fragment has no imported leaf.
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"
 IMPORTED_TYPES = tuple(sorted(

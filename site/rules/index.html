@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en" class="site-aiqt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="The ordering is what AIQT holds to; the 5 rules are how an assistant applies it, moment to moment. They ship in the chat skill you install today. Each rule is quoted from the standard.">
+<meta property="og:description" content="The ordering is what AIQT holds to; the 5 rules are how an assistant applies it, moment to moment. They ship in the chat skill you install today. Each rule is quoted from the standard.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="The 5 rules | AIQT.ai">
+<meta property="og:url" content="https://aiqt.ai/rules/">
+<meta property="og:site_name" content="AIQT.ai">
+<meta property="og:image" content="https://aiqt.ai/assets/aiqt-og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="627">
+<meta property="og:image:alt" content="AIQT.ai: A shield bearing a check mark, set on a guardrail">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://aiqt.ai/assets/aiqt-og.png">
+<title>The 5 rules | AIQT.ai</title>
+<link rel="icon" href="/draft/assets/baseline/logos/aiqt-favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/aiqt-touch.png">
+<script data-cfasync="false" src="/draft/assets/baseline/scheme.js"></script>
+<link rel="stylesheet" href="/draft/assets/baseline/fonts.css">
+<link rel="stylesheet" href="/draft/assets/baseline/palettes.css">
+<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">
+<script src="/draft/assets/baseline/rail.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main-content">Skip to content</a>
+<header class="mast"><a class="brand" href="/"><span class="name">AIQT<span class="tld">.ai</span></span><span class="rule" aria-hidden="true"></span></a><nav class="nav" aria-label="Site"><a href="/install/">Install</a><a href="/standard/">The standard</a><a href="/rules/" aria-current="page">The 5 rules</a><a href="/mappings/">Mappings</a><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a></nav><button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden><svg class="moon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg><svg class="sun" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><span class="vh">Dark mode</span></button></header>
+<main id="main-content">
+<div class="wrap"><div class="doc"><p class="lbl first">The 5 rules</p>
+<h1>The 5 rules of AIQT</h1>
+<nav class="rail" aria-label="On this page"><img class="rail-logo" src="/draft/assets/baseline/logos/aiqt.svg" alt="A shield bearing a check mark, set on a guardrail"><p class="lbl">On this page</p><ol><li><a href="#rule1">Surface what a guardrail catches</a></li><li><a href="#rule2">Self-check each change</a></li><li><a href="#rule3">Fix in-scope issues before shipping</a></li><li><a href="#rule4">Surface out-of-scope issues</a></li><li><a href="#rule5">Propose an underlying fix</a></li><li><a href="#enforced">Enforced</a></li></ol></nav>
+<p class="meta">The ordering is what AIQT holds to; the 5 rules are how an assistant applies it, moment to moment. They ship in the chat skill you install today. Each rule is quoted from the standard.</p>
+<dl class="control"><div><dt>Document</dt><dd>aiqt.ai</dd></div><div><dt>Version</dt><dd>AIQT 1.0.5</dd></div><div><dt>Status</dt><dd>Published 2026-09-15</dd></div><div><dt>Source</dt><dd><a href="https://github.com/jposluns/guardrails" target="_blank" rel="noopener noreferrer">jposluns/guardrails<span class="vh"> (opens in a new tab)</span></a></dd></div><div><dt>Licence</dt><dd><a href="/license/">Apache 2.0, see NOTICE</a></dd></div></dl>
+<p class="lbl sec">Rule 1</p>
+<h2 class="clause" id="rule1"><span class="num">1</span><span>Surface what a guardrail catches.</span></h2>
+<div class="note"><span class="label">Rule 1</span><div><p>When a guardrail blocks, flags, or refuses an action, say which guardrail and what it caught. Do not surface silent passes (no firehose).</p></div></div>
+<p class="lbl sec">Rule 2</p>
+<h2 class="clause" id="rule2"><span class="num">2</span><span>Self-check each change.</span></h2>
+<div class="note"><span class="label">Rule 2</span><div><p>At least once per change, run a substantive self-check: recap how you followed AIQT since the last one. Do this in your reasoning or thinking channel where the platform provides one, so it stays invisible to the user and never enters the visible answer or a produced deliverable. Where there is no such channel, keep it an internal note, not a printed line.</p></div></div>
+<p class="lbl sec">Rule 3</p>
+<h2 class="clause" id="rule3"><span class="num">3</span><span>Fix in-scope issues before shipping.</span></h2>
+<div class="note"><span class="label">Rule 3</span><div><p>An issue the active work detects or causes, within the current change's scope, is fixed before that change ships.</p></div></div>
+<p class="lbl sec">Rule 4</p>
+<h2 class="clause" id="rule4"><span class="num">4</span><span>Surface out-of-scope issues.</span></h2>
+<div class="note"><span class="label">Rule 4</span><div><p>An issue that sits outside what you were asked to do is named plainly, never silently dropped or quietly acted on. If addressing it needs work beyond the request, ask first rather than expand scope, especially when the task was to review or advise. A known problem is never hidden to keep a result looking clean.</p></div></div>
+<p class="lbl sec">Rule 5</p>
+<h2 class="clause" id="rule5"><span class="num">5</span><span>Propose an underlying fix.</span></h2>
+<div class="note"><span class="label">Rule 5</span><div><p>When your own gap let the issue through, propose (and, if asked, draft) a guardrail so it should not recur.</p></div></div>
+<div class="note"><span class="label">Note</span><div><p>Rule 5 improves your own project first: the guardrail lands in your workspace and protects your work. The Guardrail-Seed contribution is a separate, optional step that lets you send the lesson back to AIQT. What travels is a lesson: a general requirement expressed in the pack's own terms. It is not your code, your prompts, your conversations, or your data.</p></div></div>
+<p class="lbl sec">Enforcement</p>
+<h2 id="enforced">Rules your assistant cannot skip</h2>
+<p>An assistant can overlook a written rule. It cannot overlook a hook or a gate. So AIQT favours guardrails that can be enforced, and keeps building hooks, gates, and checks for guardrails as they are identified.</p><p>One example: the stop guard will not let your assistant end its turn while your to-do list still holds an item it can work on. It counts the open items itself from the list, rather than taking the assistant's word that it is finished. <a href="https://github.com/jposluns/guardrails/blob/main/.aiqt/core/hooks/ORCHESTRATION.md" target="_blank" rel="noopener noreferrer">See how the stop guard works<span class="vh"> (opens in a new tab)</span></a>.</p>
+<div class="next"><p class="lbl">Next</p><a class="start" href="/install/">Set up in chat <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
+</div></div>
+</main>
+<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project sites"><li class="slice slice-5"><a class="card" href="/" aria-current="page"><img src="/draft/assets/baseline/logos/aiqt.svg" alt=""><span class="cname">AIQT<span class="tld">.ai</span></span><span class="vh"> (this site)</span></a></li><li class="slice slice-6"><a class="card" href="https://grclibrary.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/grclibrary.svg" alt=""><span class="cname">GRCLibrary<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-1"><a class="card" href="https://secureconfig.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/secureconfig.svg" alt=""><span class="cname">SecureConfig<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-2"><a class="card" href="https://opfiles.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/opfiles.svg" alt=""><span class="cname">OPFiles<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-3"><a class="card" href="https://auditthis.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/auditthis.svg" alt=""><span class="cname">AuditThis<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-4"><a class="card" href="https://cleanlanguage.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/cleanlanguage.svg" alt=""><span class="cname">CleanLanguage<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li></ul><ul class="tail" aria-label="Jeff Posluns elsewhere"><li class="tile tile-1"><a class="card" href="https://github.com/jposluns" target="_blank" rel="noopener noreferrer"><img class="only-light" src="/draft/assets/baseline/marks/github-invertocat-black.svg" alt=""><img class="only-dark" src="/draft/assets/baseline/marks/github-invertocat-white.svg" alt=""><span class="cname vh">GitHub</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-2"><a class="card" href="https://www.linkedin.com/in/jposluns/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/linkedin-in-bug.png" alt=""><span class="cname vh">LinkedIn</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-3"><a class="card" href="https://orcid.org/0009-0000-7775-2233" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/orcid-id.svg" alt=""><span class="cname vh">ORCID</span><span class="vh"> (opens in a new tab)</span></a></li></ul><div class="tile sigtile"><a class="sig" href="https://posluns.ca/" target="_blank" rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span><span class="post"> Project</span></a></div></div></footer>
+<p class="vh" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

@@ -579,9 +579,9 @@ def _pv(status, code, location, detail):
 def _roster_namespaces():
     """(baseline, importer, module) namespace sets, derived from the store vocabulary.
 
-    Only `baseline` is REQUIRED of an ancestral seed. `importer` (legacy_fragment, LF) is deprecated
-    for new stores: it is accepted and copied when an ancestral store carried it, never
-    required, and never scaffolded on a fresh store. `module` is the module tier."""
+    Only `baseline` is REQUIRED of an ancestral seed. `importer` is LF, which the standard reserves
+    unassigned and no record type uses (spec 8.1): it is accepted and copied when an ancestral store
+    carried it, never required, and never scaffolded on a fresh store. `module` is the module tier."""
     baseline = frozenset(_opf_store.BASELINE_TYPES.values())
     importer = frozenset(_opf_store.IMPORTER_TYPES.values())
     module = frozenset(ns for ns, _mod in _opf_store.MODULE_TYPES.values())
