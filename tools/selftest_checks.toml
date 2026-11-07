@@ -5357,5 +5357,12 @@ expected-check-ids = [
   "walk/unsearchable-ancestor-fails-closed-with-cause",
   "write/temp-removed-on-interrupt-during-create",
   "write/descriptor-path-unreadable-fails-closed",
+  # ---------- the post-write recheck, the ".." fold, and the O_NOFOLLOW scope ----------
+  "write/dir-renamed-into-assets-after-check-removed-and-refused",
+  "write/dotdot-across-symlink-refused",
+  "bound/dotdot-across-real-dir-accepted",
+  "write/symlink-planted-at-missing-component-refused",
+  "bound/symlinked-parent-existing-dir-opened",
+  "bound/symlinked-final-missing-component-refused",
   "main/identity-refused-out-exit-2-before-chrome",
 ]

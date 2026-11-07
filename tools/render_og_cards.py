@@ -33,7 +33,20 @@ are renamed onto the card name from a new exclusively created temporary file, so
 symlink at that name is replaced as a directory entry, never written through; the temporary file is
 removed on any failure, an interrupt included (an interrupt can still leave a file descriptor, the
 temporary file's or an O_PATH one held by the parent walk, open for the moment the interrupted process
-takes to exit; no directory entry is left behind). Each card is a 1200 by 627 PNG below 1 MB; a render
+takes to exit; no directory entry is left behind). After the rename lands the card, the opened directory
+is checked again on the same descriptor; where that recheck refuses (for example the directory was renamed
+into a served assets directory after the checks and before the write), the card is unlinked through the
+descriptor and the write is refused. A window remains and is claimed nowhere narrower than this: a rename
+of the output directory that lands after the recheck has read the directory, its parents and its
+read-back path keeps the written card wherever the directory then sits, and nothing here removes it. The
+O_NOFOLLOW on the directory open covers the final path component only: an existing output directory
+reached through a symlinked parent is opened (the parent symlink is followed, and the opened directory is
+then judged by its identity and read-back path), while a final component that is itself a symlink,
+including a symlink that is the nearest existing ancestor of a missing path, is refused; so link/existing
+can be accepted where link/missing is refused. A ".." among the typed components is folded into the
+component before it only where that component is not a symlink; a ".." that would cross a symlink is
+refused, because the typed fold and the kernel would then name different directories and the directory
+the checks accept must be the directory the write opens. Each card is a 1200 by 627 PNG below 1 MB; a render
 that gives another size or a larger file is refused (exit 1) and nothing is kept. Exit 2 when
 /usr/bin/google-chrome is missing or not executable (checked before any render); a Chrome launch that then
 fails (an OSError or a timeout from the subprocess) is reported and exits 1, like any other failed render.
@@ -55,6 +68,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import errno
 import os
 import signal
+import stat
 import struct
 import subprocess
 import tempfile
@@ -210,15 +224,65 @@ def _opened_dir_refusal(dir_fd, directory):
     return _name_refusal(real)
 
 
+def _folded_directory(directory):
+    """directory with each "." dropped and each ".." folded into the component typed before it, but only
+    where that component is not a symlink (islink, which never follows the component itself): the folded
+    path then names the same directory the kernel resolves, so the directory the checks accept is the
+    directory the write opens. A ".." whose preceding component is a symlink raises Refused: the kernel
+    resolves the symlink first and takes ".." from its target, so folding it textually would name a
+    different directory than the kernel and than the real-path checks. A leading ".." with nothing typed
+    before it, or one behind another kept "..", is kept for the kernel to resolve; on an absolute path it
+    names the root itself and is dropped. The islink reads are by path at fold time, like every typed-path
+    check here; the opened directory is still judged afterwards by its identity and read-back path."""
+    path = Path(os.fspath(directory))
+    anchor = path.anchor
+    kept = []
+    for part in (path.parts[1:] if anchor else path.parts):
+        if part == ".":
+            continue
+        if part != "..":
+            kept.append(part)
+            continue
+        if kept and kept[-1] != "..":
+            prefix = Path(anchor).joinpath(*kept) if anchor else Path(*kept)
+            if os.path.islink(prefix):
+                raise Refused(
+                    "{} takes .. across the symlink {}: the kernel resolves the symlink first and the "
+                    "typed components do not, so they name different directories; refused so the checked "
+                    "directory is the written directory".format(directory, prefix))
+            kept.pop()
+        elif not anchor:
+            kept.append("..")
+    if anchor:
+        return Path(anchor).joinpath(*kept)
+    return Path(*kept) if kept else Path(".")
+
+
+def _entry_is_symlink(name, dir_fd):
+    """True when the directory entry name under the directory open as dir_fd is a symlink, read with lstat
+    through that descriptor (no path re-resolution, and the entry itself is never followed); False where
+    the entry cannot be read."""
+    try:
+        return stat.S_ISLNK(os.lstat(name, dir_fd=dir_fd).st_mode)
+    except OSError:
+        return False
+
+
 def _checked_dir_fd(directory):
     """directory opened with O_RDONLY | O_DIRECTORY | O_NOFOLLOW and already past _opened_dir_refusal,
     missing final components created one mkdir at a time through their parent's descriptor only after that
     parent has itself been opened and has passed every check, so nothing is ever created under a directory
-    that fails the checks and a refused race leaves no directory behind. Raises Refused for a refused,
-    symlinked or unwalkable directory and OSError for a plain open failure; the caller closes the returned
-    descriptor, which is closed here on every failure."""
+    that fails the checks and a refused race leaves no directory behind. The typed path is folded by
+    _folded_directory first, so a ".." that crosses a symlink is refused rather than folded into a
+    directory the kernel would not resolve it to. O_NOFOLLOW covers only the component each open names: an
+    existing directory behind a symlinked parent is opened and then judged by its identity and read-back
+    path, while a final component that is itself a symlink, the nearest existing ancestor of a missing
+    path included, is refused (the kernel reports it as ELOOP, or as ENOTDIR on some kernels; both are
+    read as the symlink refusal, the entry confirmed with lstat and never followed). Raises Refused for a
+    refused, symlinked or unwalkable directory and OSError for a plain open failure; the caller closes the
+    returned descriptor, which is closed here on every failure."""
     missing = []
-    probe = Path(os.path.normpath(os.fspath(directory)))
+    probe = _folded_directory(directory)
     while True:
         try:
             fd = os.open(probe, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -254,7 +318,8 @@ def _checked_dir_fd(directory):
             try:
                 child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             except OSError as exc:
-                if exc.errno == errno.ELOOP:
+                if exc.errno == errno.ELOOP or (exc.errno == errno.ENOTDIR
+                                                and _entry_is_symlink(name, fd)):
                     raise Refused("{} is a symlink, not opened as the output directory".format(
                         probe / name)) from exc
                 raise
@@ -327,7 +392,13 @@ def _write_card(path, data):
     refused directory; returns an error string for a plain I/O failure; re-raises any other failure (an
     interrupt included) with the temporary file removed, the temporary file's creation itself covered by a
     cleanup that uses only its name (a descriptor can still be left open for the moment an interrupted
-    process takes to exit); None when the card is written."""
+    process takes to exit); None when the card is written. After the rename, the opened directory is
+    rechecked on the same descriptor (its identity, each parent reached from it, and its read-back path);
+    a recheck that refuses, or that cannot be completed, unlinks the just-renamed card through the
+    descriptor and raises Refused, so a directory renamed into a served assets directory between the
+    checks and the rename does not keep the card. The window that remains: a rename of the directory that
+    lands after the recheck has read the directory, its parents and its read-back path keeps the card
+    wherever the directory then sits, and nothing here removes it."""
     directory = path.parent
     reason = _name_refusal(directory)
     if reason:
@@ -361,6 +432,21 @@ def _write_card(path, data):
         finally:
             if fd != -1:
                 os.close(fd)
+        try:
+            reason = _opened_dir_refusal(dir_fd, directory)
+        except OSError as exc:
+            reason = ("cannot walk the parents of the output directory {} when rechecked after the "
+                      "write ({}); fails closed".format(directory, exc))
+        if reason:
+            try:
+                os.unlink(path.name, dir_fd=dir_fd)
+                removal = "the card was removed through the held directory descriptor"
+            except OSError as exc:
+                removal = ("the card could not be removed through the held directory descriptor "
+                           "({})".format(exc))
+            raise Refused(
+                "the output directory {} was refused when rechecked on its open descriptor after the "
+                "write ({}); {}".format(directory, reason, removal))
         return None
     finally:
         os.close(dir_fd)
@@ -808,13 +894,16 @@ def _self_test():
         got = _patched("ROOT", fixture, _patched, "_name_refusal", _swap_to_assets_then_real, _write_to,
                        swap_missing / "newdir" / served.name)
         check("write/refused-race-creates-nothing-in-assets",
-              isinstance(got, Refused) and not os.path.exists(fixture / SERVED_ASSETS[0] / "newdir"),
+              isinstance(got, Refused) and "is a symlink, not opened as the output directory" in str(got)
+              and not os.path.exists(fixture / SERVED_ASSETS[0] / "newdir"),
               (got, os.path.exists(fixture / SERVED_ASSETS[0] / "newdir")))
 
         missing_under_assets = fixture / SERVED_ASSETS[0] / "new-out"
         reason = _patched("ROOT", fixture, _out_dir_identity_refusal, str(missing_under_assets))
         check("identity/missing-dir-under-assets-not-created",
-              isinstance(reason, str) and not os.path.exists(missing_under_assets),
+              isinstance(reason, str)
+              and "is a served assets directory or an ancestor of one under the repository root" in reason
+              and not os.path.exists(missing_under_assets),
               (reason, os.path.exists(missing_under_assets)))
 
         fresh = Path(tmp) / "fresh" / "a" / "b"
@@ -876,6 +965,95 @@ def _self_test():
               isinstance(got, Refused) and "cannot be read back" in str(got) and not os.path.exists(no_proc),
               (got, os.path.exists(no_proc)))
 
+        # The post-write recheck on the held descriptor: an accepted output directory renamed into a
+        # served assets directory after the checks (here at the temporary-name moment, so the rename is
+        # visible when the card is renamed into place) does not keep the card; the recheck refuses and the
+        # card is unlinked through the descriptor. A rename landing after the recheck is the window the
+        # docstrings state; it is not claimed closed and not tested here.
+        moved_out = Path(tmp) / "moved-out"
+        os.makedirs(moved_out)
+        real_urandom = os.urandom
+
+        def _rename_into_assets_urandom(count):
+            if not os.path.lexists(fixture / SERVED_ASSETS[0] / "moved-out"):
+                os.rename(moved_out, fixture / SERVED_ASSETS[0] / "moved-out")
+            return real_urandom(count)
+
+        os.urandom = _rename_into_assets_urandom
+        try:
+            got = _patched("ROOT", fixture, _write_to, moved_out / served.name)
+        finally:
+            os.urandom = real_urandom
+        check("write/dir-renamed-into-assets-after-check-removed-and-refused",
+              isinstance(got, Refused) and "rechecked on its open descriptor after the write" in str(got)
+              and os.listdir(fixture / SERVED_ASSETS[0] / "moved-out") == [],
+              (got, os.listdir(fixture / SERVED_ASSETS[0] / "moved-out")))
+
+        # A ".." that crosses a symlink: the typed fold would name dd-out under the base while the kernel
+        # (and the real-path checks) resolve deep/dd-out, so the path is refused and neither directory is
+        # created; a ".." folded across a real directory names the same directory both ways and is
+        # accepted, the card written where the kernel would put it.
+        deep = Path(tmp) / "deep" / "inner"
+        os.makedirs(deep)
+        os.symlink(deep, Path(tmp) / "deep-link")
+        got = _patched("ROOT", fixture, _write_to,
+                       Path(tmp) / "deep-link" / ".." / "dd-out" / served.name)
+        check("write/dotdot-across-symlink-refused",
+              isinstance(got, Refused) and "takes .. across the symlink" in str(got)
+              and not os.path.exists(Path(tmp) / "dd-out")
+              and not os.path.exists(Path(tmp) / "deep" / "dd-out"),
+              (got, os.path.exists(Path(tmp) / "dd-out")))
+        got = _patched("ROOT", fixture, _write_to,
+                       Path(tmp) / "deep" / "inner" / ".." / "dd-ok" / served.name)
+        check("bound/dotdot-across-real-dir-accepted",
+              got is None and (Path(tmp) / "deep" / "dd-ok" / served.name).read_bytes() == expected,
+              (got,))
+
+        # A symlink planted at a missing component between the parent's mkdir and the child open, on a
+        # kernel that reports the O_NOFOLLOW | O_DIRECTORY open of a symlink as ENOTDIR (forced here so
+        # the vector does not depend on the kernel): the entry is read back through the held descriptor as
+        # a symlink and the write is refused like the first open's ELOOP, not reported as an I/O error.
+        planted_parent = Path(tmp) / "planted-out"
+        planted_victim = Path(tmp) / "planted-victim"
+        os.makedirs(planted_parent)
+        os.makedirs(planted_victim)
+        real_mkdir = os.mkdir
+
+        def _planting_mkdir(name, mode=0o777, *, dir_fd=None):
+            if name == "planted" and dir_fd is not None:
+                os.symlink(planted_victim, name, dir_fd=dir_fd)
+            return real_mkdir(name, mode, dir_fd=dir_fd)
+
+        def _enotdir_child_open(open_target, flags, *args, **kwargs):
+            if open_target == "planted" and kwargs.get("dir_fd") is not None and flags & os.O_DIRECTORY:
+                raise OSError(errno.ENOTDIR, "Not a directory", open_target)
+            return real_os_open(open_target, flags, *args, **kwargs)
+
+        os.mkdir = _planting_mkdir
+        os.open = _enotdir_child_open
+        try:
+            got = _patched("ROOT", fixture, _write_to, planted_parent / "planted" / served.name)
+        finally:
+            os.open = real_os_open
+            os.mkdir = real_mkdir
+        check("write/symlink-planted-at-missing-component-refused",
+              isinstance(got, Refused) and "is a symlink, not opened as the output directory" in str(got)
+              and os.listdir(planted_victim) == [], (got, os.listdir(planted_victim)))
+
+        # The documented O_NOFOLLOW scope, final component only: an existing directory behind a symlinked
+        # parent is opened (and then judged by identity and read-back path), while the same symlink as the
+        # nearest existing ancestor of a missing path is the component the open names and is refused.
+        linked_real = Path(tmp) / "linked-real"
+        os.makedirs(linked_real / "existing")
+        os.symlink(linked_real, Path(tmp) / "linkdir")
+        got = _patched("ROOT", fixture, _write_to, Path(tmp) / "linkdir" / "existing" / served.name)
+        check("bound/symlinked-parent-existing-dir-opened",
+              got is None and (linked_real / "existing" / served.name).read_bytes() == expected, (got,))
+        got = _patched("ROOT", fixture, _write_to, Path(tmp) / "linkdir" / "missing" / served.name)
+        check("bound/symlinked-final-missing-component-refused",
+              isinstance(got, Refused) and "is a symlink, not opened as the output directory" in str(got)
+              and not os.path.exists(linked_real / "missing"), (got,))
+
         # main(): an output directory whose identity is a served assets directory, reached under a name the
         # path checks cannot refuse, exits 2 before render (the only place Chrome is started) is called.
         calls.clear()
@@ -907,7 +1085,12 @@ def _self_test():
           "refused; a refused race creates no directory inside served assets, from the write or from the "
           "pre-render identity check, while missing components of an accepted directory are still created "
           "through checked parents; an ancestor the walk cannot open fails closed with the cause stated; "
-          "Chrome is never started)".format(len(EXECUTED)))
+          "a directory renamed into served assets after the checks is refused by the post-write recheck "
+          "and the card removed through the held descriptor; a .. across a symlink is refused while one "
+          "across a real directory is folded and accepted; a symlink planted at a missing component and "
+          "reported as ENOTDIR is refused as a symlink, not an I/O error; an existing directory behind a "
+          "symlinked parent is opened while that symlink as the nearest existing ancestor of a missing "
+          "path is refused; Chrome is never started)".format(len(EXECUTED)))
     return 0
 
 
