@@ -5,6 +5,7 @@ required reviewer leg of it is a clean, counted delivery.
   check_review_round.py --manifest FILE --head SHA [--attempts FILE] [--decisions FILE]
                         [--table PATH]
   check_review_round.py --self-test [--execution-report ABS_PATH]
+  check_review_round.py --execution-report ABS_PATH   (the execution-set gate's launch)
 
 DRAFT STAGE. This file carries the round-manifest parser and validator only. Leg evaluation (each
 listed delivery judged by check_verifier_delivery's own evaluate()), the attempts ledger and the
@@ -102,8 +103,9 @@ import check_brief_capability  # noqa: E402  (load_table, the family table's one
 import check_verifier_delivery  # noqa: E402  (HARNESS_FIRST_RE; evaluate() from the leg-evaluation step on)
 
 # The shared refusal type and the one bounded regular-file reader (non-blocking open, regular-file-only,
-# read in chunks, closed exactly once), reused so this gate adds no descriptor site of its own; that
-# reader's size bound is this gate's manifest and brief bound.
+# read in chunks, closed exactly once), reused for every manifest, brief and capability-table read; that
+# reader's size bound is this gate's manifest and brief bound. The self-test's registry read in
+# _expected_check_ids is this file's own descriptor site, closed exactly once by its with statement.
 CannotEvaluate = check_brief_capability.CannotEvaluate
 _read_regular = check_brief_capability._read_regular
 
@@ -129,7 +131,8 @@ ORDER_NOTE = "manifest order: not established"
 
 USAGE = ("usage: check_review_round.py --manifest FILE --head SHA [--attempts FILE] "
          "[--decisions FILE] [--table PATH]\n"
-         "       check_review_round.py --self-test [--execution-report ABS_PATH]")
+         "       check_review_round.py --self-test [--execution-report ABS_PATH]\n"
+         "       check_review_round.py --execution-report ABS_PATH")
 
 
 def _checked_no_nul(path, what):
@@ -357,6 +360,53 @@ def _expected_check_ids():
     return None
 
 
+MANIFEST_READ_REFUSAL = "SELF-TEST HARNESS ERROR: cannot read"
+
+
+class _ExhaustedRegistryPath:
+    """A registry path that fails as an exhausted allocation does when opened: no registry text can
+    raise MemoryError without exhausting memory, so the handler's MemoryError arm is driven from the
+    open inside the same try as the parse."""
+
+    def __fspath__(self):
+        raise MemoryError("injected allocation failure")
+
+
+def _patched(name, value, call):
+    """call() with this module's global name bound to value, restored afterwards."""
+    module = sys.modules[__name__]
+    saved = getattr(module, name)
+    setattr(module, name, value)
+    try:
+        return call()
+    finally:
+        setattr(module, name, saved)
+
+
+def _registry_refusal(path):
+    """(result, refusal printed) of _expected_check_ids on the registry at path, its stderr captured;
+    or the class of a read or parse failure that escaped the handler, so a missing arm fails its
+    check by name instead of a traceback."""
+    printed = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(printed):
+            got = _patched("CHECKS_MANIFEST", path, _expected_check_ids)
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        return "escaped " + type(exc).__name__
+    return got, MANIFEST_READ_REFUSAL in printed.getvalue()
+
+
+def _execution_set_failures(expected, executed):
+    """The reconciliation failures of the executed check ids against the registered expected set: one
+    per registered id that did not run, one per executed id the registry does not carry."""
+    failures = []
+    for check_id in sorted(expected - executed):
+        failures.append("execution-set/missing: {}".format(check_id))
+    for check_id in sorted(executed - expected):
+        failures.append("execution-set/extra: {}".format(check_id))
+    return failures
+
+
 def check(name, got, want):
     if name in _EXECUTED_SET:
         print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
@@ -393,7 +443,7 @@ def _brief_fixture(base):
 
 
 def _manifest_text(brief, brief_sha, families=("alpha", "beta"), critical=False, required=None,
-                   version="1", rule=PANEL_RULE, leg_ids=None):
+                   version="1", rule=PANEL_RULE, leg_ids=None, delivery_base=None):
     required_names = list(families) if required is None else list(required)
     head = ["format-version = {}".format(version), 'round = "fixture-pass"',
             'revision = "{}"'.format(REV), 'repository = "fixture/round"', "", "[policy]",
@@ -402,9 +452,12 @@ def _manifest_text(brief, brief_sha, families=("alpha", "beta"), critical=False,
     rows = []
     for index, family in enumerate(families, 1):
         leg_id = (leg_ids or {}).get(index, "leg-{}".format(index))
+        # delivery_base keeps the delivery paths clean while the brief path carries a fault, so a
+        # brief-key row holds the brief key's own refusal, not the delivery key's
         rows += ["", "[[leg]]", 'id = "{}"'.format(leg_id), 'family = "{}"'.format(family),
                  'brief = "{}"'.format(brief), 'brief-sha256 = "{}"'.format(brief_sha),
-                 'delivery = "{}.delivery-{}"'.format(brief, index)]
+                 'delivery = "{}.delivery-{}"'.format(brief if delivery_base is None
+                                                      else delivery_base, index)]
     return "\n".join(head + rows) + "\n"
 
 
@@ -423,6 +476,10 @@ def _outcome(base, text, head=REV, table_text=None, skip_table=False):
         validate_round(str(manifest), head, str(table))
     except CannotEvaluate as exc:
         return ("cannot-evaluate", str(exc))
+    except (ValueError, OSError) as exc:
+        # a fault that escaped the refusals and reached a raw open: the row fails by this named
+        # outcome, never by a traceback
+        return ("escaped-" + type(exc).__name__, str(exc))
     return ("ok", "")
 
 
@@ -433,6 +490,10 @@ def _direct(manifest_path, head, table_path):
         validate_round(manifest_path, head, table_path)
     except CannotEvaluate as exc:
         return ("cannot-evaluate", str(exc))
+    except (ValueError, OSError) as exc:
+        # a fault that escaped the refusals and reached a raw open: the row fails by this named
+        # outcome, never by a traceback
+        return ("escaped-" + type(exc).__name__, str(exc))
     return ("ok", "")
 
 
@@ -483,8 +544,13 @@ def _self_test_cases(base):
                    "is repeated"), True)
     check("round/brief-hash-mismatch-cannot-evaluate",
           _refused(_outcome(base, _manifest_text(brief, "0" * 64)), "hash to"), True)
+    check("round/leg-brief-unreadable-cannot-evaluate",
+          _refused(_outcome(base, _manifest_text(str(Path(tempfile.mkdtemp(dir=base)) / "absent.md"),
+                                                 brief_sha)),
+                   "brief: cannot open"), True)
     check("round/brief-path-relative-cannot-evaluate",
-          _refused(_outcome(base, _manifest_text("relative/brief.md", brief_sha)), "absolute path"), True)
+          _refused(_outcome(base, _manifest_text("relative/brief.md", brief_sha, delivery_base=brief)),
+                   "brief must be an absolute path"), True)
     check("round/table-unreadable-cannot-evaluate",
           _refused(_outcome(base, valid_two, skip_table=True), "capability table"), True)
     # one row per validator refusal, each with a source flip that removes only that refusal
@@ -519,6 +585,27 @@ def _self_test_cases(base):
           _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
                                                     'repository = "{}/{}"'.format("a" * 101, "b" * 100))),
                    "owner/name"), True)
+    # the name side's own edges: its length bound, its first character, and the end anchor (a $
+    # would admit a trailing newline that \Z refuses)
+    check("round/repository-trailing-newline-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "fixture/round\\n"')),
+                   "owner/name"), True)
+    check("round/repository-name-at-length-validates",
+          _outcome(base, valid_two.replace('repository = "fixture/round"',
+                                           'repository = "f/{}"'.format("b" * 100)))[0], "ok")
+    check("round/repository-name-over-length-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "f/{}"'.format("b" * 101))),
+                   "owner/name"), True)
+    check("round/repository-name-leading-dot-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "fixture/.round"')),
+                   "owner/name"), True)
+    check("round/repository-name-leading-dash-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "fixture/-round"')),
+                   "owner/name"), True)
     check("round/version-two-cannot-evaluate",
           _refused(_outcome(base, _manifest_text(brief, brief_sha, version="2")),
                    "format-version"), True)
@@ -552,14 +639,21 @@ def _self_test_cases(base):
           _refused(_outcome(base, _manifest_text(brief, "0" * 63)), "64 lower-hex"), True)
     check("round/head-format-cannot-evaluate",
           _refused(_outcome(base, valid_two, head="xyz"), "--head must be a full 40-hex"), True)
+    # each path-key row isolates its key: the brief rows keep clean delivery paths and the delivery
+    # rows keep the clean brief, and every assertion names the faulted key in the refusal
     check("round/brief-path-dotdot-cannot-evaluate",
-          _refused(_outcome(base, _manifest_text("/tmp/../absent.md", brief_sha)),
-                   "absolute path with no"), True)
+          _refused(_outcome(base, _manifest_text("/tmp/../absent.md", brief_sha, delivery_base=brief)),
+                   "brief must be an absolute path"), True)
+    check("round/delivery-path-dotdot-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace(".delivery-1", "/../delivery-1")),
+                   "delivery must be an absolute path"), True)
     # NUL-byte path refusals: without them, os.open raises ValueError past the exit contract
     check("round/brief-path-nul-cannot-evaluate",
-          _refused(_outcome(base, _manifest_text("/tmp/a\\u0000b", brief_sha)), "NUL"), True)
+          _refused(_outcome(base, _manifest_text("/tmp/a\\u0000b", brief_sha, delivery_base=brief)),
+                   "brief must be an absolute path"), True)
     check("round/delivery-path-nul-cannot-evaluate",
-          _refused(_outcome(base, valid_two.replace(".delivery-1", ".deli\\u0000very-1")), "NUL"), True)
+          _refused(_outcome(base, valid_two.replace(".delivery-1", ".deli\\u0000very-1")),
+                   "delivery must be an absolute path"), True)
     nul_tmp = Path(tempfile.mkdtemp(dir=base))
     nul_table = nul_tmp / "table.toml"
     nul_table.write_text(check_brief_capability.TABLE_FIXTURE, encoding="utf-8")
@@ -602,11 +696,34 @@ def _self_test_cases(base):
     check("round/attempts-not-implemented-cannot-evaluate", (code, "attempts ledger" in out), (2, True))
     code, out = _main_quiet(argv + ["--decisions", str(manifest)])
     check("round/decisions-not-implemented-cannot-evaluate", (code, "decision records" in out), (2, True))
+    # --execution-report takes only an absolute report path (the execution-set gate's launch form)
+    check("round/execution-report-relative-cannot-evaluate",
+          _main_quiet(["--execution-report", "relative-report.json"])[0], 2)
     # the named group this gate reads from the checker's harness first-line grammar
     check("group/harness-family-named-group",
           (_harness_family("WORKER_STATUS: PASS (account=a, rc=0, family=b, model=c, effort=d)"),
            _harness_family("WORKER_STATUS_FAKE (account=a, rc=0, family=b, model=c, effort=d)")),
           ("b", None))
+    # the registry reader's own error handling: a registry that cannot be read or parsed is the
+    # harness's refusal (None, the refusal printed), one row per class the handler must catch, and
+    # the reconciliation's two legs are each driven on synthetic sets
+    harness_tmp = Path(tempfile.mkdtemp(dir=base))
+    check("harness/registry-unreadable-harness-error",
+          _registry_refusal(harness_tmp / "absent-registry.toml"), (None, True))
+    not_toml = harness_tmp / "registry-not-toml.toml"
+    not_toml.write_text("suite = \n", encoding="utf-8")
+    check("harness/registry-not-toml-harness-error", _registry_refusal(not_toml), (None, True))
+    nested = harness_tmp / "registry-nested.toml"
+    nested.write_text("suite = " + "[" * 10000 + "]" * 10000 + "\n", encoding="utf-8")
+    check("harness/registry-nested-too-deep-harness-error", _registry_refusal(nested), (None, True))
+    check("harness/registry-out-of-memory-harness-error",
+          _registry_refusal(_ExhaustedRegistryPath()), (None, True))
+    check("harness/execution-set-missing-id-fails",
+          _execution_set_failures({"x", "y"}, {"x"}), ["execution-set/missing: y"])
+    check("harness/execution-set-extra-id-fails",
+          _execution_set_failures({"x"}, {"x", "y"}), ["execution-set/extra: y"])
+    check("harness/execution-set-reconciled-clean",
+          _execution_set_failures({"x", "y"}, {"y", "x"}), [])
 
 
 def self_test(report_path=None):
@@ -626,17 +743,15 @@ def self_test(report_path=None):
     expected = _expected_check_ids()
     if expected is None:
         return 2
-    for check_id in sorted(expected - _EXECUTED_SET):
-        FAILURES.append("execution-set/missing: {}".format(check_id))
-    for check_id in sorted(_EXECUTED_SET - expected):
-        FAILURES.append("execution-set/extra: {}".format(check_id))
+    FAILURES.extend(_execution_set_failures(expected, _EXECUTED_SET))
     if FAILURES:
         print("SELF-TEST FAIL:")
         for failure in FAILURES:
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: {} unique checks executed (one row per round-manifest validator refusal, "
-          "the floor and length boundary rows, and the CLI's fail-closed draft-stage refusals); "
+          "the floor and length boundary rows, the CLI's fail-closed draft-stage refusals, and the "
+          "harness's registry-reader and reconciliation rows); "
           "execution set reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 

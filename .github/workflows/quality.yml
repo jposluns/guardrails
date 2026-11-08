@@ -1091,9 +1091,9 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_brief_capability.py --self-test
 
-      # A review round counts toward a merge only when every required leg is a clean, counted delivery.
-      # The gate runs on round manifests at the merge step; here only its self-test runs, since the
-      # repository holds no round.
+      # The review-round gate exists so that a review round can count toward a merge only when every
+      # required leg is a clean, counted delivery. Leg evaluation is not built yet (every run of the
+      # gate exits 2); this step runs only its self-test, since the repository holds no round.
       - name: Review-round gate self-test
         shell: bash
         run: python3 -I -B tools/check_review_round.py --self-test

@@ -4473,6 +4473,7 @@ expected-check-ids = [
   "round/legs-differ-from-required-cannot-evaluate",
   "round/duplicate-leg-id-cannot-evaluate",
   "round/brief-hash-mismatch-cannot-evaluate",
+  "round/leg-brief-unreadable-cannot-evaluate",
   "round/brief-path-relative-cannot-evaluate",
   "round/table-unreadable-cannot-evaluate",
   # ---------- one row per validator refusal ----------
@@ -4484,6 +4485,11 @@ expected-check-ids = [
   "round/repository-control-cannot-evaluate",
   "round/repository-at-length-validates",
   "round/repository-over-length-cannot-evaluate",
+  "round/repository-trailing-newline-cannot-evaluate",
+  "round/repository-name-at-length-validates",
+  "round/repository-name-over-length-cannot-evaluate",
+  "round/repository-name-leading-dot-cannot-evaluate",
+  "round/repository-name-leading-dash-cannot-evaluate",
   "round/version-two-cannot-evaluate",
   "round/policy-keys-cannot-evaluate",
   "round/policy-rule-cannot-evaluate",
@@ -4496,6 +4502,7 @@ expected-check-ids = [
   "round/brief-sha-format-cannot-evaluate",
   "round/head-format-cannot-evaluate",
   "round/brief-path-dotdot-cannot-evaluate",
+  "round/delivery-path-dotdot-cannot-evaluate",
   # ---------- NUL-byte path refusals, before any open ----------
   "round/brief-path-nul-cannot-evaluate",
   "round/delivery-path-nul-cannot-evaluate",
@@ -4514,8 +4521,17 @@ expected-check-ids = [
   "round/repo-option-refused-cannot-evaluate",
   "round/attempts-not-implemented-cannot-evaluate",
   "round/decisions-not-implemented-cannot-evaluate",
+  "round/execution-report-relative-cannot-evaluate",
   # ---------- the shared harness grammar's named group ----------
   "group/harness-family-named-group",
+  # ---------- the registry reader and the reconciliation legs ----------
+  "harness/registry-unreadable-harness-error",
+  "harness/registry-not-toml-harness-error",
+  "harness/registry-nested-too-deep-harness-error",
+  "harness/registry-out-of-memory-harness-error",
+  "harness/execution-set-missing-id-fails",
+  "harness/execution-set-extra-id-fails",
+  "harness/execution-set-reconciled-clean",
 ]
 
 [[suite]]
