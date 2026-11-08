@@ -18829,7 +18829,7 @@ def pgrep_self_match(data):
 # lexical over the raw text: a quoted string is one word, a comment and a here-document body hold no command.
 _STDIN_PY_TOKEN_RE = re.compile(
     r"(?P<space>[ \t\r\f\v]+|\\\n)"
-    r"|(?P<redir>\d*(?:&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||[<>]))"
+    r"|(?P<redir>(?:\{[A-Za-z_]\w*\}|\d*)(?:&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||[<>]))"
     r"|(?P<op>\|&|\|\||&&|;;|[|&;()`\n])"
     r"|(?P<comment>#[^\n]*)"
     r"|(?P<word>(?:\$'(?:[^'\\]|\\.)*'|[^\s<>|&;()`'\"\\]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)"
@@ -18872,18 +18872,22 @@ def _stdin_py_fd0(prefix):
 
 
 def _spg_redir_parts(text):
-    """A redirect token split into its leading fd digits (empty when implied) and its operator."""
+    """A redirect token split into its leading prefix and its operator. The prefix is either a {name}
+    descriptor-variable that bash opens and assigns (part of the redirect, not a word of the run) or the
+    explicit fd digits (empty when implied); the operator is the rest."""
+    if text.startswith("{"):
+        brace = text.index("}") + 1
+        return text[:brace], text[brace:]
     op = text.lstrip("0123456789")
     return text[:len(text) - len(op)], op
 
 
-def _spg_hash_is_glue(prev_char, rparen_subst, backquote_closing):
-    """Whether a '#' immediately following prev_char is glued onto the preceding word as a literal '#', the
-    way bash reads it only after a substitution's closing ')' (a '$( )' or '$(( ))') or a closing backquote.
-    After a subshell's ')', an arithmetic '(( ))' command's '))', or an opening backquote, bash begins a
-    comment instead, so the scan must read the rest of that line as command text and never skip a later line
-    as a here-document body; reading such a '#' as glue could drop a line and find fewer invocations."""
-    return (prev_char == ")" and rparen_subst) or (prev_char == "`" and backquote_closing)
+def _spg_glue_reading_present(command, start, line_end):
+    """The GLUE reading of a '#' at command[start] that directly follows a ')' or a backquote: bash may keep
+    such a '#' as a literal part of the preceding word rather than begin a comment, in which case the rest of
+    that physical line (command[start + 1:line_end]) is still command text. Scan that tail as its own command
+    and report whether a python-program-from-stdin invocation runs in it."""
+    return _spg_invocation_present(command[start + 1:line_end])
 
 
 def _spg_invocation_present(command):
@@ -18894,23 +18898,40 @@ def _spg_invocation_present(command):
     a quoted string (including an ANSI-C $'...' quote) stays one de-quoted word, so python named only as an
     argument (echo python3 -), in a quoted message, or in a here-document body is not found. A redirect's target
     word is dropped from the run, never read as a script operand (python3 2>/dev/null - reads program from
-    stdin). Several readings err toward finding one: a << inside an arithmetic (( )) or $(( )) is a shift, so it
-    opens no here-document and hides no line; a # glued right after a substitution's closing ) or a closing
-    backquote is part of that word, as in bash, not a comment, while a # after a subshell ), an arithmetic
-    command )) or an opening backquote is a comment whose rest-of-line (a << among it) can never skip a line
-    (_spg_hash_is_glue)."""
+    stdin), and a redirect's {name} descriptor prefix is part of the redirect, not a word of the run
+    (python3 {fd}>/dev/null - reads program from stdin). A << inside an arithmetic (( )) or $(( )) is a shift,
+    so it opens no here-document and hides no line.
+
+    A '#' that directly follows a ')' or a backquote is the one place the scan cannot tell bash's reading: bash
+    keeps it as literal glue on the preceding word after a word-building ')' (a $( ), a <( )/>( ) process
+    substitution, an array a=( )/a+=( ), or the real ')' of a $( ) whose inner case pattern's ')' the scan
+    cannot match) but begins a comment after a command ')' (a subshell, an arithmetic (( )) command) or an
+    opening backquote. Rather than guess, the scan reports an invocation if EITHER reading finds one:
+      - GLUE reading: _spg_glue_reading_present scans the rest of that physical line as its own command, so a
+        '; python3 -' kept after the '#' is found.
+      - COMMENT reading: the scan drops the rest of that physical line and continues from the newline, so a
+        python3 - on a LATER line is found; the dropped tail opens no here-document and no quote, so a '<<' or a
+        quote that bash never read (it was inside the comment) can never skip or swallow a later line.
+    This never finds fewer than bash. Where bash keeps the '#' as glue, any invocation it runs on that line is in
+    the tail the GLUE reading scans, and any invocation on a later line is reached by the continued scan, which
+    reads every later physical line as command text (it hides a later line only through a here-document or quote
+    opened by text before the '#', which bash, also reading the '#' as glue, opens too). Where bash reads the '#'
+    as a comment, bash drops that same line, and the COMMENT reading matches it while opening no construct of its
+    own, so it keeps every later line bash keeps. The cost is bounded: the GLUE reading recurses only on the
+    strictly shorter suffix after each such '#', so a command with k such '#'s costs at most k + 1 linear scans."""
     n, i = len(command), 0
     words, bodies, pending = [], [], None
-    depth, arith, paren = 0, [], []
-    in_backquote = False
-    prev_rparen_subst = prev_backquote_closing = False
+    depth, arith = 0, []
     while i < n:
         start = i
         match = _STDIN_PY_TOKEN_RE.match(command, i)
         kind, i = match.lastgroup, match.end()
-        if (kind == "comment" and start
-                and _spg_hash_is_glue(command[start - 1], prev_rparen_subst, prev_backquote_closing)):
-            kind, i = "word", start + 1
+        if kind == "comment" and start and command[start - 1] in (")", "`"):
+            line_end = command.find("\n", start)
+            line_end = n if line_end == -1 else line_end
+            if _spg_glue_reading_present(command, start, line_end):
+                return True
+            i = line_end                    # COMMENT reading: drop the rest of this physical line
         if kind == "space" or kind == "comment":
             continue
         if kind == "word" or kind == "stray":
@@ -18923,26 +18944,18 @@ def _spg_invocation_present(command):
             pending = None
             continue
         if kind == "redir":
-            pending = match.group().lstrip("0123456789")
+            pending = _spg_redir_parts(match.group())[1]
             if arith and pending in ("<<", "<<-"):
                 pending = None
             continue
         if match.group() == "(":
-            paren.append(start >= 1 and command[start - 1] == "$")
             depth += 1
             if command.startswith("(", i):
                 arith.append(depth)
-            prev_rparen_subst = prev_backquote_closing = False
         elif match.group() == ")":
-            prev_rparen_subst = paren.pop() if paren else False
-            prev_backquote_closing = False
             while arith and arith[-1] >= depth:
                 arith.pop()
             depth = max(depth - 1, 0)
-        elif match.group() == "`":
-            in_backquote = not in_backquote
-            prev_backquote_closing = not in_backquote
-            prev_rparen_subst = False
         if words and _stdin_py_reads_stdin(words):
             return True
         words, pending = [], None
@@ -18987,7 +19000,7 @@ def _spg_tokens(command):
             tokens.append(("comment", text))
             continue
         if kind == "redir":
-            op = text.lstrip("0123456789")
+            op = _spg_redir_parts(text)[1]
             tokens.append(("redir", text))
             if op in ("<<", "<<-"):
                 pending = op

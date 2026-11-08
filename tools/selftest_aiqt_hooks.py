@@ -3316,7 +3316,23 @@ _SPG_DENY_ROWS = (
     # A pipeline producer that itself reads its program from stdin leaves it reading the never-fed input.
     ("(spg-d70) a producer that itself reads stdin", "python3 - | python3 -"),
     # An ANSI-C $'...' quote is one word and must not swallow the newline and the python3 - after it.
-    ("(spg-d71) an ANSI-C quote does not swallow the next command", "echo $'\\''\npython3 -\necho '"))
+    ("(spg-d71) an ANSI-C quote does not swallow the next command", "echo $'\\''\npython3 -\necho '"),
+    # A '#' right after a ')' bash keeps as glue (a process substitution, an array assignment, or the real ')'
+    # of a $( ) whose inner case pattern's ')' the scan cannot match): the '; python3 -' kept after it runs,
+    # so the glue reading of the '#' must find it.
+    ("(spg-d72) a # glued after a process substitution )", "echo <(true)#; python3 -"),
+    ("(spg-d73) a # glued after an array assignment )", "a=(x)#; python3 -"),
+    ("(spg-d74) a # glued after an array-append )", "a+=(x)#; python3 -"),
+    ("(spg-d75) a # glued after a declare -a array )", "declare -a a=(x)#; python3 -"),
+    ("(spg-d76) a # glued after the real ) of a $( ) holding a case", "echo $(case x in x) true;; esac)#; python3 -"),
+    # The same case pattern read the other way: the scan matches the case pattern's ')' as the $( ) closer, so
+    # it meets the '#' early; the COMMENT reading of that '#' drops the rest of its line (opening no
+    # here-document from the '<<E' inside it) and still finds the python3 - bash runs in the case body.
+    ("(spg-d77) a # the scan meets at a case pattern ), comment reading", "echo $(case x in x)#<<E\npython3 -\nE\n;; esac)"),
+    # A {name} descriptor prefix is part of the redirect, not a word of the run, and is dropped with its target,
+    # so the lone - after it still reads the program from stdin.
+    ("(spg-d78) a named-descriptor output redirect prefix", "python3 {fd}>/dev/null -"),
+    ("(spg-d79) a named-descriptor input redirect prefix", "python3 {fd}< /dev/null -"))
 # Over-deny rows: a fed or harmless form outside the three shapes; bash does not block, the hook denies, a
 # disclosed over-deny. Each goes red with the default made allow, as the deny rows do.
 _SPG_OVERDENY_ROWS = (
@@ -3494,35 +3510,49 @@ _SPG_ORACLE_ROWS = (
     ("(spg-o78) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue", True, True),
     ("(spg-o79) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`", True, True),
     ("(spg-o80) a producer that itself reads stdin", "python3 - | python3 -", True, True),
-    ("(spg-o81) an ANSI-C quote does not swallow the next command", "echo $'\\''\npython3 -\necho '", True, True))
+    ("(spg-o81) an ANSI-C quote does not swallow the next command", "echo $'\\''\npython3 -\necho '", True, True),
+    ("(spg-o82) a # glued after a process substitution )", "echo <(true)#; python3 -", True, True),
+    ("(spg-o83) a # glued after an array assignment )", "a=(x)#; python3 -", True, True),
+    ("(spg-o84) a # glued after an array-append )", "a+=(x)#; python3 -", True, True),
+    ("(spg-o85) a # glued after a declare -a array )", "declare -a a=(x)#; python3 -", True, True),
+    ("(spg-o86) a # glued after the real ) of a $( ) holding a case", "echo $(case x in x) true;; esac)#; python3 -",
+     True, True),
+    ("(spg-o87) a # the scan meets at a case pattern ), comment reading", "echo $(case x in x)#<<E\npython3 -\nE\n;; esac)",
+     True, True),
+    ("(spg-o88) a named-descriptor output redirect prefix", "python3 {fd}>/dev/null -", True, True),
+    ("(spg-o89) a named-descriptor input redirect prefix", "python3 {fd}< /dev/null -", True, True))
 _SPG_ORACLE_WAIT = 4
 
 
 def _spg_flips():
     """Each flip name mapped to the aiqt_hooks attributes that break it: the three shape matchers (break one
     and its fed rows deny), the default (make the invocation scan find nothing, so every deny and over-deny row
-    allows), and the two glue readings (force a '#' to glue after any ')' or any backquote, the pre-fix reading
-    that let a '<<' in the comment skip the python3 - line, so the rows that depend on the comment reading
-    allow)."""
+    allows), and the glue reading (make _spg_glue_reading_present always report nothing, which reverts a '#'
+    after a ')' or a backquote to a comment-only reading, so every deny row whose invocation survives only
+    because the glue reading scans the rest of that line allows)."""
     return {
         "pipeline": {"_spg_shape_pipeline": lambda left, right: False},
         "redirect": {"_spg_shape_redirect": lambda cleaned: False},
         "heredoc": {"_spg_shape_heredoc": lambda cleaned: False},
         "default": {"_spg_invocation_present": lambda command: False},
-        "hash_paren": {"_spg_hash_is_glue": lambda prev_char, rparen_subst, backquote_closing:
-                       prev_char == ")" or (prev_char == "`" and backquote_closing)},
-        "hash_backquote": {"_spg_hash_is_glue": lambda prev_char, rparen_subst, backquote_closing:
-                           (prev_char == ")" and rparen_subst) or prev_char == "`"}}
+        "glue": {"_spg_glue_reading_present": lambda command, start, line_end: False}}
 
 
-# The glue-reading flips, each mapped to a deny row that the pre-fix reading (glue after any ')' or any
-# backquote) turns into a silent allow: glued, the '<<' in the comment text opens a here-document whose body
-# skip swallows the python3 - line. hash_paren covers the subshell and arithmetic-command cases, hash_backquote
-# the opening-backquote case.
-_SPG_HASH_FLIP_ROWS = (
-    ("hash_paren", "(spg-d67) a comment after a subshell, not glue", "(true)#<<true\npython3 -\ntrue"),
-    ("hash_paren", "(spg-d68) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue"),
-    ("hash_backquote", "(spg-d69) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`"))
+# The glue-reading flip, mapped to each deny row whose invocation lives only on the rest of the line after a '#'
+# that bash keeps as glue: with the glue reading disabled the '#' is read as a comment, its line tail is
+# dropped, and the python3 - after the '; ' is no longer found. (The comment-reading rows d67 to d69 and d77 are
+# NOT listed: their invocation is on a later line the continued scan still reads, so the glue flip leaves them
+# denied; they go red only under the default flip. d78 and d79 depend on the {name} redirect regex, not the glue
+# reading, so they too go red only under the default flip.)
+_SPG_GLUE_FLIP_ROWS = (
+    ("glue", "(spg-d54) a # right after a closing substitution", "echo $(echo a)#; python3 -"),
+    ("glue", "(spg-d55) a # right after a closing backquote", "echo `echo a`#; python3 -"),
+    ("glue", "(spg-d56) a # right after an arithmetic $(( ))", "echo $((1))#; python3 -"),
+    ("glue", "(spg-d72) a # glued after a process substitution )", "echo <(true)#; python3 -"),
+    ("glue", "(spg-d73) a # glued after an array assignment )", "a=(x)#; python3 -"),
+    ("glue", "(spg-d74) a # glued after an array-append )", "a+=(x)#; python3 -"),
+    ("glue", "(spg-d75) a # glued after a declare -a array )", "declare -a a=(x)#; python3 -"),
+    ("glue", "(spg-d76) a # glued after the real ) of a $( ) holding a case", "echo $(case x in x) true;; esac)#; python3 -"))
 
 
 def _spg_oracle(failures, handler):
@@ -3592,10 +3622,10 @@ def _test_python_stdin_program(failures):
                         "pipeline, a FILE redirect, a here-document), got {!r}".format(reason))
     flips = _spg_flips()
     used = {flip for _label, _command, flip in _SPG_FED_ROWS}
-    used_hash = {flip for flip, _label, _command in _SPG_HASH_FLIP_ROWS}
-    if used | used_hash | {"default"} != set(flips):
+    used_glue = {flip for flip, _label, _command in _SPG_GLUE_FLIP_ROWS}
+    if used | used_glue | {"default"} != set(flips):
         failures.append("(spg-flip-names) flips used by rows {} plus default differ from flips defined {}"
-                        .format(sorted(used | used_hash), sorted(flips)))
+                        .format(sorted(used | used_glue), sorted(flips)))
     for shape in ("pipeline", "redirect", "heredoc"):
         patches = flips[shape]
         saved = {name: getattr(aiqt_hooks, name) for name in patches}
@@ -3625,7 +3655,7 @@ def _test_python_stdin_program(failures):
         if got != "allow":
             failures.append("{}: with the default made allow this deny row must go red (allow), got {}"
                             .format(label, got))
-    for flip_name, label, command in _SPG_HASH_FLIP_ROWS:
+    for flip_name, label, command in _SPG_GLUE_FLIP_ROWS:
         patches = flips[flip_name]
         saved = {name: getattr(aiqt_hooks, name) for name in patches}
         for name, value in patches.items():
@@ -3636,7 +3666,7 @@ def _test_python_stdin_program(failures):
             for name, value in saved.items():
                 setattr(aiqt_hooks, name, value)
         if got != "allow":
-            failures.append("{}: with the {} glue reading forced this deny row must go red (allow), got {}"
+            failures.append("{}: with the {} reading disabled this deny row must go red (allow), got {}"
                             .format(label, flip_name, got))
     for label, data in (
             ("(spg-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
