@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "231f03f70a00e8226560745c2a6d00d6fd040eada32be95ace399d6dd1e3eafc"
+tree-sha256 = "761ef4332ae4759114a48b755aecc9a44dbdd92302722deae7a2b4297ef91b0e"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -131,8 +131,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9390
-sha256 = "55b5c983a7e6627282127c651711518a64cd78d6abf3751bc8357323e02e8643"
+bytes = 9425
+sha256 = "3bd9849cf41df3b9446fabc03d5d9ef3c58a8229bd612e120aaa07d5189e48e5"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2306,8 +2306,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53622
-sha256 = "8160b58683c5b131bb10dd1b6bfc56464cd61ad553bb7467e038ad14f7c9093a"
+bytes = 53662
+sha256 = "293de6448e4f7e52459089a1e762f98cd170d6c2a64487586db739e2dc047049"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -4146,8 +4146,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 219010
-sha256 = "001fee4d31d04dadaadef8ec61e026c634ce3be25189195693b0f19ad200d8b7"
+bytes = 219111
+sha256 = "6d1b29b8beca4d2a27b34f0b2d53e77976b9e0b45fa53921864fd5f221060f8b"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4350,6 +4350,11 @@ bytes = 269049
 sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
+path = "tools/check_review_round.py"
+bytes = 28325
+sha256 = "a4a618a7ce6815dd841b0ed02d4fe72ebe0874e5001d34654ccab36e762336a3"
+
+[[sources]]
 path = "tools/check_rule_placement.py"
 bytes = 101181
 sha256 = "7ad36408b0746a340bf2d2ea6ec56ac6553598c9e257982fcc2f95327e3c80ac"
@@ -4401,8 +4406,8 @@ sha256 = "7422a69b4ce6513111622aa77115546fa1b82883c1dee2e3fdc7d9a52e9c9579"
 
 [[sources]]
 path = "tools/check_verifier_delivery.py"
-bytes = 267341
-sha256 = "e131caaff9af4252901a7dcad13193d6f07bf1d7ba30f8e5ee6044ade26e5532"
+bytes = 267353
+sha256 = "4bf5398d01f35771fb99e30a7117b57521a69b5d3b79c2ac82f9886faf5fa6ae"
 
 [[sources]]
 path = "tools/check_version_monotonicity.py"

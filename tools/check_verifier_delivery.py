@@ -457,8 +457,8 @@ MAX_QUOTES = 500
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 PIN_LINE_RE = re.compile(r"BRIEF-PIN:(.*)")
 STATUS_PREFIX = "WORKER_STATUS"
-HARNESS_FIRST_RE = re.compile(r"WORKER_STATUS: [A-Z][A-Z_]*+ \(account=[^\s,()]++, rc=[^\s,()]++, family=[^\s,()]++, "
-                              r"model=[^\s,()]++, effort=[^\s,()]++\)")
+HARNESS_FIRST_RE = re.compile(r"WORKER_STATUS: [A-Z][A-Z_]*+ \(account=[^\s,()]++, rc=[^\s,()]++, "
+                              r"family=(?P<family>[^\s,()]++), model=[^\s,()]++, effort=[^\s,()]++\)")
 HARNESS_LAST_LINE = "WORKER_STATUS: COMPLETE"
 CLEAN_VERDICT = "NO BLOCKERS"
 # C1: the brief's INPUT declarations are read by the shared parser (tools/_input_declarations.py, bound
