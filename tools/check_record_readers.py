@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Record-reader inventory gate: every tool under tools/ that reads this project's records is on the
-consumer-switch list (.aiqt/opf-consumer-switch.toml) with a disposition, so a later switch flips one listed
-entry and a reader nobody listed fails here.
+"""Record-reader inventory gate: every tool under tools/ that this static scan detects as reading this
+project's records is on the consumer-switch list (.aiqt/opf-consumer-switch.toml) with a disposition, so a
+later switch flips one listed entry and a detected reader nobody listed fails here. A read in a form the
+scan cannot see (listed below) is not established by the list.
 
   check_record_readers.py              exit 0 clean, 1 finding, 2 cannot evaluate
   check_record_readers.py --self-test  assert every detection rule, every refusal and a pass over fixtures
@@ -12,16 +13,29 @@ Detection is static. Every .py and .sh file under tools/ is read (any directory 
 since vendored code reads no project record). opf/tools/ is not scanned: it is the store's own toolkit,
 the place readers switch to, not a reader of the records being switched. The switch list's [detect] table declares what to
 look for, and a file is a detected reader when any rule below matches:
-  name    a Python string constant equal to a declared record file name, or ending in "/" and that name
-  key     a Python subscript (x["k"]) or .get("k", ...) read of a declared registry key
+  name    a Python string constant equal to a declared record file name, or ending in that name after "/",
+          ":" or "}" (a joined path, a format template such as "{}:changelog.toml" for git show REV:PATH,
+          or the literal tail of an f-string or a concatenation)
+  key     a Python subscript (x["k"]) or .get("k", ...) read of a declared registry key, or a declared key
+          as an element of a literal tuple, list or set that a for loop or comprehension iterates
   flag    a Python string constant equal to a declared command-line flag that takes a record path
-  module  a Python import of a declared record-reading module (import m, from m import x, or
-          importlib.import_module("m")): an indirect reader
+  module  a Python import of a declared record-reading module (import m, from m import x,
+          importlib.import_module("m") or __import__("m")), or a string constant equal to m.py or ending
+          in "/m.py", "m.py" after ":" or "}" (the module loaded by file path): an indirect reader
   shell   a .sh line holding a declared record file name or flag as a whole word
-What the scan cannot see: a path built at run time from parts, a path given only on a command line whose
-flag is not declared, paths kept in the untracked orchestration registry, readers outside tools/
-(the hook library under .aiqt/core is seen only through the module rule), and a read that never names a
-file, key, flag or module. A self-test that writes record fixtures is detected like a reader; the
+The key vocabulary is checked against its authoritative source: every registry key the hook library
+(.aiqt/core/hooks/scripts/aiqt_hooks.py) reads from the registry (reg, reg_data) or its record table (rec)
+inside an argument of _orch_path(root, value), the helper through which it resolves each registry-declared
+record path, directly or through a loop over a tuple of string constants. A key it reads that [detect] keys
+lacks, a hook library that cannot be read or parsed, or one that yields no key, is cannot-evaluate.
+What the scan cannot see: a name, key or module file name built at run time from parts ("changelog" +
+".toml", "aiqt_hooks" + ".py"), a record name in the middle of a longer string that is not a path ending, a
+key held in a named collection before a loop iterates it, a module loaded through a variable name, a path
+given only on a command line whose flag is not declared, a .sh file that runs a record-reading module, paths
+kept in the untracked orchestration registry, readers outside tools/, and a read that never names a file,
+key, flag or module. The derivation of registry keys sees only reads whose receiver is named reg, reg_data
+or rec inside an _orch_path argument; a record path the hook library resolves another way is not derived.
+A self-test that writes record fixtures is detected like a reader; the
 fixture-only disposition records it. A tool that imports a declared module for some other part of it is
 detected too; the not-a-reader disposition records it, with the reason.
 
@@ -29,8 +43,10 @@ Each [[reader]] entry carries path, records (a non-empty list of names), disposi
 disposition is one of switch, stays-outside-store, fixture-only, not-a-reader, or indirect-via:<path>,
 where <path> is another listed entry. Exit 1 (finding): a detected reader that is not listed; a listed file that is gone;
 a listed file the scan no longer detects. Exit 2 (cannot evaluate): a missing, unreadable, non-UTF-8,
-malformed, too deeply nested or schema-invalid switch list, a duplicate entry, an unknown disposition or an
-indirect-via target that is not listed; a scanned source that is unreadable, not a regular file (a FIFO is
+malformed, too deeply nested or schema-invalid switch list, a duplicate entry, an unknown disposition, an
+indirect-via target that is not listed or an indirect-via cycle; a [detect] keys list that lacks a key the
+hook library derives; a missing scan root, a symbolic link to a directory or a directory that cannot be
+listed; a scanned source larger than MAX_BYTES or that is unreadable, not a regular file (a FIFO is
 refused by the opened descriptor's type, never a blocked read), a symbolic link, not UTF-8 or not parseable
 Python. A run with any cannot-evaluate cause exits 2 even when it also has findings.
 """
@@ -66,6 +82,16 @@ VIA_PREFIX = "indirect-via:"
 DETECT_FIELDS = ("names", "keys", "flags", "modules")
 READER_FIELDS = frozenset({"path", "records", "disposition", "reason"})
 TOP_FIELDS = frozenset({"format-version", "detect", "reader"})
+# The authoritative source of registry keys: the hook library resolves every registry-declared record path
+# through its _orch_path(root, value) helper, so the keys it reads from the registry (reg, reg_data) or
+# from the registry's record table (rec) inside an _orch_path argument are the keys that name a record.
+# [detect] keys must hold each of them; a key the hook library gains and the list lacks is cannot-evaluate.
+HOOK_LIBRARY = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
+HOOK_PATH_RESOLVER = "_orch_path"
+HOOK_REGISTRY_NAMES = frozenset({"reg", "reg_data", "rec"})
+# A record name ending a string after one of these is a path built by formatting or joining: "{}:name"
+# (a git show REV:PATH argument), "{}/name", f"{d}/name" or rev + ":name".
+NAME_JOINERS = ("/", ":", "}")
 
 
 class CannotEvaluate(Exception):
@@ -182,11 +208,97 @@ def load_switch_list(root):
             if target == path or target not in readers:
                 raise CannotEvaluate("{}: {} names {}, which is not another listed entry".format(
                     SWITCH_LIST, path, disposition))
+    # An indirect-via chain must end at an entry that is not itself indirect: a cycle (A via B, B via A, or
+    # longer) names no reader the switch would flip. Each step visits a new entry, so the walk is bounded.
+    for path in readers:
+        seen, current = [path], path
+        while readers[current]["disposition"].startswith(VIA_PREFIX):
+            current = readers[current]["disposition"][len(VIA_PREFIX):]
+            if current in seen:
+                raise CannotEvaluate("{}: indirect-via cycle {}".format(
+                    SWITCH_LIST, " -> ".join(seen + [current])))
+            seen.append(current)
     return detect, readers
 
 
+def _parse_python(path, rel):
+    """The parsed module at path, or CannotEvaluate naming rel when it cannot be read, decoded or parsed."""
+    text = _read_regular(path, rel)
+    try:
+        text = text.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CannotEvaluate("{}: not UTF-8 ({})".format(rel, exc)) from None
+    try:
+        return ast.parse(text, filename=rel)
+    except (SyntaxError, ValueError) as exc:
+        raise CannotEvaluate("{}: not parseable Python ({})".format(rel, exc)) from None
+    except RecursionError:
+        raise CannotEvaluate("{}: nested too deeply to parse".format(rel)) from None
+
+
+def _is_registry(node):
+    """True for a registry name (reg, reg_data, rec) or an `or` whose first operand is one: (reg or {})."""
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) and node.values:
+        node = node.values[0]
+    return isinstance(node, ast.Name) and node.id in HOOK_REGISTRY_NAMES
+
+
+def _scope_walk(scope):
+    """Every node of one function or module body, not descending into a nested function, so a loop
+    variable is resolved only within the scope that binds it."""
+    stack = list(ast.iter_child_nodes(scope))
+    while stack:
+        node = stack.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _loop_strings(scope):
+    """Each loop variable in scope bound by `for v in (<string constants>)`, mapped to those strings."""
+    loops = {}
+    for node in _scope_walk(scope):
+        if (isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and isinstance(node.target, ast.Name)
+                and isinstance(node.iter, (ast.Tuple, ast.List, ast.Set))):
+            values = [e.value for e in node.iter.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            loops.setdefault(node.target.id, set()).update(values)
+    return loops
+
+
+def hook_registry_keys(root):
+    """The sorted registry keys the hook library resolves to a record path: each read reg.get(K), rec[K],
+    (reg_data or {}).get(K) inside an argument of _orch_path(root, ...), where K is a string constant or
+    a loop variable over a tuple of string constants (`for key in ("findings", ...)`). CannotEvaluate when
+    the library cannot be read or parsed, or yields no key at all (a derivation that finds nothing would
+    pass every list vacuously)."""
+    tree = _parse_python(os.path.join(root, HOOK_LIBRARY), HOOK_LIBRARY)
+    keys = set()
+    scopes = [tree] + [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    for scope in scopes:
+        loops = _loop_strings(scope)
+        for call in _scope_walk(scope):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                    and call.func.id == HOOK_PATH_RESOLVER and len(call.args) == 2):
+                continue
+            for node in ast.walk(call.args[1]):
+                key = None
+                if isinstance(node, ast.Subscript) and _is_registry(node.value):
+                    key = node.slice
+                elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                      and node.func.attr == "get" and _is_registry(node.func.value) and node.args):
+                    key = node.args[0]
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    keys.add(key.value)
+                elif isinstance(key, ast.Name):
+                    keys.update(loops.get(key.id, ()))
+    if not keys:
+        raise CannotEvaluate("{}: no registry key is read inside a {}(root, ...) argument, so the [detect] "
+                             "keys cannot be checked against it".format(HOOK_LIBRARY, HOOK_PATH_RESOLVER))
+    return tuple(sorted(keys))
+
+
 def _ends_in_name(value, names):
-    return next((n for n in names if value == n or value.endswith("/" + n)), None)
+    return next((n for n in names if value == n or any(value.endswith(j + n) for j in NAME_JOINERS)), None)
 
 
 def _rule_name(tree, detect):
@@ -208,6 +320,12 @@ def _rule_key(tree, detect):
             key = node.args[0].value
         if isinstance(key, str) and key in keys:
             yield node.lineno, "registry key {!r}".format(key)
+        # A key iterated from a literal collection: for k in ("findings", "mode"): reg.get(k).
+        if (isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension))
+                and isinstance(node.iter, (ast.Tuple, ast.List, ast.Set))):
+            for element in node.iter.elts:
+                if isinstance(element, ast.Constant) and isinstance(element.value, str) and element.value in keys:
+                    yield element.lineno, "registry key {!r} iterated".format(element.value)
 
 
 def _rule_flag(tree, detect):
@@ -225,9 +343,15 @@ def _rule_module(tree, detect):
         elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
             names = (node.module,)
         elif (isinstance(node, ast.Call) and isinstance(node.func, (ast.Attribute, ast.Name))
-              and getattr(node.func, "attr", getattr(node.func, "id", None)) == "import_module"
+              and getattr(node.func, "attr", getattr(node.func, "id", None)) in ("import_module", "__import__")
               and node.args and isinstance(node.args[0], ast.Constant)):
             names = (node.args[0].value,)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            # A module loaded by file path (importlib.util.spec_from_file_location, runpy.run_path, a
+            # SourceFileLoader): a string naming the module's own file, whole or as its last component.
+            hit = _ends_in_name(node.value, tuple(m + ".py" for m in modules))
+            if hit is not None:
+                yield node.lineno, "names module file {!r}".format(hit)
         for name in names:
             if isinstance(name, str) and name in modules:
                 yield node.lineno, "imports {!r}".format(name)
@@ -247,22 +371,17 @@ SH_RULES = {"shell": _rule_shell}
 
 def detect_file(path, rel, detect):
     """The sorted (line, evidence) hits for one source file. CannotEvaluate when it cannot be judged."""
-    text = _read_regular(path, rel)
-    try:
-        text = text.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise CannotEvaluate("{}: not UTF-8 ({})".format(rel, exc)) from None
     hits = set()
     if rel.endswith(".sh"):
+        text = _read_regular(path, rel)
+        try:
+            text = text.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CannotEvaluate("{}: not UTF-8 ({})".format(rel, exc)) from None
         for rule in SH_RULES.values():
             hits.update(rule(text, detect))
         return sorted(hits)
-    try:
-        tree = ast.parse(text, filename=rel)
-    except (SyntaxError, ValueError) as exc:
-        raise CannotEvaluate("{}: not parseable Python ({})".format(rel, exc)) from None
-    except RecursionError:
-        raise CannotEvaluate("{}: nested too deeply to parse".format(rel)) from None
+    tree = _parse_python(path, rel)
     for rule in PY_RULES.values():
         hits.update(rule(tree, detect))
     return sorted(hits)
@@ -302,6 +421,13 @@ def scan(root):
         detect, readers = load_switch_list(root)
     except CannotEvaluate as exc:
         return [], [str(exc)], {}
+    try:
+        lacking = [k for k in hook_registry_keys(root) if k not in detect["keys"]]
+    except CannotEvaluate as exc:
+        return [], [str(exc)], {}
+    if lacking:
+        return [], ["{}: [detect] keys lacks {}, which {} resolves to a record path through {}".format(
+            SWITCH_LIST, ", ".join(repr(k) for k in lacking), HOOK_LIBRARY, HOOK_PATH_RESOLVER)], {}
     sources, errors = walk_sources(root)
     detected = {}
     for rel in sources:
@@ -374,6 +500,8 @@ _FIXTURE_FILES = {
     "tools/by_shell.sh": "#!/bin/bash\ncat ledger.toml\n",
     "tools/plain.py": 'X = "ledger.toml.bak"\nY = "myledger.toml"\n',
     "tools/_vendor/ignored.py": 'P = "ledger.toml"\n',
+    # The fixture hook library: the one registry key it resolves through _orch_path is in [detect] keys.
+    HOOK_LIBRARY: 'def a(root, reg):\n    return _orch_path(root, reg.get("ledger_path"))\n',
 }
 _FIXTURE_ENTRIES = (
     ("tools/by_name.py", "switch"),
@@ -420,8 +548,17 @@ def _gate(files=None, switch=None, prepare=None):
             prepare(tmp)
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = run_gate(tmp)
-        return rc, out.getvalue() + err.getvalue()
+            rc, crash = _guarded(run_gate, tmp)
+        # An exception the gate fails to handle makes the row fail by its own name, never abort the run.
+        return ("uncaught " + crash) if crash is not None else rc, out.getvalue() + err.getvalue()
+
+
+def _guarded(fn, *args):
+    """(fn(*args), None), or (None, the exception's class and text) when fn raises."""
+    try:
+        return fn(*args), None
+    except Exception as exc:
+        return None, "{}: {}".format(type(exc).__name__, exc)
 
 
 def _without_rule(table, name, files, switch=None):
@@ -558,25 +695,122 @@ def _self_test():
                                                            ("tools/by_flag.py", "fixture-only"),
                                                            ("tools/by_module.py", "indirect-via:tools/x.py"),
                                                            ("tools/by_shell.sh", "switch"))),
-             "not another listed entry")):
+             "not another listed entry"),
+            # A path that starts under tools/ and ends in .py but climbs out through a .. component.
+            ("refuse/malformed-list-path-dotdot", _switch_text() + _entry("tools/../tools/x.py", "switch"),
+             "is not a .py or .sh path"),
+            ("refuse/indirect-via-cycle", _switch_text((("tools/by_name.py", "switch"),
+                                                        ("tools/by_key.py", "switch"),
+                                                        ("tools/by_flag.py", "fixture-only"),
+                                                        ("tools/by_module.py", "indirect-via:tools/by_shell.sh"),
+                                                        ("tools/by_shell.sh", "indirect-via:tools/by_module.py"))),
+             "indirect-via cycle tools/by_module.py -> tools/by_shell.sh -> tools/by_module.py")):
         rc, out = _gate(switch=text)
         check(name, rc == 2 and needle in out, (rc, out))
 
-    # The TOML parse site handles each failure tomllib can raise, by class.
+    # Each read form beyond a plain constant, subscript, .get or import, unlisted, exits 1 naming it.
+    for case_id, body, evidence in (
+            ("detect/unlisted-iterated-key-reader", 'def f(r):\n    for k in ("ledger_path",):\n        r.get(k)\n',
+             "registry key 'ledger_path' iterated"),
+            ("detect/unlisted-format-name-reader", 'def f(rev):\n    return "{}:ledger.toml".format(rev)\n',
+             "name 'ledger.toml'"),
+            ("detect/unlisted-import-module-reader", 'import importlib\nM = importlib.import_module("ledger_lib")\n',
+             "imports 'ledger_lib'"),
+            ("detect/unlisted-dunder-import-reader", 'M = __import__("ledger_lib")\n', "imports 'ledger_lib'"),
+            ("detect/unlisted-path-loaded-module",
+             'import importlib.util\nS = importlib.util.spec_from_file_location("l", "/x/ledger_lib.py")\n',
+             "names module file 'ledger_lib.py'")):
+        rc, out = _gate(dict(_FIXTURE_FILES, **{"tools/new_form.py": body}))
+        check(case_id, rc == 1 and "tools/new_form.py" in out and evidence in out, (rc, out))
+
+    # The [detect] keys are checked against the registry keys the hook library resolves through _orch_path.
+    for case_id, hook, needle in (
+            ("refuse/hook-key-missing-from-detect",
+             'def a(root, reg):\n    return _orch_path(root, reg.get("ledger_path")) or '
+             '_orch_path(root, reg["ledger_extra"])\n', "[detect] keys lacks 'ledger_extra'"),
+            ("refuse/hook-loop-key-missing-from-detect",
+             'def a(root, rec):\n    for key in ("ledger_path", "ledger_loop"):\n        _orch_path(root, rec.get(key))\n',
+             "[detect] keys lacks 'ledger_loop'"),
+            ("refuse/hook-or-key-missing-from-detect",
+             'def a(root, reg_data):\n    return _orch_path(root, (reg_data or {}).get("ledger_dir"))\n',
+             "[detect] keys lacks 'ledger_dir'"),
+            ("refuse/hook-library-no-keys", 'def a(root, reg):\n    return reg\n', "no registry key is read"),
+            ("refuse/hook-library-unparseable", "def a(:\n", HOOK_LIBRARY + ": not parseable Python")):
+        rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
+        check(case_id, rc == 2 and needle in out, (rc, out))
+    # Reads that are not registry record keys derive nothing: a non-registry receiver inside _orch_path, and a
+    # loop variable bound in another function.
+    hook = ('def a(root, reg, lease, rec):\n    return _orch_path(root, reg.get("ledger_path")) or '
+            '_orch_path(root, lease.get("ledger_other")) or _orch_path(root, rec.get(key))\n'
+            'def b():\n    for key in ("ledger_far",):\n        pass\n')
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
+    check("ignore/hook-unrelated-reads", rc == 0, (rc, out))
+
+    def _no_hook(tmp):
+        os.unlink(os.path.join(tmp, HOOK_LIBRARY))
+    rc, out = _gate(prepare=_no_hook)
+    check("refuse/hook-library-missing", rc == 2 and HOOK_LIBRARY + ": missing" in out, (rc, out))
+
+    def _linked_dir(tmp):
+        os.symlink(os.path.join("..", "opf", "tools"), os.path.join(tmp, "tools", "linked"))
+    rc, out = _gate(prepare=_linked_dir)
+    check("refuse/symlinked-directory-cannot-evaluate",
+          rc == 2 and "tools/linked: a symbolic link to a directory" in out, (rc, out))
+
+    import shutil
     import unittest.mock
+
+    def _locked_dir(tmp):
+        os.makedirs(os.path.join(tmp, "tools", "locked"))
+        os.chmod(os.path.join(tmp, "tools", "locked"), 0)
+    if os.geteuid() == 0:
+        real_scandir = os.scandir
+
+        def _refuse_locked(path="."):
+            if str(path).endswith(os.sep + "locked"):
+                raise PermissionError(13, "listing refused by the self-test", str(path))
+            return real_scandir(path)
+        with unittest.mock.patch.object(os, "scandir", _refuse_locked):
+            rc, out = _gate(prepare=_locked_dir)
+    else:
+        rc, out = _gate(prepare=_locked_dir)
+    check("refuse/unlistable-directory-cannot-evaluate", rc == 2 and "cannot list a scanned directory" in out,
+          (rc, out))
+
+    def _no_scan_root(tmp):
+        shutil.rmtree(os.path.join(tmp, "tools"))
+    rc, out = _gate(prepare=_no_scan_root)
+    check("refuse/missing-scan-root-cannot-evaluate", rc == 2 and "tools: scan root missing" in out, (rc, out))
+
+    # MAX_BYTES, at each side of the bound: one byte over is refused; exactly at it and one under are read.
+    for case_id, size, want in (("refuse/source-over-max-bytes", MAX_BYTES + 1, 2),
+                                ("pass/source-at-max-bytes", MAX_BYTES, 0),
+                                ("pass/source-under-max-bytes", MAX_BYTES - 1, 0)):
+        rc, out = _gate(dict(_FIXTURE_FILES, **{"tools/big.py": b"#" + b"x" * (size - 2) + b"\n"}))
+        over = "tools/big.py: larger than {} bytes".format(MAX_BYTES) in out
+        check(case_id, rc == want and over == (want == 2), (rc, size, out[-300:]))
+
+    # Shell words are whole: a declared name with a word character before it, or a flag with one after it,
+    # is not a match.
+    rc, out = _gate(dict(_FIXTURE_FILES, **{"tools/near.sh": "#!/bin/bash\ncat myledger.toml\nrun --ledgers\n"}))
+    check("ignore/shell-word-boundaries", rc == 0 and "near.sh" not in out, (rc, out))
+
+    # The TOML parse site handles each failure tomllib can raise, by class; a handler that is missing fails
+    # the row by name, never by an uncaught exception.
     for exc_class, case_id in ((RecursionError, "parse-site/handles-recursionerror"),
                                (MemoryError, "parse-site/handles-memoryerror"),
                                (ValueError, "parse-site/handles-valueerror")):
         with unittest.mock.patch.object(tomllib, "loads", side_effect=exc_class("raised by the self-test")):
-            data, error = _parse_switch_text("x = 1\n")
-        check(case_id, data is None and bool(error), (data, error))
+            result, crash = _guarded(_parse_switch_text, "x = 1\n")
+        data, error = result if result is not None else (None, None)
+        check(case_id, crash is None and data is None and bool(error), (result, crash))
 
-    got = [_main_exit(argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
-                                         ["--execution-report", "relative/report"])]
-    check("refuse/unrecognized-argument", got == [2, 2, 2], got)
+    got = [_guarded(_main_exit, argv) for argv in (["--bogus"], ["--self-test", "--bogus"],
+                                                   ["--execution-report", "relative/report"])]
+    check("refuse/unrecognized-argument", got == [(2, None)] * 3, got)
 
-    rc = run_gate(ROOT)
-    check("live/real-tree-passes", rc == 0, rc)
+    rc, crash = _guarded(run_gate, ROOT)
+    check("live/real-tree-passes", crash is None and rc == 0, (rc, crash))
 
     if FAILURES:
         print("SELF-TEST FAIL: check_record_readers {} of {} check(s) failed".format(len(FAILURES), len(EXECUTED)))
@@ -584,11 +818,15 @@ def _self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: check_record_readers {} checks (a clean fixture passes; an unlisted reader found by "
-          "each of the name, key, flag, module and shell rules exits 1, and passes with that rule removed; a "
-          "listed file that is gone or no longer reads exits 1; _vendor and near-miss strings are ignored; a "
-          "FIFO, unreadable, symlinked, non-UTF-8 or unparseable source and a missing, malformed, too deeply "
-          "nested, duplicated or unknown-disposition list exit 2; the parse site handles RecursionError, "
-          "MemoryError and ValueError; the live tree passes)".format(len(EXECUTED)))
+          "each of the name, key, flag, module and shell rules exits 1, and passes with that rule removed; an "
+          "iterated key, a formatted name, import_module, __import__ and a module file path are each detected; "
+          "a listed file that is gone or no longer reads exits 1; _vendor, near-miss strings and near-miss "
+          "shell words are ignored; a FIFO, unreadable, symlinked, oversized, non-UTF-8 or unparseable source, "
+          "a symlinked or unlistable directory, a missing scan root, and a missing, malformed, too deeply "
+          "nested, duplicated, unknown-disposition or indirect-via-cycle list exit 2; [detect] keys lacking a "
+          "key the hook library resolves, or a missing, unparseable or keyless hook library, exits 2; the "
+          "parse site handles RecursionError, MemoryError and ValueError; the live tree passes)".format(
+              len(EXECUTED)))
     return 0
 
 

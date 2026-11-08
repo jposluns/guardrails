@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "30632d39d16932f6f0620d245b2897162f1ef3ad47091941639ca5cf924cea96"
+tree-sha256 = "91611a036aa85b2342cd562eb706ee331e7d0d7591b17bf17020e08ac8ef7001"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4321,8 +4321,8 @@ sha256 = "38ea2586cf3b7e4a27abdb2c7e8d512d9a68d4fe7fc90defdeb9cb3832537a6e"
 
 [[sources]]
 path = "tools/check_record_readers.py"
-bytes = 31046
-sha256 = "f7960c6f608288f535c93e4a1924b275b8180cec8e91af0f29c96577c094b9ce"
+bytes = 46519
+sha256 = "732ec9d5a22735702993b3ea20f34e65912fc46b54647520f48d41128a86859d"
 
 [[sources]]
 path = "tools/check_record_sections.py"
@@ -4651,8 +4651,8 @@ sha256 = "cc0464c20f62e7c83131c52c90ff9eafa40bcdd2f425fa158496c83e326a9b7c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 221827
-sha256 = "0c595dd5761a9abb19d85bf7d9ee10a66cc0489b231d66a773c34208918c4699"
+bytes = 222643
+sha256 = "b0cbd0004321f85d03ed5977f89a4d77f152c6d8e67ef64180d55a6e0d1f8427"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

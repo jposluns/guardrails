@@ -1,13 +1,18 @@
-# The OPF consumer-switch list: every tool under tools/ that reads this project's records, each with the
-# disposition it takes when the project's records move into the OPF store. tools/check_record_readers.py
-# holds this list against a static scan of tools/: a reader that is not listed fails, and a listed file
-# that is gone or no longer detected as a reader fails. A later switch flips one entry's disposition.
+# The OPF consumer-switch list: every tool under tools/ that the static scan in
+# tools/check_record_readers.py detects as reading this project's records, each with the disposition it
+# takes when the project's records move into the OPF store. A detected reader that is not listed fails, and
+# a listed file that is gone or no longer detected fails. The scan sees only the forms its docstring names;
+# a read it cannot see (its docstring lists them) is not established by this list. A later switch flips one
+# entry's disposition.
 #
 # [detect] declares what the scan looks for (see the gate's docstring for each rule):
-#   names    record file names, matched as a whole string constant or as its last path component
-#   keys     orchestration-registry keys that name a record, matched as subscript or .get reads
+#   names    record file names, matched as a whole string constant or as its end after "/", ":" or "}"
+#   keys     orchestration-registry keys that name a record, matched as subscript or .get reads or as an
+#            element of a literal collection a loop iterates; it must hold every registry key the hook
+#            library (.aiqt/core/hooks/scripts/aiqt_hooks.py) reads inside an _orch_path argument
 #   flags    command-line flags that take a record path
-#   modules  record-reading modules; importing one makes the importer an indirect reader
+#   modules  record-reading modules; importing one (import, import_module or __import__), or naming its
+#            .py file, makes the file an indirect reader
 #
 # Each [[reader]] has path, records, disposition and reason. Dispositions:
 #   switch               reads records that move into the store; switched in a later step
@@ -20,7 +25,7 @@ format-version = 1
 
 [detect]
 names = ["TODO.md", "changelog.toml", "roadmap.toml", "pending-fixes.toml", "orchestration.json", "orchestration.local.json"]
-keys = ["mistakes_register", "attestations", "pending_decisions", "handoff"]
+keys = ["mistakes_register", "attestations", "pending_decisions", "handoff", "findings", "mode", "state_dir"]
 flags = ["--backlog"]
 modules = ["aiqt_hooks", "check_mistakes_register"]
 
@@ -149,3 +154,105 @@ path = "tools/check_relied_exit_pipes.py"
 records = ["none"]
 disposition = "not-a-reader"
 reason = "It imports the hook library only for its shell lexer and reads no project record."
+
+[[reader]]
+path = "tools/check_child_status_coverage.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file and check_mistakes_register.py only as source paths in its child-status tables; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_dangerous_api.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file and check_mistakes_register.py only as paths in its reviewed-site tables; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_gensrc_failclose.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "The word mode is one of the fixture names its self-test iterates to build source files; it is not the registry's mode key."
+
+[[reader]]
+path = "tools/check_git_option_table.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file as the source whose git option table it checks; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_instruction_budget.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its findings subscript reads its own measurement result, not the registry's findings key."
+
+[[reader]]
+path = "tools/check_python_floor.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file as an interpreter-floor surface it checks; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_python_launcher_isolation.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook script's plugin path to check how hooks are launched; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/check_record_readers.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It parses the hook library's source to derive the registry keys the switch list must declare, and reads no project record."
+
+[[reader]]
+path = "tools/doctor.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its mode reads are a file mode in a pin poststate, not the registry's mode key."
+
+[[reader]]
+path = "tools/gen_hooks.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file to generate the plugin's hook copy; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/gen_secret_patterns.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names the hook library's file as the target it renders secret patterns into; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/migrate.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its mode reads are a file mode in a migration operation, not the registry's mode key."
+
+[[reader]]
+path = "tools/pin.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its mode reads are a file mode in a pin operation, not the registry's mode key."
+
+[[reader]]
+path = "tools/selftest_git_fixture_env.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names check_mistakes_register.py only in its table of self-tests to launch; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/selftest_git_fixture_env_config_combined.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names check_mistakes_register.py only in its table of self-tests to launch; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/selftest_git_fixture_env_config_malformed.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names check_mistakes_register.py only in its table of self-tests to launch; the scan finds no record name, registry key or record-path flag in it."
+
+[[reader]]
+path = "tools/selftest_git_fixture_env_core.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "It names check_mistakes_register.py only in its table of self-tests to launch; the scan finds no record name, registry key or record-path flag in it."
