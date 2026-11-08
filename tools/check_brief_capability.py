@@ -589,19 +589,22 @@ number of git or python options; a closed shape is matched once per sentence at 
 command line is split on whitespace once and its tokens classified by a plain predicate (argument_token), once per
 command line end; per opener, R6 measures its subject's length before reading it; and every word-run, command and
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
-space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print LINEAR_RUNS triples of finite,
-nonnegative times, each shape is evaluated LINEAR_RUNS times at each of three sizes (1 KiB, 8 KiB and 64 KiB), every
-brief built afresh, each run timed in CPU seconds of the child and of the processes it reaped (the parse child among
-them), so a busy host's wait for a CPU is not counted; growth is judged on the cost above the measured fixed cost,
-the median at 1 KiB, where the repeated unit is a vanishing share and launching one parse child per run dominates:
-the 64 KiB median's excess over that baseline must be at most LINEAR_FACTOR times the 8 KiB median's excess over it,
-floored at zero so a noisy baseline can only tighten the bound, plus LINEAR_SLACK seconds (the input is eight times
-larger than 8 KiB; a pass whose time grows with the square of the input takes about 64 times as long over the
-excess, where the raw medians can hide a moderate pass behind the fixed launch cost, which is most of the 8 KiB
-median). A run whose parse child is killed at the reading's parse deadline fails the shape whatever CPU time it was
-charged (a killed child is charged only its share of the deadline), as does a child stopped at the timeout. Every shape carries a lead that holds "nput", so each runs through the shared parsed-document reading, never
-the ASCII fast path, and the larger size sits exactly at that reading's text ceiling; a shape the reading's own
-bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the nesting prescan)
+space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print LINEAR_RUNS quadruples of finite,
+nonnegative times, each shape is evaluated LINEAR_RUNS times at each of four sizes (1 KiB, 8 KiB, 32 KiB and
+64 KiB), every brief built afresh, each run timed in CPU seconds of the child and of the processes it reaped (the
+parse child among them), so a busy host's wait for a CPU is not counted; growth is judged on the raw medians over
+two spans, each bound's factor exactly that span's size ratio: the 32 KiB median must be at most 4 times the 8 KiB
+median plus LINEAR_SLACK seconds, and the 64 KiB median at most 2 times the 32 KiB median plus LINEAR_SLACK seconds.
+A cost that is a fixed launch cost plus a linear term meets both bounds with the whole fixed cost plus LINEAR_SLACK
+to spare, whatever its slope, while a pass whose time grows with the square of the input quadruples over the top
+span and so fails it once its 64 KiB squared-growth cost exceeds four thirds of the fixed cost plus LINEAR_SLACK.
+The 1 KiB median is measured and reported for diagnosis only and never judged, so no stray 1 KiB run, high or low,
+can move or loosen the verdict. A run whose parse child is killed at the reading's parse deadline fails the shape
+whatever CPU time it was charged (a killed child is charged only its share of the deadline), as does a child stopped
+at the timeout. Every shape carries a lead that holds "nput", so each runs through the shared parsed-document
+reading, never the ASCII fast path, and the largest size sits exactly at that reading's text ceiling; a shape the
+reading's own bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the
+nesting prescan)
 is timed through its refusal, which is the bounded behaviour an oversized or pathological brief gets. A shape is
 evidence only for the text it repeats. On the previous revision, with a 1 MiB size, a 60-second timeout and the
 parse-free fast path (measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix
@@ -3907,7 +3910,9 @@ P5_GOVERNING_PIN = (P5_PIN + "Use `git -C w fetch <url> refs/dispatch/1/b2 && gi
 P5_CLONE_REVISION = (P5_PIN + "Use `git clone --revision={0} <url> w` and review w.\n",
                      P5_PIN + "Use `git clone --revision {0} <url> w` and review w.\n",
                      P5_PIN + "Use `git clone --revision=main <url> w` and review w.\n")
-LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
+# the slack over each span bound of the linear judgement (seconds, exact in binary so the self-test's
+# at-the-bound rows read back exactly) and the whole measuring child's timeout
+LINEAR_SLACK, LINEAR_TIMEOUT = 0.25, 120
 # fresh evaluations per size whose median CPU time is judged. Wall clock measured the host, not the work:
 # with eight busy loops sharing the measuring CPU in a square wave, one 64 KiB run of "git -c " took
 # 4.185 s of wall clock against 0.191 s for 8 KiB (ratio 21.9, over the bound) while its CPU time was
@@ -4145,13 +4150,12 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
-# The child caps its address space at 1 GiB, then evaluates 1 KiB, 8 KiB and 64 KiB briefs (the largest
-# exactly at the shared reading's text ceiling) in turn, LINEAR_RUNS times each, every brief built afresh:
-# a lead that forces the parsed-document path (it holds "nput", so the ASCII fast path never answers it),
-# a prefix, one unit repeated, and a suffix. The 1 KiB size is the fixed-cost baseline: launching one
-# parse child per run costs about the same whatever the text size, so growth is judged on each larger
-# median's excess over the 1 KiB median, which a pass that grows with the input cannot hide behind the
-# launch cost. A prescan refusal (a cannot-evaluate) is still a bounded
+# The child caps its address space at 1 GiB, then evaluates 1 KiB, 8 KiB, 32 KiB and 64 KiB briefs (the
+# largest exactly at the shared reading's text ceiling) in turn, LINEAR_RUNS times each, every brief built
+# afresh: a lead that forces the parsed-document path (it holds "nput", so the ASCII fast path never
+# answers it), a prefix, one unit repeated, and a suffix. The verdict reads only the 8, 32 and 64 KiB
+# medians; the 1 KiB time is reported for diagnosis (it shows the fixed cost, mostly the parse child's
+# launch) and never judged. A prescan refusal (a cannot-evaluate) is still a bounded
 # evaluation and is timed as one; a run whose parse child was killed at the parse deadline is not, since
 # the killed child is charged only its share of the deadline, so the child stops there and exits non-zero
 # naming the size (the row is red whatever CPU time the run took). Each run is timed by _run_cpu(), CPU
@@ -4170,7 +4174,7 @@ LINEAR_CHILD = (
     "lead = 'Input notes.\\n\\n'\n"
     "for _ in range(int(sys.argv[5])):\n"
     "    times = []\n"
-    "    for size in (1 << 10, 1 << 13, 1 << 16):\n"
+    "    for size in (1 << 10, 1 << 13, 1 << 15, 1 << 16):\n"
     "        body = size - len(lead) - len(prefix) - len(suffix)\n"
     "        data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
     "        began = m._run_cpu()\n"
@@ -4212,14 +4216,18 @@ def _parse_deadline_hit(exc):
 
 
 def _linear(unit, prefix="", suffix=""):
-    """True when, over LINEAR_RUNS fresh evaluate() runs at each of three sizes of one brief shape (a
-    parse-forcing lead, `prefix`, `unit` repeated, `suffix`), the 64 KiB median CPU time exceeds the 1 KiB
-    median (the fixed-cost baseline, mostly the parse child's launch) by at most LINEAR_FACTOR times the
-    8 KiB median's excess over that baseline, floored at zero, plus LINEAR_SLACK seconds, all timed in one
-    child capped at 1 GiB (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went wrong.
-    The child must exit 0 and print exactly LINEAR_RUNS lines of three finite, nonnegative times each; a
-    child that times out, or that exits non-zero because a run reached the parse deadline, is what went
-    wrong whatever it printed."""
+    """True when, over LINEAR_RUNS fresh evaluate() runs at each of four sizes of one brief shape (a
+    parse-forcing lead, `prefix`, `unit` repeated, `suffix`), the median CPU times grow no faster than the
+    input over each judged span: the 32 KiB median is at most 4 times the 8 KiB median plus LINEAR_SLACK
+    seconds, and the 64 KiB median at most 2 times the 32 KiB median plus LINEAR_SLACK seconds, each
+    factor exactly that span's size ratio, so a fixed-plus-linear cost passes both spans with the whole
+    fixed cost plus LINEAR_SLACK as margin whatever its slope. The 1 KiB median is reported for diagnosis
+    and never judged: no measured value is subtracted from another before judging, so neither a stray
+    baseline run nor a noisy small-size excess can loosen a bound. All timed in one child capped at 1 GiB
+    (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went wrong. The child must exit 0
+    and print exactly LINEAR_RUNS lines of four finite, nonnegative times each; a child that times out, or
+    that exits non-zero because a run reached the parse deadline, is what went wrong whatever it
+    printed."""
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", LINEAR_CHILD, str(Path(__file__).resolve().parent),
                                prefix, unit, suffix, str(LINEAR_RUNS)], capture_output=True, text=True,
@@ -4227,20 +4235,21 @@ def _linear(unit, prefix="", suffix=""):
     except subprocess.TimeoutExpired:
         return "timed out after {} s".format(LINEAR_TIMEOUT)
     try:
-        triples = [tuple(float(value) for value in line.split()) for line in done.stdout.splitlines()]
+        quads = [tuple(float(value) for value in line.split()) for line in done.stdout.splitlines()]
     except ValueError:
-        triples = []
-    if (done.returncode != 0 or len(triples) != LINEAR_RUNS or any(len(triple) != 3 for triple in triples)
-            or not all(0.0 <= value < float("inf") for triple in triples for value in triple)):
+        quads = []
+    if (done.returncode != 0 or len(quads) != LINEAR_RUNS or any(len(quad) != 4 for quad in quads)
+            or not all(0.0 <= value < float("inf") for quad in quads for value in quad)):
         return "child exit {}, output {!r}: {}".format(done.returncode, done.stdout.strip()[-80:],
                                                       done.stderr.strip()[-200:])
-    base = statistics.median(triple[0] for triple in triples)
-    small = statistics.median(triple[1] for triple in triples)
-    large = statistics.median(triple[2] for triple in triples)
-    return large - base <= LINEAR_FACTOR * max(0.0, small - base) + LINEAR_SLACK or (
-        "64 KiB median {:.3f} CPU s, 8 KiB {:.3f}, 1 KiB baseline {:.3f} over {} runs each "
-        "(64 KiB runs {})".format(
-            large, small, base, LINEAR_RUNS, ", ".join("{:.3f}".format(triple[2]) for triple in triples)))
+    base = statistics.median(quad[0] for quad in quads)
+    small = statistics.median(quad[1] for quad in quads)
+    mid = statistics.median(quad[2] for quad in quads)
+    large = statistics.median(quad[3] for quad in quads)
+    return (mid <= 4.0 * small + LINEAR_SLACK and large <= 2.0 * mid + LINEAR_SLACK) or (
+        "64 KiB median {:.3f} CPU s, 32 KiB {:.3f}, 8 KiB {:.3f}, 1 KiB {:.3f} (diagnostic, not judged) "
+        "over {} runs each (64 KiB runs {})".format(
+            large, mid, small, base, LINEAR_RUNS, ", ".join("{:.3f}".format(quad[3]) for quad in quads)))
 
 
 # THE REGEX AUDIT. Each compiled pattern reachable from this module's namespace (a global, an item of a tuple, list,
@@ -5029,46 +5038,60 @@ def self_test(report_path=None):
         probed = sorted(name for name in regex_audit()[1] if name.startswith("_AUDIT_PROBE"))
     check("perf/regex-audit-reads-containers", probed, ["_AUDIT_PROBE[0]", "_AUDIT_PROBE_CLASS.X",
                                                         "_AUDIT_PROBE_MAP['k'][0]", "_AUDIT_PROBE_SET{0}"])
-    def judged(*triples):
-        """_linear()'s verdict on a stand-in child that prints `triples` (1 KiB, 8 KiB, 64 KiB CPU times),
-        one per line, and exits 0."""
-        with _patched(LINEAR_CHILD="".join("print({!r})\n".format(" ".join(triple)) for triple in triples)):
+    def judged(*quads):
+        """_linear()'s verdict on a stand-in child that prints `quads` (1 KiB, 8 KiB, 32 KiB, 64 KiB CPU
+        times), one per line, and exits 0."""
+        with _patched(LINEAR_CHILD="".join("print({!r})\n".format(" ".join(quad)) for quad in quads)):
             return _linear("a")
 
-    with _patched(LINEAR_CHILD="import sys\n" + "print('0.1 0.1 0.2')\n" * LINEAR_RUNS + "sys.exit(9)\n"):
+    with _patched(LINEAR_CHILD="import sys\n" + "print('0.1 0.1 0.15 0.2')\n" * LINEAR_RUNS + "sys.exit(9)\n"):
         failed_child = _linear("a")
-    with _patched(LINEAR_CHILD="print('nan nan nan')\n" * LINEAR_RUNS):
+    with _patched(LINEAR_CHILD="print('nan nan nan nan')\n" * LINEAR_RUNS):
         nan_child = _linear("a")
     check("perf/failed-child-not-linear", (failed_child is True, nan_child is True,
-                                           judged(*[("0.1", "0.1", "0.2")] * (LINEAR_RUNS - 1)) is True,
-                                           judged(*[("0.1", "0.1", "0.2")] * (LINEAR_RUNS + 1)) is True,
-                                           judged(*[("0.1", "0.2")] * LINEAR_RUNS) is True,
-                                           judged(*[("0.1", "0.1", "0.2", "0.3")] * LINEAR_RUNS) is True),
+                                           judged(*[("0.1", "0.1", "0.15", "0.2")] * (LINEAR_RUNS - 1)) is True,
+                                           judged(*[("0.1", "0.1", "0.15", "0.2")] * (LINEAR_RUNS + 1)) is True,
+                                           judged(*[("0.1", "0.1", "0.2")] * LINEAR_RUNS) is True,
+                                           judged(*[("0.1", "0.1", "0.15", "0.2", "0.3")] * LINEAR_RUNS) is True),
           (False,) * 6)
-    # the verdict is the median at each size: stray 64 KiB runs short of a majority do not turn a linear
-    # shape red, and stray 8 KiB or 1 KiB runs short of a majority neither turn it red nor loosen the
-    # bound (64 KiB at 16.0 in every run stays red against a 0.25 median with stray 8 KiB runs at 3.0 or
-    # stray 1 KiB runs at 3.0, where the largest or the mean would pass it), while a majority of
-    # over-the-bound 64 KiB runs is red
+    # the verdict is the median at each judged size: stray 64 KiB runs short of a majority do not turn a
+    # linear shape red; a majority of over-the-bound 64 KiB runs is red; stray high 32 KiB runs short of
+    # a majority do not lift the top span's bound (large 1.0 against a 0.25 median of the 32 KiB runs
+    # stays red, where the mean 1.35 or the largest 3.0 of those runs would pass it); stray high 8 KiB
+    # runs do not lift the small span's bound; and stray 1 KiB runs, high or low, change nothing, since
+    # the baseline is never judged
     stray = LINEAR_RUNS // 2
     check("perf/linear-median-not-one-run", (
-        judged(*[("0.05", "0.25", "0.5")] * (LINEAR_RUNS - stray) + [("0.05", "0.25", "40.0")] * stray),
-        judged(*[("0.05", "0.25", "0.5")] * (LINEAR_RUNS - stray) + [("0.05", "3.0", "0.5")] * stray),
-        judged(*[("0.05", "0.25", "0.5")] * (LINEAR_RUNS - stray - 1)
-               + [("0.05", "0.25", "40.0")] * (stray + 1)) is True,
-        judged(*[("0.05", "0.25", "16.0")] * LINEAR_RUNS) is True,
-        judged(*[("0.05", "0.25", "16.0")] * (LINEAR_RUNS - stray) + [("0.05", "3.0", "16.0")] * stray) is True,
-        judged(*[("0.05", "0.25", "16.0")] * (LINEAR_RUNS - stray) + [("3.0", "0.25", "16.0")] * stray) is True),
-          (True, True, False, False, False, False))
-    # a moderate quadratic pass measured through the fixed launch cost: 8 KiB at 0.21 and 64 KiB at 2.40
-    # CPU s pass a bound on the raw medians (16 * 0.21 + 1.0 = 4.36), but over their 0.18 baseline the
-    # 8 KiB excess is 0.03 and the 64 KiB excess 2.22, over 16 * 0.03 + 1.0, so the excess bound is red;
-    # the same 64 KiB total grown from a small fixed cost (baseline 0.01, 8 KiB at 0.15) is near-linear
-    # growth and stays green
-    check("perf/linear-baseline-excess-red",
-          (judged(*[("0.18", "0.21", "2.4")] * LINEAR_RUNS) is True,
-           judged(*[("0.01", "0.15", "2.4")] * LINEAR_RUNS)),
-          (False, True))
+        judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray)
+               + [("0.05", "0.2", "0.4", "40.0")] * stray),
+        judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray - 1)
+               + [("0.05", "0.2", "0.4", "40.0")] * (stray + 1)) is True,
+        judged(*[("0.05", "0.8", "0.25", "1.0")] * (LINEAR_RUNS - stray)
+               + [("0.05", "0.8", "3.0", "1.0")] * stray) is True,
+        judged(*[("0.05", "0.1", "1.0", "1.5")] * (LINEAR_RUNS - stray)
+               + [("0.05", "3.0", "1.0", "1.5")] * stray) is True,
+        judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray) + [("9.9", "0.2", "0.4", "0.7")] * stray),
+        judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray) + [("0.0", "0.2", "0.4", "0.7")] * stray)),
+          (True, False, False, False, True, True))
+    # the motivating squared-growth pass measured through the fixed launch cost: 8 KiB at 0.25, 32 KiB at
+    # 0.8 and 64 KiB at 2.4 CPU s more than doubles over the top span (2.4 > 2 * 0.8 + 0.25), red; so is
+    # the same 64 KiB total grown from a small fixed cost (a squared-growth profile is red whatever
+    # baseline it claims); a linear shape reaching the same 64 KiB total (fixed cost 0.18 plus a steep
+    # slope) doubles at most over each span and stays green: the rule separates the growth's shape, not
+    # its size
+    check("perf/linear-quadratic-red",
+          (judged(*[("0.18", "0.25", "0.8", "2.4")] * LINEAR_RUNS) is True,
+           judged(*[("0.01", "0.05", "0.61", "2.41")] * LINEAR_RUNS) is True,
+           judged(*[("0.18", "0.43", "1.28", "2.4")] * LINEAR_RUNS)),
+          (False, False, True))
+    # the 1 KiB time is diagnostic only: a linear shape whose 1 KiB median lands above its 8 KiB median
+    # (a real prescan can) stays green, as does one whose baseline dwarfs every size; and a zero baseline
+    # cannot excuse squared growth
+    check("perf/linear-baseline-ignored",
+          (judged(*[("0.31", "0.30", "0.55", "0.9")] * LINEAR_RUNS),
+           judged(*[("5.0", "0.3", "0.55", "0.9")] * LINEAR_RUNS),
+           judged(*[("0.0", "0.21", "0.8", "2.4")] * LINEAR_RUNS) is True),
+          (True, True, False))
     # each run's clock counts the CPU of the children the run reaped, the parse child among them: reaping a
     # child that burned at least 0.5 CPU s moves _run_cpu() by at least 0.45 s, which this process's own
     # time (it only waits) cannot cover; and the measuring child reads that clock around each run
@@ -5092,31 +5115,25 @@ def self_test(report_path=None):
         "table = ", "m._input_declarations.PARSE_DEADLINE_SECONDS = 0.0\ntable = ", 1)
     with _patched(LINEAR_CHILD=deadline_child):
         at_deadline = _linear("a")
-    with _patched(LINEAR_TIMEOUT=2, LINEAR_CHILD="import time\n" + "print('0.1 0.1 0.2', flush=True)\n" * LINEAR_RUNS
-                  + "time.sleep(30)\n"):
+    with _patched(LINEAR_TIMEOUT=2, LINEAR_CHILD="import time\n"
+                  + "print('0.1 0.1 0.15 0.2', flush=True)\n" * LINEAR_RUNS + "time.sleep(30)\n"):
         at_timeout = _linear("a")
     check("perf/linear-deadline-not-linear", (deadline_child != LINEAR_CHILD, at_deadline is True,
                                               "parse deadline" in str(at_deadline), at_timeout is True),
           (True, False, True, False))
-    # the bound's one end over the excess, 64 KiB at baseline + LINEAR_FACTOR * (8 KiB - baseline) +
-    # LINEAR_SLACK (5.25 CPU s for a 0.25 baseline and 8 KiB at 0.5, every term exact in binary, and
-    # repr() reads back exactly): just inside, exactly at, and just outside it
-    edge = 0.25 + LINEAR_FACTOR * (0.5 - 0.25) + LINEAR_SLACK
-    check("perf/linear-bound-edges", [judged(*[("0.25", "0.5", repr(large))] * LINEAR_RUNS) is True
+    # the top span's end: the 64 KiB median at 2 times the 32 KiB median (0.5) plus LINEAR_SLACK
+    # (1.25 CPU s, every term exact in binary, and repr() reads back exactly): just inside, exactly at,
+    # and just outside it
+    edge = 2.0 * 0.5 + LINEAR_SLACK
+    check("perf/linear-bound-edges", [judged(*[("0.05", "0.2", "0.5", repr(large))] * LINEAR_RUNS) is True
                                       for large in (edge - 0.001, edge, edge + 0.001)], [True, True, False])
-    # the excess floor's end, an 8 KiB median just under, exactly at, and just over the 1 KiB baseline
-    # (0.25, with 0.2, 0.25 and 0.3125 as the 8 KiB median; each at-bound term below is exact in binary):
-    # under and at the baseline the floor holds the bound at baseline + LINEAR_SLACK (1.25), just over it
-    # the bound grows to baseline + LINEAR_FACTOR * 0.0625 + LINEAR_SLACK (2.25); each bound met exactly,
-    # then exceeded
-    check("perf/linear-floor-edges", [
-        judged(*[("0.25", "0.2", "1.25")] * LINEAR_RUNS) is True,
-        judged(*[("0.25", "0.2", repr(1.25 + 0.001))] * LINEAR_RUNS) is True,
-        judged(*[("0.25", "0.25", "1.25")] * LINEAR_RUNS) is True,
-        judged(*[("0.25", "0.25", repr(1.25 + 0.001))] * LINEAR_RUNS) is True,
-        judged(*[("0.25", "0.3125", "2.25")] * LINEAR_RUNS) is True,
-        judged(*[("0.25", "0.3125", repr(2.25 + 0.001))] * LINEAR_RUNS) is True],
-          [True, False, True, False, True, False])
+    # the small span's end: the 32 KiB median at 4 times the 8 KiB median (0.25) plus LINEAR_SLACK
+    # (1.25 CPU s, every term exact in binary), with the 64 KiB median low enough (2.0) to keep the top
+    # span green at each of the three 32 KiB values: just inside, exactly at, and just outside it, so a
+    # blow-up confined to the 8-to-32 KiB span is caught on its own
+    edge = 4.0 * 0.25 + LINEAR_SLACK
+    check("perf/linear-small-span-edges", [judged(*[("0.05", "0.25", repr(mid), "2.0")] * LINEAR_RUNS) is True
+                                           for mid in (edge - 0.001, edge, edge + 0.001)], [True, True, False])
     for check_id, unit, prefix, suffix in (
             ("perf/single-word-linear", "a", "", ""),
             ("perf/noun-run-linear", "a, ", "", ""),
@@ -7120,8 +7137,9 @@ def self_test(report_path=None):
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
-          "each evaluate within the linear growth bound at 64 KiB by the excess of the median CPU time of fresh "
-          "runs at each size over the measured 1 KiB fixed-cost baseline, through the parsed-document reading "
+          "each evaluate within the linear growth bounds on the raw medians of the CPU times of fresh runs, over "
+          "the 8-to-32 KiB and 32-to-64 KiB spans at each span's size ratio plus slack (the 1 KiB median reported, "
+          "never judged), through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
           "in a capped child that must exit 0; the parse child's process group is killed after a normal "
           "exit too, a non-zero or signalled child and a result of the wrong shape or depth are refused, "
