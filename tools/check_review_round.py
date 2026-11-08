@@ -2,16 +2,18 @@
 """Review-round merge gate (review-round): a review round counts toward a merge only when every
 required reviewer leg of it is a clean, counted delivery.
 
-  check_review_round.py --manifest FILE --repo DIR --head SHA [--attempts FILE] [--decisions FILE]
+  check_review_round.py --manifest FILE --head SHA [--attempts FILE] [--decisions FILE]
                         [--table PATH]
-  check_review_round.py --self-test
+  check_review_round.py --self-test [--execution-report ABS_PATH]
 
 DRAFT STAGE. This file carries the round-manifest parser and validator only. Leg evaluation (each
 listed delivery judged by check_verifier_delivery's own evaluate()), the attempts ledger and the
 maintainer decision records are later steps; until they land, a round whose manifest validates is
 CANNOT_EVALUATE (exit 2), never a pass, and --attempts or --decisions is refused the same way, never
 silently ignored. Exit 0 and exit 1 below describe the finished gate and are not reachable at this
-stage.
+stage. A --repo DIR option was accepted here and never read, so the draft stage drops it rather than
+carry a dead option; the leg-evaluation step, whose evaluator reads the reviewed repository,
+reintroduces it.
 
 Exit statuses:
   0  every input validates and every required leg is satisfied: at least one of its attempts is PASS
@@ -27,11 +29,17 @@ Exit statuses:
 
 The round manifest (TOML) declares, with exactly these keys: format-version (the integer 1; a bool
 or float is refused), round and leg ids ([a-z0-9][a-z0-9._-]{0,63}), revision (the reviewed commit,
-40 lower-hex; it must equal --head), repository (reported, compared with nothing), [policy] (rule =
+40 lower-hex, so only SHA-1 repositories are gated, the same bound as check_verifier_delivery's
+SHA_RE; a 64-hex SHA-256 object id is refused, never evaluated; it must equal --head), repository
+(an owner/name id,
+[A-Za-z0-9][A-Za-z0-9._-]{0,99} on each side of one '/', so a control character is refused; reported,
+compared with nothing), [policy] (rule =
 "vrfdiv", the only panel rule in v1, so a recorded single-family fallback is refused; critical, a
 bool that raises the family floor from 2 to 3; required, the family names), and one [[leg]] per
 required family (id, family, brief, brief-sha256, delivery; each path absolute with no '..'
-component). The required set comes from [policy], never from the legs that happen to be present, so
+component and no NUL byte, refused before any open because os.open raises ValueError, not the
+OSError the shared reader handles, on a NUL). The required set comes from [policy], never from the
+legs that happen to be present, so
 a missing family stays visible. Family names are the name rows of the capability table, read
 through check_brief_capability.load_table (that table's one reader, never a second copy); the
 --table seam exists for the self-test's neutral fixture families. The manifest's sha256 is computed
@@ -110,20 +118,31 @@ PANEL_RULE = "vrfdiv"
 ID_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
 HEX64_RE = re.compile(r"[0-9a-f]{64}\Z")
+# The repository id: owner/name, each side 1 to 100 characters from a closed ASCII set, so a control
+# character, an escape, a path step or any other shape is refused by the pattern itself.
+REPO_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}\Z")
 MANIFEST_KEYS = ("format-version", "leg", "policy", "repository", "revision", "round")
 POLICY_KEYS = ("critical", "required", "rule")
 LEG_KEYS = ("brief", "brief-sha256", "delivery", "family", "id")
 # A digest proves nothing about when the manifest was written or what was left out of it.
 ORDER_NOTE = "manifest order: not established"
 
-USAGE = ("usage: check_review_round.py --manifest FILE --repo DIR --head SHA [--attempts FILE] "
+USAGE = ("usage: check_review_round.py --manifest FILE --head SHA [--attempts FILE] "
          "[--decisions FILE] [--table PATH]\n"
-         "       check_review_round.py --self-test")
+         "       check_review_round.py --self-test [--execution-report ABS_PATH]")
+
+
+def _checked_no_nul(path, what):
+    """The path, or CannotEvaluate when it carries a NUL byte: os.open raises ValueError, not the
+    OSError the shared reader handles, on such a path, so the refusal must come before any open."""
+    if isinstance(path, str) and "\x00" in path:
+        raise CannotEvaluate("{}: the path contains a NUL byte".format(what))
+    return path
 
 
 def _load_family_table(table_path):
     """The family table (name -> capability row) through check_brief_capability.load_table."""
-    return check_brief_capability.load_table(table_path)
+    return check_brief_capability.load_table(_checked_no_nul(table_path, "capability table"))
 
 
 def parse_manifest(data):
@@ -159,8 +178,10 @@ def validate_manifest(doc, table):
     if not isinstance(revision, str) or not SHA40_RE.match(revision):
         raise CannotEvaluate("round manifest: revision must be a full 40-hex lower-case commit SHA")
     repository = doc["repository"]
-    if not isinstance(repository, str) or not repository:
-        raise CannotEvaluate("round manifest: repository must be a non-empty string")
+    if not isinstance(repository, str) or not REPO_RE.match(repository):
+        raise CannotEvaluate("round manifest: repository must be an owner/name id, "
+                             "[A-Za-z0-9][A-Za-z0-9._-]{0,99} on each side of one '/' (a control "
+                             "character or any other string is refused)")
     policy = doc["policy"]
     if not isinstance(policy, dict) or sorted(policy) != sorted(POLICY_KEYS):
         raise CannotEvaluate("round manifest: [policy] must have exactly the keys {}".format(
@@ -204,9 +225,10 @@ def validate_manifest(doc, table):
         leg_families.append(family)
         for key in ("brief", "delivery"):
             path = leg[key]
-            if not isinstance(path, str) or not os.path.isabs(path) or ".." in Path(path).parts:
+            if not isinstance(path, str) or "\x00" in path or not os.path.isabs(path) \
+                    or ".." in Path(path).parts:
                 raise CannotEvaluate("round manifest: leg {!r}: {} must be an absolute path with no "
-                                     "'..' component".format(leg_id, key))
+                                     "'..' component and no NUL byte".format(leg_id, key))
         digest = leg["brief-sha256"]
         if not isinstance(digest, str) or not HEX64_RE.match(digest):
             raise CannotEvaluate("round manifest: leg {!r}: brief-sha256 must be 64 lower-hex "
@@ -224,7 +246,7 @@ def validate_round(manifest_path, head, table_path):
     """The validated round, with its manifest-sha256, after the brief-integrity and --head checks; or
     CannotEvaluate naming what failed."""
     table = _load_family_table(table_path)
-    data = _read_regular(manifest_path, "round manifest")
+    data = _read_regular(_checked_no_nul(manifest_path, "round manifest"), "round manifest")
     summary = validate_manifest(parse_manifest(data), table)
     summary["manifest-sha256"] = hashlib.sha256(data).hexdigest()
     if not isinstance(head, str) or not SHA40_RE.match(head):
@@ -258,17 +280,27 @@ def _report(verdict, reasons, summary=None):
 
 def main(argv=None):
     if argv is None:
-        argv = sys.argv[1:]
-    if argv == ["--self-test"]:
-        return self_test()
+        # The process entry: the command line, ended through the execution-report finalizer when the
+        # self-test armed it, so the report's exit_code is the status the process really exits with.
+        _code = main(sys.argv[1:])
+        _finalizer = sys.modules.get("_selftest_exit_report")
+        (sys.exit if _finalizer is None else _finalizer.exit_with)(_code)
+    if argv and argv[0] in ("--self-test", "--execution-report"):
+        rest = argv[1:] if argv[0] == "--self-test" else list(argv)
+        if not rest:
+            return self_test()
+        if len(rest) == 2 and rest[0] == "--execution-report" and os.path.isabs(rest[1]):
+            return self_test(rest[1])
+        print(USAGE, file=sys.stderr)
+        return 2
     options = {}
     pairs = list(argv)
-    while len(pairs) >= 2 and pairs[0] in ("--manifest", "--repo", "--head", "--attempts",
+    while len(pairs) >= 2 and pairs[0] in ("--manifest", "--head", "--attempts",
                                            "--decisions", "--table") and pairs[0] not in options:
         options[pairs[0]] = pairs[1]
         pairs = pairs[2:]
-    if pairs or not all(key in options for key in ("--manifest", "--repo", "--head")):
-        _report("CANNOT_EVALUATE", ["usage: --manifest, --repo and --head are each required exactly "
+    if pairs or not all(key in options for key in ("--manifest", "--head")):
+        _report("CANNOT_EVALUATE", ["usage: --manifest and --head are each required exactly "
                                     "once; --attempts, --decisions and --table at most once"])
         print(USAGE, file=sys.stderr)
         return 2
@@ -294,11 +326,35 @@ def main(argv=None):
 
 # ---------- self-test ----------
 
+SUITE_ID = "review-round-selftest"
+CHECKS_MANIFEST = Path(__file__).resolve().parent / "selftest_checks.toml"
 FAILURES = []
 EXECUTED = []
 _EXECUTED_SET = set()
 REV = "a1" * 20
 OTHER_REV = "b2" * 20
+
+
+def _expected_check_ids():
+    """The registered expected check ids of this suite, or None after printing (the caller exits 2):
+    the execution set is reconciled in-run against the same hand-authored registry the execution gate
+    reads, the posture the sibling check_verifier_delivery takes."""
+    try:
+        with open(CHECKS_MANIFEST, "rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        print("SELF-TEST HARNESS ERROR: cannot read {}: {}".format(CHECKS_MANIFEST, exc), file=sys.stderr)
+        return None
+    for row in data.get("suite", []):
+        if isinstance(row, dict) and row.get("id") == SUITE_ID:
+            ids = row.get("expected-check-ids")
+            if isinstance(ids, list) and ids and all(isinstance(item, str) and item for item in ids) \
+                    and len(set(ids)) == len(ids):
+                return set(ids)
+            break
+    print("SELF-TEST HARNESS ERROR: missing or malformed suite {!r} in {}".format(SUITE_ID, CHECKS_MANIFEST),
+          file=sys.stderr)
+    return None
 
 
 def check(name, got, want):
@@ -340,7 +396,7 @@ def _manifest_text(brief, brief_sha, families=("alpha", "beta"), critical=False,
                    version="1", rule=PANEL_RULE, leg_ids=None):
     required_names = list(families) if required is None else list(required)
     head = ["format-version = {}".format(version), 'round = "fixture-pass"',
-            'revision = "{}"'.format(REV), 'repository = "fixture"', "", "[policy]",
+            'revision = "{}"'.format(REV), 'repository = "fixture/round"', "", "[policy]",
             'rule = "{}"'.format(rule), "critical = {}".format("true" if critical else "false"),
             "required = [{}]".format(", ".join('"{}"'.format(name) for name in required_names))]
     rows = []
@@ -370,6 +426,16 @@ def _outcome(base, text, head=REV, table_text=None, skip_table=False):
     return ("ok", "")
 
 
+def _direct(manifest_path, head, table_path):
+    """("ok", "") or ("cannot-evaluate", reason) of validate_round on caller-supplied paths, for the
+    rows whose refusal must come before any file is opened."""
+    try:
+        validate_round(manifest_path, head, table_path)
+    except CannotEvaluate as exc:
+        return ("cannot-evaluate", str(exc))
+    return ("ok", "")
+
+
 def _refused(outcome, needle):
     return outcome[0] == "cannot-evaluate" and needle in outcome[1]
 
@@ -394,8 +460,8 @@ def _self_test_cases(base):
           _refused(_outcome(base, "x = " + "[" * 4000 + "]" * 4000 + "\n"), "not valid UTF-8 TOML"), True)
     check("round/manifest-toml-memory-cannot-evaluate", _parse_memory_refused(), True)
     check("round/manifest-unknown-key-cannot-evaluate",
-          _refused(_outcome(base, valid_two.replace('repository = "fixture"',
-                                                    'repository = "fixture"\nextra = 1')),
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "fixture/round"\nextra = 1')),
                    "exactly the keys"), True)
     check("round/manifest-version-bool-cannot-evaluate",
           _refused(_outcome(base, _manifest_text(brief, brief_sha, version="true")),
@@ -421,6 +487,88 @@ def _self_test_cases(base):
           _refused(_outcome(base, _manifest_text("relative/brief.md", brief_sha)), "absolute path"), True)
     check("round/table-unreadable-cannot-evaluate",
           _refused(_outcome(base, valid_two, skip_table=True), "capability table"), True)
+    # one row per validator refusal, each with a source flip that removes only that refusal
+    check("round/round-id-format-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('round = "fixture-pass"',
+                                                    'round = "{}"'.format("a" * 65))),
+                   "round must be an id"), True)
+    check("round/round-id-at-length-validates",
+          _outcome(base, valid_two.replace('round = "fixture-pass"',
+                                           'round = "{}"'.format("a" * 64)))[0], "ok")
+    check("round/revision-format-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('revision = "{}"'.format(REV),
+                                                    'revision = "{}"'.format("g" * 40))),
+                   "revision must be a full 40-hex"), True)
+    check("round/revision-sha256-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('revision = "{}"'.format(REV),
+                                                    'revision = "{}"'.format("a1" * 32))),
+                   "revision must be a full 40-hex"), True)
+    check("round/repository-shape-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "Not An Id/../x"')),
+                   "owner/name"), True)
+    check("round/repository-control-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "fixture/ro\\nund"')),
+                   "owner/name"), True)
+    check("round/repository-at-length-validates",
+          _outcome(base, valid_two.replace('repository = "fixture/round"',
+                                           'repository = "{}/{}"'.format("a" * 100, "b" * 100)))[0],
+          "ok")
+    check("round/repository-over-length-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "{}/{}"'.format("a" * 101, "b" * 100))),
+                   "owner/name"), True)
+    check("round/version-two-cannot-evaluate",
+          _refused(_outcome(base, _manifest_text(brief, brief_sha, version="2")),
+                   "format-version"), True)
+    check("round/policy-keys-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('rule = "vrfdiv"', 'rule = "vrfdiv"\nextra = 1')),
+                   "[policy] must have exactly"), True)
+    check("round/policy-rule-cannot-evaluate",
+          _refused(_outcome(base, _manifest_text(brief, brief_sha, rule="consensus")),
+                   "policy.rule must be"), True)
+    check("round/critical-type-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace("critical = false", "critical = 1")),
+                   "policy.critical must be a bool"), True)
+    check("round/required-type-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('required = ["alpha", "beta"]',
+                                                    'required = "alpha"')),
+                   "non-empty list of family names"), True)
+    check("round/legs-type-cannot-evaluate",
+          _refused(_outcome(base, valid_two.split("\n\n[[leg]]", 1)[0]
+                            .replace("\n\n[policy]", "\nleg = 3\n\n[policy]")),
+                   "rows are required"), True)
+    check("round/leg-keys-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('id = "leg-1"', 'id = "leg-1"\nextra = 1')),
+                   "leg row 1 must have exactly"), True)
+    check("round/leg-id-format-cannot-evaluate",
+          _refused(_outcome(base, _manifest_text(brief, brief_sha, leg_ids={1: "Bad Id"})),
+                   "leg row 1 id must be an id"), True)
+    check("round/leg-family-type-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('family = "alpha"', "family = 3")),
+                   "family must be a string"), True)
+    check("round/brief-sha-format-cannot-evaluate",
+          _refused(_outcome(base, _manifest_text(brief, "0" * 63)), "64 lower-hex"), True)
+    check("round/head-format-cannot-evaluate",
+          _refused(_outcome(base, valid_two, head="xyz"), "--head must be a full 40-hex"), True)
+    check("round/brief-path-dotdot-cannot-evaluate",
+          _refused(_outcome(base, _manifest_text("/tmp/../absent.md", brief_sha)),
+                   "absolute path with no"), True)
+    # NUL-byte path refusals: without them, os.open raises ValueError past the exit contract
+    check("round/brief-path-nul-cannot-evaluate",
+          _refused(_outcome(base, _manifest_text("/tmp/a\\u0000b", brief_sha)), "NUL"), True)
+    check("round/delivery-path-nul-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace(".delivery-1", ".deli\\u0000very-1")), "NUL"), True)
+    nul_tmp = Path(tempfile.mkdtemp(dir=base))
+    nul_table = nul_tmp / "table.toml"
+    nul_table.write_text(check_brief_capability.TABLE_FIXTURE, encoding="utf-8")
+    nul_manifest = nul_tmp / "manifest.toml"
+    nul_manifest.write_text(valid_two, encoding="utf-8")
+    check("round/manifest-path-nul-cannot-evaluate",
+          _refused(_direct(str(nul_tmp) + "/mani\x00fest.toml", REV, str(nul_table)), "NUL"), True)
+    check("round/table-path-nul-cannot-evaluate",
+          _refused(_direct(str(nul_manifest), REV, str(nul_tmp) + "/ta\x00ble.toml"), "NUL"), True)
     # the floor boundaries: just outside refuses, exactly at and just inside validate
     check("round/panel-below-floor-cannot-evaluate",
           _refused(_outcome(base, _manifest_text(brief, brief_sha, families=("alpha",))),
@@ -445,9 +593,11 @@ def _self_test_cases(base):
     manifest.write_text(valid_two, encoding="utf-8")
     table = tmp / "table.toml"
     table.write_text(check_brief_capability.TABLE_FIXTURE, encoding="utf-8")
-    argv = ["--manifest", str(manifest), "--repo", str(tmp), "--head", REV, "--table", str(table)]
+    argv = ["--manifest", str(manifest), "--head", REV, "--table", str(table)]
     code, out = _main_quiet(argv)
     check("round/validated-round-cannot-evaluate-draft", (code, "leg evaluation" in out), (2, True))
+    code, out = _main_quiet(argv + ["--repo", str(tmp)])
+    check("round/repo-option-refused-cannot-evaluate", (code, "usage" in out), (2, True))
     code, out = _main_quiet(argv + ["--attempts", str(manifest)])
     check("round/attempts-not-implemented-cannot-evaluate", (code, "attempts ledger" in out), (2, True))
     code, out = _main_quiet(argv + ["--decisions", str(manifest)])
@@ -459,7 +609,11 @@ def _self_test_cases(base):
           ("b", None))
 
 
-def self_test():
+def self_test(report_path=None):
+    if report_path is not None:
+        # The execution report is finalized at interpreter exit (tools/_selftest_exit_report.py).
+        import _selftest_exit_report
+        _selftest_exit_report.arm(report_path, SUITE_ID, EXECUTED)
     try:
         base = Path(tempfile.mkdtemp(prefix="review-round-selftest-"))
         try:
@@ -469,14 +623,21 @@ def self_test():
     except (CannotEvaluate, OSError) as exc:
         print("SELF-TEST HARNESS ERROR: {}".format(exc), file=sys.stderr)
         return 2
+    expected = _expected_check_ids()
+    if expected is None:
+        return 2
+    for check_id in sorted(expected - _EXECUTED_SET):
+        FAILURES.append("execution-set/missing: {}".format(check_id))
+    for check_id in sorted(_EXECUTED_SET - expected):
+        FAILURES.append("execution-set/extra: {}".format(check_id))
     if FAILURES:
         print("SELF-TEST FAIL:")
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: {} unique checks executed (the round-manifest validator's refusal rows and "
-          "the floor boundary rows; execution-set reconciliation against tools/selftest_checks.toml "
-          "arrives with the suite-registration step)".format(len(EXECUTED)))
+    print("SELF-TEST PASS: {} unique checks executed (one row per round-manifest validator refusal, "
+          "the floor and length boundary rows, and the CLI's fail-closed draft-stage refusals); "
+          "execution set reconciled against tools/selftest_checks.toml".format(len(EXECUTED)))
     return 0
 
 

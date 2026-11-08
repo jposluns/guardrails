@@ -235,6 +235,7 @@ run_gate "sized-instructions" python3 -I -B tools/check_sized_instructions.py
 run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_budget.py --self-test
 run_gate "instruction-budget" python3 -I -B tools/check_instruction_budget.py
 run_gate "brief-capability-selftest" python3 -I -B tools/check_brief_capability.py --self-test  # no brief in the repository to lint
+run_gate "review-round-selftest" python3 -I -B tools/check_review_round.py --self-test  # no round in the repository to gate
 run_gate "notice-drift"    python3 -I -B tools/gen_notice.py --check
 run_gate "claude-selftest" python3 -I -B tools/gen_claude.py --self-test
 run_gate "claude-drift"    python3 -I -B tools/gen_claude.py --check
@@ -266,6 +267,7 @@ run_gate "hook-latency-selftest" python3 -I -B tools/check_selftest_execution.py
 run_gate "entry-guard-selftest" python3 -I -B tools/check_selftest_execution.py --suite entry-guard-selftest
 run_gate "entry-guard" python3 -I -B tools/check_entry_guard.py
 run_gate "verifier-delivery-selftest" python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest
+run_gate "review-round-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite review-round-selftest
 run_gate "opf-declaration-selftest" python3 -I -B tools/check_selftest_execution.py --suite opf-declaration-selftest
 run_gate "opf-declaration" python3 -I -B tools/check_opf_declaration.py
 run_gate "record-drift-selftest" python3 -I -B tools/check_record_drift.py --self-test

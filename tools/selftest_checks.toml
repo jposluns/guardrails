@@ -4457,6 +4457,68 @@ expected-check-ids = [
 ]
 
 [[suite]]
+id = "review-round-selftest"
+runner = "tools/check_review_round.py"
+expected-check-ids = [
+  # ---------- the manifest cannot-evaluate rows ----------
+  "round/manifest-unreadable-cannot-evaluate",
+  "round/manifest-malformed-cannot-evaluate",
+  "round/manifest-toml-recursion-cannot-evaluate",
+  "round/manifest-toml-memory-cannot-evaluate",
+  "round/manifest-unknown-key-cannot-evaluate",
+  "round/manifest-version-bool-cannot-evaluate",
+  "round/head-differs-from-revision-cannot-evaluate",
+  "round/unknown-family-cannot-evaluate",
+  "round/duplicate-family-cannot-evaluate",
+  "round/legs-differ-from-required-cannot-evaluate",
+  "round/duplicate-leg-id-cannot-evaluate",
+  "round/brief-hash-mismatch-cannot-evaluate",
+  "round/brief-path-relative-cannot-evaluate",
+  "round/table-unreadable-cannot-evaluate",
+  # ---------- one row per validator refusal ----------
+  "round/round-id-format-cannot-evaluate",
+  "round/round-id-at-length-validates",
+  "round/revision-format-cannot-evaluate",
+  "round/revision-sha256-cannot-evaluate",
+  "round/repository-shape-cannot-evaluate",
+  "round/repository-control-cannot-evaluate",
+  "round/repository-at-length-validates",
+  "round/repository-over-length-cannot-evaluate",
+  "round/version-two-cannot-evaluate",
+  "round/policy-keys-cannot-evaluate",
+  "round/policy-rule-cannot-evaluate",
+  "round/critical-type-cannot-evaluate",
+  "round/required-type-cannot-evaluate",
+  "round/legs-type-cannot-evaluate",
+  "round/leg-keys-cannot-evaluate",
+  "round/leg-id-format-cannot-evaluate",
+  "round/leg-family-type-cannot-evaluate",
+  "round/brief-sha-format-cannot-evaluate",
+  "round/head-format-cannot-evaluate",
+  "round/brief-path-dotdot-cannot-evaluate",
+  # ---------- NUL-byte path refusals, before any open ----------
+  "round/brief-path-nul-cannot-evaluate",
+  "round/delivery-path-nul-cannot-evaluate",
+  "round/manifest-path-nul-cannot-evaluate",
+  "round/table-path-nul-cannot-evaluate",
+  # ---------- the floor boundaries ----------
+  "round/panel-below-floor-cannot-evaluate",
+  "round/critical-two-families-cannot-evaluate",
+  "round/floor-exactly-two-validates",
+  "round/floor-three-validates",
+  "round/critical-three-validates",
+  "round/critical-four-validates",
+  # ---------- the CLI, in process ----------
+  "round/usage-cannot-evaluate",
+  "round/validated-round-cannot-evaluate-draft",
+  "round/repo-option-refused-cannot-evaluate",
+  "round/attempts-not-implemented-cannot-evaluate",
+  "round/decisions-not-implemented-cannot-evaluate",
+  # ---------- the shared harness grammar's named group ----------
+  "group/harness-family-named-group",
+]
+
+[[suite]]
 id = "hook-latency-selftest"
 runner = "tools/measure_hook_latency.py"
 expected-check-ids = [

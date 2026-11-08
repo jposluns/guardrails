@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "728495f782887d1a28d358e77377ccfa516cf0fd614aae74c4399b901a5fa0fa"
+tree-sha256 = "9e5a9f2723241090024f8f3ed1b7dea00daf7d1b8ca8044d1ba2e8acf825cc2b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 580660
-sha256 = "57ab404132fe236fc27b251a97f1e7554ad9cdaef267ac6960ae8c334d7268a7"
+bytes = 583097
+sha256 = "ed61cd73211fc466257a231a8b54793fd010263c34863da648cf95738eb9c7d6"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -2417,7 +2417,7 @@ sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "efb030611d8e3faf4b51f80293bc3677f1e37672a2d3638ede3deaa9e0c85c65"
+sha256 = "4f0561a4ae6d44e3ec58f077b8d7daf75fce9218f39f5e9d7bc37ef3d2059015"
 
 [[sources]]
 path = "RELEASING.md"
@@ -4351,8 +4351,8 @@ sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
 path = "tools/check_review_round.py"
-bytes = 28330
-sha256 = "89b17722acf6ee48157eb1a4384a774b8d5cb9ffd37530a47bb64c3695d89f70"
+bytes = 38398
+sha256 = "2d5ce5548e09ff0173dd9e5d00c50dcfbec173ff67b0bbb79e3b30a3814a9c5f"
 
 [[sources]]
 path = "tools/check_rule_placement.py"
@@ -4636,8 +4636,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 29250
-sha256 = "d9976c36b4011f452b237e0e427f667dd3f3efd7c78c4f6f701bb50c07f39ada"
+bytes = 29496
+sha256 = "c0eae938dadbf840bd82ceb855f1ca565f4ae27e449f42b93307b36c31924962"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
@@ -4651,8 +4651,8 @@ sha256 = "3c7e73a39157097bd517503fb85433ab42216d79d6806da9439a63545af30227"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 218945
-sha256 = "8347718874e549f85be982fa5ce0fac005761ef2e0158a6857500034a49eeed1"
+bytes = 221573
+sha256 = "9886a7cbb8ba2c53c661c90efb2d5a1c9fd39e109783169c1f895d5cc32fb1b1"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
