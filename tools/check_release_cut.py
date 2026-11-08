@@ -78,6 +78,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import argparse
+import ast
 import datetime
 import hashlib
 import json
@@ -2500,35 +2501,128 @@ sys.path.insert(0, os.path.dirname(path))
 runpy.run_path(path, run_name="__main__")
 """
 
+# The kill bound of each census-mapping run is the callee's own budget plus _CENSUS_MARGIN, so a correct run
+# that does most of its work before its census read is not killed under its own budget. A budget is either
+# the name of a module-level int constant in the callee, read from its source (never imported), or a number
+# of seconds where the callee names none. Measured on 2026-11-08 under CENSUS_DRIVER, one entry at a time,
+# at a 1-minute load of 25 to 33 on 80 CPUs: check_gensrc_failclose 99.5 s (its census read is in its last
+# vectors, so the run does almost all its work first), check_footer 3.8 s, every other entry 0.5 s or less.
+# The old fixed bound of 120 s killed correct check_gensrc_failclose runs under heavier load.
+_CENSUS_MARGIN = TIMEOUT * 4
+
 # Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
-# caller that reaches its clause: (path, census caller, self-test arguments).
+# caller that reaches its clause: (path, census caller, self-test arguments, callee budget).
 _CENSUS_MAPPINGS = (
-    ("tools/check_footer.py", "*", ("--self-test",)),
-    ("tools/check_overclaim.py", "*", ("--self-test",)),
-    ("tools/check_gensrc_failclose.py", "*", ("--self-test",)),
-    ("tools/gen_crosswalk.py", "*", ("--self-test",)),
-    ("tools/import_cwe.py", "*", ("--self-test",)),
-    ("opf/tools/_journal.py", "*", ("--self-test",)),                     # the close-vector clause
-    ("opf/tools/_journal.py", "_st_fd_table_eio", ("--self-test",)),      # the descriptor-helper clause
+    ("tools/check_footer.py", "*", ("--self-test",), 120),               # its self-test children wait 120 s each
+    ("tools/check_overclaim.py", "*", ("--self-test",), 0),              # no wait of its own
+    ("tools/check_gensrc_failclose.py", "*", ("--self-test",), "TOTAL_TIMEOUT"),   # its sweep backstop
+    ("tools/gen_crosswalk.py", "*", ("--self-test",), 0),
+    ("tools/import_cwe.py", "*", ("--self-test",), 0),
+    ("opf/tools/_journal.py", "*", ("--self-test",), 0),                     # the close-vector clause
+    ("opf/tools/_journal.py", "_st_fd_table_eio", ("--self-test",), 0),      # the descriptor-helper clause
 )
 
 
-def _census_mapping_check(root):
-    """Each self-test in _CENSUS_MAPPINGS, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate
+def _census_budget(root, rel, budget):
+    """The seconds of a mapping's callee budget: budget itself when it is a number, else the value of the one
+    module-level assignment of that name in the callee's source, which must be a plain non-negative int.
+    Raises ValueError when it is missing, assigned more than once or not such an int; read and parse errors
+    propagate (the caller files every one as a failure of that entry)."""
+    if not isinstance(budget, str):
+        return budget
+    values = [node.value for node in ast.parse((root / rel).read_text(encoding="utf-8")).body
+              if isinstance(node, ast.Assign)
+              and any(isinstance(name, ast.Name) and name.id == budget for name in node.targets)]
+    if (len(values) != 1 or not isinstance(values[0], ast.Constant) or type(values[0].value) is not int
+            or values[0].value < 0):
+        raise ValueError("%s is not one module-level non-negative int assignment" % budget)
+    return values[0].value
+
+
+def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS, margin=_CENSUS_MARGIN):
+    """Each self-test in mappings, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate
     report naming the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"),
-    never a traceback (exit 1) or a pass. Returns (failures, runs)."""
+    never a traceback (exit 1) or a pass. Each run is killed at its callee budget plus margin; a bound that
+    does not exceed the budget, or a budget that cannot be read, is a failure and nothing is run, and a run
+    killed at its bound is a failure naming the entry and the bound. Returns (failures, runs)."""
     failures = []
-    for rel, target, argv in _CENSUS_MAPPINGS:
-        result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target, *argv],
-                                capture_output=True, timeout=TIMEOUT * 4)
+    for rel, target, argv, budget in mappings:
+        label = "%s (census under %s)" % (rel, target)
+        try:
+            seconds = _census_budget(root, rel, budget)
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+            failures.append("%s: cannot read its callee budget %r: %r; not run" % (label, budget, exc))
+            continue
+        bound = seconds + margin
+        if not bound > seconds:
+            failures.append("%s: its kill bound %s s does not exceed the callee budget %s s; not run"
+                            % (label, bound, seconds))
+            continue
+        try:
+            result = subprocess.run([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, str(root / rel), target,
+                                     *argv], capture_output=True, timeout=bound)
+        except subprocess.TimeoutExpired:
+            failures.append("%s: killed at its %s s bound (callee budget %s s plus %s s margin) before it ended; "
+                            "a killed run is a failure, not a pass" % (label, bound, seconds, margin))
+            continue
         err = result.stderr.decode("utf-8", "replace")
         held = re.match(r"census-held (\d+)\n", err, re.ASCII)
         want = held and ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor " + held.group(1)
                          + ": OSError(5, 'injected census read failure')")
         if result.returncode != 2 or not want or want not in err or "Traceback" in err:
-            failures.append("%s (census under %s): expected exit 2 with its cannot-evaluate report, got exit %d: %s"
-                            % (rel, target, result.returncode, err.strip().splitlines()[-1:]))
-    return failures, len(_CENSUS_MAPPINGS)
+            failures.append("%s: expected exit 2 with its cannot-evaluate report, got exit %d: %s"
+                            % (label, result.returncode, err.strip().splitlines()[-1:]))
+    return failures, len(mappings)
+
+
+# A stand-in callee for the census-mapping bound rows: it sleeps argv[1] seconds, then makes its census read
+# and reports the injected error the way a real self-test does.
+_CENSUS_STANDIN = """import os, sys, time
+BUDGET = 2
+def _st_fd_table():
+    for number in range(3, 256):
+        try:
+            os.fstat(number)
+        except OSError as exc:
+            if exc.errno != 9:
+                return number, exc
+    return None, None
+time.sleep(float(sys.argv[1]))
+number, exc = _st_fd_table()
+if exc is None:
+    sys.exit(0)
+print("SELF-TEST ERROR: descriptor census cannot evaluate descriptor %d: %r" % (number, exc), file=sys.stderr)
+sys.exit(2)
+"""
+
+
+def _census_bound_rows(parent, root):
+    """The census-mapping bound rows, run on the stand-in callee: a margin of +1 above its BUDGET constant runs
+    and passes, a margin of 0 (bound at the budget) and -1 (below it) are each refused before any launch, a
+    run that outlives its bound is a failure naming the entry and the bound, and a budget constant the callee
+    does not define is a failure. Every real entry's budget must also resolve. Returns the failures."""
+    standin = parent / "census-standin"
+    standin.mkdir()
+    (standin / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
+    rel = "census-standin/standin.py"
+    label = rel + " (census under *)"
+    failures = []
+    for margin, sleep, budget, want in (
+            (1, "0", "BUDGET", None),
+            (0, "0", "BUDGET", label + ": its kill bound 2 s does not exceed the callee budget 2 s; not run"),
+            (-1, "0", "BUDGET", label + ": its kill bound 1 s does not exceed the callee budget 2 s; not run"),
+            (1, "30", 0, label + ": killed at its 1 s bound (callee budget 0 s plus 1 s margin) before it ended"),
+            (1, "0", "NO_SUCH_BUDGET", label + ": cannot read its callee budget 'NO_SUCH_BUDGET'")):
+        got, runs = _census_mapping_check(parent, ((rel, "*", (sleep,), budget),), margin)
+        if runs != 1 or (got != [] if want is None else len(got) != 1 or not got[0].startswith(want)):
+            failures.append("census bound row margin %d sleep %s budget %r: expected %r, got %r"
+                            % (margin, sleep, budget, want, got))
+    for rel, target, _, budget in _CENSUS_MAPPINGS:
+        try:
+            _census_budget(root, rel, budget)
+        except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+            failures.append("%s (census under %s): its budget %r does not resolve: %r" % (rel, target, budget, exc))
+    return failures
 
 
 def _close_harness_checks(parent, script):
@@ -2745,6 +2839,11 @@ def _self_test_isolated(red_on_revert):
             print("FAIL " + failure, file=sys.stderr)
         check("census-mapping", not mapping_failures)
         print("PASS census-mapping runs=" + str(mapping_runs) + " close-stage-legs=3")
+        bound_failures = _census_bound_rows(parent, script.parents[1])
+        for failure in bound_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("census-mapping-bound", not bound_failures)
+        print("PASS census-mapping-bound rows=5 budgets=" + str(len(_CENSUS_MAPPINGS)))
         # An in-process call of self_test() hands the caller's environment back exactly, with the
         # git fixture scrub and the git wrapper in effect inside, after a return and after an
         # exception: the entry point is run in a child around a stand-in _self_test_isolated,
