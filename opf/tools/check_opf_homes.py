@@ -2754,8 +2754,9 @@ def _homes1_scan(tools=None):
         # others read as production) is not reported here; and the count it names is of the module-level
         # undecorated defs matched below, while the classifier's own set of self-test defs also holds
         # decorated ones, so the two counts can differ. For the same reason the finding does not fire at
-        # all when every self-test def in the tree is decorated: `matched` below holds only undecorated
-        # defs, so such a tree leaves it empty and the scan reads every one of those bodies silently.
+        # all when every def in the tree whose name _SELF_TEST_NAME matches is decorated or is not at
+        # module level (a nested def, a method): `matched` below holds only undecorated module-level defs,
+        # so such a tree leaves it empty and the scan reads every one of those bodies silently.
         matched = [(rel, stmt) for rel, tree in trees for stmt in tree.body
                    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
                    and not stmt.decorator_list and _SELF_TEST_NAME.search(stmt.name)]
