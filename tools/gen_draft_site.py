@@ -32,7 +32,8 @@ an unknown or missing key, a wrong type, a duplicate output path, and a data dir
 (exit 2, nothing written). The page's scripts are derived from its content: copy.js where a copy block
 renders, select.js where the install selector renders, and rail.js where the rail lists in-page sections
 (section 7.6); no rail link carries a static aria-current. In an inline HTML value the token `$BASE/`
-renders as the base path, so content survives promotion unchanged. The document control strip reads its
+renders as the base path, so content survives promotion unchanged, and the token `$HOOK_COUNT` renders as
+the number of Claude Code hooks in .aiqt/core/hooks/manifest.toml, so no page types that count. The document control strip reads its
 Version from the repository's VERSION file and its Status from changelog.toml.
 
 Escaping: every data value is text, escaped for its context (element text, or a double-quoted attribute
@@ -105,7 +106,7 @@ SCHEME_BUTTON = (
 
 GENSRC_OUTPUTS = (
     {"target": "site/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml", ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/404.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/404.toml"),
@@ -123,7 +124,8 @@ GENSRC_OUTPUTS = (
      "sources": ("tools/gen_draft_site.py", "site/draft-src/install.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/install/details/index.html", "kind": "file",
-     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml"),
+     "sources": ("tools/gen_draft_site.py", "site/draft-src/install-details.toml",
+                 ".aiqt/core/hooks/manifest.toml"),
      "regenerate": "python3 tools/gen_draft_site.py"},
     {"target": "site/license/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/license.toml"),
@@ -442,11 +444,48 @@ def _any_link(site, href, text, where):
 
 
 def _inline(site, value):
-    """An inline HTML value with the $BASE/ token rendered as the site's base path and the $OPF_STATUS
-    token rendered as the reference CLI status note (status_note)."""
+    """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
+    token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
+    the Claude Code hook count (hook_count)."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
+    if "$HOOK_COUNT" in value:
+        value = value.replace("$HOOK_COUNT", str(hook_count()))
     return value.replace("$BASE/", site["base"])
+
+
+# The Claude Code hook count the pages state: the [[hook]] entries of the hooks manifest whose platform is
+# "claude-code" (the predicate tools/check_reference_facts.py counts for the README), rendered wherever the
+# $HOOK_COUNT token appears, so a hook added to or removed from the manifest drifts the pages that state it.
+HOOKS_SOURCE = ".aiqt/core/hooks/manifest.toml"
+
+
+def hook_count(root=ROOT):
+    """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code".
+    RefusedPage when the manifest cannot be read or parsed, when its hook key is not an array of tables
+    each with a string platform, or when it holds no Claude Code hook."""
+    path = Path(root) / HOOKS_SOURCE
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(MAX_PAGE_BYTES + 1)
+    except OSError as exc:
+        raise RefusedPage("{}: unreadable ({})".format(HOOKS_SOURCE, exc)) from exc
+    if len(data) > MAX_PAGE_BYTES:
+        raise RefusedPage("{}: larger than {} bytes".format(HOOKS_SOURCE, MAX_PAGE_BYTES))
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (RecursionError, MemoryError, ValueError, UnicodeError) as exc:
+        # tomllib raises the ValueError family on malformed TOML and RecursionError or MemoryError on
+        # hostile nesting; each is disposed of here, at the parse site, as a refusal.
+        raise RefusedPage("{}: cannot parse ({}: {})".format(HOOKS_SOURCE, type(exc).__name__, exc)) from exc
+    hooks = doc.get("hook")
+    if not isinstance(hooks, list) or not all(
+            isinstance(hook, dict) and isinstance(hook.get("platform"), str) for hook in hooks):
+        raise RefusedPage("{}: hook is not an array of tables each with a string platform".format(HOOKS_SOURCE))
+    count = sum(1 for hook in hooks if hook["platform"] == "claude-code")
+    if not count:
+        raise RefusedPage("{}: no hook has platform \"claude-code\"".format(HOOKS_SOURCE))
+    return count
 
 
 # The reference CLI status note: generated from VERB_STATUS in opf/tools/opf.py, read as a literal from the
@@ -2887,6 +2926,43 @@ def _self_test():
                 handle.write("VERB_STATUS = {}\n".format(bad))
             refused(name, verb_status, tmp)
 
+    # The hook count: read from the hooks manifest, rendered for the $HOOK_COUNT token, and the only form the
+    # pages state it in.
+    live_hooks = hook_count()
+    for rel, wording in (("site/index.html", "an opt-in plugin of {} hooks"),
+                         ("site/index.html", "Its {} Claude Code hooks"),
+                         ("site/install/details/index.html", "The {} Claude Code hooks")):
+        expect("hooks/live-count-on-pages", wording.format(live_hooks) in live_outputs[rel], (rel, wording))
+    expect("hooks/no-unrendered-token", not any("$HOOK_COUNT" in text for text in live_outputs.values()))
+    for rel in ("site/draft-src/home.toml", "site/draft-src/install-details.toml"):
+        with open(ROOT / rel, encoding="utf-8") as handle:
+            data_text = handle.read()
+        typed = re.findall(r"\b\d+ (?:Claude Code )?hooks\b", data_text)
+        expect("hooks/data-files-carry-the-token", "$HOOK_COUNT" in data_text and not typed, (rel, typed))
+    expect("hooks/token-rendered", _inline({"base": "/"}, "a $HOOK_COUNT b") == "a {} b".format(live_hooks))
+    for name, text, want in (
+            ("hooks/count-claude-code-only", '[[hook]]\nplatform = "claude-code"\n[[hook]]\nplatform = "claude-code"\n'
+             '[[hook]]\nplatform = "other"\n', 2),
+            ("hooks/count-one", '[[hook]]\nplatform = "claude-code"\n', 1)):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+            with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            got = hook_count(tmp)
+        expect(name, got == want, got)
+    for name, text in (("hooks/malformed-refused", "[[hook]\n"),
+                       ("hooks/no-hooks-refused", 'format-version = 1\n'),
+                       ("hooks/no-claude-code-hook-refused", '[[hook]]\nplatform = "other"\n'),
+                       ("hooks/platform-missing-refused", '[[hook]]\nid = "x"\n'),
+                       ("hooks/hook-not-a-table-array-refused", 'hook = 3\n'),
+                       ("hooks/missing-manifest-refused", None)):
+        with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+            if text is not None:
+                os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+                with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+            refused(name, hook_count, tmp)
+
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
         for failure in failures:
@@ -2897,8 +2973,8 @@ def _self_test():
           "cycle, base path, every "
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
-          "switch, text-field escaping, the structural link guard, the checked title and meta keys and "
-          "--check exit codes)")
+          "switch, text-field escaping, the structural link guard, the checked title and meta keys, the "
+          "hook count read from the hooks manifest and --check exit codes)")
     return 0
 
 

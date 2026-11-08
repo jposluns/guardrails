@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "41e08de9339006d6c874a4360b6dde65f004e342176526ba1d7fc0d1d94d4b38"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 26024
-sha256 = "6ffa35254702ce448df2d072db8895dea7154d4c50f2fd183774db0c3921b723"
+bytes = 26103
+sha256 = "e55e6e513040fcd01ab72d9253aa46348ec146d6abdddebf6ab59c6e265f3db9"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -836,8 +836,8 @@ sha256 = "0bef727083ae24ef1aea29a2e2b1a3593deaaf0238ec5785e01112f50112e104"
 
 [[sources]]
 path = ".aiqt/gensrc.json"
-bytes = 14429
-sha256 = "38c233f15c91514038a062ba51f7d73521b6baf44d07d35b155475b3c929c0ec"
+bytes = 14513
+sha256 = "308f9285337e54eb891ce82f77e373d6430a1891965cf2db7cc6ed7ce72bb827"
 
 [[sources]]
 path = ".aiqt/record-sections.toml.example"
@@ -3631,13 +3631,13 @@ sha256 = "f888bc67448bd472ad96cd81b0839e8869cd2c475fde106978c26cd0958609f8"
 
 [[sources]]
 path = "site/draft-src/home.toml"
-bytes = 2857
-sha256 = "b6c52bd643fc8e4348951064e29cb977f5995959436406351e30f1c1b7f1979d"
+bytes = 2875
+sha256 = "7b50029537b0a0fe577c41a82e3980db46e18b299be2d6d955afd14fb426a16f"
 
 [[sources]]
 path = "site/draft-src/install-details.toml"
-bytes = 9684
-sha256 = "24cd55e0fc5cf9c638158e97d0736c05dac66d1fe28b7f7de8d6b4bb0d644aba"
+bytes = 9693
+sha256 = "62594bf87d097c68d26bfce6765af8dd60bd0ea5ec2349fcd37d445505c7e224"
 
 [[sources]]
 path = "site/draft-src/install.toml"
@@ -3972,12 +3972,12 @@ sha256 = "996d0626d21f6c6181c7503840e84cbfbf996d6bf5eff133d423fb340e387cab"
 [[sources]]
 path = "site/index.html"
 bytes = 9971
-sha256 = "92616c43a59669c212928b7ccf5eb17bda48aa22377e016df898818f7bfa6bb9"
+sha256 = "dfd848a76fa25c004ca4d02cdd372272500e842ee2187610c51873585e2fc01c"
 
 [[sources]]
 path = "site/install/details/index.html"
 bytes = 17229
-sha256 = "7751793817f43ac93a9d98e2dbb4af9a51c1d329b6c063a4a8f24aaf91d700b7"
+sha256 = "79633112e5ab875dd482316bf62cf1d5fa166fa4562bdf3612d9da60337b2992"
 
 [[sources]]
 path = "site/install/index.html"
@@ -4486,8 +4486,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 177407
-sha256 = "6ab45f9a0305aa984fb1aebd6af838eb57dc3941175e55486117db47380b548f"
+bytes = 182334
+sha256 = "c3b61bb8077a33d48335718a2df05e884a0b53e10ac38d8ae3b18c1502f64912"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
