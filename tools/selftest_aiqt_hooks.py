@@ -17051,8 +17051,8 @@ def _main_isolated(monitor):
                 ("(H33o) worktree add --detach under a git alias denies",
                  "git -c alias.wa=worktree wa add --detach /tmp/wt-h33o {}".format(br_tip))):
             brexpect(label, command, "deny")
-        # A --git-dir or GIT_DIR redirect, a -c option with no -C, or an empty -C names a repository this guard
-        # does not pin, so a detach under one allows with a note whatever its start, with no ancestry probe, as
+        # A --git-dir or GIT_DIR redirect, a -c option with no -C, --work-tree or GIT_WORK_TREE=, or an empty -C
+        # leaves a repository this guard does not pin, so a detach under one allows with a note whatever its start, with no ancestry probe, as
         # the -b form does; the CI branch-root gate stays the backstop.
         h33_note = (
             ("(H33p) worktree add --detach on an orphaned start under --git-dir allows with a note",
@@ -17066,6 +17066,21 @@ def _main_isolated(monitor):
         )
         for label, command in h33_note:
             brexpect(label, command, "allow-note")
+        # A GIT_WORK_TREE= prefix moves only the worktree, as --work-tree does, so beside a -c option or another
+        # global option it still leaves the session repository pinned: the start is probed there and an orphaned
+        # one denies, naming the probe's reason rather than allowing with the cannot-pin note.
+        for label, command in (
+                ("(H33t) worktree add --detach on an orphaned start under GIT_WORK_TREE= and -c denies",
+                 "GIT_WORK_TREE=/etc git -c core.x=1 worktree add --detach /tmp/wt-h33t {}".format(br_orphan)),
+                ("(H33u) worktree add --detach on an orphaned start under GIT_WORK_TREE= and --no-pager denies",
+                 "GIT_WORK_TREE=/etc git --no-pager worktree add --detach /tmp/wt-h33u {}".format(br_orphan))):
+            _h33_code, _h33_out, _h33_err = brg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                 "tool_input": {"command": command}, "cwd": brr})
+            _h33_got = _reduce_result(_h33_code, _h33_out)
+            _h33_reason = ((_h33_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _h33_got != "deny" or "has no merge base with origin/HEAD" not in _h33_reason:
+                failures.append("{}: expected deny naming the missing merge base, got {} {!r}".format(
+                    label, _h33_got, _h33_reason))
         # Flip: the old classifier, which returned _ASK_START at the first detach token its walk met (so
         # every detach form denied), must turn each H33 allow and allow-note vector red, so they test the
         # detach branch and not some other allow. It walks the arguments as the classifier does, so a d that is the value of

@@ -14880,8 +14880,9 @@ def branch_root(data):
     all deny, since the probe finds no origin/HEAD merge base). A '--work-tree' or 'GIT_WORK_TREE=' redirect
     moves only the worktree, so with no -C the start is probed in the session directory, the repository the
     branch is created in, whatever the worktree value: '--work-tree=/etc' and an empty '--work-tree=' follow
-    the session repository's ancestry (a rooted start ALLOWS, an orphaned one DENIES), and only with no
-    session directory does such a redirect ALLOW-WITH-NOTE.
+    the session repository's ancestry (a rooted start ALLOWS, an orphaned one DENIES). With no -C, such a
+    redirect ALLOWS-WITH-NOTE only when the call carries no session directory or the command also carries a
+    '--git-dir' option or a 'GIT_DIR=' prefix, which this guard cannot pin (the cannot-pin sentence below).
     A CHECKOUT/SWITCH '--track <ref>' names a rooted real start and ALLOWS (a 'git branch --track' is an
     unclassifiable form and DENIES, not an allow). A 'git worktree add --detach|-d <path> <commit-ish>'
     (the detach option in any position before any '--', the operands optionally after it) creates no
@@ -14894,14 +14895,16 @@ def branch_root(data):
     without -C); under any -c option that defines no git alias ('git -c core.x=1 worktree add --detach
     <path> <commit-ish>'), any other global option before the subcommand ('--no-pager', '--bare') or any
     leading environment assignment other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
-    prefix, when no -C or --work-tree names the repository; under an empty -C ("-C ''") or a relative -C
-    when the call carries no working directory; and under a --work-tree or GIT_WORK_TREE= redirect with no
+    prefix, when the command carries no -C, --work-tree or GIT_WORK_TREE=; under an empty -C ("-C ''"),
+    with or without a working directory, or a relative -C when the call carries no working directory; and
+    under a --work-tree or GIT_WORK_TREE= redirect with no
     -C when the call carries no working directory. A detach with a missing or extra operand or beside
     -b/-B, an --orphan, and a bare 'worktree add <path> [<commit-ish>]' (git may create a branch there)
     still DENY as forms this guard cannot classify (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
     ONLY a redirect whose repository this guard cannot pin at all - a --git-dir/GIT_DIR form, a -c or other
-    global option or leading assignment with no -C or --work-tree, an empty or relative-with-no-cwd -C, or a
+    global option or leading assignment (other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
+    prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty or relative-with-no-cwd -C, or a
     --work-tree/GIT_WORK_TREE= with no -C and no session directory (_segment_repo_dir) - ALLOWS-WITH-NOTE
     (the CI branch-root gate remains the backstop) rather than denying. It never asks. A command carrying a '#'
     whose comment reading depends on context (the shared lexer's comment rule) is judged on the segments of
@@ -15063,20 +15066,24 @@ def branch_root(data):
             # a COMMAND-LOCAL redirect. Honour the -C fleet convention: resolve the
             # repository and check ancestry THERE. A -C target that RESOLVES to a concrete directory is
             # PROBED there, so one that is not a rooted repo ('-C /nonexistent', '-C /etc', a '-C $VAR' that
-            # joins to a bogus path) DENIES via the ancestry-unknown fail-safe below; a --work-tree with no -C
-            # (an empty '--work-tree=' included) is probed in the session directory (see below).
-            # ONLY a repository this guard cannot pin at all - a --git-dir/GIT_DIR form, a -c or other global
-            # option or leading assignment with no -C or --work-tree, an empty or relative-with-no-cwd -C, or
-            # a --work-tree with no -C and no session directory - ALLOWS-WITH-NOTE
+            # joins to a bogus path) DENIES via the ancestry-unknown fail-safe below; a --work-tree or
+            # GIT_WORK_TREE= with no -C (an empty '--work-tree=' included) is probed in the session directory
+            # (see below). ONLY a repository this guard cannot pin at all - a --git-dir/GIT_DIR form, a -c or
+            # other global option or leading assignment (other than GIT_WORK_TREE= and the removed
+            # GUARDRAIL_ALLOW_DISCARD prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty or
+            # relative-with-no-cwd -C, or a --work-tree or GIT_WORK_TREE= with no -C and no session
+            # directory - ALLOWS-WITH-NOTE
             # rather than denying (the CI branch-root gate remains the backstop), never a hard block of a
             # legitimate explicit-target creation.
             # a branch is created in the REPOSITORY git acts on, which --work-tree
             # NEVER relocates (it moves only the worktree); the repo is the ambient cwd, a -C target, or a
-            # --git-dir. _segment_repo_dir resolves that (a -C target, or the session cwd when only --work-tree
-            # is present), so 'git --work-tree=B branch new start' has its ancestry checked in the SESSION repo
-            # it actually creates the branch in, not B. A --git-dir/GIT_DIR/-c form, an unresolvable -C
-            # target, or a --work-tree with no session directory stays the cannot-resolve allow-note (the CI
-            # branch-root gate remains the backstop).
+            # --git-dir. _segment_repo_dir resolves that (a -C target, or the session cwd when a --work-tree or
+            # GIT_WORK_TREE= is present with no -C), so 'git --work-tree=B branch new start' and
+            # 'GIT_WORK_TREE=B git -c core.x=1 branch new start' have their ancestry checked in the SESSION repo
+            # they actually create the branch in, not B. A --git-dir/GIT_DIR form, a -c form with no -C,
+            # --work-tree or GIT_WORK_TREE=, an unresolvable -C target, or a --work-tree or GIT_WORK_TREE= with
+            # no -C and no session directory stays the cannot-resolve allow-note (the CI branch-root gate
+            # remains the backstop).
             rd = _segment_repo_dir(tokens, cwd0)
             if isinstance(rd, str) and rd != "opaque":
                 probe_repo = rd
