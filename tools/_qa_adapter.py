@@ -907,7 +907,9 @@ def run_selftest_child(args, child, failures, what, timeout=SELFTEST_CHILD_TIMEO
     whole process group is killed before the child is reaped, and the launch is recorded as a failure.
     Any other exception out of the wait (KeyboardInterrupt, MemoryError and the like) also kills the whole
     group and reaps the child before it propagates, because Popen's own exit waits without killing
-    anything and would leave the child and its grandchildren running."""
+    anything and would leave the child and its grandchildren running. The kill runs in a finally, so an
+    interrupt while the timeout is being recorded cannot skip it, and only while the child is unreaped:
+    after a normal return the child has been reaped and its group id may already name another group."""
     if child:
         failures.append("a child-mode self-test tried to launch {}; child mode launches nothing".format(what))
         return None
@@ -918,12 +920,11 @@ def run_selftest_child(args, child, failures, what, timeout=SELFTEST_CHILD_TIMEO
         try:
             out, err = _selftest_communicate(proc, timeout)
         except subprocess.TimeoutExpired:
-            _kill_selftest_group(proc)
             failures.append("{} did not exit within {} s; its process group was killed".format(what, timeout))
             return None
-        except BaseException:
-            _kill_selftest_group(proc)
-            raise
+        finally:
+            if proc.returncode is None:
+                _kill_selftest_group(proc)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
@@ -1043,7 +1044,8 @@ def _recorded_process_alive(pid, start):
 
 
 def _write_grandchild_standin(script, marker, child_sleep=60):
-    """Write a stand-in script that starts a sleeping grandchild in its own process group, records
+    """Write a stand-in script that starts a sleeping grandchild in the stand-in's own process group (the
+    group run_selftest_child kills, which is how the grandchild is meant to die with it), records
     "<grandchild pid> <grandchild start time>" in marker (a "-" start time where /proc cannot supply it;
     written whole to a side file, then renamed into place), and then sleeps child_sleep seconds."""
     part = str(marker) + ".part"
@@ -2399,28 +2401,45 @@ def _self_test_isolated(child):
         #     It starts only a sleeping stand-in, never this tool, so it runs in child mode as well. The
         #     stand-in records the grandchild's pid with its /proc start time, so a pid the system has
         #     since given to an unrelated process does not read as a survivor, and a survivor is reported
-        #     with its state, parent pid, process group and the seconds waited.
-        def grandchild_case(tag, wait, on_record=None):
+        #     with its state, parent pid, process group and the seconds waited. However the case ends (a
+        #     normal return, a recorded survivor, or an exception such as KeyboardInterrupt mid-poll), a
+        #     finally reads the marker again and kills the recorded grandchild when one /proc read confirms
+        #     its pid and start time, so a launcher that kills only the child cannot leave it running past
+        #     the self-test. killpg, when given, replaces os.killpg for the launch alone and is restored
+        #     before the poll, so that finally kills with the real os.killpg.
+        def grandchild_case(tag, wait, on_record=None, killpg=None):
             got = []
             marker = tmp / (tag + ".pid")
             script = tmp / (tag + ".py")
             _write_grandchild_standin(script, marker)
-            bounded = []
-            if run_selftest_child([str(script)], False, bounded,
-                                  "the sleeping stand-in", timeout=5) is not None or len(bounded) != 1:
-                got.append("a self-test child outliving its timeout must return None with one recorded "
-                           "failure, got {!r}".format(bounded))
-            rec = _read_grandchild_marker(marker)
-            if rec is None:
-                got.append("the sleeping stand-in did not record its grandchild within the timeout")
-            else:
-                if on_record is not None:
-                    on_record(rec)
-                survivor = _grandchild_survivor(rec[0], rec[1], wait)
-                if survivor is not None:
-                    got.append("a timed-out self-test child's grandchild survived ({}): the launch must kill "
-                               "the child's whole process group, not the child alone".format(survivor))
-            return got, rec
+            try:
+                bounded = []
+                real_killpg = os.killpg
+                if killpg is not None:
+                    os.killpg = killpg
+                try:
+                    launched = run_selftest_child([str(script)], False, bounded, "the sleeping stand-in",
+                                                  timeout=5)
+                finally:
+                    os.killpg = real_killpg
+                if launched is not None or len(bounded) != 1:
+                    got.append("a self-test child outliving its timeout must return None with one recorded "
+                               "failure, got {!r}".format(bounded))
+                rec = _read_grandchild_marker(marker)
+                if rec is None:
+                    got.append("the sleeping stand-in did not record its grandchild within the timeout")
+                else:
+                    if on_record is not None:
+                        on_record(rec)
+                    survivor = _grandchild_survivor(rec[0], rec[1], wait)
+                    if survivor is not None:
+                        got.append("a timed-out self-test child's grandchild survived ({}): the launch must "
+                                   "kill the child's whole process group, not the child alone".format(survivor))
+                return got, rec
+            finally:
+                left = _read_grandchild_marker(marker)
+                if left is not None:
+                    _kill_recorded_survivor(left[0], left[1])
 
         got57, _rec57 = grandchild_case("grandchild", 10)
         failures.extend(got57)
@@ -2517,18 +2536,11 @@ def _self_test_isolated(child):
                     failures.append("an unreaped zombie with the recorded start time must not read as alive")
             finally:
                 zombie.wait()
-        real_killpg = os.killpg
-
         def leader_only_killpg(pgid, sig):
             os.kill(pgid, sig)
 
-        os.killpg = leader_only_killpg
-        try:
-            leaked, leaked_rec = grandchild_case("leaked-grandchild", 2)
-        finally:
-            os.killpg = real_killpg
-        if leaked_rec is not None:
-            _kill_recorded_survivor(leaked_rec[0], leaked_rec[1])
+        # grandchild_case kills the leaked grandchild in its own finally, after os.killpg is restored.
+        leaked, leaked_rec = grandchild_case("leaked-grandchild", 2, killpg=leader_only_killpg)
         if not any("grandchild survived" in f and "waited" in f
                    and ("pgrp" in f or leaked_rec is None or leaked_rec[1] is None) for f in leaked):
             failures.append("case 57 run against a launcher that kills only the direct child must report the "
@@ -2546,8 +2558,9 @@ def _self_test_isolated(child):
         #     line, a line with no closing parenthesis and a line with 19 fields after it (one short of
         #     the start time) each reading as alive with the error named; a 20-field line (the shortest
         #     that reaches the start time) reading as alive with the exact start time and as gone with a
-        #     start time one tick later; and FileNotFoundError and ProcessLookupError reading as gone. It
-        #     starts only stand-ins, never this tool, so it runs in child mode as well.
+        #     start time one tick later or in state X (dead) with the exact start time, which a probe that
+        #     takes only Z as dead reads as alive; and FileNotFoundError and ProcessLookupError reading as
+        #     gone. It starts only stand-ins, never this tool, so it runs in child mode as well.
         if os.path.isdir("/proc/self"):
             import errno
             module_globals = globals()
@@ -2620,6 +2633,8 @@ def _self_test_isolated(child):
                     ("19 fields", line19, me_start, True, "19 fields after the command name"),
                     ("20 fields, exact start time", line20, me_start, True, "start time " + me_start),
                     ("20 fields, start time one tick later", line20, later, False, "start time " + me_start),
+                    ("20 fields, state X (dead), exact start time",
+                     head + " ".join(["X"] + me_fields[1:20]).encode("ascii"), me_start, False, "state X"),
                     ("FileNotFoundError", FileNotFoundError(errno.ENOENT, "injected absence"), me_start, False,
                      "absent (FileNotFoundError"),
                     ("ProcessLookupError", ProcessLookupError(errno.ESRCH, "injected exit"), me_start, False,
@@ -2642,6 +2657,175 @@ def _self_test_isolated(child):
                         failures.append("a stat read giving {} at a recorded pid must read as {} with {!r} named, "
                                         "got alive={} detail {!r}".format(
                                             label, "alive" if want_alive else "gone", want_text, alive, detail))
+
+        # 61. DISCRIMINATING (an interrupted grandchild case leaves no grandchild behind): case 57's check
+        #     is run against the launcher that kills only the direct child (as in case 59) and interrupted
+        #     with KeyboardInterrupt, once the moment the marker is read (before the poll) and once in the
+        #     survivor poll (the 2 s poll of case 59's leaked half). Each time one probe first shows the
+        #     grandchild alive, the interrupt must propagate, and the recorded grandchild must then be gone
+        #     within 5 s. A case that kills the recorded grandchild only after the poll returns, or never,
+        #     leaves it running past the self-test and fails this. It starts only stand-ins, never this
+        #     tool, so it runs in child mode as well.
+        module_globals = globals()
+        real_survivor = module_globals["_grandchild_survivor"]
+        for where in ("marker", "poll"):
+            sentinel = "injected KeyboardInterrupt at the {}".format(where)
+            seen = {}
+
+            def interrupt_on_record(rec, _msg=sentinel, _seen=seen):
+                _seen["rec"], _seen["alive"] = rec, _recorded_process_probe(rec[0], rec[1])
+                raise KeyboardInterrupt(_msg)
+
+            def interrupted_poll(pid, start, wait, _msg=sentinel, _seen=seen):
+                _seen["rec"], _seen["alive"] = (pid, start), _recorded_process_probe(pid, start)
+                raise KeyboardInterrupt(_msg)
+
+            raised = False
+            if where == "poll":
+                module_globals["_grandchild_survivor"] = interrupted_poll
+            try:
+                grandchild_case("interrupted-" + where, 2, killpg=leader_only_killpg,
+                                on_record=interrupt_on_record if where == "marker" else None)
+            except KeyboardInterrupt as exc:
+                if str(exc) != sentinel:
+                    raise
+                raised = True
+            finally:
+                module_globals["_grandchild_survivor"] = real_survivor
+            rec = seen.get("rec")
+            if not raised or rec is None or not seen["alive"][0]:
+                failures.append("a KeyboardInterrupt at the {} of the grandchild case must propagate after one "
+                                "probe shows the leaked grandchild alive, got raised={} record {!r} probe {!r}".format(
+                                    where, raised, rec, seen.get("alive")))
+            if rec is not None:
+                survivor = _grandchild_survivor(rec[0], rec[1], 5)
+                if survivor is not None:
+                    failures.append("a KeyboardInterrupt at the {} of the grandchild case left the grandchild "
+                                    "alive ({}): the case must kill the recorded grandchild in a finally".format(
+                                        where, survivor))
+                    _kill_recorded_survivor(rec[0], rec[1])
+
+        # 62. DISCRIMINATING (_pid_alive reads only an absent process as exited, and the survivor probe
+        #     without a start time or without /proc takes the bare pid check): with the stat read of this
+        #     live process scripted, _pid_alive must read alive for a line that ends at the command name
+        #     (no state field, which a check of the field list alone reads as exited) and for an empty
+        #     line, and exited for FileNotFoundError and for ProcessLookupError (which, left to the OSError
+        #     clause, falls through to a signal probe that finds this process alive). _recorded_process_probe
+        #     given no start time must name the bare pid check and read this process alive on its real stat
+        #     line and exited on FileNotFoundError; given a start time while os.path.isdir reports no
+        #     /proc/self, it must name the same check and read alive without reading /proc at all. On Linux
+        #     the stand-in always records a start time, so this is the only row that runs that branch.
+        if os.path.isdir("/proc/self"):
+            import errno
+            real_read = module_globals["_read_proc_stat"]
+            me = os.getpid()
+            me_start = _proc_start_time(me)
+            bare = "bare pid check without a recorded start time or /proc reads "
+            absent = FileNotFoundError(errno.ENOENT, "injected absence")
+            rows = (
+                ("_pid_alive", "a line with no field after the command name",
+                 "{} (qa probe)".format(me).encode("ascii"), True),
+                ("_pid_alive", "an empty line", b"", True),
+                ("_pid_alive", "FileNotFoundError", absent, False),
+                ("_pid_alive", "ProcessLookupError", ProcessLookupError(errno.ESRCH, "injected exit"), False),
+                ("no start time", "the real stat line", None, True),
+                ("no start time", "FileNotFoundError", absent, False),
+            )
+            for what, label, outcome, want_alive in rows:
+                def scripted_read(pid, _outcome=outcome):
+                    if pid != me or _outcome is None:
+                        return real_read(pid)
+                    if isinstance(_outcome, BaseException):
+                        raise _outcome
+                    return _outcome
+
+                module_globals["_read_proc_stat"] = scripted_read
+                try:
+                    if what == "_pid_alive":
+                        alive, detail = _pid_alive(me), None
+                    else:
+                        alive, detail = _recorded_process_probe(me, None)
+                finally:
+                    module_globals["_read_proc_stat"] = real_read
+                want_detail = None if what == "_pid_alive" else bare + ("alive" if want_alive else "exited")
+                if alive is not want_alive or detail != want_detail:
+                    failures.append("{} given {} for this live process must read {} (detail {!r}), got alive={} "
+                                    "detail {!r}".format(what, label, "alive" if want_alive else "exited",
+                                                         want_detail, alive, detail))
+
+            reads = []
+
+            def counted_read(pid):
+                reads.append(pid)
+                raise absent
+
+            real_isdir = os.path.isdir
+
+            def no_proc_isdir(path):
+                return False if str(path) == "/proc/self" else real_isdir(path)
+
+            module_globals["_read_proc_stat"] = counted_read
+            os.path.isdir = no_proc_isdir
+            try:
+                alive, detail = _recorded_process_probe(me, me_start)
+            finally:
+                os.path.isdir = real_isdir
+                module_globals["_read_proc_stat"] = real_read
+            if me_start is None or alive is not True or detail != bare + "alive" or reads:
+                failures.append("the survivor probe with a start time {!r} but no /proc/self must take the bare "
+                                "pid check and read this process alive without reading /proc, got alive={} "
+                                "detail {!r} reads {!r}".format(me_start, alive, detail, reads))
+
+        # 63. DISCRIMINATING (the launcher's group kill cannot be skipped while a timeout is recorded):
+        #     _selftest_communicate is replaced by one that waits for the stand-in to record its grandchild
+        #     and raises TimeoutExpired, and run_selftest_child is handed a failures list whose append
+        #     raises KeyboardInterrupt. The KeyboardInterrupt must propagate and the grandchild must be gone
+        #     within 5 s. A launcher that kills the group as a statement after recording the timeout, not in
+        #     a finally, leaves the grandchild running and fails this. It starts only a stand-in, never this
+        #     tool, so it runs in child mode as well.
+        sentinel = "injected KeyboardInterrupt while the timeout is recorded"
+
+        class InterruptingFailures(list):
+            def append(self, item):
+                raise KeyboardInterrupt(sentinel)
+
+        marker = tmp / "timeout-interrupted.pid"
+        script = tmp / "timeout-interrupted.py"
+        _write_grandchild_standin(script, marker, child_sleep=20)
+
+        def timed_out_communicate(proc, timeout, _marker=marker):
+            deadline = time.monotonic() + 10
+            while not _marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+
+        real_communicate = module_globals["_selftest_communicate"]
+        try:
+            module_globals["_selftest_communicate"] = timed_out_communicate
+            raised = False
+            try:
+                run_selftest_child([str(script)], False, InterruptingFailures(), "the timed-out stand-in",
+                                   timeout=30)
+            except KeyboardInterrupt as exc:
+                if str(exc) != sentinel:
+                    raise
+                raised = True
+            finally:
+                module_globals["_selftest_communicate"] = real_communicate
+            rec = _read_grandchild_marker(marker)
+            if not raised or rec is None:
+                failures.append("a KeyboardInterrupt while a timeout is recorded must propagate from "
+                                "run_selftest_child after the grandchild is recorded, got raised={} record "
+                                "{!r}".format(raised, rec))
+            else:
+                survivor = _grandchild_survivor(rec[0], rec[1], 5)
+                if survivor is not None:
+                    failures.append("a KeyboardInterrupt while a timeout is recorded left the self-test child's "
+                                    "grandchild alive ({}): the group kill must run in a finally".format(survivor))
+        finally:
+            left = _read_grandchild_marker(marker)
+            if left is not None:
+                _kill_recorded_survivor(left[0], left[1])
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2720,7 +2904,8 @@ def _self_test_isolated(child):
           "too, never printing this line; and every self-test child launch is bounded by a timeout that kills "
           "the child's process group and is reported as a failure, and child mode launches nothing; and the "
           "grandchild-survival probe reads a recorded process as gone only on an absent /proc stat file, "
-          "counting any other read failure or an unparsable line as alive with the error named."))
+          "counting any other read failure or an unparsable line as alive with the error named; and an "
+          "interrupted grandchild case still kills its recorded grandchild."))
 
 
 def main():
