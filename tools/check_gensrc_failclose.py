@@ -110,6 +110,10 @@ tree, so it captures local uncommitted edits; on CI, HEAD equals the tree.
 
   check_gensrc_failclose.py             sweep the real registry (default)
   check_gensrc_failclose.py --self-test build synthetic mini-repos and assert this gate's own invariants
+  check_gensrc_failclose.py --measure-load-case N
+                                        run the self-test load case's slow and leaky lanes N times each
+                                        and print each probe's largest no-progress gap and the host
+                                        load (a re-measurement of the stall bound's sizing; asserts nothing)
 """
 import sys
 
@@ -841,8 +845,11 @@ def main() -> int:
     args = sys.argv[1:]
     if "--self-test" in args:
         return self_test_main()
+    if len(args) == 2 and args[0] == "--measure-load-case" and args[1].isdigit() and int(args[1]) > 0:
+        return _measure_load_case(int(args[1]))
     if args:
-        print("usage: check_gensrc_failclose.py [--self-test]; fail-closed", file=sys.stderr)
+        print("usage: check_gensrc_failclose.py [--self-test | --measure-load-case N]; fail-closed",
+              file=sys.stderr)
         return 2
     return sweep(repo_root())
 
@@ -1693,6 +1700,205 @@ def _load_case_hang_bound_problems(hang_budget_s, stall_s, margin_s=2.0, flip_st
     return problems
 
 
+# The load-tolerance self-test case's bounds (sizing notes beside the case in _self_test_main_isolated),
+# module-level so --measure-load-case runs the same lanes under the same bounds.
+_LOAD_CASE_BUDGET_S, _LOAD_CASE_STALL_S = 1, 3
+_LOAD_CASE_HANG_BUDGET_S = 1.25
+_LOAD_CASE_LEAKY_BUDGET_S = 2.125
+
+
+def _load_case_leaky_bound_problems(leaky_budget_s, exit_allowance_s, stall_s, margin_s=2.0):
+    """The load-tolerance self-test case's three leaky lanes, checked against the poll loop of
+    _load_bound._watch at the injected maximum load factor: an empty list, or one line per bound
+    that fails. A leaky generator makes CPU or output progress until its own exit (and its leaked
+    child's start-up), which may come as late as exit_allowance_s wall seconds after launch. The
+    first poll after that last progress, at most POLL_S + SCAN_S later, is the last progress poll;
+    idle time is tested only at polls at most POLL_S + SCAN_S apart, so the stall fires at most
+    stall_s + POLL_S + SCAN_S after that poll: at most exit_allowance_s + 2 * (POLL_S + SCAN_S) +
+    stall_s wall seconds after launch. That must come at least margin_s before the leaky budget in
+    wall seconds, so the stall, not the budget, stops each leaky lane."""
+    poll_and_scan = _load_bound.POLL_S + _load_bound.SCAN_S
+    latest_stall = exit_allowance_s + 2 * poll_and_scan + stall_s
+    budget_wall = leaky_budget_s * _load_bound.MAX_LOAD_FACTOR
+    if latest_stall + margin_s > budget_wall:
+        return ["a leaky lane's stall can fire as late as {:g} wall s (last progress at {:g} s), less "
+                "than {:g} s before its {:g} wall s budget".format(latest_stall, exit_allowance_s, margin_s,
+                                                                   budget_wall)]
+    return []
+
+
+def _load_case_fixtures(tmp, leaked):
+    """The load-tolerance case's five fixture repos under tmp: (slow, hang, leaky, leaky_reject,
+    leaky_reject_escape); the leaky ones leave a descendant whose command line carries leaked."""
+    slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
+                 "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
+    slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
+    hang = _build_repo(tmp / "hang", {"goodfile": _GOODFILE.replace(
+        "def main():\n", "def main():\n    import time\n    if \"--check\" in sys.argv[1:]:\n"
+        "        time.sleep(3600)\n")})  # hangs on --check only, so the fixture build still writes
+    # Exits 0 on a corrupt target (it does not reject it) while leaving a descendant on its
+    # output: the wrong result stands beside the stop, so the sweep is a violation (exit 1), not 2.
+    leaky = _build_repo(tmp / "leaky", {"goodfile": _GOODFILE.replace(
+        "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+        ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+         "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+         "        return 0\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+    # Rejects the corrupt target (exit 2) while leaving a descendant on its output: the nonzero own
+    # exit stands as the rejection beside the stop, so the sweep is exit 0, never cannot-evaluate.
+    leaky_reject = _build_repo(tmp / "leaky-reject", {"goodfile": _GOODFILE.replace(
+        "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+        ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+         "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+         "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+    # Rejects the corrupt target (exit 2) beside the same leak, but FIRST swaps the target for a
+    # symlink escaping the sandbox: the stopped rejection must still run the post-probe containment
+    # validation, so the sweep is cannot-evaluate (exit 2), never an accepted rejection (exit 0).
+    leaky_reject_escape = _build_repo(tmp / "leaky-reject-escape", {"goodfile": _GOODFILE.replace(
+        "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
+        ("def main():\n    import os, subprocess\n"
+         "    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
+         "        target = repo_root() / \"out\" / \"goodfile.txt\"\n"
+         "        os.unlink(target)\n        os.symlink(sys.executable, target)\n"
+         "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
+         "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
+    return slow, hang, leaky, leaky_reject, leaky_reject_escape
+
+
+def _exited_unreaped(pid):
+    """True once pid has exited (reaped or not), False while it runs, None where waitid is missing;
+    WNOWAIT leaves the exit status for its owner to reap."""
+    if not hasattr(os, "waitid"):
+        return None
+    try:
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return True
+
+
+def _measure_load_case(runs):
+    """--measure-load-case: run the load-tolerance case's slow lane and three leaky lanes runs times
+    each, under the case's own injection (load factor pinned at MAX_LOAD_FACTOR, the case's budgets
+    and stall bound), and print per probe the largest no-progress gap the poll loop tested while the
+    generator had not yet exited, the last progress poll, the stop, and the host's 1-minute load
+    average before and after. A re-measurement for a reviewer; it asserts nothing and exits 0 unless
+    the runs could not be made (2)."""
+    global _run_check, _load_factor, PROBE_STALL_S
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+    from _git_fixture_env import fixture_git_lifecycle
+    try:
+        tmp = Path(tempfile.mkdtemp(prefix="aiqt-gensrc-failclose-measure-"))
+    except OSError as exc:
+        print("MEASURE ERROR: no writable temporary directory: {}".format(exc), file=sys.stderr)
+        return 2
+    leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
+    saved = (_run_check, _load_factor, PROBE_STALL_S, _load_bound._watch)
+    real_run_check, real_watch = _run_check, _load_bound._watch
+    lane = {"name": None, "polls": None}
+    records = []
+
+    def watching(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, poll_s, cpu_seconds,
+                 held):
+        polls = []
+
+        def sampled(pid):
+            cpu = cpu_seconds(pid)
+            polls.append((time.monotonic() - wall_start, cpu, len(held[0] or b"") + len(held[1] or b""),
+                          _exited_unreaped(proc.pid)))
+            return cpu
+        outcome = "own exit"
+        try:
+            return real_watch(proc, argv, pending, budget_s, stall_s, clock, start, wall_start, poll_s,
+                              sampled, held)
+        except _load_bound.Hung as exc:
+            outcome = exc.kind
+            raise
+        finally:
+            records.append((lane["name"], budget_s, polls, outcome, time.monotonic() - wall_start))
+
+    def budgeted(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+        return real_run_check(script_path, cwd, min(timeout, _LOAD_CASE_LEAKY_BUDGET_S if lane["name"]
+                                                    != "slow" else _LOAD_CASE_BUDGET_S), env_overrides)
+
+    rc = 0
+    with fixture_git_lifecycle():
+        try:
+            fixtures = _load_case_fixtures(tmp, leaked)
+            lanes = (("slow", fixtures[0]), ("leaky", fixtures[2]), ("leaky_reject", fixtures[3]),
+                     ("leaky_reject_escape", fixtures[4]))
+            print("measure-load-case: {} run(s) per lane, {} usable CPU(s), stall bound {} s, budgets "
+                  "slow {} s, leaky {} s, load factor pinned at {:g}".format(
+                      runs, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity")
+                      else os.cpu_count(), _LOAD_CASE_STALL_S, _LOAD_CASE_BUDGET_S,
+                      _LOAD_CASE_LEAKY_BUDGET_S, _load_bound.MAX_LOAD_FACTOR))
+            _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
+            PROBE_STALL_S = _LOAD_CASE_STALL_S
+            _run_check = budgeted
+            _load_bound._watch = watching
+            for run_index in range(1, runs + 1):
+                for name, fixture in lanes:
+                    lane["name"] = name
+                    first = len(records)
+                    load_before = os.getloadavg()[0]
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        sweep_rc = _gate_sweep(fixture)
+                    load_after = os.getloadavg()[0]
+                    for probe_index, (_, budget_s, polls, outcome, ended) in enumerate(records[first:], 1):
+                        gap, last_progress, exit_seen = _measured_gaps(polls)
+                        print("run {} lane {} probe {}: budget {:g} s, largest no-progress gap before own "
+                              "exit {:.3f} s, last progress poll {:.3f} s, own exit observed {}, stop {} "
+                              "at {:.3f} s, polls {}, sweep exit {}, load {:.1f} -> {:.1f}".format(
+                                  run_index, name, probe_index, budget_s, gap, last_progress,
+                                  "never" if exit_seen is None else "{:.3f} s".format(exit_seen), outcome,
+                                  ended, len(polls), sweep_rc, load_before, load_after))
+            lane["name"] = None
+        except Exception as exc:  # a run that could not be made is reported, never a traceback
+            print("MEASURE ERROR: {}: {}".format(type(exc).__name__, exc), file=sys.stderr)
+            rc = 2
+        finally:
+            _run_check, _load_factor, PROBE_STALL_S, _load_bound._watch = saved
+            failures, cannot = [], []
+            _cleanup_leaked_descendant(leaked, failures, cannot)
+            for line in failures + cannot:
+                print("MEASURE ERROR: " + line, file=sys.stderr)
+                rc = 2
+            try:
+                shutil.rmtree(tmp)
+            except OSError as exc:
+                print("MEASURE ERROR: cleanup of {}: {}".format(tmp, exc), file=sys.stderr)
+                rc = 2
+    gaps = [_measured_gaps(polls) for _, _, polls, _, _ in records]
+    if gaps:
+        print("measure-load-case: {} probe(s); worst no-progress gap before own exit {:.3f} s; latest "
+              "last progress poll {:.3f} s; latest stop {:.3f} s".format(
+                  len(gaps), max(g[0] for g in gaps), max(g[1] for g in gaps),
+                  max(r[4] for r in records)))
+    return rc
+
+
+def _measured_gaps(polls):
+    """From one probe's polls (seconds after launch, tree CPU, output bytes, exited), replaying the
+    progress rule of _load_bound._watch: (largest idle tested at a poll while the generator had not
+    exited, the last progress poll, the first poll that saw the exit or None)."""
+    seen_cpu, seen_output, last_progress = None, -1, 0.0
+    gap, exit_seen, readable = 0.0, None, True
+    for at, cpu, output, exited in polls:
+        real_cpu = isinstance(cpu, (int, float)) and cpu == cpu and cpu >= 0
+        if not real_cpu:
+            readable, seen_cpu = False, None
+        idle_before = at - last_progress
+        if seen_output < output or (readable and (seen_cpu is None or seen_cpu < cpu)):
+            last_progress = at
+        seen_output = max(seen_output, output)
+        if readable:
+            seen_cpu = cpu if seen_cpu is None else max(seen_cpu, cpu)
+        if exited and exit_seen is None:
+            exit_seen = at
+        if not exited and last_progress != at:
+            gap = max(gap, idle_before)
+    return gap, last_progress, exit_seen
+
+
 def self_test_main():
     # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
     # scrub before it would make it save, and so restore, the already scrubbed values.
@@ -1937,38 +2143,7 @@ def _self_test_main_isolated():
         leaked = "gensrc-leaked-descendant-{}".format(os.getpid())
 
         def _load_fixtures():
-            slow_main = ("def main():\n    import time\n    for _ in range(8):\n"
-                         "        print(\"working\", flush=True)\n        time.sleep(0.25)\n")
-            slow = _build_repo(tmp / "slow", {"goodfile": _GOODFILE.replace("def main():\n", slow_main)})
-            hang = _build_repo(tmp / "hang", {"goodfile": _GOODFILE.replace(
-                "def main():\n", "def main():\n    import time\n    if \"--check\" in sys.argv[1:]:\n"
-                "        time.sleep(3600)\n")})  # hangs on --check only, so the fixture build still writes
-            # Exits 0 on a corrupt target (it does not reject it) while leaving a descendant on its
-            # output: the wrong result stands beside the stop, so the sweep is a violation (exit 1), not 2.
-            leaky = _build_repo(tmp / "leaky", {"goodfile": _GOODFILE.replace(
-                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
-                ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
-                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
-                 "        return 0\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
-            # Rejects the corrupt target (exit 2) while leaving a descendant on its output: the nonzero own
-            # exit stands as the rejection beside the stop, so the sweep is exit 0, never cannot-evaluate.
-            leaky_reject = _build_repo(tmp / "leaky-reject", {"goodfile": _GOODFILE.replace(
-                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
-                ("def main():\n    import subprocess\n    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
-                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
-                 "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
-            # Rejects the corrupt target (exit 2) beside the same leak, but FIRST swaps the target for a
-            # symlink escaping the sandbox: the stopped rejection must still run the post-probe containment
-            # validation, so the sweep is cannot-evaluate (exit 2), never an accepted rejection (exit 0).
-            leaky_reject_escape = _build_repo(tmp / "leaky-reject-escape", {"goodfile": _GOODFILE.replace(
-                "def main():\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n",
-                ("def main():\n    import os, subprocess\n"
-                 "    if \"--check\" in sys.argv[1:] and run(repo_root(), True):\n"
-                 "        target = repo_root() / \"out\" / \"goodfile.txt\"\n"
-                 "        os.unlink(target)\n        os.symlink(sys.executable, target)\n"
-                 "        subprocess.Popen([sys.executable, \"-c\", \"import time; time.sleep(30)\", {!r}])\n"
-                 "        return 2\n    return run(repo_root(), \"--check\" in sys.argv[1:])\n").format(leaked))})
-            return slow, hang, leaky, leaky_reject, leaky_reject_escape
+            return _load_case_fixtures(tmp, leaked)
 
         # Sizing, so each position is decided by the code under test and not by host speed:
         #   * The 1 s per-probe budget is applied at the _run_check seam only. PROBE_TIMEOUT itself stays
@@ -1988,7 +2163,14 @@ def _self_test_main_isolated():
         #     figures sizes the bound: the first poll always counts as progress, so launch to first poll
         #     cannot move the stall. What the stall must never do is stop the slow or leaky generators
         #     before their own exit, so the sizing figure is the longest gap with no CPU or output
-        #     progress any of them shows under the injected cap before that exit. Measured on 2026-11-08,
+        #     progress any of them shows under the injected cap before that exit. To re-measure it, run
+        #     `python3 -I -B tools/check_gensrc_failclose.py --measure-load-case N` (_measure_load_case):
+        #     it runs the slow lane and the three leaky lanes N times each under this case's injection and
+        #     bounds and prints, per probe, the largest no-progress gap tested before the own exit, the
+        #     last progress poll, the stop, and the 1-minute load average before and after. The figures
+        #     that follow are a record of one measurement on one host at one load, taken before that mode
+        #     existed with the same injection; they are not a guarantee for another host or load.
+        #     Measured on 2026-11-08,
         #     12 runs each of the slow fixture and of the three leaky fixtures, the cap injected as this
         #     case injects it (the budget clock's load factor pinned at MAX_LOAD_FACTOR; the children run
         #     at real host speed, no extra load added), on an 80-CPU host whose 1-minute load average
@@ -2001,8 +2183,8 @@ def _self_test_main_isolated():
         #     stays: it tolerates two consecutive no-progress polls where the worst observed run had one,
         #     is about 2.9 times that worst observed gap, and is 12 times the slow generator's longest
         #     deliberate silent wait (0.25 s). These figures come from that one host and load; on a more
-        #     starved host the derived bound below covers only the hang lane's latest stop, not a false
-        #     stall in the slow or leaky lanes.
+        #     starved host the derived bounds below cover the hang lane's and the leaky lanes' latest
+        #     stops against their budgets, not a false stall before a slow or leaky generator's own exit.
         #   * The hang's bound, derived from the poll loop in _load_bound._watch: each poll waits POLL_S
         #     (1 s) in communicate and then scans the process table; a scan that completes takes under
         #     SCAN_S (5 s), and one cut short turns the stall test off for the rest of the run (the budget
@@ -2022,29 +2204,50 @@ def _self_test_main_isolated():
         #     hang row reads ['budget'], red. A hang budget of 25 wall s or more would let that flip race
         #     the stall. _load_case_hang_bound_problems checks both of these against the _load_bound
         #     constants, as a row of this case.
-        #   * The three leaky fixtures run under the injected cap: their 16 wall s budget cannot cut the
-        #     generator's own exit short, and only the stall bound stops each on its leaked descendant;
-        #     each leaky lane's stop kinds are recorded and required to be exactly ['stall'], so that
-        #     claim is checked rather than stated (the derived worst case for its stall,
-        #     2 * (POLL_S + SCAN_S) + 3 = 15 s after launch, still precedes the 16 wall s budget).
+        #   * The three leaky fixtures run under the injected cap, and only the stall bound may stop each
+        #     on its leaked descendant: each leaky lane's stop kinds are recorded and required to be
+        #     exactly ['stall'], so a lane the budget stops is red. Unlike the hang, a leaky generator
+        #     does real work (CPU and output progress) until its own exit and its leaked child's
+        #     start-up, so its last progress poll can come late on a slow host. With that last progress
+        #     X wall s after launch, the last progress poll lands at most X + POLL_S + SCAN_S and the
+        #     stall at most 3 + POLL_S + SCAN_S after that: at most X + 2 * (POLL_S + SCAN_S) + 3 =
+        #     X + 15 s after launch. X is allowed up to the shared budget at the cap, 16 wall s (the
+        #     bound the slow generator's own exit must meet on the same host), so the latest stall is
+        #     31 s; the leaky lanes' own budget of 2.125 s is 34 wall s at the cap, a margin of 3 s (the
+        #     hang lane's row requires at least 2 s). The shared 16 wall s budget left no margin at all
+        #     once an exit at about 1 s was allowed progress until then. Every budget a leaky probe's
+        #     _load_bound.run received is recorded and required to equal that constant, and
+        #     _load_case_leaky_bound_problems checks this derivation, fed the recorded budget, as a row.
         #   * On the idle clock the budget is 1 wall s and the slow generator sleeps 2 s, so the budget
         #     fires before it can exit; the stop kind is checked, so that position fails if anything
         #     other than the budget ends the run.
-        _LOAD_CASE_BUDGET_S, _LOAD_CASE_STALL_S = 1, 3
-        _LOAD_CASE_HANG_BUDGET_S = 1.25
+        #   (_LOAD_CASE_BUDGET_S, _LOAD_CASE_STALL_S, _LOAD_CASE_HANG_BUDGET_S and
+        #   _LOAD_CASE_LEAKY_BUDGET_S are module-level, shared with --measure-load-case.)
 
         def _evaluate_load_tolerance(fixtures):
             global _run_check, _now, _load_factor, PROBE_STALL_S
             slow, hang, leaky, leaky_reject, leaky_reject_escape = fixtures
             lane = {"name": None}
             stops = {"hang": [], "idle": [], "leaky": [], "leaky_reject": [], "leaky_reject_escape": []}
-            hang_budgets = []  # the budget each hang-lane probe actually passed down, asserted below
+            # The budget each lane's probes handed to _load_bound.run, recorded INSIDE the saved
+            # _run_check call (from the budget_s the callee receives, not from what the wrapper
+            # computed), so a call site that passes another budget is recorded as passing it.
+            received = {"hang": [], "leaky": [], "leaky_reject": [], "leaky_reject_escape": []}
+            saved_bound_run = _load_bound.run
+
+            def _recording_bound_run(*args, **kwargs):
+                if lane["name"] in received:
+                    received[lane["name"]].append(kwargs.get("budget_s"))
+                return saved_bound_run(*args, **kwargs)
 
             def _budgeted_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
-                budget = _LOAD_CASE_HANG_BUDGET_S if lane["name"] == "hang" else _LOAD_CASE_BUDGET_S
-                bounded = min(timeout, budget)
                 if lane["name"] == "hang":
-                    hang_budgets.append(bounded)
+                    budget = _LOAD_CASE_HANG_BUDGET_S
+                elif lane["name"] in received:
+                    budget = _LOAD_CASE_LEAKY_BUDGET_S
+                else:
+                    budget = _LOAD_CASE_BUDGET_S
+                bounded = min(timeout, budget)
                 try:
                     return saved_run_check(script_path, cwd, bounded, env_overrides)
                 except _load_bound.Hung as exc:
@@ -2054,6 +2257,7 @@ def _self_test_main_isolated():
 
             PROBE_STALL_S = _LOAD_CASE_STALL_S
             _run_check = _budgeted_run_check
+            _load_bound.run = _recording_bound_run
             try:
                 _load_factor = lambda: _load_bound.MAX_LOAD_FACTOR  # noqa: E731
                 _now = _load_bound.LoadClock(factor=lambda: _load_factor())
@@ -2075,6 +2279,7 @@ def _self_test_main_isolated():
                 _load_factor, PROBE_STALL_S = saved_bounds[0], saved_bounds[2]
                 _now = saved_now
                 _run_check = saved_run_check
+                _load_bound.run = saved_bound_run
                 # The survivor scan's three distinct results: None on a host WITH /proc is a
                 # self-test failure, a host with NO /proc is a named cannot-evaluate (exit 2),
                 # and an observed list is killed; never a silent pass, never a false leak
@@ -2102,8 +2307,9 @@ def _self_test_main_isolated():
                                     "fixture on its leaked descendant (['stall']), got {!r}"
                                     .format(leaky_lane, sorted(set(stops[leaky_lane]))))
             # The hang lane must have RUN under its own budget, not only been derived against it: every
-            # budget its probes passed down is recorded and required to equal the dedicated constant.
-            recorded_hang = sorted(set(hang_budgets))
+            # budget its probes' _load_bound.run received is recorded and required to equal the
+            # dedicated constant.
+            recorded_hang = sorted(set(received["hang"]))
             if recorded_hang != [_LOAD_CASE_HANG_BUDGET_S]:
                 failures.append("load tolerance: expected every hang-lane probe to pass the hang lane's "
                                 "own budget ([{!r}]) to _run_check, got {!r}"
@@ -2115,6 +2321,18 @@ def _self_test_main_isolated():
             # which the check above already made red.)
             failures.extend("load tolerance: " + problem for problem in _load_case_hang_bound_problems(
                 recorded_hang[0] if recorded_hang else _LOAD_CASE_HANG_BUDGET_S, _LOAD_CASE_STALL_S))
+            # The same for the leaky lanes: each must have run under the leaky budget, and that
+            # recorded budget must leave the derived latest stall (last progress allowed up to the
+            # shared budget at the cap) at least 2 s under it (sizing notes above).
+            for leaky_lane in ("leaky", "leaky_reject", "leaky_reject_escape"):
+                recorded_leaky = sorted(set(received[leaky_lane]))
+                if recorded_leaky != [_LOAD_CASE_LEAKY_BUDGET_S]:
+                    failures.append("load tolerance: expected every {} probe to pass the leaky lanes' "
+                                    "own budget ([{!r}]) to _run_check, got {!r}"
+                                    .format(leaky_lane, _LOAD_CASE_LEAKY_BUDGET_S, recorded_leaky))
+                failures.extend("load tolerance: " + problem for problem in _load_case_leaky_bound_problems(
+                    recorded_leaky[0] if recorded_leaky else _LOAD_CASE_LEAKY_BUDGET_S,
+                    _LOAD_CASE_BUDGET_S * _load_bound.MAX_LOAD_FACTOR, _LOAD_CASE_STALL_S))
             # The escaping fixture's exit 2 must come from the stopped-path CONTAINMENT validation, not
             # from any other cannot-evaluate condition that shares the exit code: require the
             # containment diagnostic itself (printed in the sweep's CANNOT-EVALUATE report).
