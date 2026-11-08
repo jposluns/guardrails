@@ -597,7 +597,7 @@ two spans, each bound's factor exactly that span's size ratio: the 32 KiB median
 median plus LINEAR_SLACK seconds, and the 64 KiB median at most 2 times the 32 KiB median plus LINEAR_SLACK seconds.
 A cost that is a fixed launch cost plus a linear term meets both bounds with the whole fixed cost plus LINEAR_SLACK
 to spare, whatever its slope, while a pass whose time grows with the square of the input quadruples over the top
-span and so fails it once its 64 KiB squared-growth cost exceeds four thirds of the fixed cost plus LINEAR_SLACK.
+span and so fails it once its 64 KiB squared-growth cost exceeds twice the sum of the fixed cost and LINEAR_SLACK.
 The 1 KiB median is measured and reported for diagnosis only and never judged, so no stray 1 KiB run, high or low,
 can move or loosen the verdict. A run whose parse child is killed at the reading's parse deadline fails the shape
 whatever CPU time it was charged (a killed child is charged only its share of the deadline), as does a child stopped
