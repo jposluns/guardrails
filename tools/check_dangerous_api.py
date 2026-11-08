@@ -75,9 +75,11 @@ never importing or running the file, and reports:
                tuple display of string constants, whose level is given and is not the literal
                int 0, or whose fromlist or level a * or an unreadable ** spread may hide (a
                fromlist can import a submodule, and a level other than 0 a relative module,
-               that the literal name does not place); every call of pkgutil.resolve_name or of
-               importlib.reload, whatever the argument (the first imports the module a dotted
-               or colon-separated name names, the second runs a module's code again); and a sys.path.insert
+               that the literal name does not place); every call of pkgutil.resolve_name,
+               pydoc.locate or importlib.reload, whatever the argument (pkgutil.resolve_name
+               imports the module a dotted or colon-separated name names, pydoc.locate the
+               module a dotted name names, and importlib.reload runs a module's code again);
+               and a sys.path.insert
                or sys.path.append whose path is not a string literal, in a scope that also
                calls one of those importers (it can make a directory the same code wrote
                importable there, or shadow a known module name);
@@ -230,10 +232,17 @@ matches about 160 live scopes, most of them a tool importing its own directory, 
 it would over-fire); a literal module name for a file the code itself writes under a name the
 tree or the standard library already holds (the literal is read as known), a dotted name
 whose first part is a standard-library name included; importlib.util.find_spec of a dotted
-name (it imports the parent packages of that name); while a
+name (it imports the parent packages of that name); any other API outside the named importer
+set that imports a module by name or from a path is not counted either (among those reviewed:
+pkgutil.walk_packages, pkgutil.get_data, importlib.resources.files, a string target of
+mock.patch, and unittest's TestLoader loadTestsFromName and discover); an importer reached
+through an alias of getattr (g = getattr, then g(importlib, "import_module")(n)) is not
+followed, since only a getattr called directly in the call position is; while a
 repository module is known only by the stem of a scanned *.py file, so a literal dotted
 package name from the repository, or a repository module outside the scanned roots, is
-counted (fail closed, a conservative false report); a shell launched through an argv list
+counted (fail closed, a conservative false report), and so is a __import__ whose fromlist is
+the literal None (fromlist=None or a fourth positional None, which imports no submodule); a
+shell launched through an argv list
 naming a shell (["sh", "-c", text]) or a Python interpreter given code (sys.executable with -c
 or -m), an executable= override, or os.exec*, os.spawn* or pty.spawn of a shell; a verify,
 verify_ssl, ssl, check_hostname, server_hostname, verify_mode, cert_reqs or allow_pickle value
@@ -468,9 +477,10 @@ _PATCH_OBJECT = frozenset({"unittest.mock.patch.object", "mock.patch.object"})
 _IMPORT_DUNDERS = frozenset({"importlib.__import__", "__import__", "builtins.__import__"})
 _IMPORTERS = _IMPORT_DUNDERS | frozenset({"importlib.import_module"})
 # Importers judged by the call alone: pkgutil.resolve_name imports the module a dotted or
-# colon-separated name names, and importlib.reload runs a module's code again, so every call
-# of either is a code site (fail closed, whatever the argument).
-_REIMPORTERS = frozenset({"pkgutil.resolve_name", "importlib.reload"})
+# colon-separated name names, pydoc.locate the module a dotted name names, and importlib.reload
+# runs a module's code again, so every call of any of them is a code site (fail closed,
+# whatever the argument).
+_REIMPORTERS = frozenset({"pkgutil.resolve_name", "pydoc.locate", "importlib.reload"})
 # The sys.path mutators that can make a directory the code wrote importable (or shadow a
 # known module name), with the positional index of the path each takes.
 _SYS_PATH_MUTATORS = {"sys.path.insert": 1, "sys.path.append": 0}
@@ -2739,9 +2749,12 @@ POSITIVE_VECTORS = (
     ("__import__('json', *rest)\n", ("code-import",)),
     ("__import__('json', **options)\n", ("code-import",)),
     ("import importlib\nimportlib.__import__('json', fromlist=[name])\n", ("code-import",)),
-    # Every pkgutil.resolve_name and importlib.reload call is counted, whatever the argument.
+    # Every pkgutil.resolve_name, pydoc.locate and importlib.reload call is counted, whatever
+    # the argument.
     ("import pkgutil\npkgutil.resolve_name(spec)\n", ("code-import",)),
     ("import pkgutil\npkgutil.resolve_name('a.b:c')\n", ("code-import",)),
+    ("import pydoc\npydoc.locate(spec)\n", ("code-import",)),
+    ("import pydoc\npydoc.locate('json')\n", ("code-import",)),
     ("import importlib\nimportlib.reload(mod)\n", ("code-import",)),
     ("import importlib\ngetattr(importlib, 'reload')(mod)\n", ("code-import",)),
     # A non-literal sys.path mutation in a scope that also imports by name (the import itself
