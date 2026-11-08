@@ -914,9 +914,21 @@ def run_selftest_child(args, child, failures, what, timeout=SELFTEST_CHILD_TIMEO
     already exited, so an interrupt mid-wait can leave the status set while a grandchild in the group
     still holds a pipe open. Signalling the group id is safe even after the child has been reaped,
     because the kernel keeps a process-group id allocated while the group has any live member, so the
-    signal lands on this launch's own group as long as anything in it survives; only an empty group can
-    lose its id to reuse, which is why the kill is skipped after a normal return, when the child has been
-    reaped, both pipes have reached end of file, and the group is expected to be empty."""
+    signal lands on this launch's own group as long as anything in it survives.
+
+    A normal return does not prove the group empty: communicate returns once both pipes reach end of
+    file and the child itself has been reaped, so a grandchild in the same group that closed or
+    redirected both pipes can still be alive, and it keeps running after this returns. The kill is still
+    skipped then. Signalling the group would be safe while any member lives, but the launcher cannot tell
+    an empty group, whose id may already have been handed to a new group, from a live one. Such a
+    survivor is the launched code's own detached work and lies outside this launcher's guarantee.
+
+    Two residual windows remain. If communicate raises after its own wait has reaped the child (a
+    KeyboardInterrupt, including one out of its own interrupt handling, a MemoryError, or a decode
+    error in the captured output) and nothing else in the group is alive, the kill in the finally
+    signals a group id that is already free; that id names an unrelated group only if process ids wrap
+    around to it in the short time before the signal. An interrupt that lands after Popen returns but
+    before the try is entered skips the kill altogether, so the child and its group run on."""
     if child:
         failures.append("a child-mode self-test tried to launch {}; child mode launches nothing".format(what))
         return None
@@ -948,10 +960,13 @@ def _selftest_communicate(proc, timeout):
 def _kill_selftest_group(proc):
     """Kill a self-test child's whole process group, then reap the child. A process-group id stays
     allocated while any member of the group is alive, even after its leader has been reaped, so the
-    signal cannot land on an unrelated group while anything in this launch's group survives; an
-    already-empty group makes the signal fail with a caught OSError. Callers therefore skip this kill
-    only after a normal return from the wait, when the group is expected to be empty and its id could
-    already have been handed to a new group."""
+    signal cannot land on an unrelated group while anything in this launch's group survives. Once
+    the group is empty its id is free: the signal then usually fails with a caught OSError, but if
+    process ids have wrapped and the id names a new group, the signal reaches that group instead.
+    run_selftest_child calls this with an empty group only when communicate raises after its own
+    wait reaped the child while nothing else in the group was alive, a short window. After a normal
+    return from the wait it skips this kill, because it cannot tell an empty group from a live one,
+    so a grandchild that released both pipes survives, as its docstring states."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except OSError:
@@ -2848,7 +2863,11 @@ def _self_test_isolated(child):
         #     leaves it, so a launcher that decides the group kill by the child's exit status skips the
         #     kill and leaves the grandchild running; the kill may be skipped only on a normal return. The
         #     interrupt must propagate with no recorded failure and the grandchild must be gone within
-        #     10 s. It starts only a stand-in, never this tool, so it runs in child mode as well.
+        #     10 s. The helper sets an event just before it sends the signal, and the row counts a
+        #     KeyboardInterrupt as its own only when that event is set; an earlier one, such as an
+        #     operator's, is raised on. An operator's interrupt that lands after the event is set is still
+        #     indistinguishable from the injected one. It starts only a stand-in, never this tool, so it
+        #     runs in child mode as well.
         if os.path.isdir("/proc/self"):
             import threading
             marker = tmp / "sigint-communicate.pid"
@@ -2861,13 +2880,16 @@ def _self_test_isolated(child):
                 _seen["proc"] = proc
                 return _real(proc, timeout)
 
-            def send_sigint_once_zombie(_seen=seen_proc, _marker=marker):
+            sigint_sent = threading.Event()
+
+            def send_sigint_once_zombie(_seen=seen_proc, _marker=marker, _sent=sigint_sent):
                 deadline = time.monotonic() + 20
                 while time.monotonic() < deadline:
                     proc = _seen.get("proc")
                     if (proc is not None and _marker.exists()
                             and (_proc_stat_fields(proc.pid) or ["?"])[0] == "Z"):
                         time.sleep(0.3)
+                        _sent.set()
                         os.kill(os.getpid(), signal.SIGINT)
                         return
                     time.sleep(0.05)
@@ -2882,6 +2904,8 @@ def _self_test_isolated(child):
                     run_selftest_child([str(script)], False, recorded, "the reaped-child stand-in",
                                        timeout=30)
                 except KeyboardInterrupt:
+                    if not sigint_sent.is_set():
+                        raise
                     raised = True
                 finally:
                     module_globals["_selftest_communicate"] = real_wait
