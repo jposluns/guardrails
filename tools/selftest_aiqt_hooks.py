@@ -6216,17 +6216,32 @@ def _deadline_restore_failures():
     def caller_alarm(signum, frame):
         fired.append(signum)
 
+    finished = []
+
     def as_caller(value, interval, stub_seconds, budget=None):
         fired.clear()
+        finished.clear()
+
+        def body(_data):
+            time.sleep(stub_seconds)
+            finished.append(True)
+            return (0, None, None)
+
         signal.signal(signal.SIGALRM, caller_alarm)
+        # The monotonic read comes first and `used` is read last, after the final getitimer, so every
+        # moment from the caller timer's arming to that read falls inside `used`: a host stall anywhere
+        # in the run widens `used` with it, and the elapsed-aware lower bound keeps holding. `finished`
+        # says whether the stub's sleep ran to its end, so a deadline that cut the body is told from one
+        # that did not without comparing the run's time against a fixed bound.
+        began = time.monotonic()
         signal.setitimer(signal.ITIMER_REAL, value, interval)
         before = signal.getitimer(signal.ITIMER_REAL)
-        began = time.monotonic()
         try:
-            with _stub_handler("diff_source_pretool", _sleeper(stub_seconds)):
-                code, err, _seconds = _main_run("diff_source_pretool", budget=budget)
+            with _stub_handler("diff_source_pretool", body):
+                code, _err, _seconds = _main_run("diff_source_pretool", budget=budget)
+            after = signal.getitimer(signal.ITIMER_REAL)
             used = time.monotonic() - began
-            return code, before, signal.getitimer(signal.ITIMER_REAL), used, signal.getsignal(signal.SIGALRM)
+            return code, before, after, used, signal.getsignal(signal.SIGALRM)
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
@@ -6244,12 +6259,13 @@ def _deadline_restore_failures():
                    .format(code, after))
     code, before, after, used, handler = as_caller(0.2, 0.0, 1.0)
     if not (code == 2 and fired == [signal.SIGALRM] and after == (0.0, 0.0) and handler is caller_alarm
-            and used < 0.8):
+            and not finished):
         out.append("(dl-restore-due) a caller deadline due inside the window must end it and be delivered "
-                   "once, got exit {} after {:.2f}s, fired {!r}, timer {!r}".format(code, used, fired, after))
+                   "once, got exit {} after {:.2f}s with the stub's sleep returned {}, fired {!r}, timer "
+                   "{!r}".format(code, used, bool(finished), fired, after))
     code, before, after, used, handler = as_caller(0.2, 0.5, 1.0)
     if not (code == 2 and fired == [signal.SIGALRM] and after[1] == 0.5 and 0 < after[0] <= 0.5
-            and handler is caller_alarm):
+            and handler is caller_alarm and not finished):
         out.append("(dl-restore-due-periodic) a periodic caller deadline due inside the window must be "
                    "delivered once and resume its period, got exit {}, fired {!r}, timer {!r}".format(
                        code, fired, after))
@@ -6307,15 +6323,32 @@ def _deadline_restore_failures():
     if problem:
         out.append("(dl-nested-outer) an enclosing window's deadline must reach that window's owner and leave "
                    "the timer as found, {}".format(problem))
-    with aiqt_hooks._DeadlineWindow(5.0):
-        with _stub_handler("diff_source_pretool", _sleeper(1.0)):
-            code, err, seconds = _main_run("diff_source_pretool", budget=0.1)
+    finished_inner = []
+
+    def outlasting(_data):
+        time.sleep(60.0)
+        finished_inner.append(True)
+        return (0, None, None)
+
+    # The outer window is wide enough (600 s) that no host stall brings it due over the run; the inner
+    # deadline is proved to have cut the body by the sleep not returning; and the outer countdown is
+    # judged elapsed-aware against this run's own measured time: at least 600 less the whole run's time
+    # (the monotonic read brackets the outer arming and the final getitimer, so a stall anywhere widens
+    # the allowance with the loss), and at most 600 less the 0.1-second budget the inner window must have
+    # used before its deadline could fire, so a verbatim restore still fails while no check compares the
+    # run's time against a fixed host-speed bound.
+    began = time.monotonic()
+    with aiqt_hooks._DeadlineWindow(600.0):
+        with _stub_handler("diff_source_pretool", outlasting):
+            code, _err, _seconds = _main_run("diff_source_pretool", budget=0.1)
         inside = signal.getitimer(signal.ITIMER_REAL)
-    if (code != 2 or seconds >= 0.8 or not 4.0 < inside[0] <= 5.0
+        used = time.monotonic() - began
+    if (code != 2 or finished_inner or not 600.0 - used - 0.05 <= inside[0] <= 600.0 - 0.1 + 1e-6
             or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0)
             or signal.getsignal(signal.SIGALRM) != signal.SIG_DFL):
         out.append("(dl-nested-inner) an inner deadline must end only the inner call and give the outer window "
-                   "its countdown back, got exit {} after {:.2f}s, outer timer {!r}".format(code, seconds, inside))
+                   "its countdown back less the time used, got exit {} after {:.2f}s with the stub's sleep "
+                   "returned {}, outer timer {!r}".format(code, used, bool(finished_inner), inside))
 
     old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
     try:
@@ -7171,8 +7204,9 @@ def _deadline_enclosing_restore_failures():
     under a caller with a counting handler and a periodic 30-second timer, ends normally; SIGALRM is raised,
     as the outer window's expiry, from an opcode trace event at each instruction of the inner window's
     frames once the outer window's handler is back (one run per instruction). The outer deadline must reach
-    its owner each time, with the caller's handler and periodic timer back, no caller delivery, and neither
-    window left armed."""
+    its owner each time, with the caller's handler and periodic timer back (its countdown judged
+    elapsed-aware against the run's own measured time, never a fixed host-speed bound), no caller delivery,
+    and neither window left armed."""
     out = []
     calls = []
 
@@ -7183,6 +7217,7 @@ def _deadline_enclosing_restore_failures():
         calls.clear()
         counted = [0]
         signal.signal(signal.SIGALRM, counting)
+        began = time.monotonic()
         signal.setitimer(signal.ITIMER_REAL, 30.0, 30.0)
         outer, inner = aiqt_hooks._DeadlineWindow(600.0), aiqt_hooks._DeadlineWindow(5.0)
 
@@ -7206,16 +7241,21 @@ def _deadline_enclosing_restore_failures():
             finally:
                 sys.settrace(None)
             handler, timer = signal.getsignal(signal.SIGALRM), signal.getitimer(signal.ITIMER_REAL)
+            # Read after the final getitimer, so the whole borrow sits inside `used` and the caller
+            # countdown is judged elapsed-aware against this run's own time, not a fixed host-speed bound.
+            used = time.monotonic() - began
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
         if index is None:
             return counted[0]
         if (at and escaped == "the outer deadline" and handler is counting and timer[1] == 30.0
-                and 29.0 < timer[0] <= 30.0 and not calls and not inner.armed and not outer.armed):
+                and 30.0 - used - 0.05 <= timer[0] <= 30.0 and not calls and not inner.armed
+                and not outer.armed):
             return ""
-        return "at {!r}: escaped {}, handler {!r}, timer {!r}, caller deliveries {}, armed {} and {}".format(
-            at, escaped, handler, timer, len(calls), inner.armed, outer.armed)
+        return ("at {!r}: escaped {}, handler {!r}, timer {!r} with {:.2f}s used, caller deliveries {}, "
+                "armed {} and {}".format(at, escaped, handler, timer, used, len(calls), inner.armed,
+                                         outer.armed))
 
     total = run(None)
     failed = [problem for problem in (run(index) for index in range(total)) if problem]
