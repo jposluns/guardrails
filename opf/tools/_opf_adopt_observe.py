@@ -2392,11 +2392,52 @@ def _guard_self_test():
     return rows
 
 
-def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
+def _report_line(rows):
+    """The one report line the self-test prints; the registration parses it."""
+    import json
+    return json.dumps({"opf_adopt_observe_tests": rows}, sort_keys=True)
+
+
+# The rows and resolver vectors the nested scrubbed run leaves out, because
+# their deadlines are short enough for host load to exceed: each config sets
+# fetch_bound, so it runs on the unscaled deadlines (connect 0.20 s,
+# inactivity 0.15 s, request 0.80 s, gather 1.60 s), a fetch bound of 0.50 s
+# or 1.00 s and the 3.0 s watchdog (run_case, bounded), and a stall of a
+# fraction of a second can change its verdict. The outer run still judges
+# them; self_test refuses a roster where these lists depart from the configs.
+# The rows and vectors the nested run keeps still carry wall-clock bounds
+# (listed at the launch-only leg in _runner_check) that a heavily loaded host
+# can exceed: leaving these out reduces that run's exposure to host load, it
+# does not remove it.
+_LOAD_SENSITIVE_ROWS = ("TG-11/slow-drip", "TG-11/read-inactivity",
+                        "TG-11/stalled-resolver", "TG-11/connect-timeout",
+                        "TG-11/tls-timeout")
+_LOAD_SENSITIVE_VECTORS = ("resolver-vector/blocked-timing",)
+
+
+def _runner_launch_entry(expected):
+    # The positive registration's own call, run for real: the runner-launched
+    # interpreter imports this module in the runner's scrubbed environment
+    # and evaluates every row and resolver vector that is not load-sensitive.
+    # Each must be VALID or pass, and the roster must be the one the outer
+    # run expects of it.
+    rc = self_test(vectors_only=True, steady_only=True)
+    if rc == 0 and [row.get("id") for row in SELF_TEST_ROSTER] != list(expected):
+        _print_failures(_roster_failures(SELF_TEST_ROSTER, expected))
+        return 1
+    return rc
+
+
+def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False,
+                  launch_only=False, vectors=()):
     """Prove exact dispatch using the real shell text, as the P0 suite does.
 
-    Intercepted Python gates are stubbed. Only this suite's vector leg runs,
-    except for the umask scratch-only case, which emits canned output.
+    Intercepted Python gates are stubbed. With scratch_only (the umask and
+    exit cases) the exact own call emits canned output; with launch_only (the
+    positive registration) it launches the real interpreter on this module's
+    _runner_launch_entry, which evaluates the rows and vectors that are not
+    load-sensitive; otherwise it runs this suite's vector leg. Each name in
+    vectors must have its PASS line in the runner's output.
     Vector-only dispatch avoids recursive registration checks.
     The scope is this suite only.
     """
@@ -2440,6 +2481,8 @@ def _runner_check(expected, text=None, *, fail_own=0, scratch_only=False):
         raise RuntimeError(identity + "/cannot-evaluate/recursion-marker") from exc
     if type(fail_own) is not int or fail_own not in (0, 1, 2, 7):
         raise ValueError(identity + "/invalid-failure-code")
+    if launch_only and (scratch_only or fail_own):
+        raise ValueError(identity + "/invalid-launch-mode")
     here = Path(__file__).resolve().parent
     runner = here / "run_all_checks.sh"
     source = runner.read_text(encoding="utf-8") if text is None else text
@@ -2475,6 +2518,9 @@ if [ "$#" -eq 4 ] && [ "$1" = "-I" ] && [ "$2" = "-B" ] \
   if [ "$observe_scratch_only" -eq 1 ]; then
     printf '%s\n' "$observe_expected_output"
     exit "$observe_fail_own"
+  fi
+  if [ "$observe_scratch_only" -eq 2 ]; then
+    exec "$observe_python" -I -B -c "$observe_launch" "$observe_test" "$observe_expected"
   fi
   if [ "$observe_fail_own" -ne 0 ]; then
     "$observe_python" -I -B "$observe_test" --self-test --vectors-only || exit "$?"
@@ -2517,11 +2563,19 @@ exit 0
                     "observe_python": sys.executable,
                     "observe_test": str(here / "_opf_adopt_observe.py"),
                     "observe_fail_own": str(fail_own),
-                    "observe_scratch_only": "1" if scratch_only else "0",
+                    "observe_scratch_only": (
+                        "1" if scratch_only else "2" if launch_only else "0"),
+                    "observe_launch": (
+                        "import importlib, json, sys\n"
+                        "from pathlib import Path\n"
+                        "sys.path.insert(0, str(Path(sys.argv[1]).parent))\n"
+                        "module = importlib.import_module(Path(sys.argv[1]).stem)\n"
+                        "raise SystemExit(module._runner_launch_entry(json.loads(sys.argv[2])))\n"),
+                    "observe_expected": json.dumps(list(expected)),
                     "observe_expected_output": (
-                        json.dumps({"opf_adopt_observe_tests": [
+                        _report_line([
                             {"id": item, "test_status": VALID} for item in expected
-                        ]}, sort_keys=True) + "\n"
+                        ]) + "\n"
                         + "\n".join("PASS " + item for item in expected)
                         if scratch_only else "")})
 
@@ -2566,10 +2620,31 @@ exit 0
         # cannot-evaluate without ever reading host configuration. 600 s
         # keeps the worst-case hang inside THIS member's own per-member
         # bound (tools/selftest_git_fixture_env.py, CONFIG_MEMBER_BOUNDS:
-        # 1800 s for this file's --self-test) while removing the load
-        # sensitivity; the interception probe and the scratch legs keep
-        # the tight bound.
-        proc = run_shell(shim + source, timeout=120 if scratch_only else 600)
+        # 1800 s for this file's --self-test) and makes a timeout under load
+        # less likely, though not impossible; the interception probe and the
+        # scratch legs keep the tight bound.
+        # The launch-only leg evaluates every row and vector except those on
+        # deadlines short enough for host load to exceed
+        # (_LOAD_SENSITIVE_ROWS, _LOAD_SENSITIVE_VECTORS). The ones it keeps
+        # still carry wall-clock bounds that can change their verdict, among
+        # them: each row run's 30 s watchdog and its deadlines scaled to
+        # connect 2.0 s, inactivity 1.5 s, request 8.0 s and gather 16.0 s;
+        # the TLS fixture's 2.0 s socket timeout (raw.settimeout) and its
+        # 1.0 s stop join; the 2.0 s join of a run's resolver workers (a
+        # straggler fails the row INVALID); the 1.0 s resolver-slot acquire
+        # after a run and in the held-slot queue; the 10 s HELD_JOIN of
+        # resolver-vector/positive-held-slot; the 5.0 s resolver join of
+        # resolver-vector/cleanup; and this leg's own 450 s bound
+        # (cannot-evaluate/timeout). A heavily loaded host can still fail
+        # any of them, so leaving out the short-deadline cases reduces this
+        # leg's exposure to host load; it does not remove it.
+        # Measured once, as part of a full --self-test run on a shared host:
+        # the leg took 229.3 s, at a one-minute load average of 29.45 when
+        # it started and 26.15 when it ended (/proc/loadavg). 450 s leaves
+        # about twice that and keeps the leg inside the 600 s; a host loaded
+        # well beyond that can still reach it.
+        proc = run_shell(shim + source,
+                         timeout=120 if scratch_only else 450 if launch_only else 600)
         try:
             argv_log = log.read_bytes()
         except OSError as exc:
@@ -2606,6 +2681,19 @@ exit 0
         raise AssertionError(identity + "/own-argv")
 
     if proc.returncode != 0:
+        # The runner's output is otherwise discarded with the fixture: name
+        # what it printed before the failure, bounded, on stderr.
+        sys.stdout.flush()
+        for stream, text in (("stdout", proc.stdout), ("stderr", proc.stderr)):
+            lines = (text or "").splitlines()
+            print("{}/return-code: runner {} (last {} of {} lines):".format(
+                identity, stream, min(len(lines), 20), len(lines)), file=sys.stderr)
+            for line in lines[-20:]:
+                print("  | " + line[:400], file=sys.stderr)
+        # A real nested vector run that exits 2 said it could not evaluate.
+        if (not scratch_only and own == [own_argv]
+                and "GATE FAILED: opf-adopt-observe-selftest (exit 2)" in proc.stdout.splitlines()):
+            raise RuntimeError(identity + "/cannot-evaluate/nested-exit-2")
         raise AssertionError(identity + "/return-code")
     try:
         reports = [json.loads(line)["opf_adopt_observe_tests"]
@@ -2614,7 +2702,8 @@ exit 0
         # Timing measurements vary; compare roster identities and statuses.
         if (len(reports) != 1
                 or [row["id"] for row in reports[0]] != expected
-                or any(row["test_status"] != VALID for row in reports[0])):
+                or any(row["test_status"] != VALID for row in reports[0])
+                or any("PASS " + name not in proc.stdout.splitlines() for name in vectors)):
             raise AssertionError(identity + "/pass-lines")
     except (ValueError, KeyError, TypeError) as exc:
         raise AssertionError(identity + "/pass-lines") from exc
@@ -2695,6 +2784,7 @@ def _runner_non_readable_fd_checks(expected):
 
 
 def _runner_red_checks(expected):
+    import io
     import shlex
     import subprocess
     import tempfile
@@ -2708,14 +2798,21 @@ def _runner_red_checks(expected):
         raise AssertionError(identity + "/red-fixture")
 
     def red(label, call, error, wanted):
+        # A RED's expected failure prints the runner's output; show it only
+        # when the RED itself fails.
+        noise = io.StringIO()
         try:
-            call()
+            with contextlib.redirect_stderr(noise):
+                call()
         except error as exc:
             if str(exc) != wanted:
+                sys.stderr.write(noise.getvalue())
                 raise AssertionError(identity + "/" + label + "/wrong-red") from exc
         except Exception as exc:
+            sys.stderr.write(noise.getvalue())
             raise AssertionError(identity + "/" + label + "/wrong-error") from exc
         else:
+            sys.stderr.write(noise.getvalue())
             raise AssertionError(identity + "/" + label + "/not-red")
         print("RED {} -> {}".format(label, wanted))
 
@@ -2744,8 +2841,9 @@ def _runner_red_checks(expected):
         expected, source.replace(anchor, anchor + "  exit 1\n", 1)),
         AssertionError, identity + "/return-code")
 
-    # Exit handling uses canned reports; the positive registration above
-    # independently runs the real vector leg once.
+    # Exit handling uses canned reports; the positive registration launches
+    # the real interpreter once, on _runner_launch_entry, never as a nested
+    # --self-test launch (_runner_nested_launch_check).
     def own_failure(text, status=7):
         label = "own-suite-failure" if status == 7 else "own-suite-failure-" + str(status)
         red(label, lambda: _runner_check(
@@ -2843,9 +2941,11 @@ def _runner_red_checks(expected):
             "python3 ", "env -i PATH=/usr/bin:/bin " + shlex.quote(sys.executable) + " ",
             1).replace(script_arg, shlex.quote(str(nested)), 1)
         refusal_identity = identity + "/scrubbed-environment/wrong-refusal"
+        noise = io.StringIO()
         try:
             try:
-                _runner_check(expected, source.replace(own_line, scrubbed, 1))
+                with contextlib.redirect_stderr(noise):
+                    _runner_check(expected, source.replace(own_line, scrubbed, 1))
             except AssertionError as exc:
                 if str(exc) != identity + "/return-code":
                     raise
@@ -2855,6 +2955,7 @@ def _runner_red_checks(expected):
         except Exception as exc:
             # Missing/unreadable reports and unexpected runner outcomes are
             # failures of this RED, not harness cannot-evaluate outcomes.
+            sys.stderr.write(noise.getvalue())
             raise AssertionError(refusal_identity) from exc
         if refusal != identity + "/cannot-evaluate/recursion":
             raise AssertionError(refusal_identity)
@@ -2967,7 +3068,6 @@ def _runner_red_checks(expected):
 
     # Exercise the entry actually called by descriptor children. Marker
     # inspection defects must remain failures, not become environmental skips.
-    import io
     for suffix in ("timeout", "interception", "bash", "pathsep", "argv-log",
                    "recursion", "recursion-marker", "unexpected"):
         message = identity + ("/" if suffix == "unexpected" else "/cannot-evaluate/") + suffix
@@ -2988,10 +3088,76 @@ def _runner_red_checks(expected):
     _runner_non_readable_fd_checks(expected)
 
 
-def _runner_registration_test(expected):
+def _runner_nested_launch_check(call):
+    import shlex
+    import tempfile
+    from unittest.mock import patch
+
+    # The positive registration answers the exact own call by launching the
+    # real interpreter on this module's _runner_launch_entry, in the runner's
+    # scrubbed environment, never as a nested --self-test launch: re-running
+    # the whole suite nested, its timing-sensitive rows included, under the
+    # same host load, made it fail intermittently with only its exit status
+    # left to read. The call runs under a python that logs each launch,
+    # refuses any --self-test launch with exit 1 and otherwise runs the real
+    # interpreter: it must see exactly one launch, the -c entry, and the call
+    # must pass.
+    nested = "runner/adopt-observe-registration/no-nested-suite-launch"
+    launched = "runner/adopt-observe-registration/real-own-launch"
+    with tempfile.TemporaryDirectory(prefix="opf-nested-launch-") as tmp:
+        os.chmod(tmp, 0o700)
+        log = Path(tmp) / "launches"
+        log.write_bytes(b"")
+        stub = Path(tmp) / "python3"
+        stub.write_text(
+            "#!/bin/sh\nprintf '%s\\0' \"$#\" \"$@\" >> " + shlex.quote(str(log)) + " || exit 2\n"
+            "for arg in \"$@\"; do [ \"$arg\" != --self-test ] || exit 1; done\n"
+            "exec " + shlex.quote(sys.executable) + " \"$@\"\n", encoding="utf-8")
+        stub.chmod(0o700)
+        failure = None
+        try:
+            with patch.object(sys, "executable", str(stub)):
+                call()
+        except AssertionError as exc:
+            failure = exc
+        fields = log.read_bytes().split(b"\0")
+        if fields.pop() != b"":
+            raise AssertionError(launched) from failure
+        launches = []
+        while fields:
+            try:
+                argc = int(fields.pop(0))
+            except ValueError as exc:
+                raise AssertionError(launched) from exc
+            if argc < 0 or argc > len(fields):
+                raise AssertionError(launched) from failure
+            launches.append(fields[:argc])
+            del fields[:argc]
+        if any(b"--self-test" in argv for argv in launches):
+            raise AssertionError(nested) from failure
+        # The call's own failure names itself; no launch, or another launch,
+        # fails the real own launch.
+        if failure is not None:
+            raise failure
+        if len(launches) != 1 or launches[0][:3] != [b"-I", b"-B", b"-c"]:
+            raise AssertionError(launched)
+    print("PASS " + nested)
+    print("PASS " + launched)
+
+
+def _runner_registration_test(expected, vectors=()):
     runner = Path(__file__).resolve().parent / "run_all_checks.sh"
     source = runner.read_text(encoding="utf-8")
-    _runner_check(expected, source)
+    # A real launch of _runner_launch_entry answers the own call: dispatch,
+    # exact argv, and the real interpreter's start, import and exit under the
+    # scrubbed environment are this check's, and so is a second evaluation,
+    # under that environment, of every row and vector that is not
+    # load-sensitive (each VALID or passing, within the leg's 450 s). The
+    # load-sensitive ones are judged by the outer run only.
+    _runner_nested_launch_check(lambda: _runner_check(
+        [item for item in expected if item not in _LOAD_SENSITIVE_ROWS], source,
+        launch_only=True,
+        vectors=[name for name in vectors if name not in _LOAD_SENSITIVE_VECTORS]))
     lines = [line for line in source.splitlines(keepends=True)
              if line.startswith('run_gate "opf-adopt-observe-selftest"')]
     if len(lines) != 1:
@@ -3075,6 +3241,90 @@ def _git_archive_fixture_isolated(base):
 _PRODUCTION_LOOKUP = _lookup
 
 
+def _roster_failures(executed, expected_ids=None, vector_names=None, expected_vectors=()):
+    """The FAIL lines for every reason the executed roster fails the run.
+
+    One line per row that is not VALID; with expected_ids, a roster/rows line
+    and one line per missing or unexpected row when the roster departs from
+    it; with vector_names, a roster/vectors line when they depart from
+    expected_vectors. An empty list means none of these fail the run.
+    """
+    import collections
+    lines = []
+    ids = [row.get("id") for row in executed]
+    if expected_ids is not None and ids != list(expected_ids):
+        lines.append("FAIL roster/rows: the executed roster departs from the expected "
+                     "roster ({} rows executed, {} expected)".format(len(ids), len(expected_ids)))
+        have, want = collections.Counter(ids), collections.Counter(expected_ids)
+        lines.extend("FAIL {}: missing from the executed roster".format(item)
+                     for item in want - have)
+        lines.extend("FAIL {}: not in the expected roster".format(item)
+                     for item in have - want)
+    lines.extend("FAIL {}: {}".format(row.get("id"), row.get("test_status"))
+                 for row in executed if row.get("test_status") != VALID)
+    if vector_names is not None and tuple(vector_names) != tuple(expected_vectors):
+        lines.append("FAIL roster/vectors: the resolver vectors run ({}) depart from the "
+                     "expected vectors ({})".format(len(vector_names), len(expected_vectors)))
+    return lines
+
+
+def _print_failures(lines):
+    # Flush the buffered PASS lines first, so in a merged stream these
+    # follow them, among the last lines a reader keeps.
+    sys.stdout.flush()
+    for line in lines:
+        print(line, file=sys.stderr)
+
+
+def _judge_roster(executed, expected_ids, vector_results, expected_vectors):
+    """A finished run's exit status from its rows and vectors, 0 when they
+    pass. Every failure is named on a FAIL line: a vector's own on stdout,
+    any other (_roster_failures) on stderr after the buffered PASS lines."""
+    for name, failures in vector_results:
+        print("FAIL " + name + ": " + "; ".join(failures) if failures else "PASS " + name)
+    lines = _roster_failures(executed, expected_ids, [name for name, _ in vector_results],
+                             expected_vectors)
+    if lines:
+        _print_failures(lines)
+        return 1
+    failed = [text for _, failures in vector_results for text in failures]
+    if failed:
+        return 2 if all(text.startswith("cannot evaluate") for text in failed) else 1
+    return 0
+
+
+def _failure_lines_self_test():
+    # A run that fails on a row that is not VALID, or on a roster that
+    # departs from the expected one, must name each on a FAIL line, never
+    # end in PASS lines with only its exit status left to read.
+    import io
+    expected = ["positive/forced", "TG-forced/invalid", "TG-forced/kept"]
+    names = ("vector/forced-a", "vector/forced-b")
+    vectors = [(name, []) for name in names]
+    for label, executed, wanted in (
+            ("invalid-row", [{"id": item, "test_status": VALID} for item in expected[:1]]
+             + [{"id": expected[1], "test_status": INVALID}]
+             + [{"id": expected[2], "test_status": VALID}],
+             ["FAIL TG-forced/invalid: " + INVALID]),
+            ("roster-mismatch", [{"id": item, "test_status": VALID}
+                                 for item in expected[:2] + ["TG-forced/extra"]],
+             ["FAIL TG-forced/kept: missing from the executed roster",
+              "FAIL TG-forced/extra: not in the expected roster"])):
+        identity = "self-test/" + label + "-fail-line"
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = _judge_roster(executed, expected, vectors, names)
+        said = err.getvalue().splitlines()
+        if (code != 1 or not all(line in said for line in wanted)
+                or (label == "roster-mismatch"
+                    and not any(line.startswith("FAIL roster/rows: ") for line in said))):
+            raise AssertionError(identity)
+        print("PASS " + identity)
+        # Name the row without repeating the FAIL line: a reader searching a
+        # failed run's output for FAIL lines must not find this passing one.
+        print("RED forced-{} -> named {}".format(label, wanted[0].split(" ", 1)[1].split(":")[0]))
+
+
 def _resolver_stub_bound(function):
     # A resolver worker reads _lookup only when it runs. One that outlives
     # settle_resolvers' bound can run after its case has unwound the fixture
@@ -3094,6 +3344,12 @@ def _resolver_stub_bound(function):
         settled = False
         try:
             rc = function(*args, **kwargs)
+        except BaseException as exc:
+            # A traceback alone names no failed check: say what stopped it.
+            sys.stdout.flush()
+            print("FAIL self-test/uncaught-exception: {}: {}".format(type(exc).__name__, exc),
+                  file=sys.stderr)
+            raise
         finally:
             end = time.monotonic() + 2.0
             for thread in threading.enumerate():
@@ -3104,8 +3360,9 @@ def _resolver_stub_bound(function):
             if settled:
                 _lookup = _PRODUCTION_LOOKUP
         if not settled:
-            print("resolver worker outlived the self-test; _lookup stays stubbed",
-                  file=sys.stderr)
+            sys.stdout.flush()
+            print("FAIL self-test/resolver-worker-outlived: resolver worker outlived the "
+                  "self-test; _lookup stays stubbed", file=sys.stderr)
             return rc or 2
         return rc
 
@@ -3113,8 +3370,12 @@ def _resolver_stub_bound(function):
 
 
 @_resolver_stub_bound
-def self_test(vectors_only=False):
+def self_test(vectors_only=False, steady_only=False):
     """Local fixtures only; report executed rows and require mutation sensitivity.
+
+    steady_only leaves out the load-sensitive rows and vectors
+    (_LOAD_SENSITIVE_ROWS, _LOAD_SENSITIVE_VECTORS) for the registration's
+    nested scrubbed run.
 
     Socket routing is replaced only inside this function: production destinations
     and SNI stay unchanged while TCP is delivered to a loopback fixture. The peer
@@ -4455,6 +4716,8 @@ def self_test(vectors_only=False):
                     "resolver-vector/cleanup")
     detected = (False, "fixture: detected", 0.0, [], [], [], [], [], [])
     evaluated = (True, "fixture: evaluated", 0.0, [], [], [], [], [], [])
+    # The positive-held-slot vector's join of the worker it releases.
+    HELD_JOIN = 10.0
 
     class SlotProbe:
         # The real slot. The retained-slot bound is the only timed wait for
@@ -4509,6 +4772,10 @@ def self_test(vectors_only=False):
                      ["fetch order"]),
                     (VECTOR_NAMES[6], dict(fetch_bound=0.50, delay_before_resolve=0.60),
                      ["timing bound"])):
+                if ("fetch_bound" in config) != (name in _LOAD_SENSITIVE_VECTORS):
+                    raise AssertionError("the load-sensitive vectors depart from the timing configs")
+                if steady_only and name in _LOAD_SENSITIVE_VECTORS:
+                    continue
                 failures = []
                 case = (name.replace("resolver-vector/", "vector/"), VALID, "archive", config)
                 run = run_case(base, contexts, case, False)
@@ -4615,10 +4882,15 @@ def self_test(vectors_only=False):
         # While that worker holds the slot, the cancellation sweep is not run:
         # its row is CANNOT-EVALUATE naming that run, so no row goes missing
         # and the exit is not 0. Run, the sweep raises on the held slot.
+        # The worker it releases is joined before it returns, so the next
+        # vector starts with no resolver worker alive; one that outlives
+        # HELD_JOIN fails this vector, not the next. The worker ends
+        # within milliseconds of its release when it is scheduled; the bound
+        # also covers a host that stalls it for several seconds.
         gate = threading.Event()
         case = ("vector/positive-held-slot", VALID, "archive", {"hold_after_publish": gate})
+        failures = []
         try:
-            failures = []
             run = run_case(base, contexts, case, False)
             if run[:2] != (True, VALID) or run[4:] != ([], ["after", "teardown"], [], [], []):
                 failures.append("the positive run was not a passing run with one straggler")
@@ -4637,9 +4909,12 @@ def self_test(vectors_only=False):
                     "detail": BLOCKED_SWEEP + case[0]}]:
                 failures.append("the cancellation sweep's row was not CANNOT-EVALUATE naming "
                                 + case[0])
-            results.append((VECTOR_NAMES[10], failures))
         finally:
             gate.set()
+            if join_resolvers(HELD_JOIN):
+                failures.append("the released resolver worker outlived its {} s join".format(
+                    HELD_JOIN))
+        results.append((VECTOR_NAMES[10], failures))
 
     def sweep_leaked_vector(base, contexts, results):
         # A slot held with no live resolver worker before the cancellation
@@ -4671,11 +4946,24 @@ def self_test(vectors_only=False):
             failures.append("the leaked slot did not fail the sweep's row INVALID")
         results.append((VECTOR_NAMES[11], failures))
 
+    def run_vector(vector, names, base, contexts, results):
+        # A vector that raises reports each of its names not yet reported as
+        # "cannot evaluate", naming the exception and its message, so the
+        # report says what could not be evaluated.
+        try:
+            vector(base, contexts, results)
+        except Exception as exc:
+            done = {name for name, _ in results}
+            reason = type(exc).__name__ + (": " + str(exc) if str(exc) else "")
+            results.extend((name, ["cannot evaluate: " + reason])
+                           for name in names if name not in done)
+
     def resolver_vectors(base, contexts):
         # Returns (name, failures) per vector; a vector that raises reports
         # "cannot evaluate". Every vector releases its hold, then all workers
         # are joined, and the cleanup vector requires none alive, the self-test
-        # lookup and the real slot still bound, and the slot free.
+        # lookup and the real slot still bound, the slot free, and a raising
+        # vector's report to carry its exception's message.
         results = []
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
@@ -4684,13 +4972,16 @@ def self_test(vectors_only=False):
                               (leaked_vector, VECTOR_NAMES[9:10]),
                               (held_slot_vector, VECTOR_NAMES[10:11]),
                               (sweep_leaked_vector, VECTOR_NAMES[11:12])):
-            try:
-                vector(base, contexts, results)
-            except Exception as exc:
-                done = {name for name, _ in results}
-                results.extend((name, ["cannot evaluate: " + type(exc).__name__])
-                               for name in names if name not in done)
+            run_vector(vector, names, base, contexts, results)
         failures = []
+
+        def raising(base, contexts, results):
+            raise AssertionError("the probe precondition does not hold")
+        probe = []
+        run_vector(raising, ("vector/raising",), base, contexts, probe)
+        if probe != [("vector/raising", ["cannot evaluate: AssertionError: "
+                                         "the probe precondition does not hold"])]:
+            failures.append("a raising vector's report did not name what it could not evaluate")
         if join_resolvers(5.0):
             failures.append("a resolver worker outlived the vectors")
         if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
@@ -4703,6 +4994,10 @@ def self_test(vectors_only=False):
         return results
 
     try:
+        if tuple(case[0] for case in cases if "fetch_bound" in case[3]) != _LOAD_SENSITIVE_ROWS:
+            raise AssertionError("the load-sensitive rows depart from the timing configs")
+        if steady_only:
+            cases[:] = [case for case in cases if case[0] not in _LOAD_SENSITIVE_ROWS]
         # Missing timer support is a setup cannot-evaluate, before any row.
         watchdog_preconditions()
         with watchdog(3.0):
@@ -4776,7 +5071,9 @@ def self_test(vectors_only=False):
             # missing for it.
             if main_failed:
                 SELF_TEST_ROSTER = tuple(executed)
-                print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
+                print(_report_line(executed))
+                _print_failures(_roster_failures(executed)
+                                + ["FAIL roster/rows: the run stopped after its positive control"])
                 return 1
 
             guard_rows = (_guard_self_test() + _ownership_self_test()
@@ -4793,7 +5090,10 @@ def self_test(vectors_only=False):
             "exception": type(exc).__name__,
         })
         SELF_TEST_ROSTER = tuple(executed)
-        print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
+        print(_report_line(executed))
+        # Exit 2 (cannot evaluate), but still name every row that is not
+        # VALID, the setup-or-teardown row included.
+        _print_failures(_roster_failures(executed))
         return 2
 
     # Every exit-code departure from main; all concern resolver workers:
@@ -4842,28 +5142,32 @@ def self_test(vectors_only=False):
     #   after the call, before either wait, so it missed changes made
     #   during them.
     SELF_TEST_ROSTER = tuple(executed)
-    print(json.dumps({"opf_adopt_observe_tests": executed}, sort_keys=True))
-    for name, failures in vector_results:
-        print("FAIL " + name + ": " + "; ".join(failures) if failures else "PASS " + name)
+    print(_report_line(executed))
     expected_ids = ([positive[0]] + [row["id"] for row in guard_rows]
                     + [case[0] for case in cases])
-    if [row["id"] for row in executed] != expected_ids:
+    # The FAIL-line check runs first, so its PASS lines precede any FAIL line,
+    # and the real roster is judged and named whatever its outcome.
+    try:
+        _failure_lines_self_test()
+        red_failure = None
+    except AssertionError as exc:
+        red_failure = "FAIL " + str(exc)
+    rc = _judge_roster(executed, expected_ids, vector_results, tuple(
+        name for name in VECTOR_NAMES if not (steady_only and name in _LOAD_SENSITIVE_VECTORS)))
+    if red_failure is not None:
+        _print_failures([red_failure])
         return 1
-    if any(row["test_status"] != VALID for row in executed):
-        return 1
-    failed = [text for _, failures in vector_results for text in failures]
-    if tuple(name for name, _ in vector_results) != VECTOR_NAMES:
-        return 1
-    if failed:
-        return 2 if all(text.startswith("cannot evaluate") for text in failed) else 1
+    if rc:
+        return rc
     if not vectors_only:
         try:
-            _runner_registration_test(expected_ids)
+            _runner_registration_test(expected_ids, VECTOR_NAMES)
         except AssertionError as exc:
-            print(str(exc), file=sys.stderr)
+            _print_failures(["FAIL " + str(exc)])
             return 1
         except Exception as exc:
-            print("registration cannot evaluate:", type(exc).__name__, file=sys.stderr)
+            _print_failures(["FAIL runner/adopt-observe-registration: registration cannot "
+                             "evaluate: {}: {}".format(type(exc).__name__, exc)])
             return 2
     return 0
 

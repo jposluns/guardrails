@@ -163,19 +163,19 @@ _ROSTER_NAMESPACES.update(IMPORTER_TYPES)
 _ROSTER_NS_SET = frozenset(_ROSTER_NAMESPACES.values())
 
 # A record whose schema has not shipped in the baseline validator is a named CANNOT-EVALUATE deferral,
-# never graded INVALID (F4; round-5 F-2). This covers the module tier (schemas land in U2M) AND the
-# importer-only legacy_fragment type (deprecated for new stores, spec 8.1: no record schema ships in the
-# baseline validator, so records in an existing store stay readable as a named deferral).
+# never graded INVALID. This covers the module tier (schemas land in U2M) AND the legacy_fragment type,
+# which the standard does not define (it reserves LF unassigned, spec 8.1): no record schema ships in the
+# baseline validator, so records in an existing store stay readable as a named deferral.
 _SCHEMA_DEFERRAL = ("record schema not available to the baseline validator; deferred (module-tier schemas "
-                    "land in U2M; legacy_fragment is deprecated for new stores and has no baseline "
-                    "record schema)")
+                    "land in U2M; the standard reserves LF unassigned and no record type uses it, so "
+                    "legacy_fragment has no baseline record schema)")
 
 
 def _schema_deferred(tname):
     """True when `tname` is an enabled module-tier OR importer type whose record schema has not shipped
     (it is in MODULE_TYPES or IMPORTER_TYPES but has no BASELINE_SPECS entry). Its records are a named
-    CANNOT-EVALUATE deferral, not graded INVALID by the baseline-only validator (F4; round-5 F-2 extends
-    this from the module tier to the importer legacy_fragment type)."""
+    CANNOT-EVALUATE deferral, not graded INVALID by the baseline-only validator; this covers the module
+    tier and the legacy_fragment name in IMPORTER_TYPES."""
     return tname not in BASELINE_SPECS and (tname in MODULE_TYPES or tname in IMPORTER_TYPES)
 
 # The closed spec-11 integrity roster. Every required check calls rep.ran(<id>) once; result() reconciles
@@ -1225,12 +1225,58 @@ def _canonical_remote(url):
     return (host.lower(), p)
 
 
-def _target_remote_canon(target):
+def _fs_path_form(value):
+    """How a remote spelling (a `git:` payload, or an observed actual remote) names a filesystem repository
+    rather than a URL. Both C-SYNC-AGREE legs classify through this one function, so a spelling classifies
+    the same whichever leg reads it. A filesystem sync target is accepted only as git:<absolute path> (spec
+    5.6), so this returns "blank" for an empty or whitespace-only value (it names no repository, and is
+    never a URL); "file-url" for a file:// URL; None for any other spelling containing '://', tested before
+    the absolute-path test because git reads any '://' as a scheme separator (it refuses /srv/a://repo as an
+    unsupported protocol '/srv/a', never opening it as a directory), so such a spelling is a URL form on
+    both legs and never a filesystem path; "absolute" for a POSIX-absolute path; "padded" for an absolute
+    path with leading or trailing whitespace (whitespace is significant in a path, so such a spelling is
+    ambiguous: refused, never trimmed); "relative" for any other path-shaped payload (no scheme and no
+    scp-style host colon before the first slash, the forms _canonical_remote cannot split into a host and a
+    path); and None for an scp-style host:path form, which _canonical_remote handles unchanged."""
+    s = value.strip() if isinstance(value, str) else ""
+    if not s:
+        return "blank"
+    if s[:len("file://")].lower() == "file://":
+        return "file-url"
+    if "://" in s:
+        return None
+    if s.startswith("/"):
+        return "absolute" if s == value else "padded"
+    slash, colon = s.find("/"), s.find(":")
+    if colon == -1 or (slash != -1 and slash < colon):
+        return "relative"
+    return None
+
+
+def _local_path_canon(value):
+    """The comparable local form of an absolute filesystem repository path: ("", path) with repeated
+    slashes, '.' segments and a trailing slash dropped. _canonical_remote never returns an empty host, so a
+    local form cannot collide with a URL endpoint. The path is otherwise kept exactly, whitespace included
+    (no trimming, and no '.git' fold: /srv/a and /srv/a.git are different directories). A '..' segment is
+    unresolvable (None), since folding it lexically can name a different directory than the one git opens
+    through a symlink."""
+    s = value if isinstance(value, str) else ""
+    if not s.startswith("/"):
+        return None
+    segs = [seg for seg in s.split("/") if seg not in ("", ".")]
+    if not segs or ".." in segs:
+        return None
+    return ("", "/" + "/".join(segs))
+
+
+def _target_remote_canon(target, local_paths=True):
     """The canonical (host, path) forms a REMOTE target (spec 5.5) names, for host+path agreement against
     an observed remote. Returns (canon_set, unresolved): `canon_set` is the set of canonical forms (empty
     when a remote target names no canonicalizable form), and `unresolved` lists the raw target forms the
     equivalence could not canonicalize (disclosed, never silently matched; F8). Returns (None, []) for a
-    LOCAL (dir:/path) target that names no git remote."""
+    LOCAL (dir:/path) target that names no git remote. A git:<absolute path> target canonicalizes to its
+    local form (_local_path_canon) when `local_paths` is true; with it false that form stays unresolved,
+    exactly as a URL-only canonicalizer leaves it."""
     if target.kind in ("github", "gitlab"):
         host = "github.com" if target.kind == "github" else "gitlab.com"
         val = target.value.strip().lstrip("/")
@@ -1240,6 +1286,11 @@ def _target_remote_canon(target):
             return set(), [target.value]
         return {(host, val)}, []
     if target.kind == "git":
+        if local_paths and _fs_path_form(target.value) == "absolute":
+            lc = _local_path_canon(target.value)
+            if lc is None:
+                return set(), [target.value]
+            return {lc}, []
         c = _canonical_remote(target.value)
         if c is None:
             return set(), [target.value]
@@ -1519,8 +1570,9 @@ def _gather_imported_records(root_fd, machine_rel, enabled_types, registered_ven
     """C-IMPORTED-SCHEMA (spec 8.3): read the imported-series leaves inline (the first imported-series
     release keeps them inline in either store layout, spec 4.2) and validate every row through
     _opf_schema.validate_imported_record, the closed imported envelope and its missingness rules. The
-    leaves are one per enabled type except legacy_fragment, named through _opf_store.imported_leaf_names,
-    the authority the containment registration reads: <type>.imported.index.toml with [[record]] rows,
+    leaves are one per enabled type (spec 4.2), none for this tooling's legacy_fragment, named through
+    _opf_store.imported_leaf_names, the authority the containment registration reads:
+    <type>.imported.index.toml with [[record]] rows,
     and worklog.imported.toml with [[entry]] rows for the worklog ledger. An imported row NEVER enters the
     _SCHEMA_DEFERRAL seam (spec 8.3: a conforming imported series can reach VALID), so a type whose clean
     records defer (a module-tier type) is graded by the imported validator, which refuses a type it holds
@@ -1546,7 +1598,7 @@ def _gather_imported_records(root_fd, machine_rel, enabled_types, registered_ven
             continue
         if st == "absent":
             rep.finding("enabled type {!r} has no imported leaf {} (an imported-series store holds one for "
-                        "every enabled type except legacy_fragment; spec 4.2)".format(tname, leaf))
+                        "every enabled type; spec 4.2)".format(tname, leaf))
             complete = False
             continue
         rows = _imported_leaf_rows(data, leaf_rel, "entry" if tname in _LEDGER_TYPES else "record", rep)
@@ -1651,14 +1703,15 @@ def _gather_worklog(root_fd, relpath, registered_vendors, rep, required, machine
 
 # --- the archive (C-ARCHIVE-ENUM / C-ROTATION and the merged worklog) --------------------------------
 
-def _parse_archive_manifest(data, where, rep, dropped=None):
+def _parse_archive_manifest(data, where, rep, dropped=None, wl_dropped=None):
     """Parse and validate an `archive.toml` (shape defined here). Returns (moved, worklog_moved) where
     `moved` is a list of (id, type, destination) triples and `worklog_moved` a list of (span, destination),
     or (None, None) when the file is not a table, carries an unsupported/absent schema, or an array is
     malformed (each CANNOT-EVALUATE). A malformed individual row is an INVALID finding and is left out of
-    the returned lists; when `dropped` is given, each such row is appended to it as its raw (id, type),
-    and a worklog_moved row as (None, "worklog"), so the caller can grade the population the row names as
-    not reconciled."""
+    the returned lists; when `dropped` is given, each such moved row is appended to it as its raw
+    (id, type, destination), and when `wl_dropped` is given, each such worklog_moved row's raw destination
+    is appended there, so the caller can grade the population the row names as not reconciled, against the
+    declared destination where that is still a usable path."""
     if not isinstance(data, dict):
         rep.cant("{}: archive.toml is not a table".format(where))
         return None, None
@@ -1688,17 +1741,17 @@ def _parse_archive_manifest(data, where, rep, dropped=None):
         if _valid_id_shape(mid) is None:
             rep.finding("{}: id {} is not a well-formed <NS>-<n> id (spec 8.2)".format(rw, _safe_display(mid)))
             if dropped is not None:
-                dropped.append((mid, mtype))
+                dropped.append((mid, mtype, dest))
             continue
         if not isinstance(mtype, str) or not mtype:
             rep.finding("{}: type must be a non-empty string (spec 12)".format(rw))
             if dropped is not None:
-                dropped.append((mid, mtype))
+                dropped.append((mid, mtype, dest))
             continue
         if not isinstance(dest, str) or not dest:
             rep.finding("{}: destination must be a non-empty string".format(rw))
             if dropped is not None:
-                dropped.append((mid, mtype))
+                dropped.append((mid, mtype, dest))
             continue
         moved.append((mid, mtype, dest))
     wl_raw = data.get("worklog_moved", [])
@@ -1717,13 +1770,13 @@ def _parse_archive_manifest(data, where, rep, dropped=None):
         span, dest = s.get("span"), s.get("destination")
         if not (isinstance(span, list) and len(span) == 2):
             rep.finding("{}: span must be a two-element [WL-a, WL-b] array".format(rw))
-            if dropped is not None:
-                dropped.append((None, "worklog"))
+            if wl_dropped is not None:
+                wl_dropped.append(dest)
             continue
         if not isinstance(dest, str) or not dest:
             rep.finding("{}: destination must be a non-empty string".format(rw))
-            if dropped is not None:
-                dropped.append((None, "worklog"))
+            if wl_dropped is not None:
+                wl_dropped.append(dest)
             continue
         wl_moved.append((span, dest))
     return moved, wl_moved
@@ -1745,25 +1798,44 @@ def _moved_row_types(mid, mtype, enabled_types):
     return types
 
 
-def _dest_index_has_id(root_fd, machine_rel, dest, target_id, rep):
-    """True when the store-relative index `dest` (an `archive.toml` moved destination) actually carries a
-    row for `target_id`. A dest that escapes the store, is unreadable, or is absent is fail-closed: it
-    records a finding / cannot-evaluate and returns False, so an enumerated id whose destination cannot be
-    confirmed is never read as present."""
+def _dropped_dest_key(dest):
+    """How a dropped row's raw declared destination classifies the population the row names. A row the
+    manifest parse drops for a malformed id, type or span still carries the field that says WHERE the
+    record (or the entries) went, and discarding it can turn a record genuinely held there into a false
+    absence. Returns the canonical contained form when `dest` is a usable contained path (the row is then
+    classified exactly as a kept wrong-destination row, against the counted set once the whole tree is
+    walked), False when it is a non-empty string that is not contained (never opened, so it can never be
+    a counted location: the record may exist exactly there, and its types belong in `unread`), and None
+    when the row carries no usable destination string at all (it names no location, so its types belong
+    in `unconfirmed` alone)."""
+    if not isinstance(dest, str) or not dest:
+        return None
     if not _is_contained_relpath(dest):
-        rep.finding("C-ARCHIVE-ENUM: archive destination {!r} is not a contained store-relative path "
-                    "(spec 14.2); NEVER opened".format(dest))
         return False
+    return _canonical_contained(dest)
+
+
+def _dest_index_has_id(root_fd, machine_rel, dest, target_id, rep):
+    """True when the store-relative index `dest` (an `archive.toml` moved destination the caller has
+    already required to be a contained path equal to the declaring bucket's own type index, probed only
+    where that bucket's scan counted nothing at the path) actually carries a row for `target_id`; False
+    when it was read, or is absent, and carries none; None when it could not be read. An absent
+    destination records a finding and returns False (an absent file holds no row); an unreadable or
+    malformed one is fail-closed to None, so an enumerated id whose destination cannot be confirmed is
+    never read as present. The caller tells the returns apart: a destination the probe confirmed absent
+    (or read whole) without the row leaves its type unconfirmed, one never read leaves a record source
+    unread, and a probe HIT is a record the walk counted nowhere (the tree changed between the listing
+    and the probe), likewise a record source unread, never a seat."""
     full = _rel(machine_rel, dest)
     data, st = _read_toml(root_fd, full, rep)
     if st == "error":
-        return False
+        return None
     if st == "absent":
         rep.finding("C-ARCHIVE-ENUM: archive destination {!r} does not exist".format(dest))
         return False
     rows = _index_rows(data, full, rep)
     if rows is None:
-        return False
+        return None
     for row in rows:
         if isinstance(row, dict) and row.get("id") == target_id:
             return True
@@ -1907,26 +1979,72 @@ def _archive_triaged_dir(archive_rel, path):
 
 
 def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=1,
-                      unread=None):
+                      unread=None, unconfirmed=None, active_counted=None, walk=None):
     """Walk the archive tree, validating each bucket's archive.toml, its archived non-worklog records, and
     its archived worklog, and reconciling the enumeration BIDIRECTIONALLY against what is actually present
     (OPF-SPEC 12/13). Enumeration and record-schema faults attribute to the caller's C-ARCHIVE-ENUM focus;
     the rotation-eligibility (F4) findings are collected into a returned list for C-ROTATION. Returns
     (archive_recs, archive_worklogs, rotatable) where archive_worklogs maps a year to its WL-number -> entry
     map. Archive absent means no rotation (clean); a present bucket with no archive.toml is CANNOT-EVALUATE,
-    never 'no rotation happened'. No loop is sized by a declared span endpoint. Every type whose
-    archived records could not all be seated joins `unread` (when given): an archived index that is
-    unreadable or malformed or a row that is skipped adds its type, a bucket or archive tree that
-    cannot be walked adds every enabled type, and a moved row that cannot be reconciled adds the types
-    _moved_row_types names for it: a row dropped as malformed (its id, type or destination), a row
-    whose declared type is not a roster type or disagrees with its id's namespace, and an enumerated
-    moved id whose declared destination is wrong or cannot confirm the record (that record is then
-    confirmed seated nowhere, so its type's population is incomplete for the current-state joins). The
-    archived worklog adds "worklog" when the bucket's worklog.toml is listed but cannot be read, when an
-    entry is left out of its map, and when a worklog_moved row is dropped as malformed or its span
-    enumerates an entry the bucket's worklog does not hold."""
+    never 'no rotation happened'. No loop is sized by a declared span endpoint. The walk sorts every type
+    it cannot vouch for into `unread` or `unconfirmed` (each when given; `unconfirmed` falls back to
+    `unread`) by ONE principle: a moved row's types stay in the graded `unconfirmed` set only when its
+    declared destination is a location that was opened at that path and read in full by a scan that
+    counts its ids toward a type's population, so the walk knows definitively whether the id is there.
+    The walk records those locations as it goes (each bucket's enabled type indexes and its worklog, plus
+    the active ones `active_counted` supplies) and classifies each row only after the whole tree is
+    walked, since a counted location can be a bucket walked later; the declaring bucket's own expected
+    location, settled by the time its rows are reached, is additionally probed where the bucket's listing
+    counted nothing at the path, a destination the probe confirms absent being likewise known to hold no
+    row. Every declared location outside the counted set (never opened, an uncontained path, one whose
+    ids were not counted toward a record population - a worklog named by a moved row, an index whose
+    declared type the bucket scan skips, or a probe hit where the listing counted nothing - or one that
+    could not be read in full) puts the types _moved_row_types names into `unread` instead: the record
+    may exist exactly where nothing was counted, so only the `unread` types leave an id's presence
+    unknown and the presence scans over the ids that were read stand for every other type. A declared
+    destination is compared with the counted set through its canonical contained form
+    (_canonical_contained), so a non-canonical spelling of a counted location still matches it. A row
+    dropped as malformed keeps its declared destination where that is still a usable string
+    (_dropped_dest_key): a contained one is classified exactly as a kept wrong-destination row, an
+    uncontained one puts its types in `unread`, and only a row with no usable destination string names
+    no readable location, so it adds the types it could stand for to `unconfirmed` alone, never to
+    `unread`: wherever every location a record of such a type can live was counted, the id's presence is
+    still known (a location that failed to read already put its type in `unread` itself), so one junk
+    field never turns a namespace's presence gates into CANNOT-EVALUATE. Beyond the rows, `unread` also takes the type of an archived index that is
+    unreadable or malformed or whose row is skipped, every enabled type for a bucket or archive tree that
+    cannot be walked, and "worklog" when the bucket's worklog.toml is listed but cannot be read or an
+    entry is left out of its map. `unconfirmed` also takes the types of a row whose declared type
+    disagrees with its id's namespace even where the counted destination carries the id: the id's
+    presence is known, but which of the two types the record is cannot be told, so both typed populations
+    stay incomplete for the current-state joins. The archived worklog follows the same principle: a
+    worklog_moved span that is malformed (one dropped whole included, through its kept destination) or
+    enumerates an entry the bucket's worklog lacks adds "worklog" to `unconfirmed` when its declared
+    destination is a counted ledger (one read in full, or one a listed bucket does not carry, which
+    holds no entries), and to `unread` when it names any other destination the entries could be held
+    at. `active_counted` (when given) maps each active location the caller's
+    collectors read in full to the ids counted there, keyed store-relative exactly as an archive.toml
+    destination names it (`<type>.index.toml`, `worklog.toml`); only membership is read for a ledger.
+    Without it no active location is counted, so a destination naming one stays in `unread`. `walk`
+    (when given, a dict whose caller's report has a `cannot` list) takes "tree": "absent" when no
+    archive tree exists, "unreadable" when one exists but cannot be listed, else "listed"."""
     if unread is None:
         unread = set()
+    if unconfirmed is None:
+        unconfirmed = unread
+    # The locations whose ids a full read counted toward a population: `counted_ids` maps each counted
+    # type index to the well-formed ids it seats, and `counted_wl` holds each counted worklog ledger.
+    # Both are keyed store-relative, exactly as a destination names them; a declared destination is
+    # graded against the matching set only, since an index's ids are never counted as worklog entries nor
+    # a ledger's as records.
+    counted_ids = {}
+    counted_wl = set()
+    for loc in (active_counted or {}):
+        if loc == WORKLOG_NAME or loc.endswith("/" + WORKLOG_NAME):
+            counted_wl.add(loc)
+        else:
+            counted_ids[loc] = active_counted[loc]
+    pending_moved = []      # (types the row could stand for, declared destination), classified after the walk
+    pending_wl = []         # declared worklog_moved destinations, classified after the walk
     archive_recs = []
     archive_worklogs = {}
     rotatable = []
@@ -1935,12 +2053,18 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
     # grading), matching C-CONTAINMENT.
     partial_active = import_status == "partial" and _has_active_import_run(root_fd, machine_rel, rep, homes)
     archive_rel = _rel(machine_rel, ARCHIVE_DIRNAME)
+    cant_before = len(rep.cannot) if walk is not None else 0
     years, top_files = _list_dir(root_fd, archive_rel, rep, unread, enabled_types)
     if years is None:
         # An ABSENT archive/ tree means no rotation has happened (clean). A tree that EXISTS but cannot
         # be listed takes the same return, with the cant and every enabled type already recorded unread
-        # by _list_dir above, so nothing downstream reads the unwalked tree as rotation-free.
+        # by _list_dir above, so nothing downstream reads the unwalked tree as rotation-free. Only the
+        # listing's own cant tells the two apart, so `walk` reads it from the report.
+        if walk is not None:
+            walk["tree"] = "unreadable" if len(rep.cannot) > cant_before else "absent"
         return archive_recs, archive_worklogs, rotatable
+    if walk is not None:
+        walk["tree"] = "listed"
     for fn_ in (top_files or []):
         # A regular file directly under archive/ is unmanaged: only <YYYY> bucket directories belong here.
         # C-CONTAINMENT skips the archive subtree, so its stray-path grading lives here (spec 12/14.2; B2).
@@ -1970,15 +2094,39 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
         if ast != "ok":
             unread.update(enabled_types)
             continue
-        dropped = []
-        moved, wl_moved = _parse_archive_manifest(amf, bucket, rep, dropped)
+        dropped, wl_dropped = [], []
+        moved, wl_moved = _parse_archive_manifest(amf, bucket, rep, dropped, wl_dropped)
         if moved is None:
             unread.update(enabled_types)
             continue
-        for mid, mtype in dropped:
-            # A row dropped as malformed names a rotation that cannot be reconciled: the population of
-            # each type it could stand for is incomplete.
-            unread.update(_moved_row_types(mid, mtype, enabled_types))
+        for mid, mtype, dest in dropped:
+            # A row dropped as malformed still carries the field that says where the record went. Where
+            # that destination is a usable contained path, the row is classified exactly as a kept
+            # wrong-destination row (against the counted set once the whole tree is walked), so a record
+            # genuinely held at the declared location never takes an absence finding; an uncontained
+            # string names a location that is never opened, where the record may exist (`unread`). Only
+            # a row with no usable destination string names no readable location: each type it could
+            # stand for stays graded wherever every location a record of that type can live was read in
+            # full and counted (a location that failed to read already put its type in `unread` itself),
+            # while the rotation it names is unreconciled, so those types' populations are incomplete
+            # for the current-state joins.
+            key = _dropped_dest_key(dest)
+            row_types = _moved_row_types(mid, mtype, enabled_types)
+            if key is None:
+                unconfirmed.update(row_types)
+            elif key is False:
+                unread.update(row_types)
+            else:
+                pending_moved.append((row_types, key))
+        for dest in wl_dropped:
+            # A worklog_moved row dropped whole follows the same rule over the counted ledgers.
+            key = _dropped_dest_key(dest)
+            if key is None:
+                unconfirmed.add("worklog")
+            elif key is False:
+                unread.add("worklog")
+            else:
+                pending_wl.append(key)
         if moved and not wl_moved:
             # Per-bucket rotation binding: a bucket that rotates non-worklog records MUST carry an archived
             # worklog span to bind them to a released period (spec 12). archive_wl_ids aggregates GLOBALLY,
@@ -2025,17 +2173,20 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 # than the baseline validator's false "not a supported type".
                 rep.cant("{}: {} archived schema-deferred record(s) of type {!r}; {}".format(
                     idx_rel, len(rows), tname, _SCHEMA_DEFERRAL))
+            idx_ids, idx_counted = set(), True
             for i, row in enumerate(rows):
                 rw = "{}#{}".format(idx_rel, i + 1)
                 if not isinstance(row, dict):
                     rep.cant("{}: archived record row is not a table".format(rw))
                     unread.add(tname)
+                    idx_counted = False
                     continue
                 if not deferred:
                     rv = validate_record(row, expected_type=tname, registered_vendors=registered_vendors)
                     if rv.status == CANNOT_EVALUATE:
                         rep.cant("{}: {}".format(rw, "; ".join(rv.findings)))
                         unread.add(tname)
+                        idx_counted = False
                         continue
                     if rv.status != VALID:
                         for f in rv.findings:
@@ -2044,6 +2195,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                 archive_recs.append(rec)
                 if isinstance(rec.id, str) and _valid_id_shape(rec.id) is not None:
                     present_types[rec.id] = tname
+                    idx_ids.add(rec.id)
                     elig = _archived_rotatable(rec)
                     if elig is None:
                         pass     # module-tier: rotation eligibility deferred to U2M (F4), never graded here
@@ -2051,16 +2203,28 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                         rotatable.append("C-ROTATION: archived record {!r} ({}) is not in an unqualified "
                                          "terminal state and must never rotate (spec 12:972-979)".format(
                                              rec.id, tname))
+            if idx_counted:
+                # Read in full, every row's id counted toward the type's population: a moved destination
+                # naming this index is graded against the ids counted here.
+                counted_ids[_rel(bucket_rel, fn_)] = idx_ids
         # Archived worklog (release-based rotation).
         wl_map = {}
         if WORKLOG_NAME in bfiles:
+            wl_track = set()
             wl_map = _gather_worklog(root_fd, _rel(bucket, WORKLOG_NAME), registered_vendors, rep,
-                                     required=False, unread=unread)
+                                     required=False, unread=wl_track)
+            unread.update(wl_track)
             if wl_map is None:
                 # A listed bucket worklog that is unreadable, invalid or gone at read: its entries were
                 # not read.
                 unread.add("worklog")
                 wl_map = {}
+            elif not wl_track:
+                counted_wl.add(_rel(bucket_rel, WORKLOG_NAME))
+        else:
+            # A listed bucket with no worklog.toml: the location holds no entries, so a span naming it is
+            # classified over a counted (empty) ledger.
+            counted_wl.add(_rel(bucket_rel, WORKLOG_NAME))
         archive_worklogs[year] = wl_map
 
         # F5 / F12 non-worklog reconciliation, BOTH directions.
@@ -2070,36 +2234,77 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             norm_ns = _ROSTER_NAMESPACES.get(mtype)
             # Every type the row could stand for: the declared one and the one its id's namespace binds.
             row_types = _moved_row_types(mid, mtype, enabled_types)
+            mislabelled = False
             if norm_ns is None:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r}, which is not a roster type "
                             "(spec 8.1)".format(mid, mtype))
-                # No type index can seat the record under a type the roster does not have: the type its
-                # id binds is incomplete.
-                unread.update(row_types)
             elif id_ns is not None and id_ns != norm_ns:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r} (namespace {}) but the id "
                             "namespace is {} (spec 8.1)".format(mid, mtype, norm_ns, id_ns))
-                # Whatever the destination holds, the record is not seated as the type its id binds, and
-                # which of the two it is cannot be told: both populations are incomplete.
-                unread.update(row_types)
+                mislabelled = True
             want_base = "{}{}".format(mtype, INDEX_SUFFIX)
             expected_dest = _rel(bucket_rel, want_base)
-            if dest != expected_dest:
-                # A rotation lands in its DECLARING bucket's own type index, never in the active tree
-                # or another bucket. Exact-path equality subsumes the basename check and confines the
-                # destination to archive/<year>/ (spec 12); the wrong destination is not then opened.
+            # The row's types stay in the graded `unconfirmed` set ONLY when the declared destination is a
+            # location a scan read in full while counting its ids toward a type's population (or one the
+            # probe below confirms holds no row), so the walk knows definitively whether the id is there.
+            # Every other declared location (never opened, opened but its ids not counted, or not readable
+            # in full) puts the types in `unread` instead: the record may exist exactly where nothing was
+            # counted, so a graded presence scan over the ids that were read could report a false deletion.
+            if not _is_contained_relpath(dest):
+                # An uncontained destination, including one that compares equal to an expected path built
+                # from a declared type carrying path segments, is refused before any path is built from
+                # it: it is never opened and can never be a counted location.
+                rep.finding("C-ARCHIVE-ENUM: archive destination {!r} is not a contained store-relative "
+                            "path (spec 14.2); never opened".format(dest))
+                unread.update(row_types)
+            elif dest != expected_dest:
+                # A rotation lands in its DECLARING bucket's own type index, never in the active tree or
+                # another bucket (spec 12), so the wrong destination is a finding either way; whether the
+                # row stays graded depends on whether some scan counted that location, which can be a
+                # bucket walked later, so the row is classified after the whole walk, through its
+                # canonical contained form: the counted set is keyed canonical, and a non-canonical
+                # spelling of a counted location must match it rather than read as never counted.
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} destination {!r} is not this bucket's type index "
                             "{!r} (a rotation lands in its declaring bucket; spec 12)".format(
                                 mid, dest, expected_dest))
-                unread.update(row_types)
-            elif not _dest_index_has_id(root_fd, machine_rel, dest, mid, rep):
-                rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination {!r} "
-                            "(a rotation must land where it says; spec 12:981-982)".format(mid, dest))
-                # The store says this record was rotated here, yet no read confirmed it seated anywhere
-                # (an absent, unreadable or malformed destination, or one without the row): the type's
-                # record population is incomplete, so its current-state join must not read as a pass
-                # over the records that were found (spec 8.5).
-                unread.update(row_types)
+                pending_moved.append((row_types, _canonical_contained(dest)))
+            elif dest in counted_ids:
+                # This bucket's scan read the declared destination in full and counted its ids, so the
+                # id's presence there is known without a second read.
+                if mid not in counted_ids[dest]:
+                    rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination "
+                                "{!r} (a rotation must land where it says; spec 12:981-982)".format(
+                                    mid, dest))
+                    unconfirmed.update(row_types)
+                elif mislabelled:
+                    # The counted destination carries the id, but under a type its id's namespace does not
+                    # bind: the id's presence is known, while which of the two types the record is cannot
+                    # be told, so both typed populations stay incomplete for the current-state joins.
+                    unconfirmed.update(row_types)
+            else:
+                seated = _dest_index_has_id(root_fd, machine_rel, dest, mid, rep)
+                if seated is None:
+                    # The destination could not be read at the probe: whether the id is held there is
+                    # unread, never a graded absence, so the row's state is worded as such.
+                    rep.cant("C-ARCHIVE-ENUM: enumerated moved id {!r} destination {!r} could not be read "
+                             "at the probe; whether the id is held there is unread (spec "
+                             "12:981-982)".format(mid, dest))
+                elif not seated:
+                    rep.finding("C-ARCHIVE-ENUM: enumerated moved id {!r} is absent from its destination {!r} "
+                                "(a rotation must land where it says; spec 12:981-982)".format(mid, dest))
+                if mtype not in enabled_types or seated is not False:
+                    # Nothing counted this location's ids: a declared type outside the enabled roster
+                    # (whose index the bucket scan skips even when present), a destination that cannot be
+                    # read, or a probe HIT at a path the listing counted nothing at (the tree changed
+                    # under the walk, so the record the probe saw was counted nowhere). The id's presence
+                    # stays unknown.
+                    unread.update(row_types)
+                else:
+                    # The probe confirmed the destination absent (or read it whole) without the row where
+                    # the scan counted nothing: the id is known to be held nowhere counted, so the
+                    # presence scans stay graded while the type's population is incomplete for the
+                    # current-state joins.
+                    unconfirmed.update(row_types)
             found_type = present_types.get(mid)
             if found_type is not None and found_type != mtype:
                 rep.finding("C-ARCHIVE-ENUM: moved id {!r} declares type {!r} but the archived record found "
@@ -2119,20 +2324,31 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
             if not _is_contained_relpath(dest):
                 rep.finding("C-ARCHIVE-ENUM: worklog_moved destination {!r} in {} is not a contained "
                             "store-relative path (spec 12); the destination is never opened".format(dest, bucket))
-            elif dest != expected_wl_dest:
-                # M2(b): the span reconciliation reads the bucket's OWN worklog.toml regardless of the
-                # declared destination, so a wrong destination is otherwise decorative. Require equality to
-                # the declaring bucket's worklog (spec 12).
-                rep.finding("C-ARCHIVE-ENUM: worklog_moved destination {!r} in {} is not this bucket's "
-                            "worklog {!r} (a worklog rotation lands in its bucket's own worklog; spec "
-                            "12)".format(dest, bucket, expected_wl_dest))
+                # Never opened, so it can never match a counted ledger; the raw spelling classifies it.
+                dest_key = dest
+            else:
+                # The counted ledgers are keyed canonical, so the lookup and every pending entry read
+                # the canonical contained form; a non-canonical spelling of a counted ledger matches it.
+                dest_key = _canonical_contained(dest)
+                if dest != expected_wl_dest:
+                    # M2(b): the span reconciliation reads the bucket's OWN worklog.toml regardless of the
+                    # declared destination, so a wrong destination is otherwise decorative. Require equality to
+                    # the declaring bucket's worklog (spec 12).
+                    rep.finding("C-ARCHIVE-ENUM: worklog_moved destination {!r} in {} is not this bucket's "
+                                "worklog {!r} (a worklog rotation lands in its bucket's own worklog; spec "
+                                "12)".format(dest, bucket, expected_wl_dest))
             a, b = _wl_num(span[0]), _wl_num(span[1])
             if a is None or b is None or a > b:
                 rep.finding("C-ARCHIVE-ENUM: worklog_moved span {} in {} is not a well-formed [WL-a, WL-b] "
                             "range (spec 8.2/12)".format(_safe_display(span), bucket))
-                unread.add("worklog")      # the entries it names cannot be reconciled
+                # The entries it names cannot be reconciled. The moved-row principle decides the set,
+                # against the counted ledgers once the whole walk is done: a span landing in a counted
+                # ledger names entries only read (or absent) locations could hold, so the worklog stays
+                # graded; one landing anywhere else names entries that may be held at a destination this
+                # walk never opens.
+                pending_wl.append(dest_key)
                 continue
-            spans.append((a, b, dest))
+            spans.append((a, b, dest, dest_key))
         spans.sort()
         for i in range(1, len(spans)):
             if spans[i][0] <= spans[i - 1][1]:
@@ -2149,7 +2365,7 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                             "worklog_moved span (a record cannot vanish under rotation; spec "
                             "12:981-982)".format(n, bucket))
         present_set = set(present_sorted)
-        for a, b, dest in spans:
+        for a, b, dest, dest_key in spans:
             lo = bisect.bisect_left(present_sorted, a)
             hi = bisect.bisect_right(present_sorted, b)
             in_range = present_sorted[lo:hi]          # bounded by PRESENT ids, never by the span width
@@ -2164,9 +2380,28 @@ def _validate_archive(root_fd, machine_rel, enabled_types, registered_vendors, i
                             "present in {!r}; the first missing is WL-{} (spec 12:981-982)".format(
                                 a, b, bucket, width - len(in_range), dest, first_missing))
                 # The store says those entries were rotated here, yet the bucket's worklog does not hold
-                # them: the worklog population is not confirmed complete, as for a moved record its
-                # destination cannot confirm.
-                unread.add("worklog")
+                # them. The moved-row principle decides the set, against the counted ledgers once the
+                # whole walk is done: a span landing in a counted ledger had its declared destination read
+                # in full (or holds no entries), so an entry absent from every counted ledger is absent
+                # and the worklog stays graded; one landing anywhere else names a destination this walk
+                # never opens, where the entries may still be held.
+                pending_wl.append(dest_key)
+    # Classified only now, after the whole walk: a declared destination can be a location a later bucket's
+    # scan counted (or an active one the caller's collectors did). Each contained pending entry is already
+    # in its canonical form, as the counted sets are keyed. A declared location in the counted set
+    # leaves the id's (or the entries') presence known, so the presence scans stay graded while the
+    # unreconciled rotation keeps the row's populations incomplete for the current-state joins; any other
+    # declared location was counted by nothing, so the record may exist exactly where nothing was read.
+    for row_types, dest in pending_moved:
+        if dest in counted_ids:
+            unconfirmed.update(row_types)
+        else:
+            unread.update(row_types)
+    for dest in pending_wl:
+        if dest in counted_wl:
+            unconfirmed.add("worklog")
+        else:
+            unread.add("worklog")
     return archive_recs, archive_worklogs, rotatable
 
 
@@ -2195,8 +2430,8 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
     is not reported here: the driver runs _check_importer_receipts beside this join on every store, and
     that arm reports it, or accepts in its place the remedy spec 8.6 defines (a maintainer-authored
     `corrects` decision), so the one defect is reported once and the remedy is never refused. When the
-    backlog_item or done records could not all be read, or a seated one's status or links could not be
-    interpreted (`unread` from the collectors, widened by _make_rec's `unparsed`), the join is
+    backlog_item or done records could not all be read or confirmed, or a seated one's status or links
+    could not be interpreted (`unread` from the collectors, widened by _make_rec's `unparsed`), the join is
     CANNOT-EVALUATE and is not run: a missing or unreadable receipt or target could hide a defect or report
     a false one."""
     clean = [r for r in recs if r.location != "imported"]
@@ -2208,9 +2443,9 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
                      _partial_causes(frozenset(), frozenset(), "", no_kind)))
     unread = unread | {r.rtype for r in clean if r.unparsed - {"actor"}}
     if unread & {"backlog_item", "done"}:
-        rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read or interpreted (see "
-                 "C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the receipt join is not evaluated "
-                 "over a partial set (spec 8.5)")
+        rep.cant("C-RECEIPTS: the backlog_item and done records could not all be read, confirmed or "
+                 "interpreted (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the receipt join is "
+                 "not evaluated over a partial set (spec 8.5)")
         return
     joined = [r for r in recs if r.location != "imported" and r.actor_kind != "importer"]
     bi_state = {r.id: (r.state, r.qual) for r in joined if r.rtype == "backlog_item" and isinstance(r.id, str)}
@@ -2267,11 +2502,14 @@ def _check_receipts(recs, by_id, rep, unread=frozenset()):
 def _check_handoff(recs, rep, unread=frozenset()):
     """C-HANDOFF (R2): at most one `current` handoff among clean records authored by non-importer actors
     (OPF-SPEC 8.5). Section 8.6 keys the importer firewall "on provenance rather than on series alone": it
-    "covers every record whose `actor.kind` is `importer`, in the imported series or written into the
-    clean series by the pre-1.3.0 legacy importer", and "every current-state join, including the section
-    8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
-    actors". OPF has never been released, so no store predates that firewall, and it applies on every
-    store: this check applies the exemption keyed on provenance alone, in agreement with the record
+    "covers every record whose `actor.kind` is `importer`", and "every current-state join, including the
+    section 8.5 at-most-one-current handoff rule, MUST evaluate only clean records authored by non-importer
+    actors". A clean record carrying that kind is itself a C-IMPORTED-SEGREGATION finding
+    (_check_clean_importer: "A clean-series record MUST NOT carry `actor.kind = "importer"`"), never exempt
+    history; this join still leaves it out, so it is reported once, by _check_clean_importer, and never
+    also counted here. That finding is C-IMPORTED-SEGREGATION's with the imported series active; otherwise
+    that check is off the roster (spec 4.2) and the driver reports it under C-HANDOFF, after this count.
+    This check applies the exclusion keyed on provenance alone, in agreement with the record
     writer's current-handoff join (_opf_record._current_handoffs) and the HANDOFF view
     (_opf_views.render_handoff), which apply it the same way. An imported-series row never counts either
     (_validate_opened_store builds the graded record list from the active, archive and worklog records and
@@ -2280,8 +2518,8 @@ def _check_handoff(recs, rep, unread=frozenset()):
     a prefix or an extension) the schema does not admit, reads as None and counts, fail-closed
     (validate_record already names the unknown or unreadable actor), never a silent pass; its "actor"
     entry in _make_rec's `unparsed` is therefore not a cause here, since counting it can only add to the
-    count. When the handoff records could not all be read (`unread`, from the collectors), or a seated
-    handoff's status or links could not be interpreted (_make_rec's `unparsed`: a record read as 'not
+    count. When the handoff records could not all be read or confirmed (`unread`, from the collectors), or
+    a seated handoff's status or links could not be interpreted (_make_rec's `unparsed`: a record read as 'not
     current' only because its status is unreadable is a partial count, never a pass), the check is
     CANNOT-EVALUATE; a count above one is still reported, since a record not read or not interpreted can
     only add to it."""
@@ -2294,8 +2532,8 @@ def _check_handoff(recs, rep, unread=frozenset()):
                     "most one current handoff exists among clean records not authored by a known "
                     "importer (spec 8.5/8.6)".format(len(current)))
     if "handoff" in unread:
-        rep.cant("C-HANDOFF: the handoff records could not all be read or interpreted (see C-RECORDS, "
-                 "C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); "
+        rep.cant("C-HANDOFF: the handoff records could not all be read, confirmed or interpreted (see "
+                 "C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); "
                  "the at-most-one-current count is not evaluated over a partial set (spec 8.5)")
 
 
@@ -2376,6 +2614,73 @@ def archived_records(root_fd, machine_rel, enabled_types, registered_vendors, im
     return archive_recs, rep.cannot + rep.findings + rotatable
 
 
+class ArchiveRead:
+    """What one archive walk held (archive_read). `tree` is "absent" (no archive tree: nothing rotated),
+    "unreadable" (a tree exists but cannot be listed) or "listed". `records` lists one
+    (location, type, body) triple per archived row the walk seated, in walk order, so a duplicate id
+    keeps every copy. `worklog` lists one (location, entry) pair per archived worklog entry the walk
+    mapped, bucket by bucket in walk order and in ledger order within a bucket. `problems` lists every
+    cannot-evaluate, finding and C-ROTATION message, a duplicate archived id included. `complete` is
+    False when any record population could not be read or confirmed in full. `source_bytes` maps each
+    store-relative path the walk parsed to the exact bytes of that parse."""
+    __slots__ = ("tree", "records", "worklog", "problems", "complete", "source_bytes")
+
+    def __init__(self, tree, records, worklog, problems, complete, source_bytes):
+        self.tree = tree
+        self.records = records
+        self.worklog = worklog
+        self.problems = problems
+        self.complete = complete
+        self.source_bytes = source_bytes
+
+
+def archive_read(root_fd, machine_rel, enabled_types, registered_vendors, import_status, homes=1):
+    """The archive as one _validate_archive walk read it, for a caller that must account the archive
+    inputs it renders from: the record bodies archived_records seats, the archived worklog entries the
+    walk mapped, the problems archived_records returns plus one per archived id seated more than once
+    (every copy kept), whether every population was read and confirmed in full, and the bytes of each
+    archive.toml, index and worklog the walk parsed. Those bytes are the report's read cache
+    (_read_toml, _gather_worklog), the first read of each path. The bucket scan reads each manifest,
+    index and worklog once, and every returned record and worklog entry is parsed from that read. A
+    destination probe (_dest_index_has_id) reads an index again only where the bucket scan counted
+    nothing at that path; it never seats a record, and whatever it finds leaves `complete` False (a miss
+    also adds a finding). Where the scan read that path first, its bytes are the ones kept; where it did
+    not (the index was not listed, or its read failed), the probe's bytes are kept although no record
+    comes from them. A file that could not be read or parsed has no bytes and a problem names it.
+
+    A problem the doctor files under another check names that check, so the problems are not the doctor's
+    C-ARCHIVE-ENUM list alone: a non-terminal archived record, or a bucket that rotates records with no
+    worklog span, is a C-ROTATION message, as the doctor reports it; an archived id seated more than once
+    is a C-ID-SPACE message, which the doctor reports under C-ID-SPACE in its own wording. archive_read
+    reads no active records, so an archived id that repeats an active one is reported by the doctor
+    alone, and since it passes the walk no active locations, a destination naming one leaves `complete`
+    False where the doctor counts it. A caller relies on the result only when `problems` is empty and
+    `complete` is True."""
+    rep = _Report()
+    rep.ran("C-ARCHIVE-ENUM")
+    unread, unconfirmed, walk = set(), set(), {}
+    archive_recs, archive_worklogs, rotatable = _validate_archive(
+        root_fd, machine_rel, enabled_types, registered_vendors, import_status, rep, homes=homes,
+        unread=unread, unconfirmed=unconfirmed, walk=walk)
+    problems = rep.cannot + rep.findings + rotatable
+    seen = {}
+    for rec in archive_recs:
+        if isinstance(rec.id, str):
+            seen.setdefault(rec.id, []).append(rec.location)
+    for rid in sorted(seen):
+        if len(seen[rid]) > 1:
+            problems.append("C-ID-SPACE: archived id {!r} is seated {} times ({}); every copy is kept "
+                            "and none stands for another (spec 8.2, 11)".format(
+                                rid, len(seen[rid]), ", ".join(seen[rid])))
+    complete = not (rep.cannot or unread or unconfirmed)
+    records = [(rec.location, rec.rtype, rec.body) for rec in archive_recs]
+    # Each bucket's map holds the entries _gather_worklog parsed from the one read whose bytes the read
+    # cache keeps; an entry it left out (not a table, no WL id, a reused id) already made `complete` False.
+    worklog = [("archive/{}".format(year), entry)
+               for year, wl_map in archive_worklogs.items() for entry in wl_map.values()]
+    return ArchiveRead(walk.get("tree"), records, worklog, problems, complete, dict(rep.toml_reads))
+
+
 def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
     """C-DECISION-CHAINS (R3): exactly one current effective resolution per pending_decision supersession
     chain THAT HAS A RESOLUTION (OPF-SPEC 8.5), over the chains decision_chains derives. For a chain
@@ -2384,9 +2689,9 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
     the count-only-over-one form missed (F14). A wholly-undecided chain legitimately has zero and is not
     flagged. The section 8.6 provenance firewall lives in decision_chains itself, so the writer's
     pre-publication chain check applies it identically. When the pending_decision records could not all
-    be read (`unread`, from the collectors), or a seated one's status or links could not be interpreted
-    (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run: a member not read or not
-    interpreted can split, join or resolve a chain. A pending_decision whose actor kind is absent,
+    be read or confirmed (`unread`, from the collectors), or a seated one's status or links could not be
+    interpreted (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run: a member not read or
+    not interpreted can split, join or resolve a chain. A pending_decision whose actor kind is absent,
     unreadable or a lookalike the schema does not admit (`unparsed` "actor") is not known to be
     importer-authored or not, so the check is then CANNOT-EVALUATE naming it, never a pass; it still runs,
     decision_chains reading such a record as not importer-authored, and a finding it raises over them
@@ -2400,9 +2705,9 @@ def _check_decision_chains(recs, by_id, rep, unread=frozenset()):
                      _partial_causes(frozenset(), frozenset(), "", no_kind)))
     unread = unread | {r.rtype for r in clean if r.unparsed - {"actor"}}
     if "pending_decision" in unread:
-        rep.cant("C-DECISION-CHAINS: the pending_decision records could not all be read or interpreted "
-                 "(see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the chains are not evaluated "
-                 "over a partial set (spec 8.5)")
+        rep.cant("C-DECISION-CHAINS: the pending_decision records could not all be read, confirmed or "
+                 "interpreted (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the chains are not "
+                 "evaluated over a partial set (spec 8.5)")
         return
     for _members, current in decision_chains(recs, by_id):
         if len(current) != 1:
@@ -2429,20 +2734,20 @@ def _check_links(recs, by_id, all_ids, rep, imported_recs, imported_targets, unr
     of their own leaf series (spec 8.2), so a row C-ID-SPACE refuses as outside its series (a clean id, or
     another type's namespace, in an imported leaf) never makes a link or scope resolve. This check reads
     every record of BOTH series as a link source and as a target, so its source set is complete only when
-    every collection was: when any record type could not be read in full (`unread`, from the collectors),
-    the imported-row collection skipped an unreadable, absent or malformed leaf or an unidentifiable row
-    (`imported_complete` False), or a record of either series carries a links or scopes value that could
-    not be interpreted (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not run, and its
-    message names every one of those causes that holds. A target could lie in the unread population (a
-    false dangling finding) and an unread or uninterpreted record's own links or scopes could dangle
-    unseen (a false pass), so neither direction is evaluated over a partial set."""
+    every collection was: when any record type could not be read or confirmed in full (`unread`, from the
+    collectors), the imported-row collection skipped an unreadable, absent or malformed leaf or an
+    unidentifiable row (`imported_complete` False), or a record of either series carries a links or scopes
+    value that could not be interpreted (_make_rec's `unparsed`), the check is CANNOT-EVALUATE and is not
+    run, and its message names every one of those causes that holds. A target could lie in the unread
+    population (a false dangling finding) and an unread or uninterpreted record's own links or scopes could
+    dangle unseen (a false pass), so neither direction is evaluated over a partial set."""
     link_fields = {"links", "scopes"}
     uninterpreted = {r.rtype for r in recs if r.unparsed & link_fields}
     imported_uninterpreted = any(r.unparsed & link_fields for r in imported_recs)
     if unread or uninterpreted or not imported_complete or imported_uninterpreted:
         causes = []
         if unread:
-            causes.append("the records of {} could not all be read".format(
+            causes.append("the records of {} could not all be read or confirmed".format(
                 ", ".join(repr(t) for t in sorted(unread))))
         if uninterpreted:
             causes.append("the links or scopes of {} records could not be interpreted".format(
@@ -2778,15 +3083,18 @@ def _check_worklog_contiguous(numbers, rep, skipped=frozenset()):
 
 def _imported_counter_namespaces(enabled_types):
     """The namespaces whose imported counter row the doctor requires once the imported series is active
-    (spec 8.2): one per enabled type except legacy_fragment, i.e. every enabled normative namespace the
-    imported series may carry (IMPORTED_NAMESPACES refuses LF, the reserved TX and the unassigned CL)."""
+    (spec 8.2: one for each enabled type), i.e. every enabled normative namespace the imported series may
+    carry, so this tooling's legacy_fragment owes none (IMPORTED_NAMESPACES refuses LF, the reserved TX and
+    the unassigned CL)."""
     return frozenset(ns for ns in enabled_types.values() if ns in IMPORTED_NAMESPACES)
 
 
 def _gather_imported_rows(root_fd, machine_rel, enabled_types, rep, strays=None):
-    """Read the imported-series leaves for the per-series id checks (spec 8.2/8.3). Each enabled type except
-    legacy_fragment keeps its imported rows inline in the machine store in either layout (spec 4.2): the
-    [[record]] rows of <type>.imported.index.toml, and the [[entry]] rows of worklog.imported.toml.
+    """Read the imported-series leaves for the per-series id checks (spec 8.2/8.3). The imported series
+    holds one leaf per enabled type (spec 4.2): the [[record]] rows of <type>.imported.index.toml, and the
+    [[entry]] rows of worklog.imported.toml, which this tooling keeps inline in the machine store in
+    either layout. This tooling's legacy_fragment has no imported leaf (IMPORTED_NAMESPACES refuses LF),
+    so none is read for it.
     Returns (rows, unread): `rows` holds (counter_key, id, row) for every row whose id lies in its own leaf
     series, imported:<NS>-<n> over the leaf type namespace, in leaf then row order; `unread` holds the
     counter keys whose leaf could not be read (a CANNOT-EVALUATE is already recorded here, and every later
@@ -2943,9 +3251,10 @@ def _check_imported_ids(emitted, counters_data, cst, namespaces, rep):
     cannot disagree. A leaf that grading could not read is replayed as its CANNOT-EVALUATE. The imported
     counter rows are graded here from the one counters.toml read C-COUNTERS made (`counters_data`,
     `cst`), through validate_counters over the quoted "imported:<NS>" rows alone: one per enabled type
-    except legacy_fragment (`namespaces`), each a genuine high-water (spec 8.2). An absent counters.toml
-    owes every row (a finding); an unreadable one, or one whose [counters] is not a table under the
-    supported schema, is CANNOT-EVALUATE, never graded under assumptions it does not declare."""
+    (`namespaces`), each a genuine high-water (spec 8.2), and none for this tooling's legacy_fragment. An
+    absent counters.toml owes every row (a finding); an unreadable one, or one whose [counters] is not a
+    table under the supported schema, is CANNOT-EVALUATE, never graded under assumptions it does not
+    declare."""
     for kind, msg in emitted:
         if kind == "cant":
             rep.cant("C-IMPORTED-IDS: " + msg)
@@ -3050,6 +3359,11 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
         outside the permitted set, so it is refused here too ("A clean `done` record's `receipt_of` MUST
         target a clean backlog item"). The targets of these links exist only in the imported leaves, so
         this arm runs only with the imported series active;
+      - clean importer authorship (_check_clean_importer): each clean record whose actor kind is exactly
+        `importer` is a finding ("A clean-series record MUST NOT carry `actor.kind = "importer"`"). It is
+        that record's own, so it is graded over every record read whatever else is unread, and an unread
+        type is named in the link rule's CANNOT-EVALUATE as not evaluated for this rule either. Keyed on
+        provenance, it runs on an inactive store too, where the driver reports it under C-HANDOFF;
       - the receipt firewall (_check_importer_receipts) and the decision-chain arm
         (_check_importer_chains), keyed on provenance. The firewall covers every importer-authored record,
         whether or not the imported series is active (spec 8.6), so on a store whose series is inactive,
@@ -3092,7 +3406,9 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
     if unread or links_uninterpreted:
         rep.cant("C-IMPORTED-SEGREGATION: {} (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the "
                  "clean-to-imported link rule (spec 8.6) is not evaluated over the records not read or not "
-                 "interpreted".format(_partial_causes(unread, links_uninterpreted, "links")))
+                 "interpreted{}".format(_partial_causes(unread, links_uninterpreted, "links"),
+                                        ", and the clean-importer rule (spec 8.6) is not evaluated over the "
+                                        "records not read" if unread else ""))
     for r in clean:
         own_ns = _ROSTER_NAMESPACES.get(r.rtype)
         for rel, tid in r.links:
@@ -3107,17 +3423,48 @@ def _check_imported_segregation(recs, by_id, unevaluated, rep, unread=frozenset(
                 rep.finding("C-IMPORTED-SEGREGATION: clean record {} (type {!r}) supersedes -> {!r} of "
                             "another type; a clean-to-imported supersedes is same-type only (spec "
                             "8.6)".format(_safe_display(r.id), r.rtype, tid))
+    _check_clean_importer(recs, rep, "C-IMPORTED-SEGREGATION")
     _check_importer_receipts(recs, rep, "C-IMPORTED-SEGREGATION", unread)
     _check_importer_chains(recs, by_id, rep, "C-IMPORTED-SEGREGATION", unread)
 
 
+def _check_clean_importer(recs, rep, cid, unread=frozenset()):
+    # Spec 8.6: "A clean-series record MUST NOT carry `actor.kind = "importer"`", and C-IMPORTED-SEGREGATION
+    # reports each one. Base 2.0.0 with homes 2 always carries the imported series, so no store the spec
+    # defines holds such a record as exempt history: one finding per record. Only the exact kind counts;
+    # an absent, unreadable or lookalike kind reads as None, which validate_record already names, so it is
+    # never taken for an importer here. The record is still left out of every current-state join (C-HANDOFF,
+    # the receipt and decision-chain arms), which spec 8.5 and 8.6 also require.
+    # The rule is keyed on provenance, never on activation, so it runs on every store and reports under
+    # `cid`: C-IMPORTED-SEGREGATION with the imported series active, C-HANDOFF otherwise (that check is off
+    # an inactive roster, spec 4.2). A record read from both an active and an archive leaf is one record and
+    # one finding. On the active path _check_imported_segregation names the unread types in its own
+    # CANNOT-EVALUATE, so no `unread` is passed; on the inactive path a type not read in full is this rule's
+    # CANNOT-EVALUATE, since a record not read could carry the kind, and the records read are still graded.
+    seen = set()
+    for r in recs:
+        if r.location == "imported" or r.actor_kind != "importer":
+            continue
+        key = (r.rtype, r.id) if isinstance(r.id, str) else None
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        rep.finding("{}: clean record {} (type {!r}) carries actor.kind 'importer'; a clean-series record "
+                    "MUST NOT carry it (spec 8.6)".format(cid, _safe_display(r.id), r.rtype))
+    if unread:
+        rep.cant("{}: {} (see C-RECORDS, C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the clean-importer rule "
+                 "(spec 8.6) is not evaluated over the records not read".format(
+                     cid, _partial_causes(unread, (), "")))
+
+
 def _partial_causes(unread, uninterpreted, fields, no_kind=frozenset()):
     # The causes a fail-closed rule names, in the C-LINKS wording: the types whose records were not all
-    # read, the types whose records carry a `fields` value that could not be interpreted, then the types
-    # whose records carry an actor kind that is absent, unreadable or not one ACTOR_KINDS holds.
+    # read or confirmed, the types whose records carry a `fields` value that could not be interpreted, then
+    # the types whose records carry an actor kind that is absent, unreadable or not one ACTOR_KINDS holds.
     causes = []
     if unread:
-        causes.append("the records of {} could not all be read".format(
+        causes.append("the records of {} could not all be read or confirmed".format(
             ", ".join(repr(t) for t in sorted(unread))))
     if uninterpreted:
         causes.append("the {} of {} records could not be interpreted".format(
@@ -3152,7 +3499,10 @@ def _check_importer_receipts(recs, rep, cid, unread=frozenset(), unevaluated=())
     backlog item reaching ratified `done` MUST hold a clean receipt authored by a non-importer actor". A
     non-importer item at unqualified `done` whose every receipt is importer-authored is a finding; one with
     no receipt at all is the C-RECEIPTS finding and is not repeated. An importer-authored item is not
-    graded here, since spec 8.6 lets its legacy receipt satisfy it as recorded history. The one exception
+    graded here: the obligation binds items authored by a non-importer actor, and a clean record that
+    carries the importer kind is itself a finding, reported once by _check_clean_importer (under
+    C-IMPORTED-SEGREGATION with the imported series active, under C-HANDOFF otherwise), never history this
+    arm accepts. The one exception
     spec 8.6 defines is accepted: "a maintainer-authored clean `maintainer_decision` that links `corrects`
     to that item and records that its completion stands MUST satisfy the item's receipt obligation in
     place of the withdrawn receipt ... doctor and the upgrade MUST accept it". Its machine-checkable shape
@@ -3270,7 +3620,7 @@ def _verify_immutable_body(rid, cur, prior_digests, rep):
                     "snapshot (a created-terminal record does not change; spec 8.5)".format(rid))
 
 
-def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
+def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep, source_unread=frozenset()):
     """C-HISTORY-RESURRECTION: for every id in the prior committed snapshot, confirm it did not resurrect
     across time (OPF-SPEC 8.4/13). A prior unqualified-terminal state now in any other state is a definite
     finding (actor-independent). A created-terminal record's BODY is additionally checked for preservation
@@ -3279,9 +3629,19 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
     but illegal for others is actor-DEPENDENT and, since the last-transition actor is not identifiable from
     the envelope, is CANNOT-EVALUATE (never accept-if-any-actor; codex-6); a rejection-shaped transition
     needing a pre-proposal state the snapshot cannot supply is likewise CANNOT-EVALUATE. Every durable prior
-    id must remain present in active or archive (the across-time complement of the no-deletion check)."""
+    id must remain present in active or archive (the across-time complement of the no-deletion check). A prior
+    id absent from a type with a record source that could not be read (`source_unread`, from the collectors)
+    is not read as vanished: the presence check is CANNOT-EVALUATE for that type, never a false finding. A
+    type whose sources were all read is graded even where a rotation left it unconfirmed, since an id absent
+    from every source read is absent. Reachability: `opf doctor` builds its prior from git, and that prior
+    never carries a worklog id (the worklog is a ledger, not a type index), so the worklog half of this
+    gate is reached only by a caller that supplies the observations itself."""
+    unknown = set()
     for rid in sorted(prior_records):
         ptype, pstatus = prior_records[rid]
+        if rid not in all_ids and ptype in source_unread:
+            unknown.add(ptype)
+            continue
         if rid not in all_ids:
             rep.finding("C-HISTORY-RESURRECTION: prior record {!r} is absent from both the active store and "
                         "the archive (a durable id cannot vanish; spec 12/13)".format(rid))
@@ -3329,6 +3689,10 @@ def _check_resurrection(prior_records, prior_digests, by_id, all_ids, rep):
         rep.cant("C-HISTORY-RESURRECTION: prior record {!r} transition {!r} -> {!r} is legal for some actor "
                  "kinds but illegal for others (actor-dependent); the last-transition actor is not "
                  "identifiable from the prior snapshot (spec 8.4/8.5)".format(rid, pstatus, cur_status))
+    if unknown:
+        rep.cant("C-HISTORY-RESURRECTION: the records of {} could not all be read (see C-RECORDS and "
+                 "C-ARCHIVE-ENUM); prior record presence is not evaluated over a partial set (spec "
+                 "12/13)".format(", ".join(repr(t) for t in sorted(unknown))))
 
 
 # Homes-2 durable evidence (C-EVIDENCE-ENUM, spec 4.2). Each imported/<kind>/<run-id>/ bundle carries
@@ -3749,7 +4113,7 @@ def classify_containment(manifest_data, machine_rel):
     # above IMPORTED_SPEC_VERSION, so even the reserved 2.0.0 / homes = 2 declaration C-MANIFEST accepts
     # stays inactive until activation), and admitted ONLY directly in the machine store. The names derive
     # from the enabled-type roster in _opf_store, so the leaf set cannot drift from the imported
-    # id/counter namespace set; the importer-only legacy_fragment contributes no leaf.
+    # id/counter namespace set; legacy_fragment, on the unassigned LF, contributes no leaf.
     imported = imported_series_active(manifest_data)
     imported_leaves = _opf_store.imported_leaf_names(enabled_types) if imported else frozenset()
     archive_root = _rel(mrel, ARCHIVE_DIRNAME)
@@ -3894,10 +4258,10 @@ def _legacy_import_staging(machine_rel):
 
 
 def _adoption_state(root_fd, machine_rel, in_repo, rep):
-    """The homes-1 adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17),
-    or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never a silent
-    fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no top-level
-    import of the adoption modules."""
+    """The adoption state through the read-only `_opf_adopt_state` reader (spec 4.2, 11, 14.2, 17), on
+    homes 1, or None after a CANNOT-EVALUATE: any fault inside the reader is a named cannot-evaluate, never
+    a silent fallback to the not-adopting grading. The reader is imported lazily, so the doctor gains no
+    top-level import of the adoption modules."""
     try:
         import _opf_adopt_state
         return _opf_adopt_state.adoption_state(root_fd, machine_rel, in_repo=in_repo)
@@ -4585,6 +4949,12 @@ def validate_store(resolution, supported_profiles=None, *, observations=None, an
     return rep.result(evaluated_profiles, unevaluated_profiles)
 
 
+# The cause each check that reads the worklog entries names when "worklog" is in the collectors' `unread` set:
+# an entry not read could hide a defect from it or make it report a false one.
+_WORKLOG_UNREAD = ("the worklog entries (active + archive) could not all be read or confirmed (see C-RECORDS "
+                   "and C-ARCHIVE-ENUM)")
+
+
 def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_profiles, obs, pointer_target,
                            pointer_source, in_repo, rep, ancestral_floor=None):
     # --- C-MANIFEST: identify the store, derive enabled types / vendors / layout ----------------------
@@ -4648,7 +5018,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-RECORDS: gather + validate every active record; collect per-record reconciliation ----------
     rep.ran("C-RECORDS")
-    unread = set()          # the record types whose population a collector could not read in full
+    unread = set()          # the record types whose population a collector could not read or confirm in full
     active_recs, recon = _gather_active_records(root_fd, machine_rel, enabled_types, layout,
                                                 registered_vendors, rep, unread=unread)
     try:
@@ -4687,9 +5057,33 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
 
     # --- C-ARCHIVE-ENUM: walk + reconcile the archive; collect rotation-eligibility for C-ROTATION -----
     rep.ran("C-ARCHIVE-ENUM")
+    # The walk records into its own sets, joined to `unread` below, so C-ROTATION, which reads the archived
+    # worklog alone, can tell an archived worklog left unread or unconfirmed from an active ledger that was
+    # not read.
+    archive_unread, archive_unconfirmed = set(), set()
+    # The active locations the collectors above read in full and counted, keyed store-relative exactly as
+    # an archive.toml destination names them, so the walk can grade a moved row or span whose declared
+    # destination is an active index or the active ledger: a type's index when its population was read and
+    # confirmed whole, and the active ledger when every entry was read into its map.
+    active_counted = {}
+    for _tname in enabled_types:
+        if _tname != "worklog" and _tname not in unread:
+            active_counted["{}{}".format(_tname, INDEX_SUFFIX)] = {
+                r.id for r in active_recs if r.rtype == _tname and isinstance(r.id, str)}
+    if "worklog" not in unread:
+        active_counted[WORKLOG_NAME] = set(active_worklog)
     archive_recs, archive_worklogs, rotatable = _validate_archive(root_fd, machine_rel, enabled_types,
                                                                   registered_vendors, import_status, rep,
-                                                                  homes=homes, unread=unread)
+                                                                  homes=homes, unread=archive_unread,
+                                                                  unconfirmed=archive_unconfirmed,
+                                                                  active_counted=active_counted)
+    # The record types with a record source (an index, a worklog, a bucket or a destination) that could not
+    # be read: an id of one may be held where nothing was read. `unread` also holds the types a rotation
+    # leaves unconfirmed though every source was read, so a current-state join over one is not a pass,
+    # while the ids that were read still decide whether a durable id is present.
+    source_unread = unread | archive_unread
+    archive_unread |= archive_unconfirmed
+    unread |= archive_unread
 
     # --- C-EVIDENCE-ENUM (homes 2 only): reconcile the evidence homes against their inventories -------
     if homes >= 2:
@@ -4750,14 +5144,14 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-COUNTERS: {} is absent (one monotonic high-water per namespace is required; spec "
                     "8.2)".format(_rel(machine_rel, COUNTERS_NAME)))
     elif cst == "ok":
-        # Importer/quarantine namespaces (IMPORTER_TYPES, i.e. LF) are ACCEPTED-if-present but NOT
-        # REQUIRED: a store scaffolded before LF's deprecation (spec 8.1) carries an LF counter from
+        # IMPORTER_TYPES namespaces (i.e. LF) are ACCEPTED-if-present but NOT REQUIRED: a store
+        # scaffolded before the standard reserved LF unassigned (spec 8.1) carries an LF counter from
         # opf init while legacy_fragment stays out of the manifest [types] (schema-deferred), so LF is
         # absent from known_ns; passing it as optional keeps such a store clean without requiring LF on
         # a store that lacks it, as a new store does (spec 8.2).
-        # With the imported series active (spec 8.2) the doctor also REQUIRES one "imported:<NS>" row per
-        # enabled type except legacy_fragment, each an independent number line; inactive, an imported key
-        # stays a finding exactly as before.
+        # With the imported series active the doctor also REQUIRES one "imported:<NS>" row per enabled
+        # type (spec 8.2), each an independent number line, and none for this tooling's legacy_fragment;
+        # inactive, an imported key stays a finding exactly as before.
         high, cfindings = validate_counters(
             counters_data, known_namespaces=known_ns,
             optional_namespaces=frozenset(IMPORTER_TYPES.values()),
@@ -4770,6 +5164,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-ROTATION")
     for msg in rotatable:
         rep.finding(msg)
+    if "worklog" in archive_unread:
+        # An archived entry not read could lie beyond the released end; an archived id read beyond it is
+        # still reported.
+        rep.cant("C-ROTATION: the archived worklog entries could not all be read or confirmed (see "
+                 "C-ARCHIVE-ENUM); released-only rotation is not evaluated over a partial set (spec 12)")
     if archive_wl_ids:
         if version_data is None:
             rep.cant("C-ROTATION: the version ledger did not evaluate; released-only rotation is not "
@@ -4801,6 +5200,11 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.finding("C-ID-SPACE: {}".format(f))
     for f in check_ids_within_counters(committed_ids, high):
         rep.finding("C-ID-SPACE: {}".format(f))
+    if "worklog" in unread:
+        # An entry not read can only add a duplicate or an id above its high-water, so a defect among the
+        # ids read is still reported.
+        rep.cant("C-ID-SPACE: {}; worklog id uniqueness and ids-within-counters are not evaluated over a "
+                 "partial set (spec 8.2)".format(_WORKLOG_UNREAD))
     # The imported series is graded on its OWN number lines (spec 8.2: each series independently): read from
     # the imported leaves only, unique within the series, and each id within its own "imported:<NS>"
     # high-water, never the clean one. The clean union above never holds an imported id. The imported
@@ -4820,9 +5224,10 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     # --- the cross-record checks ----------------------------------------------------------------------
     # The section 8.6 firewall is keyed on provenance, never on activation (spec 8.6: it covers every
     # importer-authored record). With the imported series active C-IMPORTED-SEGREGATION grades its receipt
-    # and decision-chain arms below; otherwise that check is off the roster (spec 4.2), so the two arms
-    # report under C-RECEIPTS and C-DECISION-CHAINS, the joins they guard, with the same `unread` set, so
-    # each arm is CANNOT-EVALUATE over a partial set on either path. A store holding an importer-authored
+    # and decision-chain arms and the clean-importer rule below; otherwise that check is off the roster
+    # (spec 4.2), so the two arms report under C-RECEIPTS and C-DECISION-CHAINS, the joins they guard, and
+    # the clean-importer rule under C-HANDOFF, the current-state join spec 8.6 names, with the same `unread`
+    # set, so each is CANNOT-EVALUATE over a partial set on either path. A store holding an importer-authored
     # clean record discloses the firewall residuals either way. Either way the two arms also fail closed on
     # a clean-record reader that did not evaluate (spec 8.3/8.6): `unseated` names those readers, and here
     # an arm whose own record types are unread is then CANNOT-EVALUATE naming them, never a pass.
@@ -4836,6 +5241,8 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         _check_importer_receipts(recs, rep, "C-RECEIPTS", unread, unseated)
     rep.ran("C-HANDOFF")
     _check_handoff(recs, rep, unread)
+    if not imported:
+        _check_clean_importer(recs, rep, "C-HANDOFF", unread)
     rep.ran("C-DECISION-CHAINS")
     _check_decision_chains(recs, by_id, rep, unread)
     if not imported:
@@ -4861,12 +5268,20 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         _check_imported_segregation(recs, by_id, unseated, rep, unread)
 
     # --- the frozen-span / no-deletion / partition / contiguity checks (active + archive together) ----
+    # Each reads the merged worklog, so each is CANNOT-EVALUATE naming the unread worklog whenever "worklog" is
+    # in `unread`. A check whose finding an unread entry could make false is not run; one whose finding an
+    # unread entry can only add to still reports the entries read.
     rep.ran("C-FROZEN-COVERAGE")
-    if version_data is not None:
+    if version_data is None:
+        rep.cant("C-FROZEN-COVERAGE: the version ledger did not evaluate; frozen coverage is not checkable")
+    if "worklog" in unread:
+        # A covered entry not read reads as absent from its span, and an archived copy not read could
+        # change the digest either way.
+        rep.cant("C-FROZEN-COVERAGE: {}; frozen coverage is not evaluated over a partial set (spec "
+                 "6.1/13)".format(_WORKLOG_UNREAD))
+    elif version_data is not None:
         for f in check_frozen_coverage(version_data, merged):
             rep.finding("C-FROZEN-COVERAGE: {}".format(f))
-    else:
-        rep.cant("C-FROZEN-COVERAGE: the version ledger did not evaluate; frozen coverage is not checkable")
 
     rep.ran("C-NO-DELETION")
     # No expansion of the high-water into an expected range (F15): an id is never deleted or reused, so the
@@ -4903,7 +5318,13 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     wl_hw = high.get("WL")
     wl_issued, wl_undecided = _split_reserved("WL", reserved.get("WL", ()), merged, holdings)
     wl_skipped = wl_issued | wl_undecided
-    if isinstance(wl_hw, int) and not isinstance(wl_hw, bool) and wl_hw >= 0:
+    if "worklog" in source_unread:
+        # The same source-unread set the typed namespaces read below: an entry not read reads as deleted,
+        # so the worklog line is not scanned. A worklog a rotation left merely unconfirmed is still
+        # scanned: every worklog source was read, so an entry absent from them all is absent.
+        rep.cant("C-NO-DELETION: {}; worklog no-deletion is not evaluated over a partial set (spec "
+                 "12/13)".format(_WORKLOG_UNREAD))
+    elif isinstance(wl_hw, int) and not isinstance(wl_hw, bool) and wl_hw >= 0:
         max_present = max(present_wl[-1] if present_wl else 0, floor.get("WL", 0))
         owed = _unreserved_overhang(wl_hw, max_present, wl_skipped)
         if owed > 0:
@@ -4941,6 +5362,15 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         hw = high.get(ns)
         if not (isinstance(hw, int) and not isinstance(hw, bool) and hw >= 0):
             continue     # an absent / malformed counter is C-COUNTERS' finding, not this check's
+        ns_unread = sorted(t for t, p in enabled_types.items() if p == ns and t in source_unread)
+        if ns_unread:
+            # A record not read reads as deleted, so the namespace's line is not scanned. A type a rotation
+            # left unconfirmed is still scanned: every source was read and counted, so an id absent from
+            # them all is absent.
+            rep.cant("C-NO-DELETION: the records of {} could not all be read (see C-RECORDS and "
+                     "C-ARCHIVE-ENUM); {}-<n> no-deletion is not evaluated over a partial set (spec "
+                     "12/13)".format(", ".join(repr(t) for t in ns_unread), ns))
+            continue
         base = floor.get(ns, 0)
         # A present id at or below the ancestral floor is NOT reported by C-NO-DELETION: a
         # re-adoption restores no ancestral record, so such an id is id-REUSE (spec 8.2), not a
@@ -4986,14 +5416,25 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
     rep.ran("C-PARTITION")
     for f in check_ids_partition(active_wl_ids, archive_wl_ids):
         rep.finding("C-PARTITION: {}".format(f))
+    if "worklog" in unread:
+        # An entry not read can only add an id held in both locations, so one found among the ids read is
+        # still reported.
+        rep.cant("C-PARTITION: {}; the one-location partition is not evaluated over a partial set (spec "
+                 "12)".format(_WORKLOG_UNREAD))
 
     rep.ran("C-CONTIGUITY")
     if not reservations_ok:
         rep.cant("C-CONTIGUITY: the id reservations did not evaluate (see C-NO-DELETION), so a reserved "
                  "worklog number cannot be told from a missing one (fail-closed)")
-    _report_undecided("C-CONTIGUITY", "WL", [n for n in wl_undecided if present_wl and n < present_wl[-1]],
-                      no_holdings, rep)
-    _check_worklog_contiguous(merged.keys(), rep, wl_skipped)
+    if "worklog" in unread:
+        # An entry not read reads as a gap, so the clean tiling is not scanned; the imported line below is
+        # graded on its own leaf.
+        rep.cant("C-CONTIGUITY: {}; worklog contiguity is not evaluated over a partial set (spec "
+                 "6.1)".format(_WORKLOG_UNREAD))
+    else:
+        _report_undecided("C-CONTIGUITY", "WL",
+                          [n for n in wl_undecided if present_wl and n < present_wl[-1]], no_holdings, rep)
+        _check_worklog_contiguous(merged.keys(), rep, wl_skipped)
     # imported:WL tiles its own line, apart from the clean tiling above (spec 8.2): `merged` stays clean-only,
     # so clean release spans, frozen coverage and the changelog gates never read an imported entry. A number
     # an imported:WL reservation holds is skipped exactly as a reserved clean worklog number is, decided
@@ -5046,13 +5487,48 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
             rep.finding("C-SYNC-AGREE: [store].sync_target {!r} does not classify as a target (spec "
                         "5.5): {}".format(sync_target, exc))
         else:
-            tcanon, tunresolved = _target_remote_canon(tgt)   # canonical (host, path) forms, None (local)
+            # A filesystem sync target is accepted only as git:<absolute path> (spec 5.6). A dir:, bare-path,
+            # relative git:, file:// URL or whitespace-padded git: path dedicated target (tcanon None) names
+            # nothing either leg can agree with, so BOTH legs refuse it, each naming the remedy, whatever the
+            # committed pointer and the actual remote observation hold. Only a git:<absolute path> target
+            # compares the committed pointer and the actual remote by their local form; a URL target
+            # compares exactly as a URL. classify_target trims the whole value, which would drop whitespace
+            # ending a git: path or a bare URL, so the payload is classified from the untrimmed value.
+            # Whitespace is significant to git in a URL as in a path (git sends a padded ssh:// path to the
+            # server as written), so a URL target with leading or trailing whitespace is refused too, as is
+            # a blank git: payload, which names no remote at all.
+            tpayload = tgt.value
+            if tgt.kind == "git":
+                tpayload = (sync_target.lstrip()[len("git:"):] if sync_target.lstrip().startswith("git:")
+                            else sync_target)
+            tform = _fs_path_form(tpayload) if tgt.kind == "git" else None
+            tform_word = {"dir": "dir:", "path": "bare-path"}.get(tgt.kind) or {
+                "file-url": "file:// URL",
+                "padded": "git: path with leading or trailing whitespace, an ambiguous"}.get(tform, "relative git:")
+            tnot_fs = None
+            if tform == "blank":
+                tnot_fs = "has a blank git: payload, which names no remote"
+            elif tgt.kind == "git" and tform is None and tpayload != tpayload.strip():
+                tnot_fs = ("is a URL with leading or trailing whitespace, which is ambiguous (git does not "
+                           "trim it)")
+            if tform in ("relative", "file-url", "padded") or tnot_fs is not None:
+                tcanon, tunresolved = None, []
+            else:
+                tcanon, tunresolved = _target_remote_canon(tgt)   # canonical (host, path) forms, None (local)
             for raw in tunresolved:
                 rep.cant("C-SYNC-AGREE: the sync_target remote form {!r} cannot be canonicalized for "
                          "host+path agreement (a disclosed residual; spec 5.5)".format(raw))
             # Leg 2: a committed pointer that names a REMOTE disagreeing with the sync_target (B3).
-            if pointer_target is not None and not pointer_target.local:
-                pcanon, pun = _target_remote_canon(pointer_target)
+            if tnot_fs is not None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} {}, so no committed pointer can agree "
+                            "with it as a dedicated sync target (spec 5.5/5.6)".format(sync_target, tnot_fs))
+            elif tcanon is None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a {} filesystem target, which no "
+                            "committed pointer can agree with as a dedicated sync target; a filesystem sync "
+                            "target is accepted only as git:<absolute path> (use git:<absolute path>; spec "
+                            "5.5/5.6)".format(sync_target, tform_word))
+            elif pointer_target is not None and not pointer_target.local:
+                pcanon, pun = _target_remote_canon(pointer_target, local_paths=tform == "absolute")
                 for raw in pun:
                     # Symmetric with the sync_target unresolved-forms cant (F7): a committed pointer naming a
                     # REMOTE the equivalence cannot canonicalize is a disclosed CANNOT-EVALUATE, never a
@@ -5063,33 +5539,67 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 if tcanon and pcanon and not _canon_sets_agree(pcanon, tcanon, tgt.kind):
                     rep.finding("C-SYNC-AGREE: the committed pointer remote {!r} does not agree with the "
                                 "manifest sync_target {!r} (spec 5.6)".format(pointer_target.value, sync_target))
-                elif pcanon and tcanon is None:
-                    # A dedicated LOCAL sync_target (dir:/path -> tcanon is None) names NO remote, so a
-                    # committed pointer that names a canonicalizable REMOTE contradicts it. Symmetric with
-                    # the actual-remote leg's local-target-with-a-remote finding (leg 3) and the
-                    # relocated-local committed-pointer-remote finding, so leg 2 does not silently pass a
-                    # remote pointer against a local sync_target (Fable F2).
-                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a local target but the "
-                                "committed pointer names a remote {} target {!r} (spec 5.6)".format(
-                                    sync_target, pointer_target.kind, pointer_target.value))
             # Leg 3: the store repository's actual remote agrees with the RESOLVED sync_target. Equivalent
             # URL forms (https / ssh scp-style git@host:path, with or without a trailing .git) compare by
             # canonical host+path, so a valid shorthand is not rejected by a naive strip-compare (F8).
-            if actual is None:
+            # A remote whose URL is empty is absent; one whose URL is only whitespace is present but blank.
+            aform = _fs_path_form(actual) if isinstance(actual, str) and actual != "" else None
+            alabel = (repr(actual) if actual_present else "present but blank: {!r}".format(actual)
+                      if aform == "blank" else "none" if isinstance(actual, str) else actual_reason)
+            if tnot_fs is not None:
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} {}, so the store repository's actual "
+                            "remote ({}) cannot agree with it as a dedicated sync target (spec 5.5/5.6)".format(
+                                sync_target, tnot_fs, alabel))
+            elif tcanon is None:
+                # Refused on this leg too, and before the observation is consulted: with no remote, or no
+                # observation, a filesystem target outside the git: form still names nothing to agree with.
+                rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} is a {} filesystem target, which the "
+                            "store repository's actual remote ({}) cannot agree with as a dedicated sync "
+                            "target; a filesystem sync target is accepted only as git:<absolute path> (use "
+                            "git:<absolute path>; spec 5.5/5.6)".format(sync_target, tform_word, alabel))
+            elif actual is None:
                 rep.cant("C-SYNC-AGREE: {}; the sync-target / remote agreement (spec 5.6) is required "
                          "for a dedicated sync target and is not evaluable by a parse-only engine".format(
                              actual_reason))
-            elif tcanon is None:
-                # a local dir:/path sync target with an observed remote cannot be canonicalized to compare
-                if actual_present:
-                    rep.finding("C-SYNC-AGREE: [store].sync_target {!r} is a local target but the store "
-                                "repository has an actual remote {!r} (spec 5.6)".format(sync_target, actual))
+            elif aform == "blank":
+                rep.finding("C-SYNC-AGREE: the manifest declares a dedicated sync_target {!r} but the store "
+                            "repository's actual remote {!r} is present but blank or whitespace-only, which "
+                            "names no remote (spec 5.6)".format(sync_target, actual))
             elif not actual_present:
                 rep.finding("C-SYNC-AGREE: the manifest declares a dedicated sync_target {!r} but the "
                             "store repository has no actual remote (spec 5.6)".format(sync_target))
+            elif tform == "absolute" and aform == "padded":
+                # whitespace is significant in a path, so an actual remote path with leading or trailing
+                # whitespace is ambiguous: refused, never trimmed into agreement with the target
+                rep.finding("C-SYNC-AGREE: the store repository's actual remote {!r} is a filesystem path with "
+                            "leading or trailing whitespace, which is ambiguous and cannot agree with the "
+                            "manifest sync_target {!r} (spec 5.6)".format(actual, sync_target))
+            elif aform is None and actual != actual.strip():
+                # whitespace is significant to git in a URL too, and _canonical_remote trims, so a URL actual
+                # remote with leading or trailing whitespace is refused here, never trimmed into agreement
+                rep.finding("C-SYNC-AGREE: the store repository's actual remote {!r} is a URL with leading or "
+                            "trailing whitespace, which is ambiguous and cannot agree with the manifest "
+                            "sync_target {!r} (spec 5.6)".format(actual, sync_target))
             else:
                 acanon = _canonical_remote(actual)
-                if acanon is None:
+                if acanon is None and tform == "absolute" and aform == "absolute":
+                    # a git:<absolute path> target is reached through a local-path remote: compare that
+                    # path's local form, classified exactly as the target was (a remote containing '://' is
+                    # a URL form, never this branch); a URL target never takes this branch, so it compares
+                    # as before, and a file:// remote stays the disclosed residual
+                    acanon = _local_path_canon(actual)
+                # A path-shaped remote holding '://' (/srv/a://repo) is read by git as an unsupported
+                # protocol, or as a bundle file at the path the OS resolves, which takes no push. Against a
+                # git:<absolute path> target whose local form differs from that path it is a sure mismatch;
+                # where the two paths are the same it stays the disclosed residual below.
+                afold = (_local_path_canon(actual) if acanon is None and tform == "absolute" and aform is None
+                         and actual.startswith("/") else None)
+                if afold is not None and tcanon and afold not in tcanon:
+                    rep.finding("C-SYNC-AGREE: the manifest sync_target {!r} does not match the store "
+                                "repository's actual remote {!r}: git reads its '://' as an unsupported "
+                                "protocol, and the path it otherwise names, {!r}, is a different path (spec "
+                                "5.6)".format(sync_target, actual, afold[1]))
+                elif acanon is None:
                     # a form the equivalence cannot canonicalize is disclosed, never a silent mismatch (F8)
                     rep.cant("C-SYNC-AGREE: the actual remote {!r} cannot be canonicalized for "
                              "host+path agreement against the sync_target (a disclosed residual; spec "
@@ -5233,7 +5743,12 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
                 rep.cant("C-CHANGELOG-GATES: {} is not valid UTF-8 ({})".format(
                     _opf_changelog.CHANGELOG_REL, exc))
                 changelog_text = None
-            if changelog_text is not None:
+            if changelog_text is not None and "worklog" in unread:
+                # The gates recompute each release's coverage over the merged worklog, so an entry not read
+                # reads as absent from its release.
+                rep.cant("C-CHANGELOG-GATES: {}; the changelog gates are not evaluated over a partial "
+                         "set (spec 7.1/7.2)".format(_WORKLOG_UNREAD))
+            elif changelog_text is not None:
                 cr = _opf_changelog.run_gates(version_data, merged_doc, changelog_text, registered_vendors)
                 if cr.status == CANNOT_EVALUATE:
                     for f in cr.findings:
@@ -5290,7 +5805,7 @@ def _validate_opened_store(root_fd, product_root_fd, machine_rel, supported_prof
         rep.cant("C-HISTORY-RESURRECTION: {}; no-resurrection across time (spec 8.4) is not "
                  "evaluated".format(prior_reason))
     else:
-        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep)
+        _check_resurrection(prior["records"], prior.get("digests") or {}, by_id, all_ids, rep, source_unread)
 
     return evaluated_profiles, unevaluated_profiles
 
@@ -5309,8 +5824,8 @@ def _enabled_modules(manifest_data):
 
 def _authoritative_types(enabled_modules, declared_types):
     """The type -> NORMATIVE-namespace roster the store must carry: the twelve baseline types, each
-    module-tier type whose module is enabled, and any importer-only type (legacy_fragment) the manifest
-    actually declares (present only after an import). Namespaces are U1's normative ones, never the
+    module-tier type whose module is enabled, and legacy_fragment (on LF, which the standard reserves
+    unassigned) when the manifest actually declares it (present only after an import). Namespaces are U1's normative ones, never the
     manifest's declared values (validate_manifest already graded those; guard-input-soundness)."""
     roster = dict(BASELINE_TYPES)
     for tname, (ns, module) in MODULE_TYPES.items():
@@ -5697,8 +6212,8 @@ def self_test():
         check("b1-nonwl-gap-below-max-invalid", _b1gr is not None and _b1gr.status == INVALID)
         check("b1-nonwl-gap-below-max-named",
               _b1gr is not None and any("C-NO-DELETION" in f and "FN-2" in f for f in _b1gr.findings))
-        # F-2: a declared importer legacy_fragment type defers to a named CANNOT-EVALUATE (it is deprecated for
-        # new stores and has no baseline record schema), never a false INVALID.
+        # A declared legacy_fragment type defers to a named CANNOT-EVALUATE (the standard defines no such
+        # type and reserves LF unassigned, so it has no baseline record schema), never a false INVALID.
         _lff = clean_machine()
         _lff["manifest.toml"] = base_manifest()
         _lff["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
@@ -6043,7 +6558,15 @@ def self_test():
         # reads importer-authored blocks), an importer-authored open BI-2 is listed in TODO as actionable
         # (red when is_actionable drops its provenance predicate), and an importer-authored PD-2 that
         # supersedes the maintainer PD-1 is listed in DECISIONS as the effective resolution (red when
-        # render_decisions and join_resolution admit importer-authored decisions).
+        # render_decisions and join_resolution admit importer-authored decisions). Each importer-authored
+        # clean record is also its own clean-importer finding (spec 8.6), on this inactive store under
+        # C-HANDOFF, so the planner's text leaves exactly that finding and the stale text adds the drift.
+        def _ci_inactive(rtype, rid):
+            # The full finding _check_clean_importer reports under C-HANDOFF on an inactive store for one
+            # clean record that carries the importer kind.
+            return ("C-HANDOFF: clean record {!r} (type {!r}) carries actor.kind 'importer'; a clean-series "
+                    "record MUST NOT carry it (spec 8.6)".format(rid, rtype))
+
         def _vd_plan(root, name):
             vres = resolve_store(root)
             vfd = _open_store_root_fd(vres.store_root, vres.pointer_source != "default")
@@ -6062,7 +6585,7 @@ def self_test():
             finally:
                 _opf_views._FILTER_PREDICATES = vsaved
 
-        def _vd_drift(machine, name, sources):
+        def _vd_drift(machine, name, sources, ci):
             vm = copy.deepcopy(machine)
             vm["manifest.toml"] = base_manifest(views={name: {
                 "kind": "composed", "sources": list(sources), "target": ".working/" + name}})
@@ -6072,10 +6595,12 @@ def self_test():
             vgood = validate_store(resolve_store(vroot), observations=clean_prior())
             (vroot / ".working" / name).write_text(vstale, encoding="utf-8")
             vbad = validate_store(resolve_store(vroot), observations=clean_prior())
-            return (vgood is not None and vgood.status == VALID
+            return (vgood is not None and vgood.findings == [ci] and not vgood.cannot_evaluate
+                    and {c for c, v in vgood.checks.items() if v != "PASS"} == {"C-HANDOFF"}
                     and all(x in vgood.residuals for x in _FIREWALL_RESIDUALS)
                     and vbad is not None and vbad.status == INVALID
-                    and {c for c, v in vbad.checks.items() if v != "PASS"} == {"C-VIEW-DRIFT"}
+                    and {c for c, v in vbad.checks.items() if v != "PASS"} == {"C-VIEW-DRIFT", "C-HANDOFF"}
+                    and vbad.by_check.get("C-HANDOFF") == [ci]
                     and vbad.by_check.get("C-VIEW-DRIFT")
                     == ["C-VIEW-DRIFT: view {!r} target {!r} has drifted from its generated source (spec "
                         "5.8/10)".format(name, ".working/" + name)])
@@ -6084,16 +6609,18 @@ def self_test():
         vm["block.index.toml"] = idx([envelope("BL-1", "block", "active", scopes=["BI-2"],
                                                actor={"kind": "importer"})])
         vm["counters.toml"] = counters(BL=1)
-        check("view-drift-importer-block-grants-no-stop", _vd_drift(vm, "TODO.md", ("backlog_item", "block")))
+        check("view-drift-importer-block-grants-no-stop", _vd_drift(vm, "TODO.md", ("backlog_item", "block"),
+                                                                   _ci_inactive("block", "BL-1")))
         vm = clean_machine()
         vm["backlog_item.index.toml"] = idx([bi(1, "done"), dict(bi(2, "open"), actor={"kind": "importer"})])
-        check("view-drift-importer-item-not-actionable", _vd_drift(vm, "TODO.md", ("backlog_item", "block")))
+        check("view-drift-importer-item-not-actionable", _vd_drift(vm, "TODO.md", ("backlog_item", "block"),
+                                                                   _ci_inactive("backlog_item", "BI-2")))
         vm = clean_machine()
         vm["pending_decision.index.toml"] = idx([pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})])
         vm["counters.toml"] = counters(PD=2)
         check("view-drift-importer-decision-not-effective",
               _vd_drift(vm, "DECISIONS.md", ("pending_decision", "autonomous_decision", "maintainer_decision",
-                                             "preference_pattern")))
+                                             "preference_pattern"), _ci_inactive("pending_decision", "PD-2")))
 
         # --- topology (tracked / sync / containment) ------------------------------------------------
         check("untracked-invalid",
@@ -6514,8 +7041,8 @@ def self_test():
         # OPF-IMPORTED-SERIES IS-2: the imported-series managed leaves (spec 8.2/4.2), behind the
         # DERIVED activation. ACTIVE (the activated 2.0.0 / homes = 2 store, both tooling gates patched
         # inside the vector): worklog.imported.toml and each enabled non-ledger type
-        # <type>.imported.index.toml are managed leaves DIRECTLY in the machine store; the importer-only
-        # legacy_fragment contributes none (its LF namespace is outside the imported series), and a
+        # <type>.imported.index.toml are managed leaves DIRECTLY in the machine store; legacy_fragment
+        # contributes none (the standard reserves LF unassigned, outside the imported series), and a
         # deeper path of a leaf name stays a stray. The pure legs drive classify_containment directly,
         # each as the bare two-argument call (the classification derives the activation from the
         # manifest itself; a caller-supplied flag with an inactive default let an omitting consumer
@@ -6649,7 +7176,7 @@ def self_test():
         # SUPPORTED_HOMES to 2 and SUPPORTED_SPEC_VERSION to IMPORTED_SPEC_VERSION (the per-vector patch
         # idiom check_opf_homes uses for SUPPORTED_HOMES), and the store declares the 2.0.0 pair, so the
         # driver-derived flag is True end to end. act_machine() is that store with every imported leaf
-        # present and empty: one per enabled type except legacy_fragment (spec 4.2), the worklog's as
+        # present and empty: one per enabled type (spec 4.2), none for legacy_fragment, the worklog's as
         # worklog.imported.toml, plus the zero high-water every imported counter needs once active
         # (spec 8.2). _is2_prior() is the prior with the empty imported baseline the across-time
         # checks need on an active store.
@@ -6975,7 +7502,7 @@ def self_test():
                   and any(m.startswith("cannot read .working/toml/backlog_item.imported.index.toml")
                           for m in imp_msgs(_up_run)))
             # An absent leaf of an enabled type is an INVALID finding (spec 4.2: every enabled type
-            # but legacy_fragment holds one); a declared legacy_fragment owes none (red when the
+            # holds one); a declared legacy_fragment owes none in this tooling (red when the
             # absence passes, or when LF is not excluded).
             _ab = act_machine()
             del _ab["finding.imported.index.toml"]
@@ -7217,7 +7744,7 @@ def self_test():
                           _xs_run is not None and _xs_run.checks.get("C-LINKS") == "PASS"
                           and len(_xs_run.findings) == 1
                           and "an imported-to-clean link MUST be refused" in _xs_run.findings[0])
-            # A clean link into an imported namespace the series refuses (the importer-only LF) is the
+            # A clean link into an imported namespace the series refuses (the unassigned LF) is the
             # per-record validator's finding, and the target, resolving in neither series, is a C-LINKS
             # dangling finding beside it; the doctor reports both (red when the namespace refusal is
             # dropped from the link validator, which leaves only the dangling finding).
@@ -7361,9 +7888,9 @@ def self_test():
             _xl_run = xs_run(_xl)
             check("r4-links-message-names-clean-and-imported-causes",
                   _xl_run is not None and _xl_run.by_check.get("C-LINKS") == [
-                      "C-LINKS: the records of 'finding' could not all be read; the imported series could "
-                      "not all be read (see C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM and "
-                      "C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over a partial set "
+                      "C-LINKS: the records of 'finding' could not all be read or confirmed; the imported "
+                      "series could not all be read (see C-RECORDS, C-PERRECORD-RECONCILE, C-ARCHIVE-ENUM "
+                      "and C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over a partial set "
                       "(spec 8.5/8.6)"])
             # The writer/doctor agreement on a declaration-only activation: a 1.3.0 store on homes 1
             # whose [unmanaged] names an imported-leaf name certifies, the name not being a
@@ -7915,8 +8442,9 @@ def self_test():
                           for f in _i3_msgs(_i3_none, "C-COUNTERS")) == len(_i3_ns) == 12
                   and sum("missing a high-water for imported namespace" in f
                           for f in _i3_msgs(_i3_none, "C-IMPORTED-IDS")) == len(_i3_ns))
-            # legacy_fragment has no imported counter row: its LF counter stays required as a clean row and
-            # no imported:LF row is asked for, while a present imported:LF row is refused (spec 8.2).
+            # In this tooling legacy_fragment has no imported counter row: its LF counter stays required as a
+            # clean row and no imported:LF row is asked for, while a present imported:LF row is refused
+            # (spec 8.2).
             _i3_lf = _i3_machine()
             _i3_lf["manifest.toml"]["types"]["legacy_fragment"] = {"namespace": "LF"}
             _i3_lf["counters.toml"]["counters"]["LF"] = 0
@@ -8322,6 +8850,25 @@ def self_test():
             def _i3_off(r, cid):
                 return r is not None and r.checks.get(cid) == "PASS" and not _i3_msgs(r, cid)
 
+            def _i3_ci(rtype, rid):
+                # The full finding _check_clean_importer reports for one clean record that carries the
+                # importer kind (spec 8.6: a clean-series record MUST NOT carry it).
+                return ("C-IMPORTED-SEGREGATION: clean record {!r} (type {!r}) carries actor.kind 'importer'; a "
+                        "clean-series record MUST NOT carry it (spec 8.6)".format(rid, rtype))
+
+            def _i3_seg_only(r, *msgs):
+                # The store's C-IMPORTED-SEGREGATION findings are exactly `msgs`, in order.
+                return (r is not None
+                        and [m for m in r.findings if m.startswith("C-IMPORTED-SEGREGATION")] == list(msgs))
+
+            def _i3_ci_active(r, *msgs):
+                # The clean active store but for the clean-importer findings `msgs`: they are the store's
+                # only findings, and C-IMPORTED-SEGREGATION is the only check beside any pending imported
+                # check that does not pass.
+                return (r is not None and r.findings == list(msgs)
+                        and r.checks.get("C-IMPORTED-SCHEMA") == "PASS" and pending_only(r)
+                        and _i3_bad(r) == {"C-IMPORTED-SEGREGATION"} | set(_imp_pending))
+
             check("imported-checks-clean-leaf-control-valid",
                   _i3_ok is not None and _i3_ok.status == VALID
                   and all(_i3_ok.checks.get(cid) == "PASS" for cid in IMPORTED_CHECKS))
@@ -8437,8 +8984,9 @@ def self_test():
                       if "backlog_item.imported.index.toml record[1]" in m and "0" * 64 in m])
             # C-IMPORTED-SEGREGATION, the receipt firewall: a maintainer-authored backlog item ratified at
             # done whose only receipt is importer-authored is the firewall finding alone (C-RECEIPTS
-            # leaves that item to this arm and passes); with the check disabled the SAME store certifies VALID. An
-            # importer-authored item with that receipt is history the firewall does not grade.
+            # leaves that item to this arm and passes), beside the clean-importer finding for the receipt
+            # itself; with the check disabled the SAME store certifies VALID. An importer-authored item with
+            # that receipt draws no receipt-firewall finding, only one clean-importer finding per record.
             _i3_idn = dn(1, "BI-1")
             _i3_idn["actor"] = {"kind": "importer"}
             _i3_sg = _i3_machine()
@@ -8448,9 +8996,10 @@ def self_test():
             _i3_sgr = _i3_run(copy.deepcopy(_i3_sg), obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-importer-receipt-finding",
                   _i3_sgr is not None and _i3_sgr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
-                  and len(_i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")) == 1
-                  and "'BI-1'" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[0]
-                  and "importer-authored" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[0]
+                  and len(_i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")) == 2
+                  and _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[0] == _i3_ci("done", "DN-1")
+                  and "'BI-1'" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[1]
+                  and "importer-authored" in _i3_msgs(_i3_sgr, "C-IMPORTED-SEGREGATION")[1]
                   and _i3_sgr.checks.get("C-RECEIPTS") == "PASS"
                   and _i3_bad(_i3_sgr) == {"C-IMPORTED-SEGREGATION"} | set(_imp_pending))
             _i3_sgf = _i3_flip("_check_imported_segregation", copy.deepcopy(_i3_sg), obs=copy.deepcopy(_i3_sg_obs))
@@ -8461,7 +9010,9 @@ def self_test():
                                                        bi(2, "open")])
             _i3_sglr = _i3_run(_i3_sgl, obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-importer-item-not-graded",
-                  _i3_sglr is not None and _i3_sglr.checks.get("C-IMPORTED-SEGREGATION") == "PASS")
+                  _i3_sglr is not None and _i3_sglr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and sorted(_i3_msgs(_i3_sglr, "C-IMPORTED-SEGREGATION"))
+                  == sorted([_i3_ci("backlog_item", "BI-1"), _i3_ci("done", "DN-1")]))
             # Clean-to-imported links (spec 8.6): relates, derives_from, follows and same-type supersedes
             # pass this check; any other relation, and supersedes to another type, is its finding (red
             # when the relation set widens or the same-type arm is dropped). C-RECORDS and C-LINKS also
@@ -8544,7 +9095,8 @@ def self_test():
             # The spec 8.6 receipt remedy: a maintainer-authored clean maintainer_decision linking
             # `corrects` to the ratified done item satisfies the receipt obligation in place of the
             # withdrawn importer-authored receipt, so the finding store above with the remedy added
-            # draws no segregation finding and certifies VALID (red when the remedy is not accepted).
+            # draws no receipt-firewall finding, its one finding the clean-importer finding for the
+            # receipt itself (red when the remedy is not accepted).
             # Whether its text records that the completion stands is prose no validator grades, so any
             # maintainer-authored corrects decision is accepted (a disclosed residual). A remedy
             # authored by an importer, or correcting another id, confers nothing: the finding stays.
@@ -8558,9 +9110,10 @@ def self_test():
 
             _i3_rmr = _i3_run(_i3_remedy(), obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-corrects-remedy-accepted",
-                  _i3_rmr is not None and _i3_rmr.status == VALID
-                  and _i3_rmr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
-                  and not _i3_msgs(_i3_rmr, "C-IMPORTED-SEGREGATION"))
+                  _i3_rmr is not None and _i3_rmr.findings == [_i3_ci("done", "DN-1")]
+                  and not _i3_rmr.cannot_evaluate
+                  and _i3_bad(_i3_rmr) == {"C-IMPORTED-SEGREGATION"}
+                  and _i3_msgs(_i3_rmr, "C-IMPORTED-SEGREGATION") == [_i3_ci("done", "DN-1")])
             _i3_rmi = _i3_run(_i3_remedy(actor_kind="importer"), obs=copy.deepcopy(_i3_sg_obs))
             _i3_rmo = _i3_run(_i3_remedy(target="BI-2"), obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-importer-remedy-confers-nothing",
@@ -8579,8 +9132,8 @@ def self_test():
             _i3_mx["counters.toml"]["counters"]["DN"] = 2
             _i3_mxr = _i3_run(_i3_mx, obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-mixed-receipts-pass",
-                  _i3_mxr is not None and _i3_mxr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
-                  and not _i3_msgs(_i3_mxr, "C-IMPORTED-SEGREGATION")
+                  _i3_mxr is not None and _i3_mxr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and _i3_msgs(_i3_mxr, "C-IMPORTED-SEGREGATION") == [_i3_ci("done", "DN-1")]
                   and _i3_mxr.checks.get("C-RECEIPTS") == "PASS"
                   and not _i3_msgs(_i3_mxr, "C-RECEIPTS"))
             _i3_ql = _i3_machine()
@@ -8593,8 +9146,8 @@ def self_test():
             _i3_ql["counters.toml"]["counters"].update({"BI": 3, "DN": 2})
             _i3_qlr = _i3_run(_i3_ql)
             check("imported-segregation-proposed-done-not-graded",
-                  _i3_qlr is not None and _i3_qlr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
-                  and not _i3_msgs(_i3_qlr, "C-IMPORTED-SEGREGATION"))
+                  _i3_qlr is not None and _i3_qlr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and _i3_msgs(_i3_qlr, "C-IMPORTED-SEGREGATION") == [_i3_ci("done", "DN-2")])
             # The decision-chain firewall (spec 8.6): "An importer-authored decision MUST NOT be
             # treated as the current effective resolution of a clean pending_decision chain". An
             # importer-authored PD-1 decided alone is a chain no non-importer decision resolves, which
@@ -8602,14 +9155,16 @@ def self_test():
             # and the store must not certify (red when the chain arm is dropped or skips every chain).
             # An importer-authored decision's `supersedes` links remove no current authority, over the
             # chain section 8.8 defines with those links included: a maintainer PD-1 decided plus an
-            # importer-authored PD-2 that supersedes it keeps PD-1 the chain's one resolution and
-            # certifies (red when an importer-authored link counts toward supersession again, which
+            # importer-authored PD-2 that supersedes it keeps PD-1 the chain's one resolution, the only
+            # finding PD-2's own clean-importer one (red when an importer-authored link counts toward
+            # supersession again, which
             # leaves the importer decision the chain's resolution), while a maintainer PD-3 that then
             # supersedes PD-2 is a second current resolution of the same chain, a C-DECISION-CHAINS
             # finding with this check passing (red when the chain derivation drops importer-authored
             # decisions again, which splits PD-1 and PD-3 into two chains that each pass). The same
-            # chain resolved by a maintainer PD-2, and an importer-authored PD-1 a maintainer PD-2
-            # supersedes (history below a clean resolution), each certify.
+            # chain resolved by a maintainer PD-2 certifies, and an importer-authored PD-1 a maintainer PD-2
+            # supersedes draws only PD-1's own clean-importer finding. Every importer-authored clean
+            # record here is that one finding under spec 8.6, pinned in full beside the chain findings.
             def _i3_chain(cur_actor=None, old_actor=None, head_actor=None):
                 m = _i3_machine()
                 p1, p2 = pd(1), pd(2, supersedes="PD-1")
@@ -8636,23 +9191,26 @@ def self_test():
                   and _i3_dcr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
                   and _i3_dcr.checks.get("C-DECISION-CHAINS") == "PASS"
                   and _i3_msgs(_i3_dcr, "C-IMPORTED-SEGREGATION")
-                  == ["C-IMPORTED-SEGREGATION: importer-authored pending_decision 'PD-1' is the current "
+                  == [_i3_ci("pending_decision", "PD-1"),
+                      "C-IMPORTED-SEGREGATION: importer-authored pending_decision 'PD-1' is the current "
                       "effective resolution of a clean pending_decision chain; resolving it now takes "
                       "a new clean decision linking back (spec 8.6)"]
                   and _i3_bad(_i3_dcr) == {"C-IMPORTED-SEGREGATION"})
             check("imported-segregation-importer-link-keeps-clean-resolution",
-                  _i3_clean_active(_i3_run(_i3_chain(cur_actor="importer"))))
+                  _i3_ci_active(_i3_run(_i3_chain(cur_actor="importer")), _i3_ci("pending_decision", "PD-2")))
             _i3_jtr = _i3_run(_i3_chain(cur_actor="importer", head_actor="maintainer"))
             check("imported-segregation-importer-joined-two-heads-finding",
                   _i3_jtr is not None and _i3_jtr.status != VALID
-                  and _i3_jtr.checks.get("C-IMPORTED-SEGREGATION") == "PASS"
+                  and _i3_jtr.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                  and _i3_msgs(_i3_jtr, "C-IMPORTED-SEGREGATION") == [_i3_ci("pending_decision", "PD-2")]
                   and _i3_msgs(_i3_jtr, "C-DECISION-CHAINS")
                   == ["C-DECISION-CHAINS: a pending_decision supersession chain with a decided resolution "
                       "has 2 current effective resolutions; exactly one exists per chain (spec 8.5)"]
-                  and _i3_bad(_i3_jtr) == {"C-DECISION-CHAINS"})
+                  and _i3_bad(_i3_jtr) == {"C-DECISION-CHAINS", "C-IMPORTED-SEGREGATION"})
             check("imported-segregation-clean-resolution-passes",
                   _i3_clean_active(_i3_run(_i3_chain()))
-                  and _i3_clean_active(_i3_run(_i3_chain(old_actor="importer"))))
+                  and _i3_ci_active(_i3_run(_i3_chain(old_actor="importer")),
+                                    _i3_ci("pending_decision", "PD-1")))
             check("imported-segregation-chain-flip-disabled-passes",
                   _i3_off(_i3_flip("_check_imported_segregation", _i3_lone()), "C-IMPORTED-SEGREGATION"))
             # The chain arm grades importer authorship only: a chain whose current resolution an assistant
@@ -8692,7 +9250,8 @@ def self_test():
             _i3_ulkr = _i3_run(_i3_ulk, obs=_i3_ulk_obs)
             check("imported-segregation-uninterpreted-receipt-cannot-evaluate",
                   _i3_ulkr is not None and _i3_ulkr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_ulkr.checks.get("C-ARCHIVE-ENUM") == "PASS" and _i3_seg_quiet(_i3_ulkr)
+                  and _i3_ulkr.checks.get("C-ARCHIVE-ENUM") == "PASS"
+                  and _i3_seg_only(_i3_ulkr, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_ulkr, "the status or links of 'done' records could not be interpreted",
                                    "the receipt firewall"))
             _i3_umv = copy.deepcopy(_i3_sg)
@@ -8710,7 +9269,8 @@ def self_test():
             _i3_ustr = _i3_run(_i3_ust)
             check("imported-segregation-uninterpreted-chain-member-cannot-evaluate",
                   _i3_ustr is not None and _i3_ustr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_ustr.checks.get("C-ARCHIVE-ENUM") == "PASS" and _i3_seg_quiet(_i3_ustr)
+                  and _i3_ustr.checks.get("C-ARCHIVE-ENUM") == "PASS"
+                  and _i3_seg_only(_i3_ustr, _i3_ci("pending_decision", "PD-2"))
                   and _i3_seg_cant(_i3_ustr,
                                    "the status or links of 'pending_decision' records could not be interpreted",
                                    "the decision-chain firewall"))
@@ -8775,7 +9335,8 @@ def self_test():
             _i3_cmvr = _i3_run(_i3_cmv)
             check("imported-segregation-unconfirmed-moved-chain-member-cannot-evaluate",
                   _i3_cmvr is not None and _i3_cmvr.checks.get("C-RECORDS") == "PASS"
-                  and _i3_cmvr.checks.get("C-ARCHIVE-ENUM") == "FINDING" and _i3_seg_quiet(_i3_cmvr)
+                  and _i3_cmvr.checks.get("C-ARCHIVE-ENUM") == "FINDING"
+                  and _i3_seg_only(_i3_cmvr, _i3_ci("pending_decision", "PD-1"))
                   and _i3_seg_cant(_i3_cmvr, "the records of 'pending_decision' could not all be read",
                                    "the decision-chain firewall"))
             # An actor kind that is absent or unreadable (a C-RECORDS finding) is unknown provenance, never a
@@ -8804,8 +9365,8 @@ def self_test():
                   all(r is not None and r.checks.get("C-RECORDS") == "FINDING"
                       and r.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
                       and any(_i3_dn_kind in m and "the receipt join" in m for m in _i3_msgs(r, "C-RECEIPTS"))
-                      and _i3_seg_quiet(r) and _i3_seg_cant(r, _i3_dn_kind, "the receipt firewall")
-                      for r in _i3_kr))
+                      and _i3_seg_only(r, *ci) and _i3_seg_cant(r, _i3_dn_kind, "the receipt firewall")
+                      for r, ci in zip(_i3_kr, ([_i3_ci("done", "DN-1")], [_i3_ci("done", "DN-1")], []))))
             # The same on the chain store: the resolution's actor kind a number, or its actor absent, leaves
             # C-DECISION-CHAINS and the decision-chain firewall CANNOT-EVALUATE naming it, never the pass
             # each read as over a non-importer resolution (red when _make_rec, the chain join or the
@@ -8832,11 +9393,11 @@ def self_test():
             _i3_kmdr = _i3_run(_i3_kmd, obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-unreadable-item-and-remedy-kind-cannot-evaluate",
                   _i3_kbir is not None and _i3_kbir.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_seg_quiet(_i3_kbir)
+                  and _i3_seg_only(_i3_kbir, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_kbir, "the actor kind of 'backlog_item' records is absent or unreadable",
                                    "the receipt firewall")
                   and _i3_kmdr is not None and _i3_kmdr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_seg_quiet(_i3_kmdr)
+                  and _i3_seg_only(_i3_kmdr, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_kmdr,
                                    "the actor kind of 'maintainer_decision' records is absent or unreadable",
                                    "the receipt firewall"))
@@ -8854,7 +9415,8 @@ def self_test():
                       and r.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
                       and not any(m.startswith("C-RECEIPTS:") for m in r.findings)
                       and any(_i3_lk_dn in m and "the receipt join" in m for m in _i3_msgs(r, "C-RECEIPTS"))
-                      and _i3_seg_quiet(r) and _i3_seg_cant(r, _i3_lk_dn, "the receipt firewall")
+                      and _i3_seg_only(r, _i3_ci("done", "DN-1"))
+                      and _i3_seg_cant(r, _i3_lk_dn, "the receipt firewall")
                       for r in [_i3_kind_receipts([copy.deepcopy(_i3_idn),
                                                    dict(dn(2, "BI-1"), actor={"kind": k})])
                                 for k in _i3_lk_kinds]))
@@ -8884,11 +9446,11 @@ def self_test():
             _i3_lkmr = _i3_run(_i3_remedy(actor_kind="Maintainer"), obs=copy.deepcopy(_i3_sg_obs))
             check("imported-segregation-lookalike-item-and-remedy-kind-cannot-evaluate",
                   _i3_lkbr is not None and _i3_lkbr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_seg_quiet(_i3_lkbr)
+                  and _i3_seg_only(_i3_lkbr, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_lkbr, "the actor kind of 'backlog_item' records is absent or "
                                    "unreadable, or not a kind the schema admits", "the receipt firewall")
                   and _i3_lkmr is not None and _i3_lkmr.checks.get("C-RECORDS") == "FINDING"
-                  and _i3_seg_quiet(_i3_lkmr)
+                  and _i3_seg_only(_i3_lkmr, _i3_ci("done", "DN-1"))
                   and _i3_seg_cant(_i3_lkmr, "the actor kind of 'maintainer_decision' records is absent or "
                                    "unreadable, or not a kind the schema admits", "the receipt firewall"))
             # The section 8.6 residuals: an active store discloses the firewall entries and the
@@ -9156,18 +9718,43 @@ def self_test():
         def handoff_msgs(res):
             return res.by_check.get("C-HANDOFF", []) if res is not None else []
 
-        # C-HANDOFF with the imported series INACTIVE: the section 8.6 firewall is keyed on provenance,
-        # never on activation (it names the clean series written by the pre-1.3.0 legacy importer, a
-        # store whose imported series is inactive), so an importer-authored clean current handoff beside
-        # the maintainer's is exempt history and the store stays VALID (red if the exemption is ever
-        # gated on the activation flag).
+        # C-HANDOFF with the imported series INACTIVE, as every store is at the shipped SUPPORTED_HOMES = 1:
+        # the clean-importer rule is keyed on provenance, never on activation, so an importer-authored clean
+        # current handoff beside the maintainer's is its one clean-importer finding, reported under
+        # C-HANDOFF while C-IMPORTED-SEGREGATION is off the roster, and never counted by the
+        # at-most-one-current join. The flip removes the inactive-store arm (the rule then runs only with
+        # the series active), which leaves the store VALID, so the finding vector reads red on it. The
+        # same importer-authored handoff read from both an active and an archive leaf is one record and
+        # one finding.
         f = clean_machine()
         f["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
                                                        actor={"kind": "importer", "id": "import-assistant"})])
         f["counters.toml"] = counters(HO=2)
-        r2imp = run(f)
-        check("r2-importer-current-handoff-exempt-while-inactive",
-              r2imp.status == VALID and not handoff_msgs(r2imp))
+        r2imp = run(copy.deepcopy(f))
+        _r2i_g = globals()
+        _r2i_prev = _r2i_g["_check_clean_importer"]
+        _r2i_g["_check_clean_importer"] = (
+            lambda recs, rep, cid, *a, **k: None if cid == "C-HANDOFF" else _r2i_prev(recs, rep, cid, *a, **k))
+        try:
+            r2imp_flip = run(copy.deepcopy(f))
+        finally:
+            _r2i_g["_check_clean_importer"] = _r2i_prev
+
+        def _r2i_finding(res):
+            return (res is not None and res.status == INVALID and not res.cannot_evaluate
+                    and res.findings == [_ci_inactive("handoff", "HO-2")]
+                    and handoff_msgs(res) == [_ci_inactive("handoff", "HO-2")])
+        check("r2-importer-clean-handoff-finding-while-inactive", _r2i_finding(r2imp))
+        check("r2-importer-clean-handoff-inactive-flip-red",
+              r2imp_flip is not None and r2imp_flip.status == VALID and not r2imp_flip.findings
+              and not _r2i_finding(r2imp_flip))
+        f["archive/2026/handoff.index.toml"] = idx([envelope("HO-2", "handoff", "current",
+                                                             actor={"kind": "importer", "id": "import-assistant"})])
+        r2imp_dup = run(f)
+        check("r2-importer-clean-handoff-active-and-archive-reported-once",
+              r2imp_dup is not None
+              and [m for m in r2imp_dup.findings if "carries actor.kind 'importer'" in m]
+              == [_ci_inactive("handoff", "HO-2")])
         # Two clean non-importer current handoffs (a maintainer and an automation author) stay a C-HANDOFF
         # finding; this vector covers exactly the automation kind while the series is inactive (the
         # per-kind exclusion coverage, both kinds and both activation states, is the three-kind vectors
@@ -9253,18 +9840,29 @@ def self_test():
         try:
             _opf_store.SUPPORTED_HOMES = 2
             _opf_store.SUPPORTED_SPEC_VERSION = _opf_store.IMPORTED_SPEC_VERSION
-            # The same maintainer + importer pair as the inactive vector: the importer-authored record is
-            # exempt history here too (spec 8.6), so no finding at all, C-HANDOFF evaluates to an explicit
-            # PASS and the only cants are the pending imported checks (red if the exemption is removed or
-            # if C-HANDOFF, or anything else, goes unevaluated). The clean HO high-water is raised in
-            # place so the imported counter high-waters act_machine() sets survive, and the run takes
-            # the empty imported baseline the across-time checks need on an active store.
+            # A maintainer's current handoff beside an importer-authored clean one. Base 2.0.0 with homes 2
+            # always carries the imported series, so the importer-authored record is never exempt history:
+            # it is the one C-IMPORTED-SEGREGATION finding (spec 8.6: a clean-series record MUST NOT carry
+            # the importer kind), while C-HANDOFF still leaves it out of the at-most-one-current join (spec
+            # 8.5/8.6) and evaluates to an explicit PASS, and the only cants are the pending imported
+            # checks. The flip runs the same store with _check_clean_importer disabled, which restores the
+            # exemption: the store then draws no finding at all, so the finding vector reads red on it.
+            # The clean HO high-water is raised in place so the imported counter high-waters act_machine()
+            # sets survive, and each run takes the empty imported baseline the across-time checks need on
+            # an active store.
             _r2_act = act_machine()
             _r2_act["handoff.index.toml"] = idx([ho(1), envelope("HO-2", "handoff", "current",
                                                                  actor={"kind": "importer",
                                                                         "id": "import-assistant"})])
             _r2_act["counters.toml"]["counters"]["HO"] = 2
-            _r2_act_run = run(_r2_act, obs=_is2_prior())
+            _r2_act_run = run(copy.deepcopy(_r2_act), obs=_is2_prior())
+            _r2_g = globals()
+            _r2_prev_ci = _r2_g["_check_clean_importer"]
+            _r2_g["_check_clean_importer"] = lambda *_a, **_k: None
+            try:
+                _r2_flip_run = run(copy.deepcopy(_r2_act), obs=_is2_prior())
+            finally:
+                _r2_g["_check_clean_importer"] = _r2_prev_ci
             # The three-kind store while ACTIVE: this vector covers exactly that the one exemption stays
             # importer-only on an active store too, so widening it to the assistant or the automation
             # kind drops the reported count below 3 and reads red here. The clean HO high-water is raised
@@ -9286,9 +9884,17 @@ def self_test():
         finally:
             _opf_store.SUPPORTED_SPEC_VERSION = _r2_prev_ssv
             _opf_store.SUPPORTED_HOMES = _r2_prev_homes
-        check("r2-importer-current-handoff-exempt-when-active",
-              _r2_act_run is not None and not _r2_act_run.findings and not handoff_msgs(_r2_act_run)
-              and _r2_act_run.checks.get("C-HANDOFF") == "PASS" and pending_only(_r2_act_run))
+        _r2_ci_msg = ("C-IMPORTED-SEGREGATION: clean record 'HO-2' (type 'handoff') carries actor.kind "
+                      "'importer'; a clean-series record MUST NOT carry it (spec 8.6)")
+
+        def _r2_ci_finding(res):
+            return (res is not None and res.status == INVALID and res.findings == [_r2_ci_msg]
+                    and res.checks.get("C-IMPORTED-SEGREGATION") == "FINDING"
+                    and not handoff_msgs(res) and res.checks.get("C-HANDOFF") == "PASS" and pending_only(res))
+        check("r2-importer-clean-handoff-segregation-finding", _r2_ci_finding(_r2_act_run))
+        check("r2-importer-clean-handoff-segregation-flip-red",
+              _r2_flip_run is not None and not _r2_flip_run.findings
+              and _r2_flip_run.checks.get("C-HANDOFF") == "PASS" and not _r2_ci_finding(_r2_flip_run))
         check("r2-assistant-and-automation-handoffs-counted-while-active",
               _r2k_act_run is not None and handoff_msgs(_r2k_act_run) == [_r2_three_msg]
               and _r2k_act_run.findings == [_r2_three_msg] and pending_only(_r2k_act_run))
@@ -9339,7 +9945,10 @@ def self_test():
         # The same holds for the sibling current-state joins fed by the same collectors: C-RECEIPTS over
         # backlog_item and done, and C-DECISION-CHAINS over pending_decision, are CANNOT-EVALUATE when
         # their records could not all be read (red if either passes over the partial set), while an
-        # unread type that none of the three reads leaves all three a PASS (red if the scoping widens).
+        # unread type that none of the three reads leaves C-RECEIPTS and C-DECISION-CHAINS a PASS (red if
+        # the scoping widens). The clean-importer rule reads every clean type, so on this inactive store
+        # C-HANDOFF, where it reports, is CANNOT-EVALUATE with that rule's one message and no handoff-count
+        # message (red if the rule passes over an unread type, or the handoff count's scoping widens).
         # C-LINKS reads EVERY type as a link source and target, so the same unread type leaves it
         # CANNOT-EVALUATE (red if it passes over any partial collection).
         f = clean_machine()
@@ -9369,8 +9978,12 @@ def self_test():
         _r2_other = run(f)
         check("current-state-joins-pass-when-another-type-unread",
               _r2_other is not None and _r2_other.checks.get("C-RECORDS") == "CANNOT-EVALUATE"
-              and all(_r2_other.checks.get(cid) == "PASS"
-                      for cid in ("C-RECEIPTS", "C-HANDOFF", "C-DECISION-CHAINS")))
+              and all(_r2_other.checks.get(cid) == "PASS" for cid in ("C-RECEIPTS", "C-DECISION-CHAINS"))
+              and _r2_other.checks.get("C-HANDOFF") == "CANNOT-EVALUATE"
+              and _r2_other.by_check.get("C-HANDOFF")
+              == ["C-HANDOFF: the records of 'finding' could not all be read or confirmed (see C-RECORDS, "
+                  "C-PERRECORD-RECONCILE and C-ARCHIVE-ENUM); the clean-importer rule (spec 8.6) is not "
+                  "evaluated over the records not read"])
 
         def _links_unread(res):
             return (res is not None and res.checks.get("C-LINKS") == "CANNOT-EVALUATE"
@@ -9608,8 +10221,8 @@ def self_test():
         _r4_two = run(f)
         check("r4-links-message-names-every-cause",
               _r4_two is not None and _r4_two.by_check.get("C-LINKS") == [
-                  "C-LINKS: the records of 'reference' could not all be read; the links or scopes of "
-                  "'finding' records could not be interpreted (see C-RECORDS, C-PERRECORD-RECONCILE, "
+                  "C-LINKS: the records of 'reference' could not all be read or confirmed; the links or "
+                  "scopes of 'finding' records could not be interpreted (see C-RECORDS, C-PERRECORD-RECONCILE, "
                   "C-ARCHIVE-ENUM and C-IMPORTED-SCHEMA); link and scope resolution is not evaluated over "
                   "a partial set (spec 8.5/8.6)"])
         # The worklog collectors feed the same completeness: every worklog entry is a link source and a
@@ -9662,16 +10275,156 @@ def self_test():
             f = clean_machine()
             f["archive/2026/archive.toml"]["worklog_moved"] = [_row]
             check("r4-links-cannot-evaluate-when-worklog-moved-{}".format(_name), _links_worklog_unread(run(f)))
+        # Every other check that reads the worklog entries is CANNOT-EVALUATE naming the unread worklog, never
+        # a pass or a false finding over the entries read, when a listed bucket worklog is absent at read or
+        # cannot be parsed or validated and when the active ledger cannot be read; the store is never VALID.
+        # C-ROTATION reads the archived entries alone, so an active ledger that cannot be read leaves it
+        # graded. The second bucket holds an edited copy of WL-3, which the active ledger also holds: read in
+        # full, it is a partition, frozen-coverage, id-space and changelog-gate finding, so a pass over the
+        # unread bucket would hide a real defect. Removing any one check's unread branch turns red every case
+        # that asserts that check, and the active-ledger case is red when C-ROTATION reads the active ledger's
+        # state too. A cannot-evaluate outranks a finding in a check's state, so the checks that skip their
+        # scan over a partial set are also asserted to report no finding, and a third case leaves unread a
+        # bucket holding the only copy of WL-2, which a scan of the entries read would report missing: each
+        # case is red when a check runs its scan beside its cannot-evaluate.
+        _wl_readers = ("C-ID-SPACE", "C-FROZEN-COVERAGE", "C-NO-DELETION", "C-PARTITION", "C-CONTIGUITY",
+                       "C-CHANGELOG-GATES")
+        _wl_skipped = ("C-FROZEN-COVERAGE", "C-NO-DELETION", "C-CONTIGUITY", "C-CHANGELOG-GATES")
+
+        def _wl_readers_unread(res, archived):
+            cids = _wl_readers + (("C-ROTATION",) if archived else ())
+            return (res is not None and res.status == CANNOT_EVALUATE
+                    and all(res.checks.get(cid) == "CANNOT-EVALUATE"
+                            and any(m.startswith(cid + ": the ") and "worklog entries" in m
+                                    and "could not all be read or confirmed" in m
+                                    and "not evaluated over a partial set" in m
+                                    for m in res.by_check.get(cid, []))
+                            for cid in cids)
+                    and not any(m in res.findings for cid in _wl_skipped for m in res.by_check.get(cid, []))
+                    and (archived or res.checks.get("C-ROTATION") == "PASS"))
+
+        def _wl_second_bucket():
+            m = clean_machine()
+            _wl_copy = wl(3)
+            _wl_copy["summary"] = "edited"
+            m["archive/2025/archive.toml"] = {"schema": 1, "moved": [], "worklog_moved": []}
+            m["archive/2025/worklog.toml"] = {"schema": 1, "entry": [_wl_copy]}
+            return m
+        _wl_full = run(_wl_second_bucket())
+        check("worklog-second-bucket-read-in-full-findings",
+              _wl_full is not None and _wl_full.status == INVALID
+              and all(_wl_full.checks.get(cid) == "FINDING"
+                      for cid in ("C-PARTITION", "C-FROZEN-COVERAGE", "C-ID-SPACE", "C-CHANGELOG-GATES")))
+        # Absent at read: the archive reader is patched to report the listed bucket worklog absent, as a
+        # removal between the bucket listing and the read would.
+        _wl_gone = "archive/2025/worklog.toml"
+        _wl_real_reader = _opf_worklog.load_archive_worklog_at
+
+        def _wl_vanishing_reader(fd, relpath, **kwargs):
+            if relpath.endswith(_wl_gone):
+                return None
+            return _wl_real_reader(fd, relpath, **kwargs)
+
+        _opf_worklog.load_archive_worklog_at = _wl_vanishing_reader
+        try:
+            _wl_absent = run(_wl_second_bucket())
+        finally:
+            _opf_worklog.load_archive_worklog_at = _wl_real_reader
+        check("worklog-readers-cannot-evaluate-when-archived-worklog-absent-at-read",
+              _wl_readers_unread(_wl_absent, True))
+        for _name, _doc in (("unparseable", "garbage = ["), ("invalid", {"schema": 1, "entry": "x"})):
+            f = _wl_second_bucket()
+            f[_wl_gone] = _doc
+            check("worklog-readers-cannot-evaluate-when-archived-worklog-{}".format(_name),
+                  _wl_readers_unread(run(f), True))
+        f = clean_machine()
+        f["worklog.toml"] = "garbage = ["
+        check("worklog-readers-cannot-evaluate-when-active-ledger-unreadable", _wl_readers_unread(run(f), False))
+
+        def _wl_unique_buckets():
+            m = clean_machine()
+            m["archive/2026/archive.toml"]["worklog_moved"] = [{"span": ["WL-1", "WL-1"],
+                                                                "destination": "archive/2026/worklog.toml"}]
+            m["archive/2026/worklog.toml"] = {"schema": 1, "entry": [wl(1)]}
+            m["archive/2025/archive.toml"] = {"schema": 1, "moved": [], "worklog_moved": [
+                {"span": ["WL-2", "WL-2"], "destination": "archive/2025/worklog.toml"}]}
+            m["archive/2025/worklog.toml"] = {"schema": 1, "entry": [wl(2)]}
+            return m
+        _wl_uniq = run(_wl_unique_buckets())
+        check("worklog-unique-entry-buckets-read-in-full-valid", _wl_uniq is not None and _wl_uniq.status == VALID)
+        f = _wl_unique_buckets()
+        f[_wl_gone] = "garbage = ["
+        check("worklog-readers-cannot-evaluate-when-archived-unique-entry-unread", _wl_readers_unread(run(f), True))
+        # C-HISTORY-RESURRECTION and C-NO-DELETION read a prior or allocated id absent from a type with a
+        # record source that could not be read as CANNOT-EVALUATE naming that type, never as vanished (red
+        # when either gate is removed): a prior worklog id beside an unread bucket worklog, and the handoff
+        # line beside an unread handoff index. A type that was read is still graded beside it: BI-3,
+        # allocated and named by the prior but held nowhere, is reported by both checks (red when either
+        # gate widens to every type).
+        def _unread_type_cant(res, cid, tname):
+            return (res is not None and res.checks.get(cid) == "CANNOT-EVALUATE"
+                    and any(m.startswith(cid + ": the records of {!r} could not all be read (see"
+                                         .format(tname)) and "not evaluated over a partial set" in m
+                            for m in res.by_check.get(cid, []))
+                    and not any(m in res.findings for m in res.by_check.get(cid, [])))
+        _prior_wl = clean_prior()
+        _prior_wl["prior"]["records"]["WL-1"] = ("worklog", "added")
+        f = clean_machine()
+        f["archive/2026/worklog.toml"] = "garbage = ["
+        check("history-resurrection-cannot-evaluate-when-worklog-unread",
+              _unread_type_cant(run(f, obs=_prior_wl), "C-HISTORY-RESURRECTION", "worklog"))
+        f = clean_machine()
+        f["handoff.index.toml"] = "garbage = ["
+        _ho_unread = run(f)
+        check("no-deletion-and-resurrection-cannot-evaluate-when-handoff-unread",
+              _unread_type_cant(_ho_unread, "C-NO-DELETION", "handoff")
+              and _unread_type_cant(_ho_unread, "C-HISTORY-RESURRECTION", "handoff"))
+        f = clean_machine()
+        f["handoff.index.toml"] = "garbage = ["
+        f["counters.toml"]["counters"]["BI"] = 3
+        _prior_bi = clean_prior()
+        _prior_bi["prior"]["records"]["BI-3"] = ("backlog_item", "open")
+        _ho_read = run(f, obs=_prior_bi)
+        check("no-deletion-and-resurrection-graded-for-read-type-beside-unread-handoff",
+              _ho_read is not None
+              and any(m.startswith("C-NO-DELETION: 1 allocated BI-<n> id(s)") for m in _ho_read.findings)
+              and any(m.startswith("C-HISTORY-RESURRECTION: prior record 'BI-3' is absent")
+                      for m in _ho_read.findings)
+              and not any("HO-" in m for m in _ho_read.findings
+                          if m.startswith(("C-NO-DELETION", "C-HISTORY-RESURRECTION"))))
+        # A rotation whose destination was read without the row leaves its type unconfirmed for the
+        # current-state joins, yet every source was read, so the presence gates still grade the type:
+        # BI-1 enumerated as moved to an archived index that parses but lacks it, and BI-3 deleted
+        # outright, beside counters BI=3 and a prior naming BI-3, report BI-3 under both checks while
+        # C-RECEIPTS stays CANNOT-EVALUATE (red when the presence gates read the types left unconfirmed).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([bi(2, "open")])
+        f["archive/2026/archive.toml"]["moved"] = [
+            {"id": "BI-1", "type": "backlog_item", "destination": "archive/2026/backlog_item.index.toml"}]
+        f["archive/2026/backlog_item.index.toml"] = idx([])
+        f["counters.toml"]["counters"]["BI"] = 3
+        _mv_read = run(f, obs=_prior_bi)
+        check("no-deletion-and-resurrection-graded-beside-destination-read-without-row",
+              _mv_read is not None
+              and any("enumerated moved id 'BI-1' is absent from its destination" in m
+                      for m in _mv_read.findings)
+              and _mv_read.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE"
+              and any(m.startswith("C-NO-DELETION: 1 allocated BI-<n> id(s) above BI-2")
+                      for m in _mv_read.findings)
+              and any(m.startswith("C-HISTORY-RESURRECTION: prior record 'BI-3' is absent")
+                      for m in _mv_read.findings)
+              and not any(m.startswith(cid + ": the records of") for m in _mv_read.cannot_evaluate
+                          for cid in ("C-NO-DELETION", "C-HISTORY-RESURRECTION")))
         # A moved row that cannot be reconciled leaves the population of every type it could stand for
         # incomplete, for each check that joins through moved rows (red when its branch alone stops
-        # recording that population unread). A row dropped as malformed still names a record through its
-        # id's namespace or its declared type: a missing type (handoff, then pending_decision), a type
-        # that is not a string (done), a malformed id and a destination that is not a string. A row with
-        # neither a usable id nor a usable type could stand for any record, so every join is
-        # CANNOT-EVALUATE. A row whose declared type is not a roster type, or names a type its id's
-        # namespace does not bind, leaves the type its id binds incomplete even where the destination
-        # holds the id; and a mislabelled row whose destination is absent adds that type beside the
-        # declared one.
+        # recording that population unconfirmed or unread). A row dropped as malformed still names a
+        # record through its id's namespace or its declared type: a missing type (handoff, then
+        # pending_decision), a type that is not a string (done), a malformed id and a destination that is
+        # not a string. A row with neither a usable id nor a usable type could stand for any record, so
+        # every join is CANNOT-EVALUATE. A row whose declared type is not a roster type, or names a type
+        # its id's namespace does not bind, leaves the type its id binds incomplete even where the
+        # destination holds the id; and a mislabelled row whose destination is absent adds that type
+        # beside the declared one.
         def _moved_rows_run(rows, extra=None, **cnt):
             m = clean_machine()
             m["archive/2026/archive.toml"]["moved"] = rows
@@ -9726,6 +10479,612 @@ def self_test():
                   _all_joins_unread(_mv_unconf)
                   and any("absent from its destination" in f_ for f_ in _mv_unconf.findings)
                   and not any("is not this bucket's type index" in f_ for f_ in _mv_unconf.findings))
+        # The presence gates over every moved-row branch, each vector built once with the record genuinely
+        # held (at the declared location where one can hold it; in the active index where the declared
+        # location cannot exist or cannot be read) and once genuinely held nowhere, beside counters that
+        # allocate it and a prior that names it. The expected states follow _validate_archive's
+        # classification principle: the absence FINDING exactly where the record is provably missing (its
+        # declared destination in the counted set - this bucket's own index, a sibling's or another
+        # bucket's enabled index, or an active one, each read in full by the scan that counts its ids, or
+        # confirmed absent by the probe where the listing counted nothing - and a dropped row through its
+        # kept declared destination where that is still a usable path, or one with no usable destination
+        # wherever the type's counted locations were all read), CANNOT-EVALUATE where
+        # its presence cannot be known (the declared location never opened, never counted, or unreadable),
+        # and never an absence finding for a record that exists. The counted set is read through the
+        # destination's canonical contained form, so a non-canonical spelling of a counted location is
+        # still a graded lookup. Each gate is read through its own absence
+        # finding and its own partial-set CANNOT-EVALUATE alone, so moving any one branch between the
+        # graded and the source-unread sets turns at least one vector red; in particular, classifying a
+        # wrong destination by path equality instead of by the counted set turns the four
+        # wrong-destination-*-counted vectors red, classifying it during the walk instead of after turns
+        # the later-bucket vectors red, discarding a dropped row's usable destination turns the held
+        # dropped-row vectors red (the flips below read both rules directly), and reading the counted
+        # set through the raw spelling turns the alias vectors' provable deletions into CANNOT-EVALUATE.
+        def _gate_state(res, cid, absent_needle, cant_needle):
+            msgs = res.by_check.get(cid, [])
+            if any(absent_needle in m for m in msgs if m in res.findings):
+                return "finding"
+            if any(cant_needle in m for m in msgs if m in res.cannot_evaluate):
+                return "cant"
+            return "pass"
+
+        def _presence_states(res, rid, tname, wl=False):
+            if res is None:
+                return None
+            type_unread = "the records of {!r} could not all be read".format(tname)
+            return (_gate_state(res, "C-NO-DELETION", "{} is absent".format(rid),
+                                "worklog no-deletion is not evaluated" if wl else type_unread),
+                    _gate_state(res, "C-HISTORY-RESURRECTION",
+                                "prior record {!r} is absent".format(rid), type_unread))
+
+        def _presence_moved(row, bi1_active=False, extra=None, working=None):
+            f = clean_machine()
+            f["backlog_item.index.toml"] = idx([bi(1, "done"), bi(2, "open")] if bi1_active
+                                               else [bi(2, "open")])
+            f["archive/2026/archive.toml"]["moved"] = [row]
+            f.update(extra or {})
+            return _presence_states(run(f, working=working), "BI-1", "backlog_item")
+
+        _mv_own = "archive/2026/backlog_item.index.toml"
+        _mv_held = idx([bi(1, "done")])
+        _mv_b25 = {"schema": 1, "moved": [], "worklog_moved": []}
+        for _name, _row, _held, _held_exp, _miss, _miss_exp in (
+                ("destination-read",
+                 {"id": "BI-1", "type": "backlog_item", "destination": _mv_own},
+                 {"extra": {_mv_own: _mv_held}}, ("pass", "pass"),
+                 {"extra": {_mv_own: idx([])}}, ("finding", "finding")),
+                ("destination-absent",
+                 {"id": "BI-1", "type": "backlog_item", "destination": _mv_own},
+                 {"bi1_active": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("destination-unreadable",
+                 {"id": "BI-1", "type": "backlog_item", "destination": _mv_own},
+                 {"bi1_active": True, "extra": {_mv_own: "garbage = ["}}, ("cant", "pass"),
+                 {"extra": {_mv_own: "garbage = ["}}, ("cant", "cant")),
+                ("wrong-destination",
+                 {"id": "BI-1", "type": "backlog_item",
+                  "destination": "archive/2026/old/backlog_item.index.toml"},
+                 {"extra": {"archive/2026/old/backlog_item.index.toml": _mv_held}}, ("cant", "cant"),
+                 {}, ("cant", "cant")),
+                ("wrong-destination-active-counted",
+                 {"id": "BI-1", "type": "backlog_item", "destination": "backlog_item.index.toml"},
+                 {"bi1_active": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("wrong-destination-sibling-counted",
+                 {"id": "BI-1", "type": "backlog_item", "destination": "archive/2026/reference.index.toml"},
+                 {"extra": {"archive/2026/reference.index.toml": idx([envelope(
+                     "BI-1", "reference", "done")])}}, ("pass", "pass"),
+                 {"extra": {"archive/2026/reference.index.toml": idx([])}}, ("finding", "finding")),
+                ("wrong-destination-other-bucket-counted",
+                 {"id": "BI-1", "type": "backlog_item",
+                  "destination": "archive/2025/backlog_item.index.toml"},
+                 {"extra": {"archive/2025/archive.toml": _mv_b25,
+                            "archive/2025/backlog_item.index.toml": _mv_held}}, ("pass", "pass"),
+                 {"extra": {"archive/2025/archive.toml": _mv_b25,
+                            "archive/2025/backlog_item.index.toml": idx([])}}, ("finding", "finding")),
+                ("wrong-destination-later-bucket-counted",
+                 {"id": "BI-1", "type": "backlog_item",
+                  "destination": "archive/2027/backlog_item.index.toml"},
+                 {"extra": {"archive/2027/archive.toml": _mv_b25,
+                            "archive/2027/backlog_item.index.toml": _mv_held}}, ("pass", "pass"),
+                 {"extra": {"archive/2027/archive.toml": _mv_b25,
+                            "archive/2027/backlog_item.index.toml": idx([])}}, ("finding", "finding")),
+                ("wrong-destination-dot-alias-counted",
+                 {"id": "BI-1", "type": "backlog_item",
+                  "destination": "archive/2026/./backlog_item.index.toml"},
+                 {"extra": {_mv_own: _mv_held}}, ("pass", "pass"),
+                 {"extra": {_mv_own: idx([])}}, ("finding", "finding")),
+                ("wrong-destination-double-slash-alias-counted",
+                 {"id": "BI-1", "type": "backlog_item",
+                  "destination": "archive/2026//backlog_item.index.toml"},
+                 {"extra": {_mv_own: _mv_held}}, ("pass", "pass"),
+                 {"extra": {_mv_own: idx([])}}, ("finding", "finding")),
+                ("wrong-destination-contained-dotdot-alias-counted",
+                 {"id": "BI-1", "type": "backlog_item",
+                  "destination": "archive/2026/old/../backlog_item.index.toml"},
+                 {"extra": {_mv_own: _mv_held}}, ("pass", "pass"),
+                 {"extra": {_mv_own: idx([])}}, ("finding", "finding")),
+                ("uncontained-destination",
+                 {"id": "BI-1", "type": "backlog_item", "destination": "../escape.toml"},
+                 {"working": {"escape.toml": _mv_held}}, ("cant", "cant"),
+                 {}, ("cant", "cant")),
+                ("uncontained-traversal-type",
+                 {"id": "BI-1", "type": "../../../escape",
+                  "destination": "archive/2026/../../../escape.index.toml"},
+                 {"bi1_active": True}, ("cant", "pass"),
+                 {}, ("cant", "cant")),
+                ("non-roster-type",
+                 {"id": "BI-1", "type": "bogus", "destination": "archive/2026/bogus.index.toml"},
+                 {"extra": {"archive/2026/bogus.index.toml": _mv_held}}, ("cant", "cant"),
+                 {}, ("cant", "cant")),
+                ("disabled-declared-type",
+                 {"id": "BI-1", "type": "maintainer_action",
+                  "destination": "archive/2026/maintainer_action.index.toml"},
+                 {"extra": {"archive/2026/maintainer_action.index.toml": _mv_held}}, ("cant", "cant"),
+                 {}, ("cant", "cant")),
+                ("namespace-mismatch-enabled-type",
+                 {"id": "BI-1", "type": "reference", "destination": "archive/2026/reference.index.toml"},
+                 {"extra": {"archive/2026/reference.index.toml": idx([envelope(
+                     "BI-1", "reference", "done")])}}, ("pass", "pass"),
+                 {"extra": {"archive/2026/reference.index.toml": idx([])}}, ("finding", "finding")),
+                ("malformed-row",
+                 {"id": "BI-1", "type": 7, "destination": _mv_own},
+                 {"extra": {_mv_own: _mv_held}}, ("pass", "pass"),
+                 {"extra": {_mv_own: idx([])}}, ("finding", "finding")),
+                ("dropped-row-uncounted-destination",
+                 {"id": "BI-1x", "type": "backlog_item",
+                  "destination": "archive/2026/old/backlog_item.index.toml"},
+                 {"extra": {"archive/2026/old/backlog_item.index.toml": _mv_held}}, ("cant", "cant"),
+                 {}, ("cant", "cant")),
+                ("dropped-row-uncontained-destination",
+                 {"id": "BI-1x", "type": "backlog_item", "destination": "../escape.toml"},
+                 {"working": {"escape.toml": _mv_held}}, ("cant", "cant"),
+                 {}, ("cant", "cant")),
+                ("dropped-row-no-destination",
+                 {"id": "BI-1", "type": "backlog_item"},
+                 {"bi1_active": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("dropped-row-unidentifiable",
+                 {"id": 7, "type": 7, "destination": 7},
+                 {"bi1_active": True}, ("pass", "pass"),
+                 {}, ("finding", "finding"))):
+            check("presence-gates-moved-row-{}-held".format(_name),
+                  _presence_moved(_row, **_held) == _held_exp)
+            check("presence-gates-moved-row-{}-missing".format(_name),
+                  _presence_moved(_row, **_miss) == _miss_exp)
+        # The restored containment refusal is read through its own finding: the expected path built from
+        # the traversal-carrying declared type compares equal to the declared destination, yet the
+        # destination is refused before any path is built from it, so C-ARCHIVE-ENUM is a FINDING (red
+        # when the walk builds and probes the uncontained path instead, which turns the finding into the
+        # contained reader's CANNOT-EVALUATE).
+        f = clean_machine()
+        f["archive/2026/archive.toml"]["moved"] = [
+            {"id": "BI-1", "type": "../../../escape",
+             "destination": "archive/2026/../../../escape.index.toml"}]
+        _mv_esc = run(f)
+        check("archive-enum-finding-for-uncontained-traversal-destination",
+              _mv_esc is not None and _mv_esc.checks.get("C-ARCHIVE-ENUM") == "FINDING"
+              and any("is not a contained store-relative path" in m for m in _mv_esc.findings))
+        # A wrong destination the walk counted must not spread: a row for BI-1 naming the ACTIVE index
+        # leaves an unrelated BI-2, deleted outright, a graded finding under both gates (red when the
+        # wrong-destination branch records the row's types unread instead of reading the counted set).
+        f = clean_machine()
+        f["backlog_item.index.toml"] = idx([bi(1, "done")])
+        f["archive/2026/archive.toml"]["moved"] = [
+            {"id": "BI-1", "type": "backlog_item", "destination": "backlog_item.index.toml"}]
+        _mv_coll = run(f)
+        check("no-deletion-and-resurrection-graded-beside-wrong-destination-counted",
+              _mv_coll is not None
+              and any("is not this bucket's type index" in m for m in _mv_coll.findings)
+              and any(m.startswith("C-NO-DELETION: 1 allocated BI-<n> id(s) above BI-1")
+                      for m in _mv_coll.findings)
+              and any(m.startswith("C-HISTORY-RESURRECTION: prior record 'BI-2' is absent")
+                      for m in _mv_coll.findings)
+              and not any(m.startswith(cid + ": the records of") for m in _mv_coll.cannot_evaluate
+                          for cid in ("C-NO-DELETION", "C-HISTORY-RESURRECTION")))
+        # One junk row leaves no namespace's presence gate unread: it names no location, so every enabled
+        # type and the worklog stay graded (red when a dropped row's types join the source-unread set),
+        # while the rotation it names is unreconciled, so the current-state joins stay CANNOT-EVALUATE.
+        f = clean_machine()
+        f["archive/2026/archive.toml"]["moved"] = [{"id": 7, "type": 7, "destination": 7}]
+        _mv_junk = run(f)
+        check("presence-gates-graded-for-every-namespace-beside-junk-row",
+              _mv_junk is not None
+              and not any(m.startswith(("C-NO-DELETION", "C-HISTORY-RESURRECTION"))
+                          for m in _mv_junk.cannot_evaluate)
+              and _mv_junk.checks.get("C-RECEIPTS") == "CANNOT-EVALUATE")
+        # The probe runs only where the bucket's listing counted nothing at the expected path. Unreadable
+        # there, its None is a record source not read, never a graded absence, and never WORDED as one:
+        # the row's state is a cannot-evaluate saying the destination is unread, not the absence finding
+        # (red when the unreadable case takes the absence wording again). A probe HIT there is a
+        # record the walk counted nowhere (the tree changed between the listing and the probe), so its
+        # types join the source-unread set too: a record the probe saw never takes an absence finding.
+        _real_dest_probe = _dest_index_has_id
+        _mv_own_row = {"id": "BI-1", "type": "backlog_item", "destination": _mv_own}
+        globals()["_dest_index_has_id"] = lambda *a, **k: None
+        try:
+            _probe_gone_held = _presence_moved(_mv_own_row, bi1_active=True)
+            _probe_gone_miss = _presence_moved(_mv_own_row)
+            f = clean_machine()
+            f["archive/2026/archive.toml"]["moved"] = [dict(_mv_own_row)]
+            _probe_gone_res = run(f)
+        finally:
+            globals()["_dest_index_has_id"] = _real_dest_probe
+        check("presence-gates-moved-row-unreadable-at-probe-held", _probe_gone_held == ("cant", "pass"))
+        check("presence-gates-moved-row-unreadable-at-probe-missing", _probe_gone_miss == ("cant", "cant"))
+        check("moved-row-unreadable-at-probe-worded-unread-not-absent",
+              _probe_gone_res is not None
+              and any("could not be read at the probe" in m for m in _probe_gone_res.cannot_evaluate)
+              and not any("is absent from its destination" in m for m in _probe_gone_res.findings))
+        globals()["_dest_index_has_id"] = lambda *a, **k: True
+        try:
+            _probe_hit_uncounted = _presence_moved(_mv_own_row)
+        finally:
+            globals()["_dest_index_has_id"] = _real_dest_probe
+        check("presence-gates-moved-row-probe-hit-uncounted-cannot-evaluate",
+              _probe_hit_uncounted == ("cant", "cant"))
+
+        # archive_read runs the one archive walk archived_records runs, so on every archive shape below its
+        # records and problems equal that reader's, and the bytes it returns are exactly the fixture bytes
+        # of the files the walk parsed: none for a file that is absent or did not parse, and the first read
+        # of an index the destination probe reads again. A row the schema refuses is kept beside its
+        # finding, a row that is not a table is a cannot-evaluate, and a duplicate archived id keeps both
+        # copies and adds one problem beyond archived_records'.
+        _ar_mf = "archive/2026/archive.toml"
+        _ar_wl = "archive/2026/worklog.toml"
+        _ar_pd = "archive/2026/pending_decision.index.toml"
+        _ar_mf25 = "archive/2025/archive.toml"
+        _ar_wl25 = "archive/2025/worklog.toml"
+        _ar_pd25 = "archive/2025/pending_decision.index.toml"
+
+        def _ar_bytes(doc):
+            return (doc if isinstance(doc, str) else _opf_emit.emit(doc)).encode("utf-8")
+
+        def _ar_moved(*rows, wl_span=("WL-1", "WL-2"), bucket="2026"):
+            return {"schema": 1,
+                    "moved": [{"id": rid, "type": "pending_decision",
+                               "destination": "archive/{}/pending_decision.index.toml".format(bucket)}
+                              for rid in rows],
+                    "worklog_moved": [{"span": list(wl_span),
+                                       "destination": "archive/{}/worklog.toml".format(bucket)}]}
+
+        def _ar_run(machine):
+            aroot = build(machine)
+            ares = resolve_store(aroot)
+            afd = _open_store_root_fd(ares.store_root, ares.pointer_source != "default")
+            try:
+                atypes = _authoritative_types(_enabled_modules(machine["manifest.toml"]),
+                                              machine["manifest.toml"]["types"])
+                legacy = archived_records(afd, ares.machine_rel, atypes, frozenset(), None)
+                read = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+            finally:
+                os.close(afd)
+            return ares.machine_rel, legacy, read
+
+        def _ar_case_absent(f):
+            del f[_ar_mf]
+            del f[_ar_wl]
+            return ()
+
+        def _ar_case_unreadable(f):
+            del f[_ar_mf]
+            del f[_ar_wl]
+            f["archive"] = "not a directory\n"
+            return ()
+
+        def _ar_case_one_year(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_several_years(f):
+            f[_ar_mf25] = _ar_moved("PD-1", wl_span=("WL-1", "WL-1"), bucket="2025")
+            f[_ar_pd25] = idx([pd(1)])
+            f[_ar_wl25] = {"schema": 1, "entry": [wl(1)]}
+            f[_ar_mf] = _ar_moved("PD-2", wl_span=("WL-2", "WL-2"))
+            f[_ar_pd] = idx([pd(2, supersedes="PD-1")])
+            f[_ar_wl] = {"schema": 1, "entry": [wl(2)]}
+            return (_ar_mf25, _ar_pd25, _ar_wl25, _ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_missing_destination(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            return (_ar_mf, _ar_wl)
+
+        def _ar_case_malformed_manifest(f):
+            f[_ar_mf] = "this is not valid toml === ["
+            f[_ar_pd] = idx([pd(1)])
+            return ()
+
+        def _ar_case_malformed_index(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = {"schema": 1, "record": "PD-1"}
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_incomplete_enumeration(f):
+            f[_ar_mf] = _ar_moved("PD-1", "PD-2")
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_unenumerated_record(f):
+            f[_ar_mf] = _ar_moved()
+            f[_ar_pd] = idx([pd(1)])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_malformed_row(f):
+            f[_ar_mf] = _ar_moved("PD-1", "PD-2")
+            f[_ar_pd] = idx([pd(1), {"id": "PD-2"}])
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        def _ar_case_non_table_row(f):
+            f[_ar_mf] = _ar_moved("PD-1")
+            f[_ar_pd] = 'schema = 1\nrecord = ["PD-1"]\n'
+            return (_ar_mf, _ar_pd, _ar_wl)
+
+        # (name, fixture, tree, complete, clean, seated pending decision ids)
+        for _name, _case, _tree, _complete, _clean, _seated in (
+                ("absent", _ar_case_absent, "absent", True, True, []),
+                ("unreadable", _ar_case_unreadable, "unreadable", False, False, []),
+                ("one-year", _ar_case_one_year, "listed", True, True, ["PD-1"]),
+                ("several-years", _ar_case_several_years, "listed", True, True, ["PD-1", "PD-2"]),
+                ("missing-destination", _ar_case_missing_destination, "listed", False, False, []),
+                ("malformed-manifest", _ar_case_malformed_manifest, "listed", False, False, []),
+                ("malformed-index", _ar_case_malformed_index, "listed", False, False, []),
+                ("incomplete-enumeration", _ar_case_incomplete_enumeration, "listed", False, False, ["PD-1"]),
+                ("unenumerated-record", _ar_case_unenumerated_record, "listed", True, False, ["PD-1"]),
+                ("malformed-row", _ar_case_malformed_row, "listed", True, False, ["PD-1", "PD-2"]),
+                ("non-table-row", _ar_case_non_table_row, "listed", False, False, [])):
+            f = clean_machine()
+            _parsed = _case(f)
+            _mrel, (_lrecs, _lprobs), _rd = _ar_run(f)
+            check("archive-read-{}-records-match-archived-records".format(_name),
+                  _rd.records == [(r.location, r.rtype, r.body) for r in _lrecs])
+            check("archive-read-{}-problems-match-archived-records".format(_name), _rd.problems == _lprobs)
+            check("archive-read-{}-bytes-are-the-parsed-fixture-bytes".format(_name),
+                  _rd.source_bytes == {_mrel + "/" + rel: _ar_bytes(f[rel]) for rel in _parsed})
+            check("archive-read-{}-tree-and-completeness".format(_name),
+                  (_rd.tree, _rd.complete, not _rd.problems) == (_tree, _complete, _clean))
+            check("archive-read-{}-seats-every-read-row".format(_name),
+                  [b.get("id") for _l, t, b in _rd.records if t == "pending_decision"] == _seated)
+            check("archive-read-{}-returns-the-parsed-worklog-entries".format(_name),
+                  _rd.worklog == [("archive/" + rel.split("/")[1], e) for rel in _parsed
+                                  if rel.endswith("/worklog.toml") for e in f[rel]["entry"]])
+        f = clean_machine()
+        _ar_case_several_years(f)
+        f[_ar_pd] = idx([pd(1)])
+        f[_ar_mf] = _ar_moved("PD-1", wl_span=("WL-2", "WL-2"))
+        _mrel, (_lrecs, _lprobs), _rd = _ar_run(f)
+        _ar_dup = [p for p in _rd.problems if p not in _lprobs]
+        check("archive-read-duplicate-id-keeps-every-copy",
+              [(l, b.get("id")) for l, _t, b in _rd.records]
+              == [("archive/2025", "PD-1"), ("archive/2026", "PD-1")]
+              and _rd.records == [(r.location, r.rtype, r.body) for r in _lrecs])
+        check("archive-read-duplicate-id-is-a-problem",
+              _rd.problems[:len(_lprobs)] == _lprobs and len(_ar_dup) == 1
+              and _ar_dup[0].startswith("C-ID-SPACE: archived id 'PD-1' is seated 2 times"))
+        # The doctor files that duplicate under C-ID-SPACE too, not under C-ARCHIVE-ENUM.
+        _ar_doc = run(f)
+        check("archive-read-duplicate-id-is-the-doctors-id-space-check",
+              _ar_doc is not None
+              and any("duplicate id 'PD-1'" in m for m in _ar_doc.by_check.get("C-ID-SPACE", []))
+              and not any("PD-1" in m for m in _ar_doc.by_check.get("C-ARCHIVE-ENUM", [])))
+
+        # A non-terminal archived record is a C-ROTATION problem, the message the doctor reports under its
+        # C-ROTATION check and not under C-ARCHIVE-ENUM.
+        f = clean_machine()
+        _ar_case_one_year(f)
+        f[_ar_pd] = idx([pd(1, status="open")])
+        _mrel, _legacy, _rd = _ar_run(f)
+        _ar_rot = [p for p in _rd.problems if p.startswith("C-ROTATION: archived record 'PD-1'")]
+        _ar_doc = run(f)
+        check("archive-read-non-terminal-record-is-the-doctors-rotation-problem",
+              len(_ar_rot) == 1 and _ar_doc is not None
+              and _ar_rot[0] in _ar_doc.by_check.get("C-ROTATION", [])
+              and _ar_rot[0] not in _ar_doc.by_check.get("C-ARCHIVE-ENUM", []))
+
+        # An archive holding only a rotated worklog seats no record, and its worklog entries come back,
+        # parsed from the bytes returned for that worklog.
+        f = clean_machine()
+        _mrel, _legacy, _rd = _ar_run(f)
+        check("archive-read-worklog-only-archive-returns-its-entries",
+              _rd.records == [] and _rd.complete and not _rd.problems
+              and [e.get("id") for _l, e in _rd.worklog] == ["WL-1", "WL-2"]
+              and _rd.source_bytes.get(_mrel + "/" + _ar_wl) == _ar_bytes(f[_ar_wl]))
+
+        # Each archive file is read once, and the records, worklog entries and bytes archive_read returns
+        # all come from that read: right after its first read each file is rewritten on disk with other
+        # content (another title, another summary, a comment before the manifest), so a second read would
+        # parse other bytes. The result must equal archive_read's over the unchanged tree, and a fresh read
+        # of the rewritten tree must differ from it, so the rewrite is visible to any second read. Red
+        # under a reader that walks the archive twice, keeping the first walk's bytes and returning the
+        # second walk's records.
+        from unittest.mock import patch as _ar_patch
+
+        def _ar_changed(machine):
+            out = {}
+            for rel, doc in machine.items():
+                if not rel.startswith("archive/"):
+                    continue
+                if rel.endswith("/archive.toml"):
+                    out[rel] = "# rewritten after the first read\n" + _ar_bytes(doc).decode("utf-8")
+                elif rel.endswith("/worklog.toml"):
+                    out[rel] = {"schema": 1, "entry": [dict(e, summary="rewritten") for e in doc["entry"]]}
+                else:
+                    out[rel] = idx([dict(r, title="rewritten") for r in doc["record"]])
+            return out
+
+        def _ar_single_read(machine):
+            changed = _ar_changed(machine)
+            _brel, _blegacy, base_read = _ar_run(machine)
+            aroot = build(machine)
+            ares = resolve_store(aroot)
+            disk = {ares.machine_rel + "/" + rel: Path(ares.store_root) / ares.machine_rel / rel
+                    for rel in changed}
+            counts = {}
+            real_read_contained = _journal._read_contained
+
+            def read_then_rewrite(fd, relpath, *args, **kwargs):
+                got = real_read_contained(fd, relpath, *args, **kwargs)
+                counts[relpath] = counts.get(relpath, 0) + 1
+                if counts[relpath] == 1 and relpath in disk:
+                    doc = changed[relpath[len(ares.machine_rel) + 1:]]
+                    disk[relpath].write_text(doc if isinstance(doc, str) else _opf_emit.emit(doc),
+                                             encoding="utf-8")
+                return got
+
+            afd = _open_store_root_fd(ares.store_root, ares.pointer_source != "default")
+            try:
+                atypes = _authoritative_types(_enabled_modules(machine["manifest.toml"]),
+                                              machine["manifest.toml"]["types"])
+                with _ar_patch.object(_journal, "_read_contained", read_then_rewrite):
+                    read = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+                again = archive_read(afd, ares.machine_rel, atypes, frozenset(), None)
+            finally:
+                os.close(afd)
+            archive_counts = {p: n for p, n in counts.items() if p.startswith(ares.machine_rel + "/archive/")}
+            return (archive_counts == {p: 1 for p in disk}
+                    and read.complete and not read.problems and read.records and read.worklog
+                    and (read.records, read.worklog, read.source_bytes)
+                    == (base_read.records, base_read.worklog, base_read.source_bytes)
+                    and again.records != read.records and again.worklog != read.worklog
+                    and all(again.source_bytes.get(p) != read.source_bytes.get(p) for p in disk))
+
+        f = clean_machine()
+        _ar_case_several_years(f)
+        check("archive-read-reads-each-file-once-and-returns-that-read", _ar_single_read(f))
+        _real_validate_archive = _validate_archive
+
+        def _validate_archive_twice(*args, **kwargs):
+            _real_validate_archive(*args, **kwargs)
+            return _real_validate_archive(*args, **kwargs)
+
+        globals()["_validate_archive"] = _validate_archive_twice
+        try:
+            _ar_flipped = _ar_single_read(f)
+        finally:
+            globals()["_validate_archive"] = _real_validate_archive
+        check("archive-read-single-read-red-under-a-second-walk", not _ar_flipped)
+
+        # The reader contract a decision view relies on: an archived pending decision comes back with the
+        # bytes of the index it was parsed from and of the manifest that enumerates it. Red when the read
+        # cache does not keep the bytes of the reads the walk parsed.
+        def _ar_contract(machine):
+            mrel, _legacy, read = _ar_run(machine)
+            return (read.tree == "listed" and read.complete and not read.problems
+                    and [b.get("id") for _l, t, b in read.records if t == "pending_decision"] == ["PD-1"]
+                    and all(read.source_bytes.get(mrel + "/" + rel) == _ar_bytes(machine[rel])
+                            for rel in (_ar_mf, _ar_pd)))
+
+        f = clean_machine()
+        _ar_case_one_year(f)
+        check("archive-read-contract-pending-decision-with-index-and-manifest-bytes", _ar_contract(f))
+        _real_read_toml = _read_toml
+
+        def _read_toml_dropping_bytes(root_fd, relpath, rep):
+            data, st = _real_read_toml(root_fd, relpath, rep)
+            rep.toml_reads.pop(relpath, None)
+            return data, st
+
+        globals()["_read_toml"] = _read_toml_dropping_bytes
+        try:
+            _ar_flipped = _ar_contract(f)
+        finally:
+            globals()["_read_toml"] = _real_read_toml
+        check("archive-read-contract-red-when-bytes-dropped", not _ar_flipped)
+
+        def _presence_worklog(wl_rows, wl2_in_bucket=False, extra=None):
+            f = clean_machine()
+            f["archive/2026/archive.toml"]["worklog_moved"] = wl_rows
+            f["archive/2026/worklog.toml"] = {"schema": 1,
+                                              "entry": [wl(1), wl(2)] if wl2_in_bucket else [wl(1)]}
+            f.update(extra or {})
+            o = clean_prior()
+            o["prior"]["records"]["WL-2"] = ("worklog", "added")
+            return _presence_states(run(f, obs=o), "WL-2", "worklog", wl=True)
+
+        # A span (well-formed, or malformed down to a reversed range) stays graded exactly when its
+        # declared destination is a counted ledger: this bucket's own, another read bucket's, or the
+        # active one, so an entry absent from every counted ledger is a graded absence while one held in
+        # any of them never takes a finding (red when the span classification reads the declaring
+        # bucket's own path instead of the counted set).
+        _wl_own_dest = "archive/2026/worklog.toml"
+        _wl_b25 = {"schema": 1, "moved": [], "worklog_moved": []}
+        _wl_b25_held = {"archive/2025/archive.toml": _wl_b25,
+                        "archive/2025/worklog.toml": {"schema": 1, "entry": [wl(2)]}}
+        _wl_b25_empty = {"archive/2025/archive.toml": _wl_b25,
+                         "archive/2025/worklog.toml": {"schema": 1, "entry": []}}
+        for _name, _rows, _held, _held_exp, _miss, _miss_exp in (
+                ("malformed-span",
+                 [{"span": ["WL-1", "WL-x"], "destination": _wl_own_dest}],
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("span-entry-absent",
+                 [{"span": ["WL-1", "WL-2"], "destination": _wl_own_dest}],
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("span-into-other-bucket-ledger",
+                 [{"span": ["WL-1", "WL-2"], "destination": "archive/2025/worklog.toml"}],
+                 {"extra": _wl_b25_held}, ("pass", "pass"),
+                 {"extra": _wl_b25_empty}, ("finding", "finding")),
+                ("span-into-later-bucket-ledger",
+                 [{"span": ["WL-1", "WL-2"], "destination": "archive/2027/worklog.toml"}],
+                 {"extra": {"archive/2027/archive.toml": _wl_b25,
+                            "archive/2027/worklog.toml": {"schema": 1, "entry": [wl(2)]}}}, ("pass", "pass"),
+                 {"extra": {"archive/2027/archive.toml": _wl_b25,
+                            "archive/2027/worklog.toml": {"schema": 1, "entry": []}}},
+                 ("finding", "finding")),
+                ("reversed-span-other-bucket-ledger",
+                 [{"span": ["WL-2", "WL-1"], "destination": "archive/2025/worklog.toml"}],
+                 {"extra": _wl_b25_held}, ("pass", "pass"),
+                 {"extra": _wl_b25_empty}, ("finding", "finding")),
+                ("span-into-active-ledger",
+                 [{"span": ["WL-1", "WL-2"], "destination": "worklog.toml"}],
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("reversed-span-active-ledger",
+                 [{"span": ["WL-2", "WL-1"], "destination": "worklog.toml"}],
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("span-dot-alias-own-ledger",
+                 [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/./worklog.toml"}],
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding")),
+                ("dropped-span-counted-destination",
+                 [{"span": "WL-1", "destination": _wl_own_dest}],
+                 {"wl2_in_bucket": True}, ("pass", "pass"),
+                 {}, ("finding", "finding"))):
+            check("presence-gates-worklog-{}-held".format(_name),
+                  _presence_worklog(_rows, **_held) == _held_exp)
+            check("presence-gates-worklog-{}-missing".format(_name),
+                  _presence_worklog(_rows, **_miss) == _miss_exp)
+        # ... and a span whose declared destination no scan counted (a file under a bucket subdirectory
+        # is never opened) names entries that may be held at a file this walk never reads, a row dropped
+        # whole (its span not a two-element array) through its kept destination included: held there or
+        # held nowhere, the presence gates are CANNOT-EVALUATE, never a false absence finding over the
+        # entries that were read.
+        _wl_stray_doc = {"schema": 1, "entry": [wl(2)]}
+        for _name, _rows in (
+                ("wrong-destination-span",
+                 [{"span": ["WL-1", "WL-2"], "destination": "archive/2026/old/worklog.toml"}]),
+                ("malformed-span-wrong-destination",
+                 [{"span": ["WL-1", "WL-x"], "destination": "archive/2026/old/worklog.toml"}]),
+                ("dropped-span-uncounted-destination",
+                 [{"span": "WL-1", "destination": "archive/2026/old/worklog.toml"}])):
+            check("presence-gates-worklog-{}-held".format(_name),
+                  _presence_worklog(_rows, False, extra={
+                      "archive/2026/old/worklog.toml": _wl_stray_doc}) == ("cant", "cant"))
+            check("presence-gates-worklog-{}-missing".format(_name),
+                  _presence_worklog(_rows, False) == ("cant", "cant"))
+        # The dropped-row destination rule and the canonical counted-set lookup are each read through a
+        # flip (restored in finally). With _dropped_dest_key returning None for every row, a dropped
+        # row's kept destination is discarded and both held fixtures above read a graded absence under
+        # both gates - a false absence for a record genuinely held at its declared location. With
+        # _canonical_contained the identity, a non-canonical spelling of a counted location misses the
+        # set and a provable deletion reads CANNOT-EVALUATE instead of a graded finding.
+        _mv_old = "archive/2026/old/backlog_item.index.toml"
+        _real_dropped_key = _dropped_dest_key
+        globals()["_dropped_dest_key"] = lambda dest: None
+        try:
+            _flip_drop_rec = _presence_moved(
+                {"id": "BI-1x", "type": "backlog_item", "destination": _mv_old},
+                extra={_mv_old: _mv_held})
+            _flip_drop_wl = _presence_worklog(
+                [{"span": "WL-1", "destination": "archive/2026/old/worklog.toml"}], False,
+                extra={"archive/2026/old/worklog.toml": _wl_stray_doc})
+        finally:
+            globals()["_dropped_dest_key"] = _real_dropped_key
+        check("presence-gates-dropped-row-flip-false-absence-when-destination-discarded",
+              _flip_drop_rec == ("finding", "finding") and _flip_drop_wl == ("finding", "finding"))
+        _real_canon = _canonical_contained
+        globals()["_canonical_contained"] = lambda p: p
+        try:
+            _flip_alias = _presence_moved(
+                {"id": "BI-1", "type": "backlog_item",
+                 "destination": "archive/2026/./backlog_item.index.toml"},
+                extra={_mv_own: idx([])})
+        finally:
+            globals()["_canonical_contained"] = _real_canon
+        check("presence-gates-alias-flip-cannot-evaluate-when-raw-spelling-read",
+              _flip_alias == ("cant", "cant"))
         # The section 8.6 firewall on the sibling joins (the maintainer ruling: keyed on provenance, on
         # every store): an importer-authored done confers no receipt on a non-importer ratified
         # backlog_item. The count leaves an item whose every receipt is importer-authored to the firewall
@@ -9741,8 +11100,9 @@ def self_test():
               and any("its only receipt(s) 'DN-1' are importer-authored" in f_
                       for f_ in _r1_imp.by_check.get("C-RECEIPTS", []))
               and not any("has no done receipt" in f_ for f_ in _r1_imp.by_check.get("C-RECEIPTS", [])))
-        # ... and an importer-authored ratified backlog_item is owed no receipt: exempt history, the store
-        # stays VALID (red when the join starts requiring receipts of importer-authored records again).
+        # ... and an importer-authored ratified backlog_item is owed no receipt: C-RECEIPTS passes and the
+        # store's one finding is the item's own clean-importer finding (red when the join starts requiring
+        # receipts of importer-authored records again).
         f = clean_machine()
         _r1_impbi = envelope("BI-1", "backlog_item", "done",
                              actor={"kind": "importer", "id": "import-assistant"})
@@ -9754,8 +11114,10 @@ def self_test():
         del _r1_impo["prior"]["records"]["DN-1"]
         del _r1_impo["prior"]["digests"]["DN-1"]
         del _r1_impo["prior"]["held"]["DN"]
+        _r1_impr = run(f, obs=_r1_impo)
         check("r1-importer-authored-backlog-item-owes-no-receipt",
-              run(f, obs=_r1_impo).status == VALID)
+              _r1_impr is not None and _r1_impr.findings == [_ci_inactive("backlog_item", "BI-1")]
+              and not _r1_impr.cannot_evaluate and _r1_impr.checks.get("C-RECEIPTS") == "PASS")
         # ... yet the exemption is from owing and conferring only: a clean receipt naming an open
         # importer-authored backlog_item is the C-RECEIPTS finding a receipt naming an open clean item is
         # (red when the receipt targets are read among the non-importer items alone).
@@ -9766,7 +11128,8 @@ def self_test():
         _r1_tgt = run(f)
         check("r1-clean-receipt-of-unratified-importer-item-finding",
               _r1_tgt is not None and _r1_tgt.status == INVALID
-              and {c for c, v in _r1_tgt.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and {c for c, v in _r1_tgt.checks.items() if v != "PASS"} == {"C-RECEIPTS", "C-HANDOFF"}
+              and _r1_tgt.by_check.get("C-HANDOFF") == [_ci_inactive("backlog_item", "BI-2")]
               and _r1_tgt.by_check.get("C-RECEIPTS")
               == ["C-RECEIPTS: done 'DN-2' receipt_of -> backlog_item 'BI-2' which is not ratified at 'done' "
                   "(state 'open'; spec 8.5)"])
@@ -9780,7 +11143,8 @@ def self_test():
         _r1_two = run(f)
         check("r1-two-clean-receipts-of-importer-authored-item-finding",
               _r1_two is not None and _r1_two.status == INVALID
-              and {c for c, v in _r1_two.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and {c for c, v in _r1_two.checks.items() if v != "PASS"} == {"C-RECEIPTS", "C-HANDOFF"}
+              and _r1_two.by_check.get("C-HANDOFF") == [_ci_inactive("backlog_item", "BI-1")]
               and _r1_two.by_check.get("C-RECEIPTS")
               == ["C-RECEIPTS: backlog_item 'BI-1' has 2 done receipts; the receipt is one-to-one "
                   "(spec 8.5)"])
@@ -9800,8 +11164,9 @@ def self_test():
                       for f_ in _r3_imp.by_check.get("C-DECISION-CHAINS", [])))
         # ... and an importer-authored supersedes link removes no current authority: a clean decided PD-1
         # that an importer-authored withdrawn PD-2 supersedes stays its chain's one current resolution,
-        # and with no importer decision current the store is VALID (red when the C-DECISION-CHAINS count
-        # lets an importer-authored link supersede, as only the firewall arm's derivation does).
+        # and with no importer decision current the store's one finding is PD-2's own clean-importer finding
+        # (red when the C-DECISION-CHAINS count lets an importer-authored link supersede, as only the
+        # firewall arm's derivation does).
         f = clean_machine()
         _r3_implk = pd(2, status="withdrawn", supersedes="PD-1")
         _r3_implk["actor"] = {"kind": "importer", "id": "import-assistant"}
@@ -9809,8 +11174,8 @@ def self_test():
         f["counters.toml"] = counters(PD=2)
         _r3_lk = run(f)
         check("r3-importer-link-removes-no-authority",
-              _r3_lk is not None and _r3_lk.status == VALID
-              and _r3_lk.checks.get("C-DECISION-CHAINS") == "PASS")
+              _r3_lk is not None and _r3_lk.findings == [_ci_inactive("pending_decision", "PD-2")]
+              and not _r3_lk.cannot_evaluate and _r3_lk.checks.get("C-DECISION-CHAINS") == "PASS")
         # Only the exact kind `importer` is barred by the receipt firewall and exempt from the chain
         # derivation: a done authored by a lookalike kind (another case, an extension, a prefix, padding)
         # or by an actor whose kind cannot be read still confers its receipt in the count, and such a
@@ -10022,26 +11387,30 @@ def self_test():
         _fw_rc = _fw_run(_fw_receipt(), _fw_dig)
         check("firewall-inactive-importer-receipt-finding",
               _fw_rc is not None and _fw_rc.status == INVALID
-              and {c for c, v in _fw_rc.checks.items() if v != "PASS"} == {"C-RECEIPTS"}
+              and {c for c, v in _fw_rc.checks.items() if v != "PASS"} == {"C-RECEIPTS", "C-HANDOFF"}
+              and _fw_rc.by_check.get("C-HANDOFF") == [_ci_inactive("done", "DN-1")]
               and _fw_rc.by_check.get("C-RECEIPTS")
               == ["C-RECEIPTS: ratified backlog_item 'BI-1' is authored by a non-importer actor but its only "
                   "receipt(s) 'DN-1' are importer-authored; it MUST hold a clean receipt authored by a "
                   "non-importer actor, or a maintainer-authored maintainer_decision correcting it (spec 8.6)"]
               and _fw_disclosed(_fw_rc))
-        # The spec 8.6 remedy is accepted on this store too; a maintainer decision that links the item by
-        # any relation but `corrects` is no remedy (red when the remedy accepts any relation).
+        # The spec 8.6 remedy is accepted on this store too, its one finding the receipt's own
+        # clean-importer finding; a maintainer decision that links the item by any relation but `corrects`
+        # is no remedy (red when the remedy accepts any relation).
         _fw_rm = _fw_run(_fw_receipt(md(1, links=[{"rel": "corrects", "id": "BI-1"}])), _fw_dig)
         _fw_rl = _fw_run(_fw_receipt(md(1, links=[{"rel": "relates", "id": "BI-1"}])), _fw_dig)
         check("firewall-inactive-corrects-remedy-accepted",
-              _fw_rm is not None and _fw_rm.status == VALID and _fw_disclosed(_fw_rm))
+              _fw_rm is not None and _fw_rm.findings == [_ci_inactive("done", "DN-1")]
+              and not _fw_rm.cannot_evaluate and _fw_rm.checks.get("C-RECEIPTS") == "PASS"
+              and _fw_disclosed(_fw_rm))
         check("firewall-inactive-non-corrects-remedy-confers-nothing",
               _fw_rl is not None and _fw_rl.checks.get("C-RECEIPTS") == "FINDING"
               and any("'BI-1'" in m and "importer-authored" in m for m in _fw_rl.by_check.get("C-RECEIPTS", [])))
         # The decision-chain arm on this store: an importer-authored decision's `supersedes` links remove
         # no current authority, over the chain section 8.8 defines with those links included. A maintainer
         # PD-1 decided that an importer-authored PD-2 supersedes stays the chain's one resolution, and the
-        # store certifies (red when an importer-authored link counts toward supersession again: the arm
-        # then reads PD-2 as the resolution and reports it).
+        # store's one finding is PD-2's own clean-importer finding (red when an importer-authored link
+        # counts toward supersession again: the arm then reads PD-2 as the resolution and reports it).
         def _fw_shape(head=False, archived=False):
             m = clean_machine()
             rows = [pd(1), dict(pd(2, supersedes="PD-1"), actor={"kind": "importer"})]
@@ -10058,7 +11427,8 @@ def self_test():
 
         _fw_ch = run(_fw_shape())
         check("firewall-inactive-importer-link-keeps-clean-resolution",
-              _fw_ch is not None and _fw_ch.status == VALID
+              _fw_ch is not None and _fw_ch.findings == [_ci_inactive("pending_decision", "PD-2")]
+              and not _fw_ch.cannot_evaluate
               and _fw_ch.checks.get("C-DECISION-CHAINS") == "PASS" and _fw_disclosed(_fw_ch))
         # ... so a maintainer PD-3 that supersedes PD-2 is a second current resolution of the one chain
         # PD-2 joins, a C-DECISION-CHAINS finding (spec 8.5, 8.8), never two one-member chains that each
@@ -10069,12 +11439,14 @@ def self_test():
         _fw_jh = run(_fw_shape(head=True))
         check("firewall-inactive-importer-joined-two-heads-finding",
               _fw_jh is not None and _fw_jh.status == INVALID
-              and {c for c, v in _fw_jh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and {c for c, v in _fw_jh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS", "C-HANDOFF"}
+              and _fw_jh.by_check.get("C-HANDOFF") == [_ci_inactive("pending_decision", "PD-2")]
               and _fw_jh.by_check.get("C-DECISION-CHAINS") == _fw_two and _fw_disclosed(_fw_jh))
         _fw_ajh = run(_fw_shape(head=True, archived=True))
         check("firewall-inactive-archived-importer-joined-two-heads-finding",
               _fw_ajh is not None and _fw_ajh.status == INVALID
-              and {c for c, v in _fw_ajh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and {c for c, v in _fw_ajh.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS", "C-HANDOFF"}
+              and _fw_ajh.by_check.get("C-HANDOFF") == [_ci_inactive("pending_decision", "PD-2")]
               and _fw_ajh.by_check.get("C-DECISION-CHAINS") == _fw_two and _fw_disclosed(_fw_ajh))
         # A chain no non-importer decision resolves (an importer-authored PD-1 decided alone) is the arm's
         # finding: resolving it now takes a new clean decision linking back (spec 8.6; red when the arm
@@ -10085,7 +11457,8 @@ def self_test():
         _fw_lone = run(f)
         check("firewall-inactive-importer-only-chain-finding",
               _fw_lone is not None and _fw_lone.status == INVALID
-              and {c for c, v in _fw_lone.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS"}
+              and {c for c, v in _fw_lone.checks.items() if v != "PASS"} == {"C-DECISION-CHAINS", "C-HANDOFF"}
+              and _fw_lone.by_check.get("C-HANDOFF") == [_ci_inactive("pending_decision", "PD-1")]
               and _fw_lone.by_check.get("C-DECISION-CHAINS")
               == ["C-DECISION-CHAINS: importer-authored pending_decision 'PD-1' is the current effective "
                   "resolution of a clean pending_decision chain; resolving it now takes a new clean decision "
@@ -10201,17 +11574,23 @@ def self_test():
               all(_fw_cant(r, "C-DECISION-CHAINS", _fw_lk_pd, "the chains are not evaluated as a pass")
                   and _fw_cant(r, "C-DECISION-CHAINS", _fw_lk_pd, "the decision-chain firewall")
                   for r in [_fw_lk_chain(cur=k) for k in _fw_lk_kinds] + [_fw_lk_chain(old="Importer")]))
-        # Legacy importer-authored clean history the firewall leaves alone: an importer-authored item ratified
-        # at done with its importer-authored receipt, and an importer-authored decision a maintainer decision
-        # supersedes, certify VALID (red when either arm grades importer-authored history it must not).
+        # Importer-authored clean records the receipt and decision-chain arms leave alone: an importer-authored
+        # item ratified at done with its importer-authored receipt, and an importer-authored decision a
+        # maintainer decision supersedes, draw no receipt or chain finding, only one clean-importer finding
+        # per record (spec 8.6) under C-HANDOFF (red when either arm grades those records).
         f = clean_machine()
         f["backlog_item.index.toml"] = idx([dict(bi(1, "done"), actor={"kind": "importer"}), bi(2, "open")])
         f["done.index.toml"] = idx([copy.deepcopy(_fw_idn)])
         f["pending_decision.index.toml"] = idx([dict(pd(1), actor={"kind": "importer"}), pd(2, supersedes="PD-1")])
         f["counters.toml"] = counters(PD=2)
         _fw_hist = _fw_run(f, _fw_dig)
-        check("firewall-inactive-legacy-history-valid",
-              _fw_hist is not None and _fw_hist.status == VALID and _fw_disclosed(_fw_hist))
+        check("firewall-inactive-importer-history-clean-importer-findings-only",
+              _fw_hist is not None and not _fw_hist.cannot_evaluate
+              and {c for c, v in _fw_hist.checks.items() if v != "PASS"} == {"C-HANDOFF"}
+              and sorted(_fw_hist.findings)
+              == sorted([_ci_inactive("backlog_item", "BI-1"), _ci_inactive("done", "DN-1"),
+                         _ci_inactive("pending_decision", "PD-1")])
+              and _fw_disclosed(_fw_hist))
         # The firewall fails closed on this inactive store as on an active one: a clean-record reader that
         # did not evaluate leaves its records unseated, so each arm whose own record types are unread is
         # CANNOT-EVALUATE naming that reader in one message, never a pass over them (red when the driver
@@ -11760,10 +13139,11 @@ def self_test():
                                         for f in _f6cr.findings))
 
         # Fable F2: a dedicated LOCAL sync_target (dir:/path -> tcanon is None) whose committed pointer names
-        # a canonicalizable REMOTE is a C-SYNC-AGREE finding (leg 2), symmetric with the actual-remote leg's
-        # local-target-with-a-remote finding. Pre-fix leg 2 short-circuited on `tcanon and pcanon` (tcanon
-        # None) and passed the remote pointer silently. Hand-set the remote Target, since resolve_store
-        # rejects a remote committed pointer before validate_store sees it.
+        # a canonicalizable REMOTE is still a C-SYNC-AGREE finding (leg 2): the dir: target is refused on
+        # that leg whatever the pointer holds, so a remote pointer is never passed silently. Pre-fix leg 2
+        # short-circuited on `tcanon and pcanon` (tcanon None) and passed the remote pointer silently.
+        # Hand-set the remote Target, since resolve_store rejects a remote committed pointer before
+        # validate_store sees it.
         _lt = clean_machine()
         _lt["manifest.toml"] = base_manifest()
         _lt["manifest.toml"]["store"] = {"sync_target": "dir:/some/where"}
@@ -11772,9 +13152,198 @@ def self_test():
         _ltr = validate_store(_ltres, observations={"tracked": "tracked", "actual_remote": "",
                                                     "prior": clean_prior()["prior"]})
         check("sync-local-target-remote-pointer-invalid", _ltr is not None and _ltr.status == INVALID)
-        check("sync-local-target-remote-pointer-named",
-              _ltr is not None and any("is a local target but the" in f
-                                       and "committed pointer names a remote" in f for f in _ltr.findings))
+        check("sync-dir-target-refused-despite-remote-pointer",
+              _ltr is not None and any("is a dir: filesystem target" in f
+                                       and "no committed pointer can agree" in f for f in _ltr.findings))
+
+        # A filesystem sync target is accepted only as git:<absolute path>. A dedicated dir: target is
+        # refused on EACH leg, each naming the remedy, even with a local committed pointer and NO actual
+        # remote (where the actual-remote leg used to pass silently) or no observation at all. Each leg's
+        # finding is asserted by its own text, so removing either leg's refusal fails its vector.
+        def _sync_case(target, actual, pointer=None):
+            m = clean_machine()
+            m["manifest.toml"] = base_manifest()
+            m["manifest.toml"]["store"] = {"sync_target": target}
+            res = resolve_store(build(m))
+            if pointer is not None:
+                res.target = classify_target(pointer)
+            obs = {"tracked": "tracked", "prior": clean_prior()["prior"]}
+            if actual is not None:
+                obs["actual_remote"] = actual
+            return validate_store(res, observations=obs)
+
+        def _sync_findings(r):
+            return [f for f in (r.findings if r is not None else []) if "C-SYNC-AGREE" in f]
+
+        _remedy = "use git:<absolute path>"
+        for _tag, _act in (("no-remote", ""), ("remote", "/srv/opf-store.git"), ("unobserved", None)):
+            _dr = _sync_case("dir:/srv/opf-store", _act)
+            check("sync-dir-target-{}-invalid".format(_tag), _dr is not None and _dr.status == INVALID)
+            check("sync-dir-target-{}-pointer-leg-refused".format(_tag),
+                  any("is a dir: filesystem target" in f and "no committed pointer can agree" in f
+                      and _remedy in f for f in _sync_findings(_dr)))
+            check("sync-dir-target-{}-remote-leg-refused".format(_tag),
+                  any("is a dir: filesystem target" in f and "actual remote" in f and "cannot agree" in f
+                      and _remedy in f for f in _sync_findings(_dr)))
+        # The bare absolute path, the other filesystem form outside git:, is refused on both legs alike.
+        _bp = _sync_case("/srv/opf-store", "")
+        check("sync-bare-path-target-both-legs-refused",
+              sum(1 for f in _sync_findings(_bp) if "is a bare-path filesystem target" in f and _remedy in f) == 2)
+        # git:<absolute path> canonicalizes to a comparable local form: it agrees with a matching actual
+        # remote and committed pointer (spelling-normalized: repeated slashes, '.' and a trailing slash),
+        # and a different path is a finding on each leg.
+        _ga = _sync_case("git:/srv/opf-store.git", "/srv/opf-store.git", pointer="git:/srv//./opf-store.git/")
+        check("sync-git-abs-path-agrees-valid", _ga is not None and _ga.status == VALID)
+        _gr = _sync_case("git:/srv/opf-store.git", "/srv/other.git")
+        check("sync-git-abs-path-other-remote-invalid", _gr is not None and _gr.status == INVALID)
+        check("sync-git-abs-path-other-remote-named",
+              any("does not match the store repository's actual remote '/srv/other.git'" in f
+                  for f in _sync_findings(_gr)))
+        _gp = _sync_case("git:/srv/opf-store.git", "/srv/opf-store.git", pointer="git:/srv/other.git")
+        check("sync-git-abs-path-other-pointer-invalid", _gp is not None and _gp.status == INVALID)
+        check("sync-git-abs-path-other-pointer-named",
+              any("committed pointer remote '/srv/other.git' does not agree" in f for f in _sync_findings(_gp)))
+        # No '.git' fold for a local path (a different directory), and a '..' segment is unresolvable.
+        _gg = _sync_case("git:/srv/opf-store", "/srv/opf-store.git")
+        check("sync-git-abs-path-no-dotgit-fold", _gg is not None and _gg.status == INVALID)
+        _gd = _sync_case("git:/srv/x/../opf-store.git", "/srv/opf-store.git")
+        check("sync-git-abs-path-dotdot-cant", _gd is not None and _gd.status == CANNOT_EVALUATE)
+        # A relative git: path is refused on both legs, naming the remedy (it used to be cannot-evaluate).
+        for _tag, _rel in (("subdir", "git:srv/opf-store.git"), ("dot", "git:./opf-store.git"),
+                           ("bare-name", "git:opf-store")):
+            _rr = _sync_case(_rel, "/srv/opf-store.git")
+            check("sync-git-relative-refused-{}".format(_tag),
+                  _rr is not None and _rr.status == INVALID
+                  and sum(1 for f in _sync_findings(_rr)
+                          if "is a relative git: filesystem target" in f and _remedy in f) == 2)
+        # https and ssh URL targets compare exactly as before: equivalent spellings agree, a different repo
+        # is a finding, and a local-path actual remote or committed pointer against a URL target stays the
+        # disclosed cannot-evaluate it was (the local form is used only for a git:<absolute path> target).
+        _url = "https://example.invalid/org/store.git"
+        _ssh = "ssh://git@example.invalid/org/store"
+        for _tag, _tg in (("https", _url), ("ssh", _ssh)):
+            _uv = _sync_case(_tg, "git@example.invalid:org/store.git")
+            check("sync-{}-target-equivalent-remote-valid".format(_tag), _uv is not None and _uv.status == VALID)
+            _ud = _sync_case(_tg, "https://example.invalid/org/other.git")
+            check("sync-{}-target-other-remote-invalid".format(_tag), _ud is not None and _ud.status == INVALID)
+            _ul = _sync_case(_tg, "/srv/opf-store.git")
+            check("sync-{}-target-local-remote-cant".format(_tag),
+                  _ul is not None and _ul.status == CANNOT_EVALUATE and not _sync_findings(_ul))
+            _up = _sync_case(_tg, "git@example.invalid:org/store.git", pointer="git:/srv/opf-store.git")
+            check("sync-{}-target-local-pointer-cant".format(_tag),
+                  _up is not None and _up.status == CANNOT_EVALUATE and not _sync_findings(_up))
+        # A file:// URL names a filesystem repository outside the git:<absolute path> form, so it is refused
+        # on both legs with the remedy, spelled bare or under git: (it used to be cannot-evaluate).
+        for _tag, _fu in (("bare", "file:///srv/opf-store.git"), ("git", "git:file:///srv/opf-store.git"),
+                          ("upper", "FILE:///srv/opf-store.git")):
+            _fr = _sync_case(_fu, "/srv/opf-store.git")
+            check("sync-file-url-target-refused-{}".format(_tag),
+                  _fr is not None and _fr.status == INVALID
+                  and sum(1 for f in _sync_findings(_fr)
+                          if "is a file:// URL filesystem target" in f and _remedy in f) == 2)
+        # Whitespace is significant in a path: a git: path or an actual remote path with leading or trailing
+        # whitespace is refused as ambiguous, never trimmed into agreement with the unpadded spelling.
+        _pt = _sync_case("git:/srv/opf-store ", "/srv/opf-store")
+        check("sync-git-abs-path-padded-target-refused",
+              _pt is not None and _pt.status == INVALID
+              and sum(1 for f in _sync_findings(_pt)
+                      if "leading or trailing whitespace, an ambiguous filesystem target" in f
+                      and _remedy in f) == 2)
+        _pl = _sync_case("git: /srv/opf-store", "/srv/opf-store")
+        check("sync-git-abs-path-leading-space-target-refused",
+              _pl is not None and _pl.status == INVALID
+              and any("leading or trailing whitespace" in f for f in _sync_findings(_pl)))
+        for _tag, _pr in (("trailing", "/srv/opf-store "), ("leading", " /srv/opf-store")):
+            _pa = _sync_case("git:/srv/opf-store", _pr)
+            check("sync-git-abs-path-padded-remote-refused-{}".format(_tag),
+                  _pa is not None and _pa.status == INVALID
+                  and any("actual remote {!r} is a filesystem path with leading or trailing whitespace".format(_pr)
+                          in f for f in _sync_findings(_pa)))
+        # Git reads any '://' as a scheme separator (it refuses /srv/a://repo as protocol '/srv/a'), so a
+        # spelling containing '://' is a URL form on BOTH legs, never an absolute path: it agrees with
+        # nothing, whichever leg spells it, bare or under git:, padded or not.
+        for _tag, _tg, _ar in (("in-target", "git:/srv/a://repo", "/srv/a:/repo"),
+                               ("in-remote", "git:/srv/a:/repo", "/srv/a://repo"),
+                               ("in-both", "git:/srv/a://repo", "/srv/a://repo"),
+                               ("other-remote", "git:/srv/a://repo", "/srv/a:/other"),
+                               ("bare", "/srv/a://repo", "/srv/a://repo"),
+                               ("bare-padded", "/srv/a://repo ", "/srv/a://repo")):
+            _sv = _sync_case(_tg, _ar)
+            check("sync-scheme-substring-path-refused-{}".format(_tag),
+                  _sv is not None and _sv.status in (INVALID, CANNOT_EVALUATE))
+            # The rule that refuses each: a git: target holding '://' is a URL form no canonicalizer can
+            # split, a cannot-evaluate naming that form (never a path mismatch), and a padded bare one is a
+            # URL with leading or trailing whitespace, refused on both legs.
+            if _tag == "other-remote":
+                check("sync-scheme-substring-path-other-remote-target-unresolved",
+                      _sv is not None and _sv.status == CANNOT_EVALUATE and not _sync_findings(_sv)
+                      and any("the sync_target remote form '/srv/a://repo' cannot be canonicalized" in c
+                              for c in _sv.cannot_evaluate))
+            elif _tag == "bare-padded":
+                check("sync-scheme-substring-path-bare-padded-url-whitespace",
+                      _sv is not None and _sv.status == INVALID
+                      and sum(1 for f in _sync_findings(_sv)
+                              if "is a URL with leading or trailing whitespace" in f) == 2)
+        # A path-shaped actual remote holding '://' never names the git:<absolute path> target through
+        # git: against a target whose path differs from the one it spells it is a mismatch finding, and
+        # against the same path it stays a disclosed cannot-evaluate.
+        _so = _sync_case("git:/srv/a%3A%2F%2Frepo", "/srv/a://repo")
+        check("sync-scheme-substring-remote-other-path-invalid",
+              _so is not None and _so.status == INVALID
+              and any("does not match the store repository's actual remote '/srv/a://repo': git reads its "
+                      "'://' as an unsupported protocol" in f for f in _sync_findings(_so)))
+        _ss = _sync_case("git:/srv/a:/repo", "/srv/a://repo")
+        check("sync-scheme-substring-remote-same-path-cant",
+              _ss is not None and _ss.status == CANNOT_EVALUATE and not _sync_findings(_ss)
+              and any("the actual remote '/srv/a://repo' cannot be canonicalized" in c
+                      for c in _ss.cannot_evaluate))
+        # Whitespace is significant to git in a URL as in a path: a URL actual remote or URL target with
+        # leading or trailing whitespace is refused by its own message, never trimmed into agreement.
+        for _tag, _tg, _ar in (("remote-trailing", _url, _url + " "), ("remote-leading", _url, " " + _url),
+                               ("remote-ssh", _ssh, _ssh + " ")):
+            _wr = _sync_case(_tg, _ar)
+            check("sync-url-padded-{}-refused".format(_tag),
+                  _wr is not None and _wr.status == INVALID
+                  and any("actual remote {!r} is a URL with leading or trailing whitespace".format(_ar) in f
+                          for f in _sync_findings(_wr)))
+        for _tag, _tg in (("target-trailing", _url + " "), ("target-git-leading", "git: " + _url)):
+            _wt = _sync_case(_tg, _url)
+            check("sync-url-padded-{}-refused".format(_tag),
+                  _wt is not None and _wt.status == INVALID
+                  and sum(1 for f in _sync_findings(_wt)
+                          if "is a URL with leading or trailing whitespace" in f) == 2)
+        # A remote stored with a line ending of its own keeps it (git's one line ending is removed), so it
+        # is a padded path, refused.
+        _nl = _sync_case("git:/srv/opf-store", "/srv/opf-store\n")
+        check("sync-git-abs-path-newline-remote-refused", _nl is not None and _nl.status == INVALID
+              and any("leading or trailing whitespace" in f for f in _sync_findings(_nl)))
+        # A present remote whose URL is only whitespace is described as blank, never as absent or a URL.
+        for _tag, _tg in (("git-path", "git:/srv/opf-store"), ("url", _url)):
+            _br = _sync_case(_tg, "   ")
+            check("sync-blank-remote-{}-refused-as-blank".format(_tag),
+                  _br is not None and _br.status == INVALID
+                  and any("is present but blank or whitespace-only" in f for f in _sync_findings(_br))
+                  and not any("has no actual remote" in f or "URL" in f for f in _sync_findings(_br)))
+        _bd = _sync_case("dir:/srv/opf-store", "   ")
+        check("sync-blank-remote-labelled-blank",
+              any("actual remote (present but blank: '   ')" in f for f in _sync_findings(_bd)))
+        # A blank git: payload names no remote: refused on both legs, never read as a URL form.
+        check("fs-path-form-blank", _fs_path_form("") == "blank" and _fs_path_form(" \t") == "blank")
+        check("fs-path-form-scheme-substring-url", _fs_path_form("/srv/a://repo") is None
+              and _fs_path_form("/srv/a://repo ") is None and _fs_path_form("FILE:///srv/a") == "file-url")
+        _bg = _sync_case("git:   ", "/srv/opf-store")
+        check("sync-blank-git-payload-refused",
+              _bg is not None and _bg.status == INVALID
+              and sum(1 for f in _sync_findings(_bg) if "has a blank git: payload" in f) == 2
+              and not any("remote form" in c for c in (_bg.cannot_evaluate if _bg is not None else [])))
+        # The actual-remote leg labels a supplied but malformed observation as malformed, not as unobserved.
+        _mr = _sync_case("dir:/srv/opf-store", 5)
+        check("sync-dir-target-malformed-remote-labelled",
+              any("actual remote (the `actual_remote` observation was supplied but malformed)" in f
+                  for f in _sync_findings(_mr)))
+        _ur = _sync_case("dir:/srv/opf-store", None)
+        check("sync-dir-target-unobserved-remote-labelled",
+              any("actual remote (no `actual_remote` observation was supplied)" in f for f in _sync_findings(_ur)))
 
         # F-5: _canonical_remote exotic edges.
         # (a) an scp bracketed-IPv6 host whose PATH itself contains '@' must not mis-split on a colon

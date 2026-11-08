@@ -3,7 +3,16 @@
 
   opf.py --self-test                run every registered OPF helper self-test (Linux CI leg)
   opf.py --self-test-group NAME     run one named group of them (SELF_TEST_GROUPS; local runner)
+  opf.py --declaration              the documented run of the spec 16.1 runtime check and its report
   opf.py <verb> [--root DIR] ...    a store verb (default --root: the cwd product repository root)
+
+Spec 16.1: before it dispatches render, doctor, init, absorb, record or adopt, the dispatcher runs the runtime
+check of the declaration file opf-declaration.toml installed beside it (_opf_declaration.runtime_check); an
+installed copy that is absent, unreadable, not the shipped bytes (the shipped-file digest is
+_opf_declaration.SHIPPED_DECLARATION_SHA256), malformed or contradictory refuses the verb at exit 2 before any
+store is resolved. upgrade, import and the not-yet-implemented verbs read and write nothing and are not gated.
+`--declaration` and doctor write the spec 16.1 report (the declaration restated as shipped, both digests and
+the runtime result) on stdout.
 
 This is the dispatcher the OPF core-tooling units grow into. U1 lands it with the store-side helper
 self-test wired in; store verbs that have not yet landed are recognized names that report
@@ -19,9 +28,13 @@ deliverable failures can remain. `doctor` HAS landed: `opf doctor
 (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 `validate_store` store-integrity engine
 over them, returning that engine's 0/1/2 contract (a NOT-ADOPTED root reports NOT APPLICABLE and exits 0;
 with `--require-store`, the enforcement-pack CI floor, it is a cannot-evaluate and exits 2 instead, so a
-repository whose store was removed cannot pass CI vacuously). Doctor is read-only; its
-observation gather is the caller-side git seam validate_store itself never touches. `upgrade` is a
-recognized verb, but this tooling defines no store upgrade: `opf upgrade` refuses every argument list on
+repository whose store was removed cannot pass CI vacuously). `opf doctor --store-identity [--root DIR]`
+instead compares the store identity (the committed `.opf.toml` target and the SHA-256 of the machine store's
+`init.toml`) with the values pinned in `.github/opf-store-identity.toml` at the product root (`schema = 1`,
+`target`, `init_sha256`): 0 both match, 1 a value differs or a `.opf.local.toml` override is present, 2 any
+value absent, malformed, unreadable or unresolvable, which outranks 1 (the override included). Doctor is
+read-only; its observation gather is the caller-side git seam validate_store itself never touches. `upgrade`
+is a recognized verb, but this tooling defines no store upgrade: `opf upgrade` refuses every argument list on
 every root at exit 2, parsing no argument, resolving no root, reading nothing and writing nothing.
 `import`'s former
 modes, `opf import [--root DIR] (--scan --set FILE | --plan --set FILE | --review <run-id> --actor NAME
@@ -58,7 +71,8 @@ refuses before any write while a plan op's slice, or the driver's receipt stage,
 `opf adopt reconcile [--root DIR]` recovers an interrupted adoption transaction from the adoption journal
 alone (_opf_adopt_apply.reconcile_report), never resolving the store, holding the journal lock and its
 own single-writer store leases across the recovery, and refuses with a named finding what it cannot prove
-safe; releasing a dead run's leftover store lease (spec 5.7) is not built yet. `complete` is
+safe; it releases a leftover store lease only when an interrupted adoption apply left it beside an open
+adoption transaction and its holder is confirmed dead (spec 5.7). `complete` is
 recognized and refuses (exit 2) until the completion stage lands in a later PR.
 
 Adopter-rooted, like doctor.py/migrate.py/conformance.py: an OPF verb operates on a PRODUCT repository
@@ -169,7 +183,7 @@ def _bootstrap():
     global _opf_store, _opf_schema, _opf_release, _opf_changelog, _opf_check
     global _opf_emit, _opf_views, _opf_fuzz, _opf_observe, _opf_absorb
     global _opf_worklog, _opf_write_guard, _opf_record, _opf_adopt_apply, _opf_adopt_plan
-    global _opf_adopt_state
+    global _opf_adopt_state, _opf_declaration
     try:
         import _opf_worklog     # manifest-selected worklog intake + WL reference grammar
         import _opf_store       # U1: store resolution + discovery + manifest base/profile schema
@@ -187,6 +201,7 @@ def _bootstrap():
         import _opf_adopt_apply  # OPF-ADOPT U1+U2+U3+U4+U5+U7: the apply shell (the three file ops, init-store, the registration ops, enable-hook and the three finish ops execute)
         import _opf_adopt_plan   # OPF-ADOPT K9a: read-only investigation + plan freeze (the adopt planner)
         import _opf_adopt_state  # homes-1 adoption control area and bounded adoption state (C-CONTAINMENT)
+        import _opf_declaration  # spec 16.1: the declaration file's runtime check and the report emitter
     except ImportError as exc:
         try:
             line = "opf: cannot bootstrap: {} (cannot evaluate)".format(_init_inert(exc.name or str(exc)))
@@ -973,6 +988,8 @@ _ENTRY_FLOOR_EXEMPT = {
     "opf-close-exc-safe-vectors": "the dispatcher's in-flight-exception close vectors (#377, "
                                   "_close_exc_safe_vectors_self_test)",
     "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
+    "opf-declaration-cli": "the dispatcher's spec 16.1 declaration suite (_declaration_cli_self_test)",
+    "opf-verb-status": "the dispatcher's verb status table suite (_verb_status_self_test)",
 }
 
 
@@ -16976,15 +16993,32 @@ def _doctor_report(result):
     print("  residuals (disclosed by-design, not gradeable): {}".format(len(result.residuals)))
 
 
+def _doctor_store_identity(root):
+    """`opf doctor --store-identity`: report _opf_store.check_store_identity at `root` and return its 0/1/2
+    exit (identity_exit_code). A cannot-evaluate goes to stderr; any residual escape fails closed to exit 2."""
+    try:
+        result = _opf_store.check_store_identity(Path(os.path.abspath(root)))
+    except Exception as exc:  # noqa: BLE001  fail-closed: an escape is cannot-evaluate, never a verdict
+        print("opf doctor: store identity: cannot evaluate: unexpected error at {!r} ({!r}); failing closed "
+              "to exit 2".format(root, exc), file=sys.stderr)
+        return EXIT_MALFORMED
+    stream = sys.stderr if result.status == _opf_store.CANNOT_EVALUATE else sys.stdout
+    print("opf doctor: store identity: {} (pinned in {})".format(result.status, _opf_store.IDENTITY_REL),
+          file=stream)
+    for note in result.notes:
+        print("  {}".format(note), file=stream)
+    return _opf_store.identity_exit_code(result)
+
+
 def _cmd_doctor(rest):
-    """`opf doctor [--root DIR] [--require-store]`: the store-integrity verb.
+    """`opf doctor [--root DIR] [--require-store | --store-identity]`: the store-integrity verb.
 
     Doctor RESOLVES the store at --root (default: the cwd product repository root), gathers the inert
     git-derived observations (_opf_observe.gather: tracked, actual_remote, prior), and runs the U6 whole-store
     integrity engine (_opf_check.validate_store) over them, returning that engine's own 0/1/2 contract via
     _opf_check.exit_code (0 VALID, 1 INVALID, 2 CANNOT-EVALUATE). A NOT-ADOPTED root reports NOT APPLICABLE
     and exits 0 (the pack's own `--root .` case, mirroring render); any other non-RESOLVED status is a located
-    cannot-evaluate (exit 2). `--require-store` is the enforcement-pack CI floor (spec 1.3.0 14.1: the pack
+    cannot-evaluate (exit 2). `--require-store` is the enforcement-pack CI floor (spec 2.0.0 14.1: the pack
     MUST provide CI checks): with it, a NOT-ADOPTED root is a located cannot-evaluate (exit 2) instead of NOT
     APPLICABLE, so a repository whose store was removed cannot pass CI vacuously; every other status keeps
     its unflagged outcome. Doctor is READ-ONLY: it makes no store change (SECI-preview-has-no-side-effects);
@@ -16992,9 +17026,19 @@ def _cmd_doctor(rest):
     empty or option-looking or duplicate --root value, a duplicate --require-store -> exit 2), matching
     _cmd_render's --root loop. Every
     residual escape from the resolver, the git gather, or the engine fails closed to exit 2 (never a false
-    verdict), the same class-width backstop the render dispatch carries."""
+    verdict), the same class-width backstop the render dispatch carries.
+
+    `--store-identity` runs the store identity comparison INSTEAD of the integrity engine
+    (_opf_store.check_store_identity, spec 14.1 completion check 4): the committed pointer's target and the
+    SHA-256 of the machine store's init.toml against the values pinned in .github/opf-store-identity.toml at
+    the product root, a fixed path no argument selects. It exits 0 when both match, 1 when a readable value
+    differs or a .opf.local.toml override is present, and 2 when any required value is absent, malformed,
+    unreadable or unresolvable; evaluation runs before any mismatch verdict and an early cannot-evaluate ends
+    it, so 2 outranks 1, the override included. It needs a store by construction, so --require-store beside
+    it, or the flag given twice, is a usage error (exit 2)."""
     root = None
     require_store = False
+    store_identity = False
     i = 0
     while i < len(rest):
         tok = rest[i]
@@ -17003,6 +17047,12 @@ def _cmd_doctor(rest):
                 print("opf doctor: --require-store given more than once", file=sys.stderr)
                 return EXIT_MALFORMED
             require_store = True
+            i += 1
+        elif tok == "--store-identity":
+            if store_identity:
+                print("opf doctor: --store-identity given more than once", file=sys.stderr)
+                return EXIT_MALFORMED
+            store_identity = True
             i += 1
         elif tok == "--root":
             if i + 1 >= len(rest):
@@ -17022,6 +17072,12 @@ def _cmd_doctor(rest):
             print("opf doctor: unrecognized argument {!r}".format(tok), file=sys.stderr)
             return EXIT_MALFORMED
     root = root if root is not None else "."
+    if store_identity:
+        if require_store:
+            print("opf doctor: --store-identity requires a store by itself; give it without --require-store",
+                  file=sys.stderr)
+            return EXIT_MALFORMED
+        return _doctor_store_identity(root)
     try:
         res = _opf_store.resolve_store(Path(os.path.abspath(root)))
     except Exception as exc:  # noqa: BLE001  fail-closed: a resolver escape is cannot-evaluate, never a verdict
@@ -18526,8 +18582,10 @@ def _init_main(rest):
     the spec 5.7 lease (.working/toml/lease.toml beside its active record) is attached, the payloads
     are published, and the lease is detached before the final observation, which runs with the
     mutex still held, as does a generation-2 run's post-write .gitignore effectiveness check; the
-    mutex is released before the success report. --recover passes explicit recovery to the acquisition, which
-    clears a dead run's leftover records only once their holder is confirmed dead. Publication is
+    mutex is released before the success report. --recover passes explicit recovery to the acquisition
+    (as operation "opf-init-plain"), which clears a dead run's leftover records only once their holder
+    is confirmed dead and they name that same operation; a leftover of another operation, an adoption's
+    "opf-init" included, is refused and kept (_opf_oplock._require_same_operation). Publication is
     create-only and deliberately not transactional: a later failure reports observed planned
     paths and leaves them for review. A failure releases whatever is still held in a finally
     inside the handled try, so before either handler below prints; a release failure there prints
@@ -19476,6 +19534,12 @@ def _adopt_read_inputs(path):
     return doc
 
 
+# The `opf adopt` subcommand vocabulary, and the subcommands refused before any parse or read in this build.
+# Module level, so the status self-test binds adopt's partial scope to the same tuples.
+ADOPT_SUBCOMMANDS = ("plan", "approve", "apply", "complete", "reconcile", "status")
+ADOPT_DEFERRED = ("complete",)
+
+
 def _cmd_adopt(rest):
     """`opf adopt <subcommand> ...` (spec 1, 14; OPF-ADOPT K9a): the adoption verb. The subcommand
     vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a shipped the two
@@ -19541,25 +19605,43 @@ def _cmd_adopt(rest):
           printed as `REFUSED (<finding>)`, in two classes. A refusal BEFORE ANY RECOVERY WRITE leaves the
           product files and every transaction as found, and releases any lock or lease it took; its message
           names anything that stays (the stale-lock arbitration file lock.break, a lock or lease whose
-          creation failed part-way): journal-lock-held (a possibly-live owner holds the journal lock, never
-          seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read or
-          classify, a stray or wrong-type journal entry, a transaction renamed or replaced after the
-          listing, or an open transaction whose journal records another product root's binding or none:
-          one copied in from another tree, and equally this tree's own after the tree moved to another
-          filesystem, was restored from a backup or was remounted under another device number, which
-          changes the identity the journal is bound to; reconcile never consumes it, and clearing it is
-          the operator's own act outside any OPF operation), store-lease-held (a store pointer at the
-          product root, or a store lease present, or claimed by another writer, in a machine
-          subdirectory, beside an open transaction other than init-store's), init-store-reversal-unproven (the reversal could remove content the operation
-          did not create) or pre-lock-fault (any other fault before the journal lock was held and recovery
+          creation failed part-way, a journal lock whose release faulted or left it in place, or whose
+          staying could not be observed): journal-lock-held (a possibly-live owner holds the journal lock,
+          never seized), journal-unclassifiable (a journal, lock, entry or transaction the engine cannot read
+          or classify, a stray or wrong-type journal entry, a transaction renamed or replaced after the
+          listing, once reconcile took the journal lock, a journal path that no longer names the journal
+          it listed or a lock it took that it cannot read back there, or an open transaction whose journal
+          records another product root's binding or none: one copied in from another tree, and equally
+          this tree's own after the tree moved to another filesystem, was restored from a backup or was
+          remounted under another device number, which changes the identity the journal is bound to;
+          reconcile never consumes it, and clearing it is the operator's own act outside any OPF
+          operation), store-lease-held (a store pointer at the product root other than the in-root one
+          init-store publishes, or a store lease present in a machine subdirectory other than a dead
+          adoption apply's leftover, or one claimed by another writer or that cannot be claimed, beside an
+          open transaction other than init-store's), init-store-reversal-unproven (the reversal could
+          remove content the operation did not create) or pre-lock-fault (any other fault before the
+          journal lock was held and recovery
           began). A refusal AFTER RECOVERY BEGAN may leave the recovery partial, as the journal records it:
           recovery-failed (files already restored or frames already published stay, the transaction stays
           open, and a later reconcile resumes it; also a transaction directory replaced during recovery,
-          never reported recovered), or store-lease-release-failed (the recovery finished,
-          but a store lease this run took could not be released and stays, named). Also exit 2: a
-          cannot-evaluate root. NOT BUILT: releasing a dead run's leftover store lease (the spec 5.7
-          lease leg) lands with the adoption lease join; until then the operator releases it. Exit 1 is
-          not used.
+          never reported recovered; also a finished recovery whose journal lock was not confirmed released:
+          its release faulted or left that lock in place, which stays, named, or the lock could not be
+          observed afterwards, each place it may stay named), or store-lease-release-failed (the recovery
+          finished, but releasing a store lease this run took faulted: one that could not be released
+          stays, named, and one removed before its directory close failed is named as released). Also exit
+          2, printed as cannot evaluate with no finding: a product root that cannot be evaluated, or an
+          unexpected error, which can come after a recovery already ran, printed with every note recorded
+          on it (such a note can name a lock or lease that stays). A leftover store lease an interrupted
+          adoption apply kept (operation adopt-apply) beside an OPEN adoption transaction is released
+          through this reconciliation only once its holder is confirmed dead on this host (spec 5.7), and
+          the release is printed on every outcome, before a refusal or error too, and named in the text of
+          every refusal raised after it; beside such a transaction any other present lease refuses as
+          store-lease-held, and a lease beside no open transaction is not touched: each stays
+          the operator's to release. Reconcile takes, reads back and releases its journal lock in the journal
+          directory it opened, and checks that the journal path still names that directory only twice: once
+          the lock is taken, and after the release. A journal moved away and put back between those two
+          checks is not seen: another run that took the journal lock meanwhile, in whatever stood at the
+          journal path, can then run beside it, and the message does not mention that run. Exit 1 is not used.
       status [--root DIR] : report the adoption state READ-ONLY, writing nothing: the adoption evidence
           bundles (the _opf_store adoption evidence home, each graded by the engine's own bundle
           validator) and the adoption journal (_opf_adopt_apply.JOURNAL_REL, classified by the engine's
@@ -19578,8 +19660,8 @@ def _cmd_adopt(rest):
     The parser is the house fail-closed idiom: an unknown subcommand or token, an empty or
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
     false 0 or an uncaught exit-1), the same class-width backstop render and doctor carry."""
-    subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
-    deferred = ("complete",)
+    subcommands = ADOPT_SUBCOMMANDS
+    deferred = ADOPT_DEFERRED
     if not rest:
         print("opf adopt: give a subcommand ({})".format(" / ".join(subcommands)), file=sys.stderr)
         return EXIT_MALFORMED
@@ -19699,17 +19781,29 @@ def _cmd_adopt(rest):
     if sub == "reconcile":
         # The explicit recovery (spec 14.2): the adoption journal ALONE, never a store resolution and
         # never the reconcile-first gate (this IS the reconcile). Every refusal names its finding.
+        leases_released = []
+
+        def print_released():
+            # a leftover lease this run released is gone whatever the run then did, so its release is
+            # printed on every outcome, before a refusal or error too
+            for report in leases_released:
+                print("opf adopt reconcile: {}".format(report))
         try:
-            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs)
+            outcomes, stale_released, lock_taken = _opf_adopt_apply.reconcile_report(root_abs, leases_released)
         except _opf_adopt_apply.ReconcileRefusal as exc:
+            print_released()
             print("opf adopt reconcile: REFUSED ({}): {}".format(exc.finding, exc), file=sys.stderr)
             return EXIT_MALFORMED
         except _opf_adopt_apply.AdoptApplyError as exc:
-            print("opf adopt reconcile: cannot evaluate: {}".format(exc), file=sys.stderr)
+            print_released()
+            print("opf adopt reconcile: cannot evaluate: {}".format(_opf_adopt_apply._journal._msg_said(exc)),
+                  file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false 0 or uncaught exit-1
-            print("opf adopt reconcile: cannot evaluate: unexpected error ({!r}); failing closed to exit "
-                  "2".format(exc), file=sys.stderr)
+            # rendered with its notes: a release, or a lease that stays, may be recorded only there
+            print_released()
+            print("opf adopt reconcile: cannot evaluate: unexpected error ({}); failing closed to exit "
+                  "2".format(_opf_adopt_apply._journal._exc_said(exc)), file=sys.stderr)
             return EXIT_MALFORMED
         recovered = [(txn, outcome) for txn, outcome in outcomes
                      if outcome in ("rolled-back", "rolled-forward")]
@@ -19718,6 +19812,7 @@ def _cmd_adopt(rest):
         if stale_released:
             print("opf adopt reconcile: released the adoption journal lock a confirmed-dead run left at "
                   "{}/lock".format(_opf_adopt_apply.JOURNAL_REL))
+        print_released()
         if not (recovered or stale_released) and lock_taken:
             print("opf adopt reconcile: nothing to reconcile: every adoption transaction was already terminal "
                   "when this run took the journal lock (another reconcile may have recovered it first); no "
@@ -19793,8 +19888,10 @@ def _cmd_adopt(rest):
             print("opf adopt {}: cannot evaluate: {}".format(sub, exc), file=sys.stderr)
             return EXIT_MALFORMED
         except Exception as exc:  # noqa: BLE001  fail-closed backstop, never a false verdict or uncaught exit-1
-            print("opf adopt {}: cannot evaluate: unexpected error ({!r}); failing closed to exit "
-                  "2".format(sub, exc), file=sys.stderr)
+            # rendered with its notes: a close error the transaction raises as itself names there the lease
+            # it left in place
+            print("opf adopt {}: cannot evaluate: unexpected error ({}); failing closed to exit "
+                  "2".format(sub, _opf_adopt_apply._journal._exc_said(exc)), file=sys.stderr)
             return EXIT_MALFORMED
 
     # sub == "status": the read-only state report over the two adoption homes; ZERO writes. Both homes
@@ -20027,6 +20124,18 @@ def _cli_self_test():
         expect(["doctor", "--check", "--root", ""], EXIT_MALFORMED)   # unknown doctor flag (and empty root)
         expect(["doctor", "--bogus"], EXIT_MALFORMED)   # unknown doctor flag
         expect(["doctor", "--require-store", "--require-store"], EXIT_MALFORMED)   # duplicate CI-floor flag
+        # --store-identity grammar, judged on the parser's own message (a deleted flag also exits 2, as an
+        # unrecognized argument, so the code alone would not discriminate).
+        for argv, diagnostic in (
+                (["doctor", "--store-identity", "--store-identity"], "--store-identity given more than once"),
+                (["doctor", "--store-identity", "--require-store"], "give it without --require-store"),
+                (["doctor", "--require-store", "--store-identity"], "give it without --require-store")):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                rc = main(argv)
+            if rc != EXIT_MALFORMED or diagnostic not in buf.getvalue():
+                failures.append("{}: rc={!r} (expected 2 + {!r}; {})".format(
+                    " ".join(argv), rc, diagnostic, buf.getvalue().strip()))
 
         # absorb verb ROUTING (OPF-CHANGELOG-ABSORB), judged on exit code only. These grammar cases fail
         # closed in the parser BEFORE any store resolution, so they need no store on disk. The NOT-ADOPTED
@@ -20869,7 +20978,9 @@ def _cli_self_test():
                 # too (red when it reports the malformed home's not-a-directory instead). reconcile and
                 # apply refuse with the fence, and approve is cannot-evaluate, apply and approve before they
                 # read their inputs (the worksheet and artefact reads are recorded: red when either reads
-                # any of them first, or approve prints an approval). Every root stays byte-identical.
+                # any of them first, or approve prints an approval). Every root stays byte-identical. The
+                # dispatcher's spec 16.1 runtime check reads, while homes is raised, the declaration the
+                # raised build ships (_running_build_declaration), so each verb gets past it to its fence.
                 from unittest import mock
                 this = sys.modules[__name__]
                 missing = os.path.join(abase, "no-such-worksheet.toml")
@@ -20880,19 +20991,21 @@ def _cli_self_test():
                 saved_homes = _opf_store.SUPPORTED_HOMES
                 try:
                     _opf_store.SUPPORTED_HOMES = 2
-                    for where, at in (("journal debris", debris), ("a clean root", clean)):
-                        fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
-                        fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
-                    fenced["status", "a malformed evidence home"] = run_adopt(
-                        ["adopt", "status", "--root", badhome])
-                    fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
-                    for sub, flags in (("apply", ["--approval", missing]), ("approve", ["--actor", "fixture"])):
-                        with mock.patch.object(this, "_adopt_read_inputs",
-                                               lambda path, sub=sub: read.append((sub, path)) or {}), \
-                                mock.patch.object(this, "_adopt_read_bounded",
-                                                  lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
-                            fenced[sub, "journal debris"] = run_adopt(
-                                ["adopt", sub, "--inputs", missing, "--plan", missing] + flags + ["--root", debris])
+                    with _running_build_declaration():
+                        for where, at in (("journal debris", debris), ("a clean root", clean)):
+                            fenced["status", where] = run_adopt(["adopt", "status", "--root", at])
+                            fenced["plan", where] = run_adopt(["adopt", "plan", "--inputs", missing, "--root", at])
+                        fenced["status", "a malformed evidence home"] = run_adopt(
+                            ["adopt", "status", "--root", badhome])
+                        fenced["reconcile", "journal debris"] = run_adopt(["adopt", "reconcile", "--root", debris])
+                        for sub, flags in (("apply", ["--approval", missing]), ("approve", ["--actor", "fixture"])):
+                            with mock.patch.object(this, "_adopt_read_inputs",
+                                                   lambda path, sub=sub: read.append((sub, path)) or {}), \
+                                    mock.patch.object(this, "_adopt_read_bounded",
+                                                      lambda path, *_args, sub=sub: read.append((sub, path)) or b""):
+                                fenced[sub, "journal debris"] = run_adopt(
+                                    ["adopt", sub, "--inputs", missing, "--plan", missing] + flags
+                                    + ["--root", debris])
                 finally:
                     _opf_store.SUPPORTED_HOMES = saved_homes
                 unread = "cannot evaluate: " + _opf_adopt_apply.JOURNAL_UNREAD
@@ -21629,7 +21742,10 @@ def _cli_self_test():
             raise, so a store resolution turns it red), one interrupted after every op landed but before
             its COMPLETE frame (rolled forward, its bundle VALID), one whose rollback was itself interrupted
             (the rollback finished), and a dead run's journal lock beside an open transaction and beside a
-            transaction that never published its INTENT (each lock released and named). The no-op: no
+            transaction that never published its INTENT (each lock released and named), and a dead apply's
+            store lease kept beside its open transaction (the lease released, the release printed, also
+            before the refusal or error, which names it too, when the release of the lease reconcile claimed in
+            its place then faults). The no-op: no
             journal, a completed transaction, a store lease with nothing open, and a second reconcile after
             a recovery each exit 0 with nothing written. Each refusal before any recovery write exits 2 with
             its named finding and every file byte-identical: a live journal lock (journal-lock-held), a
@@ -21639,7 +21755,12 @@ def _cli_self_test():
             init-store reversal whose live creations are not the operation's own
             (init-store-reversal-unproven). A fault after recovery began exits 2 as recovery-failed with
             the partial state the journal records (the transaction open, no lock and no lease left), and a
-            second reconcile resumes it to the prestate. A product root that does not exist exits 2 as
+            second reconcile resumes it to the prestate; a recovery that finishes while the release of its
+            journal lock leaves that lock in place exits 2 as recovery-failed too, the lock named as one that
+            stays, and so does one whose release leaves a directory at the lock's name, whether the lock stays
+            named as not observed. A journal swapped before the lock is taken, with a transaction to recover or
+            with none left, exits 2 as journal-unclassifiable before any recovery write, both locations
+            named. A product root that does not exist exits 2 as
             cannot evaluate, never as a REFUSED finding, and nothing is created (a contract pin, green on
             the build before it too). The lease exclusion itself, the pre-lock-fault finding, the race
             reports and the held-listing vectors ride the library self-test (_opf_adopt_apply sections 8d
@@ -21802,6 +21923,10 @@ def _cli_self_test():
                               os.path.join(unproven, j_rel, rid + "." + adopt.INIT_STORE_PHASE))
                     failing = interrupted("recoveryfailed", mid_archive)
                     failing_before = product(fixture("recoveryfailedprestate"))
+                    stays = interrupted("lockstays", mid_archive)
+                    swapped = interrupted("swappedbeforelock", mid_archive)
+                    swapped_idle = interrupted("swappednothingleft", mid_archive)
+                    dirlock = interrupted("directorylock", mid_archive)
                 except (OSError, journal.JournalError, adopt.AdoptApplyError) as exc:
                     print("opf cli self-test: harness error: could not build the reconcile fixtures "
                           "({})".format(exc), file=sys.stderr)
@@ -21891,6 +22016,78 @@ def _cli_self_test():
                                     "2 + cannot evaluate, no REFUSED finding, nothing created; {})".format(
                                         rc, out.strip()))
 
+                # a dead apply's store lease kept beside its open transaction: reconcile recovers the
+                # transaction, releases that leftover through the recovery claim and PRINTS the release (red
+                # when the printing of the released leases is dropped)
+                import _opf_init
+                kept = os.path.join(rbase, "keptlease")
+                put(kept, lease_rel.rsplit("/", 1)[0] + "/" + _opf_store.MANIFEST_NAME,
+                    _opf_init.build_manifest().encode("utf-8"))
+
+                def kill_first(point):
+                    if point.startswith("after-apply-"):
+                        raise _Interrupt(point)
+                with mock.patch.object(journal, "_kill_point", kill_first):
+                    try:
+                        adopt.run_adopt_transaction(kept, rid, lambda ops: ops.create(adopt.plan_rel(rid), plan),
+                                                    plan_digest=digest)
+                    except (_Interrupt, adopt.AdoptApplyError):
+                        pass
+                kept_lease = os.path.join(kept, lease_rel)
+                if os.path.exists(kept_lease) and dead is not None:
+                    with open(kept_lease, "rb") as fh:
+                        left = fh.read()
+                    put(kept, lease_rel, left.replace(":{}\"".format(os.getpid()).encode("utf-8"),
+                                                      ":{}\"".format(dead).encode("utf-8")))
+                rc, out = run(kept)
+                if not (rc == EXIT_OK and "transaction {}: rolled-back".format(rid) in out
+                        and "opf adopt reconcile: the leftover single-writer lease {}".format(lease_rel) in out
+                        and "confirmed-dead" in out and not os.path.exists(kept_lease) and journal_clean(kept)):
+                    failures.append("adopt reconcile over a dead apply's lease kept beside its open transaction: "
+                                    "rc={!r} (expected 0 + rolled-back + the released lease printed, the lease "
+                                    "gone; {})".format(rc, out.strip()))
+
+                # the release is printed on a refusal or an error too, before it, and the printed refusal or
+                # error names it as well: the recovery finished and only the release of the lease reconcile
+                # claimed in the leftover's place faults, as a WriteGuardError (store-lease-release-failed)
+                # or as another exception (the backstop) (red when the printing on either path, or the
+                # naming in the refusal or the error's note, is dropped)
+                def kept_dead(name):
+                    root = os.path.join(rbase, name)
+                    put(root, lease_rel.rsplit("/", 1)[0] + "/" + _opf_store.MANIFEST_NAME,
+                        _opf_init.build_manifest().encode("utf-8"))
+                    with mock.patch.object(journal, "_kill_point", kill_first):
+                        try:
+                            adopt.run_adopt_transaction(root, rid, lambda ops: ops.create(adopt.plan_rel(rid), plan),
+                                                        plan_digest=digest)
+                        except (_Interrupt, adopt.AdoptApplyError):
+                            pass
+                    path = os.path.join(root, lease_rel)
+                    if os.path.exists(path) and dead is not None:
+                        with open(path, "rb") as fh:
+                            left = fh.read()
+                        put(root, lease_rel, left.replace(":{}\"".format(os.getpid()).encode("utf-8"),
+                                                          ":{}\"".format(dead).encode("utf-8")))
+                    return root
+
+                for name, error, needle in (
+                        ("releasefault", _opf_write_guard.WriteGuardError("INJECTED-CLI-LEASE-RELEASE-FAULT"),
+                         "REFUSED ({})".format(adopt.RECONCILE_LEASE_RELEASE_FAILED)),
+                        ("releaseexception", RuntimeError("INJECTED-CLI-RELEASE-EXCEPTION"),
+                         "cannot evaluate: unexpected error")):
+                    faulted = kept_dead(name)
+
+                    def release_raises(root_fd, machine_rel, payload, verb, error=error):
+                        raise error
+                    with mock.patch.object(_opf_write_guard, "release_lease", release_raises):
+                        rc, out = run(faulted)
+                    printed = "opf adopt reconcile: the leftover single-writer lease {}".format(lease_rel)
+                    if not (rc == EXIT_MALFORMED and needle in out and str(error) in out and printed in out
+                            and out.count("confirmed-dead") >= 2 and dead is not None):
+                        failures.append("adopt reconcile over {} after a dead apply's leftover lease was released: "
+                                        "rc={!r} (expected 2 + {!r}, the release printed and named in the "
+                                        "printed refusal or error; {})".format(name, rc, needle, out.strip()))
+
                 # recovery-failed: a fault AFTER recovery began (an EIO at a rollback checkpoint once the
                 # archive copy is discarded) exits 2 named, and the state is the journal's record of a
                 # PARTIAL recovery: the transaction still open, the archive copy gone, no journal lock and no
@@ -21917,13 +22114,270 @@ def _cli_self_test():
                                     "{!r} (expected 2 + REFUSED (recovery-failed), the partial state the "
                                     "journal records, then 0 + rolled-back to the prestate; {} / {})".format(
                                         rc, rc2, out.strip(), out2.strip()))
+
+                # a recovery that finishes while the release of the journal lock it took leaves that lock in place
+                # (one it cannot read): exit 2 as recovery-failed, saying the recovery finished and naming the lock
+                # that STAYS, never exit 0 (red when the release is trusted without observing the lock afterwards)
+                opened = not journal_clean(stays)
+                real_release = journal.release_lock
+
+                def release_unreadable(journal_root):
+                    os.chmod(os.path.join(journal_root, "lock"), 0)
+                    return real_release(journal_root)
+                with mock.patch.object(journal, "release_lock", release_unreadable):
+                    rc, out = run(stays)
+                if not (opened and rc == EXIT_MALFORMED and "REFUSED ({})".format(adopt.RECONCILE_FAILED) in out
+                        and "recovery finished (" in out and "transaction {}: rolled-back".format(rid) not in out
+                        and "{}/lock is still present: that lock STAYS".format(j_rel) in out
+                        and os.path.lexists(os.path.join(stays, j_rel, "lock"))):
+                    failures.append("adopt reconcile over a finished recovery whose journal lock release leaves that "
+                                    "lock in place: rc={!r} (expected 2 + REFUSED (recovery-failed), the recovery "
+                                    "finished, the lock named as one that STAYS; {})".format(rc, out.strip()))
+
+                # the journal renamed aside, an empty directory put at its path, just before the lock is taken, and
+                # the release then leaves the lock in place in the journal reconcile listed, where it was taken: exit
+                # 2 as journal-unclassifiable before any recovery write, naming that directory, never exit 0 with the
+                # transaction reported recovered (red when the journal path is not bound to the journal reconcile
+                # listed once the lock is taken: the recovery then runs and exits recovery-failed; red too when the
+                # release's read-back is not bound to it: nothing is said unobserved)
+                real_acquire = journal.acquire_lock
+                unbound = "{} no longer resolves to the journal directory this run listed and holds".format(j_rel)
+                unobserved = "{}/lock stays could not be observed".format(j_rel)
+
+                def swap_then_acquire(journal_root, session_id):
+                    os.rename(journal_root, str(journal_root) + ".aside")
+                    os.mkdir(journal_root)
+                    return real_acquire(journal_root, session_id)
+
+                def release_unreadable_aside(journal_root):
+                    os.chmod(os.path.join(str(journal_root) + ".aside", "lock"), 0)
+                    return real_release(journal_root)
+
+                def left_aside(root):
+                    """True when the lock stays in the journal reconcile listed, now aside, and none is at the path."""
+                    return (os.path.lexists(os.path.join(root, j_rel + ".aside", "lock"))
+                            and not os.path.lexists(os.path.join(root, j_rel, "lock")))
+
+                def unswap(root):
+                    """The journal reconcile listed put back at its path, the one put there removed; True when
+                    it still holds an open transaction or a lock (no recovery write landed in it)."""
+                    shutil.rmtree(os.path.join(root, j_rel))
+                    os.rename(os.path.join(root, j_rel + ".aside"), os.path.join(root, j_rel))
+                    return not journal_clean(root)
+                opened = not journal_clean(swapped)
+                with mock.patch.object(journal, "acquire_lock", swap_then_acquire), \
+                        mock.patch.object(journal, "release_lock", release_unreadable_aside):
+                    rc, out = run(swapped)
+                left = left_aside(swapped)
+                if not (opened and rc == EXIT_MALFORMED and "REFUSED ({})".format(adopt.RECONCILE_UNCLASSIFIABLE) in out
+                        and unbound in out and unobserved in out
+                        and "transaction {}: rolled-back".format(rid) not in out and left and unswap(swapped)):
+                    failures.append("adopt reconcile over a journal swapped before its lock is taken: rc={!r} "
+                                    "(expected 2 + REFUSED (journal-unclassifiable) before any recovery write, the "
+                                    "listed journal named, the lock left there; {})".format(rc, out.strip()))
+
+                # the same swap after a concurrent reconcile recovered every transaction, so nothing is left to
+                # recover once the lock is taken: exit 2 as journal-unclassifiable, never exit 0 saying the journal
+                # lock this run took is released while it stays (red when the journal path is not bound to the
+                # journal reconcile listed once the lock is taken: the run then exits recovery-failed; red too when
+                # the release's read-back is not bound to it: nothing is said unobserved)
+                nested = []
+
+                def first_then_swap(journal_root, session_id):
+                    if not nested:
+                        with mock.patch.object(journal, "acquire_lock", real_acquire), \
+                                mock.patch.object(journal, "release_lock", real_release):
+                            nested.append(adopt.reconcile_report(swapped_idle))
+                    return swap_then_acquire(journal_root, session_id)
+                opened = not journal_clean(swapped_idle)
+                with mock.patch.object(journal, "acquire_lock", first_then_swap), \
+                        mock.patch.object(journal, "release_lock", release_unreadable_aside):
+                    rc, out = run(swapped_idle)
+                left = left_aside(swapped_idle)
+                if not (opened and nested != [] and rc == EXIT_MALFORMED
+                        and "REFUSED ({})".format(adopt.RECONCILE_UNCLASSIFIABLE) in out and unbound in out
+                        and unobserved in out and "nothing to reconcile" not in out and left):
+                    failures.append("adopt reconcile with nothing left to recover over a journal swapped before its "
+                                    "lock is taken: rc={!r} (expected 2 + REFUSED (journal-unclassifiable), the "
+                                    "listed journal named, the lock left there; {})".format(rc, out.strip()))
+
+                # a directory put at the journal lock's name after the release removed the lock this run took: an
+                # entry that is not a regular file is never read as a lock taken since, so exit 2 as recovery-failed
+                # saying whether the lock stays could not be observed, never exit 0 (red when that entry is judged
+                # by its inode)
+                def release_then_directory(journal_root):
+                    real_release(journal_root)
+                    os.mkdir(os.path.join(journal_root, "lock"))
+                opened = not journal_clean(dirlock)
+                with mock.patch.object(journal, "release_lock", release_then_directory):
+                    rc, out = run(dirlock)
+                if not (opened and rc == EXIT_MALFORMED and "REFUSED ({})".format(adopt.RECONCILE_FAILED) in out
+                        and "recovery finished (" in out and unobserved in out
+                        and "journal lock is not a regular file" in out
+                        and os.path.isdir(os.path.join(dirlock, j_rel, "lock"))):
+                    failures.append("adopt reconcile over a finished recovery whose release leaves a directory at the "
+                                    "journal lock's name: rc={!r} (expected 2 + REFUSED (recovery-failed), whether "
+                                    "the lock stays named as not observed; {})".format(rc, out.strip()))
             finally:
                 shutil.rmtree(rbase, ignore_errors=True)
+            return None
+
+        def _store_identity_leg():
+            """Drive `doctor --store-identity` end to end over synthetic product roots, each a committed pointer
+            to a companion store with the expected identity pinned in .github/opf-store-identity.toml. Judged
+            on the exit code, and on the status line where the code alone would not tell a match from a
+            refused route. Returns None on success or EXIT_MALFORMED on a harness (fixture I/O) error."""
+            import hashlib
+            init = b'format = "opf.init.bootstrap/v1"\nsource_digest = "0"\n'
+            try:
+                ibase = os.path.realpath(tempfile.mkdtemp(prefix="opf-cli-identity-"))
+            except OSError as exc:
+                print("opf cli self-test: harness error: could not create the identity tempdir ({})".format(
+                    exc), file=sys.stderr)
+                return EXIT_MALFORMED
+            seq = [0]
+
+            def build(machine="toml", init_bytes=init, pointer=None, pin=None, digest=None):
+                seq[0] += 1
+                prod = os.path.join(ibase, "prod-{:02d}".format(seq[0]))
+                store = os.path.join(ibase, "store-{:02d}".format(seq[0]))
+                mdir = os.path.join(store, ".working", machine)
+                os.makedirs(mdir)
+                os.makedirs(os.path.join(prod, ".github"))
+                with open(os.path.join(mdir, "manifest.toml"), "w", encoding="utf-8") as fh:
+                    fh.write('[opf]\nstandard = "opf"\n')
+                if init_bytes is not None:
+                    with open(os.path.join(mdir, "init.toml"), "wb") as fh:
+                        fh.write(init_bytes)
+                target = "dir:" + store
+                with open(os.path.join(prod, ".opf.toml"), "w", encoding="utf-8") as fh:
+                    fh.write(pointer if pointer is not None else '[store]\ntarget = "{}"\n'.format(target))
+                if pin is None:
+                    pin = 'schema = 1\ntarget = "{}"\ninit_sha256 = "{}"\n'.format(
+                        target, digest if digest is not None else hashlib.sha256(init).hexdigest())
+                if pin is not False:
+                    with open(os.path.join(prod, ".github", "opf-store-identity.toml"), "w",
+                              encoding="utf-8") as fh:
+                        fh.write(pin)
+                return prod, store, mdir
+
+            def run(label, prod, want, line=None):
+                buf = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                        rc = main(["doctor", "--store-identity", "--root", prod])
+                except BaseException as exc:  # noqa: BLE001  a dispatcher crash is this vector's failure
+                    failures.append("doctor --store-identity {}: raised {!r}".format(label, exc))
+                    return
+                if rc != want or (line is not None and line not in buf.getvalue()):
+                    failures.append("doctor --store-identity {}: rc={!r} (expected {}{}; {})".format(
+                        label, rc, want, "" if line is None else " + {!r}".format(line),
+                        buf.getvalue().strip()))
+
+            try:
+                try:
+                    prod, store, mdir = build()
+                    run("exact match", prod, EXIT_OK, "opf doctor: store identity: MATCH")
+                    with open(os.path.join(mdir, "init.toml"), "ab") as fh:
+                        fh.write(b"#")
+                    run("init byte appended", prod, EXIT_FINDING, "store identity: MISMATCH")
+                    prod, store, mdir = build(machine="data")
+                    run("non-default machine dir", prod, EXIT_OK, ".working/data/init.toml")
+                    for label, form in (("trailing slash", "dir:{}/"), ("leading space", " dir:{}"),
+                                        ("bare path", "{}")):
+                        prod, store, mdir = build()
+                        with open(os.path.join(prod, ".opf.toml"), "w", encoding="utf-8") as fh:
+                            fh.write('[store]\ntarget = "{}"\n'.format(form.format(store)))
+                        run("target " + label, prod, EXIT_FINDING, "target: DIFFERS")
+                    crlf = init.replace(b"\n", b"\r\n")
+                    prod, store, mdir = build(init_bytes=crlf)
+                    run("crlf init against an lf pin", prod, EXIT_FINDING, "init_sha256: DIFFERS")
+                    prod, store, mdir = build(init_bytes=crlf, digest=hashlib.sha256(crlf).hexdigest())
+                    run("crlf init against a crlf pin", prod, EXIT_OK)
+                    prod, store, mdir = build()
+                    with open(os.path.join(prod, ".opf.local.toml"), "w", encoding="utf-8") as fh:
+                        fh.write('[store]\ntarget = "dir:{}"\n'.format(store))
+                    run("override present", prod, EXIT_FINDING, ".opf.local.toml is present")
+                    # Cannot-evaluate outranks the override: evaluation continues past the override up to the
+                    # FIRST input that cannot be evaluated (an absent or unparseable pointer ends it before the
+                    # digest is read), and that cannot-evaluate outranks the override's mismatch.
+                    for label, kwargs in (("pointer absent", {}), ("init.toml missing", {"init_bytes": None}),
+                                          ("pointer unparseable", {"pointer": "not toml {{\n"})):
+                        prod, store, mdir = build(**kwargs)
+                        if label == "pointer absent":
+                            os.unlink(os.path.join(prod, ".opf.toml"))
+                        with open(os.path.join(prod, ".opf.local.toml"), "w", encoding="utf-8") as fh:
+                            fh.write('[store]\ntarget = "dir:{}"\n'.format(store))
+                        run("override present, " + label, prod, EXIT_MALFORMED, "store identity: CANNOT")
+                    prod, store, mdir = build(pointer="not toml {{\n")
+                    run("malformed pointer", prod, EXIT_MALFORMED)
+                    prod, store, mdir = build(pointer="[store]\ntarget = 5\n")
+                    run("non-string pointer target", prod, EXIT_MALFORMED)
+                    prod, store, mdir = build()
+                    os.unlink(os.path.join(prod, ".opf.toml"))
+                    shutil.copytree(mdir, os.path.join(prod, ".working", "toml"))
+                    run("pointer absent, default store discoverable", prod, EXIT_MALFORMED,
+                        "default discovery is not a substitute")
+                    prod, store, mdir = build(init_bytes=None)
+                    run("init.toml missing", prod, EXIT_MALFORMED, "init.toml is absent")
+                    prod, store, mdir = build(pin=False)
+                    run("expectation file missing", prod, EXIT_MALFORMED, "no expected store identity is pinned")
+                    digest = hashlib.sha256(init).hexdigest()
+                    for label, body in (("unparseable", "schema = \n"),
+                                        ("no schema", 'target = "dir:{s}"\ninit_sha256 = "{d}"\n'),
+                                        ("no target", 'schema = 1\ninit_sha256 = "{d}"\n'),
+                                        ("no init_sha256", 'schema = 1\ntarget = "dir:{s}"\n'),
+                                        ("unknown key", 'schema = 1\ntarget = "dir:{s}"\ninit_sha256 = "{d}"\nx = 1\n'),
+                                        ("schema 2", 'schema = 2\ntarget = "dir:{s}"\ninit_sha256 = "{d}"\n'),
+                                        ("schema bool", 'schema = true\ntarget = "dir:{s}"\ninit_sha256 = "{d}"\n'),
+                                        ("empty target", 'schema = 1\ntarget = ""\ninit_sha256 = "{d}"\n'),
+                                        ("uppercase digest", 'schema = 1\ntarget = "dir:{s}"\ninit_sha256 = "{u}"\n'),
+                                        ("short digest", 'schema = 1\ntarget = "dir:{s}"\ninit_sha256 = "{h}"\n')):
+                        store_next = os.path.join(ibase, "store-{:02d}".format(seq[0] + 1))
+                        prod, store, mdir = build(pin=body.format(s=store_next, d=digest, u=digest.upper(),
+                                                                  h=digest[:63]))
+                        run("expectation " + label, prod, EXIT_MALFORMED)
+                    for label, rel in (("expectation", os.path.join(".github", "opf-store-identity.toml")),
+                                       ("pointer", ".opf.toml"), ("init", "init.toml")):
+                        for shape in ("symlink", "hardlink", "fifo"):
+                            prod, store, mdir = build()
+                            path = os.path.join(mdir, rel) if rel == "init.toml" else os.path.join(prod, rel)
+                            kept = os.path.join(ibase, "kept-{:02d}".format(seq[0]))
+                            if shape == "fifo":
+                                os.unlink(path)
+                                os.mkfifo(path)
+                            else:
+                                os.rename(path, kept)
+                                (os.symlink if shape == "symlink" else os.link)(kept, path)
+                            run("{} {}".format(label, shape), prod, EXIT_MALFORMED)
+                    # An unreadable init.toml, by an injected read fault (never permission bits).
+                    prod, store, mdir = build()
+                    store_journal = _opf_store._journal
+                    real_read = store_journal._read_contained
+
+                    def read_fault(root_fd, relpath, *args, **kwargs):
+                        if relpath.endswith("/init.toml"):
+                            raise store_journal.JournalError("injected read fault on {}".format(relpath))
+                        return real_read(root_fd, relpath, *args, **kwargs)
+                    store_journal._read_contained = read_fault
+                    try:
+                        run("init.toml unreadable", prod, EXIT_MALFORMED, "injected read fault")
+                    finally:
+                        store_journal._read_contained = real_read
+                except OSError as exc:
+                    print("opf cli self-test: harness error: could not build an identity fixture ({})".format(
+                        exc), file=sys.stderr)
+                    return EXIT_MALFORMED
+            finally:
+                shutil.rmtree(ibase, ignore_errors=True)
             return None
 
         harness_rc = _fixture_leg()
         if harness_rc is not None:
             return harness_rc
+        identity_rc = _store_identity_leg()
+        if identity_rc is not None:
+            return identity_rc
         import_rc = _import_leg()
         if import_rc is not None:
             return import_rc
@@ -22492,14 +22946,26 @@ def _retained_close_offpath_self_test():
             call()                            # the fixture reaches every registration before it is swept
             expect("offpath-adopt-observe-" + label, call)
         # _opf_adopt_apply: the product-root closes of verify_bundle, reconcile, the default-store probe
-        # and a transaction refused at the store posture (nothing written).
+        # and a transaction that joins the fixture store's single-writer lease under the journal lock,
+        # checks the store's clean state, composes nothing and refuses (nothing written).
         run_id = "adopt-20260101T000000Z-0123456789abcdef"
         expect("offpath-adopt-apply-verify-bundle", lambda: _opf_adopt_apply.verify_bundle(str(root), run_id))
         expect("offpath-adopt-apply-reconcile", lambda: _opf_adopt_apply.reconcile(str(root)))
         expect("offpath-adopt-apply-default-store-probe",
                lambda: _opf_adopt_apply._default_store_present_without_manifest(str(root)))
-        expect("offpath-adopt-apply-transaction-refusal",
-               lambda: _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None))
+
+        def transaction_refusal():
+            # Every run starts from the same tree: an injected close failure after the lease's create
+            # leaves that lease, and one in the journal lock's release keeps the lock and its journal
+            # directories, each by design and named in the refusal (or, for a close error the run raises
+            # as itself, in its note), and either would refuse every later run before it reaches the close
+            # under test, so both are reset here.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(str(root / machine_rel / _opf_check.LEASE_NAME))
+            shutil.rmtree(str(root / Path(_opf_adopt_apply.JOURNAL_REL).parts[0]), ignore_errors=True)
+            return _opf_adopt_apply.run_adopt_transaction(str(root), run_id, lambda ops: None)
+
+        expect("offpath-adopt-apply-transaction-refusal", transaction_refusal)
         # opf.py: the init inventory / root-binding / create-only / observation helpers, beneath a held root.
         init = base / "init"
         (init / _opf_store.WORKING_DIRNAME / "a" / "b").mkdir(parents=True)
@@ -23418,6 +23884,381 @@ def _close_exc_safe_vectors_self_test():
     return EXIT_OK
 
 
+# Spec 16.1: main() runs the declaration's runtime check (_opf_declaration.runtime_check) before it dispatches any
+# verb that can touch a store, and a state other than ok refuses that verb at exit 2 before it resolves a store.
+# upgrade, import and the not-yet-implemented verbs read and write nothing, so they are not gated; nor are the
+# --self-test legs, which run over their own fixtures. Doctor also writes the spec 16.1 report on stdout.
+_DECLARATION_GATED = ("render", "doctor", "init", "absorb", "record", "adopt")
+_DECLARATION_REPORTING = ("doctor",)
+
+
+def _installed_declaration():
+    """The installed copy of the declaration file: _opf_declaration.DECLARATION_NAME beside this file's real
+    path."""
+    return Path(__file__).resolve().parent / _opf_declaration.DECLARATION_NAME
+
+
+def _running_build_declaration():
+    """A context manager for a self-test vector that raises _opf_store's SUPPORTED_HOMES, SUPPORTED_SPEC_VERSION
+    or SUPPORTED_WORKLOG in process to exercise the build those constants describe. Entered after the raise, it
+    presents the declaration that build ships: the four fields rendered from RELEASE_IDENTITY and the constants
+    as they stand on entry (the raised values are read, never restated), written to a fresh scratch directory,
+    with _installed_declaration, the shipped bytes and the shipped-file digest pointed at that file until exit,
+    when all three are restored and the directory is removed. The runtime check itself runs unpatched over it,
+    so constants raised without it, or changed after entry, still refuse as contradictory, and every run outside
+    it reads the installed copy beside this file."""
+    import contextlib
+    import hashlib
+    import tempfile
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+
+    @contextlib.contextmanager
+    def presented():
+        data = _opf_declaration.declaration_bytes(
+            _opf_declaration.RELEASE_IDENTITY, _opf_store.SUPPORTED_SPEC_VERSION, _opf_store.SUPPORTED_HOMES,
+            _opf_store.SUPPORTED_WORKLOG)
+        with tempfile.TemporaryDirectory(prefix="opf-raised-declaration-") as tmp:
+            path = Path(tmp) / _opf_declaration.DECLARATION_NAME
+            path.write_bytes(data)
+            with patch.object(here, "_installed_declaration", lambda: path), \
+                    patch.object(_opf_declaration, "SHIPPED_DECLARATION_BYTES", data), \
+                    patch.object(_opf_declaration, "SHIPPED_DECLARATION_SHA256", hashlib.sha256(data).hexdigest()):
+                yield path
+    return presented()
+
+
+def _declaration_run(rest):
+    """`opf.py --declaration`: the documented run of the spec 16.1 runtime check and the emitter. It resolves no
+    store and writes the report on stdout, at exit 0 where the check yields ok (runtime result fail: the run
+    performs no store operation) and at exit 2 where it does not (cannot_evaluate). It takes no argument."""
+    if rest:
+        print("opf --declaration: takes no argument, not {!r}".format(rest[0]), file=sys.stderr)
+        return EXIT_MALFORMED
+    check = _opf_declaration.runtime_check(_installed_declaration())
+    if not check.ok:
+        print(_opf_declaration.refusal_line("--declaration", check), file=sys.stderr)
+        print("opf --declaration: {}".format(check.detail), file=sys.stderr)
+    _opf_declaration.emit_report(check, False, sys.stdout)
+    return EXIT_OK if check.ok else EXIT_MALFORMED
+
+
+def _declaration_capture(argv):
+    """main(argv) with stdout and stderr captured: (rc, stdout, stderr)."""
+    import contextlib
+    import io
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = main(list(argv))
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _declaration_tree(root):
+    """Every path beneath root with its bytes (None for a directory), for the unchanged-tree assertions."""
+    return dict((str(path.relative_to(root)), None if path.is_dir() else path.read_bytes())
+                for path in sorted(Path(root).rglob("*")))
+
+
+def _declaration_expected(data, installed, result):
+    """The report a run writes, built here from the declaration bytes, not by the emitter under test."""
+    return ("[declaration]\n" + data.decode("ascii") + "\n[runtime]\nshipped_file_sha256 = \"{}\"\n"
+            "installed_copy_sha256 = \"{}\"\nruntime_result = \"{}\"\n").format(
+                _declaration_sha256(data), installed, result)
+
+
+def _declaration_sha256(data):
+    """The lowercase hex SHA-256 digest of data."""
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _declaration_gate_refuses(tmp, installed, state, shipped_sha256=None):
+    """Every gated verb run with the installed copy at `installed`: (ok, detail), ok where each one refuses at
+    exit 2 with the refusal line naming `state`, no verb handler runs and the root is left unchanged. With
+    shipped_sha256 the shipped-file digest is patched to it (the malformed and contradictory states are reachable
+    only on bytes that pass the digest step)."""
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    root = Path(tmp) / "root"
+    root.mkdir()
+    (root / "keep.txt").write_bytes(b"keep\n")
+    digest = _opf_declaration.SHIPPED_DECLARATION_SHA256 if shipped_sha256 is None else shipped_sha256
+    called = []
+
+    def recorder(name):
+        def handler(rest):
+            called.append(name)
+            return EXIT_OK
+        return handler
+    argvs = (["doctor", "--root", str(root)], ["render", "--check", "--root", str(root)],
+             ["render", "--write", "--root", str(root)], ["init", "--root", str(root)],
+             ["absorb", "--root", str(root)], ["record", "create", "--root", str(root)],
+             ["adopt", "plan", "--root", str(root)], ["adopt", "status", "--root", str(root)],
+             ["adopt", "apply", "--root", str(root)], ["adopt", "reconcile", "--root", str(root)])
+    before = _declaration_tree(root)
+    rows = []
+    with patch.object(here, "_installed_declaration", lambda: installed), \
+            patch.object(_opf_declaration, "SHIPPED_DECLARATION_SHA256", digest), \
+            patch.multiple(here, _cmd_doctor=recorder("doctor"), _cmd_render=recorder("render"),
+                           _cmd_init=recorder("init"), _cmd_absorb=recorder("absorb"),
+                           _cmd_record=recorder("record"), _cmd_adopt=recorder("adopt")):
+        for argv in argvs:
+            rc, out, err = _declaration_capture(argv)
+            line = ("opf {}: cannot evaluate: implementation declaration {} (spec 16.1); no store operation "
+                    "was performed\n").format(argv[0], state)
+            rows.append((argv[0], argv[1], rc, err.startswith(line)))
+    ok = all(rc == EXIT_MALFORMED and refused for _verb, _arg, rc, refused in rows)
+    return ok and not called and _declaration_tree(root) == before, (state, rows, called)
+
+
+def _dv_gate_refuses_every_store_verb(tmp):
+    absent = Path(tmp) / "absent" / _opf_declaration.DECLARATION_NAME
+    return _declaration_gate_refuses(tmp, absent, _opf_declaration.ABSENT)
+
+
+# The gate refuses on every state other than ok, not on absent alone: each refusing state of the runtime check,
+# where the shipped bytes are in place behind it (a symlink to them, a file of them the mode makes unreadable)
+# or the digest is patched to the bytes' own, so a gate that refused on absent alone would dispatch.
+def _dv_gate_refuses_symlink(tmp):
+    target = Path(tmp) / "target.toml"
+    target.write_bytes(_opf_declaration.SHIPPED_DECLARATION_BYTES)
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.symlink_to(target)
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+
+
+def _dv_gate_refuses_crlf(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(_opf_declaration.SHIPPED_DECLARATION_BYTES.replace(b"\n", b"\r\n"))
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.DIGEST_MISMATCH)
+
+
+def _dv_gate_refuses_empty(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(b"")
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.DIGEST_MISMATCH)
+
+
+def _dv_gate_refuses_directory(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.mkdir()
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+
+
+def _dv_gate_refuses_fifo(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    os.mkfifo(installed)
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+
+
+def _dv_gate_refuses_oversize(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(b"#" * (_opf_declaration.MAX_DECLARATION_BYTES + 1))
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+
+
+def _dv_gate_refuses_unreadable_mode(tmp):
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(_opf_declaration.SHIPPED_DECLARATION_BYTES)
+    if hasattr(os, "geteuid") and os.geteuid() == 0:   # chmod cannot make a file unreadable to root
+        print("opf declaration cli self-test: DISCLOSED SKIP: gate-refuses-unreadable-mode not run (uid 0 is not "
+              "bound by mode bits)", file=sys.stderr)
+        return True, "skipped: uid 0 is not bound by mode bits"
+    installed.chmod(0)
+    try:
+        return _declaration_gate_refuses(tmp, installed, _opf_declaration.UNREADABLE)
+    finally:
+        installed.chmod(0o600)
+
+
+def _dv_gate_refuses_malformed(tmp):
+    data = _opf_declaration.SHIPPED_DECLARATION_BYTES + b"# a comment\n"
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(data)
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.MALFORMED, _declaration_sha256(data))
+
+
+def _dv_gate_refuses_contradictory(tmp):
+    data = _opf_declaration.SHIPPED_DECLARATION_BYTES.replace(
+        "homes = {}\n".format(_opf_store.SUPPORTED_HOMES).encode("ascii"),
+        "homes = {}\n".format(_opf_store.SUPPORTED_HOMES + 1).encode("ascii"))
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(data)
+    return _declaration_gate_refuses(tmp, installed, _opf_declaration.CONTRADICTORY, _declaration_sha256(data))
+
+
+def _dv_ungated_verbs_read_no_declaration(tmp):
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    root = Path(tmp) / "root"
+    root.mkdir()
+    absent = Path(tmp) / "absent" / _opf_declaration.DECLARATION_NAME
+    calls = []
+    real = _opf_declaration.runtime_check
+
+    def counting(path):
+        calls.append(path)
+        return real(path)
+    with patch.object(here, "_installed_declaration", lambda: absent), \
+            patch.object(_opf_declaration, "runtime_check", counting):
+        upgrade = _declaration_capture(["upgrade", "--root", str(root)])
+        imported = _declaration_capture(["import", "--scan", "--root", str(root)])
+        stubs = [_declaration_capture([verb]) for verb in KNOWN_VERBS if verb not in _DECLARATION_GATED
+                 and verb not in ("upgrade", "import")]
+    ok = (upgrade == (EXIT_MALFORMED, "", "opf upgrade: " + UPGRADE_NONE + "\n")
+          and imported[0] == EXIT_MALFORMED and IMPORT_RETIRED in imported[2] and imported[1] == ""
+          and stubs and all(rc == EXIT_MALFORMED and "not yet implemented" in err for rc, _out, err in stubs))
+    return ok and not calls, (upgrade, imported, stubs, calls)
+
+
+def _dv_report_documented_run(tmp):
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    shipped = _installed_declaration().read_bytes()
+    live = _declaration_capture(["--declaration"])
+    installed = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    installed.write_bytes(shipped)
+    with patch.object(here, "_installed_declaration", lambda: installed):
+        copy = _declaration_capture(["--declaration"])
+    want = (EXIT_OK, _declaration_expected(shipped, _declaration_sha256(shipped), "fail"), "")
+    restated = live[1].split("[declaration]\n", 1)[-1].split("\n[runtime]\n", 1)[0].encode("ascii")
+    return live == want and copy == want and restated == shipped, (live, copy)
+
+
+def _dv_report_cannot_evaluate_run(tmp):
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    shipped = _installed_declaration().read_bytes()
+    absent = Path(tmp) / _opf_declaration.DECLARATION_NAME
+    with patch.object(here, "_installed_declaration", lambda: absent):
+        rc, out, err = _declaration_capture(["--declaration"])
+        usage = _declaration_capture(["--declaration", "--root"])
+    line = ("opf --declaration: cannot evaluate: implementation declaration absent (spec 16.1); no store "
+            "operation was performed\n")
+    ok = (rc == EXIT_MALFORMED and out == _declaration_expected(shipped, "not-read", "cannot_evaluate")
+          and err.startswith(line) and usage[0] == EXIT_MALFORMED and usage[1] == "")
+    return ok, (rc, out, err, usage)
+
+
+def _dv_doctor_carries_report(tmp):
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    shipped = _installed_declaration().read_bytes()
+    root = Path(tmp) / "not-adopted"
+    root.mkdir()
+    rc, out, err = _declaration_capture(["doctor", "--root", str(root)])
+    report = _declaration_expected(shipped, _declaration_sha256(shipped), "fail")
+    resolved = []
+    absent = Path(tmp) / "absent" / _opf_declaration.DECLARATION_NAME
+    with patch.object(here, "_installed_declaration", lambda: absent), \
+            patch.object(_opf_store, "resolve_store", lambda *a, **k: resolved.append(a)):
+        refused = _declaration_capture(["doctor", "--root", str(root)])
+    ok = (rc == EXIT_OK and out.startswith("opf doctor: NOT APPLICABLE") and out.endswith("\n" + report)
+          and refused[0] == EXIT_MALFORMED
+          and refused[1] == _declaration_expected(shipped, "not-read", "cannot_evaluate") and not resolved)
+    return ok, (rc, out, err, refused, resolved)
+
+
+def _dv_raised_build_reads_its_declaration(tmp):
+    """A build raised in process (SUPPORTED_HOMES one past the shipped generation) passes the gate only inside
+    _running_build_declaration, over the declaration that build ships: doctor is refused as contradictory with
+    the constant raised before the context, inside it once another constant moves after entry, and after it;
+    inside it doctor dispatches and its report restates the raised declaration, and with the constant restored
+    it dispatches over the installed copy again, the presented file gone and the shipped bytes restored."""
+    from unittest.mock import patch
+    here = sys.modules[__name__]
+    root = Path(tmp) / "root"
+    root.mkdir()
+    called = []
+
+    def doctor(rest):
+        called.append(rest)
+        return EXIT_OK
+    installed = _installed_declaration()
+    shipped = _opf_declaration.SHIPPED_DECLARATION_BYTES
+    raised = _opf_store.SUPPORTED_HOMES + 1
+    data = _opf_declaration.declaration_bytes(_opf_declaration.RELEASE_IDENTITY, _opf_store.SUPPORTED_SPEC_VERSION,
+                                              raised, _opf_store.SUPPORTED_WORKLOG)
+    argv = ["doctor", "--root", str(root)]
+    rows = {}
+    with patch.object(here, "_cmd_doctor", doctor):
+        with patch.object(_opf_store, "SUPPORTED_HOMES", raised):
+            rows["raised"] = _declaration_capture(argv)
+            with _running_build_declaration() as presented:
+                rows["presented"] = _declaration_capture(argv)
+                presented_bytes = presented.read_bytes()
+                with patch.object(_opf_store, "SUPPORTED_WORKLOG", _opf_store.SUPPORTED_WORKLOG + 1):
+                    rows["moved"] = _declaration_capture(argv)
+            rows["exited"] = _declaration_capture(argv)
+        rows["restored"] = _declaration_capture(argv)
+    line = ("opf doctor: cannot evaluate: implementation declaration contradictory (spec 16.1); no store "
+            "operation was performed\n")
+    refused = all(rows[key][0] == EXIT_MALFORMED and rows[key][2].startswith(line)
+                  for key in ("raised", "moved", "exited"))
+    ok = (refused and presented_bytes == data
+          and rows["presented"] == (EXIT_OK, _declaration_expected(data, _declaration_sha256(data), "fail"), "")
+          and rows["restored"] == (EXIT_OK, _declaration_expected(shipped, _declaration_sha256(shipped), "fail"), "")
+          and len(called) == 2 and not presented.exists() and _installed_declaration() == installed
+          and _opf_declaration.SHIPPED_DECLARATION_BYTES == shipped)
+    return ok, (rows, presented_bytes, called)
+
+
+_DECLARATION_CLI_VECTORS = (
+    ("gate-refuses-every-store-verb", _dv_gate_refuses_every_store_verb),
+    ("gate-refuses-symlink", _dv_gate_refuses_symlink),
+    ("gate-refuses-crlf", _dv_gate_refuses_crlf),
+    ("gate-refuses-empty", _dv_gate_refuses_empty),
+    ("gate-refuses-directory", _dv_gate_refuses_directory),
+    ("gate-refuses-fifo", _dv_gate_refuses_fifo),
+    ("gate-refuses-oversize", _dv_gate_refuses_oversize),
+    ("gate-refuses-unreadable-mode", _dv_gate_refuses_unreadable_mode),
+    ("gate-refuses-malformed", _dv_gate_refuses_malformed),
+    ("gate-refuses-contradictory", _dv_gate_refuses_contradictory),
+    ("ungated-verbs-read-no-declaration", _dv_ungated_verbs_read_no_declaration),
+    ("report-documented-run", _dv_report_documented_run),
+    ("report-cannot-evaluate-run", _dv_report_cannot_evaluate_run),
+    ("doctor-carries-report", _dv_doctor_carries_report),
+    ("raised-build-reads-its-declaration", _dv_raised_build_reads_its_declaration),
+)
+
+
+def run_declaration_cli_vector(name):
+    """Run the dispatcher's spec 16.1 vector `name` in a fresh scratch directory: (ok, detail). An exception
+    the vector lets escape is that vector's failure, named in its detail."""
+    import tempfile
+    if _bootstrap() != EXIT_OK:
+        return False, "the helpers could not be bootstrapped"
+    fn = dict(_DECLARATION_CLI_VECTORS)[name]
+    with tempfile.TemporaryDirectory(prefix="opf-declaration-cli-") as tmp:
+        try:
+            ok, detail = fn(tmp)
+        except Exception as exc:  # noqa: BLE001  an escaping error is that vector's failure, never a pass
+            return False, "raised {!r}".format(exc)
+    return ok is True, detail
+
+
+def _declaration_cli_self_test():
+    """The dispatcher's spec 16.1 vectors: the gate refuses every store verb before dispatch on an absent,
+    symlinked, CRLF, empty, directory, FIFO, oversize, mode-unreadable, malformed or contradictory declaration,
+    upgrade, import and the stub verbs never read it, `--declaration` writes the expected report
+    (exit 0, and exit 2 with not-read and cannot_evaluate when absent), doctor appends the report, and a build
+    raised in process passes the gate only over the declaration _running_build_declaration presents for it.
+    tools/check_opf_declaration.py runs each under its registered check id and shows it red under its revert."""
+    failures = []
+    for name, _fn in _DECLARATION_CLI_VECTORS:
+        ok, detail = run_declaration_cli_vector(name)
+        if not ok:
+            failures.append((name, detail))
+    if failures:
+        print("opf declaration cli self-test: FAIL ({} of {} vectors)".format(
+            len(failures), len(_DECLARATION_CLI_VECTORS)), file=sys.stderr)
+        for name, detail in failures:
+            print("  {}: {!r}".format(name, detail), file=sys.stderr)
+        return EXIT_FINDING
+    print("opf declaration cli self-test: PASS ({} vectors)".format(len(_DECLARATION_CLI_VECTORS)))
+    return EXIT_OK
+
+
 # Registered helper self-tests, run by `opf.py --self-test`. Each is (label, callable) returning a
 # 0/1/2 exit code (0 clean, 1 finding, 2 cannot-evaluate). Later units append their own helper here.
 # Built by a function rather than a module-level tuple because the _opf_* helpers it references are bound by
@@ -23448,6 +24289,9 @@ def _self_tests():
     ("opf-retained-close-offpath", _retained_close_offpath_self_test),
     ("opf-close-exc-safe-vectors", _close_exc_safe_vectors_self_test),
     ("opf-cli", _cli_self_test),
+    ("opf-declaration", _opf_declaration.self_test),
+    ("opf-declaration-cli", _declaration_cli_self_test),
+    ("opf-verb-status", _verb_status_self_test),
 )
 
 
@@ -23461,7 +24305,8 @@ def _self_tests():
 SELF_TEST_GROUPS = (
     ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
               "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
-              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli")),
+              "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli",
+              "opf-declaration", "opf-declaration-cli", "opf-verb-status")),
     ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
     ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
 )
@@ -23512,6 +24357,676 @@ def run_self_test_group(name, groups=None, tests=None):
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
 KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb",
                "record")
+
+# The status of each KNOWN_VERBS verb in this build, the one source of the published status note
+# (tools/gen_draft_site.py renders it on opfiles.ai, in opf/README.md and in opf/site/llms.txt). Each row is
+# (verb, status, scope): "available" runs through its own handler; "partial" runs through its own handler for
+# the subcommands its scope names as running, and each subcommand it names as exiting 2 refuses every argument
+# list in this build; "in progress" exits 2 in this build, through the fail-closed stub or through a handler
+# that refuses every argument list. A scope reads "A, B, and C", then optionally "; D exits 2" or "; D and E
+# exit 2" (_verb_scope_parts), and names every subcommand of the verb exactly once. A literal, so the
+# generator reads it without importing this module. _verb_status_self_test holds it to main()'s dispatch.
+VERB_STATUS = (
+    ("init", "available", ""),
+    ("render", "available", ""),
+    ("doctor", "available", ""),
+    ("absorb", "available", ""),
+    ("record", "partial", "create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2"),
+    ("adopt", "partial", "plan, approve, reconcile, and status; apply and complete exit 2"),
+    ("upgrade", "in progress", ""),
+    ("import", "in progress", ""),
+    ("migrate", "in progress", ""),
+    ("sync", "in progress", ""),
+)
+VERB_STATUSES = ("available", "partial", "in progress")
+# The line main() prints for a KNOWN_VERBS verb with no handler, as the status self-test expects it.
+_VERB_STUB_LINE = "opf {}: not yet implemented in this build (fail-closed)\n"
+
+
+def _verb_scope_list(text):
+    """The names of one scope list, "a", "a and b" or "a, b, and c" (the Oxford comma), each a lowercase
+    word with hyphens; None when the text does not read so."""
+    if ", " in text:
+        head, sep, last = text.rpartition(", and ")
+        names = head.split(", ") + [last] if sep else []
+        if len(names) < 3:
+            return None
+    else:
+        names = text.split(" and ")
+        if len(names) > 2:
+            return None
+    if not all(name and name[0].isalpha() and all(c.islower() or c == "-" for c in name) for name in names):
+        return None
+    return names
+
+
+def _verb_scope_parts(scope):
+    """(running, refused): the subcommands a partial scope names as running and as exiting 2. The scope
+    reads "A, B, and C", then optionally "; D exits 2" or "; D and E exit 2"; None when it does not read
+    so, names nothing as running, or names a subcommand twice."""
+    running_text, sep, refused_text = scope.partition("; ")
+    running = _verb_scope_list(running_text)
+    refused = []
+    if sep:
+        refused = None
+        for ending, single in ((" exits 2", True), (" exit 2", False)):
+            if refused_text.endswith(ending):
+                names = _verb_scope_list(refused_text[:-len(ending)])
+                if names is not None and (len(names) == 1) == single:
+                    refused = names
+    if running is None or refused is None or len(set(running + refused)) != len(running + refused):
+        return None
+    return running, refused
+
+
+def _verb_subcommands(verb):
+    """The subcommand vocabulary of `verb`, read from the code that parses it; None for a verb with none."""
+    return {"adopt": ADOPT_SUBCOMMANDS, "record": tuple(_opf_record.SUBCOMMANDS)}.get(verb)
+
+
+def _verb_refusal_holds(verb, sub):
+    """Whether the code that makes subcommand `sub` of `verb` refuse every argument list (exit 2) is in
+    place: adopt complete is refused before any parse; adopt apply refuses every plan while the mandatory
+    receipt stage is the refusing composer; record receipt-repair needs a homes 2 store, which this build
+    refuses while SUPPORTED_HOMES is 1. None for a subcommand with no such refusal."""
+    if (verb, sub) == ("adopt", "complete"):
+        return sub in ADOPT_DEFERRED
+    if (verb, sub) == ("adopt", "apply"):
+        stage = _opf_adopt_apply.DRIVER_STAGES.get(_opf_adopt_apply.RECEIPT_STAGE)
+        return stage is _opf_adopt_apply._receipt_not_yet_composable
+    if (verb, sub) == ("record", "receipt-repair"):
+        return _opf_store.SUPPORTED_HOMES == 1
+    return None
+
+
+# The engine entry each running subcommand reaches once its own handler has parsed it: (helper module
+# name, attribute, subcommand), the subcommand None where the entry takes the parsed request.
+_VERB_SUB_ENTRIES = {
+    "adopt": (("_opf_adopt_plan", "plan", "plan"), ("_opf_adopt_apply", "capture_approval", "approve"),
+              ("_opf_adopt_apply", "run_apply", "apply"), ("_opf_adopt_apply", "reconcile_report", "reconcile"),
+              ("_opf_adopt_apply", "_open_product_root", "status")),
+    "record": (("_opf_record", "_run_operation", None),),
+}
+# An ordinary argument list for each record subcommand, its options after the subcommand.
+_VERB_RECORD_ARGS = {
+    "create": ["--type", "backlog_item", "--title", "probe", "--actor", "maintainer"],
+    "transition": ["BI-1", "active", "--actor", "maintainer"],
+    "done-with-receipt": ["BI-1", "--actor", "maintainer"],
+    "receipt-repair": ["BI-1", "--actor", "maintainer", "--reason", "probe"],
+    "worklog-append": ["--kind", "note", "--summary", "probe", "--actor", "maintainer"],
+}
+
+
+# The read-only gates a running subcommand's handler calls before its engine entry, each of which reaches an
+# engine entry itself: (helper module name, attribute). The reconcile-first gate opens the product root
+# through the entry status uses. While any running subcommand of the verb is probed each is a stand-in that
+# passes, as the real gate does over the empty scratch root, so every entry call the probe sees comes from
+# the handler: for adopt that is every running subcommand (plan, approve, reconcile and status), of which
+# plan and approve call the gate. A subcommand named as exiting 2 runs the real gate: adopt apply does, and
+# reaches the product root entry through it (_VERB_REFUSAL_ENTRIES).
+_VERB_SUB_GATES = {
+    "adopt": (("_opf_adopt_apply", "require_clean_journal"),),
+}
+# The engine entries ("module.attribute") the real dispatch of each subcommand named as exiting 2 may call
+# while its refusal is in place, keyed by (verb, subcommand): its own entry, and any entry the real gate
+# before it reaches. A guarded entry called during the refusal run of a subcommand it is not listed for is
+# refused and is a fault (_verb_engine_guard); a subcommand with no row may call none.
+_VERB_REFUSAL_ENTRIES = {
+    ("adopt", "apply"): ("_opf_adopt_apply._open_product_root", "_opf_adopt_apply.run_apply"),
+    ("adopt", "complete"): (),
+    ("record", "receipt-repair"): ("_opf_record._run_operation",),
+}
+
+
+class _VerbProbeReached(Exception):
+    """Raised by the stand-in for a subcommand's engine entry once it has recorded the call."""
+
+
+class _VerbEngineBlocked(Exception):
+    """Raised in place of a real engine entry the status self-test does not mean to run."""
+
+
+def _verb_entry_standin(sub, reached):
+    """A stand-in for an engine entry that never calls the engine, from any caller: it records the
+    subcommand (`sub`, or the parsed request's when `sub` is None) and the code object of its immediate
+    caller in `reached`, then raises _VerbProbeReached. The caller judges whether that code is the verb's
+    own handler; a call through a lambda or any other wrapper is recorded with the wrapper's code."""
+    def standin(*args, **kwargs):
+        reached.append((sub if sub is not None else getattr(args[0] if args else None, "subcommand", None),
+                        sys._getframe(1).f_code))
+        raise _VerbProbeReached()
+    return standin
+
+
+def _verb_engine_guard(original, name, phase, calls):
+    """A guard over the real engine entry `original` (named `name`) for a whole status run. phase[0] is None,
+    or (the subcommand the run executes for real on purpose because its refusal is in place, the entries
+    that run may call). The guard records (name, that subcommand or None, whether the call is permitted) in
+    `calls`, and calls `original` only while phase[0] names a subcommand whose own entries include `name`;
+    at any other time, during another subcommand's refusal run included, it raises _VerbEngineBlocked, so
+    the engine never runs there."""
+    def guard(*args, **kwargs):
+        during, permitted = phase[0] if phase[0] is not None else (None, ())
+        allowed = name in permitted
+        calls.append((name, during, allowed))
+        if not allowed:
+            raise _VerbEngineBlocked(name)
+        return original(*args, **kwargs)
+    return guard
+
+
+def _verb_tree(base):
+    """Every path under `base`, relative, with its file type, size, and, for a regular file, the SHA-256 of
+    its content, in a fixed order, so a path that appeared, changed (a same-size rewrite included) or
+    vanished changes the result."""
+    import hashlib
+    seen = []
+    for top, dirs, files in os.walk(base):
+        dirs.sort()
+        for name in sorted(dirs + files):
+            path = os.path.join(top, name)
+            st = os.lstat(path)
+            digest = None
+            if stat.S_ISREG(st.st_mode):
+                with open(path, "rb") as handle:
+                    digest = hashlib.sha256(handle.read()).hexdigest()
+            elif stat.S_ISLNK(st.st_mode):
+                digest = os.readlink(path)
+            seen.append((os.path.relpath(path, base), stat.S_IFMT(st.st_mode), st.st_size, digest))
+    return seen
+
+
+class _VerbHelperImportBlocked(ImportError):
+    """Raised for an import of a helper module that is not loaded yet while the dispatch is intercepted."""
+
+
+class _VerbHelperImportGate:
+    """A sys.meta_path finder that records, then refuses, the import of any _opf_ helper module not loaded
+    yet, so the intercepted dispatch cannot load and run a helper that was not intercepted."""
+
+    def __init__(self, called):
+        self.called = called
+
+    def find_spec(self, name, path=None, target=None):
+        if name.startswith("_opf_"):
+            self.called.append("import " + name)
+            raise _VerbHelperImportBlocked(name)
+        return None
+
+
+def _verb_intercepted(here, dispatch, argv):
+    """Run dispatch(argv) with EVERY function this module defines, other than `dispatch` itself, and every
+    callable attribute of every loaded _opf_ helper module replaced by a recorder that returns 0, the import
+    of any _opf_ helper not loaded yet refused, and the declaration gate emptied, so no handler or helper
+    under any name runs and no store or declaration is read. Returns (the names called, in order, a helper's
+    as "module.attribute" and a refused import as "import module", the leading _bootstrap dropped; the exit,
+    or the exception the dispatch raised; stderr). Between the replacement and the restore, nothing defined
+    in this module or a helper is called other than the import gate (_VerbHelperImportGate). A function this
+    module defines is one inspect.isfunction admits (a def or a lambda, not a class, a builtin or a bound
+    method) whose __module__ is this module's name, so a function imported from another module is kept."""
+    import contextlib
+    import inspect
+    import io
+    import types
+    called = []
+    saved = [(here, name, value) for name, value in vars(here).items()
+             if inspect.isfunction(value) and value.__module__ == here.__name__
+             and value is not dispatch]
+    for module_name, module in sorted(sys.modules.items()):
+        if module_name.startswith("_opf_") and isinstance(module, types.ModuleType) and module is not here:
+            saved.extend((module, name, value) for name, value in vars(module).items()
+                         if callable(value) and value is not dispatch)
+    replaced = len(saved)
+    saved.append((here, "_DECLARATION_GATED", here._DECLARATION_GATED))
+    gate = _VerbHelperImportGate(called)
+    err = io.StringIO()
+    try:
+        for owner, name, _value in saved[:replaced]:
+            label = name if owner is here else owner.__name__ + "." + name
+            setattr(owner, name, lambda *args, _n=label, **kwargs: called.append(_n) or EXIT_OK)
+        here._DECLARATION_GATED = ()
+        sys.meta_path.insert(0, gate)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            routed = dispatch(list(argv))
+    except Exception as exc:  # noqa: BLE001  reported as a fault by the caller, never a pass
+        routed = exc
+    finally:
+        while gate in sys.meta_path:
+            sys.meta_path.remove(gate)
+        for owner, name, value in saved:
+            setattr(owner, name, value)
+    return called[1:] if called[:1] == ["_bootstrap"] else called, routed, err.getvalue()
+
+
+def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, engine_calls=None):
+    """Return the faults of `table` (default VERB_STATUS) against `dispatch` (default main()) over `verbs`
+    (default KNOWN_VERBS), with `refusals` (default _VERB_REFUSALS). Every verb appears exactly once and no
+    other name does; each status is one of VERB_STATUSES, with a scope exactly when it is partial; a
+    refusals entry is a fault unless its verb is in progress here and in VERB_STATUS.
+
+    Every probe runs with its working directory and --root in a scratch directory this function creates
+    and removes, and a probe after which a path under that directory appeared, changed or vanished is a
+    fault. Routing is judged with every function of this module and of every loaded helper intercepted
+    (_verb_intercepted), so no handler or helper under any name runs: an available or partial verb must
+    reach exactly its own `_cmd_<verb>`. An in progress verb is probed with no arguments, with --help and
+    with --root: each must reach no handler or exactly its own refusing handler, and must not raise, and
+    only then does the real dispatch run it, which must exit 2 with exactly the stub line or its refusal. A
+    partial scope must read as _verb_scope_parts reads it and name the verb's subcommands
+    (_verb_subcommands) exactly once: each named as running must reach its engine entry (_VERB_SUB_ENTRIES,
+    a stand-in that never calls the engine) straight from the real handler, with the handler's gates
+    (_VERB_SUB_GATES, a stand-in for every running subcommand of the verb) passing; each named as exiting 2
+    must have its refusal in place (_verb_refusal_holds) and exit 2 from the real dispatch, which runs the
+    real gates. An available verb with a subcommand whose refusal is in place is a fault: it is partial.
+    Each engine entry is guarded for the whole run (_verb_engine_guard): it runs only in the real dispatch of
+    a subcommand named as exiting 2 that _VERB_REFUSAL_ENTRIES lists it for, and a call anywhere else,
+    during another subcommand's refusal run included, is refused and is a fault. Every guarded call,
+    (entry, the subcommand run for real or None, whether it was permitted), is appended to `engine_calls`
+    when it is a list."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+    from unittest.mock import patch
+    table = VERB_STATUS if table is None else table
+    verbs = KNOWN_VERBS if verbs is None else verbs
+    refusals = _VERB_REFUSALS if refusals is None else refusals
+    dispatch = main if dispatch is None else dispatch
+    here = sys.modules[__name__]
+    faults = []
+    names = [row[0] for row in table]
+    for verb in verbs:
+        if names.count(verb) != 1:
+            faults.append("{} appears {} times in the status table".format(verb, names.count(verb)))
+    for name in sorted(set(names) - set(verbs)):
+        faults.append("{} is in the status table but not a known verb".format(name))
+    marked = dict((row[0], row[1]) for row in table)
+    live = dict((row[0], row[1]) for row in VERB_STATUS)
+    for verb in sorted(refusals):
+        if marked.get(verb) != "in progress":
+            faults.append("{} is in the refusal list but marked {}".format(verb, marked.get(verb)))
+    base = os.path.realpath(tempfile.mkdtemp(prefix="opf-verb-status-"))
+    root = os.path.join(base, "root")
+    inputs = os.path.join(base, "in")
+    cwd = os.getcwd()
+    # Every engine entry is guarded for the whole run: it runs only during the real dispatch of a
+    # subcommand whose refusal is in place (phase[0] names it and the entries listed for it), and only when
+    # it is one of those entries; any other call is recorded and refused.
+    phase = [None]
+    calls = [] if engine_calls is None else engine_calls
+    guards = contextlib.ExitStack()
+    try:
+        for module, attr in sorted(set((module, attr) for entries in _VERB_SUB_ENTRIES.values()
+                                       for module, attr, _sub in entries)):
+            owner = getattr(here, module)
+            guards.enter_context(patch.object(owner, attr, _verb_engine_guard(
+                getattr(owner, attr), module + "." + attr, phase, calls)))
+        os.mkdir(root)
+        os.mkdir(inputs)
+        files = dict((name, os.path.join(inputs, name + ".toml")) for name in ("inputs", "plan", "approval"))
+        for name, path in files.items():
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write('schema = 1\nproduct = "probe"\nexpected_observation_digest = "probe"\n'
+                             '[bindings]\n' if name == "inputs" else "probe = 1\n")
+        before = _verb_tree(base)
+        os.chdir(root)
+
+        def unchanged(what):
+            after = _verb_tree(base)
+            if after == before:
+                return True
+            faults.append("{} changed the scratch directory: {}".format(
+                what, sorted(set(after) ^ set(before))))
+            shutil.rmtree(root)
+            os.mkdir(root)
+            # the probes run inside root, so step into the new one rather than stay in the removed one
+            os.chdir(root)
+            return False
+
+        def real(argv):
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    code = dispatch(list(argv))
+            except Exception as exc:  # noqa: BLE001  a fault, never a pass
+                code = exc
+            return code, err.getvalue()
+
+        def sub_argv(verb, sub):
+            if verb == "record":
+                return [verb, sub] + _VERB_RECORD_ARGS.get(sub, []) + ["--root", root]
+            flags = dict(plan=["--inputs", files["inputs"]],
+                         approve=["--inputs", files["inputs"], "--plan", files["plan"], "--actor", "maintainer"],
+                         apply=["--inputs", files["inputs"], "--plan", files["plan"],
+                                "--approval", files["approval"]]).get(sub, [])
+            return [verb, sub] + flags + ["--root", root]
+
+        for verb, status, scope in table:
+            if status not in VERB_STATUSES:
+                faults.append("{} has unknown status {!r}".format(verb, status))
+                continue
+            if (status == "partial") != bool(scope):
+                faults.append("{} is {} with scope {!r}; a scope goes with partial and only partial".format(
+                    verb, status, scope))
+            probes = [[verb]] if status != "in progress" else [[verb], [verb, "--help"], [verb, "--root", root]]
+            routes = []
+            for argv in probes:
+                called, routed, err = _verb_intercepted(here, dispatch, argv)
+                routes.append((argv, called, routed, err))
+                unchanged("the intercepted dispatch of {}".format(argv))
+            if status in ("available", "partial"):
+                argv, called, routed, err = routes[0]
+                if called != ["_cmd_" + verb] or routed != EXIT_OK:
+                    faults.append("{} is marked {} but main() does not route it to _cmd_{} (handlers reached {}, "
+                                  "exit {!r}, stderr {!r})".format(verb, status, verb, called, routed, err))
+                    continue
+                vocabulary = _verb_subcommands(verb)
+                if status == "available":
+                    for sub in vocabulary or ():
+                        if _verb_refusal_holds(verb, sub):
+                            faults.append("{} is marked available but {} {} exits 2 in this build; it is "
+                                          "partial".format(verb, verb, sub))
+                    continue
+                parts = _verb_scope_parts(scope)
+                if parts is None or vocabulary is None or sorted(parts[0] + parts[1]) != sorted(vocabulary):
+                    faults.append("{}'s scope {!r} does not name each of its subcommands {} exactly once as "
+                                  "running or exiting 2".format(verb, scope, vocabulary))
+                    continue
+                caller = (here._opf_record.cli if verb == "record" else getattr(here, "_cmd_" + verb)).__code__
+                for sub in parts[0]:
+                    reached = []
+                    with contextlib.ExitStack() as stack:
+                        for module, attr, entry_sub in _VERB_SUB_ENTRIES.get(verb, ()):
+                            stack.enter_context(patch.object(getattr(here, module), attr,
+                                                             _verb_entry_standin(entry_sub, reached)))
+                        for module, attr in _VERB_SUB_GATES.get(verb, ()):
+                            stack.enter_context(patch.object(getattr(here, module), attr,
+                                                             lambda *args, **kwargs: None))
+                        code, err = real(sub_argv(verb, sub))
+                    if [name for name, _code in reached] != [sub]:
+                        faults.append("{} {} is named as running but does not reach its engine entry (reached "
+                                      "{}, exit {!r}, stderr {!r})".format(
+                                          verb, sub, [name for name, _code in reached], code, err))
+                    elif reached[0][1] is not caller:
+                        faults.append("{} {} reaches its engine entry from {}, not straight from {}; the "
+                                      "entry did not run".format(verb, sub, reached[0][1].co_name, caller.co_name))
+                    unchanged("{} {} (running)".format(verb, sub))
+                for sub in parts[1]:
+                    if not _verb_refusal_holds(verb, sub):
+                        faults.append("{} {} is named as exiting 2 but no refusal of every argument list is in "
+                                      "place for it".format(verb, sub))
+                        continue
+                    phase[0] = ("{} {}".format(verb, sub), _VERB_REFUSAL_ENTRIES.get((verb, sub), ()))
+                    try:
+                        code, err = real(sub_argv(verb, sub))
+                    finally:
+                        phase[0] = None
+                    if code != EXIT_MALFORMED:
+                        faults.append("{} {} is named as exiting 2 but exits {!r} (stderr {!r})".format(
+                            verb, sub, code, err))
+                    unchanged("{} {} (exiting 2)".format(verb, sub))
+                continue
+            for argv, called, routed, err in routes:
+                if isinstance(routed, Exception):
+                    # An intercepted dispatch that raised is a fault, and the real dispatch is not run.
+                    faults.append("{} is marked in progress, but the intercepted dispatch of {} raised {!r} "
+                                  "(handlers reached {}); it is not run".format(verb, argv, routed, called))
+                    continue
+                if called and (called != ["_cmd_" + verb] or verb not in refusals):
+                    faults.append("{} is marked in progress, but main() routes {} to {} and it is not a handler "
+                                  "that refuses every argument list".format(verb, argv, called))
+                    continue
+                if called and live.get(verb) != "in progress":
+                    # Never run the handler of a verb VERB_STATUS marks available or partial.
+                    faults.append("{} is in the refusal list, but VERB_STATUS marks it {}; its handler is not "
+                                  "run".format(verb, live.get(verb)))
+                    continue
+                code, got = real(argv)
+                want = (_VERB_STUB_LINE.format(verb) if not called
+                        else "opf {}: {}\n".format(verb, getattr(here, refusals[verb])))
+                if code != EXIT_MALFORMED or got != want:
+                    faults.append("{} is marked in progress but {} exits {!r} with stderr {!r}, not 2 with "
+                                  "{!r}".format(verb, argv, code, got, want))
+                unchanged("{} (in progress)".format(argv))
+    finally:
+        os.chdir(cwd)
+        shutil.rmtree(base, ignore_errors=True)
+        guards.close()
+    if os.path.lexists(base):
+        faults.append("the scratch directory {} could not be removed".format(base))
+    for name, during, allowed in calls:
+        if allowed:
+            continue
+        if during is None:
+            faults.append("the real engine entry {} was called outside the real dispatch of a subcommand "
+                          "whose refusal is in place; it was refused and did not run".format(name))
+        else:
+            faults.append("the real engine entry {} was called during the real dispatch of {}, which it is "
+                          "not listed for; it was refused and did not run".format(name, during))
+    return faults
+
+
+# The in progress verbs whose handler refuses every argument list with exit 2 and reads and writes nothing,
+# each with the name of the refusal it prints. Only these handlers, of in progress verbs, does the status
+# self-test run for real, and only once the intercepted dispatch reaches exactly that handler.
+_VERB_REFUSALS = {"upgrade": "UPGRADE_NONE", "import": "IMPORT_RETIRED"}
+
+
+def _verb_intercepted_faults():
+    """Hold what _verb_intercepted replaces, and return the faults, empty when it holds. A function this
+    module defines (a def, and a lambda bound here) must be replaced by a recorder during the dispatch, so
+    calling it records its name and returns 0; the dispatch itself, a class this module defines, a bound
+    method of an instance of that class, a function bound here but defined in another module, and a builtin
+    bound here must each be kept as it is. After the dispatch, every one of them must be the original again."""
+    here = sys.modules[__name__]
+    probes = dict(_verb_status_probe_lambda=lambda: None,
+                  _verb_status_probe_method=_VerbHelperImportGate([]).find_spec,
+                  _verb_status_probe_foreign=os.path.join, _verb_status_probe_builtin=len)
+    seen = {}
+
+    def dispatch(argv):
+        # reads each attribute and calls the two that must be recorders; nothing this module defines runs
+        for attr, value in originals.items():
+            seen[attr] = getattr(here, attr) is value
+        here._verb_tree(argv)
+        here._verb_status_probe_lambda()
+        return EXIT_OK
+
+    probes["_verb_status_probe_dispatch"] = dispatch
+    originals = dict(probes, _verb_tree=here._verb_tree, _VerbHelperImportGate=here._VerbHelperImportGate)
+    replaced = ("_verb_tree", "_verb_status_probe_lambda")
+    faults = []
+    for attr in probes:
+        setattr(here, attr, probes[attr])
+    try:
+        called, routed, err = _verb_intercepted(here, dispatch, ["probe"])
+    finally:
+        for attr in probes:
+            delattr(here, attr)
+    want = dict((attr, attr not in replaced) for attr in originals)
+    if seen != want:
+        faults.append("_verb_intercepted kept {} and replaced {}, not kept {} and replaced {}".format(
+            sorted(attr for attr in seen if seen[attr]), sorted(attr for attr in seen if not seen[attr]),
+            sorted(attr for attr in want if want[attr]), sorted(replaced)))
+    if called != list(replaced) or routed != EXIT_OK or err:
+        faults.append("_verb_intercepted recorded {}, exit {!r}, stderr {!r}, not {}, exit 0 and no stderr".format(
+            called, routed, err, list(replaced)))
+    if here._verb_tree is not originals["_verb_tree"] or (
+            here._VerbHelperImportGate is not originals["_VerbHelperImportGate"]):
+        faults.append("_verb_intercepted did not restore _verb_tree and _VerbHelperImportGate")
+    return faults
+
+
+def _verb_status_self_test():
+    """Hold VERB_STATUS to the dispatch (_verb_status_faults), then show that each flip fails, named: an in
+    progress stub marked available, an available verb marked in progress, a verb dropped or doubled, a
+    handler renamed (main() routing init to another name), a refusal listed for an available verb (alone and
+    with that verb marked in progress), an in progress verb that runs a handler only with arguments, a scope
+    that does not read as a list, a refused subcommand named as running, a running subcommand named as
+    exiting 2, record marked available, main() dispatching an in progress verb straight to a helper module's
+    entry, an in progress verb whose dispatch raises, an engine entry reached through a lambda, a helper
+    module imported in the intercepted dispatch (held by the import gate), a same-size rewrite of a scratch
+    file (held by content hashing), an engine entry called outside any refusal run (held by the engine
+    guard), and an engine entry called during the refusal run of a subcommand it is not listed for. No flip
+    runs a handler other than a refusing one, and no flip makes a real engine call outside the refusal run
+    of a subcommand the entry is listed for; the two flips that call an entry where it is not permitted call
+    it with no arguments, so a guard that let it through raises TypeError before the engine runs. What the
+    intercepted dispatch replaces and keeps is held first (_verb_intercepted_faults)."""
+    here = sys.modules[__name__]
+    faults = _verb_intercepted_faults() + _verb_status_faults()
+    real_main = main
+
+    def renamed(argv):
+        # main() with init's handler bound under another name
+        if list(argv[:1]) == ["init"]:
+            return getattr(here, "_verb_status_renamed_init")(list(argv[1:]))
+        return real_main(argv)
+
+    def routes_with_arguments(argv):
+        # main() routing migrate to a real handler once it has any argument
+        if list(argv[:1]) == ["migrate"] and len(argv) > 1:
+            return getattr(here, "_cmd_init")(list(argv[1:]))
+        return real_main(argv)
+
+    def to_helper(argv):
+        # main() dispatching upgrade straight to a helper module's entry, not to its own handler
+        if list(argv[:1]) == ["upgrade"]:
+            return here._opf_record.cli(list(argv[1:]))
+        return real_main(argv)
+
+    def reconcile_through_lambda(argv):
+        # main() reaching adopt reconcile's engine entry through a lambda, not straight from _cmd_adopt
+        if list(argv[:2]) == ["adopt", "reconcile"]:
+            call = lambda: here._opf_adopt_apply.reconcile_report(os.getcwd(), [])  # noqa: E731
+            return call()
+        return real_main(argv)
+
+    def raises_when_routed(argv):
+        # main() routing sync to a handler name this module does not define, so the dispatch raises
+        if list(argv[:1]) == ["sync"]:
+            return getattr(here, "_cmd_sync")(list(argv[1:]))
+        return real_main(argv)
+
+    def imports_helper(argv):
+        # main() importing a helper module that is not loaded while it dispatches migrate; the name exists
+        # nowhere, so with the import gate gone the import fails with ModuleNotFoundError and nothing runs
+        if list(argv[:1]) == ["migrate"]:
+            import importlib
+            importlib.import_module("_opf_verb_status_absent")
+        return real_main(argv)
+
+    rewritten = []
+
+    def rewrites_same_size(argv):
+        # main() rewriting a scratch input file with content of the same size and type the first time it
+        # dispatches migrate, then restoring it the first time it dispatches migrate --help, so only the
+        # content hash sees the change; the path is taken from the probe's working directory (the scratch
+        # root) on the first call
+        content = {("migrate",): "probe = 2\n", ("migrate", "--help"): "probe = 1\n"}.get(tuple(argv))
+        if content is None or tuple(argv) in rewritten[1:]:
+            return real_main(argv)
+        if not rewritten:
+            parent = os.path.dirname(os.getcwd())
+            if not os.path.basename(parent).startswith("opf-verb-status-"):
+                return real_main(argv)
+            rewritten.append(os.path.join(parent, "in", "plan.toml"))
+        rewritten.append(tuple(argv))
+        with open(rewritten[0], "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return real_main(argv)
+
+    def engine_outside_refusal(argv):
+        # main() calling adopt plan's engine entry while it dispatches record create, outside any refusal
+        # run; no arguments, so a guard that let it through raises TypeError before the engine runs
+        if list(argv[:2]) == ["record", "create"]:
+            here._opf_adopt_plan.plan()
+        return real_main(argv)
+
+    def engine_in_other_refusal(argv):
+        # main() calling adopt reconcile's engine entry during the refusal run of record receipt-repair,
+        # which that entry is not listed for; no arguments, as above
+        if list(argv[:2]) == ["record", "receipt-repair"]:
+            here._opf_adopt_apply.reconcile_report()
+        return real_main(argv)
+
+    def marked(verb, status, scope=""):
+        return tuple((v, status, scope) if v == verb else (v, s, c) for v, s, c in VERB_STATUS)
+
+    with_init = dict(_VERB_REFUSALS, init="UPGRADE_NONE")
+    flips = (
+        ("stub-marked-available", dict(table=marked("migrate", "available")), "migrate is marked available"),
+        ("available-marked-in-progress", dict(table=marked("init", "in progress")), "init is marked in progress"),
+        ("verb-dropped", dict(table=tuple(row for row in VERB_STATUS if row[0] != "sync")),
+         "sync appears 0 times"),
+        ("verb-doubled", dict(table=VERB_STATUS + (("render", "available", ""),)), "render appears 2 times"),
+        ("handler-renamed", dict(dispatch=renamed), "init is marked available but main() does not route it"),
+        ("refusal-for-available-verb", dict(refusals=with_init), "init is in the refusal list but marked available"),
+        ("refusal-for-available-verb-marked-in-progress",
+         dict(table=marked("init", "in progress"), refusals=with_init), "its handler is not run"),
+        ("in-progress-runs-with-arguments", dict(dispatch=routes_with_arguments),
+         "main() routes ['migrate', '--help'] to ['_cmd_init']"),
+        ("scope-not-a-list", dict(table=marked("adopt", "partial", "every subcommand")), "adopt's scope"),
+        ("refused-named-running", dict(table=marked("adopt", "partial",
+                                                    "plan, approve, complete, reconcile, and status; apply exits 2")),
+         "adopt complete is named as running"),
+        ("running-named-refused", dict(table=marked("record", "partial", "transition, done-with-receipt, and "
+                                                    "worklog-append; create and receipt-repair exit 2")),
+         "record create is named as exiting 2"),
+        ("record-marked-available", dict(table=marked("record", "available")),
+         "record is marked available but record receipt-repair exits 2"),
+        ("dispatch-to-helper", dict(dispatch=to_helper), "main() routes ['upgrade'] to ['_opf_record.cli']"),
+        ("intercepted-dispatch-raises", dict(dispatch=raises_when_routed),
+         "the intercepted dispatch of ['sync'] raised"),
+        ("engine-through-lambda", dict(dispatch=reconcile_through_lambda),
+         "adopt reconcile reaches its engine entry from <lambda>, not straight from _cmd_adopt"),
+        ("helper-import-refused", dict(dispatch=imports_helper),
+         "the intercepted dispatch of ['migrate'] raised _VerbHelperImportBlocked('_opf_verb_status_absent')"),
+        ("same-size-rewrite-seen", dict(dispatch=rewrites_same_size),
+         "the intercepted dispatch of ['migrate'] changed the scratch directory: [('in/plan.toml', "),
+        ("engine-outside-refusal-refused", dict(dispatch=engine_outside_refusal),
+         "record create is named as running but does not reach its engine entry (reached [], exit "
+         "_VerbEngineBlocked('_opf_adopt_plan.plan')"),
+        ("engine-in-other-refusal-refused", dict(dispatch=engine_in_other_refusal),
+         "the real engine entry _opf_adopt_apply.reconcile_report was called during the real dispatch of "
+         "record receipt-repair, which it is not listed for"),
+    )
+    # The engine calls a flip makes on purpose where no entry is permitted, each refused by the guard (every
+    # other flip must make none), and the one scratch change a flip makes on purpose (no other flip may
+    # change the scratch directory): the fault that change raises must start with that flip's needle.
+    refused_on_purpose = {"engine-outside-refusal-refused": ["_opf_adopt_plan.plan"],
+                          "engine-in-other-refusal-refused": ["_opf_adopt_apply.reconcile_report"]}
+    writes_on_purpose = ("same-size-rewrite-seen",)
+    target = getattr(here, "_cmd_init", None)
+    if target is None:
+        faults.append("_cmd_init is not defined, so main() cannot route init to it")
+        target = lambda rest: EXIT_MALFORMED  # noqa: E731  a stand-in, so the flips still run
+    here._verb_status_renamed_init = target
+    try:
+        for label, kwargs, needle in flips:
+            calls = []
+            got = _verb_status_faults(engine_calls=calls, **kwargs)
+            if not any(needle in fault for fault in got):
+                faults.append("flip {} was not caught: {!r}".format(label, got))
+            leaked = [fault for fault in got if "changed the scratch directory" in fault
+                      and not (label in writes_on_purpose and fault.startswith(needle))]
+            if leaked:
+                faults.append("flip {} ran a handler that wrote: {!r}".format(label, leaked))
+            # The only real engine calls a flip may make are in the real dispatch of a subcommand whose
+            # refusal is in place, to an entry listed for it; every other call, refused by the guard, counts
+            # here and must be exactly the calls the flip makes on purpose.
+            stray = [name for name, _during, allowed in calls if not allowed]
+            if stray != refused_on_purpose.get(label, []):
+                faults.append("flip {} made {} real engine call(s) outside a refusal run the entry is listed "
+                              "for: {!r}, not {!r}".format(label, len(stray), stray,
+                                                           refused_on_purpose.get(label, [])))
+    finally:
+        del here._verb_status_renamed_init
+    if faults:
+        print("opf verb status self-test: FAIL", file=sys.stderr)
+        for fault in faults:
+            print("  " + fault, file=sys.stderr)
+        return EXIT_FINDING
+    print("opf verb status self-test: PASS ({} verbs, {} flips)".format(len(VERB_STATUS), len(flips)))
+    return EXIT_OK
 
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
@@ -23597,12 +25112,28 @@ def main(argv=None):
     if not args or args[0] in ("-h", "--help"):
         print(__doc__, file=sys.stderr)
         return EXIT_MALFORMED
+    if args[0] == "--declaration":
+        return _declaration_run(args[1:])
     verb = args[0]
     rest = args[1:]
+    check = None
+    if verb in _DECLARATION_GATED:
+        # Spec 16.1: the runtime check gates every verb that can touch a store, before it resolves one.
+        check = _opf_declaration.runtime_check(_installed_declaration())
+        if not check.ok:
+            print(_opf_declaration.refusal_line(verb, check), file=sys.stderr)
+            print("opf {}: {}".format(verb, check.detail), file=sys.stderr)
+            if verb in _DECLARATION_REPORTING:
+                _opf_declaration.emit_report(check, False, sys.stdout)
+            return EXIT_MALFORMED
     if verb == "render":
         return _cmd_render(rest)
     if verb == "doctor":
-        return _cmd_doctor(rest)
+        rc = _cmd_doctor(rest)
+        if check is not None and verb in _DECLARATION_REPORTING:
+            # Doctor is read-only: it performs no store operation, so its runtime result is fail.
+            _opf_declaration.emit_report(check, False, sys.stdout)
+        return rc
     if verb == "init":
         return _cmd_init(rest)
     if verb == "upgrade":

@@ -1,0 +1,63 @@
+# The aiqt.ai draft install page: the prompt for a development assistant first, then the skill download in
+# 1 line with a link to the step-by-step page (install/details/, not in the nav), then OPF.
+path = "install/index.html"
+title = "Install"
+kind = "document"
+label = "Install"
+heading = "Add AIQT to your AI development assistant"
+meta = "Give your development assistant 1 prompt and it installs AIQT and walks you through adoption, with OPFiles for your project's records. Using a chat assistant? Download the skill."
+
+[[body]]
+component = "label"
+text = "Copy this prompt"
+
+[[body]]
+component = "code"
+id = "install-prompt"
+variant = "prompt-block"
+text = "Install AIQT Guardrails in this project and walk me through adopting it. Read https://aiqt.ai/llms.txt and the repository https://github.com/jposluns/guardrails first. Propose an adoption plan: the AIQT rules, hooks, and checks that fit this project's languages and tools, and OPFiles (https://opfiles.ai/llms.txt) for the project's operational records unless I opt out. Before building any new guardrail, check whether jposluns/guardrails already has one that fits. Name every file you would create or change, and why. Change nothing until I approve the plan."
+note = "Paste it into Claude Code, Codex, Antigravity CLI, Gemini CLI, Cursor, Copilot, or any other development assistant."
+
+[[body]]
+component = "prose"
+html = '''<p>Google announced that from 18 June 2026 Gemini CLI would stop serving Google AI Pro and Ultra subscribers and free users, who are directed to Antigravity CLI, whose command is <code>agy</code>. Gemini CLI remains available with Gemini Code Assist Standard or Enterprise, with Google Cloud, and with paid Gemini or Gemini Enterprise Agent Platform API keys. Paste the prompt into whichever of the 2 CLIs your Google plan or key supports (sources: <a href="https://github.com/google-gemini/gemini-cli/discussions/27274" target="_blank" rel="noopener noreferrer">Gemini CLI notice<span class="vh"> (opens in a new tab)</span></a> and <a href="https://antigravity.google/docs/skills" target="_blank" rel="noopener noreferrer">Antigravity skills<span class="vh"> (opens in a new tab)</span></a>).</p>'''
+
+[[body]]
+component = "section"
+lbl = "Chat assistants"
+heading = "Or add the skill"
+id = "skill"
+
+[[body]]
+component = "prose"
+html = '''<p><a href="/downloads/aiqt-skill-1.0.6.zip">Download the AIQT skill</a> (zip, 28 KB) and install it the way your AI assistant installs any skill. <a href="$BASE/install/details/">Step-by-step instructions for each assistant</a>, and the instruction file for assistants without skills.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Included"
+heading = "OPFiles keeps your project's records straight"
+id = "opf"
+
+[[body]]
+component = "prose"
+html = '''<p>OPFiles (OPF) is part of AIQT Guardrails, with its own site at <a href="https://opfiles.ai" target="_blank" rel="noopener noreferrer">opfiles.ai<span class="vh"> (opens in a new tab)</span></a>. It keeps your backlog, findings, decisions, and handoffs in one machine-written source, generates the readable versions from it, and fails the build when the 2 disagree. Your assistant always knows what was decided and what is still open, and it significantly cuts errors.</p><p>An AIQT adoption sets up OPF by default. It is optional: say so in your plan review and the adoption skips it, and you can add it later.</p>'''
+
+[[body]]
+component = "section"
+lbl = "Requirements"
+heading = "What it needs"
+id = "code"
+
+[[body]]
+component = "prose"
+html = '''<p>The pack's tools and hooks require Python 3.14 or newer; <a href="/development">the development assistant page</a> has the detail. The chat skill needs no Python.</p>'''
+
+[[body]]
+component = "prose"
+html = '''<p>Planning for a team? See <a href="$BASE/future/">what is coming for teams and enterprises</a>.</p>'''
+
+[[body]]
+component = "next"
+html = "What AIQT holds your assistant to."
+text = "The standard"
+href = "standard/"

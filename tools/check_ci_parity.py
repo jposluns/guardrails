@@ -3,7 +3,9 @@
 
 The gate reads tools/run_all_checks.sh and the two CI workflows (CI_WORKFLOWS:
 .github/workflows/quality.yml and .github/workflows/msg-leaks.yml) as data. It
-executes none of them. Every path is absolute and derived from this file's
+executes none of them. Its checkout-credentials rule (CHECKOUT CREDENTIALS,
+below) also reads every workflow file under .github/workflows, as parsed
+YAML. Every path is absolute and derived from this file's
 resolved repository root. The --self-test alone also runs a scratch copy of the runner
 under bash, with stub python3 and gitleaks commands, to prove a failing gate is named
 (GATE FAILED: <name> (exit <n>)) and listed (FAILED GATES: ...) before RESULT: FAIL.
@@ -246,23 +248,93 @@ group step put back into quality.yml, and the whole self-test removed,
 repeated or moved out of the heavy jobs each turn the self-test red. The rule
 runs in the self-test, which reads the live files, not in the gate's own run.
 Not checked: which HEAVY_JOBS job runs the whole self-test.
+CHECKOUT CREDENTIALS. Unless its persist-credentials input is false,
+actions/checkout writes the job token into the git config of the checkout,
+where every later step of the job, each gate this repository runs among
+them, can read it; no job of these workflows pushes, fetches or otherwise
+uses git credentials after its checkout (read at this commit), so none
+needs the token there. Every regular file directly under
+.github/workflows whose name ends in .yml or .yaml (WORKFLOW_SUFFIXES,
+letter case aside) is read through read_runner_text and parsed WHOLE into
+its YAML structure by _WorkflowReader, never judged line by line: every
+mapping in the parsed tree whose uses: value names actions/checkout (the
+part before @, letter case aside), a step wherever it sits, must carry a
+with: mapping whose persist-credentials value is the boolean false (a plain
+false, False or FALSE, the YAML 1.2 core spellings). A missing with:, a
+with: without the key, true, an empty value and any string (a quoted
+'false', 'no' or a ${{ }} expression among them, though actions/checkout
+reads some of them as not true) are each a checkout-credentials finding
+(exit 1): the rule holds the one boolean, so a comment or a run: line that
+spells the key is not the key. The reader is a conservative block-YAML
+subset: block mappings with plain keys, block sequences (a mapping may
+open on an item's line), one-line plain, single-quoted and backslash-free
+double-quoted scalars, one-line flow sequences of plain words, literal (|)
+block scalars and comments; a workflow outside that subset is
+cannot-evaluate (exit 2), never skipped. Every component from the
+repository root to the workflows directory (.github and workflows; the
+root itself is resolved when the module loads) is read through lstat: a
+symlinked one can point this rule at another tree, so one the lstat sees
+is cannot-evaluate, not followed. A workflow entry that is not a regular
+file (a symlink, directory, FIFO or device, refused on its own lstat
+before any read of it), a workflow it cannot read (a stat
+or read error or a byte outside printable ASCII plus tab and newline) or
+parse (an empty file, a tab, a document marker or directive, an anchor,
+alias or tag, a flow mapping, a folded scalar, a multi-line plain or
+quoted scalar, an indentless or one-line nested sequence, a repeated key,
+a key that is not plain, a line the indentation does not place, nesting
+past the interpreter's recursion limit), a uses: that is not one string,
+a step's uses: key spelled in another letter case (a step is a
+sequence-item mapping; whether a workflow reader folds key case is not
+modelled, and a key of an env: or other non-step mapping is data, never
+held to this rule), a with: or persist-credentials key of a checkout step
+spelled in another letter case, a step uses: starting with ./ or .\\ (a
+dot then either path separator, however a runner reads the backslash) once
+its surrounding whitespace is stripped, whatever path it names (a step cannot
+call a reusable workflow, which is a job-level uses:, so it runs a local
+action, a composite one among them, whose steps are not in these files; a
+path under .github/workflows/ is no exception), a checkout's with: that
+is not a mapping, a directory that cannot be listed and one holding no
+workflow file are each cannot-evaluate (exit 2), never skipped. Each lstat
+is a path lookup apart from the later listing and reads, which follow
+symlinks: a concurrent writer to the tree during the run that swaps
+.github, workflows or a workflow entry for a symlink after its lstat has
+it followed, and one swapped for a FIFO can block the read; this is not
+closed, so the checks hold for a tree nothing writes while the gate runs.
+The rules are CHECKOUT_RULES (persist-credentials and fail-closed); the self-test
+removes each from the running module and shows every case of it red
+without it, and the main wiring vectors run main([]) itself, so the
+checkout leg cannot be cut out of the process exit. Not read: a checkout
+inside a remote action or a remote reusable workflow, whose steps are not
+in these files (a step's local uses: is cannot-evaluate instead); the
+target of a job-level uses:, which is not resolved (a local reusable
+workflow it calls is read only as a workflow file directly under
+.github/workflows/, like every other); another action that writes
+credentials; an INPUT_PERSIST-CREDENTIALS value set through env:; and any
+other route by which a step obtains the job token (an action input that
+defaults to it among them).
 
-Exit convention:
+Exit convention (the higher of the parity leg's and the checkout-credentials
+leg's exit):
   0  extraction succeeded, every difference has an active exception, no exception is
-     stale or reversed, and every mandatory member is present on both sides
+     stale or reversed, every mandatory member is present on both sides, and every
+     checkout step sets persist-credentials: false
   1  an evaluated parity finding, stale or reversed exception, missing mandatory
-     member, required-status, trigger, relocation or lane finding
+     member, required-status, trigger, relocation, lane or checkout-credentials
+     finding
   2  cannot-evaluate, including an unreadable input, malformed control input, empty
      extraction, unsupported shell or YAML shape, unresolved command value, hidden
-     action, circular runner invocation, or shadow-scan discrepancy
+     action, circular runner invocation, shadow-scan discrepancy, or a workflow
+     directory or file the checkout-credentials rule cannot list, read, parse or
+     judge
 
 DISCLOSED RESIDUAL. This is token-level set parity only. It does not compare
 environment values, operating systems, tool versions, execution order, multiplicity,
 step placement across jobs, labels, or whether the shell harness propagates a child
 failure. Interpreter-flag differences are intentionally removed from identity and are
-owned by check_python_launcher_isolation.py. Scope is exactly the three named files
-(the runner and CI_WORKFLOWS), so gates in other workflows, such as the scheduled
-currency.yml, are not enumerated. Argument order is identity-relevant,
+owned by check_python_launcher_isolation.py. Parity scope is exactly the three named
+files (the runner and CI_WORKFLOWS), so gates in other workflows, such as the scheduled
+currency.yml, are not enumerated; only the checkout-credentials rule reads every
+workflow file, for its checkout steps alone. Argument order is identity-relevant,
 making a harmless reorder fail loud. Coordinated removal of both of this gate's own
 invocations cannot be detected if nobody runs the remaining file manually. The repository
 contracts (REPO_GATES) and the cited-standards contract's --self-test are
@@ -293,8 +365,8 @@ not a blocklist of known-bad spellings. The only recognized [ ] tests are
 if [ "$failed" -ne 0 ]; then, if [ "$notrun" -ne 0 ]; then, and the two exact
 gitleaks lookup lines, so a -v operand (whose subscript can assign), any NAME[...]
 subscript operand, a bare [ ] line, and every unlisted test form are unclassified.
-set -uo pipefail or set -euo pipefail, and the directory-binding
-cd "$(dirname "$0")/.." || exit 2 line, are accepted only at top level before the
+set -uo pipefail or set -euo pipefail, and the three checked directory-binding
+lines (LOCAL_BINDING_LINES), are accepted only at top level before the
 first gate. A bare then or done is never a runner line, and else is accepted only
 inside an open if block that holds at least one then-branch statement and is not
 already in its else branch. Every other assignment, export or echo line must be
@@ -462,6 +534,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import argparse
 import re
 import shlex
+import stat
 from collections import namedtuple
 from pathlib import Path
 
@@ -474,6 +547,13 @@ CI_SOURCE = ".github/workflows/quality.yml"
 MSG_LEAKS_CI_PATH = ROOT / ".github" / "workflows" / "msg-leaks.yml"
 MSG_LEAKS_CI_SOURCE = ".github/workflows/msg-leaks.yml"
 CI_WORKFLOWS = ((CI_SOURCE, CI_PATH), (MSG_LEAKS_CI_SOURCE, MSG_LEAKS_CI_PATH))
+# The directory every workflow file lives in, read whole by the
+# checkout-credentials rule (module docstring, CHECKOUT CREDENTIALS), and the
+# file name endings GitHub reads as workflows there (compared without regard
+# to letter case, so no spelling of them goes unread).
+WORKFLOWS_SOURCE = ".github/workflows"
+WORKFLOWS_PATH = ROOT / ".github" / "workflows"
+WORKFLOW_SUFFIXES = (".yml", ".yaml")
 
 # Runtime-derived values deliberately lose their concrete value while retaining the
 # flag in identity. A new runtime-valued flag is not masked automatically, so it
@@ -506,6 +586,12 @@ MASKED_REF_EXPRESSIONS = frozenset({
 REPO_GATES = frozenset({
     ".github/check_cited_standards_contract.py",
     ".github/check_newtab_contract.py",
+})
+
+# The pinned build gates copied from the shared site template package, each named; no general .baseline
+# executable allowance. The pin gate (tools/check_baseline_pin.py) holds their bytes.
+PINNED_BUILD_GATES = frozenset({
+    ".baseline/check_palette.py",
 })
 
 # The one status branch protection requires. In a workflow with more than one job,
@@ -567,18 +653,80 @@ REQUIRED_STATUS_JOB = (
     "        " + STEP_SHELL_LINE,
     "        env:",
     "          RESULTS: ${{ join(needs.*.result, ' ') }}",
+    "          SITE_ONLY: ${{ needs.scope.outputs.site_only }}",
+    "          EVENT_NAME: ${{ github.event_name }}",
+    "          HEAD_REF: ${{ github.head_ref }}",
+    "          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}",
+    "          BASE_REPO: ${{ github.repository }}",
+    "          OTHER_RESULTS: ${{ needs.scope.result || 'missing' }} "
+    "${{ needs.secrets.result || 'missing' }} "
+    "${{ needs.site.result || 'missing' }} "
+    "${{ needs.opf-closure-a.result || 'missing' }} "
+    "${{ needs.opf-closure-b.result || 'missing' }} "
+    "${{ needs.opf-closure-c.result || 'missing' }} "
+    "${{ needs.opf-closure-d.result || 'missing' }} "
+    "${{ needs.opf-closure-e.result || 'missing' }} "
+    "${{ needs.opf-closure-f.result || 'missing' }} "
+    "${{ needs.release.result || 'missing' }} "
+    "${{ needs.generated.result || 'missing' }} "
+    "${{ needs.registry.result || 'missing' }}",
+    "          HEAVY_RESULTS: ${{ needs.opf-tooling-a.result || 'missing' }} "
+    "${{ needs.opf-tooling-b.result || 'missing' }} "
+    "${{ needs.opf-tooling-c.result || 'missing' }} "
+    "${{ needs.selftest-execution.result || 'missing' }} "
+    "${{ needs.git-fixture-env-core.result || 'missing' }} "
+    "${{ needs.opf-host-patch.result || 'missing' }} "
+    "${{ needs.git-fixture-env-core-host-patch.result || 'missing' }} "
+    "${{ needs.git-fixture-env-config-combined-host-patch.result || "
+    "'missing' }} "
+    "${{ needs.git-fixture-env-config-malformed-host-patch.result || "
+    "'missing' }} "
+    "${{ needs.git-fixture-env-config-system-host-patch.result || "
+    "'missing' }} "
+    "${{ needs.byte-canon-matrix.result || 'missing' }}",
     "        run: |",
     "          set -euo pipefail",
     '          echo "Needed job results: ${RESULTS}"',
-    '          rest="${RESULTS:-none}"',
-    '          rest="${rest//success/}"',
-    '          rest="${rest// /}"',
-    '          if [ -n "$rest" ]; then',
-    '            echo "Quality gates: FAILED, every needed job must conclude '
-    'success"',
+    '          echo "site_only: ${SITE_ONLY:-unset}"',
+    '          other="${OTHER_RESULTS:-missing}"',
+    '          other="${other//success/}"',
+    '          other="${other// /}"',
+    '          if [ -n "$other" ]; then',
+    '            echo "Quality gates: FAILED, every always-run job must '
+    'conclude success"',
     "            exit 1",
     "          fi",
-    '          echo "Quality gates: PASS, every needed job concluded success"',
+    '          heavy="${HEAVY_RESULTS:-missing}"',
+    '          heavy="${heavy//success/}"',
+    '          accept="no"',
+    '          if [ "${SITE_ONLY:-false}" = "true" ]; then',
+    '            accept="yes"',
+    "          fi",
+    '          if [ "${EVENT_NAME:-}" != "pull_request" ]; then',
+    '            accept="no"',
+    "          fi",
+    '          head_ref="${HEAD_REF:-}"',
+    '          if [ "${head_ref}" = "${head_ref#merge-train-}" ]; then',
+    '            accept="no"',
+    "          fi",
+    '          if [ -z "${HEAD_REPO:-}" ]; then',
+    '            accept="no"',
+    "          fi",
+    '          if [ "${HEAD_REPO:-}" != "${BASE_REPO:-}" ]; then',
+    '            accept="no"',
+    "          fi",
+    '          if [ "${accept}" = "yes" ]; then',
+    '            heavy="${heavy//skipped/}"',
+    "          fi",
+    '          heavy="${heavy// /}"',
+    '          if [ -n "$heavy" ]; then',
+    '            echo "Quality gates: FAILED, a heavy job must conclude '
+    'success, or be skipped only in a site-only merge-train pull request '
+    'of this repository"',
+    "            exit 1",
+    "          fi",
+    '          echo "Quality gates: PASS, every needed job concluded as '
+    'required"',
 )
 
 # The one top-level concurrency: block quality.yml must carry, compared line for line
@@ -597,19 +745,107 @@ CONCURRENCY_BLOCK = (
 
 # The one job-level if: line a job other than Quality gates may carry, exactly as
 # written, and the quality.yml jobs that must carry it (module docstring, LANES): a
-# heavy job runs on a push and on a pull request whose head is a merge-train-*
-# branch of this repository, and is skipped on every other pull request, which
-# Quality gates reads as not success.
+# heavy job runs on a push, on a workflow_dispatch or schedule run of
+# refs/heads/main (a manual or nightly full run; on any other ref it is
+# skipped), and on a pull request whose head is a merge-train-* branch of this
+# repository, and is skipped on every other pull request, which Quality gates
+# reads as not success. The site fast lane adds the leading
+# needs.scope condition: when the scope job reads the pull request as site-only
+# (every changed path in the site allowlist), the heavy job is skipped and
+# Quality gates passes that one skip; on a push the scope job always emits
+# site_only=false, so a push to main runs the full suite. Each heavy job must
+# carry needs: scope, and the scope job must be present, or the condition reads
+# an empty output and the fast lane silently never engages.
 HEAVY_JOB_IF_LINE = (
-    "    if: github.event_name == 'push' || "
+    "    if: needs.scope.outputs.site_only != 'true' && "
+    "(github.event_name == 'push' || "
+    "((github.event_name == 'workflow_dispatch' || "
+    "github.event_name == 'schedule') && github.ref == 'refs/heads/main') || "
     "(startsWith(github.head_ref, 'merge-train-') && "
-    "github.event.pull_request.head.repo.full_name == github.repository)")
+    "github.event.pull_request.head.repo.full_name == github.repository))")
+HEAVY_JOB_NEEDS_LINE = "    needs: scope"
+SCOPE_JOB_ID = "scope"
 HEAVY_JOBS = frozenset({
-    "opf-tooling", "selftest-execution", "git-fixture-env-core",
+    "opf-tooling-a", "opf-tooling-b", "opf-tooling-c", "selftest-execution",
+    "git-fixture-env-core",
     "opf-host-patch", "git-fixture-env-core-host-patch",
     "git-fixture-env-config-combined-host-patch",
     "git-fixture-env-config-malformed-host-patch",
     "git-fixture-env-config-system-host-patch", "byte-canon-matrix",
+})
+
+# The scope job, pinned line for line after its job-id line as REQUIRED_STATUS_JOB pins
+# the Quality gates job (module docstring, LANES). Its decision step runs FIRST, before
+# any step that runs the checkout's own code, and extracts the base tree's copy of
+# tools/ci_site_scope.py (git --no-replace-objects show HEAD^1:... into the runner's
+# temporary directory), so an ordinary train cannot repoint the decision from inside
+# this job (a train that edits the workflow itself is outside what any pull_request
+# workflow covers); when the base has no readable copy the step writes
+# site_only=false, the full suite. The extracted tool then requires HEAD's raw commit
+# object to record exactly two parents, the second equal to HEAD_SHA, and reads the
+# diff against the first; the job's comments state that rule, and this pin compares
+# the job's non-comment lines only, so it holds the lines that run the rule, not the
+# comments that describe it. Any departure in the job body (outputs:, env:, a
+# step, a run line, the step ORDER) is a lane finding, because those lines choose
+# which copy of the tool decides, which inputs it reads and what runs before it. This
+# pin is a consistency check within the reviewed repository, not an authorization.
+SCOPE_JOB = (
+    "    name: Site fast-lane scope",
+    "    runs-on: ubuntu-latest",
+    "    outputs:",
+    "      site_only: ${{ steps.decide.outputs.site_only }}",
+    "    steps:",
+    "      - uses: actions/checkout@v4",
+    "        with:",
+    "          fetch-depth: 0",
+    "          fetch-tags: true",
+    "          persist-credentials: false",
+    "      - uses: actions/setup-python@v5",
+    "        with:",
+    "          python-version: '3.14'",
+    "      - name: Site fast-lane scope decision",
+    "        id: decide",
+    "        " + STEP_SHELL_LINE,
+    "        env:",
+    "          EVENT_NAME: ${{ github.event_name }}",
+    "          HEAD_REF: ${{ github.head_ref }}",
+    "          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}",
+    "          BASE_REPO: ${{ github.repository }}",
+    "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}",
+    "        run: |",
+    "          set -euo pipefail",
+    '          decided="no"',
+    '          if git --no-replace-objects show "HEAD^1:tools/ci_site_scope.py" > '
+    '"${RUNNER_TEMP}/ci_site_scope_base.py"; then',
+    '            python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
+    '            decided="yes"',
+    "          fi",
+    '          if [ "${decided}" = "no" ]; then',
+    '            echo "site_only=false" >> "${GITHUB_OUTPUT}"',
+    '            echo "site_only=false (the base commit has no readable scope tool)"',
+    "          fi",
+    "      - name: Child exit status observable (after the scope decision)",
+    "        " + STEP_SHELL_LINE,
+    "        run: python3 -I -B opf/tools/_child_status.py",
+    "      - name: Site scope self-test",
+    "        " + STEP_SHELL_LINE,
+    "        run: python3 -I -B tools/ci_site_scope.py --self-test",
+)
+# The decide step's run lines that the generic grammar would refuse, admitted exactly
+# as written because the SCOPE_JOB pin holds them in place: the base-copy extraction
+# (a git show with a redirect, replace refs disabled), the base-copy launch (a
+# runtime-derived target path)
+# and the fail-closed fallback write. The git show line names tools/ci_site_scope.py,
+# so that path is recorded as this line's extraction origin for the shadow scan; the
+# step contributes no parity member (the tool's self-test member comes from its own
+# step, and no local leg runs --ci-decide).
+SCOPE_DECIDE_SHOW_LINE = (
+    'if git --no-replace-objects show "HEAD^1:tools/ci_site_scope.py" > '
+    '"${RUNNER_TEMP}/ci_site_scope_base.py"; then')
+SCOPE_DECIDE_RUN_LINES = frozenset({
+    SCOPE_DECIDE_SHOW_LINE,
+    'python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
+    'echo "site_only=false" >> "${GITHUB_OUTPUT}"',
 })
 
 # The members that may run only in a job carrying the pinned HEAVY_JOB_IF_LINE
@@ -689,6 +925,17 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_release_cut.py --protected <ref:origin/${GITHUB_REF_NAME}>",
+        "reason": (
+            "A workflow_dispatch or schedule run has no pushed range, so the CI "
+            "job supplies only its runtime-derived origin ref and the gate "
+            "compares the checked-out tip with its first parent. The bare leg "
+            "runs locally."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": "tools/check_version_monotonicity.py --base <ref:origin/${GITHUB_BASE_REF}>",
         "reason": (
             "CI derives the comparison base from trusted event and repository "
@@ -723,9 +970,10 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_branch_root.py --protected <ref:origin/${GITHUB_REF_NAME}> --max-lag 200",
         "reason": (
-            "The push-to-main CI job self-checks the protected line against its "
-            "runtime-derived origin ref; there is no local equivalent of the "
-            "protected-ref comparison."
+            "The CI job's leg for a push to main, a workflow_dispatch or a "
+            "schedule run checks HEAD against the runtime-derived origin ref of "
+            "the ref the run is for (on a push, a self-check of the protected "
+            "line); there is no local equivalent of the protected-ref comparison."
         ),
         "backlog": "GD-123",
     },
@@ -1165,7 +1413,8 @@ def normalize(tokens, masked_ok=False, raws=None):
                 "dynamic-target",
                 "gate target must be a literal tools/*.py path",
             )
-        if (target not in REPO_GATES and not PY_TARGET_RE.fullmatch(target)
+        if (target not in REPO_GATES and target not in PINNED_BUILD_GATES
+                and not PY_TARGET_RE.fullmatch(target)
                 or ".." in target.split("/")):
             return Result(
                 False,
@@ -1173,7 +1422,7 @@ def normalize(tokens, masked_ok=False, raws=None):
                 "gate-target",
                 "unsupported gate target {!r}; expected a literal "
                 "tools/*.py path, {} or gitleaks dir".format(
-                    target, " or ".join(sorted(REPO_GATES))),
+                    target, " or ".join(sorted(REPO_GATES | PINNED_BUILD_GATES))),
             )
         canonical = [target]
 
@@ -1563,7 +1812,20 @@ def _text_format_diagnostic(text, source):
 # them, so screening only the adapted text would validate lines bash never
 # runs.
 STANDALONE_SOURCE = "opf/tools/run_all_checks.sh"
-STANDALONE_BINDING = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+# The checked directory binding: dirname's status, then a non-empty name, then
+# the cd; each guard exits 2 before any gate (vector 44 runs each guard red).
+# The cd runs with CDPATH cleared, so a relative start under a hostile CDPATH
+# never resolves into the CDPATH entry (vector 45 runs the bare cd red).
+STANDALONE_BINDING_LINES = (
+    'dir=$(dirname -- "$0") || exit 2',
+    '[ -n "$dir" ] || exit 2',
+    'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2',
+)
+LOCAL_BINDING_LINES = (
+    'dir=$(dirname -- "$0") || exit 2',
+    '[ -n "$dir" ] || exit 2',
+    'CDPATH= cd -- "$dir/.." || exit 2',
+)
 
 
 # ONE byte-level reader for every runner or workflow file this module or
@@ -1625,16 +1887,21 @@ def adapt_standalone_runner(text):
     if format_diagnostic is not None:
         return None, format_diagnostic
     lines = text.splitlines()
-    if lines.count(STANDALONE_BINDING) != 1 or lines[-1:] != ["exit 0"]:
+    width = len(STANDALONE_BINDING_LINES)
+    starts = [index for index in range(len(lines))
+              if tuple(lines[index:index + width]) == STANDALONE_BINDING_LINES]
+    if (len(starts) != 1
+            or any(lines.count(line) != 1 for line in STANDALONE_BINDING_LINES)
+            or lines[-1:] != ["exit 0"]):
         return None, _diagnostic(
             STANDALONE_SOURCE,
             0,
             "standalone-scaffold",
             "unsupported standalone runner scaffold: expected exactly one "
-            "directory-binding line and a terminal exit 0",
+            "checked directory binding and a terminal exit 0",
         )
-    lines[lines.index(STANDALONE_BINDING)] = (
-        "# validated standalone directory binding")
+    for index in range(starts[0], starts[0] + width):
+        lines[index] = "# validated standalone directory binding"
     lines[-1] = "# validated terminal exit"
     return "\n".join(lines).replace('"$here/', '"opf/tools/'), None
 
@@ -2006,8 +2273,8 @@ def extract_local(text):
             # Only where the real runners put it: top level, before any gate, where
             # a late -e cannot silently end a partially failed roster.
             scaffold = not if_stack and not members
-        elif stripped == 'cd "$(dirname "$0")/.." || exit 2':
-            # Only where the real runner puts it: top level, before any gate. A
+        elif stripped in LOCAL_BINDING_LINES:
+            # Only where the real runner puts them: top level, before any gate. A
             # second binding mid-roster would move the remaining gates to the
             # parent of the repository root when $0 is relative.
             scaffold = not if_stack and not members
@@ -2184,6 +2451,18 @@ def _classify_ci_command(
             "invoking or sourcing tools/run_all_checks.sh makes parity "
             "circular",
         ))
+        return
+
+    if block and stripped in SCOPE_DECIDE_RUN_LINES:
+        # The pinned scope-decision lines (SCOPE_JOB): the base-copy extraction, the
+        # base-copy launch and the fail-closed fallback write, each admitted only as
+        # the exact reviewed spelling the scope-job pin holds in place. The git show
+        # line names tools/ci_site_scope.py, so that path is recorded as this line's
+        # extraction origin for the shadow scan; no parity member is added (no local
+        # leg runs --ci-decide, and the self-test member comes from its own step).
+        if stripped == SCOPE_DECIDE_SHOW_LINE:
+            origins.setdefault(line_number, set()).add(
+                "tools/ci_site_scope.py")
         return
 
     tokenized = _tokenize(stripped)
@@ -2426,6 +2705,42 @@ def _aggregator_shape_findings(aggregator, lines, start):
     return []
 
 
+def _scope_job_shape_findings(lines, start, source):
+    """Compare the scope job's body (the lines after its job-id line on lines[start])
+    with SCOPE_JOB, blank and whole-line comment lines skipped, every other line
+    exactly. Any departure is a lane finding: the job's outputs:, env: and steps are
+    what choose which copy of tools/ci_site_scope.py decides the fast lane and which
+    inputs it reads, so none of them may drift unreviewed."""
+    body = []
+    for index in range(start + 1, len(lines)):
+        raw = lines[index]
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        if indent <= 2:
+            break
+        body.append((index + 1, raw))
+    for position in range(max(len(body), len(SCOPE_JOB))):
+        got = body[position] if position < len(body) else None
+        want = SCOPE_JOB[position] if position < len(SCOPE_JOB) else None
+        if got is None or got[1] != want:
+            return [Finding(
+                "lane",
+                SCOPE_JOB_ID,
+                "the scope job of {} departs from the pinned scope job "
+                "(SCOPE_JOB) at {}: got {!r}, expected {!r}; only the pinned "
+                "body is known to decide the fast lane with the base "
+                "commit's copy of the scope tool".format(
+                    source,
+                    "the end of the job" if got is None
+                    else "line {}".format(got[0]),
+                    None if got is None else got[1].strip(),
+                    None if want is None else want.strip()),
+            )]
+    return []
+
+
 def _required_status_findings(
         job_ids, job_fields, lines, source, diagnostics):
     """Flag a result-masking key on any job; in a multi-job workflow, also
@@ -2528,6 +2843,30 @@ def _lane_findings(job_ids, job_fields, lines, source, job_members):
                 "removal or rename lets its lane run without the "
                 "if:".format(job, source),
             ))
+        if HEAVY_JOBS & set(job_fields) and SCOPE_JOB_ID not in job_fields:
+            findings.append(Finding(
+                "lane",
+                SCOPE_JOB_ID,
+                "the scope job {!r} is missing from {}; the pinned "
+                "HEAVY_JOB_IF_LINE reads needs.scope.outputs.site_only, so "
+                "without the scope job the fast lane reads an empty output "
+                "and never engages, and the site-only skip is "
+                "unreviewable".format(SCOPE_JOB_ID, source),
+            ))
+        for job in sorted(HEAVY_JOBS & set(job_fields)):
+            if job_fields[job].get("needs", (0, ""))[1] != SCOPE_JOB_ID:
+                findings.append(Finding(
+                    "lane",
+                    job,
+                    "heavy job {!r} of {} does not carry needs: scope; the "
+                    "pinned HEAVY_JOB_IF_LINE reads "
+                    "needs.scope.outputs.site_only, which is empty without "
+                    "the needs: edge, so the fast lane silently never "
+                    "engages".format(job, source),
+                ))
+        if SCOPE_JOB_ID in job_fields:
+            findings.extend(_scope_job_shape_findings(
+                lines, job_fields[SCOPE_JOB_ID]["start"], source))
     if block is None and source == CI_SOURCE:
         findings.append(Finding(
             "lane",
@@ -3202,6 +3541,14 @@ def extract_ci(text, source=CI_SOURCE):
 
             if stripped == STEP_SHELL_LINE:
                 current_step["shell"].append(line_number)
+                index += 1
+                continue
+
+            if re.fullmatch(r"id: [a-z][a-z0-9_-]*", stripped):
+                # A step id only names the step for a steps.<id>.outputs
+                # read (the scope job's site_only output); it cannot mask
+                # a result or change what runs, so a plain identifier is
+                # admitted and any other spelling stays refused.
                 index += 1
                 continue
 
@@ -3999,6 +4346,541 @@ def render(report):
     return "\n".join(lines)
 
 
+# CHECKOUT CREDENTIALS (module docstring). actions/checkout writes the job
+# token into the git config of the checkout unless its persist-credentials
+# input is false, and every later step of the job can read it there. The
+# rules of that leg: persist-credentials (every checkout step's with: sets
+# that input to the boolean false) and fail-closed (a workflow directory or
+# file that cannot be listed, read, parsed or judged is cannot-evaluate,
+# never skipped). The self-test removes each rule from the running module
+# and shows every case of that rule red without it.
+CHECKOUT_ACTION = "actions/checkout"
+CHECKOUT_INPUT = "persist-credentials"
+CHECKOUT_RULES = frozenset({"persist-credentials", "fail-closed"})
+# A step uses: opening with a dot then either path separator names a local
+# path, whichever separator a runner honours, so both are refused.
+LOCAL_STEP_PREFIXES = ("./", ".\\")
+CheckoutReport = namedtuple(
+    "CheckoutReport", "code files steps findings diagnostics")
+
+# The workflow reader's line grammar: a plain key, its colon, then nothing or
+# at least one space and the value; a literal block scalar header with an
+# optional chomping indicator, no indentation indicator and an optional
+# comment; and a flow sequence item, one plain word. Plain scalars resolve
+# booleans and null as the YAML 1.2 core schema does; every other plain
+# scalar stays the string it spells.
+_WORKFLOW_KEY_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*):(?: +(.*))?")
+_LITERAL_HEADER_RE = re.compile(r"\|([+-]?)(?: +#.*| *)")
+_FLOW_ITEM_RE = re.compile(r"[A-Za-z0-9_./-]+")
+_YAML_BOOLEANS = {"true": True, "True": True, "TRUE": True,
+                  "false": False, "False": False, "FALSE": False}
+_YAML_NULLS = frozenset(("null", "Null", "NULL", "~"))
+# A value may not open with a flow mapping, a stray flow or entry indicator,
+# an anchor, alias or tag, a folded scalar, a directive or a reserved
+# character. A dash, question mark or colon followed by a space or the end
+# of the value opens a sequence, a complex key or a mapping value there.
+_VALUE_REFUSED_START = frozenset("{}],&*!>%@`")
+_ABSENT = object()
+
+
+class WorkflowShapeError(Exception):
+    """A workflow shape outside _WorkflowReader's subset, or a checkout step
+    the rule cannot judge: cannot-evaluate, never skipped."""
+
+    def __init__(self, line, message):
+        super().__init__(message)
+        self.line = line
+        self.message = message
+
+
+class _ParsedMapping(dict):
+    """A parsed block mapping; key_lines maps each key to its line number."""
+
+    def __init__(self):
+        super().__init__()
+        self.key_lines = {}
+
+
+def _plain_value(text):
+    """A plain scalar: a YAML 1.2 core boolean or null, else its string."""
+    if text in _YAML_BOOLEANS:
+        return _YAML_BOOLEANS[text]
+    return None if text in _YAML_NULLS else text
+
+
+class _WorkflowReader:
+    """Parse one workflow's text whole into mappings, lists and scalars
+    through a conservative block-YAML subset (module docstring, CHECKOUT
+    CREDENTIALS), refusing every shape outside it with WorkflowShapeError, so
+    a layout a YAML reader could build into another structure is never read
+    as this one. The text arrives through read_runner_text: printable ASCII
+    plus tab and newline, so a line breaks only at a newline."""
+
+    def __init__(self, text):
+        self.lines = text.split("\n")
+        if self.lines[-1] == "":
+            self.lines.pop()
+        self.index = 0
+
+    @staticmethod
+    def refuse(line, message):
+        raise WorkflowShapeError(line, message)
+
+    @staticmethod
+    def _item(content):
+        return content == "-" or content.startswith("- ")
+
+    def parse(self):
+        for number, line in enumerate(self.lines, 1):
+            if "\t" in line:
+                self.refuse(number, "a tab is outside the supported YAML "
+                            "subset")
+            if line.startswith(("---", "...", "%")):
+                self.refuse(number, "a document marker or directive is "
+                            "outside the supported YAML subset")
+        head = self._next()
+        if head is None or head[0] != 0:
+            self.refuse(head[2] if head else 1, "the workflow does not open "
+                        "with a top-level key at column 1")
+        tree = self._mapping(0)
+        tail = self._next()
+        if tail is not None:
+            self.refuse(tail[2], "a line the top-level mapping does not "
+                        "place")
+        return tree
+
+    def _next(self):
+        """Skip blank and comment lines; return (column, content, line) of
+        the next line, or None at the end of the text."""
+        while self.index < len(self.lines):
+            raw = self.lines[self.index]
+            content = raw.lstrip(" ")
+            if content and not content.startswith("#"):
+                return len(raw) - len(content), content, self.index + 1
+            self.index += 1
+        return None
+
+    def _mapping(self, column):
+        node = _ParsedMapping()
+        while True:
+            head = self._next()
+            if head is None or head[0] < column:
+                return node
+            at, content, number = head
+            if at > column:
+                self.refuse(number, "a line deeper than its mapping's keys")
+            if self._item(content):
+                self.refuse(number, "a sequence item where a mapping key "
+                            "belongs")
+            match = _WORKFLOW_KEY_RE.fullmatch(content)
+            if match is None:
+                self.refuse(number, "not a plain key, its colon and a space "
+                            "before any value: {!r}".format(content))
+            key = match.group(1)
+            if key in node:
+                self.refuse(number, "repeated key {!r}".format(key))
+            self.index += 1
+            node.key_lines[key] = number
+            node[key] = self._value(match.group(2) or "", number, column,
+                                    False)
+
+    def _sequence(self, column):
+        node = []
+        while True:
+            head = self._next()
+            if head is None or head[0] < column:
+                return node
+            at, content, number = head
+            if at > column:
+                self.refuse(number, "a line deeper than its sequence's "
+                            "items")
+            if not self._item(content):
+                self.refuse(number, "a mapping key where a sequence item "
+                            "belongs")
+            rest = content[1:].lstrip(" ")
+            if self._item(rest):
+                self.refuse(number, "a sequence nested on one line is "
+                            "outside the supported YAML subset")
+            if _WORKFLOW_KEY_RE.fullmatch(rest):
+                # A mapping that opens on the item's line: its keys sit at
+                # the column its first key starts, so the dash is read as
+                # indentation and the mapping is read from that line.
+                start = at + len(content) - len(rest)
+                self.lines[number - 1] = " " * start + rest
+                node.append(self._mapping(start))
+                continue
+            self.index += 1
+            node.append(self._value(rest, number, column, True))
+
+    def _value(self, text, number, column, item):
+        """The node an entry at column (a sequence item when item is true,
+        else a mapping key) holds, text being what follows its colon or
+        dash on line number."""
+        if not text or text.startswith("#"):
+            return self._nested(column, item)
+        if text.startswith("|"):
+            return self._literal(text, number, column)
+        if text.startswith("["):
+            node = self._flow_sequence(text, number)
+        elif text.startswith(("'", '"')):
+            node = self._quoted(text, number)
+        elif (text[0] in _VALUE_REFUSED_START
+              or (text[0] in "-?:" and text[1:2] in ("", " "))):
+            self.refuse(number, "a value opening with {!r} (a flow "
+                        "mapping, anchor, alias, tag, folded scalar or "
+                        "other indicator) is outside the supported YAML "
+                        "subset".format(text[0]))
+        else:
+            node = self._plain(text, number)
+        head = self._next()
+        if head is not None and head[0] > column:
+            self.refuse(head[2], "a line deeper than the one-line value "
+                        "before it (a multi-line scalar is outside the "
+                        "supported YAML subset)")
+        return node
+
+    def _nested(self, column, item):
+        """The block node under an entry at column whose value starts on a
+        later line: a deeper mapping or sequence, or null when the next line
+        is not deeper. A sequence at a key's own column (an indentless
+        sequence) is refused."""
+        head = self._next()
+        if head is None or head[0] < column:
+            return None
+        at, content, number = head
+        if at == column:
+            if not item and self._item(content):
+                self.refuse(number, "an indentless sequence is outside the "
+                            "supported YAML subset")
+            return None
+        if self._item(content):
+            return self._sequence(at)
+        return self._mapping(at)
+
+    def _literal(self, text, number, column):
+        """A literal (|) block scalar opened on line number by an entry at
+        column: its lines are deeper than column, read from the content
+        indentation its first non-blank line sets, with its chomping."""
+        header = _LITERAL_HEADER_RE.fullmatch(text)
+        if header is None:
+            self.refuse(number, "a block scalar header other than |, |- or "
+                        "|+ (an indentation indicator among them) is "
+                        "outside the supported YAML subset")
+        body = []
+        indent = None
+        while self.index < len(self.lines):
+            raw = self.lines[self.index]
+            content = raw.lstrip(" ")
+            at = len(raw) - len(content)
+            if content:
+                if indent is None:
+                    if at <= column:
+                        break
+                    indent = at
+                    if any(len(blank) > indent for blank in body):
+                        self.refuse(number, "a leading blank line indented "
+                                    "past the block's content is a layout "
+                                    "YAML rejects")
+                elif at < indent:
+                    break
+            body.append(raw)
+            self.index += 1
+        lines = [raw[indent:] if indent is not None else "" for raw in body]
+        trailing = 0
+        while lines and lines[-1] == "":
+            lines.pop()
+            trailing += 1
+        value = "\n".join(lines)
+        if header.group(1) == "+":
+            return value + "\n" * (trailing + (1 if lines else 0))
+        if header.group(1) == "-" or not lines:
+            return value
+        return value + "\n"
+
+    def _quoted(self, text, number):
+        """A one-line single- or double-quoted scalar and an optional
+        trailing comment; a double-quoted one carries no backslash."""
+        quote = text[0]
+        parts = []
+        start = 1
+        while True:
+            end = text.find(quote, start)
+            if end < 0:
+                self.refuse(number, "an unterminated quoted scalar (a "
+                            "multi-line quoted scalar is outside the "
+                            "supported YAML subset)")
+            parts.append(text[start:end])
+            if quote == "'" and text[end + 1:end + 2] == "'":
+                parts.append("'")
+                start = end + 2
+                continue
+            break
+        value = "".join(parts)
+        if quote == '"' and "\\" in value:
+            self.refuse(number, "a backslash in a double-quoted scalar is "
+                        "outside the supported YAML subset")
+        self._trailer(text[end + 1:], number)
+        return value
+
+    def _flow_sequence(self, text, number):
+        """A one-line flow sequence of plain words and an optional trailing
+        comment."""
+        end = text.find("]")
+        if end < 0:
+            self.refuse(number, "an unterminated flow sequence (a "
+                        "multi-line one is outside the supported YAML "
+                        "subset)")
+        self._trailer(text[end + 1:], number)
+        inner = text[1:end].strip(" ")
+        if not inner:
+            return []
+        items = []
+        for item in inner.split(","):
+            item = item.strip(" ")
+            if not _FLOW_ITEM_RE.fullmatch(item):
+                self.refuse(number, "a flow sequence item other than one "
+                            "plain word: {!r}".format(item))
+            items.append(_plain_value(item))
+        return items
+
+    def _plain(self, text, number):
+        """A one-line plain scalar, its trailing comment removed."""
+        cut = text.find(" #")
+        value = (text if cut < 0 else text[:cut]).rstrip(" ")
+        if ": " in value or value.endswith(":"):
+            self.refuse(number, "a colon and a space inside a plain scalar, "
+                        "where YAML reads a mapping: {!r}".format(value))
+        return _plain_value(value)
+
+    def _trailer(self, rest, number):
+        """Refuse anything after a closing quote or bracket but spaces and a
+        comment."""
+        if rest.strip(" ") and not (
+                rest.startswith(" ") and rest.lstrip(" ").startswith("#")):
+            self.refuse(number, "text after a closing quote or bracket: "
+                        "{!r}".format(rest))
+
+
+def _exact_key(mapping, key, line):
+    """mapping's value under key, or _ABSENT. A key spelling key in another
+    letter case is cannot-evaluate: whether a workflow reader folds key case
+    is not modelled."""
+    for other in mapping:
+        if other != key and other.lower() == key:
+            raise WorkflowShapeError(
+                mapping.key_lines.get(other, line),
+                "key {!r} spells {!r} in another letter case; whether a "
+                "workflow reader folds key case is not modelled".format(
+                    other, key))
+    return mapping.get(key, _ABSENT)
+
+
+def _local_step(uses):
+    """True when a step's uses: value names a local path: it starts with a
+    dot then a path separator (LOCAL_STEP_PREFIXES, ./ or .\\) once its
+    surrounding whitespace is stripped, so a quoted ' ./tools/act' and a
+    .\\tools\\act are not read as remote actions, however a runner reads the
+    backslash."""
+    return uses.strip().startswith(LOCAL_STEP_PREFIXES)
+
+
+def _checkout_steps(node, found, item=False):
+    """Append (line, uses, mapping) to found for every mapping in the parsed
+    tree whose uses: names actions/checkout (the part before @, letter case
+    aside), wherever it sits. Only a sequence-item mapping (a step) is held
+    to the uses: letter-case rule: a key of an env: or other non-step
+    mapping is data, not a step property. A step uses: naming a local path
+    (_local_step) is cannot-evaluate whatever it names: a step cannot call a
+    reusable workflow, so it runs a local action, whose steps are not in
+    these files. A job-level uses: (a reusable workflow call) is not held to
+    that rule."""
+    if isinstance(node, dict):
+        if item:
+            uses = _exact_key(node, "uses", 0)
+        else:
+            uses = node.get("uses", _ABSENT)
+        if uses is not _ABSENT:
+            line = node.key_lines["uses"]
+            if not isinstance(uses, str):
+                raise WorkflowShapeError(
+                    line, "a uses: value that is not one string: "
+                    "{!r}".format(uses))
+            name = uses.split("@", 1)[0].strip().lower()
+            if (name == CHECKOUT_ACTION
+                    or name.startswith(CHECKOUT_ACTION + "/")):
+                found.append((line, uses, node))
+            elif item and _local_step(uses):
+                raise WorkflowShapeError(
+                    line, "a step uses: of a local action ({!r}): a step "
+                    "cannot call a reusable workflow, and a local action's "
+                    "steps are not in these files".format(uses))
+        for value in node.values():
+            _checkout_steps(value, found)
+    elif isinstance(node, list):
+        for entry in node:
+            _checkout_steps(entry, found, item=True)
+
+
+def _persist_departure(step, line):
+    """None when the checkout step's with: sets persist-credentials to the
+    boolean false; otherwise the departure in words."""
+    inputs = _exact_key(step, "with", line)
+    if inputs is _ABSENT or inputs is None:
+        return ("it carries no with: inputs, so persist-credentials keeps "
+                "its default, true")
+    if not isinstance(inputs, dict):
+        raise WorkflowShapeError(step.key_lines["with"],
+                                 "a checkout step's with: is not a mapping")
+    value = _exact_key(inputs, CHECKOUT_INPUT, line)
+    if value is _ABSENT:
+        return ("its with: does not set persist-credentials, so it keeps "
+                "its default, true")
+    if value is False:
+        return None
+    if value is True:
+        return "it sets persist-credentials: true"
+    return ("it sets persist-credentials to {!r}, not the boolean false "
+            "(a plain false)".format(value))
+
+
+def checkout_credentials(directory=WORKFLOWS_PATH, reader=None):
+    """Judge every actions/checkout step of every workflow file directly
+    under directory (module docstring, CHECKOUT CREDENTIALS) and return a
+    CheckoutReport. Each file goes through read_runner_text, the ONE
+    byte-level reader, and is parsed whole by _WorkflowReader."""
+    fail_closed = "fail-closed" in CHECKOUT_RULES
+    diagnostics = []
+    findings = []
+    files = steps = 0
+    # Every component from the repository root to the workflows directory
+    # (.github and workflows; ROOT itself is resolved) is read through
+    # lstat, the outermost first: a symlinked one can point this rule at
+    # another tree, so one seen here is refused, not followed. The listing
+    # and reads below are later lookups, so a component swapped after this
+    # walk is not caught (module docstring, CHECKOUT CREDENTIALS).
+    names = ()
+    components = [directory, *directory.parents][
+        :len(Path(WORKFLOWS_SOURCE).parts)]
+    linked = None
+    try:
+        for component in reversed(components):
+            if stat.S_ISLNK(component.lstat().st_mode):
+                linked = component
+                break
+    except OSError as exc:
+        if fail_closed:
+            diagnostics.append(_diagnostic(
+                WORKFLOWS_SOURCE, 0, "workflow-directory",
+                "cannot list {} ({})".format(directory, type(exc).__name__)))
+    else:
+        if linked is not None:
+            if fail_closed:
+                diagnostics.append(_diagnostic(
+                    WORKFLOWS_SOURCE, 0, "workflow-directory",
+                    "a symlink on the path from the repository root to the "
+                    "workflows directory is not read: {}".format(linked)))
+        else:
+            try:
+                names = sorted(
+                    entry.name for entry in directory.iterdir()
+                    if entry.name.lower().endswith(WORKFLOW_SUFFIXES))
+            except OSError as exc:
+                if fail_closed:
+                    diagnostics.append(_diagnostic(
+                        WORKFLOWS_SOURCE, 0, "workflow-directory",
+                        "cannot list {} ({})".format(
+                            directory, type(exc).__name__)))
+            else:
+                if not names and fail_closed:
+                    diagnostics.append(_diagnostic(
+                        WORKFLOWS_SOURCE, 0, "workflow-directory",
+                        "no .yml or .yaml workflow file under "
+                        "{}".format(directory)))
+    for name in names:
+        source = WORKFLOWS_SOURCE + "/" + name
+        # Only a regular file is read: a symlink, directory, FIFO or device
+        # entry is refused on this lstat, before any read of it. The read
+        # below is a separate lookup that follows a symlink, so an entry
+        # swapped after this lstat by a concurrent writer is not caught
+        # (module docstring, CHECKOUT CREDENTIALS).
+        try:
+            regular = stat.S_ISREG((directory / name).lstat().st_mode)
+        except OSError as exc:
+            text, diagnostic = None, _diagnostic(
+                source, 0, "read-error", "cannot stat {} ({})".format(
+                    directory / name, type(exc).__name__))
+        else:
+            if regular:
+                text, diagnostic = read_runner_text(
+                    directory / name, source, reader=reader)
+            else:
+                text, diagnostic = None, _diagnostic(
+                    source, 0, "workflow-file", "not a regular file (a "
+                    "symlink, directory, FIFO or device entry is not read)")
+        if diagnostic is None:
+            try:
+                found = []
+                _checkout_steps(_WorkflowReader(text).parse(), found)
+                judged = [
+                    (line, uses, _persist_departure(step, line)
+                     if "persist-credentials" in CHECKOUT_RULES else None)
+                    for line, uses, step in found]
+            except WorkflowShapeError as exc:
+                diagnostic = _diagnostic(
+                    source, exc.line, "workflow-shape", exc.message)
+            except RecursionError:
+                diagnostic = _diagnostic(
+                    source, 0, "workflow-shape",
+                    "nesting deeper than this reader can follow")
+        if diagnostic is not None:
+            if fail_closed:
+                diagnostics.append(diagnostic)
+            continue
+        files += 1
+        steps += len(judged)
+        for line, uses, departure in judged:
+            if departure is not None:
+                findings.append(Finding(
+                    "checkout-credentials",
+                    "{}:{}".format(source, line),
+                    "the step uses {} and {}; actions/checkout then writes "
+                    "the job token into the checkout's git config, where "
+                    "every later step of the job can read it".format(
+                        uses, departure)))
+    code = 2 if diagnostics else (1 if findings else 0)
+    return CheckoutReport(code, files, steps, tuple(findings),
+                          _dedupe_diagnostics(diagnostics))
+
+
+def render_checkout(report):
+    """Render the checkout-credentials report deterministically."""
+    lines = ["CHECKOUT CREDENTIALS:"]
+    for diagnostic in report.diagnostics:
+        if diagnostic.line:
+            location = "{}:{}".format(diagnostic.source, diagnostic.line)
+        else:
+            location = diagnostic.source
+        lines.append("  {} [{}] {}".format(
+            location, diagnostic.code, diagnostic.message))
+    for finding in report.findings:
+        lines.append("  {} {}: {}".format(
+            finding.kind, finding.identity, finding.message))
+    if report.code == 2:
+        lines.append(
+            "CANNOT EVALUATE: checkout credentials were not determined.")
+    elif report.code == 1:
+        lines.append(
+            "FAIL: {} of {} actions/checkout step(s) do not set "
+            "persist-credentials: false.".format(
+                len(report.findings), report.steps))
+    else:
+        lines.append(
+            "PASS: {} actions/checkout step(s) in {} workflow file(s) each "
+            "set persist-credentials: false.".format(
+                report.steps, report.files))
+    return "\n".join(lines)
+
+
 # In-memory reversion of the failure-naming change, used only as the vector-26 flip.
 SILENT_RUNNER_REVERT = (
     ('  if "$@"; then :; else\n'
@@ -4102,6 +4984,204 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
             capture_output=True, text=True, timeout=60)
         calls = log.read_text(encoding="utf-8").splitlines()
     return proc.returncode, proc.stdout.splitlines(), calls
+
+
+_STUB_DIRNAME = """#!/bin/sh
+printf '%s' "$stub_dirname_out"
+exit "$stub_dirname_rc"
+"""
+
+
+def _path_absent(path):
+    """True when nothing is at path, False when something is; any other
+    error (an unreadable parent, say) propagates, so it never reads as absent."""
+    import os
+
+    try:
+        os.lstat(str(path))
+    except FileNotFoundError:
+        return True
+    return False
+
+
+def _dirname_guard_outcome(text, relative, scenario):
+    """Run a runner text from relative in a scratch tree under one dirname
+    scenario; return (rc, no gate launched).
+
+    Scenarios: "missing" (no dirname on PATH), "failed" (prints . and exits 7),
+    "empty" (prints nothing and exits 0) and "control" (prints the runner's true
+    directory). Every stub is written before the one launch, from this thread.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash not found")
+    with tempfile.TemporaryDirectory(prefix="ci-parity-dirname-") as tmp:
+        root = Path(tmp)
+        bin_dir, functions = _prepare_stubs(root)
+        runner = root / "tree" / relative
+        runner.parent.mkdir(parents=True)
+        runner.write_text(text, encoding="utf-8")
+        caller = root / "caller"
+        caller.mkdir()
+        path = [str(bin_dir)]
+        out, rc = {"failed": (".", "7"), "empty": ("", "0"),
+                   "control": (str(runner.parent), "0")}.get(scenario, ("", "0"))
+        if scenario != "missing":
+            dirname_dir = root / "dirname-bin"
+            dirname_dir.mkdir()
+            stub = dirname_dir / "dirname"
+            stub.write_text(_STUB_DIRNAME, encoding="utf-8")
+            stub.chmod(0o500)
+            path.insert(0, str(dirname_dir))
+        log = root / "calls.log"
+        env = dict(PATH=os.pathsep.join(path), BASH_ENV=str(functions),
+                   HOME=tmp, LC_ALL="C", stub_log=str(log),
+                   stub_fail_command="", stub_gitleaks_rc="0",
+                   stub_dirname_out=out, stub_dirname_rc=rc)
+        proc = subprocess.run(
+            [bash, "--noprofile", "--norc", str(runner)],
+            cwd=str(caller), env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=600)
+        return proc.returncode, _path_absent(log)
+
+
+def _passing_status(text):
+    """The exit status a passing run of a runner text gives, read from the
+    runner itself: its one pass summary echo (the last line of a
+    TERMINAL_SUMMARIES entry) and every line after it, run under bash. The
+    echo is matched on the line the grammar reads (_strip_comment, then
+    strip), so an indented echo or one with a trailing comment is found. None
+    when the text holds no single pass echo, so no exit status matches it."""
+    import shutil
+    import subprocess
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash not found")
+    lines = text.splitlines()
+    ends = {summary[-1] for summary in TERMINAL_SUMMARIES}
+    starts = [index for index, line in enumerate(lines)
+              if _strip_comment(line).strip() in ends]
+    if len(starts) != 1:
+        return None
+    proc = subprocess.run(
+        [bash, "--noprofile", "--norc", "-c", "\n".join(lines[starts[0]:]) + "\n"],
+        env=dict(LC_ALL="C"), stdin=subprocess.DEVNULL,
+        capture_output=True, timeout=60)
+    return proc.returncode
+
+
+def _passing_status_wrong(passing):
+    """True when the status a passing run gives is not 0 (or there is no
+    single pass echo, None): every stub gate passes, so a pass path that
+    exits non-zero is itself a fault, whatever the run's own status."""
+    return passing != 0
+
+
+def _status_differs(rc, passing):
+    """True when a run's exit status is not the status a passing run gives;
+    the dirname control and the CDPATH run each compare through here."""
+    return rc != passing
+
+
+def dirname_guard_problems(text, relative):
+    """The scenarios a runner text fails: "pass-status" when the status a
+    passing run gives (_passing_status) is not 0, each faulty dirname must
+    exit 2 with no gate launched, and the control must launch gates and exit
+    with that status. Every stub gate passes, so a control that launched
+    gates and then failed is not a pass."""
+    passing = _passing_status(text)
+    problems = ["pass-status"] if _passing_status_wrong(passing) else []
+    for scenario in ("missing", "failed", "empty", "control"):
+        rc, absent = _dirname_guard_outcome(text, relative, scenario)
+        if scenario == "control":
+            if absent or _status_differs(rc, passing):
+                problems.append(scenario)
+        elif (rc, absent) != (2, True):
+            problems.append(scenario)
+    return problems
+
+
+# The python3 shell function for cdpath_problems: it also records the working
+# directory each gate launches from, so a moved root shows in the log.
+_STUB_PYTHON3_PWD_FUNCTION = """python3() {
+  printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || return 2
+  return 0
+}
+"""
+
+
+def _cdpath_outcome(text, relative):
+    """Run a runner text by its RELATIVE path from its scratch tree's root
+    under a CDPATH naming a decoy tree that holds the same relative directory;
+    return (rc, tree, decoy, logged gate lines).
+
+    dirname prints the relative directory, as the real one does for a relative
+    $0. Every stub is written before the one launch, from this thread.
+    """
+    import os
+    import shutil
+    import subprocess
+    import tempfile
+
+    bash = shutil.which("bash")
+    if bash is None:
+        raise RuntimeError("bash not found")
+    with tempfile.TemporaryDirectory(prefix="ci-parity-cdpath-") as tmp:
+        root = Path(tmp)
+        bin_dir, _functions = _prepare_stubs(root)
+        functions = root / "stubs-pwd.bash"
+        functions.write_text(_STUB_PYTHON3_PWD_FUNCTION, encoding="utf-8")
+        functions.chmod(0o400)
+        tree = root / "tree"
+        runner = tree / relative
+        runner.parent.mkdir(parents=True)
+        runner.write_text(text, encoding="utf-8")
+        decoy = root / "decoy"
+        (decoy / relative).parent.mkdir(parents=True)
+        dirname_dir = root / "dirname-bin"
+        dirname_dir.mkdir()
+        stub = dirname_dir / "dirname"
+        stub.write_text(_STUB_DIRNAME, encoding="utf-8")
+        stub.chmod(0o500)
+        log = root / "calls.log"
+        env = dict(PATH=os.pathsep.join([str(dirname_dir), str(bin_dir)]),
+                   BASH_ENV=str(functions), HOME=tmp, LC_ALL="C",
+                   CDPATH=str(decoy), stub_log=str(log),
+                   stub_fail_command="", stub_gitleaks_rc="0",
+                   stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
+        proc = subprocess.run(
+            [bash, "--noprofile", "--norc", relative],
+            cwd=str(tree), env=env, stdin=subprocess.DEVNULL,
+            capture_output=True, timeout=600)
+        calls = ([] if _path_absent(log)
+                 else log.read_text(encoding="utf-8").splitlines())
+        return proc.returncode, str(tree), str(decoy), calls
+
+
+def cdpath_problems(text, relative):
+    """What a relative start under a hostile CDPATH does wrong: "pass-status"
+    when the status a passing run gives (_passing_status) is not 0, "no-gate"
+    when no gate launches from the true tree, "moved" when any logged gate
+    line names the decoy (a moved root, or a printed CDPATH match in a
+    captured directory), and "exit" when the run does not exit with that
+    status: every stub gate passes, so a run that logged a true-tree gate
+    line and then failed is not a pass."""
+    passing = _passing_status(text)
+    rc, tree, decoy, calls = _cdpath_outcome(text, relative)
+    problems = ["pass-status"] if _passing_status_wrong(passing) else []
+    if not any(call.startswith(tree + " python3 ") for call in calls):
+        problems.append("no-gate")
+    if any(decoy in call for call in calls):
+        problems.append("moved")
+    if _status_differs(rc, passing):
+        problems.append("exit")
+    return problems
 
 
 def _naming_scenarios(text):
@@ -4362,6 +5442,9 @@ def self_test():
         # The child-status probe and its coverage gate, mandatory as the contracts are.
         "python3 -I -B opf/tools/_child_status.py",
         "python3 -I -B tools/check_child_status_coverage.py",
+        # The scope tool's self-test, which the pinned SCOPE_JOB fixture body runs on
+        # the CI side of every heavy fixture, so both sides carry it everywhere.
+        "python3 -I -B tools/ci_site_scope.py --self-test",
     )
 
     def local_fixture(commands=(), tail=()):
@@ -4390,13 +5473,18 @@ def self_test():
         return "\n".join(lines) + "\n"
 
     # Every HEAVY_JOBS job, each carrying the pinned if:, which the LANES
-    # presence rule requires of every quality.yml fixture.
-    heavy_job_lines = tuple(
+    # presence rule requires of every quality.yml fixture; the scope job is the
+    # pinned SCOPE_JOB body, which the scope-pin rule requires wherever heavy
+    # jobs read its output.
+    heavy_job_lines = (
+        ("  scope:",) + SCOPE_JOB
+    ) + tuple(
         line
         for job in sorted(HEAVY_JOBS)
         for line in (
             "  " + job + ":",
             HEAVY_JOB_IF_LINE,
+            HEAVY_JOB_NEEDS_LINE,
             "    runs-on: ubuntu-latest",
             "    steps:",
             "      - uses: actions/checkout@v4",
@@ -4432,7 +5520,7 @@ def self_test():
             lines.extend(("  gates:",) + REQUIRED_STATUS_JOB[:2])
             lines.append("    needs:")
             lines.extend("      - " + job
-                         for job in ["quality"] + sorted(HEAVY_JOBS))
+                         for job in ["quality", "scope"] + sorted(HEAVY_JOBS))
             lines.extend(REQUIRED_STATUS_JOB[3:])
         return "\n".join(lines) + "\n"
 
@@ -4548,13 +5636,29 @@ def self_test():
             failures.append(
                 "01h {} is not in MANDATORY_MEMBERS; a both-runner removal of a "
                 "mandatory member would be undetected again".format(member))
+        # The pinned SCOPE_JOB fixture body still runs the child-status probe on the
+        # CI side, so dropping that member from both command rosters leaves it CI-only
+        # there; the missing-mandatory finding (absent from the local runner) still
+        # fires, which is what this vector guards.
         case("01h mandatory member removed from both runners: " + member,
              evaluate(local_fixture(drop(member)), ci_fixture(drop(member)), ()),
-             1, ("missing-mandatory",), (), ())
+             1, ("missing-mandatory",), (),
+             ("opf/tools/_child_status.py",)
+             if member == "opf/tools/_child_status.py" else ())
     unknown = "python3 -I -B .github/unrecognized.py"
     case("01f unknown repository executable refused",
          evaluate(local_fixture(common + (unknown,)),
                   ci_fixture(common + (unknown,)), ()), 2)
+    # The pinned palette gate is accepted by its exact path on both runners; a sibling under .baseline/
+    # is still refused, so the allowance is the one named file.
+    palette = "python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css"
+    case("01i pinned build gate matched",
+         evaluate(local_fixture(common + (palette,)), ci_fixture(common + (palette,)), ()), 0)
+    case("01j pinned build gate local-only",
+         evaluate(local_fixture(common + (palette,)), ci_fixture(common), ()), 1, ("local-only",))
+    sibling = "python3 -I -B .baseline/other.py"
+    case("01k unpinned .baseline executable refused",
+         evaluate(local_fixture(common + (sibling,)), ci_fixture(common + (sibling,)), ()), 2)
 
     fail_without_change = evaluate(
         local_fixture(common + (
@@ -5559,7 +6663,7 @@ def self_test():
             ("loop keyword outside the grammar",
              mutate((gitleaks, "done\n" + gitleaks))),
             ("directory rebinding below the first gate",
-             mutate((gitleaks, 'cd "$(dirname "$0")/.." || exit 2\n' + gitleaks))),
+             mutate((gitleaks, 'CDPATH= cd -- "$dir/.." || exit 2\n' + gitleaks))),
         )
         for name, mutant in allowlist_fixtures:
             if mutant is None:
@@ -6124,7 +7228,13 @@ def self_test():
         return sites
     allowed_read_sites = {
         "tools/check_ci_parity.py": {
+            # The stub call log vector 45 writes, never a runner or workflow.
+            ("_cdpath_outcome", "read_text"): 1,
+            ("_cdpath_outcome", "splitlines"): 1,
             ("_naming_scenarios", "splitlines"): 1,
+            # Splits runner text read_runner_text already returned, to run
+            # its pass summary echo and every line after it.
+            ("_passing_status", "splitlines"): 1,
             # Splits runner or quality.yml text read_runner_text already
             # returned, to read back the lines that run an opf.py group.
             ("_opf_group_lines", "splitlines"): 1,
@@ -6237,7 +7347,8 @@ def self_test():
 
     aggregator_head = ("  quality:", "    name: Quality gates")
     always = ("    if: always()",)
-    heavy_needs = tuple("      - " + job for job in sorted(HEAVY_JOBS))
+    heavy_needs = ("      - scope",) + tuple(
+        "      - " + job for job in sorted(HEAVY_JOBS))
     needs_both = ("    needs:", "      - one", "      - two") + heavy_needs
     multi_local = local_fixture(
         common + ("python3 tools/a.py", "python3 tools/b.py"))
@@ -6295,7 +7406,8 @@ def self_test():
          evaluate(multi_local,
                   multi_job_ci(aggregator_head + always
                                + ("    needs: [" + ", ".join(
-                                   ["one", "two"] + sorted(HEAVY_JOBS))
+                                   ["one", "two", "scope"]
+                                   + sorted(HEAVY_JOBS))
                                    + "]",)), ()),
          0)
     case("30k a needs: entry that is not a plain job id is cannot-evaluate",
@@ -6512,18 +7624,32 @@ def self_test():
     # needed result is not success is a finding. Each red fixture passed
     # before the change.
     for label, old, new in (
-            ("33a a deleted exit 1", "            exit 1\n", ""),
+            ("33a a deleted always-run exit 1",
+             "must conclude success\"\n            exit 1\n",
+             "must conclude success\"\n"),
+            ("33a2 a deleted heavy exit 1",
+             "of this repository\"\n            exit 1\n",
+             "of this repository\"\n"),
             ("33b a success filter that strips every result",
-             'rest="${rest//success/}"', 'rest="${rest//[a-z]/}"'),
+             'other="${other//success/}"', 'other="${other//[a-z]/}"'),
             ("33c an empty result read as success",
-             'rest="${RESULTS:-none}"', 'rest="${RESULTS:-success}"'),
-            ("33d an inverted test", 'if [ -n "$rest" ]',
-             'if [ -z "$rest" ]'),
+             'other="${OTHER_RESULTS:-missing}"',
+             'other="${OTHER_RESULTS:-success}"'),
+            ("33c2 an empty heavy result read as success",
+             'heavy="${HEAVY_RESULTS:-missing}"',
+             'heavy="${HEAVY_RESULTS:-success}"'),
+            ("33c3 a site-only default of true",
+             'if [ "${SITE_ONLY:-false}" = "true" ]; then',
+             'if [ "${SITE_ONLY:-true}" = "true" ]; then'),
+            ("33d an inverted test", 'if [ -n "$other" ]',
+             'if [ -z "$other" ]'),
+            ("33d2 an inverted heavy test", 'if [ -n "$heavy" ]',
+             'if [ -z "$heavy" ]'),
             ("33e if: ${{ always() }}", "    if: always()\n",
              "    if: ${{ always() }}\n"),
             ("33f an added step",
-             "concluded success\"\n",
-             "concluded success\"\n"
+             "concluded as required\"\n",
+             "concluded as required\"\n"
              "      - uses: actions/checkout@v4\n")):
         finding_case(
             label + " in Quality gates is a finding",
@@ -6563,10 +7689,30 @@ def self_test():
         failures.append("33i the pinned run: body is not indented 10")
     bash = shutil.which("bash", path=os.defpath)
 
-    def aggregate(body, results):
+    def aggregate(body, other, heavy, site_only, results="unused",
+                  event="pull_request", head_ref="merge-train-1",
+                  head_repo="octo/repo", base_repo="octo/repo"):
+        # The default head context is an accepting one (a merge-train pull request of
+        # this repository), so the result vectors keep testing the result logic and
+        # the train vectors below vary one condition at a time; None leaves the
+        # variable unset.
         env = dict(PATH=os.defpath, LC_ALL="C")
         if results is not None:
             env["RESULTS"] = results
+        if other is not None:
+            env["OTHER_RESULTS"] = other
+        if heavy is not None:
+            env["HEAVY_RESULTS"] = heavy
+        if site_only is not None:
+            env["SITE_ONLY"] = site_only
+        if event is not None:
+            env["EVENT_NAME"] = event
+        if head_ref is not None:
+            env["HEAD_REF"] = head_ref
+        if head_repo is not None:
+            env["HEAD_REPO"] = head_repo
+        if base_repo is not None:
+            env["BASE_REPO"] = base_repo
         return subprocess.run(
             ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c",
              "\n".join(body) + "\n"],
@@ -6576,31 +7722,116 @@ def self_test():
     if bash is None:
         failures.append("33i bash not found on " + os.defpath)
     else:
-        for results, want in (
-                (" ".join(("success",) * 10), 0),
-                ("success", 0),
-                ("failure", 1),
-                ("cancelled", 1),
-                ("skipped", 1),
-                ("success failure", 1),
-                ("success cancelled success", 1),
-                ("success skipped", 1),
-                ("neutral", 1),
-                ("", 1),
-                (None, 1)):
+        # (OTHER_RESULTS, HEAVY_RESULTS, SITE_ONLY, want): every non-heavy
+        # result must be success whatever SITE_ONLY says; a heavy skipped
+        # passes only under SITE_ONLY exactly true; every other spelling,
+        # case, empty or unset value fails.
+        for other, heavy, site_only, want in (
+                (" ".join(("success",) * 12),
+                 " ".join(("success",) * 11), None, 0),
+                ("success", "success", None, 0),
+                ("success", "success", "true", 0),
+                ("success", "success", "false", 0),
+                ("success success", "skipped skipped", "true", 0),
+                ("success", "success skipped success", "true", 0),
+                ("success", "skipped", None, 1),
+                ("success", "skipped", "false", 1),
+                ("success", "skipped", "TRUE", 1),
+                ("success", "skipped", "true ", 1),
+                ("success", "failure", "true", 1),
+                ("success", "cancelled", "true", 1),
+                ("success", "neutral", "true", 1),
+                ("skipped", "success", "true", 1),
+                ("failure", "success", None, 1),
+                ("cancelled", "success", None, 1),
+                ("success failure", "success", None, 1),
+                ("neutral", "success", None, 1),
+                ("", "success", None, 1),
+                ("success", "", None, 1),
+                (None, "success", None, 1),
+                ("success", None, None, 1),
+                (None, None, None, 1)):
             count += 1
-            got = aggregate(pinned_body, results)
+            got = aggregate(pinned_body, other, heavy, site_only)
             if got != want:
                 failures.append(
-                    "33i pinned body with RESULTS={!r}: exit {}, "
-                    "expected {}".format(results, got, want))
+                    "33i pinned body with OTHER_RESULTS={!r} "
+                    "HEAVY_RESULTS={!r} SITE_ONLY={!r}: exit {}, "
+                    "expected {}".format(other, heavy, site_only, got, want))
+        # The skip-acceptance train conditions: a skipped heavy job passes only in a
+        # pull_request whose head ref starts with merge-train- and whose head
+        # repository is non-empty and equal to the base repository; the prefix
+        # boundary is tested just inside, exactly at, and just outside it.
+        for label, overrides, want in (
+                ("push event", dict(event="push"), 1),
+                ("no event", dict(event=None), 1),
+                ("non-train head", dict(head_ref="feature-x"), 1),
+                ("empty head ref", dict(head_ref=""), 1),
+                ("unset head ref", dict(head_ref=None), 1),
+                ("head ref just inside the prefix",
+                 dict(head_ref="merge-train-7"), 0),
+                ("head ref exactly the prefix",
+                 dict(head_ref="merge-train-"), 0),
+                ("head ref just outside the prefix",
+                 dict(head_ref="merge-train"), 1),
+                ("head ref glued past the prefix",
+                 dict(head_ref="merge-trainx"), 1),
+                ("fork head repository", dict(head_repo="fork/repo"), 1),
+                ("empty repositories",
+                 dict(head_repo="", base_repo=""), 1),
+                ("unset repositories",
+                 dict(head_repo=None, base_repo=None), 1)):
+            count += 1
+            got = aggregate(pinned_body, "success", "skipped", "true",
+                            **overrides)
+            if got != want:
+                failures.append(
+                    "33i pinned body with a skipped heavy job, SITE_ONLY=true "
+                    "and {}: exit {}, expected {}".format(label, got, want))
         count += 1
         if aggregate(tuple(line for line in pinned_body
                            if line.strip() != "exit 1"),
-                     "success failure") != 0:
+                     "success failure", "success", None) != 0:
             failures.append(
                 "33i the deleted-exit-1 body did not pass a failure, so the "
                 "scenarios above do not discriminate")
+        # The site-only train guard discriminates: a body whose skipped-strip runs
+        # unconditionally (the whole acceptance chain around it removed) passes a
+        # skipped heavy job with no SITE_ONLY at all, which the vector above refuses.
+        guard = ('accept="no"\n'
+                 'if [ "${SITE_ONLY:-false}" = "true" ]; then\n'
+                 '  accept="yes"\n'
+                 'fi\n'
+                 'if [ "${EVENT_NAME:-}" != "pull_request" ]; then\n'
+                 '  accept="no"\n'
+                 'fi\n'
+                 'head_ref="${HEAD_REF:-}"\n'
+                 'if [ "${head_ref}" = "${head_ref#merge-train-}" ]; then\n'
+                 '  accept="no"\n'
+                 'fi\n'
+                 'if [ -z "${HEAD_REPO:-}" ]; then\n'
+                 '  accept="no"\n'
+                 'fi\n'
+                 'if [ "${HEAD_REPO:-}" != "${BASE_REPO:-}" ]; then\n'
+                 '  accept="no"\n'
+                 'fi\n'
+                 'if [ "${accept}" = "yes" ]; then\n'
+                 '  heavy="${heavy//skipped/}"\n'
+                 'fi\n')
+        body_text = "\n".join(pinned_body) + "\n"
+        count += 1
+        if guard not in body_text:
+            failures.append(
+                "33i the pinned body does not carry the site-only guard "
+                "block this vector removes")
+        else:
+            unguarded = tuple(body_text.replace(
+                guard, 'heavy="${heavy//skipped/}"\n', 1).split("\n"))
+            if aggregate(unguarded, "success", "skipped", None) != 0:
+                failures.append(
+                    "33i the unguarded skipped-strip body did not pass a "
+                    "skipped heavy job, so the SITE_ONLY vectors do not "
+                    "discriminate")
         # 33i options: a failing pipeline followed by a succeeding command,
         # with no set line of its own, exits nonzero only when the launch
         # carries both -e and -o pipefail, so dropping either option from
@@ -6609,7 +7840,7 @@ def self_test():
         # fails.
         options_body = ("false | true", "true")
         count += 1
-        if aggregate(options_body, None) == 0:
+        if aggregate(options_body, None, None, None, results=None) == 0:
             failures.append(
                 "33i a failing pipeline with no set line exited 0, so the "
                 "launch does not apply -e and -o pipefail")
@@ -7561,19 +8792,25 @@ def self_test():
     # its finding.
     def lane_ci(heavy_if=HEAVY_JOB_IF_LINE, light_if=None,
                 top=CONCURRENCY_BLOCK, job_tail=(),
-                light_commands=None, opf_id="opf-tooling",
-                opf_commands=("python3 tools/b.py",), drop_heavy=()):
-        other_heavy = sorted(HEAVY_JOBS - {"opf-tooling"} - set(drop_heavy))
+                light_commands=None, opf_id="opf-tooling-a",
+                opf_commands=("python3 tools/b.py",), drop_heavy=(),
+                heavy_needs=HEAVY_JOB_NEEDS_LINE, scope_job=True):
+        other_heavy = sorted(
+            HEAVY_JOBS - {"opf-tooling-a"} - set(drop_heavy))
         lines = ["name: Test"] + list(labeled_trigger) + list(top) + ["jobs:"]
-        for job, commands, condition in (
+        if scope_job:
+            lines.extend(("  scope:",) + SCOPE_JOB)
+        for job, commands, condition, needs_line in (
                 ("secrets",
                  common + ("python3 tools/a.py",)
                  if light_commands is None else light_commands,
-                 light_if),
-                (opf_id, opf_commands, heavy_if)):
+                 light_if, None),
+                (opf_id, opf_commands, heavy_if, heavy_needs)):
             lines.extend(("  " + job + ":", "    name: Job " + job))
             if condition is not None:
                 lines.append(condition)
+            if needs_line is not None:
+                lines.append(needs_line)
             lines.extend(job_tail)
             lines.extend(("    runs-on: ubuntu-latest", "    steps:",
                           "      - uses: actions/checkout@v4"))
@@ -7587,12 +8824,15 @@ def self_test():
             lines.extend((
                 "  " + job + ":",
                 HEAVY_JOB_IF_LINE,
+                HEAVY_JOB_NEEDS_LINE,
                 "    runs-on: ubuntu-latest",
                 "    steps:",
                 "      - uses: actions/checkout@v4",
             ))
         lines.extend(aggregator_head + always
-                     + ("    needs:", "      - secrets", "      - " + opf_id)
+                     + ("    needs:",)
+                     + (("      - scope",) if scope_job else ())
+                     + ("      - secrets", "      - " + opf_id)
                      + tuple("      - " + job for job in other_heavy))
         lines.extend(REQUIRED_STATUS_JOB[
             REQUIRED_STATUS_JOB.index(REQUIRED_STATUS_NEEDS_SLOT) + 1:])
@@ -7623,8 +8863,8 @@ def self_test():
              ("carries no top-level concurrency: block",)),
             ("the pinned if: removed from a heavy job",
              evaluate(multi_local, lane_ci(heavy_if=None), ()),
-             ("heavy job 'opf-tooling' of {} carries no job-level if:".format(
-                 CI_SOURCE),)),
+             ("heavy job 'opf-tooling-a' of {} carries no job-level "
+              "if:".format(CI_SOURCE),)),
             ("both removed, the workflow before the lane change",
              evaluate(multi_local, lane_ci(heavy_if=None, top=()), ()),
              ("carries no top-level concurrency: block",
@@ -7673,7 +8913,38 @@ def self_test():
             ("always()", "    if: always()"),
             ("the line wrapped in ${{ }}",
              "    if: ${{ " + HEAVY_JOB_IF_LINE[8:] + " }}"),
-            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy")):
+            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy"),
+            # A manual or scheduled run runs the heavy jobs only on main: the
+            # ref condition dropped, widened to every branch, or moved off the
+            # dispatch arm would run them on a dispatch of any other ref.
+            ("the dispatch arm without its main ref condition",
+             HEAVY_JOB_IF_LINE.replace(
+                 " && github.ref == 'refs/heads/main'", "", 1)),
+            ("the dispatch arm on every branch",
+             HEAVY_JOB_IF_LINE.replace(
+                 "github.ref == 'refs/heads/main'",
+                 "startsWith(github.ref, 'refs/heads/')", 1)),
+            ("the dispatch arm on another ref",
+             HEAVY_JOB_IF_LINE.replace(
+                 "'refs/heads/main'", "'refs/heads/dev'", 1)),
+            ("the dispatch arm's ref condition negated",
+             HEAVY_JOB_IF_LINE.replace(
+                 "github.ref == 'refs/heads/main'",
+                 "github.ref != 'refs/heads/main'", 1)),
+            ("the ref condition bound to the schedule event alone",
+             HEAVY_JOB_IF_LINE.replace(
+                 "((github.event_name == 'workflow_dispatch' || "
+                 "github.event_name == 'schedule') && "
+                 "github.ref == 'refs/heads/main')",
+                 "(github.event_name == 'workflow_dispatch' || "
+                 "github.event_name == 'schedule' && "
+                 "github.ref == 'refs/heads/main')", 1)),
+            ("the previous line, without the dispatch arm",
+             "    if: needs.scope.outputs.site_only != 'true' && "
+             "(github.event_name == 'push' || "
+             "(startsWith(github.head_ref, 'merge-train-') && "
+             "github.event.pull_request.head.repo.full_name == "
+             "github.repository))")):
         lane_case("39e a widened or respelled heavy-job if: is a lane "
                   "finding: " + label,
                   evaluate(multi_local, lane_ci(heavy_if=line), ()), 1,
@@ -7732,6 +9003,82 @@ def self_test():
               1, "job 'quality' of {} carries a job-level if:".format(
                   MSG_LEAKS_CI_SOURCE))
 
+    # 39k SITE FAST LANE WIRING: the pinned heavy-job if: reads
+    # needs.scope.outputs.site_only, which is empty unless the job carries
+    # needs: scope and the scope job exists, so a missing edge or a missing
+    # scope job disables the fast lane silently and each is a lane finding.
+    # Before these rules both fixtures passed, so each vector fails on revert.
+    lane_case("39k a heavy job without needs: scope is a lane finding",
+              evaluate(multi_local, lane_ci(heavy_needs=None), ()), 1,
+              "does not carry needs: scope")
+    lane_case("39k a heavy job whose needs: names another job is a lane "
+              "finding",
+              evaluate(multi_local, lane_ci(
+                  heavy_needs="    needs: secrets"), ()), 1,
+              "does not carry needs: scope")
+    lane_case("39k the scope job absent while heavy jobs read its output is "
+              "a lane finding",
+              evaluate(multi_local, lane_ci(scope_job=False), ()), 1,
+              "is missing from")
+    lane_case("39k control: the scope job present with needs: scope on every "
+              "heavy job passes",
+              evaluate(multi_local, lane_ci(), ()), 0)
+
+    # 39m SCOPE JOB PIN: the scope job is pinned line for line (SCOPE_JOB), so a
+    # departure in its outputs:, env: or steps — the lines that choose which copy of
+    # the scope tool decides the fast lane and which inputs it reads — is a lane
+    # finding. Each red fixture passes without the pin, so each vector fails on
+    # revert; the 39k control above is the green control.
+    for label, old, new in (
+            ("a hardwired site_only output",
+             "      site_only: ${{ steps.decide.outputs.site_only }}\n",
+             "      site_only: 'true'\n"),
+            ("the decision run from the checkout's own copy",
+             '            python3 -I -B "${RUNNER_TEMP}/'
+             'ci_site_scope_base.py" --ci-decide\n',
+             "            python3 -I -B tools/ci_site_scope.py "
+             "--ci-decide\n"),
+            ("a dropped HEAD_REF env line",
+             "          HEAD_REF: ${{ github.head_ref }}\n",
+             ""),
+            ("a dropped HEAD_SHA env line",
+             "          HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n",
+             ""),
+            ("a dropped fallback write",
+             '            echo "site_only=false" >> "${GITHUB_OUTPUT}"\n',
+             ""),
+            ("an added step before the decision",
+             "      - name: Site fast-lane scope decision\n",
+             "      - name: Extra gate\n        shell: bash\n"
+             "        run: python3 tools/a.py\n"
+             "      - name: Site fast-lane scope decision\n")):
+        mutated_ci = lane_ci().replace(old, new, 1)
+        count += 1
+        if mutated_ci == lane_ci():
+            failures.append(
+                "39m mutation did not apply: " + label)
+        lane_case("39m a scope job departing from the pinned SCOPE_JOB is a "
+                  "lane finding: " + label,
+                  evaluate(multi_local, mutated_ci, ()), 1,
+                  "departs from the pinned scope job")
+
+    # 39m STEP ORDER: the decision step is pinned FIRST after checkout and setup-python, before
+    # the probe and the scope self-test, the steps that run the checkout's own code. A pure
+    # reorder keeps every pinned line present, so only the line-for-line order pin catches it;
+    # the vector fails on revert to any set-based or per-step comparison.
+    scope_block = "\n".join(("  scope:",) + SCOPE_JOB) + "\n"
+    reordered_block = "\n".join(
+        ("  scope:",) + SCOPE_JOB[:13] + SCOPE_JOB[-6:] + SCOPE_JOB[13:-6]) + "\n"
+    reordered_ci = lane_ci().replace(scope_block, reordered_block, 1)
+    count += 1
+    if reordered_ci == lane_ci():
+        failures.append("39m mutation did not apply: the probe and self-test reordered "
+                        "ahead of the decision")
+    lane_case("39m a scope job departing from the pinned SCOPE_JOB is a lane finding: "
+              "the probe and self-test reordered ahead of the decision",
+              evaluate(multi_local, reordered_ci, ()), 1,
+              "departs from the pinned scope job")
+
     # 39j HEAVY PRESENCE and HEAVY COMMANDS: every HEAVY_JOBS job must be
     # present in quality.yml, and a HEAVY_COMMANDS member may run only in a
     # job whose if: is exactly the pinned line. Before the change a heavy job
@@ -7767,7 +9114,7 @@ def self_test():
                 opf_commands=(heavy_member,)), ())
     lane_case("39j a renamed heavy job (needs: updated, if: removed) is a "
               "missing-heavy-job lane finding",
-              renamed, 1, "heavy job 'opf-tooling' is missing")
+              renamed, 1, "heavy job 'opf-tooling-a' is missing")
     lane_case("39j the renamed job's heavy member runs without the pinned "
               "if: and is a lane finding",
               renamed, 1,
@@ -8095,6 +9442,12 @@ def self_test():
                  labeled + "  pull_request_target:\n    types: [labeled]\n", 1,
                  "pull_request_target")
     labeled_case("41h control: types: [labeled] passes", labeled, 0)
+    labeled_case("41h control: a workflow_dispatch trigger beside the labeled "
+                 "pull_request and push passes",
+                 labeled + "  push:\n    branches: [main]\n  workflow_dispatch:\n", 0)
+    labeled_case("41h control: a schedule trigger beside the labeled pull_request "
+                 "passes",
+                 labeled + "  schedule:\n    - cron: '17 3 * * *'\n", 0)
     labeled_case("41h control: a plain scalar types: labeled passes",
                  pr_types("labeled"), 0)
     # A quality.yml with no top-level on: line schedules no Quality run for the
@@ -8108,6 +9461,604 @@ def self_test():
     labeled_case("41i an on: block with no pull_request event is a trigger "
                  "finding", "  push:\n    branches: [main]\n", 1,
                  "has no pull_request event")
+
+    # 42 CHECKOUT CREDENTIALS: each case is a scratch workflow directory judged
+    # whole by checkout_credentials, the function main() runs (a file's data
+    # is its bytes, None for a directory or a str for a symlink target; the
+    # files value "symlink" makes the workflows directory itself a symlink
+    # to a compliant one; and an optional sixth member is the reader), and
+    # must return its code with its fragment in the rendered report. Every refused
+    # case then runs again with its rule removed from CHECKOUT_RULES in this
+    # running module and must pass there, so each is red on a mutant without
+    # that rule. The compliant control passes with or without a rule, so no
+    # removal can turn it red; its step and file counts show both workflow
+    # files read and the .txt file left unread.
+    import tempfile
+    from unittest.mock import patch
+
+    def checkout_file(step_lines, uses="actions/checkout@v4"):
+        return ("name: Fixture\non:\n  push:\n    branches: [main]\n"
+                "jobs:\n  one:\n    runs-on: ubuntu-latest\n    steps:\n"
+                "      - uses: " + uses + "\n"
+                + "".join(line + "\n" for line in step_lines)
+                + "      - uses: actions/setup-python@v5\n"
+                "        with:\n          python-version: '3.14'\n"
+                "      - name: Gate\n        shell: bash\n"
+                "        run: python3 -I -B tools/x.py\n").encode("ascii")
+
+    def persist_as(value):
+        return ("        with:", "          fetch-depth: 0",
+                "          persist-credentials: " + value)
+
+    compliant = (
+        "name: Fixture\n"
+        "on:\n  push:\n    branches: [main]\n  workflow_dispatch:\n"
+        "permissions:\n  contents: read\n"
+        "jobs:\n"
+        "  one:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "        with:\n          fetch-depth: 0  # full history\n"
+        "          persist-credentials: false\n"
+        "      - uses: actions/setup-python@v5\n"
+        "        with:\n          python-version: '3.14'\n"
+        "      - name: Gate\n        shell: bash\n        run: |\n"
+        "          set -euo pipefail\n"
+        "          python3 -I -B tools/x.py\n"
+        "  two:\n    runs-on: ${{ matrix.os }}\n"
+        "    strategy:\n      matrix:\n"
+        "        os: [ubuntu-latest, macos-latest]\n"
+        "    steps:\n"
+        "      - with:\n          persist-credentials: False\n"
+        "        uses: 'Actions/Checkout@main'\n").encode("ascii")
+    other = ("name: Other\non: push\njobs:\n  three:\n"
+             "    runs-on: ubuntu-latest\n    steps:\n"
+             "      - uses: actions/checkout@v4\n        with:\n"
+             "          persist-credentials: false\n").encode("ascii")
+    unset = checkout_file(("        with:", "          fetch-depth: 0"))
+    uses_case = (
+        "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n      - Uses: actions/checkout@v4\n").encode("ascii")
+    flow_steps = (
+        "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+        "    steps: [{uses: actions/checkout@v4}]\n").encode("ascii")
+    env_uses = checkout_file(persist_as("false") + (
+        "      - name: Note", "        shell: bash", "        env:",
+        "          Uses: actions/checkout@v4", "        run: echo ok"))
+
+    def local_step(uses):
+        return checkout_file(persist_as("false") + ("      - uses: " + uses,))
+    local_action = local_step("./local/action")
+    job_call = (
+        "name: F\non: push\njobs:\n  call:\n"
+        "    uses: ./.github/workflows/other.yml\n"
+        "  one:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n        with:\n"
+        "          persist-credentials: false\n").encode("ascii")
+    leading_space = (("ci.yml", local_step("' ./tools/act'")),)
+    # A dot then a backslash, plain, single-quoted and doubled: each passed
+    # under the ./ prefix alone (the flip below).
+    backslash_cases = (
+        ("a step uses: of a .\\x local path is cannot-evaluate",
+         (("ci.yml", local_step(".\\x")),), True),
+        ("a step uses: of a single-quoted '.\\x' local path is "
+         "cannot-evaluate", (("ci.yml", local_step("'.\\x'")),), True),
+        ("a step uses: of a .\\\\x local path is cannot-evaluate",
+         (("ci.yml", local_step(".\\\\x")),), True),
+    )
+    # Each step uses: below names a local path a step can only run as a
+    # local action, so each is cannot-evaluate; the files value carries an
+    # act directory or a regular other.yml where the vector names one. The
+    # third member is true where the one-part rule (one_part_local_step)
+    # accepted the vector; the nested path and the trailing space were
+    # refused under it too.
+    local_cases = (
+        ("a step uses: of a directory under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step("./.github/workflows/act")),
+                             ("act", None)), True),
+        ("a step uses: of .. under .github/workflows/ is cannot-evaluate",
+         (("ci.yml", local_step("./.github/workflows/..")),), True),
+        ("a step uses: of . under .github/workflows/ is cannot-evaluate",
+         (("ci.yml", local_step("./.github/workflows/.")),), True),
+        ("a step uses: of a nested path under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step(
+             "./.github/workflows/act/action.yml")), ("act", None)), False),
+        ("a step uses: of a regular .yml under .github/workflows/ is "
+         "cannot-evaluate", (("ci.yml", local_step(
+             "./.github/workflows/other.yml")), ("other.yml", other)), True),
+        ("a step uses: of a local path after a quoted leading space is "
+         "cannot-evaluate", leading_space, True),
+        ("a step uses: of a local path before a quoted trailing space is "
+         "cannot-evaluate", (("ci.yml", local_step("'./tools/act '")),),
+         False),
+    ) + backslash_cases
+    persist = "persist-credentials"
+    closed = "fail-closed"
+
+    def unreadable(path):
+        raise PermissionError(13, "fixture read refusal", str(path))
+    checkout_cases = (
+        ("a compliant directory passes", (
+            ("ci.yml", compliant), ("other.yaml", other),
+            ("notes.txt", unset)), 0,
+         "PASS: 3 actions/checkout step(s) in 2 workflow file(s)", None),
+        ("a with: without the key is a finding", (("ci.yml", unset),), 1,
+         "does not set persist-credentials", persist),
+        ("a checkout with no with: is a finding",
+         (("ci.yml", checkout_file(())),), 1, "carries no with: inputs",
+         persist),
+        ("the key written only in a comment is a finding (keys are read, "
+         "not lines)", (("ci.yml", checkout_file((
+             "        with:", "          # persist-credentials: false",
+             "          fetch-depth: 0"))),), 1,
+         "does not set persist-credentials", persist),
+        ("the key written only inside a run: block is a finding",
+         (("ci.yml", checkout_file((
+             "      - name: Note", "        shell: bash", "        run: |",
+             "          echo persist-credentials: false"))),), 1,
+         "carries no with: inputs", persist),
+        ("true is a finding", (("ci.yml", checkout_file(persist_as("true"))),),
+         1, "sets persist-credentials: true", persist),
+        ("TRUE is a finding", (("ci.yml", checkout_file(persist_as("TRUE"))),),
+         1, "sets persist-credentials: true", persist),
+        ("the string 'no' is a finding",
+         (("ci.yml", checkout_file(persist_as("'no'"))),), 1,
+         "to 'no', not the boolean false", persist),
+        ("the single-quoted string 'false' is a finding",
+         (("ci.yml", checkout_file(persist_as("'false'"))),), 1,
+         "to 'false', not the boolean false", persist),
+        ("the double-quoted string false is a finding",
+         (("ci.yml", checkout_file(persist_as('"false"'))),), 1,
+         "to 'false', not the boolean false", persist),
+        ("an expression is a finding",
+         (("ci.yml", checkout_file(persist_as("${{ false }}"))),), 1,
+         "to '${{ false }}', not the boolean false", persist),
+        ("an empty value is a finding",
+         (("ci.yml", checkout_file(persist_as(""))),), 1,
+         "to None, not the boolean false", persist),
+        ("a .yaml workflow is read", (("ci.yaml", unset),), 1,
+         ".github/workflows/ci.yaml:", persist),
+        ("a checkout named in other letter case is judged",
+         (("ci.yml", checkout_file(
+             ("        with:", "          fetch-depth: 0"),
+             "Actions/Checkout@main")),), 1, "uses Actions/Checkout@main",
+         persist),
+        ("a checkout action subpath without with: is a finding",
+         (("ci.yml", checkout_file((), "actions/checkout/sub@v4")),), 1,
+         "uses actions/checkout/sub@v4 and it carries no with: inputs",
+         persist),
+        ("an upper-case CI.YML beside a compliant file is read",
+         (("ci.yml", compliant), ("CI.YML", unset)), 1,
+         ".github/workflows/CI.YML:", persist),
+        ("an env: key spelling Uses is data, not a step property",
+         (("ci.yml", env_uses),), 0,
+         "PASS: 1 actions/checkout step(s) in 1 workflow file(s)", None),
+        ("a step Uses: key in another letter case is cannot-evaluate",
+         (("ci.yml", uses_case),), 2, "in another letter case", closed),
+        ("a flow step list naming uses is cannot-evaluate",
+         (("ci.yml", flow_steps),), 2,
+         "a flow sequence item other than one plain word", closed),
+        ("a local-action step uses: is cannot-evaluate",
+         (("ci.yml", local_action),), 2,
+         "a step uses: of a local action", closed),
+    ) + tuple(
+        (label, files, 2, "a step uses: of a local action", closed)
+        for label, files, _ in local_cases) + (
+        ("a job-level uses: of a local reusable workflow is not held to "
+         "the step rule", (("ci.yml", job_call), ("other.yml", other)), 0,
+         "PASS: 2 actions/checkout step(s) in 2 workflow file(s)", None),
+        ("a symlinked workflows directory is cannot-evaluate, never "
+         "followed", "symlink", 2, "a symlink on the path from the "
+         "repository root to the workflows directory", closed),
+        ("a symlinked ancestor of the workflows directory is "
+         "cannot-evaluate, never followed", "ancestor-symlink", 2,
+         "a symlink on the path from the repository root to the "
+         "workflows directory", closed),
+        ("a workflow that cannot be read is cannot-evaluate",
+         (("ci.yml", compliant),), 2, "[read-error]", closed, unreadable),
+        ("a workflow entry that is a directory is cannot-evaluate",
+         (("ci.yml", compliant), ("broken.yml", None)), 2,
+         "[workflow-file]", closed),
+        ("a symlinked workflow is cannot-evaluate, never followed",
+         (("ci.yml", compliant), ("linked.yml", "ci.yml")), 2,
+         "[workflow-file]", closed),
+        ("a byte outside printable ASCII is cannot-evaluate",
+         (("ci.yml", checkout_file(persist_as("false")) + b"# caf\xc3\xa9\n"),),
+         2, "[text-format]", closed),
+        ("an empty workflow file is cannot-evaluate", (("ci.yml", b""),), 2,
+         "does not open with a top-level key", closed),
+        ("a flow mapping is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with: {persist-credentials: false}",))),), 2,
+         "a value opening with '{'", closed),
+        ("an alias is cannot-evaluate",
+         (("ci.yml", checkout_file(("        with: *inputs",))),), 2,
+         "a value opening with '*'", closed),
+        ("an anchor is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with: &inputs",
+            "          persist-credentials: false"))),), 2,
+         "a value opening with '&'", closed),
+        ("a folded scalar is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with:", "          persist-credentials: >",
+            "            false"))),), 2, "a value opening with '>'", closed),
+        ("a repeated key is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with:", "          persist-credentials: true",
+            "          persist-credentials: false"))),), 2,
+         "repeated key 'persist-credentials'", closed),
+        ("a tab is cannot-evaluate", (("ci.yml", checkout_file((
+            "        with:", "          persist-credentials:\tfalse"))),), 2,
+         "a tab is outside", closed),
+        ("an unterminated quote is cannot-evaluate",
+         (("ci.yml", checkout_file(persist_as("'false"))),), 2,
+         "an unterminated quoted scalar", closed),
+        ("a document marker is cannot-evaluate",
+         (("ci.yml", b"---\n" + checkout_file(persist_as("false"))),), 2,
+         "a document marker", closed),
+        ("a line the indentation does not place is cannot-evaluate",
+         (("ci.yml", checkout_file((
+             "        with:", "            fetch-depth: 0",
+             "          persist-credentials: false"))),), 2,
+         "a line deeper than its mapping's keys", closed),
+        ("a multi-line plain scalar is cannot-evaluate",
+         (("ci.yml", checkout_file(persist_as("false") + (
+             "            and more",))),), 2, "a multi-line scalar", closed),
+        ("an indentless sequence is cannot-evaluate", (("ci.yml", (
+            "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n    - uses: actions/checkout@v4\n      with:\n"
+            "        persist-credentials: false\n").encode("ascii")),), 2,
+         "an indentless sequence", closed),
+        ("a key in another letter case is cannot-evaluate",
+         (("ci.yml", checkout_file((
+             "        with:", "          Persist-Credentials: false"))),),
+         2, "in another letter case", closed),
+        ("a uses: that is not one string is cannot-evaluate", (("ci.yml", (
+            "name: F\non: push\njobs:\n  one:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - uses:\n        with:\n"
+            "          persist-credentials: false\n").encode("ascii")),), 2,
+         "a uses: value that is not one string", closed),
+        ("a with: that is not a mapping is cannot-evaluate",
+         (("ci.yml", checkout_file(
+             ("        with: [persist-credentials]",))),), 2,
+         "with: is not a mapping", closed),
+        ("nesting past the recursion limit is cannot-evaluate",
+         (("ci.yml", b"name: F\n" + b"".join(
+             b" " * depth + b"k:\n" for depth in range(600))),), 2,
+         "nesting deeper than this reader can follow", closed),
+        ("a directory with no workflow file is cannot-evaluate",
+         (("notes.txt", unset),), 2, "no .yml or .yaml workflow file",
+         closed),
+        ("a missing workflow directory is cannot-evaluate", None, 2,
+         "cannot list", closed),
+    )
+
+    def checkout_directory(case, files):
+        # The files value "ancestor-symlink" makes the workflows
+        # directory's parent a symlink to a directory holding a compliant
+        # one, the workflows directory itself a real directory.
+        directory = case / "workflows"
+        if files == "symlink":
+            real = case / "real"
+            real.mkdir(parents=True)
+            (real / "ci.yml").write_bytes(compliant)
+            directory.symlink_to(real)
+        elif files == "ancestor-symlink":
+            real = case.parent / (case.name + "-real")
+            (real / "workflows").mkdir(parents=True)
+            (real / "workflows" / "ci.yml").write_bytes(compliant)
+            case.symlink_to(real)
+        elif files is not None:
+            directory.mkdir(parents=True)
+            for name, data in files:
+                if data is None:
+                    (directory / name).mkdir()
+                elif isinstance(data, str):
+                    (directory / name).symlink_to(data)
+                else:
+                    (directory / name).write_bytes(data)
+        return directory
+
+    rules_shown = set()
+    with tempfile.TemporaryDirectory(prefix="ci-parity-checkout-") as tmp:
+        for number, (label, files, want, fragment, rule, *reader) in enumerate(
+                checkout_cases):
+            count += 1
+            reader = reader[0] if reader else None
+            directory = checkout_directory(
+                Path(tmp) / "case{}".format(number), files)
+            report = checkout_credentials(directory, reader=reader)
+            rendered = render_checkout(report)
+            if report.code != want or fragment not in rendered:
+                failures.append(
+                    "42 checkout {}: code {}, expected {} with {!r}\n{}".format(
+                        label, report.code, want, fragment, rendered))
+            if rule is None:
+                continue
+            rules_shown.add(rule)
+            with patch.object(sys.modules[__name__], "CHECKOUT_RULES",
+                              CHECKOUT_RULES - {rule}):
+                mutant = checkout_credentials(directory, reader=reader)
+            if mutant.code != 0:
+                failures.append(
+                    "42 checkout {}: not red on a mutant without the {} "
+                    "rule (the mutant exits {}, not 0)".format(
+                        label, rule, mutant.code))
+    if rules_shown != CHECKOUT_RULES:
+        failures.append(
+            "42 checkout: a rule with no case shown red without it: "
+            "{}".format(sorted(CHECKOUT_RULES - rules_shown)))
+
+    # Each flip restores an earlier acceptance in the running module, and
+    # every vector it reopens must pass there, so each is red without the
+    # change: the one-part rule that read a step uses: of
+    # ./.github/workflows/<name> as a workflow file this rule reads, the
+    # local check without whitespace stripping, the ./ prefix alone (a
+    # one-member LOCAL_STEP_PREFIXES), and an lstat of the workflows
+    # directory alone (a one-component WORKFLOWS_SOURCE).
+    def one_part_local_step(uses):
+        parts = uses[2:].split("/")
+        return uses.startswith("./") and not (
+            parts[:2] == [".github", "workflows"] and len(parts) == 3
+            and parts[2])
+
+    flips = tuple(
+        (label, files, "_local_step", one_part_local_step)
+        for label, files, reopened in local_cases if reopened) + (
+        ("a step uses: of a local path after a quoted leading space is "
+         "cannot-evaluate", leading_space, "_local_step",
+         lambda uses: uses.startswith("./")),
+    ) + tuple(
+        (label, files, "LOCAL_STEP_PREFIXES", ("./",))
+        for label, files, _ in backslash_cases) + (
+        ("a symlinked ancestor of the workflows directory is "
+         "cannot-evaluate, never followed", "ancestor-symlink",
+         "WORKFLOWS_SOURCE", "workflows"),
+    )
+    with tempfile.TemporaryDirectory(prefix="ci-parity-flip-") as tmp:
+        for number, (label, files, name, value) in enumerate(flips):
+            count += 1
+            directory = checkout_directory(
+                Path(tmp) / "case{}".format(number), files)
+            with patch.object(sys.modules[__name__], name, value):
+                flipped = checkout_credentials(directory)
+            if flipped.code != 0:
+                failures.append(
+                    "42 checkout {}: not red on the flip of {} (the flip "
+                    "exits {}, not 0)\n{}".format(
+                        label, name, flipped.code, render_checkout(flipped)))
+
+    # 43 MAIN WIRING: these vectors run main([]) itself, with WORKFLOWS_PATH
+    # pointed at a scratch directory, so the checkout-credentials leg cannot
+    # be cut out of the process exit: a finding directory must surface as
+    # exit 1 and a refused one as exit 2 through main([]), while the parity
+    # legs read the live repository files and pass. The flip stubs the leg
+    # always-green in the running module: main([]) must then return the
+    # parity legs' 0, proving the nonzero exits above are the leg's own.
+    import contextlib
+    import io
+
+    def run_main():
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = main([])
+        return code, buffer.getvalue()
+
+    with tempfile.TemporaryDirectory(prefix="ci-parity-main-") as tmp:
+        finding_dir = Path(tmp) / "finding"
+        finding_dir.mkdir()
+        (finding_dir / "ci.yml").write_bytes(unset)
+        refused_dir = Path(tmp) / "refused"
+        refused_dir.mkdir()
+        (refused_dir / "notes.txt").write_bytes(unset)
+        for label, directory, want, fragment in (
+                ("a checkout finding", finding_dir, 1,
+                 "does not set persist-credentials"),
+                ("a refused workflows directory", refused_dir, 2,
+                 "no .yml or .yaml workflow file")):
+            count += 1
+            with patch.object(sys.modules[__name__], "WORKFLOWS_PATH",
+                              directory):
+                code, output = run_main()
+            if code != want or fragment not in output:
+                failures.append(
+                    "43 main wiring: {} returns exit {} from main([]), "
+                    "expected {} with {!r} in the output".format(
+                        label, code, want, fragment))
+        count += 1
+        stubbed = CheckoutReport(0, 1, 1, (), ())
+        with patch.object(sys.modules[__name__], "WORKFLOWS_PATH",
+                          finding_dir), \
+                patch.object(sys.modules[__name__], "checkout_credentials",
+                             lambda *args, **kwargs: stubbed):
+            code, output = run_main()
+        if code != 0:
+            failures.append(
+                "43 main wiring: with the checkout leg stubbed green, "
+                "main([]) returns exit {}, not the parity legs' 0, so the "
+                "vectors above do not isolate the checkout leg".format(code))
+
+    # 44. Each runner's checked directory binding, RUN under bash: a missing
+    # dirname, one that fails (printing .) and one that prints nothing each
+    # exit 2 with no gate launched, while the true directory launches gates
+    # and exits with the status a passing run gives (_passing_status), which
+    # must itself be 0. Each guard is held by its own named mutant: without
+    # the status check the failing dirname runs every gate from the calling
+    # directory's parent (or from it, standalone); without the non-empty
+    # check the empty name runs every gate from /. The pinned lines are the
+    # live ones. The
+    # gate-then-fail runner (the live one with exit 3 after its first gate)
+    # launches a gate under the control and then fails, so only the control's
+    # exit status holds it red; its flip patches the status comparison inside
+    # the real helper (_status_differs) to never differ, which reads the
+    # control by its gate launch alone and passes it. The pass-then-fail
+    # runner (the live one with exit 3 after its pass echo) exits under the
+    # control with the same status as its own pass path, so only the
+    # requirement that a passing run gives 0 holds it red; its flip patches
+    # that requirement (_passing_status_wrong) out of the real helper, which
+    # passes it. The pass echo indented, or with a trailing comment, is a form
+    # the grammar accepts, so each runner must be found passing (status 0).
+    def gate_then_fail(text):
+        first_gate = re.search(r"^run_gate .*\n", text, re.M)
+        if first_gate is None:
+            return None
+        return text[:first_gate.end()] + "exit 3\n" + text[first_gate.end():]
+
+    def pass_echo_variant(text, rewrite):
+        echoes = [match for summary in TERMINAL_SUMMARIES
+                  for match in re.finditer(
+                      "^" + re.escape(summary[-1]) + "\n", text, re.M)]
+        if len(echoes) != 1:
+            return None
+        echo = echoes[0]
+        return (text[:echo.start()] + rewrite(echo.group()[:-1]) + "\n"
+                + text[echo.end():])
+
+    def grammar_diagnostics(text, relative):
+        if relative == STANDALONE_SOURCE:
+            text, diagnostic = adapt_standalone_runner(text)
+            if diagnostic is not None:
+                return (diagnostic,)
+        return extract_local(text).diagnostics
+
+    echo_rewrites = (
+        ("pass-then-fail", lambda echo: echo + "\nexit 3"),
+        ("indented pass echo", lambda echo: "    " + echo),
+        ("pass echo with a trailing comment", lambda echo: echo + "  # all gates passed"),
+    )
+    module = sys.modules[__name__]
+
+    count += 8
+    for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
+                              (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
+        runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
+        if runner_diagnostic is not None:
+            failures.append("44 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            continue
+        failing = gate_then_fail(runner_text)
+        if failing is None:
+            failures.append("44 {} has no top-level run_gate line".format(relative))
+        else:
+            got = dirname_guard_problems(failing, relative)
+            if got != ["control"]:
+                failures.append("44 {} gate-then-fail runner gave {}, expected "
+                                "['control']".format(relative, got))
+            with patch.object(module, "_status_differs", lambda rc, passing: False):
+                flipped = dirname_guard_problems(failing, relative)
+            if flipped:
+                failures.append(
+                    "44 {} gate-then-fail runner: not red on the flip to the "
+                    "launch-only control (the flip gives {}, not [])".format(
+                        relative, flipped))
+        for label, rewrite in echo_rewrites:
+            variant = pass_echo_variant(runner_text, rewrite)
+            if variant is None:
+                failures.append("44 {} has no single pass echo".format(relative))
+                break
+            got = dirname_guard_problems(variant, relative)
+            if label == "pass-then-fail":
+                if got != ["pass-status"]:
+                    failures.append("44 {} {} runner gave {}, expected "
+                                    "['pass-status']".format(relative, label, got))
+                with patch.object(module, "_passing_status_wrong", lambda passing: False):
+                    flipped = dirname_guard_problems(variant, relative)
+                if flipped:
+                    failures.append(
+                        "44 {} {} runner: not red on the flip that drops the "
+                        "zero passing status (the flip gives {}, not [])".format(
+                            relative, label, flipped))
+                continue
+            diagnostics = grammar_diagnostics(variant, relative)
+            if diagnostics:
+                failures.append("44 {} {}: the grammar refuses it: {!r}".format(
+                    relative, label, diagnostics))
+            passing = _passing_status(variant)
+            if passing != 0 or got:
+                failures.append("44 {} {} runner: passing status {}, problems {}, "
+                                "expected 0 and []".format(relative, label, passing, got))
+        problems = dirname_guard_problems(runner_text, relative)
+        if problems:
+            failures.append("44 {} dirname guard failed: {}".format(relative, problems))
+        for label, line, expected in (
+                ("status check removed", binding[0], ["failed"]),
+                ("non-empty check removed", binding[1], ["empty"])):
+            if runner_text.count(line + "\n") != 1:
+                failures.append("44 {} binding drift: {}".format(relative, line))
+                continue
+            mutant = runner_text.replace(
+                line + "\n",
+                ("" if line is binding[1] else line[:-len(" || exit 2")] + "\n"), 1)
+            got = dirname_guard_problems(mutant, relative)
+            if got != expected:
+                failures.append("44 {} mutant ({}) gave {}, expected {}".format(
+                    relative, label, got, expected))
+
+    # 45. Each runner's cd runs with CDPATH cleared, RUN under bash: started by
+    # its relative path from its tree's root under a CDPATH naming a decoy tree
+    # that holds the same relative directory, every gate still launches from the
+    # true tree, nothing names the decoy, and the run exits with the status a
+    # passing run gives. The pinned line without its CDPATH=
+    # prefix is held red: the bare cd resolves through the decoy, moving the
+    # top-level runner's root there and printing the decoy into the standalone
+    # runner's captured directory. The gate-then-fail runner of vector 44 logs
+    # a true-tree gate line and then fails, so only the exit status holds it
+    # red; its flip patches the status comparison inside the real helper
+    # (_status_differs) to never differ, as the helper that never read the
+    # exit status did, which passes it. The pass-then-fail runner of vector 44
+    # is held red only by the requirement that a passing run gives 0; its flip
+    # patches that requirement (_passing_status_wrong) out of the real helper.
+    # The indented and commented pass echoes of vector 44 each pass.
+    count += 8
+    for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
+                              (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
+        runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
+        if runner_diagnostic is not None:
+            failures.append("45 cannot read {}: {!r}".format(relative, runner_diagnostic))
+            continue
+        problems = cdpath_problems(runner_text, relative)
+        if problems:
+            failures.append("45 {} CDPATH binding failed: {}".format(relative, problems))
+        failing = gate_then_fail(runner_text)
+        if failing is None:
+            failures.append("45 {} has no top-level run_gate line".format(relative))
+        else:
+            got = cdpath_problems(failing, relative)
+            if got != ["exit"]:
+                failures.append("45 {} gate-then-fail runner gave {}, expected "
+                                "['exit']".format(relative, got))
+            with patch.object(module, "_status_differs", lambda rc, passing: False):
+                flipped = cdpath_problems(failing, relative)
+            if flipped:
+                failures.append(
+                    "45 {} gate-then-fail runner: not red on the flip to the "
+                    "helper that never read the exit status (the flip gives "
+                    "{}, not [])".format(relative, flipped))
+        for label, rewrite in echo_rewrites:
+            variant = pass_echo_variant(runner_text, rewrite)
+            if variant is None:
+                failures.append("45 {} has no single pass echo".format(relative))
+                break
+            got = cdpath_problems(variant, relative)
+            if label == "pass-then-fail":
+                if got != ["pass-status"]:
+                    failures.append("45 {} {} runner gave {}, expected "
+                                    "['pass-status']".format(relative, label, got))
+                with patch.object(module, "_passing_status_wrong", lambda passing: False):
+                    flipped = cdpath_problems(variant, relative)
+                if flipped:
+                    failures.append(
+                        "45 {} {} runner: not red on the flip that drops the "
+                        "zero passing status (the flip gives {}, not [])".format(
+                            relative, label, flipped))
+            elif got:
+                failures.append("45 {} {} runner gave {}, expected []".format(
+                    relative, label, got))
+        line = binding[2]
+        if runner_text.count(line + "\n") != 1 or line.count("CDPATH= cd -- ") != 1:
+            failures.append("45 {} binding drift: {}".format(relative, line))
+            continue
+        mutant = runner_text.replace(
+            line + "\n", line.replace("CDPATH= cd -- ", "cd -- ") + "\n", 1)
+        got = cdpath_problems(mutant, relative)
+        if "moved" not in got:
+            failures.append("45 {} mutant (CDPATH= removed) gave {}, expected moved".format(
+                relative, got))
 
     if failures:
         print("SELF-TEST FAIL:")
@@ -8144,7 +10095,10 @@ def main(argv=None):
 
     report = run_paths(LOCAL_PATH, CI_PATH, extra_ci_paths=CI_WORKFLOWS[1:])
     print(render(report))
-    return report.code
+    checkout = checkout_credentials(WORKFLOWS_PATH)
+    print(render_checkout(checkout))
+    # The higher exit wins: cannot-evaluate (2) over a finding (1) over a pass.
+    return max(report.code, checkout.code)
 
 
 if __name__ == "__main__":

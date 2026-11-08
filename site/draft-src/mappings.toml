@@ -1,0 +1,147 @@
+# The aiqt.ai draft Mappings page (template specification sections 7.5, 7.10 and the reference page).
+# The By rule and By framework bodies are rendered by the generator's mappings component from the
+# same mappings data as the live page, so they cannot drift from it.
+path = "mappings/index.html"
+title = "Mappings"
+kind = "document"
+label = "Reference"
+heading = "Framework mappings"
+meta = "A navigational crosswalk from the pack's mapped rules to security and AI-governance frameworks (OWASP, NIST, MITRE ATLAS, ISO/IEC, CSA): a registry of the frameworks and editions referenced, then a forward view by rule and a reverse view by framework."
+
+[[body]]
+component = "control"
+document = "aiqt.ai"
+source_text = "jposluns/guardrails"
+source_href = "https://github.com/jposluns/guardrails"
+
+[[body]]
+component = "label"
+text = "At a glance"
+
+[[body]]
+component = "figures"
+[[body.items]]
+num = "896"
+cap = "mappings"
+[[body.items]]
+num = "103"
+cap = "rules mapped"
+[[body.items]]
+num = "489"
+cap = "identifiers"
+[[body.items]]
+num = "17"
+cap = "frameworks"
+
+[[body]]
+component = "prose"
+html = "<p>Every mapped identifier is validated against a pinned-edition manifest before it can ship.</p>"
+
+[[body]]
+component = "section"
+lbl = "Methodology and limits"
+id = "methodology"
+heading = "How the crosswalk is built"
+rail = "Methodology and limits"
+
+[[body]]
+component = "prose"
+html = "<p>The mappings are part of the rules themselves. Each mapped rule records the framework identifiers it maps to, and continuous integration checks every one against a pinned-edition manifest of that framework's identifiers.</p><ul><li><strong>5 relation kinds.</strong> A rule supports a control, aligns with guidance, addresses a risk, mitigates a technique, or mitigates a weakness.</li><li><strong>Each mapping carries its fit.</strong> A tight mapping is a direct, 1-to-1 correspondence; a broad mapping is a looser, thematic relation.</li><li><strong>Identifiers and published titles only.</strong> No further specification prose, requirement text, control or clause bodies, figures, or tables from any framework are reproduced.</li><li><strong>What absence means.</strong> No mapping is currently asserted; the rule and identifier pair may be unassessed, judged not to fit, or removed after review. A pinned edition may lag a framework's most recent release.</li></ul>"
+
+[[body]]
+component = "scope"
+html = "A mapping asserts a relationship of ideas, not certification against a standard. No framework publisher endorses, sponsors, or is affiliated with this pack."
+
+[[body]]
+component = "section"
+lbl = "Registry"
+id = "registry"
+heading = "Framework registry"
+rail = "Framework registry"
+
+[[body]]
+component = "prose"
+html = "<p>Each framework is pinned to a single edition.</p>"
+
+[[body]]
+component = "register"
+reg = "Register 1"
+title = "Framework registry"
+count = "17 rows"
+caption = "Framework registry"
+sticky = true
+fixed = false
+cols = ["w26", "w17", "w16", "w14", "w11", "w16"]
+head = ["Framework", "Publisher", "Edition", "Relation", "Stability", "Identifiers"]
+rows = [["CSA AI Controls Matrix", "Cloud Security Alliance", "1.1.0", "supports control", "<span class=\"tag accent\">stable</span>", "73 referenced (curated subset)"], ["CSA Cloud Controls Matrix", "Cloud Security Alliance", "4.1.0", "supports control", "<span class=\"tag accent\">stable</span>", "50 referenced (curated subset)"], ["ISO/IEC 23894:2023 AI guidance on risk management", "ISO/IEC", "2023", "aligns with guidance", "<span class=\"tag accent\">stable</span>", "14 referenced (curated subset)"], ["ISO/IEC 42001:2023 AI management system", "ISO/IEC", "2023", "supports control", "<span class=\"tag accent\">stable</span>", "17 referenced (curated subset)"], ["MITRE ATLAS", "MITRE", "2026.06", "mitigates technique", "<span class=\"tag\">snapshot</span>", "63 referenced (curated subset)"], ["MITRE CWE", "MITRE", "4.20", "mitigates weakness", "<span class=\"tag\">snapshot</span>", "72 referenced (curated subset)"], ["NIST SP 800-53 Security and Privacy Controls", "NIST", "Rev 5 (catalog 5.2.0)", "supports control", "<span class=\"tag accent\">stable</span>", "66 referenced (curated subset)"], ["NIST AI Risk Management Framework", "NIST", "1.0 (NIST AI 100-1)", "aligns with guidance", "<span class=\"tag accent\">stable</span>", "21 referenced (curated subset)"], ["NIST Secure Software Development Framework", "NIST", "1.1 (SP 800-218)", "supports control", "<span class=\"tag accent\">stable</span>", "18 referenced (curated subset)"], ["OWASP API Security Top 10", "OWASP Foundation", "2023", "addresses risk", "<span class=\"tag accent\">stable</span>", "8 referenced (curated subset)"], ["OWASP Top 10 for Agentic Applications", "OWASP Foundation", "2026", "addresses risk", "<span class=\"tag accent\">stable</span>", "9 referenced (curated subset)"], ["OWASP Application Security Verification Standard", "OWASP Foundation", "5.0.0", "supports control", "<span class=\"tag accent\">stable</span>", "13 referenced (curated subset)"], ["OWASP Cheat Sheet Series", "OWASP Foundation", "commit <code class=\"hash\" title=\"f54d8ded2764010ecacd0deb87e1586da32d41dd\">f54d8de</code> (2026-07-04)", "aligns with guidance", "<span class=\"tag\">snapshot</span>", "26 referenced (curated subset)"], ["OWASP Top 10 for LLM Applications", "OWASP Foundation", "2026", "addresses risk", "<span class=\"tag accent\">stable</span>", "10 of 10"], ["OWASP MCP Top 10", "OWASP Foundation", "2025", "addresses risk", "<span class=\"tag\">beta</span>", "10 of 10"], ["OWASP Top 10 Proactive Controls", "OWASP Foundation", "4.0.0", "supports control", "<span class=\"tag accent\">stable</span>", "9 referenced (curated subset)"], ["OWASP Top 10 (Web Application Security Risks)", "OWASP Foundation", "2025", "addresses risk", "<span class=\"tag accent\">stable</span>", "10 of 10"]]
+
+[[body]]
+component = "section"
+lbl = "Forward view"
+id = "by-rule"
+heading = "By rule"
+rail = "By rule"
+
+[[body]]
+component = "prose"
+html = "<p>Every rule that carries at least one mapping, in AIQT priority order. Open a rule to see the frameworks it maps to and the identifiers under each, with the fit noted in parentheses.</p>"
+
+[[body]]
+component = "mappings"
+view = "by-rule"
+
+[[body]]
+component = "section"
+lbl = "Reverse view"
+id = "by-framework"
+heading = "By framework"
+rail = "By framework"
+
+[[body]]
+component = "prose"
+html = "<p>The same mappings read the other way.</p>"
+
+[[body]]
+component = "mappings"
+view = "by-framework"
+
+[[body]]
+component = "section"
+lbl = "Downloads"
+id = "sources"
+heading = "Take the data"
+rail = "Downloads"
+
+[[body]]
+component = "download"
+href = "/downloads/mappings.csv"
+filename = "mappings.csv"
+size = "CSV, 240 KB"
+html = "Flat, 1 row per rule-and-identifier pair, the join key most GRC tools expect."
+
+[[body]]
+component = "download"
+href = "/downloads/mappings.json"
+filename = "mappings.json"
+size = "JSON, 379 KB"
+html = "The framework registry once, plus a flat array of every mapping."
+
+[[body]]
+component = "prose"
+html = "<p>Attribution for each framework is in the <a href=\"https://github.com/jposluns/guardrails/blob/main/NOTICE\" target=\"_blank\" rel=\"noopener noreferrer\">NOTICE<span class=\"vh\"> (opens in a new tab)</span></a> file.</p>"
+
+[[body]]
+component = "section"
+lbl = "Enforcement register"
+id = "enforcement"
+heading = "Enforcement register"
+rail = "Enforcement register"
+
+[[body]]
+component = "prose"
+html = "<p>The register lists every rule and the shipped mechanical controls linked to it. A link records that a control exists, not how much of the rule it covers, so none of the statuses means a rule is enforced.</p>\n<p>Of 133 rules, 17 are gate-linked, 25 are hook-linked or preview only, and 91 have no control.</p>\n<p><a href=\"/enforcement\">Read the enforcement register</a></p>"
+
+[[body]]
+component = "next"
+text = "Back to the standard"
+href = "standard/"
