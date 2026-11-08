@@ -287,6 +287,31 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        conformance is exactly Marko
                        2.2.4's, so rare edge inputs are read exactly where Marko diverges from a strict
                        CommonMark reading (a no-break space accepted after a closing fence, for one).
+  P7 residual anchor   HARD, for every family. A declaration is a column-zero line of the raw brief text,
+                       `ACCEPTED-RESIDUAL: <anchor>`, one per residual. An anchor is gate:<id> or hook:<id>,
+                       accepting that control's whole residue field in .aiqt/core/gates/manifest.toml
+                       ([[gate]]) or .aiqt/core/hooks/manifest.toml ([[hook]]) read at the brief's pinned
+                       revision and matched by exact id; or <path> :: <symbol> :: <excerpt>, split at the
+                       first two " :: " separators, whose excerpt must occur byte-exact (whitespace, case
+                       and CR against LF all count) inside the named symbol at the pin: a Python qualified
+                       def or class name located with ast (the source is never imported), or
+                       gate:<id>.residue / hook:<id>.residue naming a manifest field of the TOML file at
+                       <path>, matched against the TOML-decoded value (escapes applied, as a reviewer reads
+                       the field), never the file's source bytes. The pin is the first BRIEF-PIN line's
+                       value, else the first pin line's, resolved as in P3; content is read from the git
+                       object store (read_at_revision: a regular-file blob of at most P7_READ_MAX_BYTES,
+                       under the P3 reads' hermetic environment and timeout), never HEAD, the index or the
+                       working tree, and a symbol that is not found is never a whole-file search. A
+                       declaration with no anchor, or an anchor whose id, symbol or excerpt is absent at
+                       the pin (a missing path or residue field included), is HARD (exit 1). A malformed
+                       declaration (a column-zero label without its colon, a glued suffix, one " :: "
+                       separator, an empty path, symbol or excerpt), an unresolved or conflicting pin, a
+                       brief with declarations and no pin or no repository to read it from, and content
+                       that cannot be read or parsed at the pin (a non-regular or oversized entry, invalid
+                       TOML, two manifest rows with one id, source ast cannot parse) are CANNOT_EVALUATE
+                       (exit 2), never a pass. Keyword-free residual prose is at most advisory: a line
+                       holding the label outside a column-zero declaration prints one ADVISORY line, and
+                       nothing is read at the pin for it.
 
 What the preflight cannot know: whether the worker's uid can read a path (permissions, ACLs, a mount, a
 sandbox); that is the dispatcher's check, made where the worker runs, and the hard readability check belongs
@@ -3040,12 +3065,232 @@ def rule_p6(names, row, repo):
     return findings
 
 
+# ---------- P7: accepted residuals at the pin ----------
+# a declaration is a column-zero line of the raw brief text: ACCEPTED-RESIDUAL: <anchor>
+RESIDUAL_LABEL = "ACCEPTED-RESIDUAL"
+ANCHOR_SEPARATOR = " :: "
+ANCHOR_SHAPE = "gate:<id>, hook:<id>, or <path> :: <symbol> :: <excerpt>"
+MANIFEST_RELS = dict(gate=".aiqt/core/gates/manifest.toml", hook=".aiqt/core/hooks/manifest.toml")
+# the symbol of an excerpt anchor that names a manifest residue field instead of a Python symbol
+RESIDUE_FIELD_RE = re.compile(r"(gate|hook):(\S+)\.residue\Z")
+P7_READ_MAX_BYTES = 1 << 20
+REGULAR_FILE_MODES = ("100644", "100755")
+
+
+def read_at_revision(repo, commit, path):
+    """The bytes of `path` at `commit` in `repo`, read from the object store (never HEAD, the index or the
+    working tree), or None when the commit has no entry at that path. Both reads run under GIT_READ_TIMEOUT
+    and _git_read_env(), hermetic like the P3 reads (_cat_file keeps checking existence only). git ls-tree
+    names the entry first, through a :(literal) pathspec so no wildcard is applied: only a regular-file blob
+    (mode 100644 or 100755) of at most P7_READ_MAX_BYTES is then read, with git cat-file blob; any other
+    entry (a symlink, a submodule, a directory), an oversized blob, a repository git refuses for its
+    ownership, and a git that fails, cannot be launched or times out are CannotEvaluate, never a pass."""
+    def refusal(why):
+        return CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, why))
+    try:
+        probe = subprocess.run(["git", "-C", str(repo), "ls-tree", "-l", "--full-tree", commit, "--",
+                                ":(literal)" + path],
+                               capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise refusal(exc)
+    if _ownership_refused(probe):
+        raise refusal(OWNERSHIP_REMEDY)
+    if probe.returncode != 0:
+        raise refusal(probe.stderr.decode("utf-8", "replace").strip() or "git ls-tree failed")
+    listing = probe.stdout.decode("utf-8", "replace")
+    if not listing.strip():
+        return None
+    fields = listing.split("\t", 1)[0].split()
+    if len(fields) != 4 or fields[1] != "blob" or fields[0] not in REGULAR_FILE_MODES:
+        raise refusal("not a regular file at the pin (mode {})".format(fields[0] if fields else "unknown"))
+    if not fields[3].isdigit() or int(fields[3]) > P7_READ_MAX_BYTES:
+        raise refusal("larger than {} bytes".format(P7_READ_MAX_BYTES))
+    try:
+        blob = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", commit + ":" + path],
+                              capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise refusal(exc)
+    if _ownership_refused(blob):
+        raise refusal(OWNERSHIP_REMEDY)
+    if blob.returncode != 0:
+        raise refusal(blob.stderr.decode("utf-8", "replace").strip() or "git cat-file failed")
+    if len(blob.stdout) > P7_READ_MAX_BYTES:
+        raise refusal("larger than {} bytes".format(P7_READ_MAX_BYTES))
+    return blob.stdout
+
+
+def residual_declarations(raw):
+    """[(line, anchor)] for the ACCEPTED-RESIDUAL declarations of the raw brief text, one per residual: a
+    column-zero line `ACCEPTED-RESIDUAL: <anchor>`, the anchor the rest of the line with surrounding
+    whitespace stripped (an excerpt's interior bytes are kept exactly). A column-zero line that opens with
+    the label but not with `ACCEPTED-RESIDUAL:` (another separator, a glued suffix such as
+    ACCEPTED-RESIDUALS) is a malformed declaration: CannotEvaluate, never ignored. The label anywhere else
+    (indented, mid-line, in code) is prose and declares nothing; rule_p7 prints it as ADVISORY at most."""
+    declarations = []
+    for number, line in enumerate(raw.split("\n"), 1):
+        if not line.startswith(RESIDUAL_LABEL):
+            continue
+        rest = line[len(RESIDUAL_LABEL):]
+        if not rest.startswith(":"):
+            raise CannotEvaluate("line {}: a column-zero {} line is not a declaration; write {}: "
+                                 "<anchor>".format(number, RESIDUAL_LABEL, RESIDUAL_LABEL))
+        declarations.append((number, rest[1:].strip()))
+    return declarations
+
+
+def residual_entries(data, kind, path, commit):
+    """The [[gate]] or [[hook]] rows of a manifest's bytes read at a pin, as id -> row: bytes that are not
+    UTF-8 TOML (a parser recursion and memory exhaustion included) and two rows with one id are
+    CannotEvaluate, never a pass; a row with no string id is skipped (it can anchor nothing)."""
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: not valid UTF-8 TOML: {}".format(path, commit, exc))
+    rows = doc.get(kind)
+    entries = dict()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+            continue
+        if row["id"] in entries:
+            raise CannotEvaluate("{} at {}: two [[{}]] rows hold id {!r}".format(path, commit, kind, row["id"]))
+        entries[row["id"]] = row
+    return entries
+
+
+def _definition_nodes(body, name):
+    """The def and class statements of a body list named `name`."""
+    kinds = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+    return [node for node in body if isinstance(node, kinds) and node.name == name]
+
+
+def symbol_segments(data, symbol, path, commit):
+    """The byte segments of the Python definitions a qualified name reaches in a source read at a pin: the
+    source is parsed with ast and never imported; each dotted part is matched, by exact name, against the
+    statements directly in the previous part's body (the module's at the start), so a name is found only
+    inside its qualifier, never by a whole-file search. Every match of the last part is returned (a name
+    defined twice at one level gives each segment), sliced from the raw bytes by the parse's line numbers
+    and utf-8 column offsets, so a segment holds the definition's bytes exactly (decorators sit outside it;
+    a CRLF line keeps its carriage return). Source the parser cannot read is CannotEvaluate."""
+    try:
+        tree = ast.parse(data)
+    except (SyntaxError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: cannot parse as Python: {}".format(path, commit, exc))
+    nodes = [tree]
+    for part in symbol.split("."):
+        nodes = [found for node in nodes for found in _definition_nodes(getattr(node, "body", []), part)]
+        if not nodes:
+            return []
+    starts, offset = [], 0
+    for line in data.split(b"\n"):
+        starts.append(offset)
+        offset += len(line) + 1
+    return [data[starts[node.lineno - 1] + node.col_offset:
+                 starts[node.end_lineno - 1] + node.end_col_offset] for node in nodes]
+
+
+def excerpt_in(excerpt, data):
+    """Whether a declared excerpt occurs inside the anchored bytes, byte for byte (the excerpt's utf-8
+    bytes; whitespace, case and CR against LF all count), bound here so the self-test can patch it red."""
+    return excerpt.encode("utf-8") in data
+
+
+def judge_residual(repo, commit, line, anchor):
+    """The P7 finding for one declaration's anchor at the resolved pin, or None when it holds (rule_p7)."""
+    def hard(message):
+        return ("P7", "HARD", line, message, _excerpt(anchor or RESIDUAL_LABEL + ":"))
+    if ANCHOR_SEPARATOR not in anchor:
+        kind, _, ident = anchor.partition(":")
+        if kind not in MANIFEST_RELS or not ident:
+            return hard("accepted-residual declaration with no anchor: name " + ANCHOR_SHAPE)
+        path = MANIFEST_RELS[kind]
+        data = read_at_revision(repo, commit, path)
+        if data is None:
+            return hard("the {} manifest ({}) does not exist at the pinned revision".format(kind, path))
+        row = residual_entries(data, kind, path, commit).get(ident)
+        if row is None:
+            return hard("{}:{} is not in {} at the pinned revision".format(kind, ident, path))
+        if not isinstance(row.get("residue"), str):
+            return hard("{}:{} has no residue field in {} at the pinned revision".format(kind, ident, path))
+        return None
+    path, _, rest = anchor.partition(ANCHOR_SEPARATOR)
+    symbol, separator, excerpt = rest.partition(ANCHOR_SEPARATOR)
+    path, symbol = path.strip(), symbol.strip()
+    if not separator or not path or not symbol or not excerpt:
+        raise CannotEvaluate("line {}: malformed accepted-residual anchor: write <path> :: <symbol> :: "
+                             "<excerpt>, two \" :: \" separators with no part empty".format(line))
+    data = read_at_revision(repo, commit, path)
+    if data is None:
+        return hard("{} does not exist at the pinned revision, so the symbol {} is absent "
+                    "there".format(path, symbol))
+    field = RESIDUE_FIELD_RE.fullmatch(symbol)
+    if field:
+        row = residual_entries(data, field.group(1), path, commit).get(field.group(2))
+        if row is None:
+            return hard("{}:{} is not in {} at the pinned revision".format(
+                field.group(1), field.group(2), path))
+        if not isinstance(row.get("residue"), str):
+            return hard("{} names no residue field in {} at the pinned revision".format(symbol, path))
+        # matched against the TOML-decoded value's utf-8 bytes, not the file's source bytes, so the
+        # excerpt reads like a reviewer reads the field: escapes applied, quotes removed
+        if not excerpt_in(excerpt, row["residue"].encode("utf-8")):
+            return hard("the excerpt does not occur byte-exact in the {} field of {} at the pinned "
+                        "revision".format(symbol, path))
+        return None
+    segments = symbol_segments(data, symbol, path, commit)
+    if not segments:
+        return hard("the symbol {} (a qualified def or class name) is not in {} at the pinned "
+                    "revision".format(symbol, path))
+    if not any(excerpt_in(excerpt, segment) for segment in segments):
+        return hard("the excerpt does not occur byte-exact inside the symbol {} in {} at the pinned "
+                    "revision (the whole file is never searched)".format(symbol, path))
+    return None
+
+
+def rule_p7(names, row, repo):
+    """P7 HARD, for every family: each accepted-residual declaration (residual_declarations: a column-zero
+    ACCEPTED-RESIDUAL: <anchor> line of the raw brief text, one per residual) must anchor its residual at
+    the brief's pinned revision: the first BRIEF-PIN line's value, else the first pin line's, resolved as in
+    P3. An anchor is gate:<id> or hook:<id>, accepting that control's whole residue field in the gates or
+    hooks manifest read at the pin and matched by exact id, or <path> :: <symbol> :: <excerpt>, split at the
+    first two " :: " separators, whose excerpt must occur byte-exact inside the named symbol at the pin
+    (judge_residual): a Python qualified def or class name located with ast and never imported, or
+    gate:<id>.residue / hook:<id>.residue naming a manifest field of the TOML file at <path>, matched
+    against the TOML-decoded value. A declaration with no anchor, or an anchor whose id, symbol or excerpt
+    is absent at the pin, is HARD; a malformed declaration or anchor, an unresolved or conflicting pin, a
+    brief with declarations and no pin or no repository, and pinned content that cannot be read or parsed
+    are CannotEvaluate, never a pass. Keyword-free residual prose is at most advisory: a line holding the
+    label outside a column-zero declaration prints one ADVISORY line and nothing is read at the pin."""
+    declarations = residual_declarations(names.raw)
+    advisory = [("P7", "ADVISORY", number, "the ACCEPTED-RESIDUAL label outside a column-zero declaration "
+                 "is prose and is not checked at the pin; declare it as ACCEPTED-RESIDUAL: <anchor> at "
+                 "column zero", _excerpt(line.strip()))
+                for number, line in enumerate(names.raw.split("\n"), 1)
+                if RESIDUAL_LABEL in line and not line.startswith(RESIDUAL_LABEL)]
+    if not declarations:
+        return advisory
+    if names.bad_pins:
+        raise CannotEvaluate("line {}: a REVIEWED HEAD or BRIEF-PIN line with no pin of 7 to 40 or 64 hex "
+                             "digits".format(names.bad_pins[0]))
+    conflict = brief_pin_conflict(names) or reviewed_head_conflict(names) or near_pin_conflict(names)
+    if conflict is not None:
+        raise CannotEvaluate(pin_conflict_message(conflict))
+    if not names.pins:
+        raise CannotEvaluate("the brief declares an accepted residual but pins no revision; add a BRIEF-PIN "
+                             "line for the anchors to be read at")
+    if repo is None:
+        raise CannotEvaluate("the brief declares an accepted residual but no repository was given to read "
+                             "the pin from")
+    commit = resolve_revision(repo, (names.brief_pins or names.pins)[0][1])
+    findings = [judge_residual(repo, commit, line, anchor) for line, anchor in declarations]
+    return [finding for finding in findings if finding is not None] + advisory
+
+
 def preflight(text, row, repo, raw):
-    """The preflight findings (P1 to P6) for a brief's text and its family's row; they apply to every family. `raw`
-    is the text before decode_brief removed format characters, which the P5 cure reads."""
+    """The preflight findings (P1 to P7) for a brief's text and its family's row; they apply to every family. `raw`
+    is the text before decode_brief removed format characters, which the P5 cure and the P7 declarations read."""
     names = PreflightText(text, raw)
     return rule_p1(names, row, repo) + rule_p2(names, row, repo) + rule_p3(names, row, repo) + rule_p4(
-        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo)
+        names, row, repo) + rule_p5(names, row, repo) + rule_p6(names, row, repo) + rule_p7(names, row, repo)
 
 
 def can_execute(row):
@@ -3108,7 +3353,7 @@ COMMAND_LINE_HINT = ("to ask about a command line, name the function, row or ent
                      "embedding the command (for example: quote the def line of X, not the line that runs git push)")
 
 
-PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6"))
+PREFLIGHT_RULES = frozenset(("P1", "P2", "P3", "P4", "P5", "P6", "P7"))
 # added to a REFUSE line when a P6 hit is among the hard hits
 INPUT_HINT = "; provide each missing declared input, or correct its INPUT line, before sending"
 
@@ -3139,6 +3384,10 @@ def run(brief_path, family, table_path, scoped=True, repo=None):
     elif code == EXIT_REFUSE and set(hard) == {"P6"}:
         print("REFUSE: family {}: the brief declares an input that does not exist on this host ({} hard hit(s): "
               "P6 x{}){}".format(family, len(hard), len(hard), INPUT_HINT))
+    elif code == EXIT_REFUSE and set(hard) == {"P7"}:
+        print("REFUSE: family {}: the brief accepts a residual whose anchor does not hold at the pinned "
+              "revision ({} hard hit(s): P7 x{}); correct each ACCEPTED-RESIDUAL line ({}), or re-pin the "
+              "brief".format(family, len(hard), len(hard), ANCHOR_SHAPE))
     elif code == EXIT_REFUSE:
         print("REFUSE: family {}: the brief names an input the family cannot read ({} hard hit(s): {}); name "
               "paths under the declared workdir, or state a path the worker must not use as a prohibition{}".format(
@@ -4129,6 +4378,64 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
+
+
+# P7 fixture content: the old gates manifest holds a residue with a TOML-escaped CRLF (its decoded value
+# holds a real carriage return and line feed) and a row with no residue field; the module holds the needle
+# inside one function, a different needle outside every definition, and one inside a nested method
+P7_GATES_OLD = ('[[gate]]\nid = "g1"\nresidue = "old gate residue win\\r\\nend"\n\n'
+                '[[gate]]\nid = "noresidue"\nscript = "x"\n')
+P7_GATES_NEW = '[[gate]]\nid = "g1"\nresidue = "new gate residue"\n'
+P7_GATES_INVALID = "[[gate]\n"
+P7_GATES_DUPLICATE = '[[gate]]\nid = "g1"\nresidue = "a"\n\n[[gate]]\nid = "g1"\nresidue = "b"\n'
+P7_HOOKS = '[[hook]]\nid = "h1"\nresidue = "old hook residue"\n'
+P7_MODULE_OLD = ('OUTSIDE = "needle outside symbol"\n\n\ndef outer():\n    return "needle inside old"\n\n\n'
+                 'class Box:\n    def method(self):\n        return "boxed needle"\n')
+P7_MODULE_NEW = P7_MODULE_OLD.replace("needle inside old", "needle inside new")
+
+
+def _p7_commit(repo, env, message):
+    """Stage everything and commit in the P7 fixture repository; the new commit's full id."""
+    subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                    "maintenance.auto=false", "add", "-A"], check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                    "maintenance.auto=false", "commit", "-q", "-m", message],
+                   check=True, capture_output=True, timeout=60, env=env)
+    made = subprocess.run(["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c",
+                           "maintenance.auto=false", "rev-parse", "HEAD"],
+                          check=True, capture_output=True, timeout=60, env=env)
+    return made.stdout.decode("ascii").strip()
+
+
+def _p7_repo(base):
+    """(repo, [four commit ids]) of a fixture repository for P7: the first commit holds the manifests and a
+    module the anchors read, the second changes their content (so a later HEAD differs from the first pin),
+    the third makes the gates manifest invalid TOML and the fourth gives it two rows with one id."""
+    repo = base / "p7-repo"
+    os.makedirs(repo / ".aiqt" / "core" / "gates")
+    os.makedirs(repo / ".aiqt" / "core" / "hooks")
+    os.makedirs(repo / "pkg")
+    env = _git_fixture_env.git_fixture_env(
+        GIT_AUTHOR_NAME="fixture", GIT_AUTHOR_EMAIL="fixture@example.invalid",
+        GIT_COMMITTER_NAME="fixture", GIT_COMMITTER_EMAIL="fixture@example.invalid")
+    subprocess.run(["git", "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false",
+                    "init", "-q", str(repo)], check=True, capture_output=True, timeout=60, env=env)
+    gates = repo / ".aiqt" / "core" / "gates" / "manifest.toml"
+    hooks = repo / ".aiqt" / "core" / "hooks" / "manifest.toml"
+    module = repo / "pkg" / "mod.py"
+    commits = []
+    for message, gates_text, module_text in (("old", P7_GATES_OLD, P7_MODULE_OLD),
+                                             ("new", P7_GATES_NEW, P7_MODULE_NEW),
+                                             ("invalid", P7_GATES_INVALID, P7_MODULE_NEW),
+                                             ("duplicate", P7_GATES_DUPLICATE, P7_MODULE_NEW)):
+        with open(gates, "w", encoding="utf-8") as handle:
+            handle.write(gates_text)
+        with open(hooks, "w", encoding="utf-8") as handle:
+            handle.write(P7_HOOKS)
+        with open(module, "w", encoding="utf-8", newline="") as handle:
+            handle.write(module_text)
+        commits.append(_p7_commit(repo, env, message))
+    return repo, commits
 # The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
 # larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
 # (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
@@ -6906,7 +7213,114 @@ def self_test(report_path=None):
         if os.path.lexists(locked):
             os.chmod(locked, 0o700)
         shutil.rmtree(inputs, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 218)
+    # ---------- P7: accepted residuals at the pin ----------
+    p7_base = Path(tempfile.mkdtemp(prefix="aiqt-brief-p7-"))
+    try:
+        p7_repo, p7_commits = _p7_repo(p7_base)
+        p7_old, p7_head = p7_commits[0], p7_commits[-1]
+
+        def p7(lines, pin=p7_old, family="alpha"):
+            return _outcome("BRIEF-PIN: {}\n".format(pin) + lines, family, True, p7_repo)
+
+        p7_hard = (1, [("P7", "HARD")])
+        gates_rel, hooks_rel = MANIFEST_RELS["gate"], MANIFEST_RELS["hook"]
+        # both whole-field anchors hold at the pin: the gate's and the hook's residue fields exist by id
+        check("preflight/p7-whole-field-pass",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n"), p7("ACCEPTED-RESIDUAL: hook:h1\n"),
+               p7("ACCEPTED-RESIDUAL: gate:g1\nACCEPTED-RESIDUAL: hook:h1\n")], [(0, [])] * 3)
+        # a partial residue (the TOML-decoded field value) and a Python excerpt, inside its def or its
+        # nested method, each occur byte-exact at the pin
+        check("preflight/p7-excerpt-pass", [p7(lines) for lines in (
+            "ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: old gate residue\n",
+            "ACCEPTED-RESIDUAL: " + hooks_rel + " :: hook:h1.residue :: old hook residue\n",
+            "ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n",
+            "ACCEPTED-RESIDUAL: pkg/mod.py :: Box.method :: boxed needle\n")], [(0, [])] * 4)
+        check("preflight/p7-unanchored-hard",
+              [p7("ACCEPTED-RESIDUAL:\n"), p7("ACCEPTED-RESIDUAL: just prose words\n"),
+               p7("ACCEPTED-RESIDUAL: gates:g1\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-id-hard",
+              [p7("ACCEPTED-RESIDUAL: gate:absent\n"), p7("ACCEPTED-RESIDUAL: hook:absent\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:absent.residue :: x\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-symbol-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: missing :: x\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: Box.absent :: x\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: method :: boxed needle\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-excerpt-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: not there\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: not there\n")], [p7_hard] * 2)
+        # the needle is in the file, only outside the named symbol: never found by a whole-file search
+        check("preflight/p7-outside-symbol-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle outside symbol\n"), p7_hard)
+        # an old pin matches while HEAD differs, and the same excerpt at the later pin matches its content
+        check("preflight/p7-old-pin-pass",
+              (p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n"), p7_head != p7_old,
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_head)),
+              ((0, []), True, (0, [])))
+        # an excerpt present only at HEAD is absent at the old pin
+        check("preflight/p7-head-only-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n"), p7_hard)
+        # byte-exactness: a doubled space, another case, and a CRLF in the decoded residue (its CR and LF
+        # are real bytes, so "win end" does not match "win\r\nend") each miss
+        check("preflight/p7-byte-exact-hard",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle  inside old\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: Needle inside old\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: win end\n")], [p7_hard] * 3)
+        check("preflight/p7-missing-residue-hard",
+              [p7("ACCEPTED-RESIDUAL: gate:noresidue\n"),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:noresidue.residue :: x\n")], [p7_hard] * 2)
+        # a path with no entry at the pin is HARD for P7 and ADVISORY for P3 (it may be a file to create)
+        check("preflight/p7-missing-file-hard",
+              p7("ACCEPTED-RESIDUAL: absent/file.py :: f :: x\n"),
+              (1, [("P3", "ADVISORY"), ("P7", "HARD")]))
+        check("preflight/p7-malformed-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUALS: gate:g1\n"), p7("ACCEPTED-RESIDUAL gate:g1\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py ::  :: x\n")], ["CannotEvaluate"] * 4)
+        # a declaration with no pin, an unresolved pin, conflicting pins, or no repository, each through
+        # rule_p7 itself where rule_p3 would answer first
+        check("preflight/p7-pin-cannot-evaluate",
+              [_outcome("ACCEPTED-RESIDUAL: gate:g1\n", "alpha", True, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: 0123456789ab\nACCEPTED-RESIDUAL: gate:g1\n"), None, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: {}\nBRIEF-PIN: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(p7_old, p7_head)),
+                   None, p7_repo),
+               _git_outcome(rule_p7, PreflightText(
+                   "BRIEF-PIN: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(p7_old)), None, None)],
+              ["CannotEvaluate"] * 4)
+        check("preflight/p7-invalid-toml-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n", p7_commits[2]),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: a\n", p7_commits[2])],
+              ["CannotEvaluate"] * 2)
+        check("preflight/p7-duplicate-id-cannot-evaluate",
+              [p7("ACCEPTED-RESIDUAL: gate:g1\n", p7_commits[3]),
+               p7("ACCEPTED-RESIDUAL: " + gates_rel + " :: gate:g1.residue :: a\n", p7_commits[3])],
+              ["CannotEvaluate"] * 2)
+        # the label outside a column-zero declaration is prose: one ADVISORY line, nothing read at the pin
+        # (gate:absent would be HARD as a declaration), and a brief without the label prints nothing
+        check("preflight/p7-prose-advisory",
+              [p7(" ACCEPTED-RESIDUAL: gate:absent\n"), p7("Note the ACCEPTED-RESIDUAL label here.\n"),
+               p7("No residual lines here.\n")],
+              [(0, [("P7", "ADVISORY")]), (0, [("P7", "ADVISORY")]), (0, [])])
+
+        def p7_case(lines, pin=p7_old):
+            return lambda: p7(lines, pin)
+
+        check("revert/p7-red", *flip([p7_case("ACCEPTED-RESIDUAL: just prose words\n")], [(0, [])],
+                                     rule_p7=nothing))
+        check("revert/p7-symbol-scope-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle outside symbol\n")], [(0, [])],
+            symbol_segments=lambda data, symbol, path, commit: [data]))
+        check("revert/p7-byte-exact-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: Needle inside old\n")], [(0, [])],
+            excerpt_in=lambda excerpt, data: excerpt.encode("utf-8").lower() in data.lower()))
+        pinned_read = read_at_revision
+        check("revert/p7-pin-read-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n")], [(0, [])],
+            read_at_revision=lambda repo, commit, path: pinned_read(repo, p7_head, path)))
+    finally:
+        shutil.rmtree(p7_base, ignore_errors=True)
+    check("revert/every-flip-ran", len(flipped), 222)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
@@ -6964,7 +7378,11 @@ def self_test(report_path=None):
           "heading or table cell (folded through the bounded confusable table), a brief holding a non-LF line "
           "separator or a format character outside code, a brief the vendored parser cannot read, a FIFO or "
           "device, or an input this uid "
-          "cannot read (P6), and "
+          "cannot read (P6), refuses a column-zero ACCEPTED-RESIDUAL declaration with no anchor or whose "
+          "gate or hook id, Python symbol or byte-exact excerpt is absent at the brief's pinned revision, "
+          "read from the git object store and never by a whole-file search, exits 2 on a malformed "
+          "declaration, an unresolved or conflicting pin, or pinned content it cannot read or parse, and "
+          "prints the label in prose as ADVISORY (P7), and "
           "each preflight rule and guard patched out flips its fixture; "
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
