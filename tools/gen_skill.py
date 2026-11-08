@@ -1471,6 +1471,20 @@ def self_test_main():
             failures.append("skill version mismatched to the versioned-zip literal expected exit 2, "
                             "got {}\n{}".format(code, out))
 
+        # 7b. A built SKILL.md whose frontmatter the shared restricted reader does not decide VALID fails
+        #     closed (exit 2) naming the verdict: an empty description section renders an empty folded
+        #     block, which the reader decides INVALID. Removing the reader gate in build_outputs (or
+        #     forcing its verdict) makes this leg fail.
+        nonvalid = tmp / "nonvalid-frontmatter"
+        nonvalid.mkdir()
+        nv_src = good_src.replace("=== description ===\nA self-test skill description line.\n",
+                                  "=== description ===\n")
+        _write_fixture(nonvalid, nv_src)
+        code, out = capture(nonvalid, False)
+        if code != 2 or "frontmatter is not VALID" not in out:
+            failures.append("a built SKILL.md with non-VALID frontmatter expected exit 2 naming the "
+                            "verdict, got {}\n{}".format(code, out))
+
         # 8. The generator never deletes a file under site/downloads, and the top level is ALLOW-LISTED:
         #    a stale versioned zip, any aiqt-skill variant (case, separator, prefix, suffix, 'v', 'latest',
         #    a hidden or unicode-dash name) and ANY other undeclared entry, whatever its name, fails closed:
@@ -2295,7 +2309,8 @@ def self_test_main():
             print("  - " + f)
         return 1
     print("SELF-TEST PASS: well-formed source round-trips clean (SKILL.md and the zips); an unknown "
-          "corpus-id, an invalid-UTF-8 target, and a version/zip-literal mismatch each fail closed (exit 2); "
+          "corpus-id, an invalid-UTF-8 target, a version/zip-literal mismatch, and a built SKILL.md whose "
+          "frontmatter the restricted reader does not decide VALID each fail closed (exit 2); "
           "a drifted SKILL.md is caught (exit 1); nothing is ever deleted: an orphan reserved entry and a "
           "stale versioned zip plus fourteen other undeclared top-level entries (the allow-list) are kept "
           "and named for removal, git rm if tracked or rm if untracked (normal run exit 2 writing nothing, "

@@ -14,13 +14,19 @@ one of three statuses; anything it does not read is CANNOT_EVALUATE, never a pas
 The subset:
   - the file starts with a line that is exactly "---" and the frontmatter ends at the next line that is
     exactly "---"; the text is UTF-8 with LF line ends (a BOM, a CR or a NUL is CANNOT_EVALUATE);
+  - every frontmatter character is inside YAML's printable set; a character outside it (a C0 or C1
+    control, DEL, a surrogate or a non-character), a byte order mark after the opening fence, and the
+    NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR characters (line breaks to a YAML 1.1 parser, plain
+    content to this reader's LF-only line split) are each CANNOT_EVALUATE;
   - each key line starts in column 0 with a plain key ([A-Za-z0-9_][A-Za-z0-9_-]*), a colon and one
-    space, then exactly one value form:
+    space, then exactly one value form (a value that starts with a further space is CANNOT_EVALUATE:
+    the extra indentation would hide the value's first character from every form check below):
       a one-line single-quoted value ('it''s'), with nothing after the closing quote;
       a one-line double-quoted value whose escapes are only \\ \" \/ \n and \t;
       a block scalar header (|, |-, |+, >, >-, >+) followed by lines indented by at least one space;
       a safe plain value: it does not start with a YAML indicator character, it holds no " #" and no
-        tab, it does not read as a YAML null, boolean or number, and it may continue on following lines
+        tab, it does not read as a YAML null, boolean, number (signed base-2, -8 and -16 forms
+        included) or the "=" value key, and it may continue on following lines
         indented by at least one space (each continuation line held to the same rules);
   - a key line with nothing after the colon is an empty value: INVALID for name and description,
     CANNOT_EVALUATE for any other key;
@@ -38,6 +44,20 @@ The value text it returns for a block scalar or a multi-line plain value is a si
 for the non-empty test: it does not reproduce YAML's handling of more-indented lines inside a folded
 scalar, and the gate never publishes it.
 """
+import sys
+
+if tuple(sys.version_info[:2]) < (3, 14):
+    import os
+    try:
+        sys.stderr.write(
+            "error: _skill_frontmatter.py requires Python 3.14 or newer; this is Python %d.%d.%d (%s). "
+            "Nothing was run (cannot evaluate).\n"
+            % (tuple(sys.version_info[:3]) + (sys.executable or "unknown interpreter",)))
+        sys.stderr.flush()
+    except BaseException:
+        pass
+    os._exit(2)
+
 import re
 
 VALID, INVALID, CANNOT_EVALUATE = 0, 1, 2
@@ -54,11 +74,35 @@ BLOCK_HEADER_RE = re.compile(r"[|>][+-]?\Z")
 DOUBLE_ESCAPES = {"\\": "\\", '"': '"', "/": "/", "n": "\n", "t": "\t"}
 # A plain value starting with one of these is a YAML indicator (or reserved) and is outside the subset.
 INDICATORS = frozenset("-?:,[]{}#&*!|>'\"%@`")
-# Plain values YAML resolves to something other than a string (YAML 1.1 and 1.2 core forms).
+# Plain values YAML resolves to something other than a string (YAML 1.1 and 1.2 core forms), plus
+# "=", which YAML 1.1 resolves to the value key type (PyYAML refuses to construct it). The base-2,
+# -8 and -16 integer forms admit a sign (YAML 1.1 reads "+0x1F" as the integer 31).
 NON_STRING_RE = re.compile(
-    r"(~|null|Null|NULL|true|True|TRUE|false|False|FALSE|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF"
+    r"(=|~|null|Null|NULL|true|True|TRUE|false|False|FALSE|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF"
     r"|y|Y|n|N|[-+]?(?:\.[0-9]+|[0-9][0-9_]*(?:[.:][0-9_]*)*)(?:[eE][-+]?[0-9]+)?"
-    r"|0[xob][0-9a-fA-F_]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}.*)\Z")
+    r"|[-+]?0[xob][0-9a-fA-F_]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
+    r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}.*)\Z")
+
+# YAML's printable set (c-printable), restricted further: TAB and LF are the only accepted controls
+# (CR, NUL and a leading BOM are refused before any line is read), a byte order mark inside the text
+# is refused, and NEL (U+0085), LINE SEPARATOR (U+2028) and PARAGRAPH SEPARATOR (U+2029) are refused
+# because a YAML 1.1 parser reads each as a line break while this reader's LF-only split does not.
+_REFUSED_PRINTABLE = frozenset((chr(0x85), chr(0x2028), chr(0x2029), chr(0xFEFF)))
+
+
+def _unreadable_char(line):
+    """The first character of a frontmatter line that is outside the readable set, or None."""
+    for ch in line:
+        if ch == "\t":
+            continue
+        if ch in _REFUSED_PRINTABLE:
+            return ch
+        code = ord(ch)
+        if 0x20 <= code <= 0x7E or 0xA0 <= code <= 0xD7FF or 0xE000 <= code <= 0xFFFD \
+                or 0x10000 <= code <= 0x10FFFF:
+            continue
+        return ch
+    return None
 
 
 class Result:
@@ -149,6 +193,13 @@ def evaluate_text(text):
     except ValueError:
         return Result(CANNOT_EVALUATE, "no closing '---' frontmatter line", 1)
     body = lines[1:end]
+    for j, raw in enumerate(body):
+        bad = _unreadable_char(raw)
+        if bad is not None:
+            return Result(CANNOT_EVALUATE,
+                          "character {!r} in the frontmatter is outside the readable set "
+                          "(not YAML-printable, a byte order mark, or a non-LF line break)".format(bad),
+                          j + 2)
     fields, i = {}, 0
     try:
         while i < len(body):
@@ -174,6 +225,10 @@ def evaluate_text(text):
                     raise _Stop(CANNOT_EVALUATE, "empty value for {!r}".format(key), lineno)
                 fields[key] = ""
                 continue
+            if value[0] == " ":
+                raise _Stop(CANNOT_EVALUATE,
+                            "leading space before the value of {!r} (the value-form checks would read "
+                            "only the space)".format(key), lineno)
             if value != value.rstrip(" "):
                 raise _Stop(CANNOT_EVALUATE, "trailing space after the value of {!r}".format(key), lineno)
             if value[0] == "'":
@@ -243,3 +298,12 @@ def evaluate_bytes(data):
     except UnicodeDecodeError as exc:
         return Result(CANNOT_EVALUATE, "not UTF-8 ({})".format(exc.reason))
     return evaluate_text(text)
+
+
+if __name__ == "__main__":
+    # This module is a library with no command line: running it directly (with or without
+    # arguments) decides nothing, so it refuses rather than exit 0 having evaluated nothing.
+    sys.stderr.write("error: _skill_frontmatter.py is a library with no command line; run "
+                     "tools/check_skill_frontmatter.py [--self-test] instead. Nothing was "
+                     "evaluated (cannot evaluate).\n")
+    sys.exit(2)

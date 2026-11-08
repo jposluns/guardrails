@@ -9,11 +9,14 @@ VALID.
   any other argument list is refused with exit 2
 
 The files are found from `git ls-files` by base name, never from a fixed list. A zip is read into memory
-and each member whose base name is SKILL.md is read from it; nothing is extracted to disk. A file or
-member the reader decides INVALID is a finding (exit 1). A file or member it decides CANNOT_EVALUATE, a
-tracked path that is not a regular file, an unreadable or oversized file, a zip that cannot be opened or
-read, a git failure, and a tree with no tracked SKILL.md at all are cannot-evaluate (exit 2), never a
-pass. The reader is the one shared source in opf/tools/ so the pack's adopters receive it.
+and each member whose base name is SKILL.md is read from it; nothing is extracted to disk. The zip
+suffix is matched case-insensitively (an upper-case .ZIP is scanned too). A file or member the reader
+decides INVALID is a finding (exit 1), and so is a scanned zip with no SKILL.md member at all (it ships
+no skill definition). A file or member the reader decides CANNOT_EVALUATE, a tracked path that is not a
+regular file, an unreadable or oversized file, a zip that cannot be opened or read, a zip member name
+holding a backslash, a git failure, and a tree with no tracked SKILL.md at all are cannot-evaluate
+(exit 2), never a pass. The reader is the one shared source in opf/tools/ so the pack's adopters
+receive it.
 """
 import sys
 
@@ -85,18 +88,24 @@ def _read_bytes(path, limit):
 
 def targets(root, tracked):
     """(skill paths, zip paths): tracked files whose base name is SKILL.md, and tracked *.zip files under
-    site/downloads/."""
+    site/downloads/ (the suffix matched case-insensitively, so an upper- or mixed-case variant such as
+    .ZIP is scanned like any other skill download, never silently skipped)."""
     skills = sorted(p for p in tracked if p.rsplit("/", 1)[-1] == SKILL_NAME)
-    zips = sorted(p for p in tracked if p.startswith(ZIP_DIR) and p.endswith(".zip"))
+    zips = sorted(p for p in tracked if p.startswith(ZIP_DIR) and p.lower().endswith(".zip"))
     return skills, zips
 
 
 def zip_members(data, where):
-    """[(member name, bytes)] for every member of the zip bytes whose base name is SKILL.md."""
+    """[(member name, bytes)] for every member of the zip bytes whose base name is SKILL.md. A member
+    name holding a backslash is cannot-evaluate: a Windows-built archive can use it as a separator, so
+    the base-name test cannot be trusted to see such a member's real name."""
     out = []
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             for info in archive.infolist():
+                if "\\" in info.filename:
+                    raise CannotEvaluate("{}!{}: member name holds a backslash".format(
+                        where, info.filename))
                 if info.filename.rsplit("/", 1)[-1] != SKILL_NAME:
                     continue
                 if info.file_size > fm.MAX_BYTES:
@@ -134,7 +143,13 @@ def scan(root, tracked=None):
             errors.append("{}: {}".format(rel, exc))
     for rel in zips:
         try:
-            for name, body in zip_members(_read_bytes(root / rel, MAX_ZIP_BYTES), rel):
+            members = zip_members(_read_bytes(root / rel, MAX_ZIP_BYTES), rel)
+            if not members:
+                # A skill download with no SKILL.md member ships no skill definition at all: a
+                # definite defect (a finding), not something outside the subset.
+                findings.append("{}: holds no {} member".format(rel, SKILL_NAME))
+                continue
+            for name, body in members:
                 items.append(("{}!{}".format(rel, name), body))
         except CannotEvaluate as exc:
             errors.append(str(exc) if str(exc).startswith(rel) else "{}: {}".format(rel, exc))
@@ -239,6 +254,40 @@ def _run_vectors():
     ("vector/cannot/empty-other-key", _doc(GOOD_NAME, GOOD_DESC, "license:"), fm.CANNOT_EVALUATE),
     ("vector/cannot/nested-mapping", _doc(GOOD_NAME, GOOD_DESC, "meta:", "  a: b"), fm.CANNOT_EVALUATE),
     ("vector/cannot/block-dedent-inside", _doc(GOOD_NAME, "description: |", "    deep", "  shallow"),
+     fm.CANNOT_EVALUATE),
+    # A second space after "key: " hides the value's first character from every value-form check, so a
+    # leading space in a value is refused whatever follows it (anchor, tag, flow, alias, quote, list
+    # item, or a non-string read of name).
+    ("vector/cannot/leading-space-anchor", _doc(GOOD_NAME, "description:  &a text"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/leading-space-tag", _doc(GOOD_NAME, "description:  !!int 5"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/leading-space-flow", _doc(GOOD_NAME, "description:  [a, b]"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/leading-space-name", _doc("name:  true", GOOD_DESC), fm.CANNOT_EVALUATE),
+    ("vector/cannot/leading-space-alias", _doc(GOOD_NAME, "description:  *a"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/leading-space-double-quote", _doc(GOOD_NAME, 'description:  "unterminated'),
+     fm.CANNOT_EVALUATE),
+    ("vector/cannot/leading-space-list-item", _doc(GOOD_NAME, "description:  - item"), fm.CANNOT_EVALUATE),
+    # Characters outside YAML's printable set, and the three non-LF line breaks a YAML 1.1 parser
+    # honours while this reader's LF-only split does not.
+    ("vector/cannot/control-c0", _doc(GOOD_NAME, "description: a\x01b"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/control-escape", _doc(GOOD_NAME, "description: a\x1bb"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/control-del", _doc(GOOD_NAME, "description: a\x7fb"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/control-form-feed", _doc(GOOD_NAME, "description: a\x0cb"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/break-nel", _doc(GOOD_NAME, "description: a\x85b"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/break-line-separator", _doc(GOOD_NAME, "description: a" + chr(0x2028) + "b"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/break-paragraph-separator", _doc(GOOD_NAME, "description: a" + chr(0x2029) + "b"),
+     fm.CANNOT_EVALUATE),
+    # Plain values YAML does not read as a string beyond the long-known forms: the "=" value key
+    # (PyYAML refuses to construct it) and a signed base-16 integer.
+    ("vector/cannot/equals-name", _doc("name: =", GOOD_DESC), fm.CANNOT_EVALUATE),
+    ("vector/cannot/signed-hex-name", _doc("name: +0x1F", GOOD_DESC), fm.CANNOT_EVALUATE),
+    # Each of these reaches its named guard directly: the all-CRLF and leading-BOM vectors above would
+    # be caught by the fence test even without the CR and BOM guards, so they do not pin those guards.
+    ("vector/cannot/cr-in-value", _doc(GOOD_NAME, "description: a\rb"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/bom-after-fence", "---\n" + chr(0xFEFF) + GOOD_NAME + "\n" + GOOD_DESC + "\n---\n",
+     fm.CANNOT_EVALUATE),
+    ("vector/cannot/nul-in-value", _doc(GOOD_NAME, "description: a\x00b"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/tab-in-plain", _doc(GOOD_NAME, "description: a\tb"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/blank-line-indented-past-block", _doc(GOOD_NAME, "description: >-", "   ", "  text"),
      fm.CANNOT_EVALUATE),
     ):
         got = fm.evaluate_bytes(text.encode("utf-8"))
@@ -364,6 +413,27 @@ def _self_test():
     check("gate/zip-unreadable", _tree_case(zipped) == 2)
     check("gate/zip-outside-downloads-ignored",
           _tree_case({"a/SKILL.md": good, "other/s.zip": b"not a zip"}) == 0)
+    check("gate/zip-no-skill-member",
+          _tree_case({"a/SKILL.md": good,
+                      "site/downloads/s.zip": _zip_bytes([("s/other.md", good)])}) == 1)
+    check("gate/zip-backslash-member",
+          _tree_case({"a/SKILL.md": good,
+                      "site/downloads/s.zip": _zip_bytes([("s\\SKILL.md", good)])}) == 2)
+    check("gate/zip-upper-case-suffix",
+          _tree_case({"a/SKILL.md": good,
+                      "site/downloads/s.ZIP": _zip_bytes([("s/SKILL.md", bad)])}) == 1)
+
+    # The reader is a library with no command line: run directly (bare or with any flag) it refuses
+    # with exit 2 and says so, rather than exit 0 having evaluated nothing.
+    reader_path = str(ROOT / "opf" / "tools" / "_skill_frontmatter.py")
+    try:
+        runs = [subprocess.run([sys.executable, "-I", "-B", reader_path] + extra,
+                               capture_output=True, timeout=60) for extra in ([], ["--self-test"])]
+        reader_ok = all(r.returncode == 2 and b"no command line" in r.stderr for r in runs)
+        reader_detail = [(r.returncode, r.stderr.decode("utf-8", "replace")) for r in runs]
+    except (OSError, subprocess.SubprocessError) as exc:
+        reader_ok, reader_detail = False, "could not run the reader: {}".format(exc)
+    check("reader/no-cli", reader_ok, reader_detail)
 
     with tempfile.TemporaryDirectory(prefix="skill-frontmatter-selftest-") as tmp:
         os.makedirs(Path(tmp) / "a" / SKILL_NAME)
@@ -382,9 +452,10 @@ def _self_test():
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: check_skill_frontmatter {} checks (VALID, INVALID and CANNOT_EVALUATE vectors, "
-          "a flip for each INVALID vector, the ': ' boundaries, the size bound, the two shipped files "
-          "INVALID before the content fix and VALID after, and the gate over tempdir trees and zips)".format(
-              len(EXECUTED)))
+          "a flip for each INVALID vector, the ': ' boundaries, leading-space values, unprintable and "
+          "non-LF-break characters, the size bound, the two shipped files INVALID before the content fix "
+          "and VALID after, the reader's command-line refusal, and the gate over tempdir trees and "
+          "zips)".format(len(EXECUTED)))
     return 0
 
 

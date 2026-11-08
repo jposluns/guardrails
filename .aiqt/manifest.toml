@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8245d751cb2997acfb71a50a3e3bd650120a10ed38142b2adfef613d26259146"
+tree-sha256 = "ab5289178114c349f698d246f017dc9dcad0a98d20fd33d4ca9944a1cededddb"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -131,8 +131,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9430
-sha256 = "662151937d9795612b76d07a77396facdc692e6511214bf971cc83a68df0dc32"
+bytes = 9469
+sha256 = "06a159e43b9fb30fd871afcf53ce6a3f7577885eaf374965139a7fed1a0b8974"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3103
-sha256 = "57ae61066d50aad2053b7815f0af012477b24c2ae51e714003f48105f30cc6f1"
+sha256 = "50730401f3a9c0e24cc61000629c7a3b1d9bcd6165e3b3931d52c83fa7171ca2"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -2542,7 +2542,7 @@ sha256 = "25ac6a39c6c32a429af5f14baae41d877392f40e2fadcb5d26c33a96f34a7068"
 [[sources]]
 path = "opf/prompt-pack/flow/SKILL.md"
 bytes = 118063
-sha256 = "d6ce745ed071426f57d9d2a6cda620c139cdb24ed99ba554faa42c0dc95fd278"
+sha256 = "f3fe2d0fb62f8669e7bafa759ed4e06977036d7ce31a8425a13203886a41a39e"
 
 [[sources]]
 path = "opf/prompt-pack/import/SKILL.md"
@@ -2612,7 +2612,7 @@ sha256 = "d73988b74fb317acf23ca8f017086faacead2946d8f4b42e20e082256d7f2401"
 [[sources]]
 path = "opf/prompt-pack/pack.toml"
 bytes = 3994
-sha256 = "3b7426be1f0c83161caa2cff4b15fc0294e30f4ef44c505c0bb5a38590e4449b"
+sha256 = "66e56ce8ec6d9da0cdb955d430e716d528dbb0a5fd39308f0cb0bc3ba32f2678"
 
 [[sources]]
 path = "opf/site/.well-known/security.txt"
@@ -3271,8 +3271,8 @@ sha256 = "eeaf84ff6f52265afaada78685614553c864d42cfb1ec5331fa0a89fbe159a8c"
 
 [[sources]]
 path = "opf/tools/_skill_frontmatter.py"
-bytes = 12460
-sha256 = "51372315936dab792d94cfe5919590fc0066f5b786bfe46f1de820eb2d45996c"
+bytes = 15730
+sha256 = "d18f1cd654109034e9c3806356ae2e33e0cdb7b723fc9cc2a0aaf3610b4631fc"
 
 [[sources]]
 path = "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json"
@@ -4396,8 +4396,8 @@ sha256 = "deac085d23bfdcd68eda1f88b5cf41da9683f9d79307d2c803107b69817dd9a3"
 
 [[sources]]
 path = "tools/check_skill_frontmatter.py"
-bytes = 23937
-sha256 = "e33797dac950becb67144b0a81a6e0386770e084e348d023bf44957789415b8c"
+bytes = 29422
+sha256 = "7d070a0bb8b91cc9728ca0d7a0b8f7100636be748548b1ba524d27449d47a70d"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
@@ -4561,8 +4561,8 @@ sha256 = "2f19dc1e1f6bac53f5afebb6b1857889467c249b29d566954a89e25687f884c3"
 
 [[sources]]
 path = "tools/gen_skill.py"
-bytes = 135935
-sha256 = "d1a7b719af6f90c266826f4dccad98d1788858431f1c1c9411c9de4b2fbdd77f"
+bytes = 136943
+sha256 = "8a9487b8478eec3865cdb6464b5aad1b57338ac8bd81358216c2292ddd2a5512"
 
 [[sources]]
 path = "tools/gen_worker_pack.py"
@@ -4656,8 +4656,8 @@ sha256 = "cc0464c20f62e7c83131c52c90ff9eafa40bcdd2f425fa158496c83e326a9b7c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 222881
-sha256 = "e520221065c98373cf521c6de2b360b4c8354c1973b921734c512c7ff36bc0ab"
+bytes = 223766
+sha256 = "e269fd8b8b48c7c9980267dccdb4d1c14a70acb15305327e352649e631f28810"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
