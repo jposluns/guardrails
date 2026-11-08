@@ -2339,7 +2339,7 @@ def _self_test_main_isolated():
         #     token may survive (the whole gc process group is killed, not just git). Flips: an unguarded
         #     gc (its overrun raises out of the setup) turns the exit-0 leg into exit 2; a kill of the git
         #     leader alone leaves the sleeping child alive and fails the survivor leg.
-        gc_token = "gensrc-gc-standin-{}".format(os.getpid())
+        gc_standin_label = "gensrc-gc-standin-{}".format(os.getpid())
 
         def _gc_overrun_fixtures():
             return (_build_repo(tmp / "gc-overrun-good", {"goodfile": _GOODFILE}),
@@ -2349,16 +2349,16 @@ def _self_test_main_isolated():
             global TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS
             good, swap = fixtures
             saved_gc = (TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS)
-            standin = "!{} -c 'import time; time.sleep(60)' {}".format(sys.executable, gc_token)
+            standin = "!{} -c 'import time; time.sleep(60)' {}".format(sys.executable, gc_standin_label)
             TEMPLATE_GC_TIMEOUT = 2
             _TEMPLATE_GC_ARGS = ("-c", "alias.gcstandin=" + standin, "gcstandin")
             try:
                 rc_good, good_out, good_err = sweep_captured_streams(good)
-                survivors = _load_bound._alive_with(gc_token)
+                survivors = _load_bound._alive_with(gc_standin_label)
                 rc_swap, swap_out, swap_err = sweep_captured_streams(swap)
             finally:
                 TEMPLATE_GC_TIMEOUT, _TEMPLATE_GC_ARGS = saved_gc
-                _cleanup_leaked_descendant(gc_token, failures, cannot)
+                _cleanup_leaked_descendant(gc_standin_label, failures, cannot)
             if rc_good != 0:
                 failures.append("template gc overrun: a conformant repo must still pass (exit 0) when the "
                                 "template gc overruns its bound, got exit {!r}, stdout {!r} stderr {!r}"
@@ -2392,7 +2392,7 @@ def _self_test_main_isolated():
         #       group survives it (Popen's exit handling alone would leave the group running).
         #     - deadline clamp: _setup_timeout at each end of its interval, and a setup whose sweep
         #       deadline has already elapsed fails closed before it launches anything.
-        gc_branch_token = "gensrc-gc-branch-{}".format(os.getpid())
+        gc_branch_label = "gensrc-gc-branch-{}".format(os.getpid())
         gc_branch_runs = {"n": 0}
 
         def _gc_branch_fixture(name):
@@ -2405,7 +2405,7 @@ def _self_test_main_isolated():
 
         def _gc_standin(code):
             # The token rides the alias argv, so the git leader, its shell and the stand-in all carry it.
-            return ("-c", "alias.gcstandin=!{} -c '{}' {}".format(sys.executable, code, gc_branch_token),
+            return ("-c", "alias.gcstandin=!{} -c '{}' {}".format(sys.executable, code, gc_branch_label),
                     "gcstandin")
 
         def _materialize_with_standin(fixture, gc_args, gc_timeout, deadline=None):
@@ -2443,9 +2443,9 @@ def _self_test_main_isolated():
                 "open(\".git/objects/pack/tmp_idx_standin\", \"w\").write(\"x\"); time.sleep(60)")
             try:
                 raised, err = _materialize_with_standin(fixture, standin, 2)
-                survivors = _load_bound._alive_with(gc_branch_token)
+                survivors = _load_bound._alive_with(gc_branch_label)
             finally:
-                _cleanup_leaked_descendant(gc_branch_token, failures, cannot)
+                _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
             git_dir = fixture[1] / ".git"
             left = sorted(str(p.relative_to(git_dir)) for pattern in _GC_DEBRIS_GLOBS
                           for p in git_dir.glob(pattern))
@@ -2470,7 +2470,7 @@ def _self_test_main_isolated():
                                                         2)
             finally:
                 _load_bound._kill_group = saved_kill_group
-                _cleanup_leaked_descendant(gc_branch_token, failures, cannot)
+                _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
             if (not isinstance(raised, OSError) or "could not be stopped" not in str(raised)
                     or "injected group-signal refusal" not in str(raised)):
                 failures.append("template gc unstoppable group: an overrun whose process group cannot be "
@@ -2533,8 +2533,8 @@ def _self_test_main_isolated():
                 interrupted = True
             finally:
                 subprocess.Popen = saved_popen
-                survivors = _load_bound._alive_with(gc_branch_token)
-                _cleanup_leaked_descendant(gc_branch_token, failures, cannot)
+                survivors = _load_bound._alive_with(gc_branch_label)
+                _cleanup_leaked_descendant(gc_branch_label, failures, cannot)
             if not interrupted:
                 failures.append("template gc interrupt: a KeyboardInterrupt out of the gc wait must "
                                 "propagate")
