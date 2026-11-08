@@ -422,19 +422,83 @@ def _module_function_references(tree):
     return names, rows
 
 
+def _reference_cycle_groups(names, rows):
+    """Each module-level function's strongly connected component of the in-module reference
+    graph's UNGUARDED references, as name -> frozenset of the component's members. A
+    dispatch-guarded reference is test-side whoever makes it, so it never couples a cycle; a
+    component coupled by unguarded references can only be admitted to the self-test split as a
+    whole, on the references arriving from OUTSIDE it, so the members of a cycle can never
+    vouch for each other."""
+    edges = {}
+    for referrer, target, dispatch in rows:
+        if dispatch:
+            continue
+        if referrer in names and target in names and referrer != target:
+            edges.setdefault(referrer, set()).add(target)
+    order = []
+    seen = set()
+    for start in sorted(names):
+        if start in seen:
+            continue
+        seen.add(start)
+        stack = [(start, iter(sorted(edges.get(start, ()))))]
+        while stack:
+            node, pending = stack[-1]
+            advanced = False
+            for nxt in pending:
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append((nxt, iter(sorted(edges.get(nxt, ())))))
+                    advanced = True
+                    break
+            if not advanced:
+                order.append(node)
+                stack.pop()
+    back = {}
+    for referrer, targets in edges.items():
+        for target in targets:
+            back.setdefault(target, set()).add(referrer)
+    groups = {}
+    assigned = set()
+    for start in reversed(order):
+        if start in assigned:
+            continue
+        assigned.add(start)
+        member_stack = [start]
+        members = []
+        while member_stack:
+            node = member_stack.pop()
+            members.append(node)
+            for prev in sorted(back.get(node, ())):
+                if prev not in assigned:
+                    assigned.add(prev)
+                    member_stack.append(prev)
+        group = frozenset(members)
+        for member in members:
+            groups[member] = group
+    return groups
+
+
 def _selftest_production_split(tree, cross_refs=frozenset(), forced=frozenset()):
-    """The names of `tree`'s module-level functions that are SELF-TEST functions, by REACHABILITY
-    from the self-test entry points, never by a hand list and never by a bare name: a function
-    stays self-test only while every reference to it is test-side, and a function reachable from
-    production code is production whatever its name is.
+    """The names of `tree`'s module-level functions that are SELF-TEST functions, as the LEAST
+    fixed point built upward from the self-test entry points, never by a hand list and never by
+    a bare name: the set starts EMPTY and a function is ADDED only when every reference to it is
+    already proven test-side, so nothing is ever presumed self-test and pruned later.
 
     - A CANDIDATE entry is a function whose name carries the house convention ("self_test" in
       the name) or whose every in-module reference sits under a self-test dispatch guard (the
       `--selftest-*-child` children).
-    - A reference is test-side when it is dispatch-guarded, made from a self-test function, or is
-      the dispatch of a candidate from `main` or from module-level code (how every suite starts).
-    - A function reached from production through any other reference is production, so a helper
-      with "self_test" in its name that production calls is held to the rules.
+    - A reference is test-side when it is dispatch-guarded, made from a function ALREADY in the
+      set, or is the dispatch of a candidate from `main` or from module-level code (how every
+      suite starts). Functions coupled by UNGUARDED references into a cycle (a mutual pair, a
+      longer cycle) form one strongly connected group that joins only as a whole, judged on the
+      references arriving from OUTSIDE the group alone, so the members can never vouch for each
+      other. The set grows one proven function or group at a time until nothing more qualifies.
+    - Everything the growth never reaches is production: a function reached from production
+      through any other reference (so a helper with "self_test" in its name that production
+      calls is held to the rules), and equally a pair, a longer cycle or a self-recursive
+      function with no test-side reference from outside itself, which under a
+      greatest-fixed-point reading could hold itself test-side and hide a call.
     - A function referenced from nowhere in its own module is production (an exported seam), a
       candidate included, unless another scanned module names it (`cross_refs`), as the
       cross-module self-test seams are; a mutant therefore cannot mint an unreferenced
@@ -454,23 +518,26 @@ def _split_from_references(names, rows, cross_refs, forced):
     candidates |= {name for name in names
                    if referenced.get(name) and all(d for _, d in referenced[name])}
     candidates -= set(forced)
-    selftest = {name for name in candidates if referenced.get(name) or name in cross_refs}
-    selftest |= {name for name in names if referenced.get(name)} - set(forced)
+    groups = _reference_cycle_groups(names, rows)
+    selftest = set()
     changed = True
     while changed:
         changed = False
-        for name in sorted(selftest):
-            refs = referenced.get(name, [])
-            if not refs:
-                if name in candidates and name in cross_refs:
-                    continue
-                selftest.discard(name)
-                changed = True
+        for name in sorted(set(names) - set(forced) - selftest):
+            group = groups[name]
+            if group & set(forced):
                 continue
-            allowed = {None, "main"} if name in candidates else set()
-            if not all(d or (r in selftest and r != name) or r in allowed
-                       for r, d in refs):
-                selftest.discard(name)
+            external = [(referrer, target, dispatch) for referrer, target, dispatch in rows
+                        if target in group and (referrer is None or referrer not in group)]
+            if external:
+                joins = all(d or r in selftest
+                            or (t in candidates and r in (None, "main"))
+                            for r, t, d in external)
+            else:
+                joins = all(member in candidates and member in cross_refs
+                            for member in group)
+            if joins:
+                selftest |= group
                 changed = True
     return selftest
 
@@ -4670,6 +4737,34 @@ def _suite_isolated(invoke):
                      "\n\n\ndef _mint_self_test():\n    return _init_seam\n\n\n"
                      "def init_operation(",
                      "does not pass homes2"),
+                    ("a mutually referencing production pair, one calling the seam "
+                     "without the rule",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _init_pair_a(root):\n    return _init_pair_b(root)\n\n\n"
+                     "def _init_pair_b(root):\n    if root is None:\n"
+                     "        return _init_pair_a(root)\n"
+                     "    return run_init_operation(root)\n",
+                     "_init_pair_b does not pass homes2"),
+                    ("a three-function production cycle, one calling the seam with "
+                     "homes2=False",
+                     "_zz_homes_mutant.py", None,
+                     "import _opf_init_operation\n\n\n"
+                     "def _init_tri_a(root):\n    return _init_tri_b(root)\n\n\n"
+                     "def _init_tri_b(root):\n    return _init_tri_c(root)\n\n\n"
+                     "def _init_tri_c(root):\n    if root is None:\n"
+                     "        return _init_tri_a(root)\n"
+                     "    return _opf_init_operation.run_init_operation("
+                     "root, homes2=False)\n",
+                     "_init_tri_c does not pass homes2"),
+                    ("a self-recursive production function calling the seam without "
+                     "the rule",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _init_solo(root):\n    if root is None:\n"
+                     "        return _init_solo(root)\n"
+                     "    return run_init_operation(root)\n",
+                     "_init_solo does not pass homes2"),
                     ("a local rebinding of the store alias before the call",
                      "_opf_adopt_apply.py", rule_coupled,
                      "            store = None\n"
