@@ -1696,6 +1696,7 @@ expected-check-ids = [
   "rdp/label-screen-mutants",
   "rdp/label-screen-sweep",
   "rdp/label-screen-linear-time",
+  "rdp/label-screen-linear-time-decision",
   "rdp/proc-self-brief-unverifiable",
   "rdp/late-verdict-never-used",
   "rdp/filemode-false-ignores-exec-bit",
