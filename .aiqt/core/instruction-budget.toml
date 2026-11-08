@@ -101,21 +101,20 @@
 #                        chgchk.15): measured PACK 135159 at the PR base 6be5fdf4 without the paragraph -> 136094
 #                        (+935 units); the 370 units then under the ratchet 135529 absorb 370 of them, and the
 #                        ratchet rises by the remaining 565.
-#                        Raised 136094 -> 136834 on 2026-11-08 under the maintainer's recorded decision of
-#                        2026-11-08 to raise the ratchet by exactly the measured overage, when
-#                        validation-gates-apply gained its passage on evaluating, before a dispatch, the
-#                        input refusal conditions a callee's interface or documentation states
-#                        (valgat.2): measured PACK 136094 at the base e5724f69 -> 136834 (+740 units: the
-#                        739-unit passage plus its one joining space); rule files 119471 -> 120211; managed
-#                        block 360 and file headers 16263 unchanged. PACK sat exactly at the ratchet, so no
-#                        headroom absorbs any of it and the ratchet rises by the whole measured overage,
-#                        136094 + 740 = 136834.
+#                        Raised 136094 -> 136303 on 2026-11-08 under the maintainer's standing decision to
+#                        set the ratchet to exactly the measured PACK (at most 148000), when
+#                        validation-gates-apply gained one short sentence on withholding a dispatch the
+#                        caller can tell the callee will refuse, which defers to existing rules rather than
+#                        defining its terms (valgat.2): measured PACK 136094 at the base e5724f69 -> 136303
+#                        (+209 units: the 208-unit sentence plus its one joining space); rule files 119471
+#                        -> 119680; managed block 360 and file headers 16263 unchanged. The ratchet equals
+#                        that measured PACK, 136303.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136834
+ratchet = 136303
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
