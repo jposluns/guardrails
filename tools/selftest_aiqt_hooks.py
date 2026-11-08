@@ -3162,6 +3162,75 @@ def _test_trkasy_no_amp(failures, tmp):
         aiqt_hooks._orch_foreground_detach_lexed = fixed
 
 
+_WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
+
+
+def _wait_loop_deny_text_faults(reason, banner):
+    """The faults of the orch_untracked_wait_loop deny text: it must not name gh pr checks (a fine-grained
+    token cannot read the Checks API it uses) or suggest resubmitting the same loop, and its remedy must be
+    one tracked task read by its exit status, never by output words. The hook ships to adopter
+    repositories that may have no tools/ci-status.sh, so that path is not required; where the text names
+    it, it must be only an example ("such as tools/ci-status.sh")."""
+    faults = []
+    for where, text in (("reason", reason), ("banner", banner)):
+        flat = " ".join(text.split()).lower()
+        if "gh pr checks" in flat:
+            faults.append("the {} names gh pr checks".format(where))
+        if flat.count("tools/ci-status.sh") != flat.count("such as tools/ci-status.sh"):
+            faults.append("the {} names tools/ci-status.sh other than as an example".format(where))
+        if "exit status" not in flat:
+            faults.append("the {} does not say to read the exit status".format(where))
+    flat = " ".join(reason.split()).lower()
+    if "same loop" in flat:
+        faults.append("the reason suggests resubmitting the same loop")
+    if "never by matching success or failure words" not in flat:
+        faults.append("the reason does not forbid matching success or failure words in the output")
+    return faults
+
+
+def _test_wait_loop_deny_text(failures, tmp):
+    """orch_untracked_wait_loop deny text, in registry scope (a git toplevel holding the registry): the
+    matching poll loop denies, and the reason and banner pass _wait_loop_deny_text_faults. The flip wraps
+    _deny so the reason names the old gh pr checks watch, and the row must then go red."""
+    try:
+        root = _init_repo(tmp / "wait-loop-deny-text")
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(wl-deny-text-cannot-evaluate) the registry-scope repository could not be built: {}"
+                        .format(exc))
+        return
+    (root / ".aiqt").mkdir(parents=True, exist_ok=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_untracked_wait_loop
+
+    def faults_now():
+        code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                             "cwd": str(root),
+                                             "tool_input": {"command": _WAIT_LOOP_DENY_COMMAND}})
+        if _reduce_result(code, stdout_obj) != "deny":
+            return ["the poll loop did not deny ({})".format(_reduce_result(code, stdout_obj))]
+        reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+        banner = (stdout_obj or {}).get("systemMessage", "")
+        if not isinstance(reason, str) or not isinstance(banner, str):
+            return ["the reason or banner is not a string"]
+        return _wait_loop_deny_text_faults(reason, banner)
+    faults = faults_now()
+    if faults:
+        failures.append("(wl-deny-text) the untracked wait-loop deny text is wrong: {}"
+                        .format("; ".join(faults)))
+    saved = aiqt_hooks._deny
+
+    def old_watch_deny(reason, banner):
+        return saved(reason + " (for example: timeout <seconds> gh pr checks <ref> --watch)", banner)
+    aiqt_hooks._deny = old_watch_deny
+    try:
+        flipped = faults_now()
+    finally:
+        aiqt_hooks._deny = saved
+    if not any("names gh pr checks" in fault for fault in flipped):
+        failures.append("(wl-deny-text-flip) with the reason naming gh pr checks the row must go red, got {!r}"
+                        .format(flipped))
+
+
 def _test_pgrep_self_match(failures):
     """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
     must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
@@ -28545,6 +28614,7 @@ def _main_isolated(monitor):
         _test_git_stash_ref(failures)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
+        _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)

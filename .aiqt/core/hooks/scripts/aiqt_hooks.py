@@ -26027,13 +26027,16 @@ def orch_untracked_wait_loop(data):
             "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "
             "'&' (a for/while/until loop carrying sleep plus a status probe). A detached child is not a "
             "harness-tracked task: its completion cannot notify this session, so the result is stranded and "
-            "the session goes dark waiting on it. Remove the trailing '&' and take ONE of these exits: (1) "
-            "submit the same loop as a tracked background dispatch (run_in_background: true) and collect its "
-            "completion; (2) run a bounded foreground watch and act on the observed result (for example: "
-            "timeout <seconds> gh pr checks <ref> --watch); (3) schedule a tracked wake that re-invokes this "
-            "session to re-check.",
+            "the session goes dark waiting on it. Remove the trailing '&', do not resubmit the loop in any "
+            "form, and take ONE of these exits: (1) to wait for CI, start ONE tracked task as a background "
+            "dispatch (run_in_background: true) that runs this repository's own CI status reader in a mode "
+            "that waits until the run ends (such as tools/ci-status.sh <sha> --wait in the AIQT Guardrails "
+            "repository), collect its completion, and read the outcome from that task's exit status as the "
+            "reader documents its codes, never by matching success or failure words in its output; (2) "
+            "schedule a tracked wake that re-invokes this session to re-check.",
             "AIQT guardrail: denied an untracked background wait loop; a bare-'&' poll cannot notify this "
-            "session. Use run_in_background, a bounded foreground watch, or a tracked wake.")
+            "session. Run one tracked task with the repository's own CI status reader in its wait mode and "
+            "read its exit status, or schedule a tracked wake.")
     return _allow()                         # 'none' or 'indeterminate': emit nothing; truncation guard backstops
 
 
