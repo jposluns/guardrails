@@ -156,7 +156,9 @@ INVALID_UTF8 = b"\xff\xfe\x00 not-utf8 \x80\x81"
 # breaking a decode, so a content-guarding --check must report drift while a tolerant reader still passes.
 VALID_MARKER = b"\n# aiqt-failclose: valid-but-different content marker\n"
 # The regenerate grammar the gate recognizes: exactly `python3 tools/gen_<stem>.py`, validated with shlex.
-REGEN_RE = re.compile(r"^tools/gen_([A-Za-z0-9_]+)\.py$")
+# An OPF tooling generator (opf/tools/gen_<stem>.py) is recognized the same way; its stem carries the
+# opf/tools/ prefix so it never shares a baseline with a tools/ generator of the same name.
+REGEN_RE = re.compile(r"^((?:opf/)?tools/gen_[A-Za-z0-9_]+)\.py$")
 # Both bounds are in LOAD-ADJUSTED seconds (tools/_load_bound.py): they stretch while the host runs more
 # work than it has CPUs, so a loaded host slows the sweep without turning it into cannot-evaluate, and a
 # probe is also stopped early once its process tree makes no CPU or output progress for PROBE_STALL_S
@@ -615,7 +617,10 @@ def _validate_regenerate(regenerate):
     if len(parts) != 2 or parts[0] != "python3":
         return None
     match = REGEN_RE.match(parts[1])
-    return match.group(1) if match else None
+    if not match:
+        return None
+    path = match.group(1)
+    return path[len("tools/gen_"):] if path.startswith("tools/") else path
 
 
 def _tree_members(tree_path):
@@ -763,7 +768,7 @@ def _process_entry(entry, template, baselines, deadline, violations, cannot, cle
         cannot.append("{}: regenerate {!r} is not of the grammar 'python3 tools/gen_<stem>.py'"
                       .format(target_rel, entry["regenerate"]))
         return
-    script_rel = "tools/gen_{}.py".format(stem)
+    script_rel = stem + ".py" if stem.startswith("opf/tools/") else "tools/gen_{}.py".format(stem)
     if not (template / script_rel).is_file():
         cannot.append("{}: generator gen_{}.py is absent in the sandbox".format(target_rel, stem))
         return

@@ -458,6 +458,15 @@ def build_registry(root):
     with sort_keys for determinism, plus a trailing newline. Raises ValueError/OSError on a bad
     declaration or an unreadable input; the caller maps those to exit 2."""
     declarations = discover_declarations(root / "tools")
+    # The OPF tooling's own generators (opf/tools/gen_*.py) declare their outputs the same way. A tree with
+    # no opf/tools has none; one that is there but cannot be listed raises OSError (exit 2).
+    opf_tools = root / "opf" / "tools"
+    if os.path.lexists(opf_tools):
+        with os.scandir(opf_tools) as it:
+            opf_names = sorted(e.name for e in it if e.name.startswith("gen_") and e.name.endswith(".py"))
+        for name in opf_names:
+            declarations.append(("opf/tools/" + name[:-3], _read_declaration(opf_tools / name,
+                                                                             "opf/tools/" + name)))
     entries = collect_entries(declarations, root)
     obj = {"version": 1, "generated": entries}
     return json.dumps(obj, indent=2, sort_keys=True) + "\n"

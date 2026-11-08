@@ -94,7 +94,7 @@ Each check's own docstring quotes the spec 14.1 roster sentence it enforces; the
     at its plan digest; and the recipe the template runs, opf/enforcement/ci/opf-ci.sh, is live and equals
     the pack's shipped recipe by digest. The two reference files are themselves authenticated: each is
     read contained and no-follow under the pack root and must equal the sha256 embedded in this module
-    (generated and drift-gated by tools/gen_secret_patterns.py), so a reference replaced, symlinked or
+    (generated and drift-gated by opf/tools/gen_ci_floor_digests.py), so a reference replaced, symlinked or
     unreadable in the working tree is CANNOT-EVALUATE. Any other workflow content, any other path, an
     absent or modified copy, an absent or modified recipe, or a shipped file that cannot be read is
     CANNOT-EVALUATE, the reason telling the adopter to install the template unmodified (OPF_TOOL, which
@@ -600,8 +600,8 @@ _PACK_ROOT = Path(__file__).resolve().parent.parent
 _SHIPPED_TEMPLATE = "enforcement/ci/github-actions.yml"
 _SHIPPED_RECIPE = "enforcement/ci/opf-ci.sh"
 # The released digests of those two files (bare-hex sha256), generated and drift-gated: editing either file
-# without regenerating fails tools/gen_secret_patterns.py --check in CI. Never hand-edit this region.
-# BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with tools/gen_secret_patterns.py)
+# without regenerating fails opf/tools/gen_ci_floor_digests.py --check in CI. Never hand-edit this region.
+# BEGIN generated OPF CI floor digests (source: opf/enforcement/ci/; regenerate with opf/tools/gen_ci_floor_digests.py)
 _SHIPPED_TEMPLATE_SHA256 = '06e3aee534c802b45779b151fc0a04ca862c45fdffb6f298e8be04a80cfd35b6'
 _SHIPPED_RECIPE_SHA256 = '307786750bfaa8d6fa8c770923570a6c1616482669c826d46d3885e7d6728ea2'
 # END generated OPF CI floor digests
@@ -653,7 +653,7 @@ def _shipped(rel, expected):
         raise Unevaluable("cannot read the pack's shipped CI file {} (absent)".format(rel))
     if hashlib.sha256(data).hexdigest() != expected:
         raise Unevaluable("the pack's shipped CI file {} does not match the digest embedded in this evaluator "
-                          "(regenerate with tools/gen_secret_patterns.py when the release changes it); an "
+                          "(regenerate with opf/tools/gen_ci_floor_digests.py when the release changes it); an "
                           "unauthenticated reference is never trusted".format(rel))
     return data
 
