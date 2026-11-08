@@ -141,8 +141,7 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _git_fixture_env  # noqa: E402
 import _selftest_exit_report  # noqa: E402
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "opf" / "tools"))
-import _optlevel  # noqa: E402  level-0 parses for the mutants, shared with opf/tools
+import _pack_optlevel as _optlevel  # noqa: E402  level-0 parses for the mutants (the pack's own copy)
 
 ROOT = Path(__file__).resolve().parents[1]
 CHECKS_MANIFEST = ROOT / "tools" / "selftest_checks.toml"

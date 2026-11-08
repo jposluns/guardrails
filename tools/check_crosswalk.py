@@ -59,9 +59,8 @@ except ModuleNotFoundError:  # not a version problem: every Python 3.14 ships to
     os._exit(2)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))  # _journal relocated to opf/tools (OPF-SELF-CONTAIN)
 from _gen_common import repo_root  # noqa: E402
-import _journal  # noqa: E402
+import _pack_journal as _journal  # noqa: E402  the pack's own copy, pinned in tools/pack-copies-pin.toml
 # the SAME 9.1 component computation the engine binds cutovers to, and the SAME validated terminal
 # classification the engine uses, so the gate never selects an invalid or non-cutover terminal.
 from migrate import components, _validated_completed_cutover  # noqa: E402

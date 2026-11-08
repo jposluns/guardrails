@@ -195,13 +195,14 @@ its bytes are not modified. The CommonMark specification is authored by John Mac
 CommonMark project and licensed under CC BY-SA 4.0.
 
 Marko (version 2.2.4)
-  CommonMark parser, vendored under opf/tools/_vendor/marko/
+  CommonMark parser, vendored under opf/tools/_vendor/marko/, with a byte-identical copy under
+  tools/_vendor/marko/
 Licence: MIT
 Copyright (c) 2019 Frost Ming
 Source: https://github.com/frostming/marko
 Vendored unchanged and used parse-only. The full MIT licence text is retained verbatim at
-opf/tools/_vendor/licenses/marko-MIT.txt; provenance is recorded in
-opf/tools/_vendor/marko-2.2.4.provenance.toml.
+opf/tools/_vendor/licenses/marko-MIT.txt and tools/_vendor/licenses/marko-MIT.txt; provenance is
+recorded in opf/tools/_vendor/marko-2.2.4.provenance.toml.
 
 Shared site template (baseline package) (version 1.7.0)
   Pinned copy of the site template's runtime and licence files, under site/draft/assets/baseline/

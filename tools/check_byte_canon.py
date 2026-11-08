@@ -55,15 +55,15 @@ import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-# opf/tools/ carries the ONE shared pure byte-canon scanner (_byte_canon) and the relocated containment
-# probe, moved there for OPF self-containment; this gate reaches DOWN into them (a permitted downward edge).
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))
+# tools/_pack_byte_canon.py and tools/_pack_containment.py are the pack's own copies of the shared pure
+# byte-canon scanner and the containment probe (origin and SHA-256 pinned in tools/pack-copies-pin.toml),
+# so this gate runs without opf/ present.
 from _gen_common import repo_root, load_toml  # noqa: E402
-import _containment  # noqa: E402
+import _pack_containment as _containment  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated scope loader; never a second parser
 # The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
 # here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
-from _byte_canon import (  # noqa: E402
+from _pack_byte_canon import (  # noqa: E402
     ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, LINE_SEPARATORS, scan_bytes, _is_two_space_break,
 )
 
@@ -195,6 +195,55 @@ def load_policy(root):
     if not isinstance(hb_rows, list):
         raise GateError("{}: [[hardbreak]] is not an array".format(POLICY_REL))
     return rows, hb_rows
+
+
+PACK_COPIES_REL = "tools/pack-copies-pin.toml"
+PACK_COPY_KEYS = frozenset(("origin", "sha256"))
+PACK_COPY_SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def pack_copy_digest(rel, origin, data):
+    """The SHA-256 a pack copy's bytes are held to against its row. tools/check_python_floor.py requires every
+    guarded surface to open with the floor guard naming its own file, so a copy whose file name differs from its
+    origin's refuses under its own name: that one refusal name, found exactly once as the guard writes it, is put
+    back to the origin's file name before hashing, and every other byte must still equal the origin's. A copy
+    without that refusal, or with it more than once, is hashed as it stands."""
+    own = rel.rsplit("/", 1)[-1].encode("utf-8")
+    original = origin.rsplit("/", 1)[-1].encode("utf-8")
+    refusal = b'"error: ' + own + b' requires Python '
+    if own != original and data.count(refusal) == 1:
+        data = data.replace(refusal, b'"error: ' + original + b' requires Python ', 1)
+    return hashlib.sha256(data).hexdigest()
+
+
+def pack_copy_findings(root):
+    """Each pack copy pinned in tools/pack-copies-pin.toml must still hash to the SHA-256 its row records (the
+    origin's digest at copy time, taken as pack_copy_digest describes), so a copy edited or replaced apart from
+    its row is a finding. The origin itself is not read: the copies must keep working when opf/ is absent. A
+    malformed pin file is GateError."""
+    try:
+        data = load_toml(root / PACK_COPIES_REL)
+    except (OSError, ValueError, RecursionError, MemoryError) as exc:
+        raise GateError("cannot read {} ({})".format(PACK_COPIES_REL, exc))
+    rows = data.get("files")
+    if set(data) != {"files"} or not isinstance(rows, dict) or not rows:
+        raise GateError("{}: exactly one non-empty [files] table is required".format(PACK_COPIES_REL))
+    findings = []
+    for rel in sorted(rows):
+        row = rows[rel]
+        if (not rel.startswith("tools/") or ".." in rel.split("/") or not isinstance(row, dict)
+                or set(row) != PACK_COPY_KEYS or not isinstance(row["origin"], str)
+                or not isinstance(row["sha256"], str) or PACK_COPY_SHA_RE.match(row["sha256"]) is None):
+            raise GateError("{}: malformed row {!r}".format(PACK_COPIES_REL, rel))
+        try:
+            digest = pack_copy_digest(rel, row["origin"], (root / rel).read_bytes())
+        except OSError as exc:
+            findings.append("{}: pinned pack copy cannot be read ({})".format(rel, exc))
+            continue
+        if digest != row["sha256"]:
+            findings.append("{}: pack copy drifted from its pinned origin digest ({} pins {} for {})".format(
+                rel, PACK_COPIES_REL, row["sha256"], row["origin"]))
+    return findings
 
 
 def validate_allowances(root, rows, scope_paths):
@@ -356,6 +405,7 @@ def run(root):
         hardbreak_paths = validate_hardbreak(root, hb_rows, scope)
         check_matrix(root)
         findings = coverage_findings(scope, binary, effective_attributes(root, scope))
+        findings += pack_copy_findings(root)
         for path in sorted(scope - binary):
             try:
                 data = (root / path).read_bytes()
@@ -373,7 +423,7 @@ def run(root):
             print("  " + f)
         return 1
     print("PASS: every released text file is byte-canonical; .gitattributes covers the release "
-          "scope; the platform matrix holds")
+          "scope; the platform matrix holds; every pinned pack copy matches its origin digest")
     return 0
 
 
@@ -427,7 +477,7 @@ def self_test_main():
     # Single-source pin (OPF-SELF-CONTAIN, c.1 risk 2): the pure byte legs and forbidden sets this gate
     # uses ARE the _byte_canon objects, never a second copy. A future re-implementation that shadowed the
     # import with a local definition would fork silently; this identity check fails closed if it ever does.
-    import _byte_canon as _bc
+    import _pack_byte_canon as _bc
     if not (scan_bytes is _bc.scan_bytes and FORBIDDEN is _bc.FORBIDDEN
             and FORBIDDEN_RE is _bc.FORBIDDEN_RE and BOM is _bc.BOM
             and ZERO_WIDTH is _bc.ZERO_WIDTH and BIDI is _bc.BIDI
@@ -497,7 +547,7 @@ def self_test_main():
                  "ps.md": ("# a{}b\n".format(chr(0x2029)), "byte offset 3: ", "U+2029")}
     g = globals()
     saved_inputs = {k: g[k] for k in ("release_scope", "load_policy", "effective_attributes",
-                                      "check_matrix")}
+                                      "check_matrix", "pack_copy_findings")}
     try:
         with _tf.TemporaryDirectory() as _d:
             _root = Path(_d)
@@ -507,6 +557,7 @@ def self_test_main():
             g["load_policy"] = lambda _r: ([], [])
             g["effective_attributes"] = lambda _r, s: {p: {"text": "set", "eol": "lf"} for p in s}
             g["check_matrix"] = lambda _r: None
+            g["pack_copy_findings"] = lambda _r: []
             for scope, want_rc, want_lines in (
                     ({"clean.txt"}, 0, []),
                     ({"clean.txt"} | set(sep_files), 1,
@@ -826,6 +877,45 @@ def self_test_main():
     except (GateError, KeyError, ValueError) as exc:
         print("error: vectors unusable ({}); fail-closed".format(exc), file=sys.stderr)
         return 2
+    # The pinned pack copies (tools/pack-copies-pin.toml), over a temp root: a copy at its pinned digest is
+    # quiet; one changed byte, a missing copy and a malformed digest each fire.
+    import tempfile as _tf
+    with _tf.TemporaryDirectory() as _d:
+        _root = Path(_d)
+        (_root / "tools").mkdir()
+        _body = b"x = 1\n"
+        (_root / "tools" / "_pack_x.py").write_bytes(_body)
+        _pin = '[files."tools/_pack_x.py"]\norigin = "opf/tools/_x.py"\nsha256 = "{}"\n'
+        (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_body).hexdigest()), encoding="utf-8")
+        if pack_copy_findings(_root) != []:
+            failures.append("pack copy at its pinned digest was not quiet")
+        (_root / "tools" / "_pack_x.py").write_bytes(b"x = 2\n")
+        if len(pack_copy_findings(_root)) != 1:
+            failures.append("a drifted pack copy did not fire")
+        (_root / "tools" / "_pack_x.py").unlink()
+        if len(pack_copy_findings(_root)) != 1:
+            failures.append("a missing pack copy did not fire")
+        (_root / PACK_COPIES_REL).write_text(_pin.format("0" * 63), encoding="utf-8")
+        try:
+            pack_copy_findings(_root)
+            failures.append("a malformed pack-copy digest was not fail-closed")
+        except GateError:
+            pass
+        # A copy whose floor guard refuses under its own name is held to the origin's digest with that one name
+        # put back; any other changed byte, and the own-name refusal twice, still fire.
+        _guard = b'x = 1\n"error: {} requires Python 3.14 or newer"\n'
+        _origin_body = _guard.replace(b"{}", b"_x.py")
+        _copy_body = _guard.replace(b"{}", b"_pack_x.py")
+        (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_origin_body).hexdigest()),
+                                             encoding="utf-8")
+        for _label, _body, _want in (("a copy whose guard names its own file", _copy_body, 0),
+                                     ("a copy whose guard still names the origin", _origin_body, 0),
+                                     ("a renamed guard plus one other changed byte",
+                                      _copy_body.replace(b"x = 1", b"x = 2"), 1),
+                                     ("a renamed guard written twice", _copy_body + _copy_body[6:], 1)):
+            (_root / "tools" / "_pack_x.py").write_bytes(_body)
+            if len(pack_copy_findings(_root)) != _want:
+                failures.append("pack copy: {} gave the wrong finding count".format(_label))
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:

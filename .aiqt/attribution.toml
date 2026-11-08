@@ -115,12 +115,12 @@ verified-date = "2026-08-22"
 
 [vendored."marko"]
 name = "Marko"
-component = "CommonMark parser, vendored under opf/tools/_vendor/marko/"
+component = "CommonMark parser, vendored under opf/tools/_vendor/marko/, with a byte-identical copy under tools/_vendor/marko/"
 version = "2.2.4"
 licence = "MIT"
 copyright = "Copyright (c) 2019 Frost Ming"
 homepage = "https://github.com/frostming/marko"
-note = "Vendored unchanged and used parse-only. The full MIT licence text is retained verbatim at opf/tools/_vendor/licenses/marko-MIT.txt; provenance is recorded in opf/tools/_vendor/marko-2.2.4.provenance.toml."
+note = "Vendored unchanged and used parse-only. The full MIT licence text is retained verbatim at opf/tools/_vendor/licenses/marko-MIT.txt and tools/_vendor/licenses/marko-MIT.txt; provenance is recorded in opf/tools/_vendor/marko-2.2.4.provenance.toml."
 verified = true
 verified-date = "2026-09-20"
 

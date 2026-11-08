@@ -622,6 +622,10 @@ ALLOWLIST = (
     ("opf/tools/_journal.py", "_StCloseFault.__init__", "shell", 1,
      "self-test fault injector: wraps the os functions named in its own fixed _ST_WATCHED"
      " tuple (descriptor stat and seek calls) to count closes; never runs a shell"),
+    ("tools/_pack_journal.py", "_StCloseFault.__init__", "shell", 1,
+     "self-test fault injector in the pack's pinned copy of opf/tools/_journal.py: wraps the os"
+     " functions named in its own fixed _ST_WATCHED tuple (descriptor stat and seek calls) to count"
+     " closes; never runs a shell"),
     ("opf/tools/check_opf_record.py", "_t77_claim_failing", "shell", 1,
      "self-test fault injector: passes os to the journal's own _st_supports to find the support"
      " table holding the one function it patches; never runs a shell"),
