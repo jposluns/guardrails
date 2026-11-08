@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "d68bfc030e61058d1218b18a38598b561b31ac7f9f0cc2d640f0431be84ce90c"
+tree-sha256 = "25cdced808b9d6c25c4eaab3c2179bfbd50c2fd6f4d9c441c5dc30f9be117b56"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2391,8 +2391,8 @@ sha256 = "854403d7fd810507f024d0ff23a6db4c8bcf8978ea92210d7536a247d5c0fd28"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 646976
-sha256 = "f23dff9820fe63111e777e9f5d930395ed2b7c0436920da2e691abbef96af325"
+bytes = 647498
+sha256 = "208d8c756a33f9f40e86ab36edf13e5d4bc0022b454972a5f8191b412cac1d13"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3946,8 +3946,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 707165
-sha256 = "4c23930a89f5f7bec38dcfc8a33eb1d10ea48bee5c892958e8617d43214266e9"
+bytes = 707706
+sha256 = "b1a7ccb75f8d2c7d0d74364f8a196d3f91155af295075122946eba39c38ba803"
 
 [[sources]]
 path = "site/evidence.html"
