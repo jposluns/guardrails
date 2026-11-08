@@ -2514,15 +2514,22 @@ runpy.run_path(path, run_name="__main__")
 # four times slower than its slower measured run, about a host four times as loaded.
 # The bounds must also fit inside the whole run: tools/selftest_git_fixture_env.py kills
 # `check_release_cut.py --self-test --red-on-revert` at 1200 s (CONFIG_MEMBER_BOUND_DEFAULT), and a run killed
-# there never reaches the named failure below. The bounds sum to 430 + 6 * 30 = 610 s. A plain --self-test run
-# took 283.5 s on the same day at a 1-minute load of 25 to 33, the seven entries about 113 s of it (their second
-# measured runs above), so the rest about 171 s; with every entry running to its bound that run ends by about
-# 610 + 171 = 781 s, 419 s under 1200 s, and a table at the 720 s total cap by about 891 s, 309 s under. The
-# --red-on-revert run adds its revert replays to that rest; their time was not measured with these figures.
-# _census_table_failures refuses, before anything runs, a row bound above _CENSUS_BOUND_CAP and a
-# table whose bounds sum above _CENSUS_TOTAL_CAP, so a table edit cannot silently break that arithmetic.
+# there never reaches the named failure below. A killed entry spends its bound, then at most _CENSUS_KILL_WAIT s
+# draining its pipes and at most _CENSUS_KILL_WAIT s polling its group empty, so an entry costs at worst its
+# bound plus 2 * _CENSUS_KILL_WAIT s. _census_table_failures refuses, before anything runs, an empty table, a
+# row bound above _CENSUS_BOUND_CAP, and a table whose bounds plus 2 * _CENSUS_KILL_WAIT s per entry sum above
+# _CENSUS_TOTAL_CAP, so a table edit cannot silently break this arithmetic: any table that runs spends at most
+# _CENSUS_TOTAL_CAP = 720 s on its entries, post-kill waits included. This table's bounds sum to
+# 430 + 6 * 30 = 610 s, 610 + 7 * 2 * 5 = 680 s with the post-kill waits. A plain --self-test run took 283.5 s
+# on the same day at a 1-minute load of 25 to 33, the seven entries about 113 s of it (their second measured
+# runs above), so the rest about 171 s; with every entry killed at its bound and both post-kill waits spent,
+# that run ends by about 680 + 171 = 851 s, 349 s under 1200 s, and a table spending the full 720 s cap by
+# about 891 s, 309 s under. The --red-on-revert run adds its revert replays to that rest; the replays' time was
+# not measured.
 _CENSUS_BOUND_CAP = 600
 _CENSUS_TOTAL_CAP = 720
+# The most a killed entry waits after its group kill, once for its pipes and once more for its group to empty.
+_CENSUS_KILL_WAIT = 5
 
 # Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
 # caller that reaches its clause: (path, census caller, self-test arguments, kill bound in seconds).
@@ -2538,65 +2545,79 @@ _CENSUS_MAPPINGS = (
 
 
 def _census_table_failures(mappings):
-    """The refusals of a census-mapping table, read before any entry runs. Each row's bound must be a plain int
-    (its type exactly int, so a bool, a float such as inf or nan, None or a str is refused), above 0 s and at
-    most _CENSUS_BOUND_CAP s; when every row passes, the bounds together must be at most _CENSUS_TOTAL_CAP s. A
-    refused value is never formatted whole (a huge int raises on conversion to text). Returns [] when the table
+    """The refusals of a census-mapping table, read before any entry runs. An empty table is refused: a table
+    that maps nothing checks nothing. Each row's bound must be a plain int (its type exactly int, so a bool, a
+    float such as inf or nan, None or a str is refused), above 0 s and at most _CENSUS_BOUND_CAP s; when every
+    row passes, the bounds plus 2 * _CENSUS_KILL_WAIT s for every entry (the most a killed entry spends after
+    its kill) must together be at most _CENSUS_TOTAL_CAP s, so the table's worst case holds by construction. A
+    refused bound of ordinary size is shown as itself (-1000000000 included); only one whose text would be huge
+    (conversion of such an int to text raises) is summarised as below -1000000000. Returns [] when the table
     may run."""
     failures = []
+    if not mappings:
+        failures.append("census-mapping table: it is empty")
     for rel, target, _, bound in mappings:
         label = "%s (census under %s)" % (rel, target)
         if type(bound) is not int:
             failures.append("%s: its bound is a %s, not a plain int number of seconds" % (label, type(bound).__name__))
         elif not bound > 0:
-            shown = str(bound) if bound > -10 ** 9 else "below -1000000000"
+            shown = str(bound) if bound >= -10 ** 9 else "below -1000000000"
             failures.append("%s: its bound %s s does not exceed 0 s" % (label, shown))
         elif bound > _CENSUS_BOUND_CAP:
             failures.append("%s: its bound exceeds the %d s cap" % (label, _CENSUS_BOUND_CAP))
-    total = 0 if failures else sum(row[3] for row in mappings)
-    if total > _CENSUS_TOTAL_CAP:
-        failures.append("census-mapping table: its bounds sum to %d s, above the %d s total cap"
-                        % (total, _CENSUS_TOTAL_CAP))
+    if not failures:
+        total = sum(row[3] for row in mappings)
+        spend = 2 * _CENSUS_KILL_WAIT * len(mappings)
+        if total + spend > _CENSUS_TOTAL_CAP:
+            failures.append("census-mapping table: its bounds sum to %d s and its %d entries can each spend "
+                            "2 * %d s more after a kill, %d s together, above the %d s total cap"
+                            % (total, len(mappings), _CENSUS_KILL_WAIT, total + spend, _CENSUS_TOTAL_CAP))
     return [failure + "; nothing run" for failure in failures]
 
 
 def _census_run(args, bound):
     """Run CENSUS_DRIVER in this interpreter on args (the callee path, the census caller and the self-test
     arguments) as the leader of a new session, and so of its own process group, with stdin from /dev/null and
-    stdout and stderr captured. Returns (exit code, stderr bytes, "") when it ends within bound seconds.
-    Otherwise the whole group is sent SIGKILL while the leader is still unreaped (so the group id names no other
-    group), the leader is reaped and its pipes drained (for up to TIMEOUT s, in case a process that left the
-    group still holds them), and the group is polled with signal 0 every 0.05 s until no member is left, for up
-    to TIMEOUT s (an orphaned member is reaped by whatever adopted it); then it returns (None, b"", note), note
-    naming what was still there, or "". Any other exception out of the wait (an interrupt) kills the group the
-    same way before it propagates. A run that ends within its bound is not group-killed: a descendant that had
-    released the output pipes can outlive it, and one that left the group is never reached."""
+    stdout and stderr captured. Returns (exit code, stderr bytes, "") when it ends within bound seconds. On
+    every other path out of the wait the whole group is sent SIGKILL. At the bound the leader is still unreaped,
+    so the kill goes out before the reap and the group id names no other group; the leader is then reaped and
+    its pipes drained (for up to _CENSUS_KILL_WAIT s, in case a process that left the group still holds them),
+    the group is polled with signal 0 every 0.05 s until no member is left, for up to _CENSUS_KILL_WAIT s (an
+    orphaned member is reaped by whatever adopted it), and it returns (None, b"", note), note naming what was
+    still there, or "". On an interrupt the wait itself can already have reaped an exited leader while a group
+    member still held the pipes; the kill still reaches that member (a group id stays this group's while any
+    member lives), and the interrupt then propagates. A run that ends within its bound is not group-killed: a
+    descendant that had released the output pipes can outlive it, and one that left the group is never
+    reached."""
     notes = []
+    ended = False
     with subprocess.Popen([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, *args], stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True) as proc:
         try:
             _, err = proc.communicate(timeout=bound)
+            ended = True
             return proc.returncode, err, ""
         except subprocess.TimeoutExpired:
             pass
         finally:
-            if proc.returncode is None:                   # unreaped: the group id still names this group
-                try:
-                    os.killpg(proc.pid, signal.SIGKILL)
+            if not ended:                                 # every path but the normal return: an interrupted
+                try:                                      # wait can reap an exited leader, and the group can
+                    os.killpg(proc.pid, signal.SIGKILL)   # still have members holding the pipes
                 except ProcessLookupError:
                     pass
         try:
-            proc.communicate(timeout=TIMEOUT)
+            proc.communicate(timeout=_CENSUS_KILL_WAIT)
         except subprocess.TimeoutExpired:
-            notes.append("its output pipes were still held %d s after the group kill" % TIMEOUT)
-    deadline = time.monotonic() + TIMEOUT
+            notes.append("its output pipes were still held %d s after the group kill" % _CENSUS_KILL_WAIT)
+    deadline = time.monotonic() + _CENSUS_KILL_WAIT
     while True:
         try:
             os.killpg(proc.pid, 0)
         except (ProcessLookupError, PermissionError):
             break
         if time.monotonic() >= deadline:
-            notes.append("its process group %d still had a member %d s after the kill" % (proc.pid, TIMEOUT))
+            notes.append("its process group %d still had a member %d s after the kill"
+                         % (proc.pid, _CENSUS_KILL_WAIT))
             break
         time.sleep(0.05)
     return None, b"", "; ".join(notes)
@@ -2605,8 +2626,9 @@ def _census_run(args, bound):
 def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS):
     """Each self-test in mappings, run under CENSUS_DRIVER, must end exit 2 with its cannot-evaluate
     report naming the held descriptor ("SELF-TEST ERROR: descriptor census cannot evaluate descriptor N:"),
-    never a traceback (exit 1) or a pass. The table is read first: when _census_table_failures refuses any row
-    bound or the bound total, those refusals are the failures and no entry runs at all. Otherwise each entry
+    never a traceback (exit 1) or a pass. The table is read first: when _census_table_failures refuses the table
+    (an empty one, any row bound, or the bound total with its post-kill waits), those refusals are the failures
+    and no entry runs at all. Otherwise each entry
     runs in its own session under its row's explicit bound in seconds (_census_run); one that outlives it has
     its whole process group killed and awaited, and is a failure naming the entry and the bound. Returns
     (failures, runs), runs counting the entries launched."""
@@ -2631,9 +2653,10 @@ def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS):
 
 
 # A stand-in callee for the census-mapping bound rows: it sleeps argv[1] seconds, then makes its census read and
-# reports the injected error the way a real self-test does. Given argv[2], it first writes there its own pid,
-# or, given argv[3] as well, the pid of a grandchild it starts that sleeps 120 s (bounded, so a failed group kill
-# leaves nothing running for long; the row kills that pid itself when it finds it still running).
+# reports the injected error the way a real self-test does. Given argv[2], it first writes there its own pid and
+# process group, or, given argv[3] as well, those of a grandchild it starts that inherits (and so holds) the
+# output pipes and sleeps 120 s (bounded, so a failed group kill leaves nothing running for long; a row that
+# finds the recorded pid still in the recorded group kills it itself, and never signals a pid that left it).
 _CENSUS_STANDIN = """import os, subprocess, sys, time
 def _st_fd_table():
     for number in range(3, 256):
@@ -2648,7 +2671,7 @@ if len(sys.argv) > 2:
     if len(sys.argv) > 3:
         pid = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(120)"]).pid
     with open(sys.argv[2], "w", encoding="ascii") as record:
-        record.write(str(pid))
+        record.write("%d %d" % (pid, os.getpgid(0)))
 time.sleep(float(sys.argv[1]))
 number, exc = _st_fd_table()
 if exc is None:
@@ -2663,11 +2686,14 @@ def _census_bound_rows(parent):
     on an idle host passes (that slack, some 600 times the idle run, keeps the row from failing on a loaded
     host); a 10 s bound on a run that starts a grandchild and then sleeps 60 s is a failure naming the entry and
     the bound, and the grandchild must be gone when the check returns (10 s leaves the stand-in time to start it
-    and record its pid on a loaded host). Refused before any launch, each a named failure with no run: a bound
-    of 0, -1 or -10 ** 5000 (not above 0 s); True, 1.5, inf, nan, None or "60" (not a plain int); 601, 10 ** 30
-    or 10 ** 5000 (above the cap); a table of one good and one refused row (the good row must not run either);
-    and two good rows summing to the total cap plus 1. The table check alone takes each end: 1, 2, the cap - 1
-    and the cap pass, as do two rows summing to the total cap - 1 and to the total cap exactly, and the real
+    and record its pid on a loaded host; the recorded pid is signalled only while it is still in the recorded
+    group). Refused before any launch, each a named failure with no run: an empty table; a bound of 0, -1,
+    -10 ** 9 + 1, -10 ** 9 or -10 ** 9 - 1 (not above 0 s; the first two shown as themselves, -1000000000
+    included, the last as below -1000000000) or -10 ** 5000 (shown the same summarised way); True, 1.5, inf,
+    nan, None or "60" (not a plain int); 601, 10 ** 30 or 10 ** 5000 (above the cap); a table of one good and
+    one refused row (the good row must not run either); and two good rows whose sum plus the post-kill waits
+    tops the total cap by 1 s. The table check alone takes each end: 1, 2, the cap - 1 and the cap pass, as do
+    two rows whose sum plus those waits comes to the total cap - 1 and to the total cap exactly, and the real
     table must pass too. Returns (failures, rows checked)."""
     standin = parent / "census-standin"
     standin.mkdir()
@@ -2682,14 +2708,18 @@ def _census_bound_rows(parent):
     zero = label + ": its bound %s s does not exceed 0 s; nothing run"
     not_int = label + ": its bound is a %s, not a plain int number of seconds; nothing run"
     capped = label + ": its bound exceeds the %d s cap; nothing run" % _CENSUS_BOUND_CAP
-    over = _CENSUS_TOTAL_CAP - _CENSUS_BOUND_CAP + 1
+    over = _CENSUS_TOTAL_CAP - 4 * _CENSUS_KILL_WAIT - _CENSUS_BOUND_CAP + 1
     cases = (
         ("pass", (row(60),), [], 1),
         ("killed", (row(10, "60", str(grandchild), "spawn"),),
          [label + ": killed at its 10 s bound before it ended, with its whole process group; a killed run is a "
           "failure, not a pass"], 1),
+        ("empty", (), ["census-mapping table: it is empty; nothing run"], 0),
         ("zero", (row(0),), [zero % 0], 0),
         ("negative", (row(-1),), [zero % -1], 0),
+        ("negative-edge-inside", (row(-10 ** 9 + 1),), [zero % (-10 ** 9 + 1)], 0),
+        ("negative-edge-at", (row(-10 ** 9),), [zero % (-10 ** 9)], 0),
+        ("negative-edge-outside", (row(-10 ** 9 - 1),), [zero % "below -1000000000"], 0),
         ("huge-negative", (row(-10 ** 5000),), [zero % "below -1000000000"], 0),
         ("bool", (row(True),), [not_int % "bool"], 0),
         ("float", (row(1.5),), [not_int % "float"], 0),
@@ -2702,8 +2732,10 @@ def _census_bound_rows(parent):
         ("huger", (row(10 ** 5000),), [capped], 0),
         ("one-refused", (row(60, "0", str(ran)), row(0)), [zero % 0], 0),
         ("total-plus-one", (row(_CENSUS_BOUND_CAP), row(over)),
-         ["census-mapping table: its bounds sum to %d s, above the %d s total cap; nothing run"
-          % (_CENSUS_TOTAL_CAP + 1, _CENSUS_TOTAL_CAP)], 0),
+         ["census-mapping table: its bounds sum to %d s and its 2 entries can each spend 2 * %d s more after "
+          "a kill, %d s together, above the %d s total cap; nothing run"
+          % (_CENSUS_BOUND_CAP + over, _CENSUS_KILL_WAIT, _CENSUS_BOUND_CAP + over + 4 * _CENSUS_KILL_WAIT,
+             _CENSUS_TOTAL_CAP)], 0),
     )
     failures = []
     for name, table, want, want_runs in cases:
@@ -2712,20 +2744,17 @@ def _census_bound_rows(parent):
             failures.append("census bound row %s: expected %r with %d runs, got %r with %d runs"
                             % (name, want, want_runs, got, runs))
     try:
-        pid = int(grandchild.read_text(encoding="ascii"))
+        pid, group = (int(field) for field in grandchild.read_text(encoding="ascii").split())
     except (OSError, ValueError) as exc:
         failures.append("census bound row killed: the stand-in recorded no grandchild pid: %r" % exc)
     else:
-        try:
-            os.kill(pid, 0)
+        try:                                # a pid that left the recorded group was reused; never signal it
+            if os.getpgid(pid) == group:
+                failures.append("census bound row killed: its grandchild %d still ran after the check returned"
+                                % pid)
+                os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
-        else:
-            failures.append("census bound row killed: its grandchild %d still ran after the check returned" % pid)
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
     if ran.exists():
         failures.append("census bound row one-refused: its good row ran although the table was refused")
     ends = ((1,), (2,), (_CENSUS_BOUND_CAP - 1,), (_CENSUS_BOUND_CAP,),
@@ -2738,6 +2767,133 @@ def _census_bound_rows(parent):
     if got:
         failures.append("census-mapping table: the real table is refused: %r" % got)
     return failures, len(cases) + len(ends) + 1
+
+
+def _census_interrupt_row(parent):
+    """The interrupted wait against _census_run: the stand-in leader starts a grandchild that inherits and so
+    holds the output pipes for up to 120 s, records that grandchild's pid and group, sleeps 1 s and exits; the
+    exit's SIGCHLD raises KeyboardInterrupt in this thread inside the wait, whose interrupt handling reaps the
+    already-exited leader before _census_run's cleanup sees it. The cleanup must kill the group on that path
+    even though the leader is already reaped, so the grandchild must be gone once the interrupt reaches here; a
+    survivor is a failure, killed here once it is confirmed still in the recorded group. Returns the failures."""
+    parent.mkdir()
+    (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
+    record = parent / "grandchild"
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    failures = []
+    interrupted = False
+    previous = signal.signal(signal.SIGCHLD, interrupt)
+    try:
+        _census_run([str(parent / "standin.py"), "*", "1", str(record), "spawn"], 2 * TIMEOUT)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        signal.signal(signal.SIGCHLD, previous)
+    if not interrupted:
+        failures.append("census interrupt row: the wait ended with no interrupt; nothing was reproduced")
+    try:
+        pid, group = (int(field) for field in record.read_text(encoding="ascii").split())
+    except (OSError, ValueError) as exc:
+        failures.append("census interrupt row: the stand-in recorded no grandchild pid: %r" % exc)
+        return failures
+    deadline = time.monotonic() + _CENSUS_KILL_WAIT
+    while True:
+        try:
+            alive = os.getpgid(pid) == group
+        except (ProcessLookupError, PermissionError):
+            alive = False
+        if not alive or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    if alive:
+        failures.append("census interrupt row: its grandchild %d survived the interrupted wait" % pid)
+        try:                                # a pid that left the recorded group was reused; never signal it
+            if os.getpgid(pid) == group:
+                os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return failures
+
+
+# The driver appended to the flipped _census_run copy: the interrupt row of _census_interrupt_row, run in a
+# child interpreter, reporting on stdout whether the recorded grandchild survived the interrupted wait (a
+# survivor is killed once it is confirmed still in the recorded group, so nothing outlives the report).
+_CENSUS_FLIP_DRIVER = """
+
+def _interrupt(signum, frame):
+    raise KeyboardInterrupt
+
+workdir = sys.argv[1]
+record = os.path.join(workdir, "grandchild")
+signal.signal(signal.SIGCHLD, _interrupt)
+interrupted = False
+try:
+    _census_run([os.path.join(workdir, "standin.py"), "*", "1", record, "spawn"], 60)
+except KeyboardInterrupt:
+    interrupted = True
+signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+if not interrupted:
+    print("no-interrupt")
+    sys.exit(1)
+with open(record, "r", encoding="ascii") as handle:
+    pid, group = (int(field) for field in handle.read().split())
+deadline = time.monotonic() + _CENSUS_KILL_WAIT
+alive = True
+while True:
+    try:
+        alive = os.getpgid(pid) == group
+    except (ProcessLookupError, PermissionError):
+        alive = False
+    if not alive or time.monotonic() >= deadline:
+        break
+    time.sleep(0.05)
+if alive:
+    try:
+        if os.getpgid(pid) == group:
+            os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    print("grandchild-survived")
+else:
+    print("grandchild-gone")
+"""
+
+
+def _census_interrupt_flip_red(parent, script):
+    """The interrupt row against a copy of _census_run whose group kill is put back behind the condition that
+    the leader is unreaped, taken from this file's own text with only that condition flipped and run as a child
+    interpreter on a scratch script. Under that condition the interrupted wait has already reaped the exited
+    leader, the kill is skipped, and the recorded grandchild must survive (the scratch driver then kills it,
+    once it is confirmed still in the recorded group). Returns the failures: [] when the flipped copy let the
+    grandchild survive, a named failure when it did not reproduce the skipped kill."""
+    source = script.read_text(encoding="utf-8")
+    require(source.count("\ndef _census_run(") == 1, "census interrupt flip: its function anchor is not unique")
+    begin = source.index("\ndef _census_run(")
+    body = source[begin:source.index("\ndef ", begin + 1)]
+    anchor = "if not ended:"
+    require(body.count(anchor) == 1, "census interrupt flip: its kill-condition anchor is not unique")
+    parent.mkdir()
+    (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
+    (parent / "flip.py").write_text(
+        "import os, signal, subprocess, sys, time\n"
+        + "CENSUS_DRIVER = " + repr(CENSUS_DRIVER) + "\n"
+        + "_CENSUS_KILL_WAIT = " + repr(_CENSUS_KILL_WAIT) + "\n"
+        + body.replace(anchor, "if proc.returncode is None:", 1)
+        + _CENSUS_FLIP_DRIVER, encoding="utf-8")
+    try:
+        report = subprocess.run([sys.executable, "-I", "-B", str(parent / "flip.py"), str(parent)],
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=2 * TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return ["census interrupt flip: its child interpreter did not end within %d s" % (2 * TIMEOUT)]
+    outcome = report.stdout.decode("utf-8", "replace").strip()
+    if report.returncode != 0 or outcome != "grandchild-survived":
+        return ["census interrupt flip: expected the flipped copy to leave the grandchild running, got exit "
+                "%d with %r (stderr %r)" % (report.returncode, outcome,
+                                            report.stderr.decode("utf-8", "replace").strip()[-200:])]
+    return []
 
 
 def _close_harness_checks(parent, script):
@@ -2960,6 +3116,17 @@ def _self_test_isolated(red_on_revert):
         check("census-mapping-bound", not bound_failures)
         print("PASS census-mapping-bound rows=" + str(bound_rows) + " entries=" + str(len(_CENSUS_MAPPINGS))
               + " bound-sum=" + str(sum(row[3] for row in _CENSUS_MAPPINGS)))
+        interrupt_failures = _census_interrupt_row(parent / "census-interrupt")
+        for failure in interrupt_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("census-interrupt-kill", not interrupt_failures)
+        print("PASS census-interrupt-kill")
+        if red_on_revert:
+            flip_failures = _census_interrupt_flip_red(parent / "census-interrupt-flip", script)
+            for failure in flip_failures:
+                print("FAIL " + failure, file=sys.stderr)
+            check("census-interrupt-kill-red", not flip_failures)
+            print("RED census-interrupt-kill at the unreaped-leader-only group kill")
         # An in-process call of self_test() hands the caller's environment back exactly, with the
         # git fixture scrub and the git wrapper in effect inside, after a return and after an
         # exception: the entry point is run in a child around a stand-in _self_test_isolated,
