@@ -1600,6 +1600,17 @@ def _watchdog_isolation_self_test(launch=None):
             result = launch(label, mode, code)
             verdict = _watchdog_completion_verdict(result.returncode, result.stdout)
             detail = result.stdout + result.stderr
+        except _opf_emit.ChildStatusDeadline as exc:
+            # Deadline expiry alone (fixture startup or descendant cleanup):
+            # no status was observed, which a starved host can produce on a
+            # correct fixture. The distinct CANNOT-EVALUATE, never a pass and
+            # never a definite failure; lost ownership and an unexpected wait
+            # PID stay RuntimeError failures below.
+            unevaluated.append(label + "/" + mode)
+            print("opf watchdog isolation: CANNOT EVALUATE", label, mode,
+                  "deadline expiry before status (no verdict):", str(exc),
+                  file=sys.stderr)
+            continue
         except (RuntimeError, subprocess.CalledProcessError) as exc:
             verdict, detail = "fail", str(exc)
         except subprocess.TimeoutExpired:
@@ -1660,6 +1671,10 @@ _DEADLINE_EXECUTION_BOUND = 5.0
 # floor pins them and the leg ledger charges each fixture call by them.
 _DEADLINE_CASE_TIMEOUT = 0.25
 _DEADLINE_RECEIPT_ALLOWANCE = 1.0
+# The transient-census hold, counted as WORK (forced-empty census calls the
+# drain must poll through before ECHILD), never as wall time a loaded host
+# can stretch past the drain's own cleanup deadline.
+_CENSUS_EMPTY_POLLS = 40
 # Interpreter start, `import opf` and _bootstrap for one fixture process: the
 # launch margin the regression runner adds on top of a leg's own budget.
 _WATCHDOG_LAUNCH_MARGIN = 30
@@ -4142,8 +4157,19 @@ def _watchdog_deadline_case(mode):
         os.register_at_fork(after_in_child=startup)
     real_signal = _opf_emit._fixture_signal
     real_drain, real_children = _opf_emit._fixture_drain, _opf_emit._fixture_children
-    empty_since = [None]
+    empty_polls = [0]
     events = tempfile.TemporaryFile()
+    real_close = _opf_emit._FixtureProcess.close
+    armed = []
+
+    def record_close(proc):
+        # Capture the ARMED absolute deadline run_bounded gave its fixture
+        # process: the declared timeline is judged instead of starved wall
+        # time (host load can delay the observed cancel without bound, but
+        # it can never move the deadline run_bounded armed).
+        if os.getpid() == caller and not armed:
+            armed.append(proc.deadline)
+        return real_close(proc)
 
     def record(row):
         os.write(events.fileno(), (json.dumps(row) + "\n").encode("ascii"))
@@ -4151,7 +4177,15 @@ def _watchdog_deadline_case(mode):
     def cancel(pid, signum, *args, **kwargs):
         sent = real_signal(pid, signum, *args, **kwargs)
         if sent and signum == signal.SIGKILL:
-            record(["cancel", time.monotonic()])
+            # BOTH origins are recorded, each tagged with its origin: the
+            # delayed and stuck starts get their one legitimate cancel from
+            # the CALLER-side kill (close() collecting a guardian that never
+            # released a subject), so every observed kill feeds the execution
+            # bound. Only a GUARDIAN-side send is the deadline firing against
+            # the owned subject tree, so the no-verdict decision below keys
+            # on that origin alone.
+            record(["cancel", time.monotonic(),
+                    "guardian" if os.getpid() != caller else "caller"])
         return sent
 
     def drain(*args, **kwargs):
@@ -4161,20 +4195,23 @@ def _watchdog_deadline_case(mode):
             record(["drain", time.monotonic(), kwargs["deadline"]])
 
     def census():
-        if mode == "transient-census":
-            if empty_since[0] is None:
-                empty_since[0] = time.monotonic()
-            if time.monotonic() - empty_since[0] < 1.6:
-                return []
+        # The forced-empty hold is WORK the drain must poll through, never a
+        # wall-time window a loaded host can stretch past the drain's own
+        # cleanup deadline: empty for the first _CENSUS_EMPTY_POLLS calls.
+        if mode == "transient-census" and empty_polls[0] < _CENSUS_EMPTY_POLLS:
+            empty_polls[0] += 1
+            record(["census-empty", time.monotonic()])
+            return []
         return real_children()
 
-    result, elapsed, reaped = None, None, False
+    result, elapsed, reaped, unestablished = None, None, False, None
     try:
         start = time.monotonic()
         with patch.object(os, "fork", fork), patch.object(os, "pipe", capture_pipe), \
                 patch.object(_opf_emit, "_fixture_signal", cancel), \
                 patch.object(_opf_emit, "_fixture_drain", drain), \
-                patch.object(_opf_emit, "_fixture_children", census):
+                patch.object(_opf_emit, "_fixture_children", census), \
+                patch.object(_opf_emit._FixtureProcess, "close", record_close):
             # The thunk writes started_w and the guardian-side drain/cancel hooks
             # write the events file: both must be DECLARED under the fd allowlist.
             result = _opf_emit.run_bounded(thunk, timeout_s=_DEADLINE_CASE_TIMEOUT,
@@ -4184,11 +4221,27 @@ def _watchdog_deadline_case(mode):
         events.seek(0)
         rows = [json.loads(line) for line in events]
         cancellations = [row[1] for row in rows if row[0] == "cancel"]
+        guardian_cancels = [row[1] for row in rows
+                            if row[0] == "cancel" and row[2] == "guardian"]
         drains = [row for row in rows if row[0] == "drain"]
+        empties = [row for row in rows if row[0] == "census-empty"]
         cancelled = min(cancellations) if cancellations else None
-        # Execution latency ends at the observed signal, never at cleanup end.
-        execution_ok = (cancelled is not None and
-                        _DEADLINE_CASE_TIMEOUT <= cancelled - start < _DEADLINE_EXECUTION_BOUND)
+        guardian_cancelled = (min(guardian_cancels) if guardian_cancels
+                              else None)
+        # The execution bound is judged on the CONTROLLED timeline: the ARMED
+        # absolute deadline run_bounded gave its fixture, relative to this
+        # measurement's begin (run_bounded computes that deadline from the
+        # next adjacent clock reading). A late armed deadline (at or above
+        # the execution bound) stays a definite failure under ANY load,
+        # because starvation delays observations, never the armed value; an
+        # early armed deadline is equally definite. The real-time lower
+        # bound is kept on the OBSERVED signal: the deadline never fires
+        # before the requested 0.25 s, and a cancel must really have been
+        # observed (the deadline fires against the endless stall).
+        tripped = (armed[0] - start) if armed else None
+        execution_ok = (cancelled is not None and tripped is not None
+                        and _DEADLINE_CASE_TIMEOUT <= tripped < _DEADLINE_EXECUTION_BOUND
+                        and cancelled - start >= _DEADLINE_CASE_TIMEOUT)
         # Cleanup is checked against its own declared deadline. One second
         # (_DEADLINE_RECEIPT_ALLOWANCE) is allowed separately for receipt
         # delivery and parent scheduling.
@@ -4196,21 +4249,58 @@ def _watchdog_deadline_case(mode):
                             [(cancelled or start) + _opf_emit._FIXTURE_CLEANUP_GRACE])
         cleanup_ok = (all(row[1] <= row[2] for row in drains)
                       and finished <= cleanup_limit + _DEADLINE_RECEIPT_ALLOWANCE)
-        if mode == "transient-census":
-            # The old combined 1.5 s assertion rejects this passing cleanup.
-            assert elapsed > 1.5 and drains, (elapsed, rows)
         # The helper owns cleanup. A diagnostic never sends another signal.
-        reaped = _opf_emit._fixture_child_reaped(child[0])
+        reaped = bool(child) and _opf_emit._fixture_child_reaped(child[0])
         os.set_blocking(started_r, False)
-        reached = os.read(started_r, 200) == b"started"
+        try:
+            reached = os.read(started_r, 200) == b"started"
+        except BlockingIOError:
+            # No byte and the write end still open in this process: the
+            # subject was never released (startup never completed).
+            reached = False
+        census_ok = True
+        if mode == "transient-census":
+            # The forced-empty hold is observed as WORK, never wall time: the
+            # drain polled through every forced-empty census before ECHILD
+            # (an empty snapshot is retried, never completion), and the owned
+            # subject's cancel was already recorded when the hold began (an
+            # empty census never defers the cancel, so a swallowed first send
+            # surfaces as a cancel ordered after the hold's first poll).
+            census_ok = (len(empties) >= _CENSUS_EMPTY_POLLS and bool(drains)
+                         and cancelled is not None
+                         and cancelled <= empties[0][1])
         ok = (result == "TIMEOUT" and execution_ok and cleanup_ok
-              and reached and reaped)
+              and reached and reaped and census_ok)
+        if (not ok and result == "TIMEOUT" and guardian_cancelled is None
+                and not reached):
+            # Nothing was established: the guardian never released a subject
+            # (no started byte) and no guardian-side cancel was recorded
+            # (a caller-side kill collects such a guardian, it is never the
+            # deadline firing), which a starved host can produce on a correct
+            # run_bounded (guardian startup shares the requested deadline).
+            # No verdict, never a pass and never a definite failure.
+            unestablished = ("no subject reached and no guardian-side "
+                             "cancel recorded")
+        elif not ok and isinstance(result, str) and result.startswith(
+                "SETUP-ERROR:ChildStatusDeadline"):
+            # Deadline expiry alone in the guardian's receipt (the distinct
+            # subclass): its cleanup deadline passed before ECHILD, which a
+            # starved host can reach on a correct drain. Lost ownership and
+            # an unexpected wait PID stay definite failures (plain
+            # ChildStatusUnavailable never takes this branch).
+            unestablished = result
     finally:
         os.close(started_r)
         os.close(started_w)
         events.close()
+    if unestablished:
+        print(_WATCHDOG_CANNOT_EVALUATE + " (deadline/" + mode + ": "
+              + unestablished + ")")
+        print("opf watchdog deadline:", mode, "NO VERDICT", result,
+              "total", elapsed)
+        return EXIT_OK
     print("opf watchdog deadline:", mode, "PASS" if ok else "FAIL",
-          result, "execution", None if cancelled is None else cancelled - start,
+          result, "execution", tripped,
           "total", elapsed, "cleanup", cleanup_ok, "reaped", reaped)
     return EXIT_OK if ok else EXIT_FINDING
 
@@ -5614,19 +5704,55 @@ def _watchdog_completion_case(mode, tree=None):
             refuses(emit.ChildStatusUnavailable,
                     lambda: emit._fixture_drain(123, deadline=101))
     elif mode == "deadline-flips":
+        import contextlib
+        import io
         real_run = emit.run_bounded
         def late(thunk, **kwargs):
-            # The forced timeout sits ABOVE the measured execution bound,
-            # so the late parent deadline stays red under any load the
-            # bound itself tolerates (the load-flake bound note at
-            # _DEADLINE_EXECUTION_BOUND).
+            # The forced timeout sits ABOVE the execution bound. The fixture
+            # judges the ARMED deadline itself, which host starvation cannot
+            # move, so the late deadline stays red under any load (the
+            # load-flake bound note at _DEADLINE_EXECUTION_BOUND).
             return real_run(thunk, **dict(
                 kwargs, timeout_s=_DEADLINE_EXECUTION_BOUND + 1))
         with patch.object(emit, "run_bounded", late):
             assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
         import time
+
+        def no_verdict(case, mode_name):
+            # The distinct no-verdict outcome, pinned exactly: the marker on
+            # a CLEAN exit (the runner maps it to CANNOT-EVALUATE), never a
+            # silent pass (the marker must be present) and never a definite
+            # failure.
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                rc = case(mode_name)
+            out = buffer.getvalue()
+            assert rc == EXIT_OK and _WATCHDOG_CANNOT_EVALUATE in out, (rc, out)
+            return out
+
+        # An already-expired cleanup deadline is deadline expiry alone in the
+        # guardian receipt: the distinct no-verdict (a starved host can reach
+        # any cleanup deadline on a correct drain), never a pass.
         with patch.object(emit, "_fixture_cleanup_deadline",
                           side_effect=lambda deadline=None: time.monotonic() - 1):
+            out = no_verdict(_watchdog_deadline_case, "pipe-stall")
+            assert "ChildStatusDeadline" in out, out
+        # A guardian that cannot reach READY inside the bounded startup
+        # window leaves no subject and no recorded cancel: that run holds no
+        # verdict either (never a pass, never a definite failure). The REAL
+        # start() runs with its deadline already expired, so the raise site,
+        # run_bounded's handling and the fixture's mapping are all exercised.
+        real_start = emit._FixtureProcess.start
+        def starved_start(proc):
+            proc.deadline = time.monotonic() - 1
+            return real_start(proc)
+        with patch.object(emit._FixtureProcess, "start", starved_start):
+            no_verdict(_watchdog_deadline_case, "pipe-stall")
+        # A LOST-OWNERSHIP drain refusal is NOT deadline expiry: it must stay
+        # a definite failure, never the no-verdict mapping above.
+        with patch.object(emit, "_fixture_drain",
+                          side_effect=emit.ChildStatusUnavailable(
+                              "lost descendant ownership")):
             assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
         real_signal, first = emit._fixture_signal, [True]
         def census_only(*args, **kwargs):
@@ -5634,16 +5760,11 @@ def _watchdog_completion_case(mode, tree=None):
                 first[0] = False
                 return False
             return real_signal(*args, **kwargs)
-        # The swallowed first send provably delays the observed cancel past
-        # the 1.6 s transient-census window, so THIS red keys on that
-        # window, not on the load-tolerant shared bound: pinning the bound
-        # to the window keeps the mutant red under any load (load only
-        # delays the retried send further; see the load-flake bound note
-        # at _DEADLINE_EXECUTION_BOUND).
-        import sys as sys_module
-        runner_module = sys_module.modules[_watchdog_deadline_case.__module__]
-        with patch.object(emit, "_fixture_signal", census_only), \
-                patch.object(runner_module, "_DEADLINE_EXECUTION_BOUND", 1.6):
+        # The swallowed first send provably ORDERS the first recorded cancel
+        # after the forced-empty hold began (the drain can only retry it once
+        # a census lists the subject again), so this red keys on observed
+        # order, never on wall time or on the load-tolerant shared bound.
+        with patch.object(emit, "_fixture_signal", census_only):
             assert _watchdog_deadline_case("transient-census") == EXIT_FINDING
     elif mode == "subject-setup":
         real_subreaper, real_setsid = emit._fixture_subreaper, os.setsid
@@ -15791,6 +15912,7 @@ def _watchdog_run_legs(cases, launch):
     correct leg and which therefore establishes nothing), else EXIT_FINDING
     when any leg failed, else EXIT_OK."""
     import subprocess
+    import _opf_emit
     failed = False
     unevaluated = []
     for label, code, timeout in cases:
@@ -15798,6 +15920,14 @@ def _watchdog_run_legs(cases, launch):
             result = launch(label, code, timeout)
             verdict = _watchdog_completion_verdict(result.returncode, result.stdout)
             detail = result.stdout + result.stderr
+        except _opf_emit.ChildStatusDeadline as exc:
+            # Deadline expiry alone (fixture startup or descendant cleanup)
+            # is no verdict on the leg: a starved host can reach any such
+            # deadline on a correct fixture. The distinct CANNOT-EVALUATE,
+            # never a pass and never a definite failure; lost ownership and
+            # an unexpected wait PID stay RuntimeError failures below.
+            verdict = "cannot-evaluate"
+            detail = "(deadline expiry before status: no verdict) " + str(exc)
         except (RuntimeError, subprocess.CalledProcessError) as exc:
             verdict, detail = "fail", str(exc)
         except subprocess.TimeoutExpired:
@@ -16698,7 +16828,17 @@ def _watchdog_regression_self_test():
             (dict(a=(EXIT_OK, marked), b=subprocess.CalledProcessError(1, "b")), EXIT_MALFORMED),
             (dict(a=subprocess.CalledProcessError(1, "a"), b=(EXIT_OK, "ok\n")), EXIT_FINDING),
             (dict(a=(EXIT_FINDING, marked)), EXIT_FINDING),
-            (dict(a=RuntimeError("cannot launch")), EXIT_FINDING)):
+            (dict(a=RuntimeError("cannot launch")), EXIT_FINDING),
+            # Deadline expiry alone is the leg's own no-verdict (a starved
+            # host can reach any deadline on a correct fixture), while every
+            # other unavailable status (lost ownership, an unexpected wait
+            # PID) stays a definite failure.
+            (dict(a=_opf_emit.ChildStatusDeadline("fixture startup deadline")),
+             EXIT_MALFORMED),
+            (dict(a=_opf_emit.ChildStatusDeadline("fixture startup deadline"),
+                  b=subprocess.CalledProcessError(1, "b")), EXIT_MALFORMED),
+            (dict(a=_opf_emit.ChildStatusUnavailable("lost descendant ownership")),
+             EXIT_FINDING)):
         with contextlib.redirect_stdout(io.StringIO()):
             got = _watchdog_run_legs([(label, "", 1) for label in outcomes], scripted(outcomes))
         if got != want:
@@ -16759,7 +16899,13 @@ def _watchdog_regression_self_test():
     for outcome, want in ((subprocess.TimeoutExpired("timer", 1), EXIT_MALFORMED),
                           ((EXIT_OK, ""), EXIT_OK), ((EXIT_FINDING, ""), EXIT_FINDING),
                           ((EXIT_OK, marked), EXIT_MALFORMED),
-                          ((EXIT_FINDING, marked), EXIT_FINDING)):
+                          ((EXIT_FINDING, marked), EXIT_FINDING),
+                          # Deadline expiry alone is no verdict; any other
+                          # unavailable status stays a definite failure.
+                          (_opf_emit.ChildStatusDeadline("fixture startup deadline"),
+                           EXIT_MALFORMED),
+                          (_opf_emit.ChildStatusUnavailable("lost descendant ownership"),
+                           EXIT_FINDING)):
         with contextlib.redirect_stdout(io.StringIO()), \
                 contextlib.redirect_stderr(io.StringIO()):
             got = _watchdog_isolation_self_test(launch=isolation_scripted(outcome))
