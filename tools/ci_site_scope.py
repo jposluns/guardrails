@@ -1678,15 +1678,19 @@ def self_test(report_path=None):
             # the runs behind every cannot-evaluate note of ci_select(), each with the cause its
             # note names: an absent, a broken and an unset registry and, on this two-parent
             # merge, a head sha that is not its second parent; the linear head of the next
-            # fixture adds the parent-read failure
+            # fixture adds the parent-read failure; each run is given its own GITHUB_OUTPUT
+            # target and keeps its exit code, its stdout and whether that target was written
             follows_runs = [
                 (cause, _ci_select_run(repo, "pull_request", head_sha=head_sha,
-                                       registry=registry)[1])
-                for cause, head_sha, registry in (
-                    ("cannot read the registry", train_tip, Path(scratch) / "absent.toml"),
-                    ("not valid TOML", train_tip, broken_file),
-                    ("CHECKS_REGISTRY is not set", train_tip, None),
-                    ("is not the pull request's head commit", "0" * 40, registry_file))]
+                                       registry=registry,
+                                       output=Path(scratch) / ("no-output-follows-" + name)))
+                for cause, name, head_sha, registry in (
+                    ("cannot read the registry", "absent", train_tip,
+                     Path(scratch) / "absent.toml"),
+                    ("not valid TOML", "broken", train_tip, broken_file),
+                    ("CHECKS_REGISTRY is not set", "unset", train_tip, None),
+                    ("is not the pull request's head commit", "mismatch", "0" * 40,
+                     registry_file))]
         with tempfile.TemporaryDirectory() as scratch:
             # a linear head is cannot-evaluate for the shadow plan too, still exit 0
             repo, base = _fixture_repo(Path(scratch), env)
@@ -1703,7 +1707,14 @@ def self_test(report_path=None):
             follows_runs.append(
                 ("HEAD has one parent (a linear commit)",
                  _ci_select_run(repo, "pull_request", head_sha="0" * 40,
-                                registry=registry_file)[1]))
+                                registry=registry_file,
+                                output=Path(scratch) / "no-output-follows-linear")))
+            # each of those five cannot-evaluate runs exits 0 and leaves its GITHUB_OUTPUT
+            # target unwritten, as the registry rows above require of theirs: a run that wrote
+            # site_only on any of these notes would change the decision the jobs follow
+            check("ciselect/cannot-evaluate-runs-exit-0-no-output",
+                  [(result[0], result[2]) for _cause, result in follows_runs],
+                  [(0, False)] * 5)
             # the five runs reach all four cannot-evaluate notes of ci_select() (unset registry,
             # parent read, second-parent mismatch, registry read); each output names its cause,
             # states what really happens (the run follows the site_only decision already
@@ -1712,7 +1723,7 @@ def self_test(report_path=None):
             check("ciselect/cannot-evaluate-states-run-follows-site-only",
                   [(cause in out, "the plan is advisory and the run follows site_only" in out,
                     "full suite" in out)
-                   for cause, out in follows_runs],
+                   for cause, (_rc, out, _wrote) in follows_runs],
                   [(True, True, False)] * 5)
         with tempfile.TemporaryDirectory() as scratch:
             # ---------- the local --explain --base REV query ----------

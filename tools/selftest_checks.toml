@@ -2076,6 +2076,7 @@ expected-check-ids = [
   "ciselect/malformed-registry-cannot-evaluate",
   "ciselect/unset-registry-cannot-evaluate",
   "ciselect/linear-head-cannot-evaluate",
+  "ciselect/cannot-evaluate-runs-exit-0-no-output",
   "ciselect/cannot-evaluate-states-run-follows-site-only",
   # ---------- the local --explain --base REV query ----------
   "explain/missing-registry-exit-2",
