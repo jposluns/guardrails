@@ -83,6 +83,7 @@ import hashlib
 import json
 import os
 import re
+import selectors
 import signal
 import stat
 import subprocess
@@ -2549,7 +2550,9 @@ def _census_table_failures(mappings):
     that maps nothing checks nothing. Each row's bound must be a plain int (its type exactly int, so a bool, a
     float such as inf or nan, None or a str is refused), above 0 s and at most _CENSUS_BOUND_CAP s; when every
     row passes, the bounds plus 2 * _CENSUS_KILL_WAIT s for every entry (the most a killed entry spends after
-    its kill) must together be at most _CENSUS_TOTAL_CAP s, so the table's worst case holds by construction. A
+    its kill) must together be at most _CENSUS_TOTAL_CAP s, which bounds what the entries spend in their drain
+    and post-kill waits; the fork and exec of each entry's leader before its wait begins, and each wait's poll
+    overshoot (a wake comes up to 0.05 s late), lie outside that arithmetic and are not bounded by it. A
     refused bound of ordinary size is shown as itself (-1000000000 included); only one whose text would be huge
     (conversion of such an int to text raises) is summarised as below -1000000000. Returns [] when the table
     may run."""
@@ -2578,31 +2581,68 @@ def _census_table_failures(mappings):
 def _census_run(args, bound):
     """Run CENSUS_DRIVER in this interpreter on args (the callee path, the census caller and the self-test
     arguments) as the leader of a new session, and so of its own process group, with stdin from /dev/null and
-    stdout and stderr captured. Returns (exit code, stderr bytes, "") when it ends within bound seconds. On
-    every other path out of the wait the whole group is sent SIGKILL. At the bound the leader is still unreaped,
-    so the kill goes out before the reap and the group id names no other group; the leader is then reaped and
-    its pipes drained (for up to _CENSUS_KILL_WAIT s, in case a process that left the group still holds them),
-    the group is polled with signal 0 every 0.05 s until no member is left, for up to _CENSUS_KILL_WAIT s (an
-    orphaned member is reaped by whatever adopted it), and it returns (None, b"", note), note naming what was
-    still there, or "". On an interrupt the wait itself can already have reaped an exited leader while a group
-    member still held the pipes; the kill still reaches that member (a group id stays this group's while any
-    member lives), and the interrupt then propagates. A run that ends within its bound is not group-killed: a
-    descendant that had released the output pipes can outlive it, and one that left the group is never
-    reached."""
+    stdout and stderr captured. The leader stays this process's unreaped child until the kill decision is
+    made: the drain below reads both pipes itself (a selector over the two of them) and watches for the
+    leader's exit with os.waitid and WNOWAIT, which detects the exit without reaping, so until this function
+    reaps it an exited leader stays a zombie and its group id cannot be freed for reuse. When the leader has
+    exited and both pipes have hit end of file within bound seconds of the fork, the leader is reaped and
+    (exit code, stderr bytes, "") returned; nothing is killed on that path (a descendant that had released
+    the output pipes can outlive the run, and one that left the group is never reached). The bound covers
+    only that drain: the fork and exec before it, and each wait's poll overshoot (a wake comes up to 0.05 s
+    late), lie outside it. On every other path out of the drain (the bound spent, or an exception such as an
+    interrupt raised inside it) the leader is still unreaped, so the group id still names this group: the
+    whole group is sent SIGKILL first and the leader reaped only after that (on an exception, by the Popen
+    exit as the exception propagates; on a KeyboardInterrupt that exit waits for it only up to 0.25 s and
+    leaves a leader not yet gone by then to the subprocess module's later cleanup, which reaps it once). After a kill the pipes are drained for up to _CENSUS_KILL_WAIT s (in
+    case a process that left the group still holds them), the group is polled with signal 0 every 0.05 s
+    until no member is left, for up to _CENSUS_KILL_WAIT s (an orphaned member is reaped by whatever adopted
+    it), and it returns (None, b"", note), note naming what was still there, or "". SIGINT is blocked in this
+    thread from before the leader's construction until the drain is entered, so a KeyboardInterrupt from
+    SIGINT cannot land between the fork and the cleanup that kills the group (the leader inherits that mask,
+    so it starts with SIGINT blocked); a handler for another signal that raises inside the construction can
+    still leave the group running with no kill, a residual this function does not close."""
     notes = []
     ended = False
-    with subprocess.Popen([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, *args], stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True) as proc:
+    exited = False
+    err = bytearray()
+    unblock = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        proc = subprocess.Popen([sys.executable, "-I", "-B", "-c", CENSUS_DRIVER, *args], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    except BaseException:
+        signal.pthread_sigmask(signal.SIG_SETMASK, unblock)
+        raise
+    with proc:
         try:
-            _, err = proc.communicate(timeout=bound)
-            ended = True
-            return proc.returncode, err, ""
-        except subprocess.TimeoutExpired:
-            pass
+            signal.pthread_sigmask(signal.SIG_SETMASK, unblock)   # a pending SIGINT now raises inside this try
+            deadline = time.monotonic() + bound
+            with selectors.DefaultSelector() as pipes:
+                for pipe in (proc.stdout, proc.stderr):
+                    os.set_blocking(pipe.fileno(), False)
+                    pipes.register(pipe, selectors.EVENT_READ)
+                while True:
+                    if not exited:
+                        exited = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+                    if exited and not pipes.get_map():
+                        ended = True              # from here the kill stays off: never a kill after the reap
+                        code = proc.wait()        # the exit was seen with WNOWAIT, so a zombie until this reap
+                        return code, bytes(err), ""
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    for key, _ in pipes.select(min(left, 0.05)):
+                        try:
+                            chunk = os.read(key.fd, 65536)
+                        except BlockingIOError:   # a wake with nothing left to read
+                            continue
+                        if not chunk:
+                            pipes.unregister(key.fileobj)
+                        elif key.fileobj is proc.stderr:
+                            err += chunk
         finally:
-            if not ended:                                 # every path but the normal return: an interrupted
-                try:                                      # wait can reap an exited leader, and the group can
-                    os.killpg(proc.pid, signal.SIGKILL)   # still have members holding the pipes
+            if not ended:                                 # every path but the normal return: the leader is
+                try:                                      # still unreaped here, so the group id still names
+                    os.killpg(proc.pid, signal.SIGKILL)   # this group, exited leader or not
                 except ProcessLookupError:
                     pass
         try:
@@ -2772,10 +2812,16 @@ def _census_bound_rows(parent):
 def _census_interrupt_row(parent):
     """The interrupted wait against _census_run: the stand-in leader starts a grandchild that inherits and so
     holds the output pipes for up to 120 s, records that grandchild's pid and group, sleeps 1 s and exits; the
-    exit's SIGCHLD raises KeyboardInterrupt in this thread inside the wait, whose interrupt handling reaps the
-    already-exited leader before _census_run's cleanup sees it. The cleanup must kill the group on that path
-    even though the leader is already reaped, so the grandchild must be gone once the interrupt reaches here; a
-    survivor is a failure, killed here once it is confirmed still in the recorded group. Returns the failures."""
+    exit's SIGCHLD raises KeyboardInterrupt in this thread inside the drain wait, before anything has reaped
+    the exited leader. The cleanup must kill the group on that path, while the leader is still its unreaped
+    zombie, so the grandchild must be gone once the interrupt reaches here; a survivor is a failure, killed
+    here once it is confirmed still in the recorded group. SIGCHLD is blocked across the handler install and
+    across its restore (and unblocked in between, and afterwards as it was): signal.signal first runs a
+    pending handler, so an unblocked restore could raise before restoring and leave the raising handler
+    installed. The block holds off only a signal delivered after it; a handler already pending when the
+    restore begins runs inside the blocking call itself (pthread_sigmask runs pending handlers too), so the
+    restore sits in a finally of that call and the mask reset in a finally of the restore, and both still
+    happen when that handler raises. Returns the failures."""
     parent.mkdir()
     (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
     record = parent / "grandchild"
@@ -2785,13 +2831,21 @@ def _census_interrupt_row(parent):
 
     failures = []
     interrupted = False
+    unblock = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
     previous = signal.signal(signal.SIGCHLD, interrupt)
     try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, unblock)     # the handler goes live only inside this try
         _census_run([str(parent / "standin.py"), "*", "1", str(record), "spawn"], 2 * TIMEOUT)
     except KeyboardInterrupt:
         interrupted = True
     finally:
-        signal.signal(signal.SIGCHLD, previous)
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})   # an already pending handler runs here
+        finally:
+            try:
+                signal.signal(signal.SIGCHLD, previous)         # nothing delivered after the block runs here
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, unblock)
     if not interrupted:
         failures.append("census interrupt row: the wait ended with no interrupt; nothing was reproduced")
     try:
@@ -2815,6 +2869,60 @@ def _census_interrupt_row(parent):
                 os.kill(pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
+    return failures
+
+
+def _census_interrupt_unreaped_row(parent):
+    """The interrupt row again, watching the kill itself: os.killpg is wrapped (and restored in a finally) so
+    that when _census_run's cleanup kills the stand-in leader's group, the wrapper first asks os.waitid, with
+    WNOWAIT so the wrapper itself reaps nothing, whether that leader is an exited, still-unreaped child of
+    this process. On the interrupted wait the leader has already exited (its exit raised the interrupt), so
+    the one group kill must find exactly that; no kill, a reaped leader (ChildProcessError) or a still-running
+    one is a failure. SIGCHLD is blocked around the handler install and restore, each restore step in a
+    finally of the one before it, as in _census_interrupt_row, and the real kill still goes out, so nothing here outlives the row. Returns the failures."""
+    parent.mkdir()
+    (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
+    seen = []
+    real_killpg = os.killpg
+
+    def interrupt(signum, frame):
+        raise KeyboardInterrupt
+
+    def watching(pgid, sig):
+        if sig == signal.SIGKILL:
+            try:
+                waited = os.waitid(os.P_PID, pgid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                seen.append("a reaped leader")
+            else:
+                seen.append("an exited, unreaped leader" if waited is not None else "a still-running leader")
+        return real_killpg(pgid, sig)
+
+    failures = []
+    interrupted = False
+    unblock = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})
+    previous = signal.signal(signal.SIGCHLD, interrupt)
+    os.killpg = watching
+    try:
+        signal.pthread_sigmask(signal.SIG_SETMASK, unblock)     # the handler goes live only inside this try
+        _census_run([str(parent / "standin.py"), "*", "1", str(parent / "grandchild"), "spawn"], 2 * TIMEOUT)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        os.killpg = real_killpg
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})   # an already pending handler runs here
+        finally:
+            try:
+                signal.signal(signal.SIGCHLD, previous)         # nothing delivered after the block runs here
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, unblock)
+    if not interrupted:
+        failures.append("census interrupt unreaped row: the wait ended with no interrupt; nothing was "
+                        "reproduced")
+    if seen != ["an exited, unreaped leader"]:
+        failures.append("census interrupt unreaped row: expected one group kill finding an exited, unreaped "
+                        "leader, saw %r" % (seen,))
     return failures
 
 
@@ -2863,12 +2971,14 @@ else:
 
 
 def _census_interrupt_flip_red(parent, script):
-    """The interrupt row against a copy of _census_run whose group kill is put back behind the condition that
-    the leader is unreaped, taken from this file's own text with only that condition flipped and run as a child
-    interpreter on a scratch script. Under that condition the interrupted wait has already reaped the exited
-    leader, the kill is skipped, and the recorded grandchild must survive (the scratch driver then kills it,
-    once it is confirmed still in the recorded group). Returns the failures: [] when the flipped copy let the
-    grandchild survive, a named failure when it did not reproduce the skipped kill."""
+    """The interrupt row against a copy of _census_run whose cleanup is put back to deciding the group kill
+    only after the leader can be reaped: the guard that turns the kill off only on the normal return is
+    replaced with one that first polls the leader (proc.poll() reaps an exited one) and kills only while it is
+    unreaped, taken from this file's own text with only that guard flipped and run as a child interpreter on a
+    scratch script. On the interrupted wait the leader has exited, the poll reaps it, the kill is skipped, and
+    the recorded grandchild must survive (the scratch driver then kills it, once it is confirmed still in the
+    recorded group). Returns the failures: [] when the flipped copy let the grandchild survive, a named
+    failure when it did not reproduce the skipped kill."""
     source = script.read_text(encoding="utf-8")
     require(source.count("\ndef _census_run(") == 1, "census interrupt flip: its function anchor is not unique")
     begin = source.index("\ndef _census_run(")
@@ -2878,10 +2988,10 @@ def _census_interrupt_flip_red(parent, script):
     parent.mkdir()
     (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
     (parent / "flip.py").write_text(
-        "import os, signal, subprocess, sys, time\n"
+        "import os, selectors, signal, subprocess, sys, time\n"
         + "CENSUS_DRIVER = " + repr(CENSUS_DRIVER) + "\n"
         + "_CENSUS_KILL_WAIT = " + repr(_CENSUS_KILL_WAIT) + "\n"
-        + body.replace(anchor, "if proc.returncode is None:", 1)
+        + body.replace(anchor, "if not ended and proc.poll() is None:", 1)
         + _CENSUS_FLIP_DRIVER, encoding="utf-8")
     try:
         report = subprocess.run([sys.executable, "-I", "-B", str(parent / "flip.py"), str(parent)],
@@ -3121,12 +3231,17 @@ def _self_test_isolated(red_on_revert):
             print("FAIL " + failure, file=sys.stderr)
         check("census-interrupt-kill", not interrupt_failures)
         print("PASS census-interrupt-kill")
+        unreaped_failures = _census_interrupt_unreaped_row(parent / "census-interrupt-unreaped")
+        for failure in unreaped_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("census-interrupt-kill-unreaped", not unreaped_failures)
+        print("PASS census-interrupt-kill-unreaped")
         if red_on_revert:
             flip_failures = _census_interrupt_flip_red(parent / "census-interrupt-flip", script)
             for failure in flip_failures:
                 print("FAIL " + failure, file=sys.stderr)
             check("census-interrupt-kill-red", not flip_failures)
-            print("RED census-interrupt-kill at the unreaped-leader-only group kill")
+            print("RED census-interrupt-kill at the reap-before-kill cleanup")
         # An in-process call of self_test() hands the caller's environment back exactly, with the
         # git fixture scrub and the git wrapper in effect inside, after a return and after an
         # exception: the entry point is run in a child around a stand-in _self_test_isolated,
