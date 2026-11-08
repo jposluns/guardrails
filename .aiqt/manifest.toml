@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "5550246dbca1e96096402885b604449c3b1689f2f060146ee29f2cfe7871ff81"
+tree-sha256 = "72c5abfc2e41f64f720f800f658be678492e40212c79b75d1bcc0c9d1d665083"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -41,8 +41,8 @@ sha256 = "15d8d9d85050558c0be30c9b5b591818f94d9a2aca057db681aa3ff0ba069c75"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 315526
-sha256 = "9a713cae184c7dd91c69fb61e56a935ab02e49e67284c8b8cbd758829945df7e"
+bytes = 315524
+sha256 = "2bfa9e8f4a45e275eff6ec018df87aba1dbab7cebd618e2702232ce183f53aae"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -381,8 +381,8 @@ sha256 = "11fb788e9b4da6deb19b0e2ccde54822a3dd084c9044a94c44acc4d189ad9e3e"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-change-carries-check.md"
-bytes = 3621
-sha256 = "d565efcd59a19d866abc842f6be55d1812d76877865e3a6bfb4dd8a91f8184bd"
+bytes = 3619
+sha256 = "d4641e2663cbe4b318af5b971904a2be4ac8b682228175c93c249722feb6d7ec"
 
 [[sources]]
 path = ".aiqt/core/rules/quali-compatibility-or-migration.md"
@@ -847,7 +847,7 @@ sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
 bytes = 1104
-sha256 = "907869de848de3ab288a72b6c6738af3df816e78ff1ada17a42bbc8ad8eea3b7"
+sha256 = "2de6aa0318a61eef0f7cc503f4b9f9f62261761af90e4252d48e48db20b4e018"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -1186,8 +1186,8 @@ sha256 = "11fb788e9b4da6deb19b0e2ccde54822a3dd084c9044a94c44acc4d189ad9e3e"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-change-carries-check.md"
-bytes = 3621
-sha256 = "d565efcd59a19d866abc842f6be55d1812d76877865e3a6bfb4dd8a91f8184bd"
+bytes = 3619
+sha256 = "d4641e2663cbe4b318af5b971904a2be4ac8b682228175c93c249722feb6d7ec"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-QUALI-compatibility-or-migration.md"
@@ -1856,8 +1856,8 @@ sha256 = "868392342c7c5a916cf0db183a6b0c952ddf13618eef7fb592352add2be1ad01"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-change-carries-check.mdc"
-bytes = 3427
-sha256 = "7bf9a8b2f2150f52e6b65e4be796f0b02b2a452d4585cb291ae9c47de47b691c"
+bytes = 3425
+sha256 = "60d8c1a13f24251d44c181a6747e00dc5f0d621f28b74d8b2327b3fad3e2fb66"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-compatibility-or-migration.mdc"
@@ -2311,8 +2311,8 @@ sha256 = "21fde9319bf20547792d6aa11a8d14c6cd93eb26b686ec0ea03035802ec0278a"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 118900
-sha256 = "a88ecf8a529a7f96e089c127b2009c4e0557f03dca3caf8902a49a6b73041530"
+bytes = 118898
+sha256 = "37650989e2db31cb5d45115bfd07b1b6227e58aaee53cbcca0ed0dd22ea982b3"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2376,8 +2376,8 @@ sha256 = "35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 118861
-sha256 = "53721d399c0561da52a7f2c974d281fef791c1b2f7cb2da03e165e622926dd0e"
+bytes = 118859
+sha256 = "8879e3932193c8ccac90bfc05a583ab8e086beb35cc4ed01e5ee521b8d13f5b7"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2396,8 +2396,8 @@ sha256 = "fb7ada4c8106de6734e1b59b9753c7549fbc23f06d9225c2201c6df727d1ad38"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 118896
-sha256 = "fde9b920c27d5786dc9af49e78a16e33cc91207da0ebc2fc000ca0a288fca5c9"
+bytes = 118894
+sha256 = "93d03f3e46044370df5194099444e0153c1cbe4536dedda7d3eebec2fc12ff6d"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
@@ -4977,7 +4977,7 @@ sha256 = "11fb788e9b4da6deb19b0e2ccde54822a3dd084c9044a94c44acc4d189ad9e3e"
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-change-carries-check.md"
 path = ".claude/rules/aiqt/10-QUALI-change-carries-check.md"
 kind = "file"
-sha256 = "d565efcd59a19d866abc842f6be55d1812d76877865e3a6bfb4dd8a91f8184bd"
+sha256 = "d4641e2663cbe4b318af5b971904a2be4ac8b682228175c93c249722feb6d7ec"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-QUALI-compatibility-or-migration.md"
@@ -5781,7 +5781,7 @@ sha256 = "868392342c7c5a916cf0db183a6b0c952ddf13618eef7fb592352add2be1ad01"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-change-carries-check.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-QUALI-change-carries-check.mdc"
 kind = "file"
-sha256 = "7bf9a8b2f2150f52e6b65e4be796f0b02b2a452d4585cb291ae9c47de47b691c"
+sha256 = "60d8c1a13f24251d44c181a6747e00dc5f0d621f28b74d8b2327b3fad3e2fb66"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-QUALI-compatibility-or-migration.mdc"
@@ -6321,13 +6321,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "a88ecf8a529a7f96e089c127b2009c4e0557f03dca3caf8902a49a6b73041530"
+sha256 = "37650989e2db31cb5d45115bfd07b1b6227e58aaee53cbcca0ed0dd22ea982b3"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "53721d399c0561da52a7f2c974d281fef791c1b2f7cb2da03e165e622926dd0e"
+sha256 = "8879e3932193c8ccac90bfc05a583ab8e086beb35cc4ed01e5ee521b8d13f5b7"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -6340,7 +6340,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "fde9b920c27d5786dc9af49e78a16e33cc91207da0ebc2fc000ca0a288fca5c9"
+sha256 = "93d03f3e46044370df5194099444e0153c1cbe4536dedda7d3eebec2fc12ff6d"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
