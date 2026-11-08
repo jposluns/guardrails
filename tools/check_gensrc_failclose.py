@@ -1670,6 +1670,29 @@ def _cleanup_leaked_descendant(leaked, failures, cannot_evaluate):
         _load_bound._kill_pid(pid)
 
 
+def _load_case_hang_bound_problems(hang_budget_s, stall_s, margin_s=2.0, flip_stall_s=30.0):
+    """The load-tolerance self-test case's hang lane, checked against the poll loop of
+    _load_bound._watch at the injected maximum load factor: an empty list, or one line per bound
+    that fails. The stall fires at most 2 * (POLL_S + SCAN_S) + stall_s wall seconds after launch
+    (the first progress poll within POLL_S + SCAN_S, then idle time tested only at polls at most
+    POLL_S + SCAN_S apart), and that must come at least margin_s before the hang budget in wall
+    seconds, so the stall, not the budget, decides the hang row. The budget fires at the first poll
+    at or after it, at most POLL_S + SCAN_S late, and that must come before a flip_stall_s stall
+    bound could fire (never before POLL_S + flip_stall_s), so that flip still reads the budget."""
+    poll_and_scan = _load_bound.POLL_S + _load_bound.SCAN_S
+    latest_stall = 2 * poll_and_scan + stall_s
+    budget_wall = hang_budget_s * _load_bound.MAX_LOAD_FACTOR
+    problems = []
+    if latest_stall + margin_s > budget_wall:
+        problems.append("the hang's stall can fire as late as {:g} wall s, less than {:g} s before its "
+                        "{:g} wall s budget".format(latest_stall, margin_s, budget_wall))
+    if budget_wall + poll_and_scan >= _load_bound.POLL_S + flip_stall_s:
+        problems.append("the hang's {:g} wall s budget can fire as late as {:g} s, not before a {:g} s "
+                        "stall bound could ({:g} s)".format(budget_wall, budget_wall + poll_and_scan,
+                                                           flip_stall_s, _load_bound.POLL_S + flip_stall_s))
+    return problems
+
+
 def self_test_main():
     # The lifecycle applies the git fixture scrub itself after saving the caller's environment; a
     # scrub before it would make it save, and so restore, the already scrubbed values.
@@ -1900,8 +1923,11 @@ def _self_test_main_isolated():
         #     generator that takes about 2 s while printing progress passes every probe (a 1 s wall-clock
         #     bound would have made it cannot-evaluate); a generator that sleeps silently is still stopped
         #     by the stall bound (exit 2; a spy on _run_check requires the stop to be the stall bound's,
-        #     not the 16 s budget's); and on an idle host the same slow generator overruns the 1 s budget
-        #     (exit 2), so the pass is owed to the load adjustment; a generator exiting 0 on a corrupt target
+        #     not the budget's, and the hang lane's own 20 wall s budget leaves the derived stall bound a
+        #     margin of at least 2 s, checked as a row); and on an idle host the same slow generator
+        #     overruns the 1 s budget (exit 2, and the spy requires that stop to be the budget's, not any
+        #     other cannot-evaluate cause), so the pass is owed to the load adjustment. Under the same
+        #     injected cap, a generator exiting 0 on a corrupt target
         #     beside a leaked descendant is a violation (exit 1), and a generator REJECTING the corrupt
         #     target (nonzero) beside the same leak passes (exit 0): the own exit stands either way, never
         #     filed as cannot-evaluate, but only once the stopped probe passed the same post-probe
@@ -1949,27 +1975,56 @@ def _self_test_main_isolated():
         #     at its gate value, because the sweep also uses it as the plain wall-clock timeout of every
         #     template git command (_materialize_git); cut to 1 s, a git call slowed past 1 s by host load
         #     ended the sweep cannot-evaluate (exit 2) before any probe ran, at whichever position it hit.
-        #   * The stall bound is 3 wall s, three poll intervals (_load_bound.POLL_S): at 1 s, one poll in
-        #     which a starved child showed no output and no CPU tick already fired it, so a slow or leaky
-        #     generator could be stopped before its own exit. At the injected cap the budget is 16 wall s,
-        #     so the silent hang is still stopped by the stall bound at most 3 + 1 (poll) + 5 (SCAN_S) = 9
-        #     wall s in, 7 s before the budget could fire.
+        #   * The stall bound is 3 wall s. At 1 s, one poll in which a starved child showed no output and no
+        #     CPU tick already fired it, so a slow or leaky generator could be stopped before its own exit.
+        #     Measured on 2026-11-08, 12 runs each of the hang and the idle fixture, 4 of each beside 8
+        #     busy-loop processes, on an 80-CPU host whose 1-minute load average stayed between 39.5 and
+        #     45.4 throughout (other work; the 8 busy loops added little): launch to the first progress
+        #     poll took 1.04 to 1.07 s in every run of both fixtures; every hang run had exactly one
+        #     progress poll and its stall fired 3.12 to 3.18 s after it (4.17 to 4.23 s after launch);
+        #     every idle run was stopped by its 1 s budget 0.001 to 0.004 s after its only progress poll;
+        #     each process-table scan took about 0.05 s. The worst observed silence before the stall fired
+        #     (3.18 s) is the bound plus one poll, so 3 s stays: about 2.8 times the worst observed launch
+        #     to first progress poll (1.07 s), and 12 times the slow generator's longest silent wait
+        #     (0.25 s). These figures come from that one host and load; a more starved host is covered
+        #     only by the derived bound below.
+        #   * The hang's bound, derived from the poll loop in _load_bound._watch: each poll waits POLL_S
+        #     (1 s) in communicate and then scans the process table; a scan that completes takes under
+        #     SCAN_S (5 s), and one cut short turns the stall test off for the rest of the run (the budget
+        #     then stops the hang and the hang row turns red, never a false pass). The first poll always
+        #     counts as progress (there is no earlier CPU reading), so the first progress poll lands at
+        #     most POLL_S + SCAN_S = 6 s after launch. Idle time is measured from the last progress poll
+        #     and tested only at poll times, at most POLL_S + SCAN_S apart, so the stall fires at most
+        #     3 + POLL_S + SCAN_S = 9 s after the last progress poll. With no progress after the first
+        #     poll (every measured run) the hang is stopped at most 6 + 9 = 15 s after launch, plus the
+        #     spawn time and any delay in scheduling this process; a child still starting up at a later
+        #     poll moves its last progress poll, and the bound, later by that much. At the injected cap
+        #     the shared 1 s budget is 16 wall s, a margin of only 1 s, so the hang lane has its own
+        #     budget of 1.25 s, 20 wall s at the cap: a margin of 5 s.
+        #   * A stall bound of 30 s (the flip that shows which bound stopped the hang) cannot fire before
+        #     POLL_S + 30 = 31 s after launch, while the 20 wall s hang budget fires at the first poll at or
+        #     after 20 s, at most 20 + POLL_S + SCAN_S = 26 s in: the budget stops the hang first and the
+        #     hang row reads ['budget'], red. A hang budget of 25 wall s or more would let that flip race
+        #     the stall. _load_case_hang_bound_problems checks both of these against the _load_bound
+        #     constants, as a row of this case.
         #   * The three leaky fixtures run under the injected cap: their 16 wall s budget cannot cut the
         #     generator's own exit short, and only the stall bound stops each on its leaked descendant.
         #   * On the idle clock the budget is 1 wall s and the slow generator sleeps 2 s, so the budget
         #     fires before it can exit; the stop kind is checked, so that position fails if anything
         #     other than the budget ends the run.
         _LOAD_CASE_BUDGET_S, _LOAD_CASE_STALL_S = 1, 3
+        _LOAD_CASE_HANG_BUDGET_S = 1.25
 
         def _evaluate_load_tolerance(fixtures):
-            global _run_check, _now, _load_factor, PROBE_TIMEOUT, PROBE_STALL_S
+            global _run_check, _now, _load_factor, PROBE_STALL_S
             slow, hang, leaky, leaky_reject, leaky_reject_escape = fixtures
             lane = {"name": None}
             stops = {"hang": [], "idle": []}
 
             def _budgeted_run_check(script_path, cwd, timeout=PROBE_TIMEOUT, env_overrides=None):
+                budget = _LOAD_CASE_HANG_BUDGET_S if lane["name"] == "hang" else _LOAD_CASE_BUDGET_S
                 try:
-                    return saved_run_check(script_path, cwd, min(timeout, _LOAD_CASE_BUDGET_S), env_overrides)
+                    return saved_run_check(script_path, cwd, min(timeout, budget), env_overrides)
                 except _load_bound.Hung as exc:
                     if lane["name"] in stops:
                         stops[lane["name"]].append(exc.kind)
@@ -1993,7 +2048,7 @@ def _self_test_main_isolated():
                 rc_idle = sweep_quiet(slow)
                 lane["name"] = None
             finally:
-                _load_factor, PROBE_TIMEOUT, PROBE_STALL_S = saved_bounds
+                _load_factor, PROBE_STALL_S = saved_bounds[0], saved_bounds[2]
                 _now = saved_now
                 _run_check = saved_run_check
                 # The survivor scan's three distinct results: None on a host WITH /proc is a
@@ -2015,6 +2070,10 @@ def _self_test_main_isolated():
                 failures.append("load tolerance: expected the slow generator on an idle host to be stopped "
                                 "by the load-adjusted budget alone (['budget']), got {!r}"
                                 .format(sorted(set(stops["idle"]))))
+            # The hang lane's derived bound (sizing notes above): its stall must fire at least 2 s before
+            # its budget, and that budget must stop it before a 30 s stall bound could.
+            failures.extend("load tolerance: " + problem for problem in _load_case_hang_bound_problems(
+                _LOAD_CASE_HANG_BUDGET_S, _LOAD_CASE_STALL_S))
             # The escaping fixture's exit 2 must come from the stopped-path CONTAINMENT validation, not
             # from any other cannot-evaluate condition that shares the exit code: require the
             # containment diagnostic itself (printed in the sweep's CANNOT-EVALUATE report).
@@ -2588,8 +2647,10 @@ def _self_test_main_isolated():
           "detected (exit 2); a decode-only generator is caught (exit 1) specifically by a "
           "valid-but-different / same-length content probe; a total-runtime deadline overrun returns exit "
           "2; a generator slower than the per-probe bound passes under host load while a silently sleeping "
-          "generator (stopped by the heuristic stall bound, not the budget) and the same slow generator on an "
-          "idle host each return exit 2, while one exiting 0 on a corrupt target beside a leaked descendant "
+          "generator (stopped by the heuristic stall bound, not the budget, whose derived latest stop is "
+          "at least 2 s before its own budget) and the same slow generator on an idle host (stopped by the "
+          "budget, not any other cause) each return exit 2, while, under the same injected load, one "
+          "exiting 0 on a corrupt target beside a leaked descendant "
           "(the leaky fixture) returns exit 1, one rejecting the corrupt target beside the same leak (the "
           "leaky_reject fixture) returns exit 0, and a stopped rejection that swapped its target for an "
           "escaping symlink (the leaky_reject_escape fixture) returns exit 2 with the containment "
