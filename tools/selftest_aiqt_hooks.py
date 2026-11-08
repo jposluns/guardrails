@@ -16971,11 +16971,10 @@ def _main_isolated(monitor):
                  "git checkout -b h24f --detach orphan-start", "deny")
         brexpect("(H24g) checkout --detach --no-detach -b creation denies (no silent allow)",
                  "git checkout --detach --no-detach -b h24g orphan-start", "deny")
-        # H25: a `git worktree add --detach` creates NO branch, so it is allowed even from an orphan
-        # (round-6 codex MAJOR: --detach was over-denied).
-        # H25: --detach is option-order-dependent (a later --no-detach flips it, git applies last), so a
-        # detach form is not confidently classifiable and fail-safe ASKS (redesign-fix-7, codex --no-detach
-        # BLOCKER); never a silent allow of a --detach --no-detach -b creation.
+        # H25: a `git worktree add --detach` creates no branch, but its commit-ish is still probed, so an
+        # orphaned one denies (H33 has the rooted allows). A later --no-detach flips --detach (git applies
+        # the last), so a form carrying it is not classifiable and denies fail-safe; never a silent allow
+        # of a --detach --no-detach -b creation.
         brexpect("(H25a) worktree add --detach <path> <orphan> denies",
                  "git worktree add --detach /tmp/wt-detach orphan-start", "deny")
         brexpect("(H25b) worktree add --detach --no-detach -b <name> creation denies (no silent allow)",
@@ -16991,10 +16990,128 @@ def _main_isolated(monitor):
                  "git branch --unknown-flag qa orphan-start", "deny")
         brexpect("(H26d) checkout --patch (benign unrecognized) denies (fail-safe)",
                  "git checkout --patch somefile", "deny")
-        brexpect("(H26e) worktree add -d (short --detach) denies",
+        brexpect("(H26e) worktree add -d (short --detach) on an orphaned start denies",
                  "git worktree add -d /tmp/wt-shortd orphan-start", "deny")
         brexpect("(H26f) branch -lv (version-ambiguous -l) denies",
                  "git branch -lv somepattern", "deny")
+
+        # H33: a `git worktree add --detach|-d <path> <commit-ish>` creates no branch, so its commit-ish is
+        # probed as a -b start is: a rooted one ALLOWS in any option position, through -C from a non-git
+        # cwd as the -b form does; an orphaned or unresolvable one, a missing or extra operand, -b beside
+        # it, --orphan, an abbreviated or valued --detach, a detach word after -- (an operand to git), a git
+        # alias, and the bare form without --detach still DENY.
+        h33_allow = (
+            ("(H33a) worktree add --detach before the operands on a rooted start allows",
+             "git -C {} worktree add --detach /tmp/wt-h33a {}".format(brr, br_tip), str(_f12_plain)),
+            ("(H33b) worktree add --detach after the operands on a rooted start allows",
+             "git -C {} worktree add /tmp/wt-h33b {} --detach".format(brr, br_tip), str(_f12_plain)),
+            ("(H33c) worktree add -d on a rooted start allows",
+             "git worktree add -d /tmp/wt-h33c {}".format(br_tip), brr),
+            ("(H33d) worktree add -qd -- <path> <rooted> allows (operands after --)",
+             "git worktree add -qd -- /tmp/wt-h33d origin/HEAD", brr),
+        )
+        for label, command, cwd in h33_allow:
+            got = _decision(brg, command, cwd=cwd)
+            if got != "allow":
+                failures.append("{}: expected allow, got {}".format(label, got))
+        # The orphaned and unresolvable starts deny from the ancestry probe, so each names the probe's reason,
+        # not the reason of a form this guard cannot classify.
+        for label, command, fragment in (
+                ("(H33e) worktree add --detach on an orphaned start denies naming the missing merge base",
+                 "git -C {} worktree add /tmp/wt-h33e {} --detach".format(brr, br_orphan),
+                 "has no merge base with origin/HEAD"),
+                ("(H33f) worktree add --detach on an unresolvable start denies naming the unresolved start",
+                 "git -C {} worktree add --detach /tmp/wt-h33f no-such-ref-h33f".format(brr),
+                 "ancestry could not be evaluated (the branch start point")):
+            _h33_code, _h33_out, _h33_err = brg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                 "tool_input": {"command": command}, "cwd": brr})
+            _h33_got = _reduce_result(_h33_code, _h33_out)
+            _h33_reason = ((_h33_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _h33_got != "deny" or fragment not in _h33_reason:
+                failures.append("{}: expected deny naming {!r}, got {} {!r}".format(
+                    label, fragment, _h33_got, _h33_reason))
+        for label, command in (
+                ("(H33g) worktree add --orphan beside --detach still denies",
+                 "git worktree add --detach --orphan /tmp/wt-h33g {}".format(br_tip)),
+                ("(H33h) worktree add --detach with a third operand denies",
+                 "git worktree add --detach /tmp/wt-h33h {} extra".format(br_tip)),
+                ("(H33i) worktree add --detach with no commit-ish denies",
+                 "git worktree add --detach /tmp/wt-h33i"),
+                ("(H33j) worktree add --detach beside -b denies",
+                 "git worktree add --detach -b h33j /tmp/wt-h33j {}".format(br_tip)),
+                ("(H33k) worktree add --det (abbreviated) denies",
+                 "git worktree add --det /tmp/wt-h33k {}".format(br_tip)),
+                ("(H33l) worktree add --detach=yes (valued) denies",
+                 "git worktree add --detach=yes /tmp/wt-h33l {}".format(br_tip)),
+                ("(H33m) worktree add -- <path> <rooted> --detach denies (a --detach after -- is a third "
+                 "operand, not the option)",
+                 "git worktree add -- /tmp/wt-h33m {} --detach".format(br_tip)),
+                ("(H33n) worktree add <path> <rooted> without --detach still denies",
+                 "git worktree add /tmp/wt-h33n {}".format(br_tip)),
+                ("(H33o) worktree add --detach under a git alias denies",
+                 "git -c alias.wa=worktree wa add --detach /tmp/wt-h33o {}".format(br_tip))):
+            brexpect(label, command, "deny")
+        # A --git-dir or GIT_DIR redirect, a -c option with no -C, or an empty -C names a repository this guard
+        # does not pin, so a detach under one allows with a note whatever its start, with no ancestry probe, as
+        # the -b form does; the CI branch-root gate stays the backstop.
+        h33_note = (
+            ("(H33p) worktree add --detach on an orphaned start under --git-dir allows with a note",
+             "git --git-dir={}/.git worktree add --detach /tmp/wt-h33p {}".format(brr, br_orphan)),
+            ("(H33q) worktree add --detach on an orphaned start under a GIT_DIR prefix allows with a note",
+             "GIT_DIR={}/.git git worktree add --detach /tmp/wt-h33q {}".format(brr, br_orphan)),
+            ("(H33r) worktree add --detach on an orphaned start under a -c option allows with a note",
+             "git -c core.x=1 worktree add --detach /tmp/wt-h33r {}".format(br_orphan)),
+            ("(H33s) worktree add -d on an orphaned start under an empty -C allows with a note",
+             "git -C '' worktree add -d /tmp/wt-h33s {}".format(br_orphan)),
+        )
+        for label, command in h33_note:
+            brexpect(label, command, "allow-note")
+        # Flip: the old classifier, which returned _ASK_START at the first detach token its walk met (so
+        # every detach form denied), must turn each H33 allow and allow-note vector red, so they test the
+        # detach branch and not some other allow. It walks the arguments as the classifier does, so a d that is the value of
+        # -b (-bd, -b -d) stays a branch name; with no detach token met the classifier's own answer stands.
+        _h33_saved = aiqt_hooks._worktree_creation_start
+
+        def _h33_old_detach_deny(args):
+            if not args or args[0] != "add":
+                return _h33_saved(args)
+            created = False
+            i = 1
+            while i < len(args):
+                tok = args[i]
+                if tok in aiqt_hooks._EOO_TOKENS:
+                    break                               # the rest are operands
+                if tok.startswith("--") and len(tok) > 2:
+                    if tok in aiqt_hooks._CLEAN_LONG_BOOLEANS:
+                        i += 1
+                        continue
+                    return aiqt_hooks._ASK_START        # --detach, and every other long option
+                if tok.startswith("-") and len(tok) > 1:
+                    chars = tok[1:]
+                    for j, ch in enumerate(chars):
+                        if ch in aiqt_hooks._CLEAN_SHORT_LETTERS:
+                            continue
+                        if ch in aiqt_hooks._WORKTREE_CREATE_SHORT and not created:
+                            created = True
+                            if not chars[j + 1:]:
+                                i += 1                  # separated value: -b NAME
+                            break
+                        return aiqt_hooks._ASK_START    # -d, and every other short letter
+                i += 1
+            return _h33_saved(args)
+
+        aiqt_hooks._worktree_creation_start = _h33_old_detach_deny
+        try:
+            for label, command, cwd in h33_allow:
+                got = _decision(brg, command, cwd=cwd)
+                if got != "deny":
+                    failures.append("{} flip: the old detach deny must turn it red, got {}".format(label, got))
+            for label, command in h33_note:
+                got = _decision(brg, command, cwd=brr)
+                if got != "deny":
+                    failures.append("{} flip: the old detach deny must turn it red, got {}".format(label, got))
+        finally:
+            aiqt_hooks._worktree_creation_start = _h33_saved
 
         # === L11: shared raw-aware tokenizer regression matrix (direct _lex_command assertions) =======
         # Assert the exact cleaned argv and the redirect metadata, BEFORE the handler-level vectors, so a

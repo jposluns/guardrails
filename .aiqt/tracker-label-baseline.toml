@@ -269,8 +269,8 @@ reviewer-source = 5
 [[path]]
 path = "tools/selftest_aiqt_hooks.py"
 fix-id = 23
-review-round = 206
-reviewer-source = 58
+review-round = 205
+reviewer-source = 57
 
 [[path]]
 path = "tools/selftest_ci_status.py"
