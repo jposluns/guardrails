@@ -4116,6 +4116,7 @@ expected-check-ids = [
   "preflight/p7-cr-only-source",
   "preflight/p7-crlf-source",
   "preflight/p7-declared-encoding",
+  "preflight/p7-strict-decode-cannot-evaluate",
   "preflight/p7-cookie-second-line-cannot-evaluate",
   "preflight/p7-unparsable-source-cannot-evaluate",
   "preflight/p7-segment-failure-cannot-evaluate",
@@ -4123,6 +4124,7 @@ expected-check-ids = [
   "preflight/p7-non-regular-entry-cannot-evaluate",
   "preflight/p7-replace-objects-ignored",
   "preflight/p7-tag-pin-replace-ignored",
+  "preflight/p7-exists-replace-ignored",
   "preflight/p7-reviewed-heads-cannot-evaluate",
   "revert/p7-red",
   "revert/p7-symbol-scope-red",
@@ -4130,8 +4132,10 @@ expected-check-ids = [
   "revert/p7-pin-read-red",
   "revert/p7-regular-file-red",
   "revert/p7-tag-pin-replace-red",
+  "revert/p7-exists-replace-red",
   "revert/p7-cookie-cr-split-red",
   "revert/p7-cookie-second-line-red",
+  "revert/p7-strict-decode-red",
   "revert/every-flip-ran",
 ]
 

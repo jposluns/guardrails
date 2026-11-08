@@ -3106,7 +3106,7 @@ REGULAR_FILE_MODES = ("100644", "100755")
 def read_at_revision(repo, commit, path):
     """The bytes of `path` at `commit` in `repo`, read from the object store (never HEAD, the index or the
     working tree), or None when the commit has no entry at that path. Both reads run under GIT_READ_TIMEOUT
-    and _git_read_env(), hermetic like the P3 reads (_cat_file keeps checking existence only). git ls-tree
+    and _no_replace_env(), hermetic like the P3 reads (_cat_file keeps checking existence only). git ls-tree
     names the entry first, through a :(literal) pathspec so no wildcard is applied: only a regular-file blob
     (mode 100644 or 100755) of at most P7_READ_MAX_BYTES is then read, with git cat-file blob; any other
     entry (a symlink, a submodule, a directory), an oversized blob, a repository git refuses for its
@@ -4470,11 +4470,14 @@ P7_MODULE_NEW = P7_MODULE_OLD.replace("needle inside old", "needle inside new")
 # sources of the fifth fixture commit, each with a needle inside target() and another after it, and what
 # each row pins: a lone CR line end before the def, a lone CR inside a string literal, only lone CR line
 # ends, and CRLF line ends (the parser's line split); latin_first, valid UTF-8 whose first line declares
-# latin-1 (the cookie refusal itself); latin_second, bytes that are not UTF-8 (refused for the bytes,
-# whatever its cookie says, so it pins the strict decode, not the cookie check); gbk_cr_blank and
-# gbk_shebang, valid UTF-8 declaring gbk on the second line after a lone-CR blank line and after a shebang
-# (the second-line cookie refusal, found only when the first two lines are split at a lone CR too and the
-# second is read); a UTF-8 cookie in two spellings (read, not refused); and source ast cannot parse
+# latin-1 (the cookie refusal itself); latin_second, bytes that are not UTF-8 declaring latin-1 on the
+# second line after a lone-CR shebang (the second-line cookie refusal: with the strict decode weakened,
+# the cookie still refuses it, so it does not pin the decode); latin_body and latin_body_utf8_cookie,
+# bytes that are not UTF-8 only after the second line, with no cookie and with a UTF-8 cookie (no cookie
+# check refuses them, so only the strict decode does: they pin it); gbk_cr_blank and gbk_shebang, valid
+# UTF-8 declaring gbk on the second line after a lone-CR blank line and after a shebang (the second-line
+# cookie refusal, found only when the first two lines are split at a lone CR too and the second is read);
+# a UTF-8 cookie in two spellings (read, not refused); and source ast cannot parse
 P7_TAIL = b"\n\n\nAFTER = 'needle after'\n"
 P7_SOURCES = {
     "pkg/cr_line.py": b"def first():\r    return 1\n\n\ndef target():\n    return 'needle target'\n" + P7_TAIL,
@@ -4486,6 +4489,9 @@ P7_SOURCES = {
                            + b"'\n" + P7_TAIL),
     "pkg/latin_second.py": (b"#!/usr/bin/env python3\r# -*- coding: latin-1 -*-\ndef target():\n    return '"
                             + b"\xe9" * 40 + b"'\n" + P7_TAIL),
+    "pkg/latin_body.py": b"def target():\n    return 'needle target'\nY = '\xe9'\n" + P7_TAIL,
+    "pkg/latin_body_utf8_cookie.py": (b"# coding: utf-8\ndef target():\n    return 'needle target'\nY = '\xe9'\n"
+                                      + P7_TAIL),
     "pkg/utf8_cookie.py": (b"# -*- coding: utf-8 -*-\ndef target():\n    return 'needle target \xc3\xa9'\n"
                            + P7_TAIL),
     "pkg/gbk_cr_blank.py": b"\r# coding: gbk\ndef target():\n    return 'needle target'\n" + P7_TAIL,
@@ -4516,14 +4522,17 @@ def p7_big_source(size):
 
 
 def _p7_repo(base):
-    """(repo, [five commit ids], tag-object pin) of a fixture repository for P7: the first commit holds the
-    manifests and a module the anchors read, the second changes their content (so a later HEAD differs from
-    the first pin), the third makes the gates manifest invalid TOML and the fourth gives it two rows with one
-    id. The fifth adds the P7_SOURCES, sources of P7_READ_MAX_BYTES less one, exactly and plus one bytes, a
+    """(repo, [five commit ids], tag-object pin, replaced commit) of a fixture repository for P7: the first
+    commit holds the manifests and a module the anchors read, the second changes their content (so a later
+    HEAD differs from the first pin), the third makes the gates manifest invalid TOML and the fourth gives it
+    two rows with one id. The fifth adds the P7_SOURCES, sources of P7_READ_MAX_BYTES less one, exactly and plus one bytes, a
     symbolic link and a submodule entry. A refs/replace entry then substitutes the first commit's module blob with the
     second's, which a read that honoured replace objects would take at the first pin; an annotated tag of the
     first commit, returned as the tag-object pin, gets a refs/replace entry pointing it at an annotated tag
-    of the second commit, which a resolution that honoured replace objects would peel to the second commit."""
+    of the second commit, which a resolution that honoured replace objects would peel to the second commit.
+    Last, a commit outside every branch with the first commit's tree, returned as the replaced commit, gets a
+    refs/replace entry pointing it at a commit with the fifth commit's tree, so a path the fifth adds is
+    absent at the replaced commit but found by an existence probe that honoured replace objects."""
     repo = base / "p7-repo"
     os.makedirs(repo / ".aiqt" / "core" / "gates")
     os.makedirs(repo / ".aiqt" / "core" / "hooks")
@@ -4572,7 +4581,13 @@ def _p7_repo(base):
         tags.append(subprocess.run(git + ["rev-parse", "refs/tags/" + name], check=True, capture_output=True,
                                    timeout=60, env=env).stdout.decode("ascii").strip())
     subprocess.run(git + ["replace", tags[0], tags[1]], check=True, capture_output=True, timeout=60, env=env)
-    return repo, commits, tags[0]
+    trees = [subprocess.run(git + ["rev-parse", commit + "^{tree}"], check=True, capture_output=True, timeout=60,
+                            env=env).stdout.decode("ascii").strip() for commit in (commits[0], commits[4])]
+    made = [subprocess.run(git + ["commit-tree", "-m", message, tree], check=True, capture_output=True,
+                           timeout=60, env=env).stdout.decode("ascii").strip()
+            for message, tree in (("genuine paths", trees[0]), ("replacement paths", trees[1]))]
+    subprocess.run(git + ["replace", made[0], made[1]], check=True, capture_output=True, timeout=60, env=env)
+    return repo, commits, tags[0], made[0]
 # The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
 # larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
 # (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
@@ -7353,7 +7368,7 @@ def self_test(report_path=None):
     # ---------- P7: accepted residuals at the pin ----------
     p7_base = Path(tempfile.mkdtemp(prefix="aiqt-brief-p7-"))
     try:
-        p7_repo, p7_commits, p7_tag_pin = _p7_repo(p7_base)
+        p7_repo, p7_commits, p7_tag_pin, p7_replaced = _p7_repo(p7_base)
         p7_old, p7_head, p7_entries = p7_commits[0], p7_commits[3], p7_commits[4]
 
         def p7(lines, pin=p7_old, family="alpha"):
@@ -7462,6 +7477,11 @@ def self_test(report_path=None):
                p7_entry("pkg/utf8_cookie.py", "needle target é"),
                p7_entry("pkg/utf8_cookie.py", "needle after"), p7_entry("pkg/utf8_spelt.py", "needle target")],
               ["CannotEvaluate", "CannotEvaluate", (0, []), p7_hard, (0, [])])
+        # bytes that are not UTF-8 only after the second line, with no cookie or a UTF-8 one, pass every
+        # cookie check: only the strict decode refuses them
+        check("preflight/p7-strict-decode-cannot-evaluate",
+              [p7_entry("pkg/latin_body.py", "needle target"),
+               p7_entry("pkg/latin_body_utf8_cookie.py", "needle target")], ["CannotEvaluate"] * 2)
         # a non-UTF-8 cookie on the second line of valid UTF-8 bytes is refused: after a lone-CR blank line
         # (hidden from a split that reads only LF line ends) and after a shebang (hidden from a guard that
         # reads only the first line)
@@ -7496,6 +7516,11 @@ def self_test(report_path=None):
               [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_tag_pin),
                p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_tag_pin)],
               [(0, []), p7_hard])
+        # a refs/replace entry points a commit at one with another path set: the existence probe walks the
+        # genuine tree, where the fifth commit's pkg/cr_line.py is absent and pkg/mod.py is present
+        check("preflight/p7-exists-replace-ignored",
+              [p7("Read pkg/cr_line.py before you answer.\n", p7_replaced),
+               p7("Read pkg/mod.py before you answer.\n", p7_replaced)], [(0, [("P3", "ADVISORY")]), (0, [])])
         # REVIEWED HEAD lines with no BRIEF-PIN line, which the conflict checks do not compare, must all
         # resolve to one commit; two that agree pass
         check("preflight/p7-reviewed-heads-cannot-evaluate",
@@ -7538,9 +7563,19 @@ def self_test(report_path=None):
              p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n", p7_tag_pin)],
             [p7_hard, (0, [])], _rev_parse=replaced_rev_parse))
 
-        def p7_cookie_mutant(heads):
+        def replaced_cat_file(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "cat-file", "-e", commit + ":" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the existence probe again, the replaced commit's path is found
+        # through its replacement's tree and the P3 advisory goes quiet
+        check("revert/p7-exists-replace-red", *flip(
+            [p7_case("Read pkg/cr_line.py before you answer.\n", p7_replaced)], [(0, [])],
+            _cat_file=replaced_cat_file))
+
+        def p7_cookie_mutant(heads, errors="strict"):
             def mutant(data, path, commit):
-                text = data.decode("utf-8-sig")
+                text = data.decode("utf-8-sig", errors)
                 for line in heads(data):
                     declared, _ = tokenize.detect_encoding(iter((line + b"\n",)).__next__)
                     if codecs.lookup(declared).name not in ("utf-8", "utf-8-sig"):
@@ -7558,9 +7593,16 @@ def self_test(report_path=None):
             [p7_case("ACCEPTED-RESIDUAL: pkg/gbk_shebang.py :: target :: needle target\n", p7_entries)],
             [(0, [])], python_source_text=p7_cookie_mutant(
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:1])))
+        # with the decode weakened to errors='replace' (the two-line cookie check kept), bytes that are not
+        # UTF-8 after the second line are read and the anchors pass
+        check("revert/p7-strict-decode-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/latin_body.py :: target :: needle target\n", p7_entries),
+             p7_case("ACCEPTED-RESIDUAL: pkg/latin_body_utf8_cookie.py :: target :: needle target\n", p7_entries)],
+            [(0, [])] * 2, python_source_text=p7_cookie_mutant(
+                lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 226)
+    check("revert/every-flip-ran", len(flipped), 228)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
