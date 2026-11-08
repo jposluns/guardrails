@@ -659,15 +659,15 @@ source that defines its input forms. The cases cover the outcomes the fix change
 the boundaries it affects. The tests of changed outcomes are observed to fail with the fix reverted; tests of
 preserved outcomes need not, since they exist to catch a fix that wrongly moves a sibling's verdict.
 
-A move of executable code, or a rewrite of paths code depends on, meant to preserve behaviour carries checks
-that, from the resulting layout with the old locations absent or unreachable, run the affected code, its
-tests, and each build or generator that reads an affected directory. Each behaviour altered by a move of
-executable code, or by a rewrite of paths code depends on, is guarded by an automated test or gate that lands
-together with the move or rewrite and fails when the move or rewrite is absent. For a move of executable
-code, or a rewrite of paths code depends on, replayed edits, byte comparisons of rewritten lines,
-stale-reference searches, and passing textual gates are evidence about its edits, not about its resulting
-layout. A move of executable code, or a rewrite of paths code depends on, whose resulting layout cannot be
-exercised is reported unverified.
+A move of executable code, or rewrite of paths code depends on, meant in either case to preserve behaviour,
+carries checks that run the affected code, its tests, and each build or generator that reads an affected
+directory, with the old locations absent or unreachable. Any behaviour altered by a move of executable code,
+or rewrite of paths code depends on, meant in either case to preserve behaviour, is guarded by an automated
+test or gate that lands with and fails without the move or rewrite. For a move of executable code, or rewrite
+of paths code depends on, meant in either case to preserve behaviour, treat replayed edits, byte comparisons
+of rewritten lines, stale-reference searches, and passing textual gates as evidence about its edits, not its
+result. A move of executable code, or rewrite of paths code depends on, meant in either case to preserve
+behaviour, is reported unverified when its result cannot be exercised.
 
 ## Preserve compatibility or provide a migration path
 
