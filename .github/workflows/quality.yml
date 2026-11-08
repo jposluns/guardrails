@@ -962,6 +962,32 @@ jobs:
             python3 -I -B tools/check_branch_root.py --protected "origin/${GITHUB_REF_NAME}" --max-lag 200
           fi
 
+      - name: Moved Python roots self-test
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite moved-python-roots-selftest
+
+      - name: Moved Python roots
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            python3 -I -B tools/check_moved_python_roots.py --base "origin/${GITHUB_BASE_REF}" --head "$PR_HEAD_SHA"
+          else
+            if [ "$EVENT_NAME" = "push" ]; then
+              # The before OID of the push event is the protected tip the push replaced, so
+              # the judged range is exactly what this push changed.
+              python3 -I -B tools/check_moved_python_roots.py --base "$PUSH_BEFORE"
+            else
+              # A workflow_dispatch or schedule run has no event range: the gate derives its
+              # default base from the merge base of HEAD and origin/HEAD.
+              python3 -I -B tools/check_moved_python_roots.py
+            fi
+          fi
+
       - name: Release delta self-test
         shell: bash
         run: python3 -I -B tools/check_release_delta.py --self-test

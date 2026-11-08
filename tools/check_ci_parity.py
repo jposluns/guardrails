@@ -979,6 +979,30 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": (
+            "tools/check_moved_python_roots.py --base <ref:origin/${GITHUB_BASE_REF}> "
+            "--head <ref:$PR_HEAD_SHA>"
+        ),
+        "reason": (
+            "The pull_request CI job judges the moved Python files of the PR "
+            "head against its target branch, both runtime-derived from the "
+            "event; a local run has no PR-head or target-ref context, so the "
+            "bare default-base leg runs locally and in the CI else-branch."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_moved_python_roots.py --base <ref:$PUSH_BEFORE>",
+        "reason": (
+            "The push CI job supplies the event's before OID as the base so "
+            "the judged range is exactly what the push changed; the bare "
+            "default-base leg runs locally and in the CI else-branch."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": "opf/tools/opf.py --self-test",
         "reason": (
             "The host-patch job runs the whole OPF tooling self-test on the "

@@ -854,6 +854,7 @@ tools/check_links.py text eol=lf
 tools/check_manifest.py text eol=lf
 tools/check_mappings.py text eol=lf
 tools/check_mistakes_register.py text eol=lf
+tools/check_moved_python_roots.py text eol=lf
 tools/check_msg_leaks.py text eol=lf
 tools/check_must_deliver.py text eol=lf
 tools/check_newtab.py text eol=lf

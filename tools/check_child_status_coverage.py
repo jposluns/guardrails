@@ -452,6 +452,7 @@ DIRECT_LAUNCH_RESIDUAL = (
     "tools/check_manifest.py",
     "tools/check_mappings.py",
     "tools/check_mistakes_register.py",
+    "tools/check_moved_python_roots.py",
     "tools/check_msg_leaks.py",
     "tools/check_newtab.py",
     "tools/check_no_dashes.py",

@@ -194,6 +194,8 @@ run_gate "version-monotonicity-selftest" python3 -I -B tools/check_version_monot
 run_gate "version-monotonicity" python3 -I -B tools/check_version_monotonicity.py
 run_gate "branch-root-selftest" python3 -I -B tools/check_branch_root.py --self-test
 run_gate "branch-root"          python3 -I -B tools/check_branch_root.py --max-lag 200
+run_gate "moved-python-roots-selftest" python3 -I -B tools/check_selftest_execution.py --suite moved-python-roots-selftest
+run_gate "moved-python-roots"          python3 -I -B tools/check_moved_python_roots.py
 run_gate "release-delta-selftest" python3 -I -B tools/check_release_delta.py --self-test
 run_gate "release-delta"          python3 -I -B tools/check_release_delta.py
 run_gate "release-build-selftest" python3 -I -B tools/check_release_build.py --self-test
