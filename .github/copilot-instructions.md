@@ -573,7 +573,10 @@ not needed, detaching it is a deliberate, recorded choice, not a reflex.
 ## Validation is a gate on apply
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
-source. Trust is never a substitute for the gate.
+source. Trust is never a substitute for the gate. However cheap, a dispatch to a callee with documented
+or demonstrated input refusal conditions requires caller-side validation: the caller first evaluates
+each condition from inputs it holds, withholds dispatch with the callee's reason if one holds or as
+cannot-evaluate if one is undecidable, and retains the callee's check.
 
 ## Workers produce inert data
 
