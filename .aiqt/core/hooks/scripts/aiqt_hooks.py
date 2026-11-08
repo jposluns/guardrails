@@ -14896,16 +14896,18 @@ def branch_root(data):
     <path> <commit-ish>'), any other global option before the subcommand ('--no-pager', '--bare') or any
     leading environment assignment other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
     prefix, when the command carries no -C, --work-tree or GIT_WORK_TREE=; under an empty -C ("-C ''"),
-    with or without a working directory, or a relative -C when the call carries no working directory; and
-    under a --work-tree or GIT_WORK_TREE= redirect with no
-    -C when the call carries no working directory. A detach with a missing or extra operand or beside
-    -b/-B, an --orphan, and a bare 'worktree add <path> [<commit-ish>]' (git may create a branch there)
-    still DENY as forms this guard cannot classify (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
+    with or without a working directory, or a -C chain whose first -C is relative when the call carries no
+    working directory (an absolute first -C, as in '-C /repo -C .', pins the repository); and under a
+    --work-tree or GIT_WORK_TREE= redirect with no -C when the call carries no working directory. A detach
+    with a missing or extra operand or beside -b/-B, an --orphan, and a bare 'worktree add <path>
+    [<commit-ish>]' (git may create a branch there) still DENY as forms this guard cannot classify
+    (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
     ONLY a redirect whose repository this guard cannot pin at all - a --git-dir/GIT_DIR form, a -c or other
     global option or leading assignment (other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
-    prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty or relative-with-no-cwd -C, or a
-    --work-tree/GIT_WORK_TREE= with no -C and no session directory (_segment_repo_dir) - ALLOWS-WITH-NOTE
+    prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty -C, a -C chain whose first -C is relative
+    with no session directory, or a --work-tree/GIT_WORK_TREE= with no -C and no session directory
+    (_segment_repo_dir) - ALLOWS-WITH-NOTE
     (the CI branch-root gate remains the backstop) rather than denying. It never asks. A command carrying a '#'
     whose comment reading depends on context (the shared lexer's comment rule) is judged on the segments of
     both readings of each such '#'; one the lexer cannot judge that way whose text (_hash_doubt_scan) names
@@ -15070,9 +15072,10 @@ def branch_root(data):
             # GIT_WORK_TREE= with no -C (an empty '--work-tree=' included) is probed in the session directory
             # (see below). ONLY a repository this guard cannot pin at all - a --git-dir/GIT_DIR form, a -c or
             # other global option or leading assignment (other than GIT_WORK_TREE= and the removed
-            # GUARDRAIL_ALLOW_DISCARD prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty or
-            # relative-with-no-cwd -C, or a --work-tree or GIT_WORK_TREE= with no -C and no session
-            # directory - ALLOWS-WITH-NOTE
+            # GUARDRAIL_ALLOW_DISCARD prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty -C, a -C
+            # chain whose first -C is relative with no session directory (an absolute first -C, as in
+            # '-C /repo -C .', is pinned and probed), or a --work-tree or GIT_WORK_TREE= with no -C and no
+            # session directory - ALLOWS-WITH-NOTE
             # rather than denying (the CI branch-root gate remains the backstop), never a hard block of a
             # legitimate explicit-target creation.
             # a branch is created in the REPOSITORY git acts on, which --work-tree
@@ -15080,10 +15083,9 @@ def branch_root(data):
             # --git-dir. _segment_repo_dir resolves that (a -C target, or the session cwd when a --work-tree or
             # GIT_WORK_TREE= is present with no -C), so 'git --work-tree=B branch new start' and
             # 'GIT_WORK_TREE=B git -c core.x=1 branch new start' have their ancestry checked in the SESSION repo
-            # they actually create the branch in, not B. A --git-dir/GIT_DIR form, a -c form with no -C,
-            # --work-tree or GIT_WORK_TREE=, an unresolvable -C target, or a --work-tree or GIT_WORK_TREE= with
-            # no -C and no session directory stays the cannot-resolve allow-note (the CI branch-root gate
-            # remains the backstop).
+            # they actually create the branch in, not B. Every cannot-pin case listed above (_segment_repo_dir
+            # returns None or "opaque") stays the cannot-pin allow-note (the CI branch-root gate remains the
+            # backstop).
             rd = _segment_repo_dir(tokens, cwd0)
             if isinstance(rd, str) and rd != "opaque":
                 probe_repo = rd
@@ -15091,10 +15093,10 @@ def branch_root(data):
                 if pending_note is None:
                     pending_note = (
                         "AIQT guardrail (rule brnrot, branch-rooted-on-live-main): this branch creation "
-                        "carries a command-local repository redirect whose target this guard cannot resolve "
-                        "(a --git-dir/GIT_DIR/-c form, or an unresolvable -C target), so it "
-                        "cannot check the start point's ancestry here; it is allowed and the CI branch-root "
-                        "gate remains the backstop. Prefer an explicit '-C <dir>' target and start point.")
+                        "carries a command-local git option or environment assignment (the repository it acts "
+                        "on cannot be pinned from this call), so it cannot check the start point's ancestry "
+                        "here; it is allowed and the CI branch-root gate remains the backstop. Prefer an "
+                        "explicit '-C <dir>' target and start point.")
                 continue
         if probe_repo is None:
             outcome, detail = ("unknown", "the session repository directory is unavailable")
@@ -15117,7 +15119,7 @@ def branch_root(data):
     if pending_deny is not None:
         return _deny(*pending_deny)  # a confirmed orphan / cannot-prove-rooted deny outranks an allow-note
     if pending_note is not None:
-        return _allow_note(pending_note)  # an unresolvable command-local redirect
+        return _allow_note(pending_note)  # a command-local option or assignment whose repository is not pinned
     return _allow()
 
 

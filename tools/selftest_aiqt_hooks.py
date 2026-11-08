@@ -16771,9 +16771,9 @@ def _main_isolated(monitor):
                  "git checkout --track orphan-start", "deny")
         brexpect("(r3f6c) checkout -t <orphan> (short --track, no -b) DENIES",
                  "git checkout -t orphan-start", "deny")
-        # (banner support) a -C/--work-tree target that RESOLVES to a concrete NON-repo directory is probed
-        # there and DENIES via the ancestry-unknown fail-safe (not allow-with-note); only a --git-dir/GIT_dir
-        # or a truly opaque -C notes. /etc is a real dir that is not a git repo.
+        # (banner support) a -C target that RESOLVES to a concrete NON-repo directory is probed there and
+        # DENIES via the ancestry-unknown fail-safe (not allow-with-note); a --work-tree with no -C is probed
+        # in the session directory instead. /etc is a real dir that is not a git repo.
         if _decision(brg, "git -C /etc checkout -b x", cwd=brr) != "deny":
             failures.append("(r3-C-nonrepo) a -C target that resolves to a non-repo concrete dir (/etc) must "
                             "DENY via the ancestry-unknown fail-safe, not allow-with-note")
@@ -17052,8 +17052,8 @@ def _main_isolated(monitor):
                  "git -c alias.wa=worktree wa add --detach /tmp/wt-h33o {}".format(br_tip))):
             brexpect(label, command, "deny")
         # A --git-dir or GIT_DIR redirect, a -c option with no -C, --work-tree or GIT_WORK_TREE=, or an empty -C
-        # leaves a repository this guard does not pin, so a detach under one allows with a note whatever its start, with no ancestry probe, as
-        # the -b form does; the CI branch-root gate stays the backstop.
+        # leaves a repository this guard does not pin, so a detach under one allows with a note whatever its
+        # start, with no ancestry probe, as the -b form does; the CI branch-root gate stays the backstop.
         h33_note = (
             ("(H33p) worktree add --detach on an orphaned start under --git-dir allows with a note",
              "git --git-dir={}/.git worktree add --detach /tmp/wt-h33p {}".format(brr, br_orphan)),
@@ -29684,13 +29684,21 @@ def _main_isolated(monitor):
           "DENY with no allow-note. Only the admitted && grammar propagates switch state, keyed by "
           "worktree identity. brnrot (branch_root) DENIES a branch "
           "created from an orphaned start and DENIES-and-educates a form it cannot prove rooted (an "
-          "--orphan form, an unresolved ancestry), is -C-AWARE (resolves and probes the -C/--work-tree "
-          "target, so a -C/--work-tree target that resolves to a non-rooted concrete dir - nonexistent, "
-          "/etc - DENIES via the ancestry-unknown fail-safe), treats a missing origin/HEAD as rooted and a "
-          "CHECKOUT/SWITCH --track of a real rooted ref as a rooted creation (a git-branch --track is an "
-          "unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a redirect whose worktree it cannot pin "
-          "(a --git-dir/GIT_DIR/-c form or an opaque -C/--work-tree); a rooted creation and "
-          "non-creation commands ALLOW. "
+          "--orphan form, an unresolved ancestry), is -C-AWARE (resolves a -C chain and probes its target, "
+          "so a -C target that resolves to a non-rooted concrete dir - nonexistent, /etc - DENIES via the "
+          "ancestry-unknown fail-safe; a --work-tree or GIT_WORK_TREE= with no -C moves only the worktree, "
+          "so the start is probed in the session directory whatever the worktree value, and "
+          "--work-tree=/etc ALLOWS a rooted start and DENIES an orphaned one), treats a missing origin/HEAD "
+          "as rooted and a CHECKOUT/SWITCH --track of a real rooted ref as a rooted creation (a git-branch "
+          "--track is an unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a command whose "
+          "repository it cannot pin: a --git-dir/GIT_DIR form (with or without -C); a -c or other global "
+          "option (--no-pager) or a leading assignment other than GIT_WORK_TREE= and the removed "
+          "GUARDRAIL_ALLOW_DISCARD prefix (FOO=, GIT_WORK_TREE+=) when the command carries no -C, "
+          "--work-tree or GIT_WORK_TREE= (beside GIT_WORK_TREE= or --work-tree with a session directory, "
+          "-c and --no-pager are probed in the session directory and an orphaned start DENIES); an empty "
+          "-C; a -C chain whose first -C is relative with no session directory; or a --work-tree or "
+          "GIT_WORK_TREE= with no -C and no session directory. A rooted creation and non-creation "
+          "commands ALLOW. "
           "gatdis (gate_weakening) DENIES a --no-verify bypass (with a value-aware '--' boundary so a '--' "
           "eaten as an option value does not hide a following -n), any raw git naming whose segment the "
           "closed literal allowlist grammar refuses on a roster verb (an expansion, substitution, process "
