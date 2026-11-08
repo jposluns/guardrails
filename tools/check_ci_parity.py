@@ -130,8 +130,10 @@ inferred over a workflow default), also not observed; defaults.run.working-direc
 (Step shell, above); and the
 runner image, runs-on labels, services and environment values (a job or step env:
 can set a variable such as BASH_ENV that changes what an accepted gate command
-does). Inside a run: block the exact line exit 1 is accepted, because it can only
-end a step red; every other exit spelling stays unclassified.
+does). Inside a run: block the exact line exit 1 is accepted, because the line
+itself requests a nonzero exit; an environment this gate does not check (such as
+a BASH_ENV file that sets an EXIT trap ending in exit 0) can still override the
+step's exit. Every other exit spelling stays unclassified.
 TWO WORKFLOWS. The CI side is the union of the named workflows in CI_WORKFLOWS:
 quality.yml and msg-leaks.yml, which holds the message/metadata leak scan alone
 so that only its one job re-runs on a PR title/body edit. A gate may run in
@@ -2537,7 +2539,9 @@ def _classify_ci_command(
     elif block and stripped in ("else", "fi"):
         benign = True
     elif block and stripped == "exit 1":
-        # Only a failing exit: it can end a step red, never green.
+        # The line itself requests a nonzero exit; an environment this
+        # gate does not check (a BASH_ENV EXIT trap) can still override
+        # the step's exit.
         benign = True
     elif (block
             and tokens[:2] == ["git", "rev-parse"]
