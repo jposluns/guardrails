@@ -3949,6 +3949,310 @@ def _test_trkasy_no_amp(failures, tmp):
         aiqt_hooks._orch_foreground_detach_lexed = fixed
 
 
+_WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
+
+
+_WAIT_LOOP_CHECKS_API_COMMANDS = ("gh pr checks", "gh pr status", "gh run watch")
+
+
+# The only spans of a poll-loop deny text (flattened and lower-cased) that may name the foreground, the
+# background dispatch flag, or the loop itself ("a foreground command" only describes the denied call): the
+# clause that forbids resubmitting the loop, and exit (1)'s
+# dispatch of the CI status reader (a different command, not the loop). Outside them, any word of
+# _WAIT_LOOP_RERUN_WORDS offers the loop again in some form (in the foreground, as a tracked dispatch, or by a
+# rerun), which contradicts the denial even where it never says "resubmit".
+_WAIT_LOOP_SANCTIONED_SPANS = (
+    "do not resubmit the loop in any form (neither as a tracked background dispatch nor in the foreground)",
+    "a background dispatch (run_in_background: true) that runs that reader",
+    "do not resubmit the loop")
+_WAIT_LOOP_RERUN_WORDS = ("in the foreground", "foreground wait", "run it foreground", "run_in_background",
+                          "the loop", "this loop", "rerun", "re-run", "keep it foreground",
+                          "retry it as a tracked background dispatch", "start the poll again",
+                          "the same polling command again")
+
+
+def _wait_loop_deny_text_faults(reason, banner):
+    """The faults of a deny text for a backgrounded polling loop (orch_untracked_wait_loop's, and
+    orch_truncation_guard's bare-'&' detach deny on the same loop). Neither the reason nor the banner may name
+    gh pr checks, gh pr status or gh run watch (each reads the Checks API, which a fine-grained token cannot
+    read, as tools/ci-status.sh's header says). Each must forbid resubmitting the loop: it carries "do not
+    resubmit the loop", every "resubmit" in it is inside that phrase, and it never says "same loop" or gives
+    the generic detach advice that would resubmit it (use the tracked background dispatch, or keep the
+    command in the foreground). Outside the do-not-resubmit clause and exit (1)'s dispatch of the reader
+    (_WAIT_LOOP_SANCTIONED_SPANS) it offers neither a foreground run or wait, run_in_background, the loop,
+    nor a rerun (_WAIT_LOOP_RERUN_WORDS), so a reworded offer to run the loop again ("run the loop in the foreground",
+    "rerun the loop with run_in_background", "keep it foreground", "retry it as a tracked background
+    dispatch", "start the poll again", "the same polling command again") is a fault. The remedy is one tracked task read by its exit
+    status, never by output words; the reason confines that exit to a CI wait in a repository that has such a reader and sends every
+    other wait to the tracked wake. The hook ships to adopter repositories that may have no
+    tools/ci-status.sh, so that path is not required; where the text names it, it must be only an example
+    ("such as tools/ci-status.sh")."""
+    faults = []
+    for where, text in (("reason", reason), ("banner", banner)):
+        flat = " ".join(text.split()).lower()
+        for name in _WAIT_LOOP_CHECKS_API_COMMANDS:
+            if name in flat:
+                faults.append("the {} names {}".format(where, name))
+        if flat.count("tools/ci-status.sh") != flat.count("such as tools/ci-status.sh"):
+            faults.append("the {} names tools/ci-status.sh other than as an example".format(where))
+        if "exit status" not in flat:
+            faults.append("the {} does not say to read the exit status".format(where))
+        if "do not resubmit the loop" not in flat:
+            faults.append("the {} does not say do not resubmit the loop".format(where))
+        if flat.count("resubmit") != flat.count("do not resubmit the loop"):
+            faults.append("the {} says resubmit other than in do not resubmit the loop".format(where))
+        if "same loop" in flat:
+            faults.append("the {} suggests resubmitting the same loop".format(where))
+        for advice in ("use the platform's tracked background dispatch", "keep the command in the foreground",
+                       "run it foreground", "use the tracked background dispatch or run it in the foreground"):
+            if advice in flat:
+                faults.append("the {} gives the generic detach advice {!r}, which resubmits the loop"
+                              .format(where, advice))
+        rest = flat
+        for span in _WAIT_LOOP_SANCTIONED_SPANS:
+            rest = rest.replace(span, " ")
+        for word in _WAIT_LOOP_RERUN_WORDS:
+            if word in rest:
+                faults.append("the {} offers to run the loop again ({!r} outside the do-not-resubmit clause and "
+                              "exit (1))".format(where, word))
+    flat = " ".join(reason.split()).lower()
+    if "never by matching success or failure words" not in flat:
+        faults.append("the reason does not forbid matching success or failure words in the output")
+    if "(1) only for a ci wait in a repository that has a ci status reader" not in flat:
+        faults.append("the reason does not confine exit (1) to a CI wait in a repository with a CI status reader")
+    if "(2) otherwise" not in flat:
+        faults.append("the reason does not send every other wait to exit (2), the tracked wake")
+    return faults
+
+
+def _wait_loop_deny_faults(handler, root, command=_WAIT_LOOP_DENY_COMMAND):
+    """handler's deny on command, _WAIT_LOOP_DENY_COMMAND unless given (a foreground call in registry scope
+    at root), judged by _wait_loop_deny_text_faults; a call that does not deny is itself the fault."""
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "cwd": str(root), "tool_input": {"command": command}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        return ["the poll loop did not deny ({})".format(_reduce_result(code, stdout_obj))]
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    banner = (stdout_obj or {}).get("systemMessage", "")
+    if not isinstance(reason, str) or not isinstance(banner, str):
+        return ["the reason or banner is not a string"]
+    return _wait_loop_deny_text_faults(reason, banner)
+
+
+# Each mutant appends text to the orch_untracked_wait_loop deny reason that the row must catch: the label,
+# the appended text, and a word every fault it must raise holds.
+_WAIT_LOOP_DENY_MUTANTS = (
+    ("gh-pr-checks", " (for example: timeout <seconds> gh pr checks <ref> --watch)", "names gh pr checks"),
+    ("resubmit-tracked", " (3) resubmit this loop with run_in_background: true.", "resubmit other than"),
+    ("gh-run-watch", " (3) run gh run watch <id>.", "names gh run watch"),
+    ("gh-pr-status", " (3) run gh pr status.", "names gh pr status"),
+    ("foreground-wait", " Or run the loop in the foreground and wait.", "run the loop again"),
+    ("rerun-tracked", " (3) rerun the loop with run_in_background: true.", "run the loop again"),
+    ("keep-it-foreground", " Or keep it foreground.", "run the loop again"),
+    ("retry-tracked-dispatch", " (3) retry it as a tracked background dispatch.", "run the loop again"),
+    ("start-poll-again", " Then start the poll again.", "run the loop again"),
+    ("same-polling-command", " Then run the same polling command again.", "run the loop again"))
+
+
+def _test_wait_loop_deny_text(failures, tmp):
+    """orch_untracked_wait_loop deny text, in registry scope (a git toplevel holding the registry): the
+    matching poll loop denies, and the reason and banner pass _wait_loop_deny_text_faults. Each mutant in
+    _WAIT_LOOP_DENY_MUTANTS wraps _deny so the reason carries its text, and the row must then go red with
+    the fault it names.
+
+    The same loop also meets orch_truncation_guard's bare-'&' detach deny, so the row runs that handler on
+    it as well and requires its reason and banner to pass the same check. That is the property that the two
+    reasons do not contradict: both deny, both say "do not resubmit the loop" and resubmit nothing else, and
+    neither gives the generic detach advice (use the tracked background dispatch, or keep the command in the
+    foreground) that would resubmit the loop the other forbids. Its flip patches _orch_detach_poll_loop to
+    find no poll loop and _orch_bg_poll_loop to read 'none' (with only the first patch the guard's hedged
+    fallback text, which also passes this check, would take over), which restores the generic detach text
+    for this command, and the row must then go red."""
+    try:
+        root = _init_repo(tmp / "wait-loop-deny-text")
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(wl-deny-text-cannot-evaluate) the registry-scope repository could not be built: {}"
+                        .format(exc))
+        return
+    (root / ".aiqt").mkdir(parents=True, exist_ok=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_untracked_wait_loop
+    faults = _wait_loop_deny_faults(handler, root)
+    if faults:
+        failures.append("(wl-deny-text) the untracked wait-loop deny text is wrong: {}"
+                        .format("; ".join(faults)))
+    saved = aiqt_hooks._deny
+    for label, extra, expected in _WAIT_LOOP_DENY_MUTANTS:
+        def mutant_deny(reason, banner, extra=extra):
+            return saved(reason + extra, banner)
+        aiqt_hooks._deny = mutant_deny
+        try:
+            flipped = _wait_loop_deny_faults(handler, root)
+        finally:
+            aiqt_hooks._deny = saved
+        if not any(expected in fault for fault in flipped):
+            failures.append("(wl-deny-text-flip-{}) with the reason carrying {!r} the row must go red with a "
+                            "fault naming {!r}, got {!r}".format(label, extra, expected, flipped))
+    guard = aiqt_hooks.orch_truncation_guard
+    faults = _wait_loop_deny_faults(guard, root)
+    if faults:
+        failures.append("(wl-deny-text-truncation-guard) the truncation guard's deny of the same poll loop "
+                        "contradicts the wait-loop deny: {}".format("; ".join(faults)))
+    saved_poll = aiqt_hooks._orch_detach_poll_loop
+    saved_bg = aiqt_hooks._orch_bg_poll_loop
+    aiqt_hooks._orch_detach_poll_loop = lambda command: False
+    aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
+    try:
+        flipped = _wait_loop_deny_faults(guard, root)
+    finally:
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+        aiqt_hooks._orch_bg_poll_loop = saved_bg
+    if not any("generic detach advice" in fault for fault in flipped):
+        failures.append("(wl-deny-text-truncation-guard-flip) with the truncation guard's generic detach text "
+                        "restored for the poll loop the row must go red, got {!r}".format(flipped))
+    _wait_loop_overmatch_rows(failures, root)
+    _wait_loop_fallback_rows(failures, root)
+
+
+# A detach whose '#' the shared lexer cannot judge under both readings, with the poll shape's words only in
+# quoted text: _orch_bg_poll_loop's text-scan fallback reads it as 'match' (the wait-loop hook's disclosed
+# over-match), but it is not a polling loop. The wait-loop hook still denies it with the wait-loop exits,
+# so the truncation guard's deny gives the hedged fallback text (the detach stated, the poll loop stated
+# only conditionally, and the same exits), never the generic detach advice that would offer the loop the
+# other deny forbids, and never the lexed poll text, which would state outright a loop that is not there.
+_WAIT_LOOP_OVERMATCH_COMMAND = "npm run serve & x=\"$(echo # (\n)\"; echo \"for gh sleep done\""
+
+
+# The hedge the truncation guard's fallback poll text carries (the poll loop stated conditionally), and the
+# opening the lexed poll text states outright; _wait_loop_overmatch_faults tells the two texts apart by them.
+_WAIT_LOOP_HEDGE_PHRASE = "if this command backgrounds a polling loop"
+_WAIT_LOOP_OUTRIGHT_PHRASE = "this foreground command backgrounds a polling loop"
+
+
+def _wait_loop_overmatch_faults(root, command=_WAIT_LOOP_OVERMATCH_COMMAND):
+    """The faults of orch_truncation_guard's deny on command (a foreground call in registry scope at root),
+    _WAIT_LOOP_OVERMATCH_COMMAND unless given: it must deny with the hedged fallback text, judged by
+    _wait_loop_deny_text_faults (so it carries the wait-loop exits and offers neither a foreground run nor
+    run_in_background) plus the hedge itself (_WAIT_LOOP_HEDGE_PHRASE), and it must not state the loop
+    outright as the lexed poll text does (_WAIT_LOOP_OUTRIGHT_PHRASE), since the fallback 'match' may be an
+    over-match on words in quoted or comment text."""
+    code, stdout_obj, _stderr = aiqt_hooks.orch_truncation_guard(
+        {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(root),
+         "tool_input": {"command": command}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        return ["the over-matched detach did not deny ({})".format(_reduce_result(code, stdout_obj))]
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    banner = (stdout_obj or {}).get("systemMessage", "")
+    if not isinstance(reason, str) or not isinstance(banner, str):
+        return ["the reason or banner is not a string"]
+    faults = _wait_loop_deny_text_faults(reason, banner)
+    flat = " ".join(reason.split()).lower()
+    if _WAIT_LOOP_HEDGE_PHRASE not in flat:
+        faults.append("the reason lacks the hedge ({!r})".format(_WAIT_LOOP_HEDGE_PHRASE))
+    if _WAIT_LOOP_OUTRIGHT_PHRASE in flat:
+        faults.append("the reason states the poll loop outright on a command the lexer did not read as one")
+    if "keep the command in the foreground" in flat:
+        faults.append("the reason gives the generic detach advice")
+    return faults
+
+
+def _wait_loop_overmatch_rows(failures, root):
+    """orch_truncation_guard on _WAIT_LOOP_OVERMATCH_COMMAND: the precondition (the shared lexer refuses it
+    with _UncertainHashError, and the wait-loop classifier's text-scan fallback then reads it as 'match'),
+    the row (_wait_loop_overmatch_faults), a flip that gates the lexed poll text on the classifier's answer,
+    fallback included, under which the row must go red (the loop stated outright), and a flip that reads the
+    fallback as 'none', which restores the generic detach text and must also turn the row red."""
+    try:
+        aiqt_hooks._lex_readings(_WAIT_LOOP_OVERMATCH_COMMAND)
+        lexed = True
+    except aiqt_hooks._UncertainHashError:
+        lexed = False
+    except ValueError:
+        lexed = True
+    if lexed or aiqt_hooks._orch_bg_poll_loop(_WAIT_LOOP_OVERMATCH_COMMAND) != "match":
+        failures.append("(wl-deny-text-overmatch-cannot-evaluate) the over-match fixture no longer reads 'match' "
+                        "only through the text-scan fallback, so the row below tests nothing")
+        return
+    faults = _wait_loop_overmatch_faults(root)
+    if faults:
+        failures.append("(wl-deny-text-overmatch) the truncation guard's deny of an over-matched detach is "
+                        "wrong: {}".format("; ".join(faults)))
+    saved_poll = aiqt_hooks._orch_detach_poll_loop
+    aiqt_hooks._orch_detach_poll_loop = lambda command: aiqt_hooks._orch_bg_poll_loop(command) == "match"
+    try:
+        flipped = _wait_loop_overmatch_faults(root)
+    finally:
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+    if not any("states the poll loop outright" in fault for fault in flipped):
+        failures.append("(wl-deny-text-overmatch-flip) with the lexed poll text gated on the fallback's 'match' "
+                        "the row must go red, got {!r}".format(flipped))
+    saved_bg = aiqt_hooks._orch_bg_poll_loop
+    aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
+    try:
+        flipped = _wait_loop_overmatch_faults(root)
+    finally:
+        aiqt_hooks._orch_bg_poll_loop = saved_bg
+    if not any("generic detach advice" in fault for fault in flipped):
+        failures.append("(wl-deny-text-overmatch-generic-flip) with the generic detach text restored for the "
+                        "over-matched detach the row must go red, got {!r}".format(flipped))
+
+
+# Commands where a bare '&' really backgrounds work in a polling loop but the shared lexer refuses the
+# command (a '#' it cannot judge under both readings, here inside a backquote substitution or a quoted
+# "$( ... )"), with the '&' before the first such '#' so the detach scan reads it: _orch_bg_poll_loop reads
+# 'match' only through its text-scan fallback while _orch_detach_poll_loop is False. The truncation guard's
+# deny must give the hedged fallback text (the wait-loop exits, offering neither a foreground run nor
+# run_in_background), and orch_untracked_wait_loop denies the same command with those exits, so the two
+# denials must not contradict on any of them.
+_WAIT_LOOP_FALLBACK_LOOP_ROWS = (
+    ("backquote-hash", "while true; do gh run view 1; sleep 30; done & x=`echo #`"),
+    ("backquote-hash-second-line", "while true; do gh run view 1; sleep 30; done &\nx=`echo #`"),
+    ("quoted-subst-hash", "while true; do gh run view 1; sleep 30; done & x=\"$(echo # (\n)\""),
+    ("amp-in-body", "while true; do gh run view 1 & sleep 30; done; x=`echo #`"),
+    ("for-curl", "for i in 1 2 3; do curl -fsS https://example.invalid/status; sleep 5; done & x=`echo #`"),
+)
+
+
+def _wait_loop_fallback_rows(failures, root):
+    """orch_truncation_guard and orch_untracked_wait_loop on each _WAIT_LOOP_FALLBACK_LOOP_ROWS command: the
+    precondition (the shared lexer refuses it with _UncertainHashError, _orch_bg_poll_loop reads 'match'
+    only through its text-scan fallback, and _orch_detach_poll_loop finds no lexed loop), the guard's deny
+    judged by _wait_loop_overmatch_faults (the hedged fallback text with the wait-loop exits), the wait-loop
+    hook's deny on the same command judged by _wait_loop_deny_text_faults (the property that the two denials
+    do not contradict), and a flip that reads the fallback as 'none', which restores the guard's generic
+    detach text and must turn each row red with the generic-advice fault."""
+    for label, command in _WAIT_LOOP_FALLBACK_LOOP_ROWS:
+        try:
+            aiqt_hooks._lex_readings(command)
+            uncertain = False
+        except aiqt_hooks._UncertainHashError:
+            uncertain = True
+        except ValueError:
+            uncertain = False
+        if (not uncertain or aiqt_hooks._orch_bg_poll_loop(command) != "match"
+                or aiqt_hooks._orch_detach_poll_loop(command)):
+            failures.append("(wl-deny-text-fallback-{}-cannot-evaluate) the fixture no longer reads 'match' "
+                            "only through the text-scan fallback, so the row tests nothing".format(label))
+            continue
+        faults = _wait_loop_overmatch_faults(root, command)
+        if faults:
+            failures.append("(wl-deny-text-fallback-{}) the truncation guard's deny of a fallback-matched "
+                            "poll loop is wrong: {}".format(label, "; ".join(faults)))
+        faults = _wait_loop_deny_faults(aiqt_hooks.orch_untracked_wait_loop, root, command)
+        if faults:
+            failures.append("(wl-deny-text-fallback-{}-wait-loop) the wait-loop deny of a fallback-matched "
+                            "poll loop is wrong: {}".format(label, "; ".join(faults)))
+        saved_bg = aiqt_hooks._orch_bg_poll_loop
+        aiqt_hooks._orch_bg_poll_loop = lambda cmd: "none"
+        try:
+            flipped = _wait_loop_overmatch_faults(root, command)
+        finally:
+            aiqt_hooks._orch_bg_poll_loop = saved_bg
+        if not any("generic detach advice" in fault for fault in flipped):
+            failures.append("(wl-deny-text-fallback-{}-flip) with the generic detach text restored for the "
+                            "fallback-matched loop the row must go red, got {!r}".format(label, flipped))
+
+
 def _test_pgrep_self_match(failures):
     """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
     must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
@@ -29564,6 +29868,7 @@ def _main_isolated(monitor):
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
+        _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)
