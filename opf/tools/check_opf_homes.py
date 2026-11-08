@@ -1990,6 +1990,19 @@ _ATTRIBUTE_WRITER_EXCLUSIONS = {
         "the same fault recorders' low-level start wrappers; the _opf_emit.py reason above",
     ("_opf_views.py", "_install_fault_hooks", "setattr(_threads, _alias, _replacement)"):
         "the same wrappers bound over threading's saved aliases; the _opf_emit.py reason above",
+    ("opf.py", "_verb_intercepted",
+     "setattr(owner, name, lambda *args, _n=label, **kwargs: called.append(_n) or EXIT_OK)"):
+        "the intercepted dispatch's recorders: the pairs are saved[:replaced], filled from vars of this module "
+        "with the functions it defines (inspect.isfunction, matching __module__) and from each loaded _opf_ "
+        "helper module's callables; the store's HOMES is an integer, never a callable, so no pair names it",
+    ("opf.py", "_verb_intercepted", "setattr(owner, name, value)"):
+        "the same pairs restored from saved, plus this module's _DECLARATION_GATED by its literal name; the "
+        "reason above",
+    ("opf.py", "_verb_intercepted_faults", "setattr(here, attr, probes[attr])"):
+        "the interception probes: attr runs over the literal probe names the probes dict is built with, each "
+        "starting _verb_status_probe_, and the receiver is this module",
+    ("opf.py", "_verb_intercepted_faults", "delattr(here, attr)"):
+        "the same literal probe names removed from this module after the probe dispatch; the reason above",
     ("opf.py", "_watchdog_install_charges.<locals>.charged", "setattr(owner, name, wrapper)"):
         "the watchdog's charge wrappers: charged is a closure of _watchdog_install_charges, which calls it only "
         "with fixed owners and literal names (_opf_emit with run_bounded and _run_fixture_process, "
@@ -2402,19 +2415,51 @@ def _self_test_functions(trees):
     def holders(name, strings):
         return [(kind, owner) for kind, owner, names, text in regions if name in names or (strings and name in text)]
 
-    production, memo, visiting = set(), {}, set()
+    production, memo, held = set(), {}, {}
 
     def helper(name):
-        # Least fixed point: a helper is spelled at least once, as a name, an attribute or inside a string, and
-        # only by self-test code or other helpers; a cycle that reaches no self-test code is no helper.
+        # A helper is spelled at least once, as a name, an attribute or inside a string, never by production
+        # code (a production region, an entry, a self-test function production reaches, or a def such code
+        # taints), and self-test code reaches it through untainted defs. Both conditions are fixed points over
+        # the defs that spell `name`, transitively, so a def that spells its own name, as a fixture that
+        # patches itself out of the child source it launches does, is still a helper while live self-test code
+        # reaches its cycle; a cycle no self-test code reaches is no helper, and a def spelled nowhere taints
+        # like production code (each fails closed, keeping the bodies such defs name read).
         if name not in memo:
-            if name in visiting or name not in defs:
+            if name not in defs:
+                memo[name] = False
                 return False
-            visiting.add(name)
-            found = holders(name, True)
-            memo[name] = bool(found) and all((kind == "test" and owner not in production)
-                                             or (kind == "def" and helper(owner)) for kind, owner in found)
-            visiting.discard(name)
+            closure, queue = {name}, [name]
+            while queue:
+                current = queue.pop()
+                if current not in held:
+                    held[current] = holders(current, True)
+                for kind, owner in held[current]:
+                    if kind == "def" and owner not in closure:
+                        closure.add(owner)
+                        queue.append(owner)
+            tainted = {d for d in closure if not held[d] or any(
+                kind not in ("test", "def") or (kind == "test" and owner in production)
+                for kind, owner in held[d])}
+            grew = True
+            while grew:
+                grew = False
+                for d in closure - tainted:
+                    if any(kind == "def" and owner in tainted for kind, owner in held[d]):
+                        tainted.add(d)
+                        grew = True
+            reaches = {d for d in closure if any(
+                kind == "test" and owner not in production for kind, owner in held[d])}
+            grew = True
+            while grew:
+                grew = False
+                for d in closure - reaches:
+                    if any(kind == "def" and owner in reaches and owner not in tainted
+                           for kind, owner in held[d]):
+                        reaches.add(d)
+                        grew = True
+            for d in closure:
+                memo[d] = d not in tainted and d in reaches
         return memo[name]
 
     def reached(name, through_defs):
@@ -2700,6 +2745,18 @@ def _homes1_scan(tools=None):
     trees, findings = _scanned_trees(tools)
     params = _homes_parameters(tree for _rel, tree in trees)
     self_tests, _helpers = _self_test_functions(trees)
+    if not self_tests:
+        # The classifier leaving no self-test body unread while the tree defines self-test functions is a
+        # finding, never a silent widening of the scan to every self-test body.
+        matched = [(rel, stmt) for rel, tree in trees for stmt in tree.body
+                   if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and not stmt.decorator_list and _SELF_TEST_NAME.search(stmt.name)]
+        if matched:
+            rel, stmt = matched[0]
+            findings.append("{}:{}: the tree holds self-test function definitions ({}) but the classifier "
+                            "leaves none unread, so the scan would read every self-test body; a scan that "
+                            "cannot tell self-test code apart refuses instead of widening".format(
+                                rel, stmt.lineno, len(matched)))
     hits = {}
     for rel, tree in trees:
         module = {"rel": rel, "free": _HOMES1_FREE.get(rel, ()), "docstrings": _docstring_ids(tree),
@@ -6728,7 +6785,9 @@ def _self_test_vectors():
     # `self_test` is a module-level def that _SELF_TEST_NAME matches (narrowing the old substring test left none of
     # them scanned), and no production code spells one, so each body stays unread; a production caller added
     # later turns this red even where the function it reaches scans clean. The helpers only self-test code names
-    # are opf.py's two watchdog fixtures, which only its watchdog self-tests reach.
+    # are opf.py's two watchdog fixtures, which only its watchdog self-tests reach, and the runner registration
+    # fixtures of _opf_adopt_observe.py and _opf_pack_manifest.py, reached only from their self_test functions
+    # (the fd-checks fixture names itself in the child source it launches, so its cycle is still a helper).
     trees, refused = _scanned_trees(_TOOLS)
     self_tests, helpers = _self_test_functions(trees)
     named = [(node, tree) for _rel, tree in trees for node in ast.walk(tree)
@@ -6736,7 +6795,34 @@ def _self_test_vectors():
     check("homes1-self-test-convention", lambda: refused == [] and named and all(
         any(node is stmt for stmt in tree.body) and _SELF_TEST_NAME.search(node.name) for node, tree in named))
     check("homes1-self-test-unread", lambda: {id(node) for node, _tree in named} == self_tests)
-    check("homes1-self-test-helpers", lambda: helpers == {"_watchdog_timer_case", "_watchdog_launcher_case"})
+    check("homes1-self-test-helpers", lambda: helpers == {
+        "_watchdog_timer_case", "_watchdog_launcher_case", "_runner_launch_entry", "_runner_check",
+        "_runner_registration_test", "_runner_red_checks", "_runner_descriptor_entry",
+        "_runner_non_readable_fd_checks"})
+    # The self-spawning runner convention: a fixture that patches itself out of the child source it launches
+    # spells its own name, and only self-test code reaches that cycle, so the classifier still names the chain
+    # helpers and the self-test body stays unread (red when a cycle alone denies helper status); and when the
+    # classifier leaves no self-test body unread while the tree defines self-test functions, the scan reports
+    # that instead of silently reading every body (here an aliasing production caller reaches the only one).
+    with tempfile.TemporaryDirectory(prefix="opf-homes-classifier-") as tmp:
+        tree = Path(tmp)
+        (tree / "planted.py").write_text(
+            "import _opf_store\n\n\n"
+            "def self_test():\n    setattr(_opf_store, 'HOMES', 1)\n    return _registration_check()\n\n\n"
+            "def _registration_check():\n    return _spawning_fixture()\n\n\n"
+            "def _spawning_fixture():\n    self_test\n    return \"patch('_spawning_fixture')\"\n",
+            encoding="utf-8")
+        planted_trees, planted_refused = _scanned_trees(tree)
+        planted_unread, planted_helpers = _self_test_functions(planted_trees)
+        check("homes1-self-referential-helper-unread", lambda: homes1_findings(tree) == [])
+        check("homes1-self-referential-helper-named", lambda: planted_refused == [] and len(planted_unread) == 1
+              and planted_helpers == {"_registration_check", "_spawning_fixture"})
+        (tree / "planted.py").write_text(
+            "def self_test():\n    return 0\n\n\nRUN = self_test\n", encoding="utf-8")
+        check("homes1-classifier-fail-closed", lambda: homes1_findings(tree) == [
+            "planted.py:1: the tree holds self-test function definitions (1) but the classifier leaves none "
+            "unread, so the scan would read every self-test body; a scan that cannot tell self-test code "
+            "apart refuses instead of widening"])
     # The premises the store_control_roots and classify_containment reasons rest on: outside self-test code
     # opf record's _run_operation is the write guard's one caller, and the guard reads only the
     # classification's malformed and colliding lists.
@@ -7279,6 +7365,9 @@ def _self_test_vectors():
              "capability home".format(_LEGACY_RECORD_JOURNAL))))
     with tempfile.TemporaryDirectory(prefix="opf-homes-gap-") as tmp:
         tree = Path(tmp)
+        # An unreached self-test function keeps the fixture tree's unread set nonempty, so each row below
+        # holds its own finding alone and the no-unread-self-test refusal stays with its dedicated rows.
+        (tree / "_planted_anchor.py").write_text("def anchor_self_test():\n    return 0\n", encoding="utf-8")
         for label, name, red, clean, finding in gap_forms:
             expect = ["{}:{}: ".format(name, f[0]) + (f[1] if len(f) == 2 else (
                 "homes-1 {} `{}` in {} is reintroduced; homes 2 is the only generation and every other one "
