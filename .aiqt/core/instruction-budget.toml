@@ -94,18 +94,18 @@
 #                        files 117926 -> 118464; managed block 360 and file headers 16136 unchanged. This queued
 #                        seed fold measured 538 units against the 559-unit estimate. The ratchet rises by the
 #                        measured delta, 134991 + 538 = 135529, rather than drawing on the estimate.
-#                        Raised 135529 -> 135715 on 2026-11-08 under the maintainer's recorded decision of
+#                        Raised 135529 -> 136039 on 2026-11-08 under the maintainer's recorded decision of
 #                        2026-11-08 to raise the ratchet by exactly the measured overage, when change-carries-check
 #                        gained its paragraph on verifying a move of executable code, or a rewrite of paths code
 #                        depends on, by exercising the result (chgchk.12 to chgchk.15): measured PACK 135159 at the
-#                        PR base without the paragraph -> 135715 (+556 units); the 370 units then under the ratchet
-#                        absorb 370 of them, and the ratchet rises by the remaining 186.
+#                        PR base without the paragraph -> 136039 (+880 units); the 370 units then under the ratchet
+#                        absorb 370 of them, and the ratchet rises by the remaining 510.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 135715
+ratchet = 136039
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
