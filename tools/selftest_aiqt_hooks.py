@@ -2892,7 +2892,8 @@ _PSM_IDIOM_ROWS = (
 # Long bracket idioms, each one scan of the command: (label, command, decision). A test that searched the
 # whole command once per class letter used about 104 s of CPU on the first at 400 KB; each row must stay
 # under _PSM_TIMED_BOUND CPU seconds of the calling thread's own work (_hook_cpu_timed; about 0.01 to
-# 0.06 s in-process on an 80-core host with Python 3.14.4, 2026-10-29). The last is a literal whose period letter is the class letter, which is not judged and denies.
+# 0.06 s in-process on an 80-core host with Python 3.14.4, 2026-10-29). The last is a literal whose
+# period letter is the class letter, which is not judged and denies.
 _PSM_TIMED_ROWS = (
     ("(psm-t1) a 200,000-letter class", "pgrep -f '[" + "a" * 200000 + "]x' " + "b" * 200000, "allow"),
     ("(psm-t2) a 200,000-letter literal", "pgrep -f '[b]" + "a" * 199999 + "c' " + "a" * 200000, "allow"),
@@ -5379,13 +5380,16 @@ def _hook_cpu_timed(call, bound=None, runs=3):
     re-timed, up to runs times in all, only while the least reading so far is at or over it, and that
     least reading is judged, since stray charges the clock cannot see apart (kernel reclaim billed to
     an allocating thread as system time, a co-scheduled sibling's cache pressure) only ever add time,
-    so the least of three is the fairest reading of the call's own cost, while a real super-linear
-    regression of the measured path is over the bound on every run and still fails in seconds. The
-    call's own work, its reference counting included, is always charged. The re-timed call must be
-    deterministic: same input, same decision, no state carried across runs (a counting shim is reset
-    inside the call). The median-judged rows (_timed_runs over the lex-cost and deadline-shape cases)
-    keep _cpu_seconds: they time handlers that reap child processes, which no thread clock sees, and
-    their three-run median already tolerates one slowed run."""
+    so the least of three is the fairest reading of the call's own cost. The call's own work, its
+    reference counting included, is always charged. The re-timed call must be deterministic: same
+    input, same decision, no state carried across runs (a counting shim is reset inside the call).
+    Disclosed limit: a real super-linear regression of the measured path is over the bound on every
+    run, and so still fails in seconds, only in a call that meets that precondition; a call that keeps
+    state between runs (a memoised quadratic helper, for example) can read low on its second and third
+    runs, and its least reading then passes the bound. The median-judged rows (_timed_runs over the
+    lex-cost and deadline-shape cases) keep their existing clocks, time.process_time in the lex-cost
+    rows and _cpu_seconds in the deadline-shape cases, and judge the median of three runs, which
+    already tolerates one slowed run."""
     import gc
     spent = None
     for _ in range(max(1, runs)):
