@@ -906,10 +906,17 @@ def run_selftest_child(args, child, failures, what, timeout=SELFTEST_CHILD_TIMEO
     full run starts the child in a new session and waits at most timeout seconds; on expiry the child's
     whole process group is killed before the child is reaped, and the launch is recorded as a failure.
     Any other exception out of the wait (KeyboardInterrupt, MemoryError and the like) also kills the whole
-    group and reaps the child before it propagates, because Popen's own exit waits without killing
-    anything and would leave the child and its grandchildren running. The kill runs in a finally, so an
-    interrupt while the timeout is being recorded cannot skip it, and only while the child is unreaped:
-    after a normal return the child has been reaped and its group id may already name another group."""
+    group before it propagates, because Popen's own exit waits without killing anything and would leave
+    the child and its grandchildren running. The kill runs in a finally, so an interrupt while the
+    timeout is being recorded cannot skip it, and it is skipped only when the wait returned normally,
+    recorded by a flag set on the line after the wait. The child's exit status cannot stand in for that
+    flag: communicate's own interrupt handling briefly waits for the child and reaps it when it has
+    already exited, so an interrupt mid-wait can leave the status set while a grandchild in the group
+    still holds a pipe open. Signalling the group id is safe even after the child has been reaped,
+    because the kernel keeps a process-group id allocated while the group has any live member, so the
+    signal lands on this launch's own group as long as anything in it survives; only an empty group can
+    lose its id to reuse, which is why the kill is skipped after a normal return, when the child has been
+    reaped, both pipes have reached end of file, and the group is expected to be empty."""
     if child:
         failures.append("a child-mode self-test tried to launch {}; child mode launches nothing".format(what))
         return None
@@ -917,13 +924,15 @@ def run_selftest_child(args, child, failures, what, timeout=SELFTEST_CHILD_TIMEO
     with subprocess.Popen([sys.executable, "-I", "-B", *args], stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True, start_new_session=True, cwd=cwd,
                           env=env) as proc:
+        returned = False
         try:
             out, err = _selftest_communicate(proc, timeout)
+            returned = True
         except subprocess.TimeoutExpired:
             failures.append("{} did not exit within {} s; its process group was killed".format(what, timeout))
             return None
         finally:
-            if proc.returncode is None:
+            if not returned:
                 _kill_selftest_group(proc)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
@@ -937,8 +946,12 @@ def _selftest_communicate(proc, timeout):
 
 
 def _kill_selftest_group(proc):
-    """Kill a self-test child's whole process group, then reap the child. The group is signalled while its
-    leader is unreaped, so its id cannot have been reused."""
+    """Kill a self-test child's whole process group, then reap the child. A process-group id stays
+    allocated while any member of the group is alive, even after its leader has been reaped, so the
+    signal cannot land on an unrelated group while anything in this launch's group survives; an
+    already-empty group makes the signal fail with a caught OSError. Callers therefore skip this kill
+    only after a normal return from the wait, when the group is expected to be empty and its id could
+    already have been handed to a new group."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except OSError:
@@ -2826,6 +2839,141 @@ def _self_test_isolated(child):
             left = _read_grandchild_marker(marker)
             if left is not None:
                 _kill_recorded_survivor(left[0], left[1])
+
+        # 64. DISCRIMINATING (a real interrupt during the real wait kills the group even after the child
+        #     was reaped): a stand-in records a grandchild that inherits the stdout pipe and then exits at
+        #     once, so the real communicate keeps reading the pipe the grandchild holds open; once the
+        #     stand-in shows as an unreaped zombie, a helper thread sends this process a real SIGINT.
+        #     communicate's own interrupt handling then reaps the exited child before the KeyboardInterrupt
+        #     leaves it, so a launcher that decides the group kill by the child's exit status skips the
+        #     kill and leaves the grandchild running; the kill may be skipped only on a normal return. The
+        #     interrupt must propagate with no recorded failure and the grandchild must be gone within
+        #     10 s. It starts only a stand-in, never this tool, so it runs in child mode as well.
+        if os.path.isdir("/proc/self"):
+            import threading
+            marker = tmp / "sigint-communicate.pid"
+            script = tmp / "sigint-communicate.py"
+            _write_grandchild_standin(script, marker, child_sleep=0)
+            real_wait = module_globals["_selftest_communicate"]
+            seen_proc = {}
+
+            def recording_wait(proc, timeout, _real=real_wait, _seen=seen_proc):
+                _seen["proc"] = proc
+                return _real(proc, timeout)
+
+            def send_sigint_once_zombie(_seen=seen_proc, _marker=marker):
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    proc = _seen.get("proc")
+                    if (proc is not None and _marker.exists()
+                            and (_proc_stat_fields(proc.pid) or ["?"])[0] == "Z"):
+                        time.sleep(0.3)
+                        os.kill(os.getpid(), signal.SIGINT)
+                        return
+                    time.sleep(0.05)
+
+            interrupter = threading.Thread(target=send_sigint_once_zombie)
+            recorded = []
+            raised = False
+            module_globals["_selftest_communicate"] = recording_wait
+            try:
+                interrupter.start()
+                try:
+                    run_selftest_child([str(script)], False, recorded, "the reaped-child stand-in",
+                                       timeout=30)
+                except KeyboardInterrupt:
+                    raised = True
+                finally:
+                    module_globals["_selftest_communicate"] = real_wait
+                    interrupter.join(timeout=25)
+                rec = _read_grandchild_marker(marker)
+                if not raised or recorded or rec is None:
+                    failures.append("a real SIGINT during the real wait must propagate from "
+                                    "run_selftest_child with no recorded failure after the grandchild is "
+                                    "recorded, got raised={} recorded={!r} record {!r}".format(
+                                        raised, recorded, rec))
+                else:
+                    survivor = _grandchild_survivor(rec[0], rec[1], 10)
+                    if survivor is not None:
+                        failures.append("a real SIGINT during the real wait, after the child exited while "
+                                        "its grandchild held the stdout pipe, left the grandchild alive "
+                                        "({}): the group kill may be skipped only on a normal return, "
+                                        "never on a set exit status".format(survivor))
+            finally:
+                left = _read_grandchild_marker(marker)
+                if left is not None:
+                    _kill_recorded_survivor(left[0], left[1])
+
+        # 65. DISCRIMINATING (a normal return signals no group): after the wait returns normally the child
+        #     has been reaped and its group is expected to be empty, so its id could already name an
+        #     unrelated group; run_selftest_child on a stand-in that exits at once, with os.killpg replaced
+        #     by a recorder, must complete the launch with no recorded failure and no killpg call. A
+        #     launcher whose finally kills the group unconditionally fails this. It starts only a stand-in,
+        #     never this tool, so it runs in child mode as well.
+        signalled = []
+
+        def recording_killpg(pgid, sig, _got=signalled):
+            _got.append((pgid, sig))
+
+        plain = []
+        real_killpg = os.killpg
+        os.killpg = recording_killpg
+        try:
+            done = run_selftest_child(["-c", "pass"], False, plain, "the exiting stand-in", timeout=30)
+        finally:
+            os.killpg = real_killpg
+        if done is None or done.returncode != 0 or plain or signalled:
+            failures.append("a launch whose wait returns normally must record no failure and signal no "
+                            "process group (the reaped child's group id may already name another group), "
+                            "got result={!r} recorded={!r} killpg calls {!r}".format(done, plain, signalled))
+
+        # 66. DISCRIMINATING (the survivor kill spares a reused pid and kills the whole group): with
+        #     os.kill and os.killpg replaced by recorders, _kill_recorded_survivor on this live process
+        #     with a start time one tick later than real must attempt no signal (the recorded process is
+        #     gone and its pid has been reused), while on a live sleeper leading its own session it must
+        #     send exactly one SIGKILL to the sleeper's process group and no pid-only kill, so the
+        #     sleeper's own grandchildren die with it. A kill without the start-time comparison signals
+        #     the reused pid, and one that signals the pid alone leaves the group running; each fails one
+        #     half. It starts only a stand-in, never this tool, so it runs in child mode as well.
+        if os.path.isdir("/proc/self"):
+            kills, killpgs = [], []
+
+            def recording_kill_pid(pid, sig, _got=kills):
+                _got.append((pid, sig))
+
+            def recording_kill_group(pgid, sig, _got=killpgs):
+                _got.append((pgid, sig))
+
+            me = os.getpid()
+            me_start = _proc_start_time(me)
+            sleeper = subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(60)"],
+                                       start_new_session=True)
+            try:
+                sl_start = _proc_start_time(sleeper.pid)
+                real_kill, real_killpg = os.kill, os.killpg
+                os.kill, os.killpg = recording_kill_pid, recording_kill_group
+                try:
+                    if me_start is not None and me_start.isdigit():
+                        _kill_recorded_survivor(me, str(int(me_start) + 1))
+                    reused = (list(kills), list(killpgs))
+                    del kills[:]
+                    del killpgs[:]
+                    if sl_start is not None:
+                        _kill_recorded_survivor(sleeper.pid, sl_start)
+                    grouped = (list(kills), list(killpgs))
+                finally:
+                    os.kill, os.killpg = real_kill, real_killpg
+                if me_start is None or not me_start.isdigit() or reused != ([], []):
+                    failures.append("the survivor kill given a live pid whose start time differs from the "
+                                    "record must signal nothing (the pid has been reused), got start {!r} "
+                                    "kill {!r} killpg {!r}".format(me_start, reused[0], reused[1]))
+                if sl_start is None or grouped != ([], [(sleeper.pid, signal.SIGKILL)]):
+                    failures.append("the survivor kill on a recorded session leader must send exactly one "
+                                    "SIGKILL to its process group and never a pid-only kill, got start "
+                                    "{!r} kill {!r} killpg {!r}".format(sl_start, grouped[0], grouped[1]))
+            finally:
+                sleeper.terminate()
+                sleeper.wait()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2905,7 +3053,10 @@ def _self_test_isolated(child):
           "the child's process group and is reported as a failure, and child mode launches nothing; and the "
           "grandchild-survival probe reads a recorded process as gone only on an absent /proc stat file, "
           "counting any other read failure or an unparsable line as alive with the error named; and an "
-          "interrupted grandchild case still kills its recorded grandchild."))
+          "interrupted grandchild case still kills its recorded grandchild; and an interrupt during the "
+          "launch wait kills the child's group even when the child was already reaped, while a normal "
+          "return signals no group, and the survivor kill spares a reused pid and signals the recorded "
+          "group, never the pid alone."))
 
 
 def main():
