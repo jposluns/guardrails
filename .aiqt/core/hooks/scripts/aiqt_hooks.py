@@ -9656,8 +9656,11 @@ def _segment_repo_dir(tokens, cwd):
                     another leading env assignment. The caller keeps its own conservative cannot-pin handling.
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
-    path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs."""
-    if _segment_has_gitdir_redirect(tokens, appended=False):
+    path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs.
+    A leading GIT_DIR+= reads exactly as GIT_DIR= does (with no ambient GIT_DIR, which takes the caller's
+    override path first, '+=' sets the value as '=' does), so it returns None too, with or without -C:
+    git uses the git dir that assignment names, not the -C directory."""
+    if _segment_has_gitdir_redirect(tokens):
         return None
     cw = _command_word_index(tokens)
     has_worktree = any(tok.startswith("GIT_WORK_TREE=") for tok in tokens[:cw])
@@ -10441,9 +10444,10 @@ def _segment_has_gitdir_redirect(tokens, appended=True):
     preserve the wrong repo's stash."""
     # A leading GIT_DIR+= names the git dir just as GIT_DIR= does (no ambient GIT_DIR reaches a caller: a
     # non-cosmetic ambient GIT_* takes the override path first), so it counts too, which only sends more
-    # segments to the session-read denies. appended=False reads the '=' spelling alone: _segment_repo_dir keeps
-    # that reading, so the -C directory it returns for a GIT_DIR+= segment (the snapshot base git_discard
-    # reads before asking git, and the repository the branch-root guard probes) is unchanged.
+    # segments to the session-read denies. appended=False reads the '=' spelling alone. _segment_repo_dir
+    # counts both spellings, so a GIT_DIR+= segment, with or without -C, names a repository it does not
+    # resolve (None), as a GIT_DIR= segment does: git_discard asks git for that repository, and the
+    # branch-root guard allows the creation with its cannot-pin note instead of probing the -C directory.
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
         if tok.startswith("GIT_DIR=") or (appended and tok.startswith("GIT_DIR+=")):
@@ -14891,8 +14895,8 @@ def branch_root(data):
     directory under a --work-tree or GIT_WORK_TREE= redirect) a rooted one ALLOWS and an orphaned or
     unresolvable one DENIES. Where it is not pinned, any start, an orphaned or unresolvable one included,
     ALLOWS-WITH-NOTE with no ancestry probe, as the -b form does (the cannot-pin sentence below): under a
-    '--git-dir=<repo>/.git' or a separated '--git-dir <path>' option or a 'GIT_DIR=...' prefix (with or
-    without -C); under any -c option that defines no git alias ('git -c core.x=1 worktree add --detach
+    '--git-dir=<repo>/.git' or a separated '--git-dir <path>' option or a 'GIT_DIR=...' or 'GIT_DIR+=...'
+    prefix (with or without -C); under any -c option that defines no git alias ('git -c core.x=1 worktree add --detach
     <path> <commit-ish>'), any other global option before the subcommand ('--no-pager', '--bare') or any
     leading environment assignment other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
     prefix, when the command carries no -C, --work-tree or GIT_WORK_TREE=; under an empty -C ("-C ''"),
@@ -14903,7 +14907,8 @@ def branch_root(data):
     [<commit-ish>]' (git may create a branch there) still DENY as forms this guard cannot classify
     (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
-    ONLY a redirect whose repository this guard cannot pin at all - a --git-dir/GIT_DIR form, a -c or other
+    ONLY a redirect whose repository this guard cannot pin at all - a --git-dir/GIT_DIR form (a leading
+    GIT_DIR+= reads as GIT_DIR=, with or without -C), a -c or other
     global option or leading assignment (other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
     prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty -C, a -C chain whose first -C is relative
     with no session directory, or a --work-tree/GIT_WORK_TREE= with no -C and no session directory

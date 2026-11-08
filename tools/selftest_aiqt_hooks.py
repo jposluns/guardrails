@@ -16795,6 +16795,17 @@ def _main_isolated(monitor):
                      cwd=str(_f12_plain)) != "deny":
             failures.append("(f12-C-orphan) a -C <repo> creation from an ORPHAN start must still DENY "
                             "(the -C target's ancestry is checked, not blindly allowed)")
+        # A leading GIT_DIR+= with no ambient GIT_DIR sets the value as GIT_DIR= does, so git uses the git dir
+        # it names, not the -C directory: the creation is in a repository this guard cannot pin, and it allows
+        # with the cannot-pin note on a rooted and an orphaned start alike, as the GIT_DIR= spelling does. Read
+        # as a bare -C, the -C target was probed instead (the rooted start allowed with no note, the orphaned
+        # one denied), though git creates the branch elsewhere.
+        for _gda_label, _gda_start in (("gitdir-append-C-rooted", ""), ("gitdir-append-C-orphan", " orphan-start")):
+            _gda_got = _decision(brg, "GIT_DIR+=/nonexistent-brnrot/.git git -C {} checkout -b x{}".format(
+                brr, _gda_start), cwd=str(_f12_plain))
+            if _gda_got != "allow-note":
+                failures.append("({}) a GIT_DIR+= prefix beside -C <repo> names a repository this guard cannot "
+                                "pin, so it must allow with a note, got {}".format(_gda_label, _gda_got))
 
         # H3: origin/HEAD cannot be derived, so the guard falls back to a local
         # main/master; a MISSING protected line is not evidence a plain local branch is orphaned, so a
@@ -29691,7 +29702,8 @@ def _main_isolated(monitor):
           "--work-tree=/etc ALLOWS a rooted start and DENIES an orphaned one), treats a missing origin/HEAD "
           "as rooted and a CHECKOUT/SWITCH --track of a real rooted ref as a rooted creation (a git-branch "
           "--track is an unclassifiable form and DENIES), and ALLOWS-WITH-NOTE only a command whose "
-          "repository it cannot pin: a --git-dir/GIT_DIR form (with or without -C); a -c or other global "
+          "repository it cannot pin: a --git-dir/GIT_DIR form, a leading GIT_DIR+= read as GIT_DIR= "
+          "(with or without -C); a -c or other global "
           "option (--no-pager) or a leading assignment other than GIT_WORK_TREE= and the removed "
           "GUARDRAIL_ALLOW_DISCARD prefix (FOO=, GIT_WORK_TREE+=) when the command carries no -C, "
           "--work-tree or GIT_WORK_TREE= (beside GIT_WORK_TREE= or --work-tree with a session directory, "
