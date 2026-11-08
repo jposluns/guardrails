@@ -135,13 +135,18 @@ end a step red; every other exit spelling stays unclassified.
 GITLEAKS DOWNLOAD. A run: | block holding a line that names curl, wget, sha256sum or
 gitleaks.tar.gz, or one of the retry loop's lines, must equal GITLEAKS_STEP_RUN line
 for line (indentation removed, blank lines and shell comments skipped): the bounded
-retry of the Secrets (gitleaks) step, which checks every downloaded archive against
-the pinned checksum, removes a failed or mismatched one before the next attempt and
-exits 1 when no attempt matched. Any departure (the checksum line dropped, the loop
-or its failure exit removed, another attempt count) is cannot-evaluate
+retry of the Secrets (gitleaks) step, which bounds each curl attempt's connect and
+total time, checks every downloaded archive against the pinned checksum, removes a
+failed or mismatched one before the next attempt and exits 1 when no attempt matched.
+Any departure in the run: text (the checksum line dropped, the loop or its failure
+exit removed, another attempt count, a curl time bound removed) is cannot-evaluate
 (gitleaks-download-pin), and curl, tar and a checksum pipeline are no longer accepted
-by the generic run-line grammar anywhere else. Not checked: the pinned version and
-checksum values, and bash's own behaviour on the pinned body.
+by the generic run-line grammar anywhere else. The pin covers edits to the run: text
+only. Not checked: the pinned version and checksum values; bash's own behaviour on
+the pinned body; and which curl, sha256sum or tar the pinned lines run, which a step
+or job env: (for example PATH or BASH_ENV, which can name a repository directory or
+file supplying a sha256sum that always passes) or an earlier step (for example one
+that writes GITHUB_PATH) can change; the gate does not check that.
 TWO WORKFLOWS. The CI side is the union of the named workflows in CI_WORKFLOWS:
 quality.yml and msg-leaks.yml, which holds the message/metadata leak scan alone
 so that only its one job re-runs on a PR title/body edit. A gate may run in
@@ -860,26 +865,33 @@ SCOPE_DECIDE_RUN_LINES = frozenset({
 
 # The Secrets (gitleaks) step's run: body, pinned line for line (each line with its
 # indentation removed; blank lines and shell comments skipped): a bounded retry of the
-# release download (3 attempts, 10 seconds apart) in which each downloaded archive is
-# checked against the pinned GITLEAKS_SHA256, a failed or mismatched archive is removed
-# before the next attempt, the step exits 1 when no attempt matched, and only a matched
-# archive is extracted and run. Any run: block holding a line of GITLEAKS_FETCH_LINES,
-# or a line naming curl, wget, sha256sum or gitleaks.tar.gz, must equal this tuple
-# exactly (gitleaks-download-pin, cannot-evaluate), so a download whose checksum check
-# is dropped, reordered, bypassed or made optional is refused. This gate does not model
-# bash and does not run this body: an exact pin was chosen so that any edit to the
-# step's script is a finding until the pin and the workflow change together under
-# review. This pin is a consistency check within the reviewed repository, not an
-# authorization, and it does not check the pinned version or checksum values
-# (tools/check_gitleaks_pin.py reads the version pin).
+# release download (3 attempts, 10 seconds apart, each curl attempt limited to 30 seconds
+# to connect and 300 seconds in total, so a stalled transfer fails that attempt) in which
+# each downloaded archive is checked against the pinned GITLEAKS_SHA256, a failed or
+# mismatched archive is removed before the next attempt, the step exits 1 when no
+# attempt matched, and only a matched archive is extracted and run. Any run: block
+# holding a line of GITLEAKS_FETCH_LINES, or a line naming curl, wget, sha256sum or
+# gitleaks.tar.gz, must equal this tuple exactly (gitleaks-download-pin,
+# cannot-evaluate), so an edit to the run: text that drops, reorders, bypasses or makes
+# optional the checksum check is refused. The pin covers the run: text only: a step or
+# job env: (for example PATH or BASH_ENV) or an earlier step (for example one that
+# writes GITHUB_PATH) can change which curl, sha256sum or tar these lines run, and the
+# gate does not check that. This gate does not model bash and does not run this body:
+# an exact pin was chosen so that any edit to the step's script is a finding until the
+# pin and the workflow change together under review. This pin is a consistency check
+# within the reviewed repository, not an authorization, and it does not check the
+# pinned version or checksum values (tools/check_gitleaks_pin.py reads the version pin).
 GITLEAKS_SCAN_LINE = "./gitleaks dir . --no-banner --redact --exit-code 1"
+GITLEAKS_CURL_LINE = (
+    'if curl -fsSL --connect-timeout 30 --max-time 300 '
+    '-o gitleaks.tar.gz "$url"; then')
 GITLEAKS_STEP_RUN = (
     "set -euo pipefail",
     'url="https://github.com/gitleaks/gitleaks/releases/download/'
     'v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"',
     'verified="no"',
     "for attempt in 1 2 3; do",
-    'if curl -fsSL -o gitleaks.tar.gz "$url"; then',
+    GITLEAKS_CURL_LINE,
     'if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then',
     'verified="yes"',
     "break",
@@ -905,7 +917,7 @@ GITLEAKS_STEP_RUN = (
 # generic grammar.
 GITLEAKS_FETCH_LINES = frozenset({
     "for attempt in 1 2 3; do",
-    'if curl -fsSL -o gitleaks.tar.gz "$url"; then',
+    GITLEAKS_CURL_LINE,
     'if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then',
     "break",
     "rm -f gitleaks.tar.gz",
@@ -10210,7 +10222,7 @@ def self_test():
     gitleaks_case("pinned body with a shell comment and a blank line accepted",
                   gitleaks_step(pinned[:3] + ["# retry the download", ""]
                                 + pinned[3:]), [])
-    for name, body, want in (
+    step_rows = (
             # The checksum check dropped: its if line and the matching fi.
             ("checksum line removed",
              pinned[:checksum] + pinned[checksum + 1:checksum + 3]
@@ -10233,36 +10245,58 @@ def self_test():
                                                            pinned[checksum]]
              + pinned[-1:], pin_only),
             ("extraction ahead of the loop",
-             pinned[:3] + [pinned[-2]] + pinned[3:-2] + pinned[-1:], pin_only)):
+             pinned[:3] + [pinned[-2]] + pinned[3:-2] + pinned[-1:], pin_only),
+            # The curl time bounds: without them a stalled transfer is never
+            # retried and holds the job until its timeout.
+            ("curl total-time bound removed",
+             [line.replace(" --max-time 300", "") for line in pinned],
+             pin_and_grammar),
+            ("curl connect bound removed",
+             [line.replace(" --connect-timeout 30", "") for line in pinned],
+             pin_and_grammar),
+            ("curl without either time bound",
+             [line.replace(" --connect-timeout 30 --max-time 300", "")
+              for line in pinned], pin_and_grammar),
+            ("curl total-time bound raised",
+             [line.replace("--max-time 300 ", "--max-time 3000 ")
+              for line in pinned], pin_and_grammar))
+    for name, body, want in step_rows:
         gitleaks_case(name, gitleaks_step(body), want)
     # A pinned loop line, or a checksum pipeline or download, in another step's
     # block (the generic grammar accepted the last two alone before this pin).
-    for name, body, want in (
+    def other_step(body):
+        return (
+            "      - name: Other",
+            "        shell: bash",
+            "        run: |",
+        ) + tuple("          " + line for line in body)
+
+    other_rows = (
             ("pinned sleep line in another step", ["sleep 10"], pin_only),
             ("bare checksum pipeline in another step",
              ['echo "00  x.tar.gz" | sha256sum -c -'], pin_and_grammar),
             ("bare curl download in another step",
              ['curl -fsSL -o x.tar.gz "https://x.invalid/x.tar.gz"'],
-             pin_and_grammar)):
-        gitleaks_case(name, (
-            "      - name: Other",
-            "        shell: bash",
-            "        run: |",
-        ) + tuple("          " + line for line in body), want)
-    # Flip: with the block pin disabled, the step without its checksum line is
-    # accepted, so the pin (not the generic grammar) is what refuses it.
-    no_checksum = gitleaks_step(
-        pinned[:checksum] + pinned[checksum + 1:checksum + 3]
-        + pinned[checksum + 4:])
-    with patch.object(module, "_gitleaks_fetch_pin",
-                      lambda block_lines, source: []):
-        count += 1
-        flipped = gitleaks_codes(no_checksum)
-    if flipped:
-        failures.append(
-            "46 flip: with the pin disabled the step without its checksum line "
-            "gave {}, expected [] (the vector does not isolate the pin)".format(
-                flipped))
+             pin_and_grammar))
+    for name, body, want in other_rows:
+        gitleaks_case(name, other_step(body), want)
+    # Flips: with the block pin disabled, every row above that expects only
+    # gitleaks-download-pin is accepted, so the pin alone refuses it; every row
+    # that expects both codes still gives unclassified-command, so the generic
+    # run-line grammar refuses it as well, independently of the pin.
+    flip_rows = tuple((name, gitleaks_step(body), want)
+                      for name, body, want in step_rows) + tuple(
+        (name, other_step(body), want) for name, body, want in other_rows)
+    for name, extra_steps, want in flip_rows:
+        expected = [] if want == pin_only else ["unclassified-command"]
+        with patch.object(module, "_gitleaks_fetch_pin",
+                          lambda block_lines, source: []):
+            count += 1
+            flipped = gitleaks_codes(extra_steps)
+        if flipped != expected:
+            failures.append(
+                "46 flip {}: with the pin disabled gave {}, expected {}".format(
+                    name, flipped, expected))
     # The live quality.yml carries the pinned body.
     count += 1
     live_text, live_why = read_runner_text(ROOT / CI_SOURCE, CI_SOURCE)

@@ -261,10 +261,12 @@ jobs:
       # its licence as NOASSERTION and has required a licence key for organization
       # repositories; the binary avoids both that and a third-party action in the
       # supply chain. Bump GITLEAKS_VERSION and GITLEAKS_SHA256 together.
-      # A transient release-download fault (an HTTP 504, or a body that fails the checksum) is
-      # retried: at most 3 attempts, 10 seconds apart, each one's archive checked against the
-      # pinned checksum, and a failed or mismatched archive removed before the next attempt. Only
-      # an archive that matched the checksum is extracted; when no attempt matches, the step exits 1.
+      # A transient release-download fault (an HTTP error, a body that fails the checksum, or a
+      # stalled transfer) is retried: at most 3 attempts, 10 seconds apart, each one's archive
+      # checked against the pinned checksum, and a failed or mismatched archive removed before the
+      # next attempt. Each curl attempt is bounded (30 seconds to connect, 300 seconds in total), so
+      # a stall fails that attempt instead of holding the job until its timeout. Only an archive
+      # that matched the checksum is extracted; when no attempt matches, the step exits 1.
       # tools/check_ci_parity.py pins this run: body line for line (GITLEAKS_STEP_RUN).
       - name: Secrets (gitleaks)
         shell: bash
@@ -276,7 +278,7 @@ jobs:
           url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           verified="no"
           for attempt in 1 2 3; do
-            if curl -fsSL -o gitleaks.tar.gz "$url"; then
+            if curl -fsSL --connect-timeout 30 --max-time 300 -o gitleaks.tar.gz "$url"; then
               if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then
                 verified="yes"
                 break
