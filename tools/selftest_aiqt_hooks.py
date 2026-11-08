@@ -5380,13 +5380,17 @@ def _hook_cpu_timed(call, bound=None, runs=3):
     re-timed, up to runs times in all, only while the least reading so far is at or over it, and that
     least reading is judged, since stray charges the clock cannot see apart (kernel reclaim billed to
     an allocating thread as system time, a co-scheduled sibling's cache pressure) only ever add time,
-    so the least of three is the fairest reading of the call's own cost. The call's own work, its
+    so the least of up to three is the fairest reading of the call's own cost. The call's own work, its
     reference counting included, is always charged. The re-timed call must be deterministic: same
     input, same decision, no state carried across runs (a counting shim is reset inside the call).
     Disclosed limit: a real super-linear regression of the measured path is over the bound on every
-    run, and so still fails in seconds, only in a call that meets that precondition; a call that keeps
-    state between runs (a memoised quadratic helper, for example) can read low on its second and third
-    runs, and its least reading then passes the bound. The median-judged rows (_timed_runs over the
+    run, and so still fails, only in a call that meets that precondition, and then only after up to
+    runs timed calls of the regressed path, so in about runs times its own cost: the psm-t rows, which
+    time one call at about 400 KB with no smaller probe first, are the worst recorded case (about 104 s
+    of CPU per call at 400 KB, so about five minutes), while the rows that time a small probe first
+    fail on that probe; a call that keeps state between runs (a memoised quadratic helper, for example)
+    can read low on its second and third runs, and its least reading then passes the bound. The
+    median-judged rows (_timed_runs over the
     lex-cost and deadline-shape cases) keep their existing clocks, time.process_time in the lex-cost
     rows and _cpu_seconds in the deadline-shape cases, and judge the median of three runs, which
     already tolerates one slowed run."""
