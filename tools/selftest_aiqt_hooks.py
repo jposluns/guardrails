@@ -6305,11 +6305,12 @@ def _deadline_restore_failures():
     # measured span allows one more delivery, and the allowance is 0 on an unstalled run, so a second
     # delivery with no measured period in the span still fails. The allowance ignores the re-arm's
     # phase inside the period: the restore re-arms the due timer one period less its overdue time
-    # (normally a few milliseconds) ahead, so a stall from the restore's clock read to the cancel
-    # whose length lands within about that overdue time below a multiple of 0.5 s delivers one more
-    # than the allowance, and such a run turns this row red with the hook right, a disclosed residual.
-    # The phase could be derived from the measured clock reads and brackets; the allowance does not
-    # use it. The high end allows the microsecond a re-arming setitimer rounds up.
+    # (taken modulo the period; 0.15 to 0.27 ms in one host's measurement) ahead, so a stall from the
+    # restore's clock read to the cancel whose length lands within about that overdue time below a
+    # multiple of 0.5 s delivers one more than the allowance, and such a run turns this row red with
+    # the hook right, a disclosed residual. The phase could be bounded from the measured clock reads
+    # and brackets, not derived exactly; the allowance does not use it. The high end allows the
+    # microsecond a re-arming setitimer rounds up.
     allowed = 1 + (int((run.cancelled - reads[-1]) // 0.5) if len(reads) == 2 else 0)
     if not (run.code == 2 and fired and fired == [signal.SIGALRM] * len(fired) and len(fired) <= allowed
             and run.after[1] == 0.5 and 0 < run.after[0] <= 0.5 + 1e-6
@@ -8120,9 +8121,13 @@ def _deadline_restore_fault_failures():
     _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body sleeps 0.05 s, so that a restore
     that counts the window's time twice, or not at all, is off by at least that much. A host stall widens
     the bounds by only the stall (_restored_countdown_bounds), and on one side only, so it passes such a
-    restore only when it lasts about as long as the body and falls on that restore's side: a stall in the
-    restore's gap can pass the one that counts twice, and a stall in the arm or read bracket the one that
-    counts not at all; "expired", a 0.2-second
+    restore only when it lasts about as long as the body and falls on that restore's side. The one that
+    counts twice (too low) can pass under a stall in the restore's gap, between armed[0] and the arming
+    setitimer, or between the getitimer and read[1]; the one that counts not at all (too high) under a
+    stall between the arming setitimer and armed[1], between read[0] and the getitimer, or from the
+    re-arming setitimer's action to the read after it returns. A stall in the take's gap, or anywhere
+    between the take's clock read and the restore's, adds to either wrong restore's error as much as it
+    widens the bound, so it passes neither; "expired", a 0.2-second
     window whose body ends while the first instruction of _give_back waits (up to 1 s, from an opcode trace
     stage) until the window's own expiry is pending, so the restore discards it; "due", the window's own
     expiry at a caller timer due 0.05 s in. Each case is checked at return from the with statement, before
