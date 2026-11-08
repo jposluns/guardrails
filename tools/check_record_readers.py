@@ -23,33 +23,32 @@ look for, and a file is a detected reader when any rule below matches:
           importlib.import_module("m") or __import__("m")), or a string constant equal to m.py or ending
           in "/m.py", "m.py" after ":" or "}" (the module loaded by file path): an indirect reader
   shell   a .sh line holding a declared record file name or flag as a whole word
-The key vocabulary is checked against its authoritative source: the registry keys the hook library
-(.aiqt/core/hooks/scripts/aiqt_hooks.py) reads from the registry (reg, reg_data) or its record table (rec)
-and resolves to a record path through its _orch_path(root, value) helper. A key is derived when a read of
-the registry, of a receiver alias of it (r = reg) or of an alias of its bound .get (g = reg.get, by plain
-or annotated assignment, or getattr(reg, "get")) sits inside an _orch_path value argument (positional or
-keyword), or reaches one through same-scope bindings followed transitively: plain, annotated and augmented
-assignments, walrus bindings, tuple and list targets (element-wise over a same-shape literal, else each
-name takes the whole right side's reads), for, with and comprehension targets, and parameter defaults.
-A resolvable key is a string constant, or a loop variable over a literal tuple, list or set of string
-constants only that nothing else in the scope rebinds. A traced read whose key resolves to neither form
-is cannot-evaluate naming a line, never a silent pass; so is a traced name bound by a nested def, class
-or parameter that mentions the registry, a traced name bound only in an enclosing scope whose binding
-involves the registry, a lambda mentioning the registry inside a traced expression, and a getattr on the
-registry other than its bound .get. A key the derivation yields that [detect] keys lacks, a hook library
-that cannot be read or parsed, or one that yields no key, is cannot-evaluate.
+The key vocabulary is checked against its authoritative source: the hook library
+(.aiqt/core/hooks/scripts/aiqt_hooks.py), scanned whole (every scope: the module, class bodies,
+functions, lambdas, comprehensions and decorators). Every Load-context occurrence of a registry
+receiver name (reg, reg_data, rec) must be one of a closed set of accepted access forms, each yielding
+its key: R.get(K), R.get(K, default), R[K], (R or {}).get(K) or (R or {})[K], with K a string constant
+or a loop variable over a literal tuple, list or set of string constants that nothing else in its
+scope rebinds. The derived key set is the union over all such reads, plus the keys-read each
+[[detect.registry-use]] entry asserts. Every other occurrence (a non-constant key, any other method or
+attribute, the receiver passed as a call argument, assigned, returned, yielded, unpacked, iterated,
+compared, formatted or used in any other expression) is cannot-evaluate naming its line, unless a
+[[detect.registry-use]] entry in the switch list anchors that line: its line-anchor, one or more
+complete consecutive source lines, must match exactly one place in the hook library, must cover at
+least one such non-conforming use, and carries a reason and the keys-read the author asserts for that
+use. Each derived key must be in [detect] keys or, when it names no record path, in
+[detect.non-record-keys] with a reason; a derived key in neither list, a key in both lists, an
+excluded key no read derives, an anchor matching zero or several places, a stale allowlist entry, a
+hook library that cannot be read or parsed, or one that yields no key, is cannot-evaluate.
 What the scan cannot see: a name, key or module file name built at run time from parts ("changelog" +
 ".toml", "aiqt_hooks" + ".py"), a record name in the middle of a longer string that is not a path ending, a
 key held in a named collection before a loop iterates it, a module loaded through a variable name, a path
 given only on a command line whose flag is not declared, a .sh file that runs a record-reading module, paths
 kept in the untracked orchestration registry, readers outside tools/, and a read that never names a file,
-key, flag or module. The residual the key derivation does not see: a helper handed the registry itself
-(helper(reg)) or its bare bound .get may read any key behind the call, and a module-level helper name is
-never followed into; a registry read through an attribute of another object, or made in another module, is
-not derived; a record path the hook library resolves through any helper other than _orch_path (for example
-a declared sentinel path it joins onto an anchor with os.path.join) is not seen and its key is not derived;
-a read that reaches no _orch_path argument derives nothing and is not refused; and an _orch_path call whose
-arguments are all *-splatted carries no readable value expression.
+key, flag or module. The residual of the key derivation: a registry object reached under a name that is
+not in HOOK_REGISTRY_NAMES (for example through a function return value, another object's attribute, or
+an alias bound from the receiver) is not seen, and a key used outside the hook library is not seen; an
+allowlisted use is covered only by the keys-read its author asserts.
 A self-test that writes record fixtures is detected like a reader; the
 fixture-only disposition records it. A tool that imports a declared module for some other part of it is
 detected too; the not-a-reader disposition records it, with the reason.
@@ -59,8 +58,10 @@ disposition is one of switch, stays-outside-store, fixture-only, not-a-reader, o
 where <path> is another listed entry. Exit 1 (finding): a detected reader that is not listed; a listed file that is gone;
 a listed file the scan no longer detects. Exit 2 (cannot evaluate): a missing, unreadable, non-UTF-8,
 malformed, too deeply nested or schema-invalid switch list, a duplicate entry, an unknown disposition, an
-indirect-via target that is not listed or an indirect-via cycle; a [detect] keys list that lacks a key the
-hook library derives; a missing scan root, a symbolic link to a directory or a directory that cannot be
+indirect-via target that is not listed or an indirect-via cycle; a registry use in the hook library outside
+the accepted access forms with no registry-use entry anchoring its line; a derived registry key in neither
+[detect] keys nor [detect.non-record-keys]; a malformed, ambiguous or stale registry-use or non-record-keys
+entry; a missing scan root, a symbolic link to a directory or a directory that cannot be
 listed; a scanned source larger than MAX_BYTES or that is unreadable, not a regular file (a FIFO is
 refused by the opened descriptor's type, never a blocked read), a symbolic link, not UTF-8 or not parseable
 Python. A run with any cannot-evaluate cause exits 2 even when it also has findings.
@@ -97,19 +98,21 @@ VIA_PREFIX = "indirect-via:"
 DETECT_FIELDS = ("names", "keys", "flags", "modules")
 READER_FIELDS = frozenset({"path", "records", "disposition", "reason"})
 TOP_FIELDS = frozenset({"format-version", "detect", "reader"})
-# The authoritative source of registry keys: the keys the hook library reads from the registry (reg,
-# reg_data) or its record table (rec) and resolves to a record path through its _orch_path(root, value)
-# helper. Derived: a string-constant key (or a loop variable over a literal collection of string constants
-# only, rebound nowhere else in its scope) read from the registry, a receiver alias of it or an alias of
-# its bound .get, inside an _orch_path value argument or reaching one through same-scope bindings followed
-# transitively. Refused (cannot-evaluate): a traced read whose key resolves to no string constant, and a
-# traced name the trace cannot follow (a nested def, class, lambda, closure, global or registry attribute)
-# where the registry is involved. Not seen: a helper handed the registry itself, a read in another module,
-# a record path the hook library resolves through any helper other than _orch_path (one it joins onto an
-# anchor itself), and registry reads that reach no _orch_path argument. [detect] keys must hold each
-# derived key; a key the hook library gains and the list lacks is cannot-evaluate.
+DETECT_OPTIONAL = ("non-record-keys", "registry-use")
+REGISTRY_USE_FIELDS = frozenset({"line-anchor", "reason", "keys-read"})
+# The authoritative source of registry keys: the hook library is scanned whole (every scope, class
+# bodies, decorators, lambdas and comprehensions included), and every Load-context occurrence of a
+# registry receiver name must be an accepted access form, each yielding its key: R.get(K),
+# R.get(K, default), R[K], (R or {}).get(K) or (R or {})[K], with K a string constant or a loop
+# variable over a literal collection of string constants nothing else in its scope rebinds. Any other
+# occurrence is cannot-evaluate naming its line unless a [[detect.registry-use]] allowlist entry
+# anchors that line (an anchor must match exactly one place and excuse at least one such use; its
+# keys-read join the derived set). A derived key must be in [detect] keys or excluded in
+# [detect.non-record-keys] with a reason. Not seen: a registry object reached under a name not in
+# HOOK_REGISTRY_NAMES (a function return value, another object's attribute, an alias bound from the
+# receiver), and a key read outside the hook library; an allowlisted use is covered only by its
+# asserted keys-read.
 HOOK_LIBRARY = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-HOOK_PATH_RESOLVER = "_orch_path"
 HOOK_REGISTRY_NAMES = frozenset({"reg", "reg_data", "rec"})
 # A record name ending a string after one of these is a path built by formatting or joining: "{}:name"
 # (a git show REV:PATH argument), "{}/name", f"{d}/name" or rev + ":name".
@@ -198,9 +201,35 @@ def load_switch_list(root):
     if type(data.get("format-version")) is not int or data.get("format-version") != 1:
         raise CannotEvaluate("{}: format-version must be the integer 1".format(SWITCH_LIST))
     block = data.get("detect")
-    if not isinstance(block, dict) or set(block) != set(DETECT_FIELDS):
-        raise CannotEvaluate("{}: [detect] must hold exactly {}".format(SWITCH_LIST, ", ".join(DETECT_FIELDS)))
+    if not isinstance(block, dict) or set(block) - set(DETECT_OPTIONAL) != set(DETECT_FIELDS):
+        raise CannotEvaluate("{}: [detect] must hold exactly {} (plus optional {})".format(
+            SWITCH_LIST, ", ".join(DETECT_FIELDS), " and ".join(DETECT_OPTIONAL)))
     detect = {field: _string_list(block[field], "[detect] " + field) for field in DETECT_FIELDS}
+    excluded = block.get("non-record-keys", {})
+    if not isinstance(excluded, dict) or not all(
+            isinstance(k, str) and k and isinstance(v, str) and v.strip() for k, v in excluded.items()):
+        raise CannotEvaluate("{}: [detect.non-record-keys] must map each excluded key to a non-empty "
+                             "reason".format(SWITCH_LIST))
+    detect["non-record-keys"] = dict(excluded)
+    raw_uses = block.get("registry-use", [])
+    if not isinstance(raw_uses, list):
+        raise CannotEvaluate("{}: [[detect.registry-use]] must be an array of tables".format(SWITCH_LIST))
+    uses = []
+    for number, entry in enumerate(raw_uses, 1):
+        where = "{} [[detect.registry-use]] #{}".format(SWITCH_LIST, number)
+        if not isinstance(entry, dict) or set(entry) != REGISTRY_USE_FIELDS:
+            raise CannotEvaluate("{}: must hold exactly {}".format(
+                where, ", ".join(sorted(REGISTRY_USE_FIELDS))))
+        anchor, reason, keys_read = entry["line-anchor"], entry["reason"], entry["keys-read"]
+        if not isinstance(anchor, str) or not anchor.strip():
+            raise CannotEvaluate("{}: line-anchor must be a non-empty string".format(where))
+        if not isinstance(reason, str) or not reason.strip():
+            raise CannotEvaluate("{}: reason must be a non-empty string".format(where))
+        if not isinstance(keys_read, list) or not all(isinstance(k, str) and k for k in keys_read) \
+                or len(set(keys_read)) != len(keys_read):
+            raise CannotEvaluate("{}: keys-read must be a list of distinct non-empty strings".format(where))
+        uses.append((anchor, tuple(keys_read)))
+    detect["registry-use"] = tuple(uses)
     rows = data.get("reader")
     if not isinstance(rows, list) or not rows:
         raise CannotEvaluate("{}: needs at least one [[reader]] entry".format(SWITCH_LIST))
@@ -243,32 +272,31 @@ def load_switch_list(root):
     return detect, readers
 
 
-def _parse_python(path, rel):
-    """The parsed module at path, or CannotEvaluate naming rel when it cannot be read, decoded or parsed."""
-    text = _read_regular(path, rel)
+def _parse_python_text(path, rel):
+    """(tree, text): the parsed module at path and its decoded source, or CannotEvaluate naming rel when
+    it cannot be read, decoded or parsed."""
+    raw = _read_regular(path, rel)
     try:
-        text = text.decode("utf-8")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise CannotEvaluate("{}: not UTF-8 ({})".format(rel, exc)) from None
     try:
-        return ast.parse(text, filename=rel)
+        return ast.parse(text, filename=rel), text
     except (SyntaxError, ValueError) as exc:
         raise CannotEvaluate("{}: not parseable Python ({})".format(rel, exc)) from None
     except RecursionError:
         raise CannotEvaluate("{}: nested too deeply to parse".format(rel)) from None
 
 
-def _is_registry(node, extra=frozenset()):
-    """True for a registry receiver: a name in HOOK_REGISTRY_NAMES or in extra (a scope's receiver
-    aliases, r = reg), or an `or` whose first operand is one: (reg or {})."""
-    if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) and node.values:
-        node = node.values[0]
-    return isinstance(node, ast.Name) and (node.id in HOOK_REGISTRY_NAMES or node.id in extra)
+def _parse_python(path, rel):
+    """The parsed module at path, or CannotEvaluate naming rel when it cannot be read, decoded or parsed."""
+    return _parse_python_text(path, rel)[0]
 
 
 def _scope_walk(scope):
-    """Every node of one function or module body, not descending into a nested function, so a loop
-    variable is resolved only within the scope that binds it."""
+    """Every node of one scope (the module, a def, an async def or a lambda), not descending into a
+    nested function or lambda, so a loop variable is resolved only within the scope that binds it. Class
+    bodies, comprehensions and decorators are walked as part of the scope that holds them."""
     stack = list(ast.iter_child_nodes(scope))
     while stack:
         node = stack.pop()
@@ -277,383 +305,160 @@ def _scope_walk(scope):
             stack.extend(ast.iter_child_nodes(node))
 
 
-class _Scope:
-    """One name-binding region (the module, a def, an async def or a lambda): its binding records by
-    name, the names it declares global or nonlocal, its receiver aliases (names holding the registry
-    itself) and .get aliases (names holding a registry's bound .get), and its enclosing scope."""
-
-    def __init__(self, node, parent):
-        self.node = node
-        self.parent = parent
-        self.bindings = {}
-        self.global_names = set()
-        self.nonlocal_names = set()
-        self.receivers = set()
-        self.get_aliases = set()
-
-    def bind(self, name, kind, lineno, payload):
-        """One binding record. kind "expr": payload is the bound expression, whose registry reads the
-        name carries. kind "loop": payload is a frozenset of the literal loop strings, or None for a
-        literal collection holding any non-string element (deriving only the literal part of a mixed
-        collection would silently drop the rest). kind "def" or "param": payload is the AST the trace
-        cannot follow (a nested def, async def or class; a parameter's default), or None. kind
-        "import": an imported name, which cannot hold this process's registry."""
-        self.bindings.setdefault(name, []).append((kind, lineno, payload))
-
-
-def _target_names(target):
-    """Every plain name a target binds, however nested the tuple, list or starred pattern."""
-    if isinstance(target, ast.Name):
-        yield target
-    elif isinstance(target, (ast.Tuple, ast.List)):
-        for element in target.elts:
-            yield from _target_names(element)
-    elif isinstance(target, ast.Starred):
-        yield from _target_names(target.value)
-
-
-def _bind_target(scope, target, value):
-    """One assignment of value to target. A Tuple or List target over a same-length Tuple or List
-    literal with no starred element binds element-wise; any other shape gives every bound name the
-    whole right side's reads (the element came out of it, so this is a superset, never a loss)."""
-    if (isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, (ast.Tuple, ast.List))
-            and len(target.elts) == len(value.elts)
-            and not any(isinstance(e, ast.Starred) for e in list(target.elts) + list(value.elts))):
-        for element, part in zip(target.elts, value.elts):
-            _bind_target(scope, element, part)
-        return
-    for name in _target_names(target):
-        scope.bind(name.id, "expr", getattr(value, "lineno", name.lineno), value)
+def _loop_key_strings(scope):
+    """name -> the frozenset of strings a plain for, async-for or comprehension target over a literal
+    tuple, list or set of string constants can hold within scope. A name any other construct also binds
+    (an assignment, a parameter, a non-literal or mixed-element loop, an import, a def or class name, an
+    except, match or global/nonlocal binding) is absent and never resolves a key."""
+    nodes = list(_scope_walk(scope))
+    loop_targets = set()
+    strings = {}
+    for node in nodes:
+        if (isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension))
+                and isinstance(node.target, ast.Name)
+                and isinstance(node.iter, (ast.Tuple, ast.List, ast.Set)) and node.iter.elts
+                and all(isinstance(e, ast.Constant) and isinstance(e.value, str)
+                        for e in node.iter.elts)):
+            loop_targets.add(id(node.target))
+            strings.setdefault(node.target.id, set()).update(e.value for e in node.iter.elts)
+    bound_otherwise = set()
+    for node in nodes:
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if id(node) not in loop_targets:
+                bound_otherwise.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound_otherwise.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound_otherwise.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound_otherwise.update(a.asname or a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound_otherwise.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound_otherwise.update(node.names)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            bound_otherwise.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound_otherwise.add(node.rest)
+    return {name: frozenset(value) for name, value in strings.items() if name not in bound_otherwise}
 
 
-def _bind_assign(scope, node):
-    for target in node.targets:
-        _bind_target(scope, target, node.value)
-
-
-def _bind_annassign(scope, node):
-    if node.value is not None:
-        _bind_target(scope, node.target, node.value)
-
-
-def _bind_augassign(scope, node):
-    if isinstance(node.target, ast.Name):
-        scope.bind(node.target.id, "expr", node.value.lineno, node.value)
-
-
-def _bind_walrus(scope, node):
-    if isinstance(node.target, ast.Name):
-        scope.bind(node.target.id, "expr", node.value.lineno, node.value)
-
-
-def _bind_loop(scope, node):
-    """A For, AsyncFor or comprehension target: a plain name over a literal collection of string
-    constants only is a resolvable key source; every other shape gives each bound name the iterated
-    expression's reads."""
-    if isinstance(node.target, ast.Name) and isinstance(node.iter, (ast.Tuple, ast.List, ast.Set)):
-        values = [e.value for e in node.iter.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
-        payload = frozenset(values) if len(values) == len(node.iter.elts) else None
-        scope.bind(node.target.id, "loop", node.iter.lineno, payload)
-        return
-    for name in _target_names(node.target):
-        scope.bind(name.id, "expr", node.iter.lineno, node.iter)
-
-
-def _bind_with(scope, node):
-    for item in node.items:
-        if item.optional_vars is not None:
-            _bind_target(scope, item.optional_vars, item.context_expr)
-
-
-def _bind_scope_name(scope, node):
-    # A nested def, async def or class binds its name; its body runs later, so the trace records
-    # only the node, and refuses a later use when the body mentions the registry.
-    scope.bind(node.name, "def", node.lineno, node)
-
-
-def _bind_import(scope, node):
-    for alias in node.names:
-        scope.bind(alias.asname or alias.name.split(".")[0], "import", node.lineno, None)
-
-
-def _bind_global(scope, node):
-    scope.global_names.update(node.names)
-
-
-def _bind_nonlocal(scope, node):
-    scope.nonlocal_names.update(node.names)
-
-
-# Every name-binding statement form the trace resolves, by node type; the self-test removes each in
-# turn to prove the rows that cover it depend on it.
-_BINDING_FORMS = {
-    ast.Assign: _bind_assign, ast.AnnAssign: _bind_annassign, ast.AugAssign: _bind_augassign,
-    ast.NamedExpr: _bind_walrus, ast.For: _bind_loop, ast.AsyncFor: _bind_loop,
-    ast.comprehension: _bind_loop, ast.With: _bind_with, ast.AsyncWith: _bind_with,
-    ast.FunctionDef: _bind_scope_name, ast.AsyncFunctionDef: _bind_scope_name,
-    ast.ClassDef: _bind_scope_name, ast.Import: _bind_import, ast.ImportFrom: _bind_import,
-    ast.Global: _bind_global, ast.Nonlocal: _bind_nonlocal,
-}
-
-
-def _bind_params(scope, node):
-    """The parameters of a def or lambda scope: one whose default is the registry itself (or an `or`
-    of it) carries the registry in under the parameter's name; every other parameter is bound by the
-    caller, opaque to the trace, with its default kept for the registry-mention check."""
-    args = node.args
-    positional = list(args.posonlyargs) + list(args.args)
-    defaults = {}
-    for arg, default in zip(positional[len(positional) - len(args.defaults):], args.defaults):
-        defaults[arg.arg] = default
-    for arg, default in zip(args.kwonlyargs, args.kw_defaults):
-        defaults[arg.arg] = default
-    names = [a.arg for a in positional + list(args.kwonlyargs)]
-    names.extend(extra.arg for extra in (args.vararg, args.kwarg) if extra is not None)
-    for name in names:
-        default = defaults.get(name)
-        if default is not None and _is_registry(default):
-            scope.receivers.add(name)
-        else:
-            scope.bind(name, "param", node.lineno, default)
-
-
-def _collect_scopes(node, parent, scopes):
-    """The scope of node and, recursively, of every def, async def and lambda inside it, each with
-    its binding records collected."""
-    scope = _Scope(node, parent)
-    scopes.append(scope)
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-        _bind_params(scope, node)
-    for child in _scope_walk(node):
-        handler = _BINDING_FORMS.get(type(child))
-        if handler is not None:
-            handler(scope, child)
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            _collect_scopes(child, scope, scopes)
-    return scopes
-
-
-def _share_outer_bindings(scopes):
-    """A binding made under a global or nonlocal declaration binds the outer name: its records are
-    copied to the module scope (global) or to the nearest enclosing function scope that also binds
-    the name, else the immediate enclosing scope (nonlocal), so a registry read written through
-    either declaration is seen where the name is used."""
-    module_scope = scopes[0]
-    for scope in scopes:
-        for name in sorted(scope.global_names):
-            for record in scope.bindings.get(name, []):
-                module_scope.bindings.setdefault(name, []).append(record)
-        for name in sorted(scope.nonlocal_names):
-            target = scope.parent
-            while (target is not None and target.parent is not None
-                   and name not in target.bindings):
-                target = target.parent
-            if target is not None and target.parent is not None:
-                for record in scope.bindings.get(name, []):
-                    target.bindings.setdefault(name, []).append(record)
-
-
-def _is_get_alias_expr(expr, scope):
-    """True when expr is a registry receiver's bound .get: r.get, (r or {}).get or getattr(r, "get")
-    with r the registry or a receiver alias of it."""
-    if isinstance(expr, ast.Attribute) and expr.attr == "get" and _is_registry(expr.value, scope.receivers):
-        return True
-    return (isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id == "getattr"
-            and len(expr.args) >= 2 and _is_registry(expr.args[0], scope.receivers)
-            and isinstance(expr.args[1], ast.Constant) and expr.args[1].value == "get")
-
-
-def _alias_fixpoint(scope):
-    """Grow scope's receiver and .get-alias names to a fixed point: r = reg makes r a receiver,
-    g = r.get (by plain or annotated assignment, or getattr(r, "get")) makes g a .get alias, and a
-    chain of such bindings is followed. A name with any one such binding counts, whatever its other
-    bindings hold: the fail direction is a read seen, never one missed."""
-    changed = True
-    while changed:
-        changed = False
-        for name, records in scope.bindings.items():
-            for kind, _lineno, payload in records:
-                if kind != "expr":
-                    continue
-                if name not in scope.receivers and _is_registry(payload, scope.receivers):
-                    scope.receivers.add(name)
-                    changed = True
-                if name not in scope.get_aliases and _is_get_alias_expr(payload, scope):
-                    scope.get_aliases.add(name)
-                    changed = True
-
-
-def _mentions_registry(node, scope):
-    """True when any name under node is the registry, or a receiver or .get alias of scope or of a
-    scope enclosing it."""
-    known = set(HOOK_REGISTRY_NAMES)
-    cursor = scope
-    while cursor is not None:
-        known |= cursor.receivers | cursor.get_aliases
-        cursor = cursor.parent
-    return any(isinstance(n, ast.Name) and n.id in known for n in ast.walk(node))
-
-
-def _resolve_key(key, scope):
-    """(strings, ok): the string constants a read's key can hold. ok is False when the scan cannot
-    pin them: a missing or non-constant key expression, or a loop variable that anything else in the
-    scope rebinds (the literal loop strings would be stale)."""
+def _key_strings(key, scope_loops):
+    """The frozenset of string constants one key expression can hold: a string constant, or a name bound
+    only as a literal-loop target in its scope (scope_loops); None when the key cannot be pinned."""
     if isinstance(key, ast.Constant) and isinstance(key.value, str):
-        return {key.value}, True
-    if isinstance(key, ast.Name):
-        records = scope.bindings.get(key.id, [])
-        if records and all(kind == "loop" and payload is not None for kind, _lineno, payload in records):
-            strings = set()
-            for _kind, _lineno, payload in records:
-                strings |= payload
-            return strings, True
-    return set(), False
-
-
-def _enclosing_refusal(name, use_lineno, scope):
-    """A (lineno, reason) refusal when name is bound in an enclosing scope with the registry
-    involved: the trace never follows a value across scopes, so a closure over a registry read or
-    over a receiver alias fails closed. A module-level def or class name is the documented helper
-    residual, never followed and never refused; any other enclosing binding with no registry
-    mention resolves to nothing. None when no enclosing binding involves the registry."""
-    cursor = scope.parent
-    while cursor is not None:
-        if name in cursor.receivers or name in cursor.get_aliases:
-            return (use_lineno, "a registry receiver or .get alias reaching in from an enclosing scope")
-        records = cursor.bindings.get(name, [])
-        for kind, lineno, payload in records:
-            if kind == "def" and cursor.parent is None:
-                continue
-            if kind in ("expr", "def", "param") and payload is not None \
-                    and _mentions_registry(payload, cursor):
-                return (lineno, "a binding in an enclosing scope that involves the registry")
-        if records:
-            return None
-        cursor = cursor.parent
+        return frozenset((key.value,))
+    if isinstance(key, ast.Name) and isinstance(key.ctx, ast.Load):
+        return scope_loops.get(key.id)
     return None
 
 
-def _trace_name(name, use_lineno, scope, visited):
-    """(keys, refusals) carried by one name a traced value uses. Each same-scope binding is
-    followed: an expression binding contributes its reads; a loop binding holds strings, which
-    carry no read; a nested def, class or parameter binding whose kept AST mentions the registry
-    is a refusal, and one that does not mentions nothing the trace needs. A name with no same-scope
-    binding (or one declared global or nonlocal) is judged by _enclosing_refusal."""
-    token = (id(scope), name)
-    if token in visited:
-        return set(), []
-    visited.add(token)
-    keys, refusals = set(), []
-    records = scope.bindings.get(name, [])
-    for kind, lineno, payload in records:
-        if kind == "expr":
-            got, bad = _expr_reads(payload, scope, visited)
-            keys |= got
-            refusals.extend(bad)
-        elif kind in ("def", "param") and payload is not None and _mentions_registry(payload, scope):
-            refusals.append((lineno, "a binding the trace cannot follow that involves the registry"))
-    if not records or name in scope.global_names or name in scope.nonlocal_names:
-        outer = _enclosing_refusal(name, use_lineno, scope)
-        if outer is not None:
-            refusals.append(outer)
-    return keys, refusals
+def _accepted_read(node, parents, scope_loops):
+    """The frozenset of keys one Load-context registry occurrence yields when it is an accepted access
+    form: R.get(K), R.get(K, default), R[K], (R or {}).get(K) or (R or {})[K], with K a string constant
+    or a literal-loop variable nothing else in its scope rebinds. None for every other occurrence: the
+    caller fails closed on it."""
+    receiver, parent = node, parents.get(node)
+    if (isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.Or) and len(parent.values) == 2
+            and parent.values[0] is node and isinstance(parent.values[1], ast.Dict)
+            and not parent.values[1].keys and not parent.values[1].values):
+        receiver, parent = parent, parents.get(parent)
+    if (isinstance(parent, ast.Subscript) and parent.value is receiver
+            and isinstance(parent.ctx, ast.Load)):
+        return _key_strings(parent.slice, scope_loops)
+    if isinstance(parent, ast.Attribute) and parent.value is receiver and parent.attr == "get":
+        call = parents.get(parent)
+        if (isinstance(call, ast.Call) and call.func is parent and not call.keywords
+                and len(call.args) in (1, 2)
+                and not any(isinstance(a, ast.Starred) for a in call.args)):
+            return _key_strings(call.args[0], scope_loops)
+    return None
 
 
-def _expr_reads(expr, scope, visited):
-    """(keys, refusals): every registry read the scan can see in expr, traced through same-scope
-    bindings transitively (visited bounds the walk). keys are the resolved string-constant keys;
-    refusals are (lineno, reason) rows the caller fails closed on: a read whose key the scan cannot
-    pin, a getattr on the registry other than its bound .get, a lambda that mentions the registry
-    (its body runs later, where the trace cannot follow), and the per-name refusals of
-    _trace_name."""
-    keys, refusals = set(), []
-    traced = set()
-    for node in ast.walk(expr):
-        is_read, key = False, None
-        if isinstance(node, ast.Subscript) and _is_registry(node.value, scope.receivers):
-            is_read, key = True, node.slice
-        elif isinstance(node, ast.Call):
-            func = node.func
-            if ((isinstance(func, ast.Attribute) and func.attr == "get"
-                 and _is_registry(func.value, scope.receivers))
-                    or (isinstance(func, ast.Name) and func.id in scope.get_aliases)
-                    or _is_get_alias_expr(func, scope)):
-                is_read, key = True, (node.args[0] if node.args else None)
-            elif (isinstance(func, ast.Name) and func.id == "getattr" and node.args
-                  and _is_registry(node.args[0], scope.receivers)
-                  and not _is_get_alias_expr(node, scope)):
-                refusals.append((node.lineno, "a getattr on the registry other than its bound .get"))
-                continue
-        if is_read:
-            strings, ok = _resolve_key(key, scope)
-            if ok:
-                keys |= strings
-            else:
-                refusals.append((node.lineno, "a key the scan cannot resolve to a string constant"))
-            continue
-        if isinstance(node, ast.Lambda) and _mentions_registry(node, scope):
-            refusals.append((node.lineno, "a lambda that mentions the registry"))
-            continue
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-            # Every loaded name is traced, the registry's own names too: rec bound from
-            # reg.get("record") carries that read to wherever rec is used.
-            traced.add((node.id, node.lineno))
-    for name, lineno in sorted(traced):
-        got, bad = _trace_name(name, lineno, scope, visited)
-        keys |= got
-        refusals.extend(bad)
-    return keys, refusals
+def _anchor_hits(source_lines, anchor):
+    """Every (first line number, line count), one-based, where anchor, split on newlines, occurs in
+    source_lines as consecutive whole lines."""
+    anchor_lines = anchor.split("\n")
+    count = len(anchor_lines)
+    return [(start + 1, count) for start in range(len(source_lines) - count + 1)
+            if source_lines[start:start + count] == anchor_lines]
 
 
-def hook_registry_keys(root):
-    """The sorted registry keys the hook library resolves to a record path. Derived: each read
-    reg.get(K), rec[K], (reg_data or {}).get(K), a call of a .get alias (g = reg.get, by plain or
-    annotated assignment, or g = getattr(reg, "get")) and a read through a receiver alias (r = reg,
-    then r.get(K)), where K is a string constant or a loop variable over a literal collection of
-    string constants that nothing else in the scope rebinds; found inside a value argument
-    (positional or keyword) of _orch_path(root, ...) directly, or reached from one through same-scope
-    bindings followed transitively: assignments (tuple and list targets bind element-wise over a
-    same-shape literal, else each name takes the whole right side's reads), annotated and augmented
-    assignments, walrus bindings, for and with targets, comprehension targets, and a parameter
-    default. Refused (CannotEvaluate naming a line): a traced read whose key resolves to no string
-    constant (a loop variable rebound anywhere else in the scope is unresolved, not its stale
-    literal); a traced name bound by a nested def, class or parameter whose kept source mentions the
-    registry; a traced name bound only in an enclosing scope whose binding there involves the
-    registry (the trace stays inside one scope); a lambda mentioning the registry inside a traced
-    expression; a getattr on the registry other than its bound .get; a hook library that cannot be
-    read or parsed, or one that yields no key at all (a derivation that finds nothing would pass
-    every list vacuously). The residual the trace does not see: a helper handed the registry itself
-    (helper(reg)) or its bare bound .get may read any key behind the call, and a module-level helper
-    name is never followed into; a registry read through an attribute of another object, or made in
-    another module, is not derived; those reads are refused only where a traced binding or lambda
-    names the registry."""
-    tree = _parse_python(os.path.join(root, HOOK_LIBRARY), HOOK_LIBRARY)
+def hook_registry_keys(root, registry_use=()):
+    """The sorted registry keys the hook library reads, derived from every registry access. The whole
+    library is scanned, every scope included (the module, class bodies, decorators, lambdas,
+    comprehensions and nested defs). Every Load-context occurrence of a registry receiver name (a name
+    in HOOK_REGISTRY_NAMES) must be one of the accepted access forms, each yielding its key: R.get(K),
+    R.get(K, default), R[K], (R or {}).get(K) or (R or {})[K], with K a string constant or a loop
+    variable over a literal tuple, list or set of string constants that nothing else in its scope
+    rebinds. The result is the union of those keys and the keys-read asserted by registry_use, the
+    validated (line-anchor, keys-read) pairs of the [[detect.registry-use]] allowlist. Refused
+    (CannotEvaluate): any other occurrence, naming its line, unless an allowlist anchor (one or more
+    complete consecutive source lines) matches exactly one place in the library and covers that line;
+    an anchor matching zero or several places; an entry whose anchor covers no non-conforming use (a
+    stale entry); a hook library that cannot be read or parsed; and one that yields no key at all (a
+    derivation that finds nothing would pass every list vacuously). The residual the derivation does
+    not see: a registry object reached under a name not in HOOK_REGISTRY_NAMES (for example through a
+    function return value, another object's attribute, or an alias bound from the receiver) is not
+    seen, and a key used outside the hook library is not seen; an allowlisted use is covered only by
+    the keys-read its author asserts."""
+    tree, text = _parse_python_text(os.path.join(root, HOOK_LIBRARY), HOOK_LIBRARY)
     keys = set()
+    refused = {}
     try:
-        scopes = _collect_scopes(tree, None, [])
-        _share_outer_bindings(scopes)
-        for scope in scopes:
-            _alias_fixpoint(scope)
-        for scope in scopes:
-            for call in _scope_walk(scope.node):
-                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-                        and call.func.id == HOOK_PATH_RESOLVER):
-                    continue
-                values = list(call.args[1:]) + [kw.value for kw in call.keywords if kw.arg != "root"]
-                for value in values:
-                    got, refusals = _expr_reads(value, scope, set())
-                    keys.update(got)
-                    if refusals:
-                        lineno, reason = sorted(refusals)[0]
-                        raise CannotEvaluate(
-                            "{}: the registry read at line {} reaching an {} argument has {}, so the "
-                            "[detect] keys cannot be checked against it".format(
-                                HOOK_LIBRARY, lineno, HOOK_PATH_RESOLVER, reason))
+        parents = {}
+        for node in ast.walk(tree):
+            for child in ast.iter_child_nodes(node):
+                parents[child] = node
+        owner, loops = {}, {}
+        stack = [tree]
+        while stack:
+            scope = stack.pop()
+            loops[id(scope)] = _loop_key_strings(scope)
+            for node in _scope_walk(scope):
+                owner[id(node)] = scope
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    stack.append(node)
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Name) and node.id in HOOK_REGISTRY_NAMES
+                    and isinstance(node.ctx, ast.Load)):
+                continue
+            got = _accepted_read(node, parents, loops[id(owner.get(id(node), tree))])
+            if got is None:
+                refused.setdefault(node.lineno, node.id)
+            else:
+                keys |= got
     except RecursionError:
         raise CannotEvaluate("{}: nested too deeply to analyse".format(HOOK_LIBRARY)) from None
+    source_lines = text.split("\n")
+    excused = set()
+    for anchor, keys_read in registry_use:
+        hits = _anchor_hits(source_lines, anchor)
+        if len(hits) != 1:
+            raise CannotEvaluate(
+                "{}: [[detect.registry-use]] anchor {!r} matches {} in {}; an anchor must match exactly "
+                "one run of whole source lines".format(
+                    SWITCH_LIST, anchor,
+                    "no line" if not hits else "{} places".format(len(hits)), HOOK_LIBRARY))
+        start, count = hits[0]
+        covered = set(range(start, start + count))
+        if not covered & set(refused):
+            raise CannotEvaluate(
+                "{}: [[detect.registry-use]] anchor {!r} excuses no registry use in {}; remove the "
+                "stale entry".format(SWITCH_LIST, anchor, HOOK_LIBRARY))
+        excused |= covered
+        keys.update(keys_read)
+    leftover = sorted(line for line in refused if line not in excused)
+    if leftover:
+        line = leftover[0]
+        raise CannotEvaluate(
+            "{}: the registry use of {!r} at line {} is outside the accepted access forms (R.get(K), "
+            "R.get(K, default), R[K], (R or {{}}).get(K) or (R or {{}})[K], K a string constant or a "
+            "literal-loop variable) and no [[detect.registry-use]] entry anchors it; {} such line(s) "
+            "in all".format(HOOK_LIBRARY, refused[line], line, len(leftover)))
     if not keys:
-        raise CannotEvaluate("{}: no registry key is read inside a {}(root, ...) argument, so the [detect] "
-                             "keys cannot be checked against it".format(HOOK_LIBRARY, HOOK_PATH_RESOLVER))
+        raise CannotEvaluate("{}: no registry key is read in an accepted access form, so the [detect] "
+                             "keys cannot be checked against the hook library".format(HOOK_LIBRARY))
     return tuple(sorted(keys))
 
 
@@ -782,12 +587,24 @@ def scan(root):
     except CannotEvaluate as exc:
         return [], [str(exc)], {}
     try:
-        lacking = [k for k in hook_registry_keys(root) if k not in detect["keys"]]
+        derived = hook_registry_keys(root, detect["registry-use"])
     except CannotEvaluate as exc:
         return [], [str(exc)], {}
+    declared, excluded = detect["keys"], detect["non-record-keys"]
+    problems = []
+    for key in sorted(set(declared) & set(excluded)):
+        problems.append("{}: [detect] non-record-keys repeats {!r} from [detect] keys; a key names a "
+                        "record path or does not, never both".format(SWITCH_LIST, key))
+    for key in sorted(k for k in excluded if k not in derived):
+        problems.append("{}: [detect] non-record-keys lists {!r} but no registry read in {} derives it; "
+                        "remove the stale exclusion".format(SWITCH_LIST, key, HOOK_LIBRARY))
+    lacking = [k for k in derived if k not in declared and k not in excluded]
     if lacking:
-        return [], ["{}: [detect] keys lacks {}, which {} resolves to a record path through {}".format(
-            SWITCH_LIST, ", ".join(repr(k) for k in lacking), HOOK_LIBRARY, HOOK_PATH_RESOLVER)], {}
+        problems.append("{}: [detect] keys lacks {}, which {} reads from the registry; a derived key "
+                        "that names no record path belongs in [detect] non-record-keys with a "
+                        "reason".format(SWITCH_LIST, ", ".join(repr(k) for k in lacking), HOOK_LIBRARY))
+    if problems:
+        return [], problems, {}
     sources, errors = walk_sources(root)
     detected = {}
     for rel in sources:
@@ -860,7 +677,7 @@ _FIXTURE_FILES = {
     "tools/by_shell.sh": "#!/bin/bash\ncat ledger.toml\n",
     "tools/plain.py": 'X = "ledger.toml.bak"\nY = "myledger.toml"\n',
     "tools/_vendor/ignored.py": 'P = "ledger.toml"\n',
-    # The fixture hook library: the one registry key it resolves through _orch_path is in [detect] keys.
+    # The fixture hook library: its one accepted registry read derives a key [detect] keys declares.
     HOOK_LIBRARY: 'def a(root, reg):\n    return _orch_path(root, reg.get("ledger_path"))\n',
 }
 _FIXTURE_ENTRIES = (
@@ -1091,137 +908,73 @@ def _self_test():
         rc, out = _gate(dict(_FIXTURE_FILES, **{"tools/new_form.py": body}))
         check(case_id, rc == 1 and "tools/new_form.py" in out and evidence in out, (rc, out))
 
-    # The [detect] keys are checked against the registry keys the hook library resolves through _orch_path.
+    # The [detect] keys are checked as a superset of the keys the whole-library derivation yields
+    # (less the excluded non-record keys); the hook library itself must be present and parseable.
     for case_id, hook, needle in (
             ("refuse/hook-key-missing-from-detect",
              'def a(root, reg):\n    return _orch_path(root, reg.get("ledger_path")) or '
              '_orch_path(root, reg["ledger_extra"])\n', "[detect] keys lacks 'ledger_extra'"),
             ("refuse/hook-loop-key-missing-from-detect",
-             'def a(root, rec):\n    for key in ("ledger_path", "ledger_loop"):\n        _orch_path(root, rec.get(key))\n',
-             "[detect] keys lacks 'ledger_loop'"),
+             'def a(root, rec):\n    for key in ("ledger_path", "ledger_loop"):\n'
+             '        _orch_path(root, rec.get(key))\n', "[detect] keys lacks 'ledger_loop'"),
             ("refuse/hook-or-key-missing-from-detect",
              'def a(root, reg_data):\n    return _orch_path(root, (reg_data or {}).get("ledger_dir"))\n',
              "[detect] keys lacks 'ledger_dir'"),
-            ("refuse/hook-library-no-keys", 'def a(root, reg):\n    return reg\n', "no registry key is read"),
+            ("refuse/hook-keyword-key-missing-from-detect",
+             'def a(root, reg):\n    return _orch_path(root, value=reg.get("ledger_kw"))\n',
+             "[detect] keys lacks 'ledger_kw'"),
+            ("refuse/hook-library-no-keys", "X = 1\n", "no registry key is read"),
             ("refuse/hook-library-unparseable", "def a(:\n", HOOK_LIBRARY + ": not parseable Python")):
         rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
         check(case_id, rc == 2 and needle in out, (rc, out))
-    # Reads that are not registry record keys derive nothing: a receiver whose bindings never reach
-    # the registry is ignored inside an _orch_path argument.
+
+    # Reads through a receiver that is not a registry name derive nothing and are not refused.
     hook = ('def a(root, reg, lease):\n    return _orch_path(root, reg.get("ledger_path")) or '
             '_orch_path(root, lease.get("ledger_other"))\n')
     rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
     check("ignore/hook-unrelated-reads", rc == 0, (rc, out))
 
-    # The derivation follows same-scope bindings: x = reg.get("K") (plain, or behind the conditional shape
-    # the hook library uses for its lease), then x inside an _orch_path argument, derives K.
-    keys, crash = _hook_keys('def a(root, reg):\n    box = reg.get("ledger_box")\n'
-                             '    return _orch_path(root, box.get("path")) or '
-                             '_orch_path(root, reg.get("ledger_path"))\n')
-    check("derive/assigned-key", crash is None and keys == ("ledger_box", "ledger_path"), (keys, crash))
-
+    # One derive row per accepted access form and per scanned region: the read is accepted and its
+    # key, absent from [detect] keys, is reported, so the derived set provably includes that read.
     for case_id, hook, needle in (
-            ("refuse/hook-assigned-key-missing-from-detect",
-             'def a(root, reg):\n    box = reg.get("ledger_box")\n    return _orch_path(root, box.get("path"))\n',
-             "[detect] keys lacks 'ledger_box'"),
-            ("refuse/hook-assigned-conditional-key-missing-from-detect",
-             'def a(root, reg):\n    box = reg.get("ledger_box") if isinstance(reg.get("ledger_box"), dict) '
-             'else None\n    if box:\n        return _orch_path(root, box.get("path"))\n',
-             "[detect] keys lacks 'ledger_box'"),
-            ("refuse/hook-alias-key-missing-from-detect",
-             'def a(root, reg):\n    g = reg.get\n    return _orch_path(root, g("ledger_alias"))\n',
-             "[detect] keys lacks 'ledger_alias'"),
-            ("refuse/hook-keyword-key-missing-from-detect",
-             'def a(root, reg):\n    return _orch_path(root, value=reg.get("ledger_kw"))\n',
-             "[detect] keys lacks 'ledger_kw'")):
+            ("derive/get-constant-key",
+             'def a(root, reg):\n    return reg.get("ledger_get")\n', "lacks 'ledger_get'"),
+            ("derive/get-default-key",
+             'def a(root, reg):\n    return reg.get("ledger_dflt", None)\n', "lacks 'ledger_dflt'"),
+            ("derive/subscript-key",
+             'def a(root, reg):\n    return reg["ledger_subs"]\n', "lacks 'ledger_subs'"),
+            ("derive/or-get-key",
+             'def a(root, reg_data):\n    return (reg_data or {}).get("ledger_or")\n', "lacks 'ledger_or'"),
+            ("derive/or-subscript-key",
+             'def a(root, reg_data):\n    return (reg_data or {})["ledger_orsub"]\n', "lacks 'ledger_orsub'"),
+            ("derive/literal-loop-key",
+             'def a(root, rec):\n    for key in ("ledger_path", "ledger_lkey"):\n        rec.get(key)\n',
+             "lacks 'ledger_lkey'"),
+            ("derive/comprehension-loop-key",
+             'def a(root, rec):\n    return [rec[key] for key in ["ledger_comp"]]\n', "lacks 'ledger_comp'"),
+            ("derive/class-body-read-key",
+             'class C:\n    V = reg.get("ledger_cls")\n', "lacks 'ledger_cls'"),
+            ("derive/decorator-read-key",
+             'def d(x):\n    return lambda f: f\n@d(reg.get("ledger_deco"))\ndef f():\n    return None\n',
+             "lacks 'ledger_deco'"),
+            ("derive/lambda-body-read-key",
+             'f = lambda reg: reg.get("ledger_lam")\n', "lacks 'ledger_lam'"),
+            ("derive/nested-def-read-key",
+             'def a(root, reg):\n    def getter():\n        return reg.get("ledger_nested")\n'
+             '    return _orch_path(root, getter())\n', "lacks 'ledger_nested'"),
+            ("derive/walrus-value-read-key",
+             'def a(root, reg):\n    if (box := reg.get("ledger_wal")):\n        return box\n    return None\n',
+             "lacks 'ledger_wal'"),
+            ("derive/for-iter-read-key",
+             'def a(root, reg):\n    for p in reg.get("ledger_each"):\n        _orch_path(root, p)\n',
+             "lacks 'ledger_each'"),
+            ("derive/with-context-read-key",
+             'def a(root, reg):\n    with reg.get("ledger_ctx") as c:\n        _orch_path(root, c)\n',
+             "lacks 'ledger_ctx'")):
         rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
         check(case_id, rc == 2 and needle in out, (rc, out))
 
-    # With the assignment-derived key declared, the same hook library passes.
-    detect = _FIXTURE_DETECT.replace('keys = ["ledger_path"]', 'keys = ["ledger_path", "ledger_box"]')
-    hook = ('def a(root, reg):\n    box = reg.get("ledger_box")\n'
-            '    return _orch_path(root, box.get("path")) or _orch_path(root, reg.get("ledger_path"))\n')
-    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}), _switch_text(detect=detect))
-    check("pass/hook-assigned-key-listed", rc == 0, (rc, out))
-
-    # A registry read reached from an _orch_path argument (directly or through traced same-scope
-    # bindings) whose key the scan cannot resolve to a string constant is cannot-evaluate naming a
-    # line, never a silent pass; reads the trace does not reach at all (a helper handed the registry,
-    # a read in another module) are the documented residual, outside this claim.
-    for case_id, hook in (
-            ("refuse/hook-unresolvable-key-format",
-             'def a(root, reg, n):\n    return _orch_path(root, reg.get("ledger_{}".format(n)))\n'),
-            ("refuse/hook-unresolvable-key-fstring",
-             'def a(root, reg, n):\n    return _orch_path(root, reg.get(f"ledger_{n}"))\n'),
-            ("refuse/hook-unresolvable-key-parameter",
-             'def a(root, reg, key):\n    return _orch_path(root, reg.get(key))\n'),
-            ("refuse/hook-unresolvable-key-named-collection-loop",
-             'KEYS = ("ledger_path",)\ndef a(root, reg):\n    for key in KEYS:\n'
-             '        _orch_path(root, reg.get(key))\n'),
-            ("refuse/hook-unresolvable-key-tuple-unpacking-loop",
-             'def a(root, reg):\n    for key, _tag in (("ledger_path", 1),):\n'
-             '        _orch_path(root, reg.get(key))\n'),
-            ("refuse/hook-unresolvable-key-mixed-literal-loop",
-             'def a(root, reg, extra):\n    for key in ("ledger_path", extra):\n'
-             '        _orch_path(root, reg.get(key))\n'),
-            ("refuse/hook-unresolvable-key-other-scope-loop",
-             'def a(root, rec):\n    return _orch_path(root, rec.get(key))\n'
-             'def b():\n    for key in ("ledger_far",):\n        pass\n'),
-            ("refuse/hook-unresolvable-key-alias-call",
-             'def a(root, reg, key):\n    g = reg.get\n    return _orch_path(root, g(key))\n'),
-            ("refuse/hook-assigned-unresolvable-key",
-             'def a(root, reg, key):\n    box = reg.get(key)\n    return _orch_path(root, box.get("path"))\n')):
-        rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
-        check(case_id, rc == 2 and "registry read at line" in out
-              and "reaching an " + HOOK_PATH_RESOLVER + " argument" in out, (rc, out))
-
-    # Every binding form the trace resolves derives a constant key through it: the key, absent from
-    # [detect] keys, is reported.
-    for case_id, hook, needle in (
-            ("derive/annassign-key",
-             'def a(root, reg):\n    box: dict = reg.get("ledger_ann")\n'
-             '    return _orch_path(root, box.get("path"))\n', "[detect] keys lacks 'ledger_ann'"),
-            ("derive/walrus-key",
-             'def a(root, reg):\n    if (box := reg.get("ledger_walrus")):\n'
-             '        return _orch_path(root, box.get("path"))\n    return None\n',
-             "[detect] keys lacks 'ledger_walrus'"),
-            ("derive/augassign-key",
-             'def a(root, reg):\n    p = ""\n    p += reg.get("ledger_aug")\n'
-             '    return _orch_path(root, p)\n', "[detect] keys lacks 'ledger_aug'"),
-            ("derive/tuple-first-element-key",
-             'def a(root, reg):\n    box, other = reg.get("ledger_pair"), None\n'
-             '    return _orch_path(root, box.get("path"))\n', "[detect] keys lacks 'ledger_pair'"),
-            ("derive/tuple-second-element-key",
-             'def a(root, reg):\n    status, box = "ok", reg.get("ledger_second")\n'
-             '    return _orch_path(root, box.get("path"))\n', "[detect] keys lacks 'ledger_second'"),
-            ("derive/tuple-whole-value-key",
-             'def a(root, reg, make):\n    box, status = make(reg.get("ledger_whole"))\n'
-             '    return _orch_path(root, box)\n', "[detect] keys lacks 'ledger_whole'"),
-            ("derive/receiver-alias-key",
-             'def a(root, reg):\n    r = reg\n    return _orch_path(root, r.get("ledger_recv"))\n',
-             "[detect] keys lacks 'ledger_recv'"),
-            ("derive/getattr-alias-key",
-             'def a(root, reg):\n    g = getattr(reg, "get")\n'
-             '    return _orch_path(root, g("ledger_getattr"))\n',
-             "[detect] keys lacks 'ledger_getattr'"),
-            ("derive/annassign-alias-key",
-             'def a(root, reg):\n    g: object = reg.get\n'
-             '    return _orch_path(root, g("ledger_annalias"))\n',
-             "[detect] keys lacks 'ledger_annalias'"),
-            ("derive/for-target-value-key",
-             'def a(root, reg):\n    for p in reg.get("ledger_each"):\n'
-             '        _orch_path(root, p)\n', "[detect] keys lacks 'ledger_each'"),
-            ("derive/with-target-key",
-             'def a(root, reg):\n    with reg.get("ledger_ctx") as c:\n'
-             '        _orch_path(root, c)\n', "[detect] keys lacks 'ledger_ctx'"),
-            ("derive/lambda-scope-key",
-             'def a(root, reg):\n    f = lambda r=reg: _orch_path(root, r.get("ledger_lam"))\n'
-             '    return f()\n', "[detect] keys lacks 'ledger_lam'")):
-        rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
-        check(case_id, rc == 2 and needle in out, (rc, out))
-
-    # The multi-step chain the hook library itself holds (registry read, then two object reads, then
-    # the resolver) derives exactly the registry key at the head of the chain.
+    # A chain needs only its head read derived: the later steps go through non-registry names.
     keys, crash = _hook_keys(
         'def a(root, reg):\n'
         '    lease = reg.get("ledger_lease") if isinstance(reg.get("ledger_lease"), dict) else None\n'
@@ -1230,64 +983,171 @@ def _self_test():
         '    return _orch_path(root, lock_path)\n')
     check("derive/multi-step-chain-key", crash is None and keys == ("ledger_lease",), (keys, crash))
 
-    # The same binding forms with a key the scan cannot pin are cannot-evaluate, never a silent pass;
-    # so are the shapes the trace refuses to follow (a lambda or nested def over the registry, a
-    # closure or global binding from another scope, a registry attribute other than .get, and a loop
-    # variable rebound in its scope, whose literal would be stale).
-    for case_id, hook in (
-            ("refuse/annassign-unresolvable-key",
-             'def a(root, reg, k):\n    box: dict = reg.get(k)\n'
-             '    return _orch_path(root, box.get("path"))\n'),
-            ("refuse/walrus-unresolvable-key",
-             'def a(root, reg, k):\n    if (box := reg.get(k)):\n'
-             '        return _orch_path(root, box.get("path"))\n    return None\n'),
-            ("refuse/augassign-unresolvable-key",
-             'def a(root, reg, k):\n    p = ""\n    p += reg.get(k)\n'
-             '    return _orch_path(root, p)\n'),
-            ("refuse/tuple-target-unresolvable-key",
-             'def a(root, reg, k):\n    status, box = "ok", reg.get(k)\n'
-             '    return _orch_path(root, box)\n'),
-            ("refuse/receiver-alias-unresolvable-key",
-             'def a(root, reg, k):\n    r = reg\n    return _orch_path(root, r.get(k))\n'),
-            ("refuse/getattr-alias-unresolvable-key",
-             'def a(root, reg, k):\n    g = getattr(reg, "get")\n    return _orch_path(root, g(k))\n'),
+    # With every derived key declared, the gate passes.
+    detect = _FIXTURE_DETECT.replace('keys = ["ledger_path"]', 'keys = ["ledger_path", "ledger_box"]')
+    hook = ('def a(root, reg):\n    box = reg.get("ledger_box")\n'
+            '    return _orch_path(root, box.get("path")) or _orch_path(root, reg.get("ledger_path"))\n')
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}), _switch_text(detect=detect))
+    check("pass/hook-assigned-key-listed", rc == 0, (rc, out))
+
+    # Every registry use outside the accepted access forms is cannot-evaluate naming its exact line,
+    # never a silent pass; one row per shape.
+    for case_id, hook, line in (
+            ("refuse/for-literal-collection-read",
+             'def a(root, reg, k):\n    for v in [reg.get(k)]:\n        _orch_path(root, v)\n', 2),
+            ("refuse/comprehension-literal-collection-read",
+             'def a(root, reg, k):\n    return [_orch_path(root, v) for v in [reg.get(k)]]\n', 2),
+            ("refuse/match-mapping-capture",
+             'def a(root, reg):\n    match reg:\n        case {"ledger_m": v}:\n            return v\n'
+             '    return None\n', 2),
+            ("refuse/match-as-capture",
+             'def a(root, reg):\n    match reg:\n        case str() as v:\n            return v\n'
+             '    return None\n', 2),
+            ("refuse/match-bare-capture",
+             'def a(root, reg):\n    match reg:\n        case v:\n            return v\n', 2),
+            ("refuse/except-as-binding",
+             'def a(root, reg):\n    try:\n        raise ValueError(reg)\n    except ValueError as e:\n'
+             '        return _orch_path(root, e.args[0])\n', 3),
+            ("refuse/nonlocal-chain",
+             'def a(root, reg, k):\n    box = None\n    def mid():\n        def inner():\n'
+             '            nonlocal box\n            box = reg.get(k)\n        inner()\n    mid()\n'
+             '    return _orch_path(root, box)\n', 6),
+            ("refuse/pop-method", 'def a(root, reg):\n    return reg.pop("ledger_pop")\n', 2),
+            ("refuse/setdefault-method",
+             'def a(root, reg):\n    return reg.setdefault("ledger_sd", "")\n', 2),
+            ("refuse/dunder-getitem-method",
+             'def a(root, reg):\n    return reg.__getitem__("ledger_dd")\n', 2),
+            ("refuse/copy-then-subscript",
+             'def a(root, reg):\n    c = reg.copy()\n    return c["ledger_cp"]\n', 2),
+            ("refuse/splat-dict-then-subscript",
+             'def a(root, reg):\n    d = {**reg}\n    return d["ledger_sp"]\n', 2),
+            ("refuse/items-loop",
+             'def a(root, reg):\n    for k, v in reg.items():\n        _orch_path(root, v)\n', 2),
+            ("refuse/conditional-receiver",
+             'def a(root, reg, c):\n    return (reg if c else {}).get("ledger_cond")\n', 2),
+            ("refuse/or-second-operand-receiver",
+             'def a(root, reg, other):\n    return (other or reg).get("ledger_or2")\n', 2),
+            ("refuse/nullcontext-receiver",
+             'from contextlib import nullcontext\ndef a(root, reg):\n    with nullcontext(reg) as r:\n'
+             '        return r.get("ledger_nc")\n', 3),
+            ("refuse/class-body-unpinned-read",
+             'KEY = "ledger_ck"\nclass C:\n    V = reg.get(KEY)\n', 3),
+            ("refuse/decorator-registry-argument",
+             'def d(x):\n    return lambda f: f\n@d(reg)\ndef f():\n    return None\n', 3),
+            ("refuse/lambda-handed-registry",
+             'def a(root, reg):\n    f = lambda r=reg: r.get("ledger_lh")\n    return f()\n', 2),
+            ("refuse/nested-def-handed-registry",
+             'def a(root, reg):\n    def g(r=reg):\n        return r.get("ledger_nh")\n    return g()\n', 2),
+            ("refuse/starred-resolver-argument",
+             'def a(root, reg, k):\n    args = (root, reg.get(k))\n    return _orch_path(*args)\n', 2),
+            ("refuse/aliased-resolver-call",
+             'def a(root, reg, k):\n    op = _orch_path\n    return op(root, reg.get(k))\n', 3),
+            ("refuse/attribute-resolver-call",
+             'def a(root, reg, k, helpers):\n    return helpers._orch_path(root, reg.get(k))\n', 2),
+            ("refuse/receiver-alias-assignment",
+             'def a(root, reg):\n    r = reg\n    return r.get("ledger_ra")\n', 2),
+            ("refuse/getattr-call-argument",
+             'def a(root, reg):\n    g = getattr(reg, "get")\n    return g("ledger_ga")\n', 2),
+            ("refuse/hook-unresolvable-key-format",
+             'def a(root, reg, n):\n    return reg.get("ledger_{}".format(n))\n', 2),
+            ("refuse/hook-unresolvable-key-fstring",
+             'def a(root, reg, n):\n    return reg.get(f"ledger_{n}")\n', 2),
+            ("refuse/hook-unresolvable-key-parameter",
+             'def a(root, reg, key):\n    return reg.get(key)\n', 2),
+            ("refuse/hook-unresolvable-key-named-collection-loop",
+             'KEYS = ("ledger_path",)\ndef a(root, reg):\n    for key in KEYS:\n        reg.get(key)\n', 4),
+            ("refuse/hook-unresolvable-key-tuple-unpacking-loop",
+             'def a(root, reg):\n    for key, _tag in (("ledger_path", 1),):\n        reg.get(key)\n', 3),
+            ("refuse/hook-unresolvable-key-mixed-literal-loop",
+             'def a(root, reg, extra):\n    for key in ("ledger_path", extra):\n        reg.get(key)\n', 3),
+            ("refuse/hook-unresolvable-key-other-scope-loop",
+             'def a(root, rec):\n    return rec.get(key)\ndef b():\n    for key in ("ledger_far",):\n'
+             '        pass\n', 2),
+            ("refuse/hook-unresolvable-key-alias-call",
+             'def a(root, reg, k):\n    g = reg.get\n    return g(k)\n', 2),
+            ("refuse/hook-assigned-unresolvable-key",
+             'def a(root, reg, key):\n    box = reg.get(key)\n    return box\n', 2),
             ("refuse/rebound-loop-variable-key",
              'def a(root, reg, other):\n    for key in ("ledger_path",):\n        key = other\n'
-             '        _orch_path(root, reg.get(key))\n'),
+             '        reg.get(key)\n', 4),
             ("refuse/lambda-default-registry",
-             'def a(root, reg):\n    f = lambda k, r=reg: r.get(k)\n'
-             '    return _orch_path(root, f("ledger_hidden"))\n'),
+             'def a(root, reg):\n    f = lambda k, r=reg: r.get(k)\n    return f("ledger_hid")\n', 2),
             ("refuse/lambda-returns-registry",
-             'def a(root, reg, k):\n    f = lambda: reg\n'
-             '    return _orch_path(root, f().get(k))\n'),
-            ("refuse/nested-def-getter",
-             'def a(root, reg):\n    def getter():\n        return reg.get("ledger_nested")\n'
-             '    return _orch_path(root, getter())\n'),
+             'def a(root, reg, k):\n    f = lambda: reg\n    return f().get(k)\n', 2),
             ("refuse/getattr-non-get-attribute",
-             'def a(root, reg):\n    v = getattr(reg, "values")\n    return _orch_path(root, v)\n'),
-            ("refuse/closure-assigned-name",
-             'def a(root, reg):\n    box = reg.get("ledger_far")\n    def inner():\n'
-             '        return _orch_path(root, box.get("path"))\n    return inner\n'),
-            ("refuse/global-bound-registry-read",
-             'box = None\ndef setup(reg):\n    global box\n    box = reg.get("ledger_glob")\n'
-             'def a(root):\n    return _orch_path(root, box)\n')):
+             'def a(root, reg):\n    return getattr(reg, "values")\n', 2)):
         rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
-        check(case_id, rc == 2 and "registry read at line" in out
-              and "reaching an " + HOOK_PATH_RESOLVER + " argument" in out, (rc, out))
+        check(case_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} is".format(line) in out, (rc, out))
 
-    # Bounded refusals: an enclosing-scope binding with no registry in it resolves to nothing, and a
-    # helper handed the registry itself is the documented residual, not a refusal (the shape the
-    # live library uses for its validated-configuration tuple).
+    # The [[detect.registry-use]] allowlist: an entry whose anchor matches exactly one place excuses
+    # the non-conforming use(s) on its lines and contributes its keys-read to the derived set.
+    hook_call = ('def a(root, reg, helper):\n    return helper(reg)\n'
+                 'def b(root, reg):\n    return reg.get("ledger_path")\n')
+    use_entry = ('[[detect.registry-use]]\nline-anchor = "    return helper(reg)"\n'
+                 'reason = "a fixture helper call"\nkeys-read = ["ledger_aux"]\n')
+    detect_aux = _FIXTURE_DETECT.replace('keys = ["ledger_path"]', 'keys = ["ledger_path", "ledger_aux"]')
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_call}),
+                    _switch_text(detect=detect_aux + use_entry))
+    check("pass/allowlist-excused-use", rc == 0, (rc, out))
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_call}),
+                    _switch_text(detect=_FIXTURE_DETECT + use_entry))
+    check("refuse/allowlist-key-undeclared", rc == 2 and "lacks 'ledger_aux'" in out, (rc, out))
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_call}), _switch_text(
+        detect=detect_aux + use_entry.replace("    return helper(reg)", "    return nothing(reg)")))
+    check("refuse/allowlist-anchor-unmatched", rc == 2 and "matches no line" in out, (rc, out))
+    hook_twice = ('def a(root, reg, helper):\n    return helper(reg)\ndef b(root, reg, helper):\n'
+                  '    return helper(reg)\ndef c(root, reg):\n    return reg.get("ledger_path")\n')
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_twice}),
+                    _switch_text(detect=detect_aux + use_entry))
+    check("refuse/allowlist-anchor-ambiguous", rc == 2 and "matches 2 places" in out, (rc, out))
+    # A multi-line anchor pins one of several identical lines, so an entry survives line-number drift.
+    two_entries = ('[[detect.registry-use]]\n'
+                   'line-anchor = "def a(root, reg, helper):\\n    return helper(reg)"\n'
+                   'reason = "a fixture helper call"\nkeys-read = []\n'
+                   '[[detect.registry-use]]\n'
+                   'line-anchor = "def b(root, reg, helper):\\n    return helper(reg)"\n'
+                   'reason = "a fixture helper call"\nkeys-read = []\n')
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_twice}),
+                    _switch_text(detect=_FIXTURE_DETECT + two_entries))
+    check("pass/allowlist-multiline-anchor", rc == 0, (rc, out))
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_call}), _switch_text(
+        detect=detect_aux + use_entry.replace('reason = "a fixture helper call"', 'reason = "  "')))
+    check("refuse/allowlist-empty-reason", rc == 2 and "reason must be a non-empty string" in out, (rc, out))
+    stale_entry = ('[[detect.registry-use]]\nline-anchor = "def b(root, reg):"\n'
+                   'reason = "anchors a line with no non-conforming use"\nkeys-read = []\n')
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_call}), _switch_text(
+        detect=detect_aux + use_entry + stale_entry))
+    check("refuse/allowlist-stale-entry", rc == 2 and "excuses no registry use" in out, (rc, out))
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_call}), _switch_text(
+        detect=detect_aux + use_entry.replace('keys-read = ["ledger_aux"]',
+                                              'keys-read = ["ledger_aux"]\nnote = "x"')))
+    check("refuse/malformed-registry-use-entry", rc == 2 and "must hold exactly" in out, (rc, out))
+
+    # [detect.non-record-keys]: a derived key that names no record path passes when excluded with a
+    # reason; a key in both lists, a stale exclusion and a malformed table refuse.
+    hook_aux = 'def a(root, reg):\n    return reg.get("ledger_path") or reg.get("ledger_aux")\n'
+    excl = '[detect.non-record-keys]\nledger_aux = "a fixture key that names no record path"\n'
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_aux}),
+                    _switch_text(detect=_FIXTURE_DETECT + excl))
+    check("pass/non-record-key-excluded", rc == 0, (rc, out))
+    both = '[detect.non-record-keys]\nledger_path = "also declared as a record key"\n'
+    rc, out = _gate(switch=_switch_text(detect=_FIXTURE_DETECT + both))
+    check("refuse/key-in-both-lists", rc == 2 and "repeats 'ledger_path' from [detect] keys" in out, (rc, out))
+    ghost = '[detect.non-record-keys]\nledger_ghost = "never read by the fixture hook library"\n'
+    rc, out = _gate(switch=_switch_text(detect=_FIXTURE_DETECT + ghost))
+    check("refuse/stale-non-record-key",
+          rc == 2 and "lists 'ledger_ghost' but no registry read" in out, (rc, out))
+    badexcl = 'non-record-keys = ["ledger_aux"]\n'
+    rc, out = _gate(switch=_switch_text(detect=_FIXTURE_DETECT + badexcl))
+    check("refuse/malformed-non-record-keys",
+          rc == 2 and "[detect.non-record-keys] must map" in out, (rc, out))
+
+    # A module-level constant that reaches a resolver is no registry use at all.
     hook = ('TAIL = "ledger-side.txt"\ndef a(root, reg):\n'
             '    return _orch_path(root, TAIL) or _orch_path(root, reg.get("ledger_path"))\n')
     rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
     check("ignore/enclosing-plain-constant", rc == 0, (rc, out))
-    hook = ('def helper(reg):\n    return "ok", {}\n'
-            'def a(root, reg):\n    status, cfg = helper(reg)\n'
-            '    return _orch_path(root, cfg.get("lock_path")) or '
-            '_orch_path(root, reg.get("ledger_path"))\n')
-    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
-    check("ignore/helper-call-residual", rc == 0, (rc, out))
 
     def _no_hook(tmp):
         os.unlink(os.path.join(tmp, HOOK_LIBRARY))
@@ -1366,18 +1226,19 @@ def _self_test():
           "a listed file that is gone or no longer reads exits 1; _vendor, near-miss strings and near-miss "
           "shell words are ignored; a FIFO, unreadable, symlinked, oversized, non-UTF-8 or unparseable source, "
           "a symlinked or unlistable directory, a missing scan root, and a missing, malformed, too deeply "
-          "nested, duplicated, unknown-disposition or indirect-via-cycle list exit 2; [detect] keys lacking a "
-          "key the hook library resolves inline, through one assignment step, through a .get alias or by "
-          "keyword, or a missing, unparseable or keyless hook library, exits 2; a registry read reaching an "
-          "_orch_path argument whose key resolves to no string constant (a formatted or f-string key, a "
-          "parameter, a named-collection, tuple-unpacking, mixed-literal or other-scope loop, an alias call, "
-          "or an unresolved assignment) exits 2 naming its line; every traced binding form (annotated, "
-          "augmented, walrus and tuple assignments, for and with targets, a lambda scope, a receiver or "
-          "getattr .get alias, and a multi-step chain) derives a constant key and refuses an unpinned "
-          "one; a rebound loop variable, a lambda or nested def over the registry, a closure or global "
-          "binding from another scope and a non-get registry attribute each refuse; an enclosing plain "
-          "constant and a helper handed the registry pass; the parse site handles RecursionError, "
-          "MemoryError and ValueError; the live tree passes)".format(len(EXECUTED)))
+          "nested, duplicated, unknown-disposition or indirect-via-cycle list exit 2; the hook library is "
+          "scanned whole (module, class bodies, decorators, lambdas, comprehensions and nested defs): every "
+          "accepted access form (R.get(K), R.get(K, default), R[K], (R or {{}}).get(K), (R or {{}})[K], and a "
+          "literal-loop key) derives its key, and [detect] keys is checked as a superset of the derived set; "
+          "every registry use outside those forms (a non-constant key, another method or attribute, a call "
+          "argument, a match, except or loop capture, an alias, a splat, a conditional or or-fallback "
+          "receiver, and the rest) exits 2 naming its line unless a [[detect.registry-use]] entry anchors it "
+          "exactly once (an anchor matching zero or several places, a blank reason and a stale entry each "
+          "exit 2; asserted keys-read join the derived set); [detect.non-record-keys] excludes derived keys "
+          "that name no record path (a key in both lists or an exclusion nothing derives exits 2); the "
+          "residual: a registry object reached under a name not in HOOK_REGISTRY_NAMES, or a key read "
+          "outside the hook library, is not seen; the parse site handles RecursionError, MemoryError and "
+          "ValueError; the live tree passes)".format(len(EXECUTED)))
     return 0
 
 

@@ -8,10 +8,15 @@
 # [detect] declares what the scan looks for (see the gate's docstring for each rule):
 #   names    record file names, matched as a whole string constant or as its end after "/", ":" or "}"
 #   keys     orchestration-registry keys that name a record, matched as subscript or .get reads or as an
-#            element of a literal collection a loop iterates; it must hold every registry key the hook
-#            library (.aiqt/core/hooks/scripts/aiqt_hooks.py) resolves to a record path through its
-#            _orch_path helper, read inside an argument or through one assignment step, a .get alias or a
-#            keyword value (the gate's docstring states the derived forms and the ones that refuse)
+#            element of a literal collection a loop iterates; together with [detect.non-record-keys] it
+#            must hold every key the hook library (.aiqt/core/hooks/scripts/aiqt_hooks.py) derives: every
+#            registry access there must be an accepted read form (R.get(K), R.get(K, default), R[K],
+#            (R or {}).get(K) or (R or {})[K], K a string constant or a literal-loop variable) yielding
+#            its key, or be excused by a [[detect.registry-use]] entry below (a line-anchor of one or
+#            more whole source lines that matches the hook library exactly once, a reason, and the
+#            keys-read the author asserts for that use, which join the derived set); any other registry
+#            use fails the gate. [detect.non-record-keys] excludes, with a reason, each derived key
+#            that names no record path.
 #   flags    command-line flags that take a record path
 #   modules  record-reading modules; importing one (import, import_module or __import__), or naming its
 #            .py file, makes the file an indirect reader
@@ -30,6 +35,292 @@ names = ["TODO.md", "changelog.toml", "roadmap.toml", "pending-fixes.toml", "orc
 keys = ["mistakes_register", "attestations", "pending_decisions", "handoff", "findings", "mode", "state_dir", "lease", "record"]
 flags = ["--backlog"]
 modules = ["aiqt_hooks", "check_mistakes_register"]
+
+[detect.non-record-keys]
+ts = "Read at the escape-spoof sentinel surface, where rec is the parsed sentinel object sharing a receiver name; a timestamp, not a record path."
+detail = "Read at the escape-spoof sentinel surface, where rec is the parsed sentinel object sharing a receiver name; a detail string, not a record path."
+escape = "The operator escape declaration block; its nested path names an escape sentinel the hooks probe, not a project record the switch would flip."
+enumerator = "The backlog enumerator declaration (an argv array), not a record path."
+staleness = "The staleness policy object (hour bounds), not a record path."
+yield_tools = "A list of tool names the yield guard scopes to, not a record path."
+dispatch_tools = "A list of tool names the dispatch ledger guard scopes to, not a record path."
+review_dispatch = "The review dispatch binding object, not a record path."
+companion_stores = "The declared companion store roots the write guard admits, not a project record the switch would flip."
+
+[[detect.registry-use]]
+line-anchor = "        if not rec or len(rec) < 3:"
+reason = "Here rec is one NUL-separated git status record (bytes), not the orchestration registry; the truth and length tests read no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "        xy, path = rec[:2], rec[3:]"
+reason = "Here rec is one NUL-separated git status record (bytes); slicing its status letters and path reads no registry key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    return _state_dir_from_registry(root, reg if status == \"ok\" else None)"
+reason = "The registry is handed to _state_dir_from_registry under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    return _orch_mode_detail(reg, root)[0]"
+reason = "The registry is handed to _orch_mode_detail under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    if _orch_mode(reg, root) is not None:"
+reason = "The registry is handed to _orch_mode under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                \"the registry declares no enumerator\" if \"enumerator\" not in reg"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    refs, _unsub, _findings = _orch_attestation_derive(reg, root,"
+reason = "The registry is handed to _orch_attestation_derive under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    status, payload = _orch_enumerate(reg, root)"
+reason = "The registry is handed to _orch_enumerate under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                                   _orch_pending_haystack(reg, root), staleness,"
+reason = "The registry is handed to _orch_pending_haystack under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                                   attestations=_orch_attestation_refs(reg, root, staleness))"
+reason = "The registry is handed to _orch_attestation_refs under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    escape_active, escape_spoof = _orch_escape_active(reg, root)"
+reason = "The registry is handed to _orch_escape_active under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                          \"unreadable, writes NO guard-event (no record).\".format(reg,"
+reason = "Here reg holds the registry read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                                                                                  event_name))\n    scope = _orch_scope_live(reg, root, data.get(\"session_id\"))"
+reason = "The registry is handed to _orch_scope_live under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    ctx, ts, basis = _orch_build_ctx(reg, root, kind, data)"
+reason = "The registry is handed to _orch_build_ctx under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "            \"work rather than parking or stopping the run.\".format(reg),"
+reason = "Here reg holds the registry read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "            \"(ignorance refuses the wind-down); fix the registry or keep working.\")\n    scope = _orch_scope_live(reg, root, data.get(\"session_id\"))"
+reason = "The registry is handed to _orch_scope_live under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    ctx, ts, basis = _orch_build_ctx(reg, root, kind, data, wake_text=wake_text)"
+reason = "The registry is handed to _orch_build_ctx under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    mode, unread = _orch_mode_detail(reg, root)"
+reason = "The registry is handed to _orch_mode_detail under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "        return _orch_ask_attended(data, reg, root)"
+reason = "The registry is handed to _orch_ask_attended under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    scope = _orch_scope_live(reg, root, data.get(\"session_id\"))\n    if not scope:\n        # the same scope gate as the yield guard: a non-holder session never inherits the backlog."
+reason = "The registry is handed to _orch_scope_live under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    if \"enumerator\" not in reg:"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    ctx, ts, basis = _orch_build_ctx(reg, root, \"ask\", data)"
+reason = "The registry is handed to _orch_build_ctx under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    scope = _orch_scope_live(reg, root, data.get(\"session_id\"))\n    if not scope:\n        return _allow()  # only the holder session writes the shared dispatch ledger"
+reason = "The registry is handed to _orch_scope_live under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    if \"review_dispatch\" not in reg:"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    return [rec for rec in p.stdout.split(b\"\\0\") if rec]"
+reason = "Here rec is one NUL-separated git byte record in a comprehension over a probe's output, not the orchestration registry; no key is read."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "        meta, tab, name = rec.partition(b\"\\t\")"
+reason = "Here rec is one git ls-tree byte record; splitting it reads no registry key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "            return (\"bad\", reg)"
+reason = "Here reg holds the registry read-error detail string, not the registry; returning it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "        binding, cfg = _rdp_binding(reg)"
+reason = "The registry is handed to _rdp_binding under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                    \"check records the binding then in force\".format(path, reg_dir, rec, path))"
+reason = "Here rec is the failure detail of a record read, not the orchestration registry; formatting it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "        digest, rcfg = rec"
+reason = "Here rec is the (digest, config) pair a record read returned, not the orchestration registry; unpacking it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    scope = _orch_scope_live(reg, root, data.get(\"session_id\"))\n    if not scope:\n        return _allow()  # only the holder session stamps/resets the shared turn-state"
+reason = "The registry is handed to _orch_scope_live under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "        findings.append(\"the orchestration registry could not be read ({})\".format(reg))"
+reason = "Here reg holds the registry read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    findings.extend(_orch_resume_probes(reg, root))"
+reason = "The registry is handed to _orch_resume_probes under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    if \"record\" not in reg:"
+reason = "A key-presence test (in) that reads no value."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    if isinstance(rec, dict):"
+reason = "A type test on the record table just read; it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "        return (rec, None)"
+reason = "Returning the record table, which callers bind under the same receiver name; their reads are derived where they occur."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                \"probed: cannot-evaluate\".format(_orch_record_value_kind(rec)))"
+reason = "Formatting the kind of a malformed record block; it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    rec, block_finding = _orch_record_block(reg)"
+reason = "The registry is handed to _orch_record_block under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "        if key in rec and _orch_path(root, rec[key]) is None:"
+reason = "A key-presence test over the record table; the subscript read beside it is an accepted form and derives its keys."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    findings.extend(_orch_lease_hb_resume_findings(reg, root, lease))"
+reason = "The registry is handed to _orch_lease_hb_resume_findings under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    findings.extend(_orch_merge_pending_findings(reg, root))"
+reason = "The registry is handed to _orch_merge_pending_findings under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    findings.extend(_orch_validate_attestations(reg, root))"
+reason = "The registry is handed to _orch_validate_attestations under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    rec = _orch_record_block(reg)[0]"
+reason = "The registry is handed to _orch_record_block under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "            refs, unsub, dfindings = _orch_attestation_derive(reg, root, sd, rows)"
+reason = "The registry is handed to _orch_attestation_derive under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "            rec = rec if isinstance(rec, dict) else {}"
+reason = "Here rec is the parsed escape-spoof sentinel object, not the orchestration registry; the type test reads no registry key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    findings = _orch_resume_audit_findings(status, reg, root)"
+reason = "The registry is handed to _orch_resume_audit_findings under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    sd = _state_dir_from_registry(root, reg)"
+reason = "The registry is handed to _state_dir_from_registry under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                                               _orch_lease_hb_dests(root, reg))"
+reason = "The registry is handed to _orch_lease_hb_dests under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    dests = _orch_lease_hb_dests(root, reg)"
+reason = "The registry is handed to _orch_lease_hb_dests under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    cfg_status, cfg = _orch_lease_hb_config(reg, root)"
+reason = "The registry is handed to _orch_lease_hb_config under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    status, cfg = _orch_lease_hb_config(reg, root)"
+reason = "The registry is handed to _orch_lease_hb_config under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "                       \"disarming confinement\".format(reg))"
+reason = "Here reg holds the registry read-error detail string, not the registry; formatting it reads no key."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    if reg_status == \"ok\" and isinstance(reg, dict) and \"state_dir\" in reg \\"
+reason = "An isinstance and key-presence test that reads no value."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    state_dir = _state_dir_from_registry(root, reg if reg_status == \"ok\" else None)"
+reason = "The registry is handed to _state_dir_from_registry under its registry-named parameter; the keys it reads are derived where that helper reads them."
+keys-read = []
+
+[[detect.registry-use]]
+line-anchor = "    if reg_status != \"ok\" or not isinstance(reg, dict):"
+reason = "An isinstance test that reads no value."
+keys-read = []
 
 [[reader]]
 path = "tools/aei_backlog_md.py"
