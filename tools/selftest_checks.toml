@@ -3582,6 +3582,8 @@ expected-check-ids = [
   "perf/failed-child-not-linear",
   "perf/linear-median-not-one-run",
   "perf/linear-bound-edges",
+  "perf/linear-cpu-counts-reaped",
+  "perf/linear-deadline-not-linear",
   "perf/single-word-linear",
   "perf/noun-run-linear",
   "perf/git-options-linear",
