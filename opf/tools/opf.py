@@ -24295,10 +24295,14 @@ def _verb_intercepted(here, dispatch, argv):
     returns 0, the import of any _opf_ helper not loaded yet refused, and the declaration gate emptied, so
     no handler and no helper the probes may reach runs and no declaration is read. The store module is left
     exactly as it is: no attribute of it is ever written, not even to restore one, so the interception
-    cannot write to the store module under any name. A dispatch that reached a store callable would still
-    fail its probe, because every probe requires the recorded names to be exactly its own handler and a
-    store callable records nothing; any filesystem effect of such a call is caught by the caller's
-    scratch-tree hash walk. Returns (the names called, in order, a helper's as "module.attribute" and a
+    cannot write to the store module under any name. Store calls are observed instead of replaced: a
+    profile hook (sys.setprofile, installed for the dispatch and taken down in the finally, the hook that
+    was set before put back) records each call that executes code whose globals are the store module's
+    namespace as "_opf_store.<name>", so a dispatch that reaches any store callable records a name no
+    probe accepts and fails its probe; the store call itself runs for real, and any filesystem effect of
+    it is caught by the caller's scratch-tree hash walk. The hook is per-thread (the dispatch runs in this
+    thread) and sees every Python-level call, a store function reached through another store function
+    included. Returns (the names called, in order, a helper's as "module.attribute" and a
     refused import as "import module", the leading _bootstrap dropped; the exit, or the exception the
     dispatch raised; stderr). Between the replacement and the restore, nothing defined in this module or a
     helper other than the store module is callable for real, other than the import gate
@@ -24315,7 +24319,7 @@ def _verb_intercepted(here, dispatch, argv):
              and value is not dispatch]
     for module_name, module in sorted(sys.modules.items()):
         # The store module is skipped by name: the interception must never write to _opf_store, so none of
-        # its callables is replaced or restored.
+        # its callables is replaced or restored; the profile hook below records any call into it instead.
         if (module_name.startswith("_opf_") and module_name != "_opf_store"
                 and isinstance(module, types.ModuleType) and module is not here):
             saved.extend((module, name, value) for name, value in vars(module).items()
@@ -24323,6 +24327,16 @@ def _verb_intercepted(here, dispatch, argv):
     replaced = len(saved)
     saved.append((here, "_DECLARATION_GATED", here._DECLARATION_GATED))
     gate = _VerbHelperImportGate(called)
+    store = sys.modules.get("_opf_store")
+    store_globals = vars(store) if store is not None else None
+
+    def observe(frame, event, arg):
+        # A frame whose globals are the store module's namespace executes store code; the comparison is by
+        # identity, so no other module, and no lambda or recorder defined here, can match it.
+        if event == "call" and frame.f_globals is store_globals:
+            called.append("_opf_store." + frame.f_code.co_name)
+
+    previous_profile = sys.getprofile()
     err = io.StringIO()
     try:
         for owner, name, _value in saved[:replaced]:
@@ -24330,11 +24344,13 @@ def _verb_intercepted(here, dispatch, argv):
             setattr(owner, name, lambda *args, _n=label, **kwargs: called.append(_n) or EXIT_OK)
         here._DECLARATION_GATED = ()
         sys.meta_path.insert(0, gate)
+        sys.setprofile(observe)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             routed = dispatch(list(argv))
     except Exception as exc:  # noqa: BLE001  reported as a fault by the caller, never a pass
         routed = exc
     finally:
+        sys.setprofile(previous_profile)
         while gate in sys.meta_path:
             sys.meta_path.remove(gate)
         for owner, name, value in saved:
@@ -24562,12 +24578,15 @@ def _verb_intercepted_faults():
     calling it records its name and returns 0; the dispatch itself, a class this module defines, a bound
     method of an instance of that class, a function bound here but defined in another module, and a builtin
     bound here must each be kept as it is, and every callable of the store module must be kept as it is
-    during the dispatch (the interception never writes to _opf_store). After the dispatch, every one of
-    them must be the original again."""
+    during the dispatch (the interception never writes to _opf_store). A store call made during the
+    dispatch must run for real (it returns its real value, so nothing replaced it) and still be recorded
+    as "_opf_store.<name>" by the profile hook. After the dispatch, every one of them must be the original
+    again."""
     here = sys.modules[__name__]
     store = sys.modules["_opf_store"]
     store_originals = sorted((name, value) for name, value in vars(store).items() if callable(value))
     store_kept = []
+    store_ran = []
     probes = dict(_verb_status_probe_lambda=lambda: None,
                   _verb_status_probe_method=_VerbHelperImportGate([]).find_spec,
                   _verb_status_probe_foreign=os.path.join, _verb_status_probe_builtin=len)
@@ -24578,6 +24597,7 @@ def _verb_intercepted_faults():
         for attr, value in originals.items():
             seen[attr] = getattr(here, attr) is value
         store_kept.append(all(getattr(store, name) is value for name, value in store_originals))
+        store_ran.append(store._home_kind("import") == "import")
         here._verb_tree(argv)
         here._verb_status_probe_lambda()
         return EXIT_OK
@@ -24598,9 +24618,13 @@ def _verb_intercepted_faults():
         faults.append("_verb_intercepted kept {} and replaced {}, not kept {} and replaced {}".format(
             sorted(attr for attr in seen if seen[attr]), sorted(attr for attr in seen if not seen[attr]),
             sorted(attr for attr in want if want[attr]), sorted(replaced)))
-    if called != list(replaced) or routed != EXIT_OK or err:
+    recorded = ["_opf_store._home_kind"] + list(replaced)
+    if called != recorded or routed != EXIT_OK or err:
         faults.append("_verb_intercepted recorded {}, exit {!r}, stderr {!r}, not {}, exit 0 and no stderr".format(
-            called, routed, err, list(replaced)))
+            called, routed, err, recorded))
+    if store_ran != [True]:
+        faults.append("_verb_intercepted did not leave the store callable running for real: _home_kind did "
+                      "not return its real value during the dispatch")
     if here._verb_tree is not originals["_verb_tree"] or (
             here._VerbHelperImportGate is not originals["_VerbHelperImportGate"]):
         faults.append("_verb_intercepted did not restore _verb_tree and _VerbHelperImportGate")
@@ -24614,7 +24638,9 @@ def _verb_status_self_test():
     """Hold VERB_STATUS to the dispatch (_verb_status_faults), then show that each flip fails, named: an in
     progress stub marked available, an available verb marked in progress, a verb dropped or doubled, a
     handler renamed (main() routing init to another name), a refusal listed for an available verb (alone and
-    with that verb marked in progress), an in progress verb that runs a handler only with arguments, a scope
+    with that verb marked in progress), a dispatch that calls a store callable and then routes a verb
+    normally (held by the profile hook: the store call runs for real, since the interception never writes
+    to _opf_store, and is recorded), an in progress verb that runs a handler only with arguments, a scope
     that does not read as a list, a refused subcommand named as running, the pre-fence table that named
     adopt reconcile as running, a running subcommand named as
     exiting 2, adopt marked available, main() dispatching an in progress verb straight to a helper module's
@@ -24646,6 +24672,14 @@ def _verb_status_self_test():
         # main() dispatching upgrade straight to a helper module's entry, not to its own handler
         if list(argv[:1]) == ["upgrade"]:
             return here._opf_record.cli(list(argv[1:]))
+        return real_main(argv)
+
+    def through_store(argv):
+        # main() calling a store callable while it dispatches init, then routing it normally; the store
+        # call runs for real (the interception never writes to _opf_store) and must still be recorded, so
+        # the probe fails on the recorded names, not on the routing or the exit
+        if list(argv[:1]) == ["init"]:
+            here._opf_store._home_kind("import")
         return real_main(argv)
 
     def status_through_lambda(argv):
@@ -24732,6 +24766,9 @@ def _verb_status_self_test():
         ("adopt-marked-available", dict(table=marked("adopt", "available")),
          "adopt is marked available but adopt reconcile exits 2"),
         ("dispatch-to-helper", dict(dispatch=to_helper), "main() routes ['upgrade'] to ['_opf_record.cli']"),
+        ("dispatch-through-store", dict(dispatch=through_store),
+         "init is marked available but main() does not route it to _cmd_init (handlers reached "
+         "['_opf_store._home_kind', '_bootstrap', '_cmd_init']"),
         ("intercepted-dispatch-raises", dict(dispatch=raises_when_routed),
          "the intercepted dispatch of ['sync'] raised"),
         ("engine-through-lambda", dict(dispatch=status_through_lambda),
