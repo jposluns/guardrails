@@ -9,7 +9,9 @@
 #   names    record file names, matched as a whole string constant or as its end after "/", ":" or "}"
 #   keys     orchestration-registry keys that name a record, matched as subscript or .get reads or as an
 #            element of a literal collection a loop iterates; it must hold every registry key the hook
-#            library (.aiqt/core/hooks/scripts/aiqt_hooks.py) reads inside an _orch_path argument
+#            library (.aiqt/core/hooks/scripts/aiqt_hooks.py) resolves to a record path through its
+#            _orch_path helper, read inside an argument or through one assignment step, a .get alias or a
+#            keyword value (the gate's docstring states the derived forms and the ones that refuse)
 #   flags    command-line flags that take a record path
 #   modules  record-reading modules; importing one (import, import_module or __import__), or naming its
 #            .py file, makes the file an indirect reader
@@ -25,7 +27,7 @@ format-version = 1
 
 [detect]
 names = ["TODO.md", "changelog.toml", "roadmap.toml", "pending-fixes.toml", "orchestration.json", "orchestration.local.json"]
-keys = ["mistakes_register", "attestations", "pending_decisions", "handoff", "findings", "mode", "state_dir"]
+keys = ["mistakes_register", "attestations", "pending_decisions", "handoff", "findings", "mode", "state_dir", "lease", "record"]
 flags = ["--backlog"]
 modules = ["aiqt_hooks", "check_mistakes_register"]
 
@@ -58,6 +60,12 @@ path = "tools/check_record_drift.py"
 records = ["findings register", "changelog refs"]
 disposition = "switch"
 reason = "It reads the findings register named in the orchestration registry, and findings move into the store."
+
+[[reader]]
+path = "tools/check_record_sections.py"
+records = ["none"]
+disposition = "not-a-reader"
+reason = "Its record reads are the [[record]] tables of an adopter's record-sections config, not the orchestration registry's record key."
 
 [[reader]]
 path = "tools/check_mistakes_register.py"
