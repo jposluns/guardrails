@@ -916,7 +916,7 @@ def run_selftest_child(args, child, failures, what, timeout=SELFTEST_CHILD_TIMEO
                           stderr=subprocess.PIPE, text=True, start_new_session=True, cwd=cwd,
                           env=env) as proc:
         try:
-            out, err = proc.communicate(timeout=timeout)
+            out, err = _selftest_communicate(proc, timeout)
         except subprocess.TimeoutExpired:
             _kill_selftest_group(proc)
             failures.append("{} did not exit within {} s; its process group was killed".format(what, timeout))
@@ -925,6 +925,14 @@ def run_selftest_child(args, child, failures, what, timeout=SELFTEST_CHILD_TIMEO
             _kill_selftest_group(proc)
             raise
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _selftest_communicate(proc, timeout):
+    """The one wait in run_selftest_child: proc.communicate(timeout=timeout), returning its (stdout,
+    stderr) and letting every exception through. It is a module-level function so the self-test can
+    replace it, and restore it, to raise an injected exception mid-wait without touching the subprocess
+    module for the whole process."""
+    return proc.communicate(timeout=timeout)
 
 
 def _kill_selftest_group(proc):
@@ -2425,7 +2433,8 @@ def _self_test_isolated(child):
                             "got {!r}".format(refused))
 
         # 58. DISCRIMINATING (an exception other than the timeout leaves no surviving group):
-        #     communicate is replaced by one that waits for the stand-in to record its grandchild and then
+        #     _selftest_communicate, the wait run_selftest_child goes through, is replaced (and restored)
+        #     by one that waits for the stand-in to record its grandchild and then
         #     raises KeyboardInterrupt, or RuntimeError. run_selftest_child must let that exception through,
         #     record no failure of its own, and leave the grandchild dead. A launcher that handles only
         #     TimeoutExpired leaves Popen's exit to wait without killing: the grandchild survives
@@ -2439,14 +2448,15 @@ def _self_test_isolated(child):
             script = tmp / "interrupted-{}.py".format(name)
             _write_grandchild_standin(script, marker, child_sleep=20)
 
-            def interrupted_communicate(self, *args, _marker=marker, _exc=injected, _msg=sentinel, **kwargs):
+            def interrupted_communicate(proc, timeout, _marker=marker, _exc=injected, _msg=sentinel):
                 deadline = time.monotonic() + 10
                 while not _marker.exists() and time.monotonic() < deadline:
                     time.sleep(0.05)
                 raise _exc(_msg)
 
-            real_communicate = subprocess.Popen.communicate
-            subprocess.Popen.communicate = interrupted_communicate
+            module_globals = globals()
+            real_communicate = module_globals["_selftest_communicate"]
+            module_globals["_selftest_communicate"] = interrupted_communicate
             raised, recorded = False, []
             try:
                 run_selftest_child([str(script)], False, recorded, "the interrupted stand-in", timeout=30)
@@ -2455,7 +2465,7 @@ def _self_test_isolated(child):
                     raise
                 raised = True
             finally:
-                subprocess.Popen.communicate = real_communicate
+                module_globals["_selftest_communicate"] = real_communicate
             if not raised or recorded:
                 failures.append("a {} out of communicate must propagate from run_selftest_child with no "
                                 "recorded failure, got raised={} recorded={!r}".format(name, raised, recorded))
