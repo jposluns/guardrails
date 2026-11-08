@@ -249,7 +249,7 @@ reason = "Rationale for stgprm.1 and stgprm.2; no obligation of its own."
 
 [[exempt]]
 corpus-id = "stgprm"
-text = "This governs an artefact or a change\nreaching a runtime, distribution, or live target, and is distinct from integrating a change into the\nprotected line of development."
+text = "This governs an artefact or a change\nreaching a runtime, distribution, or live target, not integrating a change into the protected line of\ndevelopment; when a merge into that line itself deploys, this rule governs the deployment it triggers,\nnot the merge."
 reason = "Scope note separating this rule from the branch-and-merge-on-green rule (artbr1); no obligation of its own."
 
 [[exempt]]
