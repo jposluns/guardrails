@@ -1100,8 +1100,8 @@ def build_source_payloads(*, operation_id, binding, head, first_adoption, invent
     """The exact bytes of every planned source {store-relative path: bytes}, init.toml included:
     the D1 builders' documents (counters seeded from a validated ancestral seed when one is given),
     the `dir:.` store pointer, CHANGELOG.md when the plan creates it, and the provenance computed
-    over all of them EXCLUDING itself. `homes2` (explicit, never a default) builds the homes-2
-    manifest; its plan also creates .working/.gitignore with the rendered managed block and, while
+    over all of them EXCLUDING itself. `homes2` defaults to False (generation 1); True, only ever
+    an explicit caller input, builds the homes-2 manifest; its plan also creates .working/.gitignore with the rendered managed block and, while
     the imported series is active, the empty imported leaves and their zero counter rows (spec 4.2)."""
     counters_seed = None
     if seed is not None:
@@ -2873,7 +2873,10 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
     resumed (its adoption transaction reverses a partial one); `admitted` and `admitted_dirs`
     are REFUSED without it (they are the coupled seam's bindings, never a plain init's). A plain RESUME must carry the SAME
     ancestral, admitted and operation_id bindings its recorded plan carries, else it refuses
-    (_resume_binding_or_refuse). `homes2` (explicit, never a default) plans a FRESH operation at
+    (_resume_binding_or_refuse). `homes2` defaults to False (generation 1, the shipped layout);
+    every non-test caller passes it explicitly from the one rule _opf_store.init_writes_homes2
+    (the adoption-coupled init, init_operation and the kill-point child; check_opf_init refuses a
+    named site that omits it or derives it another way). True plans a FRESH operation at
     homes generation 2 (_fresh_plan) and is REFUSED up front, before the mutex and any branch, while
     this tooling does not support homes 2; a resume or a completed rerun must name its recorded
     plan's own generation, else it refuses (_generation_or_refuse); and every attempt of a
@@ -3037,10 +3040,15 @@ def run_init_operation(product_root, *, ancestral=None, recover=False, admitted=
 
 def init_operation(product_root, *, ancestral=None, recover=False, admitted=None,
                    operation_id=None, admitted_dirs=None):
-    """Public CLI seam; preserve the library result and decision-7 milestone boundary."""
+    """Public CLI seam; preserve the library result and decision-7 milestone boundary. The homes
+    generation is never chosen here: it is the one rule plain `opf init` and the init an adoption
+    composes also read (_opf_store.init_writes_homes2, read at call time), so this seam writes the
+    same spec_version as they do. A resume or rerun must still match its recorded plan's generation
+    (_generation_or_refuse)."""
     return run_init_operation(product_root, ancestral=ancestral, recover=recover,
                               admitted=admitted, operation_id=operation_id,
-                              admitted_dirs=admitted_dirs)
+                              admitted_dirs=admitted_dirs,
+                              homes2=_opf_store.init_writes_homes2())
 
 
 # --- self-test ------------------------------------------------------------------------------------
@@ -3349,7 +3357,7 @@ def _child_main(argv):
     elif name != "none":
         raise SystemExit("unknown kill point {!r}".format(kill))
     res = run_init_operation(root, ancestral=None if seed == "-" else seed, recover=recover == "1",
-                             operation_id=opid)
+                             operation_id=opid, homes2=_opf_store.init_writes_homes2())
     print(json.dumps({s: getattr(res, s) for s in InitResult.__slots__}, sort_keys=True))
     return 0
 

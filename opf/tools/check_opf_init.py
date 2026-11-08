@@ -335,6 +335,74 @@ _ROUTE_EXTERNAL_IMPORTS = dict(
     uuid=("import", "uuid"),
 )
 
+# The fresh-init entries outside opf.py that choose a store's homes generation. opf.py's _init_main
+# is held to the one rule by its roster above (it admits _opf_store.init_writes_homes2, never
+# SUPPORTED_HOMES); each site here is held the same way by _homes_rule_violations: the named
+# module-level function calls run_init_operation exactly once, with no * or ** splat, passes homes2
+# as exactly <module alias>.init_writes_homes2() with no arguments, and names SUPPORTED_HOMES
+# nowhere, so a site that re-derives the generation itself, passes a constant or omits the argument
+# is a finding. Rows are (file in this directory, function, the alias that file imports
+# _opf_store as).
+_HOMES_RULE_SITES = (
+    ("_opf_adopt_apply.py", "_init_store_run", "store"),
+    ("_opf_init_operation.py", "init_operation", "_opf_store"),
+    ("_opf_init_operation.py", "_child_main", "_opf_store"),
+)
+
+
+def _homes_rule_call(node, alias):
+    """True only for the exact spelling <alias>.init_writes_homes2() with no arguments."""
+    return (isinstance(node, ast.Call) and not node.args and not node.keywords
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "init_writes_homes2"
+            and isinstance(node.func.value, ast.Name) and node.func.value.id == alias)
+
+
+def _homes_rule_violations(sources):
+    """Findings for _HOMES_RULE_SITES over `sources`, a dict of file name to source text; an empty
+    list means every site reads the one homes rule. A missing or unparsable source, or a site
+    function that is absent or defined more than once at module level, is itself a finding."""
+    found = []
+    for fname, func, alias in _HOMES_RULE_SITES:
+        text = sources.get(fname)
+        if type(text) is not str:
+            found.append("{}: source not supplied".format(fname))
+            continue
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+            found.append("{}: cannot parse ({})".format(fname, type(exc).__name__))
+            continue
+        defs = [node for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func]
+        if len(defs) != 1:
+            found.append("{}: {} is defined {} times at module level".format(fname, func, len(defs)))
+            continue
+        calls = []
+        for node in ast.walk(defs[0]):
+            if ((isinstance(node, ast.Name) and node.id == "SUPPORTED_HOMES")
+                    or (isinstance(node, ast.Attribute) and node.attr == "SUPPORTED_HOMES")):
+                found.append("{}: {} names SUPPORTED_HOMES (line {})".format(
+                    fname, func, node.lineno))
+            if isinstance(node, ast.Call):
+                callee = node.func
+                name = (callee.id if isinstance(callee, ast.Name)
+                        else callee.attr if isinstance(callee, ast.Attribute) else None)
+                if name == "run_init_operation":
+                    calls.append(node)
+        if len(calls) != 1:
+            found.append("{}: {} calls run_init_operation {} times, not once".format(
+                fname, func, len(calls)))
+            continue
+        call = calls[0]
+        rule = [kw for kw in call.keywords if kw.arg == "homes2"]
+        if (any(isinstance(arg, ast.Starred) for arg in call.args)
+                or any(kw.arg is None for kw in call.keywords)):
+            found.append("{}: {} splats its run_init_operation arguments".format(fname, func))
+        elif len(rule) != 1 or not _homes_rule_call(rule[0].value, alias):
+            found.append("{}: {} does not pass homes2={}.init_writes_homes2()".format(
+                fname, func, alias))
+    return found
+
 
 def _route_external_binding_ok(node, name):
     """True only when node is exactly the pinned import form for the external
@@ -4058,6 +4126,51 @@ def _suite_isolated(invoke):
                     encoding="utf-8")
                 check("route gate: the real source is clean",
                       _init_route_violations(gate_source) == [])
+                # The homes rule outside opf.py: the real adoption-coupled init, the substrate's
+                # public seam and its kill-point child each pass homes2 from the one rule, and a
+                # mutant that re-derives the generation, passes a constant, omits the argument,
+                # splats it or drops the site is a finding.
+                rule_dir = Path(__file__).resolve().parent
+                rule_sources = dict(
+                    (fname, (rule_dir / fname).read_text(encoding="utf-8"))
+                    for fname in sorted(set(site[0] for site in _HOMES_RULE_SITES)))
+                check("homes rule sites: the real sources are clean",
+                      _homes_rule_violations(rule_sources) == [])
+                rule_adopt = "homes2=store.init_writes_homes2())"
+                rule_seam = ("                              admitted_dirs=admitted_dirs,\n"
+                             "                              homes2=_opf_store.init_writes_homes2())")
+                rule_child = "operation_id=opid, homes2=_opf_store.init_writes_homes2())"
+                check("homes rule sites: the mutation anchors are present once",
+                      rule_sources["_opf_adopt_apply.py"].count(rule_adopt) == 1
+                      and rule_sources["_opf_init_operation.py"].count(rule_seam) == 1
+                      and rule_sources["_opf_init_operation.py"].count(rule_child) == 1
+                      and rule_sources["_opf_init_operation.py"].count(
+                          "\ndef init_operation(") == 1)
+                rule_mutants = [
+                    ("the adoption-coupled init re-deriving SUPPORTED_HOMES >= 2",
+                     "_opf_adopt_apply.py", rule_adopt, "homes2=store.SUPPORTED_HOMES >= 2)"),
+                    ("the adoption-coupled init splatting its arguments",
+                     "_opf_adopt_apply.py", rule_adopt,
+                     "homes2=store.init_writes_homes2(), **{})"),
+                    ("the public seam omitting homes2",
+                     "_opf_init_operation.py", rule_seam,
+                     "                              admitted_dirs=admitted_dirs)"),
+                    ("the public seam re-deriving SUPPORTED_HOMES >= 2",
+                     "_opf_init_operation.py", rule_seam,
+                     rule_seam.replace("_opf_store.init_writes_homes2()",
+                                       "_opf_store.SUPPORTED_HOMES >= 2")),
+                    ("the kill-point child passing a constant",
+                     "_opf_init_operation.py", rule_child, "operation_id=opid, homes2=False)"),
+                    ("the public seam renamed away",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef init_operation_v1("),
+                ]
+                for mutant_label, fname, old, new in rule_mutants:
+                    mutated_sources = dict(rule_sources)
+                    mutated_sources[fname] = rule_sources[fname].replace(old, new)
+                    check("homes rule sites flag " + mutant_label,
+                          mutated_sources[fname] != rule_sources[fname]
+                          and _homes_rule_violations(mutated_sources) != [])
                 gate_anchor = '    stage = "preflight"'
                 check("route gate: the mutation anchor is present once",
                       gate_source.count(gate_anchor) == 1)

@@ -22197,6 +22197,52 @@ def _init_store_git_checks(check, ctx, refused):
               homes_rows[1][2][0] == homes_rows[1][1][0]
               and homes_rows[2][2][0] != homes_rows[2][1][0], observed=homes_rows)
 
+        # THE THIRD AND FOURTH FRESH-INIT ENTRIES: the substrate's public seam (init_op.init_operation)
+        # and its kill-point child entry (init_op._child_main, run in-process here with no kill hook)
+        # read the same rule, so at SUPPORTED_HOMES 1 and 2 each requests the generation plain init
+        # writes. Each entry's substrate call is recorded through the real signature and answered
+        # REFUSED, so nothing is written; the flip drops homes2 from the recorded call and must turn
+        # the comparison red at 2.
+        def seam_spec(homes, entry, omit=False):
+            seen = []
+
+            def record(*a, **k):
+                if omit:
+                    k.pop("homes2", None)
+                call = real_sig.bind(*a, **k)
+                call.apply_defaults()
+                seen.append(call.arguments["homes2"])
+                stopped = init_op.InitResult()
+                stopped.status = init_op.REFUSED
+                stopped.primary_failure = dict(code=init_op.REFUSED, detail="the homes probe stops here")
+                return stopped
+
+            target = os.path.join(base, "homesrule-{}-{}-{}".format(entry, homes, int(omit)))
+            quiet = io.StringIO()
+            with mock.patch.object(store, "SUPPORTED_HOMES", homes), \
+                    mock.patch.object(init_op, "run_init_operation", record), \
+                    contextlib.redirect_stdout(quiet):
+                if entry == "seam":
+                    init_op.init_operation(target)
+                else:
+                    init_op._child_main([target, "none", "-", "0", "-", "-"])
+            return homes_spec(homes, seen)
+
+        entry_rows = {}
+        for homes in (1, 2):
+            entry_rows[homes] = dict(
+                (entry, (seam_spec(homes, entry), seam_spec(homes, entry, omit=True)))
+                for entry in ("seam", "child"))
+        check("init-homes-rule-shared-by-seam-and-child",
+              all(entry_rows[h][e][0] == homes_rows[h][1][0]
+                  for h in (1, 2) for e in ("seam", "child"))
+              and homes_rows[2][1][0] != homes_rows[1][1][0],
+              observed=(entry_rows, homes_rows))
+        check("init-homes-rule-seam-and-child-omitted-argument-flip-red",
+              all(entry_rows[1][e][1] == homes_rows[1][1][0]
+                  and entry_rows[2][e][1] != homes_rows[2][1][0] for e in ("seam", "child")),
+              observed=(entry_rows, homes_rows))
+
         # THE OCCUPIED MACHINE PATH COMPOSITION (codex round 2, spec 14.2: "After the archival
         # the destination is an ordinary managed path"): the shell archives the occupying
         # machine-store file preserve-first; the emptied PRE-EXISTING machine directory is then
