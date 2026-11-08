@@ -101,21 +101,21 @@
 #                        chgchk.15): measured PACK 135159 at the PR base 6be5fdf4 without the paragraph -> 136094
 #                        (+935 units); the 370 units then under the ratchet 135529 absorb 370 of them, and the
 #                        ratchet rises by the remaining 565.
-#                        Raised 136094 -> 136420 on 2026-11-08 under the maintainer's recorded decision of
+#                        Raised 136094 -> 136785 on 2026-11-08 under the maintainer's recorded decision of
 #                        2026-11-08 to raise the ratchet by exactly the measured overage, when
-#                        validation-gates-apply gained its sentence on caller-side validation ahead of a
-#                        dispatch to a callee with documented or demonstrated input refusal conditions
-#                        (valgat.2): measured PACK 136094 at the base e5724f69 -> 136420 (+326 units: the
-#                        325-unit sentence plus its one joining space); rule files 119471 -> 119797; managed
+#                        validation-gates-apply gained its sentence on evaluating, before a dispatch, the
+#                        input refusal conditions a callee's own interface or documentation states
+#                        (valgat.2): measured PACK 136094 at the base e5724f69 -> 136785 (+691 units: the
+#                        690-unit sentence plus its one joining space); rule files 119471 -> 120162; managed
 #                        block 360 and file headers 16263 unchanged. PACK sat exactly at the ratchet, so no
 #                        headroom absorbs any of it and the ratchet rises by the whole measured overage,
-#                        136094 + 326 = 136420.
+#                        136094 + 691 = 136785.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
 #                        predates header counting, which added 16136 units to PACK at the 112222 ->
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136420
+ratchet = 136785
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"

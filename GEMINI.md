@@ -573,10 +573,14 @@ not needed, detaching it is a deliberate, recorded choice, not a reflex.
 ## Validation is a gate on apply
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
-source. Trust is never a substitute for the gate. However cheap, a dispatch to a callee with documented
-or demonstrated input refusal conditions requires caller-side validation: the caller first evaluates
-each condition from inputs it holds, withholds dispatch with the callee's reason if one holds or as
-cannot-evaluate if one is undecidable, and retains the callee's check.
+source. Trust is never a substitute for the gate. Before a dispatch to a callee whose own interface or
+documentation states conditions under which it refuses an input (environmental failures such as a
+timeout, a rate limit, an authorization denial, or a model declining are not such conditions), the
+caller evaluates each stated condition it can settle cheaply and with certainty from inputs it already
+has or can read without side effects, withholds the dispatch when such a condition is met and reports in
+its own result a refusal naming that condition, and leaves every other condition to the callee's own
+check, which it retains; for a pre-check ahead of an expensive apply, the guard-input-soundness rule
+(grdinp) sets the bar instead.
 
 ## Workers produce inert data
 

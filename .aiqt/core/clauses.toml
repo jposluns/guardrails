@@ -1562,16 +1562,16 @@ source-path = ".aiqt/core/rules/integ-validation-gates-apply.md"
 start-line = 17
 end-line = 18
 canonical-text = "There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its\nsource. Trust is never a substitute for the gate."
-source-digest = "870cfd33746770e065eb3b96623722ede36a4d26921f695669f88394e75e4e20"
+source-digest = "15f7f059fa1f4f09fc3d6cd8017fe26c737d70cbbb564e8e0384397197aaac5b"
 
 [[clause]]
 clause-id = "valgat.2"
 corpus-id = "valgat"
 source-path = ".aiqt/core/rules/integ-validation-gates-apply.md"
 start-line = 18
-end-line = 21
-canonical-text = "However cheap, a dispatch to a callee with documented\nor demonstrated input refusal conditions requires caller-side validation: the caller first evaluates\neach condition from inputs it holds, withholds dispatch with the callee's reason if one holds or as\ncannot-evaluate if one is undecidable, and retains the callee's check."
-source-digest = "870cfd33746770e065eb3b96623722ede36a4d26921f695669f88394e75e4e20"
+end-line = 25
+canonical-text = "Before a dispatch to a callee whose own interface or\ndocumentation states conditions under which it refuses an input (environmental failures such as a\ntimeout, a rate limit, an authorization denial, or a model declining are not such conditions), the\ncaller evaluates each stated condition it can settle cheaply and with certainty from inputs it already\nhas or can read without side effects, withholds the dispatch when such a condition is met and reports in\nits own result a refusal naming that condition, and leaves every other condition to the callee's own\ncheck, which it retains; for a pre-check ahead of an expensive apply, the guard-input-soundness rule\n(grdinp) sets the bar instead."
+source-digest = "15f7f059fa1f4f09fc3d6cd8017fe26c737d70cbbb564e8e0384397197aaac5b"
 
 [[clause]]
 clause-id = "wowo01.1"
