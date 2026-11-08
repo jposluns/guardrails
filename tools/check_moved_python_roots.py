@@ -20,7 +20,11 @@ origin/HEAD that does not resolve is exit 2. A --base that is an all-zero object
 object id's length (a push event's before value for a newly created ref) is accepted only when the
 head commit has no parent: nothing precedes a root commit, so the change moves no file and the run
 prints that and exits 0; a zero base over pre-existing history is exit 2, the rule
-tools/check_release_cut.py applies to a zero before. A shallow repository is exit 2 before any
+tools/check_release_cut.py applies to a zero before. The head's parents are read from the raw
+commit object (git cat-file commit with object replacement disabled), never through a history
+walk such as git rev-list, which honours an info/grafts file and replace refs: a grafts entry
+must not make a head over real history look parentless and let a zero base pass. A named parent
+whose object is missing is exit 2. A shallow repository is exit 2 before any
 judgment, as the branch-root sibling's probe refuses one, because a truncated history can hide the
 true merge base and make the gate judge unrelated history. Each revision is resolved with
 `git rev-parse --verify --end-of-options REV^{commit}`. Every git call runs with the ambient GIT_*
@@ -54,15 +58,19 @@ Path, dirname or __file__ redefined locally, and text inside comments or strings
 2 hops or more (one hop is the file's own directory, which moves with the file). Anything else
 anchored on __file__ (a non-literal index, a helper function, a name bound more than once) is not
 judged; the tool prints how many such expressions it skipped. Each in-scope head derivation is
-judged against its own base counterpart in the same enclosing scope (the qualified function or
-class path, the module itself for module-level code): the base derivation assigned to the same name
-in that scope, or failing that one with the same normalized expression text in that scope, in any
-matched base path (base derivations of every hop count take part, so a one-hop base .parent
-corrected to .parents[1] during a one-level-deeper move is the same directory and passes). Where
-one scope assigns a name more than once on either side, each head assignment of that name is judged
-against the base assignment of that name in the same source position, and the comparison is exit 2
-(cannot evaluate, with a reason) when the recognized assignments cannot be paired one to one that
-way. It passes only when a counterpart names
+judged against a base counterpart under its enclosing scope's qualified path (the qualified
+function or class path, the module itself for module-level code): the base derivation assigned to
+the same name under that path, or failing that one with the same normalized expression text under
+that path, in any matched base path (base derivations of every hop count take part, so a one-hop
+base .parent corrected to .parents[1] during a one-level-deeper move is the same directory and
+passes). Scopes with distinct qualified paths are never judged against each other; two scopes that
+share one qualified path (for example two conditional defs of the same function name) are pooled
+under it, their assignments of one name paired in source order. Where one qualified path assigns a
+name more than once on either side and the base assigns that name under that path, each head
+assignment of that name is judged against the base assignment of that name in the same source
+position, and the comparison is exit 2 (cannot evaluate, with a reason) when the recognized
+assignments cannot be paired one to one that way; a name the base never assigns under that path
+falls back to the expression-text key instead. It passes only when a counterpart names
 the same repository-relative directory (hops above the root are a distinct outside-the-repository
 value per level, compared by value and never probed as a tree path) and, for an in-repository
 directory, that directory is present in the head tree. A counterpart naming only other directories
@@ -194,18 +202,41 @@ def _refuse_shallow(root):
 
 
 def _commit_parents(root, sha):
-    """The parent object ids of sha, read from git rev-list (a root commit has none)."""
+    """The parent object ids of sha (a root commit has none), read from the raw commit object
+    (git cat-file commit with object replacement disabled), never through a history walk: git
+    rev-list honours an info/grafts file and replace refs, either of which could make a head over
+    real history look parentless. cat-file prints the stored object bytes, which no graft rewrites.
+    A malformed parent header line or a named parent whose object is missing is cannot-evaluate."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "rev-list", "--parents", "-n", "1", sha, "--"],
+            ["git", "-C", str(root), "--no-replace-objects", "cat-file", "commit", sha],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         _proc_failure(exc)
-    fields = proc.stdout.decode("ascii", "replace").split()
-    if proc.returncode != 0 or not fields or fields[0] != sha:
-        raise CannotEvaluate("cannot read the parents of {}: {}".format(
-            sha, _stderr_text(proc) or "git rev-list failed"))
-    return fields[1:]
+    if proc.returncode != 0:
+        raise CannotEvaluate("cannot read the commit object {}: {}".format(
+            sha, _stderr_text(proc) or "git cat-file failed"))
+    parents = []
+    for raw_line in proc.stdout.split(b"\n\n", 1)[0].split(b"\n"):
+        if raw_line.startswith(b"parent "):
+            value = raw_line[len(b"parent "):].decode("ascii", "replace")
+            if not value or set(value) - set("0123456789abcdef"):
+                raise CannotEvaluate(
+                    "cannot read the parents of {}: malformed parent line in the commit "
+                    "object".format(sha))
+            parents.append(value)
+    for parent in parents:
+        try:
+            probe = subprocess.run(
+                ["git", "-C", str(root), "--no-replace-objects", "cat-file", "-e", parent],
+                capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+        except (OSError, subprocess.SubprocessError) as exc:
+            _proc_failure(exc)
+        if probe.returncode != 0:
+            raise CannotEvaluate(
+                "commit {} names parent {} but that object is missing; the history cannot be "
+                "evaluated".format(sha, parent))
+    return parents
 
 
 def _default_base(root, head_sha):
@@ -355,7 +386,9 @@ def _parse_python(blob, label):
     """The decoded source text and its AST, read without being executed; every parse failure the
     plan names is cannot-evaluate, for a base version as for a head version. LookupError covers a
     coding cookie naming a registered codec that is not a text encoding (rot13, hex), which
-    tokenize.detect_encoding or the decode raises where an unknown cookie raises SyntaxError."""
+    tokenize.detect_encoding or the decode raises where an unknown cookie raises SyntaxError; as
+    IndexError and KeyError are LookupError subclasses, the tuple also routes those to
+    cannot-evaluate should the probe ever raise one, never a crash."""
     try:
         encoding, _first_lines = tokenize.detect_encoding(io.BytesIO(blob).readline)
         text = blob.decode(encoding)
@@ -662,9 +695,11 @@ def _eval(node, scope, aliases, visiting):
 def _counterpart_keys(scope_qual, name, expr):
     """The counterpart keys of one derivation, most specific first: the assigned target name under
     its enclosing scope's qualified path ("" is the module scope), else the normalized expression
-    text under that path. Scope-qualified so one scope's derivation is never judged against another
-    scope's; a module-level function named so the self-test can flip the qualifier off and show the
-    scope rows discriminate."""
+    text under that path. Keys from distinct qualified paths never match each other; two scopes
+    sharing one qualified path (conditional defs of the same function name) share keys and are
+    paired in source order by _match_counterpart. A module-level function named so the self-test
+    can flip the qualifier off on its own: under that flip the head-order fixture's finding moves
+    to the wrong line, which is what discriminates the qualifier."""
     if name:
         return (("name", scope_qual, name), ("expr", scope_qual, expr))
     return (("expr", scope_qual, expr),)
@@ -672,11 +707,13 @@ def _counterpart_keys(scope_qual, name, expr):
 
 def _match_counterpart(keys, head_ordinal, head_count, base_by_key, base_name_seq, context):
     """The base directories the head derivation carrying these keys is judged against (None when
-    no key matches). Where the same scope assigns the name more than once on either side, each head
-    assignment is paired with the base assignment of that name in the same source position, and a
-    set that cannot be paired one to one is cannot-evaluate, never a merged-set pass. A module-level
-    function so the self-test can flip it back to the merged-set lookup and show the rows
-    discriminate."""
+    no key matches). Where the base assigns the head derivation's name under the same qualified
+    path and either side assigns it there more than once, each head assignment is paired with the
+    base assignment of that name in the same source position, and a set that cannot be paired one
+    to one is cannot-evaluate, never a merged-set pass; a name the base never assigns under that
+    path falls through to the first matching key, the expression text, as a merged set. A
+    module-level function so the self-test can flip it back to the merged-set lookup, under which
+    the same-scope reassignment rows hide their finding."""
     name_key = keys[0] if keys[0][0] == "name" else None
     if name_key is not None and name_key in base_name_seq:
         per_old = base_name_seq[name_key]
@@ -856,20 +893,26 @@ def scan(root, base, head, min_hops=MIN_HOPS, compare=True):
                     if bad and counterpart is None:
                         # No counterpart is never a pass: a name-matched addition cannot be told
                         # from a new file, and a renamed file whose base derived this directory
-                        # under another name or expression cannot be matched soundly either way.
+                        # in another scope or under another name or expression cannot be matched
+                        # soundly either way. The message names the scope searched: the base may
+                        # well assign the same name in some other scope, which is no counterpart.
+                        scope_label = keys[0][1] or "<module>"
                         if pairing == "name-match":
                             raise CannotEvaluate(
                                 "cannot judge added {!r}: line {} derives {!r} ({}) but no "
                                 "deleted or renamed .py file named {!r} has a base derivation "
-                                "with the same name or expression; a new file cannot be told "
+                                "with the same name or expression in scope {} (an assignment in "
+                                "another scope is no counterpart); a new file cannot be told "
                                 "from a moved one".format(
-                                    new, line, head_dir, expr, new.rsplit("/", 1)[-1]))
+                                    new, line, head_dir, expr, new.rsplit("/", 1)[-1],
+                                    scope_label))
                         if head_dir in base_all:
                             raise CannotEvaluate(
                                 "cannot judge {} -> {}: line {} derives {!r} ({}) with no base "
-                                "counterpart of the same name or expression, while the base "
-                                "derived that directory another way".format(
-                                    ", ".join(olds), new, line, head_dir, expr))
+                                "counterpart of the same name or expression in scope {}, while "
+                                "the base derived that directory in another scope or under "
+                                "another name or expression".format(
+                                    ", ".join(olds), new, line, head_dir, expr, scope_label))
                 else:
                     bad = True
                 if bad:
@@ -964,8 +1007,12 @@ def main(argv=None):
 # --- self-test --------------------------------------------------------------------------------------
 # The fixture matrix over synthetic git repositories in a tempdir only (never the live repository).
 # The scoped-counterpart rows are paired the other way around: each flags, and its flip (the scope
-# qualifier dropped from the counterpart keys and the merged-set lookup restored) hides the finding,
-# so those rows fail if the scope-qualified pairing regresses.
+# qualifier dropped from the counterpart keys AND the merged-set lookup restored, together) hides
+# the finding, so those rows fail only when both regress at once. Dropping the qualifier alone
+# keeps those rows green (each side assigns the name once per function, so the position matcher
+# still pairs f with f and g with g); the head-order row, whose head lists g before f, is the one
+# that fails under a qualifier-only drop, because cross-scope positional pairing then moves the
+# finding to the wrong line.
 # Every comparison-quiet row is paired with its flag-everything flip (scan(compare=False), the plain
 # matcher with no before-and-after comparison; for the one-hop and lexical-dirname rows the flip
 # also lowers the hop minimum to 1, and for the not-recognized rows the flip removes exactly the
@@ -1433,10 +1480,13 @@ def self_test(report_path=None):
 
         # fixture 23b2: the counterpart key carries the enclosing scope. In each repository two
         # functions assign the same name; the move corrects f's hops and leaves g's stale, and g's
-        # stale head directory equals f's base directory, so only the per-scope judgment reports g.
-        # Each row is paired with the scope-free flip (the qualifier dropped from the keys AND the
-        # counterpart restored to the merged-set lookup), under which the finding hides, so every
-        # row here fails if the scope-qualified pairing regresses.
+        # stale head directory equals f's base directory, so the merged-set lookup passes both
+        # while the per-scope judgment reports g. Each row is paired with the combined scope-free
+        # flip (the qualifier dropped from the keys AND the counterpart restored to the merged-set
+        # lookup), under which the finding hides; these rows do NOT discriminate dropping the
+        # qualifier alone, because f and g each assign the name once and in the same order on both
+        # sides, so positional pairing still lands g on g. The head-order fixture below covers
+        # that drop by itself.
         def _scope_free_keys(_qual, name, expr):
             return (("name", "", name), ("expr", "", expr)) if name else (("expr", "", expr),)
 
@@ -1480,6 +1530,49 @@ def self_test(report_path=None):
             got = _outcome(scope_b, scope_b_b, scope_b_h)
         check("verdict/scoped-deeper-move-scope-free-flip-hides",
               _counts(got) == ("ok", 0, 1, 2, 0), got)
+
+        # fixture 23b2b: the head lists g before f and g is the stale one. The scoped pairing
+        # flags g's line (line 3) wherever g sits; with the qualifier dropped from the keys but
+        # the position matcher kept, head g (first) pairs with base f (first) and the finding
+        # lands on f's line (line 5); with the merged-set lookup as well, nothing is flagged.
+        # The main row therefore fails under a qualifier-only drop: it discriminates the
+        # qualifier on its own, which fixture 23b2 cannot.
+        order_base = ("from pathlib import Path\n"
+                      "def f():\n    ROOT = Path(__file__).parents[2]\n"
+                      "def g():\n    ROOT = Path(__file__).parents[1]\n")
+        order_head = ("from pathlib import Path\n"
+                      "def g():\n    ROOT = Path(__file__).parents[1]\n"
+                      "def f():\n    ROOT = Path(__file__).parents[1]\n")
+        order_repo, order_b, order_h = _repo_with(
+            base, "scope-head-order", {"tools/a/b/x.py": order_base},
+            {"tools/a/x.py": order_head})
+        got = _outcome(order_repo, order_b, order_h)
+        check("verdict/scoped-head-order-stale-first-flagged",
+              _counts(got) == ("ok", 1, 1, 2, 0) and got[1][0]["line"] == 3
+              and got[1][0]["head_dir"] == "tools"
+              and got[1][0]["base_dirs"] == ["tools/a"], got)
+        with _patched(this, "_counterpart_keys", _scope_free_keys):
+            got = _outcome(order_repo, order_b, order_h)
+        check("verdict/scoped-head-order-qualifier-only-flip-misattributes",
+              _counts(got) == ("ok", 1, 1, 2, 0) and got[1][0]["line"] == 5
+              and got[1][0]["head_dir"] == "tools"
+              and got[1][0]["base_dirs"] == ["tools/a"], got)
+
+        # fixture 23b2c: a correct move of a module-level root into a function finds no
+        # counterpart under the function's qualified path and stays fail-closed (cannot
+        # evaluate), and the message names the scope it searched instead of claiming the base
+        # has no derivation of that name at all.
+        scoped_move_base = ("from pathlib import Path\n"
+                            "ROOT = Path(__file__).parents[1]\n" + filler)
+        scoped_move_head = ("from pathlib import Path\n"
+                            "def main():\n    ROOT = Path(__file__).parents[1]\n" + filler)
+        smv, smv_b, smv_h = _repo_with(
+            base, "scope-move", {"a/b/t.py": scoped_move_base}, {"a/c/t.py": scoped_move_head})
+        got = _outcome(smv, smv_b, smv_h)
+        check("verdict/root-moved-into-function-scope-cannot-evaluate",
+              got[0] == "cannot" and "in scope main" in got[1]
+              and "no base counterpart" in got[1]
+              and "in another scope or under another name" in got[1], got)
 
         # fixture 23b3: one scope assigning the same name twice is judged assignment by
         # assignment in source order (the second stays stale here, hidden under the merged-set
@@ -1536,7 +1629,8 @@ def self_test(report_path=None):
             base, "no-base-derivation", {"u/t.py": "VALUE = 1\n"}, {"v/w/t.py": P1})
         got = _outcome(nobase, nobase_b, nobase_h)
         check("match/add-name-no-base-derivation-cannot-evaluate",
-              got[0] == "cannot" and "cannot judge added" in got[1], got)
+              got[0] == "cannot" and "cannot judge added" in got[1]
+              and "in scope <module>" in got[1], got)
 
         # fixture 23f: .parent corrected to .parents[1] over a one-level-deeper move names the
         # same directory under the same name: a pass, and the flip still flags it
@@ -1593,6 +1687,53 @@ def self_test(report_path=None):
         got = _launch("--root", str(fixed), "--base", "0" * len(fixed_h), "--head", fixed_h)
         check("hist/zero-base-with-history-cannot-evaluate",
               got[0] == 2 and "zero --base" in got[2], got)
+
+        # fixture 23j2: an info/grafts entry that makes HEAD look parentless to a history walk
+        # must not let a zero base pass over real history: the parents are read from the raw
+        # commit object, which no graft rewrites, so the real parent is still found and the run
+        # is refused. The flip restores the rev-list read, which honours the graft and passes.
+        graft = _init_repo(base, "grafted")
+        gr1 = _commit_state(graft, {}, {"a/t.py": P1}, "one")
+        gr2 = _commit_state(graft, {"a/t.py": P1}, {"a/t.py": P1 + "# two\n"}, "two")
+        os.makedirs(Path(graft) / ".git" / "info", exist_ok=True)
+        with open(Path(graft) / ".git" / "info" / "grafts", "w", encoding="ascii") as handle:
+            handle.write(gr2 + "\n")
+        parents_read = _commit_parents(Path(graft), gr2)
+        got = _launch("--root", str(graft), "--base", "0" * len(gr2), "--head", gr2)
+        check("hist/grafted-head-zero-base-cannot-evaluate",
+              parents_read == [gr1] and got[0] == 2 and "zero --base" in got[2],
+              (parents_read, got))
+
+        def _rev_list_parents(walk_root, walk_sha):
+            proc = subprocess.run(
+                ["git", "-C", str(walk_root), "rev-list", "--parents", "-n", "1",
+                 walk_sha, "--"],
+                capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+            fields = proc.stdout.decode("ascii", "replace").split()
+            if proc.returncode != 0 or not fields or fields[0] != walk_sha:
+                raise CannotEvaluate("cannot read the parents of {}".format(walk_sha))
+            return fields[1:]
+
+        flip_out = io.StringIO()
+        with (_patched(this, "_commit_parents", _rev_list_parents),
+              contextlib.redirect_stdout(flip_out)):
+            flip_rc = main(["--root", str(graft), "--base", "0" * len(gr2), "--head", gr2])
+        check("hist/grafted-head-rev-list-flip-passes",
+              flip_rc == 0 and "moves no Python file" in flip_out.getvalue(),
+              (flip_rc, flip_out.getvalue()))
+
+        # fixture 23j3: a commit naming a parent whose object is missing cannot be evaluated
+        lostp = _init_repo(base, "lost-parent")
+        lp1 = _commit_state(lostp, {}, {"a.txt": "1\n"}, "one")
+        lp2 = _commit_state(lostp, {"a.txt": "1\n"}, {"a.txt": "2\n"}, "two")
+        os.remove(Path(lostp) / ".git" / "objects" / lp1[:2] / lp1[2:])
+        try:
+            _commit_parents(Path(lostp), lp2)
+            got = "returned"
+        except CannotEvaluate as exc:
+            got = "cannot: {}".format(exc)
+        check("hist/missing-parent-object-cannot-evaluate",
+              got.startswith("cannot") and lp1 in got and "missing" in got, got)
 
         # fixture 24: a base syntax error, a head null byte and deep nesting are cannot-evaluate
         bad_base, bb_b, bb_h = _repo_with(
@@ -1737,8 +1878,9 @@ def self_test(report_path=None):
         return 1
     print("SELF-TEST PASS: check_moved_python_roots {} checks over synthetic git fixtures (the "
           "seed shape, R100, wrapper, dot-dot, alias and bound-name derivations flagged, each "
-          "head derivation judged against its own base counterpart in its own scope, same-scope "
-          "reassignments paired one to one or refused; corrected hops, same-depth "
+          "head derivation judged against a base counterpart under its scope's qualified path, "
+          "same-scope reassignments paired one to one in source order or refused; corrected "
+          "hops, same-depth "
           "moves, one-hop and lexical-dirname derivations, redefined or quoted names, unmoved and "
           "new files and non-__file__ roots quiet, each comparison-quiet row with its "
           "flag-everything flip and the scope-only quiet rows disclosed without one; unpaired "
@@ -1746,7 +1888,8 @@ def self_test(report_path=None):
           "in-scope derivation never a pass; the marker clearing exactly its directory and "
           "lapsing on the next move; odd path bytes enumerated; -l0 pairing under "
           "diff.renameLimit=1; criss-cross merge bases combined; above-root hops distinct by "
-          "value; shallow histories and zero bases over history refused; parse, recursion, mode, "
+          "value; shallow histories and zero bases over history refused, head parents read from "
+          "the raw commit object so a grafts entry hides none; parse, recursion, mode, "
           "blob, revision, merge-base and record failures each cannot-evaluate; and the launch "
           "contract); execution set reconciled against tools/selftest_checks.toml".format(
               len(EXECUTED)))
