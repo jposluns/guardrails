@@ -298,17 +298,24 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        gate:<id>.residue / hook:<id>.residue naming a manifest field of the TOML file at
                        <path>, matched against the TOML-decoded value (escapes applied, as a reviewer reads
                        the field), never the file's source bytes. The pin is the first BRIEF-PIN line's
-                       value, else the first pin line's, resolved as in P3; content is read from the git
-                       object store (read_at_revision: a regular-file blob of at most P7_READ_MAX_BYTES,
-                       under the P3 reads' hermetic environment and timeout), never HEAD, the index or the
-                       working tree, and a symbol that is not found is never a whole-file search. A
+                       value, else the first pin line's, resolved as in P3, and every pin line must resolve
+                       to that one commit (two REVIEWED HEAD lines with no BRIEF-PIN line included); a short
+                       pin resolves through git rev-parse, so a branch named like it can take its place, as
+                       in P3. Content is read from the git object store (read_at_revision: a regular-file
+                       blob of at most P7_READ_MAX_BYTES, under the P3 reads' hermetic environment and
+                       timeout, object substitution disabled), never HEAD, the index or the working tree,
+                       and a symbol that is not found is never a whole-file search. Python source is read
+                       only as UTF-8 (a coding cookie naming another encoding on either of the first two
+                       lines is CANNOT_EVALUATE) and a definition is sliced as the parser splits lines
+                       (CRLF, a lone CR or LF) by ast.get_source_segment. A
                        declaration with no anchor, or an anchor whose id, symbol or excerpt is absent at
                        the pin (a missing path or residue field included), is HARD (exit 1). A malformed
                        declaration (a column-zero label without its colon, a glued suffix, one " :: "
                        separator, an empty path, symbol or excerpt), an unresolved or conflicting pin, a
                        brief with declarations and no pin or no repository to read it from, and content
                        that cannot be read or parsed at the pin (a non-regular or oversized entry, invalid
-                       TOML, two manifest rows with one id, source ast cannot parse) are CANNOT_EVALUATE
+                       TOML, two manifest rows with one id, source ast cannot parse, a declared encoding
+                       other than UTF-8, a definition it cannot locate) are CANNOT_EVALUATE
                        (exit 2), never a pass. Keyword-free residual prose is at most advisory: a line
                        holding the label outside a column-zero declaration prints one ADVISORY line, and
                        nothing is read at the pin for it.
@@ -651,6 +658,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 import ast
 import atexit
 import bisect
+import codecs
 import contextlib
 import errno
 import io
@@ -666,6 +674,7 @@ import stat
 import subprocess
 import tempfile
 import time
+import tokenize
 import unicodedata
 from pathlib import Path
 
@@ -3084,13 +3093,17 @@ def read_at_revision(repo, commit, path):
     names the entry first, through a :(literal) pathspec so no wildcard is applied: only a regular-file blob
     (mode 100644 or 100755) of at most P7_READ_MAX_BYTES is then read, with git cat-file blob; any other
     entry (a symlink, a submodule, a directory), an oversized blob, a repository git refuses for its
-    ownership, and a git that fails, cannot be launched or times out are CannotEvaluate, never a pass."""
+    ownership, and a git that fails, cannot be launched or times out are CannotEvaluate, never a pass. Both
+    reads disable object substitution (--no-replace-objects and GIT_NO_REPLACE_OBJECTS=1, as the release
+    schema and branch-root readers do), so a refs/replace/* entry cannot decide which bytes are read."""
     def refusal(why):
         return CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, why))
+    env = _git_read_env()
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"
     try:
-        probe = subprocess.run(["git", "-C", str(repo), "ls-tree", "-l", "--full-tree", commit, "--",
-                                ":(literal)" + path],
-                               capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+        probe = subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "ls-tree", "-l", "--full-tree",
+                                commit, "--", ":(literal)" + path],
+                               capture_output=True, timeout=GIT_READ_TIMEOUT, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise refusal(exc)
     if _ownership_refused(probe):
@@ -3106,8 +3119,9 @@ def read_at_revision(repo, commit, path):
     if not fields[3].isdigit() or int(fields[3]) > P7_READ_MAX_BYTES:
         raise refusal("larger than {} bytes".format(P7_READ_MAX_BYTES))
     try:
-        blob = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", commit + ":" + path],
-                              capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+        blob = subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "cat-file", "blob",
+                               commit + ":" + path],
+                              capture_output=True, timeout=GIT_READ_TIMEOUT, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise refusal(exc)
     if _ownership_refused(blob):
@@ -3163,16 +3177,56 @@ def _definition_nodes(body, name):
     return [node for node in body if isinstance(node, kinds) and node.name == name]
 
 
+def python_source_text(data, path, commit):
+    """The text Python reads from a source's bytes, or CannotEvaluate. The parser ends a line at CRLF, a lone
+    CR or LF, so the first two lines are taken that way and each is read alone by tokenize.detect_encoding: a
+    declared encoding (a coding cookie or a byte order mark) whose codec is not UTF-8 is refused, since ast
+    column offsets count UTF-8 bytes of the decoded text and would not match bytes in another encoding. A
+    cookie on the second line is refused even after a line of code, where Python ignores it: fail closed. The
+    bytes are then decoded as strict UTF-8 (a leading byte order mark dropped); bytes that are not UTF-8, or
+    an unknown or malformed cookie, are CannotEvaluate."""
+    lines = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2]
+    for line in lines:
+        try:
+            declared, _ = tokenize.detect_encoding(iter((line + b"\n",)).__next__)
+            name = codecs.lookup(declared).name
+        except (SyntaxError, LookupError, UnicodeDecodeError, ValueError) as exc:
+            raise CannotEvaluate("{} at {}: cannot read its encoding declaration: {}".format(path, commit, exc))
+        if name not in ("utf-8", "utf-8-sig"):
+            raise CannotEvaluate("{} at {}: declares the encoding {}; only UTF-8 Python source is read".format(
+                path, commit, declared))
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise CannotEvaluate("{} at {}: not UTF-8 Python source: {}".format(path, commit, exc))
+
+
+def definition_segment(text, node, path, commit):
+    """The UTF-8 bytes of one definition's source, sliced by ast.get_source_segment from the decoded text,
+    which splits lines as the parser does (CRLF, a lone CR or LF, never a form feed), so the segment ends
+    where the definition ends; a node it cannot place (no position, a line or column outside the text, a
+    column inside a character) is CannotEvaluate, never an uncaught error."""
+    try:
+        segment = ast.get_source_segment(text, node)
+    except (IndexError, ValueError, TypeError, AttributeError, UnicodeError, RecursionError, MemoryError) as exc:
+        raise CannotEvaluate("{} at {}: cannot locate a definition's source: {!r}".format(path, commit, exc))
+    if segment is None:
+        raise CannotEvaluate("{} at {}: cannot locate a definition's source (no position)".format(path, commit))
+    return segment.encode("utf-8")
+
+
 def symbol_segments(data, symbol, path, commit):
     """The byte segments of the Python definitions a qualified name reaches in a source read at a pin: the
-    source is parsed with ast and never imported; each dotted part is matched, by exact name, against the
-    statements directly in the previous part's body (the module's at the start), so a name is found only
-    inside its qualifier, never by a whole-file search. Every match of the last part is returned (a name
-    defined twice at one level gives each segment), sliced from the raw bytes by the parse's line numbers
-    and utf-8 column offsets, so a segment holds the definition's bytes exactly (decorators sit outside it;
-    a CRLF line keeps its carriage return). Source the parser cannot read is CannotEvaluate."""
+    source is decoded as Python reads it (python_source_text: UTF-8 only), parsed with ast and never
+    imported; each dotted part is matched, by exact name, against the statements directly in the previous
+    part's body (the module's at the start), so a name is found only inside its qualifier, never by a
+    whole-file search. Every match of the last part is returned (a name defined twice at one level gives
+    each segment), each sliced from the decoded text as the parser splits it (definition_segment) and
+    encoded as UTF-8, so a segment holds the definition's bytes exactly (decorators sit outside it; a CRLF
+    or lone CR line end keeps its carriage return). Source the parser cannot read is CannotEvaluate."""
+    text = python_source_text(data, path, commit)
     try:
-        tree = ast.parse(data)
+        tree = ast.parse(text)
     except (SyntaxError, UnicodeDecodeError, ValueError, RecursionError, MemoryError) as exc:
         raise CannotEvaluate("{} at {}: cannot parse as Python: {}".format(path, commit, exc))
     nodes = [tree]
@@ -3180,12 +3234,7 @@ def symbol_segments(data, symbol, path, commit):
         nodes = [found for node in nodes for found in _definition_nodes(getattr(node, "body", []), part)]
         if not nodes:
             return []
-    starts, offset = [], 0
-    for line in data.split(b"\n"):
-        starts.append(offset)
-        offset += len(line) + 1
-    return [data[starts[node.lineno - 1] + node.col_offset:
-                 starts[node.end_lineno - 1] + node.end_col_offset] for node in nodes]
+    return [definition_segment(text, node, path, commit) for node in nodes]
 
 
 def excerpt_in(excerpt, data):
@@ -3281,6 +3330,14 @@ def rule_p7(names, row, repo):
         raise CannotEvaluate("the brief declares an accepted residual but no repository was given to read "
                              "the pin from")
     commit = resolve_revision(repo, (names.brief_pins or names.pins)[0][1])
+    # every pin line must resolve to that one commit: two REVIEWED HEAD lines with no BRIEF-PIN line are not
+    # compared by the conflict checks above, and an anchor read at one of two revisions proves nothing
+    for number, pin in names.pins:
+        other = resolve_revision(repo, pin)
+        if other != commit:
+            raise CannotEvaluate("line {}: the pin {} resolves to {}, not to {}, the revision the anchors are "
+                                 "read at; the accepted residuals are read at one revision, so every REVIEWED "
+                                 "HEAD and BRIEF-PIN line must name it".format(number, pin, other, commit))
     findings = [judge_residual(repo, commit, line, anchor) for line, anchor in declarations]
     return [finding for finding in findings if finding is not None] + advisory
 
@@ -4392,6 +4449,28 @@ P7_HOOKS = '[[hook]]\nid = "h1"\nresidue = "old hook residue"\n'
 P7_MODULE_OLD = ('OUTSIDE = "needle outside symbol"\n\n\ndef outer():\n    return "needle inside old"\n\n\n'
                  'class Box:\n    def method(self):\n        return "boxed needle"\n')
 P7_MODULE_NEW = P7_MODULE_OLD.replace("needle inside old", "needle inside new")
+# sources of the fifth fixture commit, each with a needle inside target() and another after it: a lone CR
+# line end before the def, a lone CR inside a string literal, only lone CR line ends, CRLF line ends, a
+# declared latin-1 encoding (on the first line, and on the second once a lone CR ends the first) whose
+# non-ASCII bytes would carry a UTF-8 slice past the def, a UTF-8 cookie in two spellings, and source ast
+# cannot parse
+P7_TAIL = b"\n\n\nAFTER = 'needle after'\n"
+P7_SOURCES = {
+    "pkg/cr_line.py": b"def first():\r    return 1\n\n\ndef target():\n    return 'needle target'\n" + P7_TAIL,
+    "pkg/cr_string.py": (b"def first():\n    return '''a\rb'''\n\n\ndef target():\n    return 'needle target'\n"
+                         + P7_TAIL),
+    "pkg/cr_only.py": b"X = 'needle outside'\rdef target():\r    return 'needle target'\r",
+    "pkg/crlf.py": b"def target():\r\n    return 'needle target'\r\n\r\n\r\nAFTER = 'needle after'\r\n",
+    "pkg/latin_first.py": (b"# -*- coding: latin-1 -*-\ndef target():\n    return '" + b"\xc3\xa9" * 20
+                           + b"'\n" + P7_TAIL),
+    "pkg/latin_second.py": (b"#!/usr/bin/env python3\r# -*- coding: latin-1 -*-\ndef target():\n    return '"
+                            + b"\xe9" * 40 + b"'\n" + P7_TAIL),
+    "pkg/utf8_cookie.py": (b"# -*- coding: utf-8 -*-\ndef target():\n    return 'needle target \xc3\xa9'\n"
+                           + P7_TAIL),
+    "pkg/utf8_spelt.py": b"# coding=utf8\ndef target():\n    return 'needle target'\n" + P7_TAIL,
+    "pkg/broken.py": b"def target(:\n    return 'needle target'\n",
+}
+P7_BIG_HEAD = b"def big():\n    return 'needle big'\n"
 
 
 def _p7_commit(repo, env, message):
@@ -4407,10 +4486,18 @@ def _p7_commit(repo, env, message):
     return made.stdout.decode("ascii").strip()
 
 
+def p7_big_source(size):
+    """A Python source of exactly `size` bytes whose def big() holds the needle, padded by one comment line."""
+    return P7_BIG_HEAD + b"#" * (size - len(P7_BIG_HEAD) - 1) + b"\n"
+
+
 def _p7_repo(base):
-    """(repo, [four commit ids]) of a fixture repository for P7: the first commit holds the manifests and a
+    """(repo, [five commit ids]) of a fixture repository for P7: the first commit holds the manifests and a
     module the anchors read, the second changes their content (so a later HEAD differs from the first pin),
-    the third makes the gates manifest invalid TOML and the fourth gives it two rows with one id."""
+    the third makes the gates manifest invalid TOML and the fourth gives it two rows with one id. The fifth
+    adds the P7_SOURCES, sources of P7_READ_MAX_BYTES less one, exactly and plus one bytes, a symbolic link
+    and a submodule entry. A refs/replace entry then substitutes the first commit's module blob with the
+    second's, which a read that honoured replace objects would take at the first pin."""
     repo = base / "p7-repo"
     os.makedirs(repo / ".aiqt" / "core" / "gates")
     os.makedirs(repo / ".aiqt" / "core" / "hooks")
@@ -4435,6 +4522,23 @@ def _p7_repo(base):
         with open(module, "w", encoding="utf-8", newline="") as handle:
             handle.write(module_text)
         commits.append(_p7_commit(repo, env, message))
+    sizes = dict(inside=P7_READ_MAX_BYTES - 1, at=P7_READ_MAX_BYTES, over=P7_READ_MAX_BYTES + 1)
+    sources = dict(P7_SOURCES, **dict(("pkg/big_{}.py".format(name), p7_big_source(size))
+                                      for name, size in sizes.items()))
+    for rel, content in sources.items():
+        with open(repo / rel, "wb") as handle:
+            handle.write(content)
+    os.symlink("mod.py", repo / "pkg" / "link.py")
+    git = ["git", "-C", str(repo), "-c", "gc.auto=0", "-c", "gc.autoDetach=false", "-c", "maintenance.auto=false"]
+    subprocess.run(git + ["add", "-A"], check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(git + ["update-index", "--add", "--cacheinfo", "160000,{},pkg/sub".format(commits[0])],
+                   check=True, capture_output=True, timeout=60, env=env)
+    subprocess.run(git + ["commit", "-q", "-m", "entries"], check=True, capture_output=True, timeout=60, env=env)
+    commits.append(subprocess.run(git + ["rev-parse", "HEAD"], check=True, capture_output=True, timeout=60,
+                                  env=env).stdout.decode("ascii").strip())
+    blobs = [subprocess.run(git + ["rev-parse", commit + ":pkg/mod.py"], check=True, capture_output=True,
+                            timeout=60, env=env).stdout.decode("ascii").strip() for commit in commits[:2]]
+    subprocess.run(git + ["replace", blobs[0], blobs[1]], check=True, capture_output=True, timeout=60, env=env)
     return repo, commits
 # The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
 # larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
@@ -7217,7 +7321,7 @@ def self_test(report_path=None):
     p7_base = Path(tempfile.mkdtemp(prefix="aiqt-brief-p7-"))
     try:
         p7_repo, p7_commits = _p7_repo(p7_base)
-        p7_old, p7_head = p7_commits[0], p7_commits[-1]
+        p7_old, p7_head, p7_entries = p7_commits[0], p7_commits[3], p7_commits[4]
 
         def p7(lines, pin=p7_old, family="alpha"):
             return _outcome("BRIEF-PIN: {}\n".format(pin) + lines, family, True, p7_repo)
@@ -7303,6 +7407,59 @@ def self_test(report_path=None):
                p7("No residual lines here.\n")],
               [(0, [("P7", "ADVISORY")]), (0, [("P7", "ADVISORY")]), (0, [])])
 
+        def p7_entry(rel, excerpt, symbol="target"):
+            return p7("ACCEPTED-RESIDUAL: {} :: {} :: {}\n".format(rel, symbol, excerpt), p7_entries)
+
+        # a lone CR ends a line for the parser: before the def, and inside a string literal, a slice that
+        # counted only LF lines would end past the def and take the needle after it
+        check("preflight/p7-lone-cr-scope",
+              [p7_entry(rel, excerpt) for rel in ("pkg/cr_line.py", "pkg/cr_string.py")
+               for excerpt in ("needle target", "needle after")], [(0, []), p7_hard] * 2)
+        # a source whose lines end only in lone CRs is read, never an uncaught IndexError
+        check("preflight/p7-cr-only-source",
+              [p7_entry("pkg/cr_only.py", "needle target"), p7_entry("pkg/cr_only.py", "needle outside")],
+              [(0, []), p7_hard])
+        check("preflight/p7-crlf-source",
+              [p7_entry("pkg/crlf.py", "needle target"), p7_entry("pkg/crlf.py", "needle after")],
+              [(0, []), p7_hard])
+        # a declared encoding other than UTF-8 cannot be read (column offsets count UTF-8 bytes); a UTF-8
+        # cookie in either spelling is read
+        check("preflight/p7-declared-encoding",
+              [p7_entry("pkg/latin_first.py", "needle after"), p7_entry("pkg/latin_second.py", "needle after"),
+               p7_entry("pkg/utf8_cookie.py", "needle target é"),
+               p7_entry("pkg/utf8_cookie.py", "needle after"), p7_entry("pkg/utf8_spelt.py", "needle target")],
+              ["CannotEvaluate", "CannotEvaluate", (0, []), p7_hard, (0, [])])
+        check("preflight/p7-unparsable-source-cannot-evaluate",
+              p7_entry("pkg/broken.py", "needle target"), "CannotEvaluate")
+        # a definition whose position cannot be placed in the text is CannotEvaluate, never an uncaught error
+        check("preflight/p7-segment-failure-cannot-evaluate",
+              [_git_outcome(definition_segment, "x = 1\n", ast.Name(id="x"), "p", "c"),
+               _git_outcome(definition_segment, "x = 1\n",
+                            ast.Pass(lineno=5, col_offset=0, end_lineno=5, end_col_offset=4), "p", "c"),
+               _git_outcome(definition_segment, "x = 'é'\n",
+                            ast.Pass(lineno=1, col_offset=0, end_lineno=1, end_col_offset=6), "p", "c")],
+              ["CannotEvaluate"] * 3)
+        # the size bound: one byte under and exactly P7_READ_MAX_BYTES are read, one byte over is not
+        check("preflight/p7-size-bound",
+              [p7_entry("pkg/big_{}.py".format(name), "needle big", "big") for name in ("inside", "at", "over")],
+              [(0, []), (0, []), "CannotEvaluate"])
+        # a symbolic link (mode 120000, a blob) and a submodule entry (mode 160000) are not regular files
+        check("preflight/p7-non-regular-entry-cannot-evaluate",
+              [p7_entry("pkg/link.py", "needle target"), p7_entry("pkg/sub", "needle target")],
+              ["CannotEvaluate"] * 2)
+        # a refs/replace entry substitutes the first pin's module blob with the second's: never read
+        check("preflight/p7-replace-objects-ignored",
+              [p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n"),
+               p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n")], [(0, []), p7_hard])
+        # REVIEWED HEAD lines with no BRIEF-PIN line, which the conflict checks do not compare, must all
+        # resolve to one commit; two that agree pass
+        check("preflight/p7-reviewed-heads-cannot-evaluate",
+              [_outcome("REVIEWED HEAD: {}\nREVIEWED HEAD: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(
+                  p7_old, p7_head), "alpha", True, p7_repo),
+               _outcome("REVIEWED HEAD: {}\nREVIEWED HEAD: {}\nACCEPTED-RESIDUAL: gate:g1\n".format(
+                   p7_old, p7_old[:12]), "alpha", True, p7_repo)],
+              ["CannotEvaluate", (0, [])])
+
         def p7_case(lines, pin=p7_old):
             return lambda: p7(lines, pin)
 
@@ -7318,9 +7475,14 @@ def self_test(report_path=None):
         check("revert/p7-pin-read-red", *flip(
             [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside new\n")], [(0, [])],
             read_at_revision=lambda repo, commit, path: pinned_read(repo, p7_head, path)))
+        # with the regular-file mode check widened to a symbolic link, the link's target text is read as
+        # Python source and the anchor turns from CannotEvaluate into a missing symbol
+        check("revert/p7-regular-file-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/link.py :: target :: needle target\n", p7_entries)], [p7_hard],
+            REGULAR_FILE_MODES=REGULAR_FILE_MODES + ("120000",)))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 222)
+    check("revert/every-flip-ran", len(flipped), 223)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
