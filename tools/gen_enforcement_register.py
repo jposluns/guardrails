@@ -746,8 +746,8 @@ def _page_content(html_inner):
         '<p class="lead">Which rules have a shipped mechanical control linked to them, and which do not yet.',
         '  This page is generated from the enforceability ledger, so its linkage claims match the controls',
         '  declared in the pack\'s gates and hooks manifests when the page was generated.</p>',
-        '<p class="meta">Generated from the main branch source. Latest release: {}, published {}.</p>'.format(
-            _t(version), _t(date)),
+        '<p class="meta">Generated from the main branch source. Latest release: {}, which the change log '
+        'records with the date {}.</p>'.format(_t(version), _t(date)),
         "",
         '<section id="register">',
         html_inner,

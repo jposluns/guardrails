@@ -368,7 +368,7 @@ def _footer(site):
     links = ['<a href="{}">Accessibility</a>'.format(_url(site, "accessibility/")),
              '<a href="{}">Licence</a>'.format(_url(site, "license/"))]
     if site["key"] == "aiqt":
-        links += ['<a href="{}">Plans for teams</a>'.format(_url(site, "future/")),
+        links += ['<a href="{}">Ideas for teams</a>'.format(_url(site, "future/")),
                   '<a href="/enforcement">Enforcement register</a>',
                   '<a href="/llms.txt">llms.txt</a>']
     links += [_external("https://posluns.ca/privacy/", "Privacy"),
@@ -563,6 +563,34 @@ _STORE_CONSTANTS = (("SUPPORTED_HOMES", int), ("SUPPORTED_SPEC_VERSION", str), (
 _SPEC_VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\Z")
 
 
+def _reject_dynamic_stores(tree, wanted, where):
+    """Refuse (RefusedPage) the dynamic store shapes a static constant reader must not accept, anywhere in
+    `tree`: an attribute store or delete whose attribute name is in `wanted` (so `anything.CONSTANT = ...`
+    never slips past the name walk), a subscript store or delete whose container is a direct call of vars,
+    globals or locals, whatever the key (a computed key defeats key matching, so every such store is
+    refused), and any possible sys.modules reference, judged conservatively as any attribute access named
+    `modules` or an `from sys import modules` form (an alias of sys cannot be tracked statically, so the
+    attribute name alone decides). Shapes outside these (an alias of globals(), a helper call, another
+    module assigning the constant) stay outside any static reader and are disclosed by the caller."""
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
+                and node.attr in wanted):
+            raise RefusedPage("{}: {} must not be stored or deleted through an attribute".format(
+                where, node.attr))
+        if (isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del))
+                and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                and node.value.func.id in ("vars", "globals", "locals")):
+            raise RefusedPage("{}: a subscript store or delete on a call of vars, globals or locals is "
+                              "refused".format(where))
+        if isinstance(node, ast.Attribute) and node.attr == "modules":
+            raise RefusedPage("{}: a possible sys.modules reference (an attribute named 'modules') is "
+                              "refused".format(where))
+        if (isinstance(node, ast.ImportFrom) and node.module == "sys"
+                and any(alias.name == "modules" for alias in node.names)):
+            raise RefusedPage("{}: a possible sys.modules reference (importing 'modules' from sys) is "
+                              "refused".format(where))
+
+
 def _store_constants(data, where):
     """The literal values of _STORE_CONSTANTS in the module source `data` (bytes), read by parsing it to an
     AST and evaluating only each binding's literal (ast.literal_eval); the module is never imported or run.
@@ -577,15 +605,21 @@ def _store_constants(data, where):
     of the name, an except-as, a match capture, a parameter, a global or nonlocal declaration, or a type
     alias. The walk is conservative and fails safe: it also refuses a function local, a class-body attribute
     or a comprehension variable that reuses one of these names, though none of those binds the module
-    constant. Disclosed residual: a dynamic store (globals()[name] = ..., setattr on the module, or
-    exec) is beyond any static reader and is not refused; the tooling's own self-test patches
-    SUPPORTED_SPEC_VERSION through globals() at run time, which leaves the import-time value this reads
-    unchanged. A PEP 695 type parameter of the name binds only in its own scope and is not inspected."""
+    constant. Three dynamic store shapes are refused anywhere in the tree as well (_reject_dynamic_stores):
+    an attribute store or delete whose attribute name is a read constant, a subscript store or delete on a
+    direct call of vars, globals or locals (whatever the key), and any possible sys.modules reference (an
+    attribute named `modules` on anything, or importing `modules` from sys), each fail closed. Disclosed
+    residual: a dynamic store in any other shape is beyond this static reader and is not refused, for
+    example a store through an alias of globals() or through a helper call inside the module (the tooling's
+    own self-test rebinds constants through one such helper at run time and restores them, which leaves the
+    import-time value this reads unchanged), or another module assigning _opf_store.<constant>. A PEP 695
+    type parameter of the name binds only in its own scope and is not inspected."""
     try:
         tree = ast.parse(data, filename=where)
     except (SyntaxError, ValueError, MemoryError, RecursionError) as exc:
         raise RefusedPage("{}: cannot parse it ({}: {})".format(where, type(exc).__name__, exc)) from exc
     wanted = {name for name, _type in _STORE_CONSTANTS}
+    _reject_dynamic_stores(tree, wanted, where)
     bindings = {name: [] for name in wanted}
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -1950,7 +1984,7 @@ def _self_test():
     expect("footer/policy-links", page.count('<nav class="policy" aria-label="Site policies">') == 1
            and '<a href="/draft/accessibility/">Accessibility</a>' in page
            and '<a href="/draft/license/">Licence</a>' in page
-           and '<a href="/draft/future/">Plans for teams</a>' in page
+           and '<a href="/draft/future/">Ideas for teams</a>' in page
            and '<a href="/enforcement">Enforcement register</a>' in page
            and '<a href="/llms.txt">llms.txt</a>' in page)
     expect("footer/privacy-every-page", bool(outputs) and all(
@@ -2896,6 +2930,46 @@ def _self_test():
             flipped = "refused: {}".format(exc)
         finally:
             globals()["_reject_rebinding"] = saved_walk
+        expect(name + "-flip", store_tail.format(store_version) in flipped, flipped)
+
+    # The dynamic store shapes a static reader must refuse outright: an attribute store or delete whose
+    # attribute name is a read constant, a subscript store or delete on a direct call of vars, globals or
+    # locals (whatever the key, wherever it sits), and any possible sys.modules reference (an attribute
+    # named `modules`, or importing `modules` from sys). Each vector appends one such statement to the
+    # shipped source and must be refused; its flip renders the same source with _reject_dynamic_stores
+    # disabled, where the line reads the shipped value, so that walk is what refuses each vector.
+    attr_needle = "must not be stored or deleted through an attribute"
+    dyn_needle = "a subscript store or delete on a call of vars, globals or locals is refused"
+    modules_needle = "a possible sys.modules reference"
+    dynamic_vectors = (
+        ("refuse/store-dynamic-attr-store",
+         'import types\n_m = types.SimpleNamespace()\n_m.SUPPORTED_HOMES = 2\n', attr_needle),
+        ("refuse/store-dynamic-attr-del",
+         'import types\n_m = types.SimpleNamespace()\ndel _m.SUPPORTED_SPEC_VERSION\n', attr_needle),
+        ("refuse/store-dynamic-sys-modules-attr-store",
+         'import sys as _s\n_s.modules[__name__].SUPPORTED_SPEC_VERSION = "9.8.7"\n', attr_needle),
+        ("refuse/store-dynamic-vars-subscript",
+         'vars()["SUPPORTED_SPEC_VERSION"] = "9.8.7"\n', dyn_needle),
+        ("refuse/store-dynamic-globals-subscript",
+         'globals()["SUPPORTED_SPEC_VERSION"] = "9.8.7"\n', dyn_needle),
+        ("refuse/store-dynamic-globals-del",
+         'del globals()["SUPPORTED_SPEC_VERSION"]\n', dyn_needle),
+        ("refuse/store-dynamic-locals-subscript-computed-key",
+         'def _f():\n    locals()["SUPPORTED_" + "HOMES"] = 2\n', dyn_needle),
+        ("refuse/store-dynamic-sys-modules-read", "import sys\n_probe = sys.modules\n", modules_needle),
+        ("refuse/store-dynamic-sys-modules-import-from",
+         "from sys import modules as _mods\n", modules_needle))
+    saved_dynamic = globals()["_reject_dynamic_stores"]
+    for name, statement, needle in dynamic_vectors:
+        source = store_source + b"\n" + statement.encode("utf-8")
+        expect(name, needle in refused(name, release_over, source), needle)
+        globals()["_reject_dynamic_stores"] = lambda *_args: None
+        try:
+            flipped = release_over(source)
+        except RefusedPage as exc:
+            flipped = "refused: {}".format(exc)
+        finally:
+            globals()["_reject_dynamic_stores"] = saved_dynamic
         expect(name + "-flip", store_tail.format(store_version) in flipped, flipped)
 
     # _init_store_version restates the init command's selection rule: opf/tools/opf.py builds the init

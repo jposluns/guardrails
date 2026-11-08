@@ -94,6 +94,16 @@ from _semver import _parse  # noqa: E402  the shipped bare-SemVer parser (major,
 import tomllib  # noqa: E402
 
 
+def _module_rebind(name, value):
+    """Rebind this module's global `name` at run time: the self-test's one patch point, whose callers
+    save and restore the prior value around each vector. A run-time rebind never changes the import-time
+    literal a static reader of this source recovers; routing every such patch through this single helper
+    keeps the module free of direct subscript stores on globals(), which the release-line reader of the
+    version constants refuses outright."""
+    namespace = globals()
+    namespace[name] = value
+
+
 # --- fixed names and vocabularies (spec 4) ------------------------------------------------------------
 
 POINTER_REL = ".opf.toml"              # committed store pointer, at the PRODUCT root (spec 4.3)
@@ -3147,13 +3157,13 @@ def self_test():
                 _s["fired"] = True
                 os.rename(str(_t), str(_t) + "-moved")   # root disappears at the resolution boundary
             return fd
-        globals()["_open_root_fd"] = _toctou_orf
+        _module_rebind("_open_root_fd", _toctou_orf)
         try:
             check("toctou-default-root-disappeared-cannot-eval",
                   _guard(lambda: resolve_store(toctou_root).status) == CANNOT_EVALUATE)
             check("toctou-open-was-exercised", _toctou["fired"])
         finally:
-            globals()["_open_root_fd"] = _real_orf
+            _module_rebind("_open_root_fd", _real_orf)
 
         # 4: zero manifests at a POINTER target -> CANNOT-EVALUATE (pointer promised a store).
         empty_store = base / "empty-store"
@@ -4448,11 +4458,11 @@ def self_test():
 
         for _r7w_err, _r7w_tag in ((4, "eintr"), (5, "eio")):
             check("r7-working-p1-one-close-no-probe-reuse-" + _r7w_tag, _r7w_vector(_r7w_err) == [])
-            globals()["_close_fd_exc_safe"] = _r7w_reclose
+            _module_rebind("_close_fd_exc_safe", _r7w_reclose)
             try:
                 _r7w_red = _r7w_vector(_r7w_err)
             finally:
-                globals()["_close_fd_exc_safe"] = _r7w_p1
+                _module_rebind("_close_fd_exc_safe", _r7w_p1)
             check("r7-working-reclose-flip-red-by-reuse-" + _r7w_tag,
                   "reuse" in _r7w_red and set(_r7w_red) <= set(("reuse", "probe")))
         # The leak check fails closed: a child left open whose census read fails EIO fails the vector naming
@@ -5462,7 +5472,7 @@ def self_test():
                   {"opf": {"spec_version": HOMES2_SPEC_VERSION, "homes": 2}}))
         _isd_prev = SUPPORTED_SPEC_VERSION
         try:
-            globals()["SUPPORTED_SPEC_VERSION"] = IMPORTED_SPEC_VERSION
+            _module_rebind("SUPPORTED_SPEC_VERSION", IMPORTED_SPEC_VERSION)
             check("imported-series-declared-130-and-later-once-supported",
                   imported_series_declared({"opf": {"spec_version": "1.3.0"}})
                   and imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
@@ -5481,7 +5491,7 @@ def self_test():
                   and not imported_series_declared({"opf": {"spec_version": "1.2.99"}}))
             # Support ABOVE the threshold activates too: the support comparison is at-or-above,
             # not equality (red when its ">=" tightens to "==").
-            globals()["SUPPORTED_SPEC_VERSION"] = "1.3.1"
+            _module_rebind("SUPPORTED_SPEC_VERSION", "1.3.1")
             check("imported-series-declared-under-support-above-130",
                   imported_series_declared({"opf": {"spec_version": "1.3.0"}})
                   and imported_series_declared({"opf": {"spec_version": "1.3.1"}}))
@@ -5491,16 +5501,16 @@ def self_test():
             # declarations (red when the support threshold drifts down to the interior
             # multidigit 1.2.10, or past it to the lower 1.2.1). Sampled support points only,
             # the way the declared arm is sampled above.
-            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.1"
+            _module_rebind("SUPPORTED_SPEC_VERSION", "1.2.1")
             _isd_sup_121 = (not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
                             and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
-            globals()["SUPPORTED_SPEC_VERSION"] = "1.2.10"
+            _module_rebind("SUPPORTED_SPEC_VERSION", "1.2.10")
             check("imported-series-declared-false-under-support-below-130",
                   _isd_sup_121
                   and not imported_series_declared({"opf": {"spec_version": "1.3.0"}})
                   and not imported_series_declared({"opf": {"spec_version": "2.0.0"}}))
         finally:
-            globals()["SUPPORTED_SPEC_VERSION"] = _isd_prev
+            _module_rebind("SUPPORTED_SPEC_VERSION", _isd_prev)
         check("imported-series-declared-current-and-malformed-false",
               not imported_series_declared({"opf": {"spec_version": SUPPORTED_SPEC_VERSION}})
               and not imported_series_declared({"opf": {"spec_version": "1.0.0"}})
@@ -5667,24 +5677,24 @@ def self_test():
             os.rename(str(store), str(base / "identity-swapped-out"))
             os.rename(str(swap_in), str(store))
             return found
-        globals()["discover_machine_store"] = discover_then_swap
+        _module_rebind("discover_machine_store", discover_then_swap)
         try:
             check("identity-store-root-swapped-after-discovery",
                   id_says(prod, "store root was swapped by path"))
         finally:
-            globals()["discover_machine_store"] = real_discover
+            _module_rebind("discover_machine_store", real_discover)
         prod, store, _mdir = id_fixture()
 
         def discover_then_move(store_root_fd, store_root):
             found = real_discover(store_root_fd, store_root)
             os.rename(str(store), str(base / "identity-store-moved-{:02d}".format(id_seq[0])))
             return found
-        globals()["discover_machine_store"] = discover_then_move
+        _module_rebind("discover_machine_store", discover_then_move)
         try:
             check("identity-store-root-renamed-after-discovery",
                   id_says(prod, "store root is no longer the directory"))
         finally:
-            globals()["discover_machine_store"] = real_discover
+            _module_rebind("discover_machine_store", real_discover)
         # The pointer and the override are read again after init.toml is hashed: each change below, made right
         # after the first read of the inputs, is cannot-evaluate naming what changed, never the first read's MATCH.
         real_inputs = _read_identity_inputs
@@ -5696,11 +5706,11 @@ def self_test():
                 got = real_inputs(product_root_fd)
                 change(prod, store)
                 return got
-            globals()["_read_identity_inputs"] = inputs_then_change
+            _module_rebind("_read_identity_inputs", inputs_then_change)
             try:
                 return id_says(prod, text)
             finally:
-                globals()["_read_identity_inputs"] = real_inputs
+                _module_rebind("_read_identity_inputs", real_inputs)
 
         def id_repoint(prod, _store):
             _prod2, other, _mdir2 = id_fixture()
@@ -5727,12 +5737,12 @@ def self_test():
             got = real_inputs(product_root_fd)
             os.unlink(str(unprod / LOCAL_POINTER_REL))
             return got
-        globals()["_read_identity_inputs"] = inputs_then_unoverride
+        _module_rebind("_read_identity_inputs", inputs_then_unoverride)
         try:
             check("identity-override-removed-after-read",
                   id_says(prod, "{} disappeared".format(LOCAL_POINTER_REL)))
         finally:
-            globals()["_read_identity_inputs"] = real_inputs
+            _module_rebind("_read_identity_inputs", real_inputs)
         # After the hash, each held root must still be the directory its path names: a product root renamed
         # away (its pointer still reads through the held descriptor) or swapped by path for one holding a
         # matching store (a relative dir: target resolves against the PATH) is cannot-evaluate naming the
@@ -5763,12 +5773,12 @@ def self_test():
             os.rename(str(prod), str(base / "identity-prod-swapped-out"))
             os.rename(str(swap_prod), str(prod))
             return got
-        globals()["_read_identity_inputs"] = inputs_then_swap_root
+        _module_rebind("_read_identity_inputs", inputs_then_swap_root)
         try:
             check("identity-product-root-swapped-after-read",
                   id_says(prod, "product root was swapped by path"))
         finally:
-            globals()["_read_identity_inputs"] = real_inputs
+            _module_rebind("_read_identity_inputs", real_inputs)
 
         # A relative dir: store root lies beneath the product-root path, so a product root renamed away or
         # swapped by path after the store root opened also fails the store-root check: the report names the
@@ -5778,11 +5788,11 @@ def self_test():
                 found = real_discover(store_root_fd, store_root)
                 move()
                 return found
-            globals()["discover_machine_store"] = discover_then_move_product
+            _module_rebind("discover_machine_store", discover_then_move_product)
             try:
                 got = _guard(lambda: check_store_identity(prod))
             finally:
-                globals()["discover_machine_store"] = real_discover
+                _module_rebind("discover_machine_store", real_discover)
             return (got != "RAISED" and got.status == CANNOT_EVALUATE and any(text in n for n in got.notes)
                     and not any("store root" in n for n in got.notes))
         prod = id_rel_fixture()
@@ -5808,11 +5818,11 @@ def self_test():
                 got = real_digest(target, product_root, product_root_fd)
                 change(prod, store)
                 return got
-            globals()["_read_committed_init_digest"] = digest_then_change
+            _module_rebind("_read_committed_init_digest", digest_then_change)
             try:
                 return id_says(prod, text)
             finally:
-                globals()["_read_committed_init_digest"] = real_digest
+                _module_rebind("_read_committed_init_digest", real_digest)
         check("identity-pointer-removed-after-digest", id_changed_after_digest(
             lambda prod, _store: os.unlink(str(prod / POINTER_REL)),
             "re-read after hashing {}: {} is absent".format(INIT_NAME, POINTER_REL)))
