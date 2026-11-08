@@ -29,13 +29,21 @@ functions, lambdas, comprehensions and decorators). Every Load-context occurrenc
 receiver name (reg, reg_data, rec) must be one of a closed set of accepted access forms, each yielding
 its key: R.get(K), R.get(K, default), R[K], (R or {}).get(K) or (R or {})[K], with K a string constant
 or a loop variable over a literal tuple, list or set of string constants whose loop target binds in
-exactly the scope of the read (a comprehension is its own scope; its targets resolve keys only for
-reads inside it) and that nothing rebinds, including a nested scope declaring it nonlocal or, for a
-module-level read, any function declaring it global; or the registry name handed, positionally or by
-keyword, to a call whose callee is a module-level def of the hook library whose matching parameter is
-itself a registry name (the hand-off yields no key; its reads are derived where that parameter is
-read; any other callee, a non-registry parameter name, *args or **kwargs, or a callee that cannot be
-resolved is refused naming its line). The derived key set is the union over all such reads, plus the
+exactly the scope of the read and that nothing rebinds, including a nested scope declaring it nonlocal
+or, for a module-level read, any function declaring it global. Scopes follow run-time evaluation: a
+comprehension is its own scope but its first (outermost) iterable belongs to the enclosing scope, a
+def's decorators, parameter defaults and annotations and a lambda's defaults belong to the enclosing
+scope, and a class body is its own scope, so a pin never crosses into a scope whose run-time binding
+it does not govern. The other accepted form is the registry name handed, positionally or by keyword,
+by a call that holds no starred or double-starred argument, to a callee that is an undecorated
+module-level def of the hook library whose matching parameter is itself a registry name (the hand-off
+yields no key; its reads are derived where that parameter is read; any other callee, a decorated def,
+a non-registry parameter name, *args or **kwargs, a call holding a starred or double-starred argument,
+or a callee that cannot be resolved is refused naming its line). A registry use inside a
+type-parameter list or a type-alias statement is refused (both evaluate lazily, so no binding there is
+certain), and a module that writes globals(), locals() or vars() by a subscript or a method call such
+as globals().update can rebind any name at run time, so every pin and hand-off in it is refused.
+The derived key set is the union over all accepted reads, plus the
 keys-read each [[detect.registry-use]] entry asserts. Every other occurrence (a non-constant key, any
 other method or attribute, the receiver passed otherwise as a call argument, assigned, returned,
 yielded, unpacked, iterated, compared, formatted or used in any other expression) is a refused use,
@@ -55,8 +63,9 @@ key held in a named collection before a loop iterates it, a module loaded throug
 given only on a command line whose flag is not declared, a .sh file that runs a record-reading module, paths
 kept in the untracked orchestration registry, readers outside tools/, and a read that never names a file,
 key, flag or module. The residual of the key derivation: a registry object reached under a name not in
-HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, and an allowlisted
-use is covered only by its asserted keys-read.
+HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a dynamic namespace
+held first in a variable (g = globals, then g()[k] = v) is not seen, and an allowlisted use is covered
+only by its asserted keys-read.
 A self-test that writes record fixtures is detected like a reader; the
 fixture-only disposition records it. A tool that imports a declared module for some other part of it is
 detected too; the not-a-reader disposition records it, with the reason.
@@ -113,17 +122,23 @@ REGISTRY_USE_FIELDS = frozenset({"line-anchor", "reason", "keys-read", "uses"})
 # registry receiver name must be an accepted access form, each yielding its key: R.get(K),
 # R.get(K, default), R[K], (R or {}).get(K) or (R or {})[K], with K a string constant or a loop
 # variable over a literal collection of string constants whose loop target binds in exactly the scope
-# of the read (a comprehension is its own scope) and that nothing rebinds, a nested scope's nonlocal
-# and a module-read's global included; or the registry name handed to a module-level def of the hook
-# library whose matching parameter is itself a registry name (any other callee, parameter name, *args,
-# **kwargs or unresolvable callee is refused). Any other occurrence is a refused use, keyed by line
+# of the read and that nothing rebinds, a nested scope's nonlocal and a module-read's global included
+# (scopes follow run-time evaluation: a comprehension's first iterable, a def's decorators, defaults
+# and annotations and a lambda's defaults belong to the enclosing scope, and a class body is its own
+# scope); or the registry name handed, by a call with no starred or double-starred argument, to an
+# undecorated module-level def of the hook library whose matching parameter is itself a registry name
+# (any other callee, a decorated def, another parameter name, *args, **kwargs, a starred call or an
+# unresolvable callee is refused). A use inside a type-parameter list or type-alias statement is
+# refused (lazy evaluation), and a module writing globals(), locals() or vars() by subscript or method
+# call has every pin and hand-off refused. Any other occurrence is a refused use, keyed by line
 # and column, and cannot-evaluate unless a [[detect.registry-use]] allowlist entry excuses it (an
 # anchor must match exactly one place, cover at least one refused use, and declare each excused use's
 # exact source text in uses, so an extra or changed use on an anchored line fails closed; its
 # keys-read join the derived set). A derived key must be in [detect] keys or excluded in
 # [detect.non-record-keys] with a reason. The residual: a registry object reached under a name not in
-# HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, and an allowlisted
-# use is covered only by its asserted keys-read.
+# HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a dynamic
+# namespace held first in a variable is not seen, and an allowlisted use is covered only by its
+# asserted keys-read.
 HOOK_LIBRARY = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 HOOK_REGISTRY_NAMES = frozenset({"reg", "reg_data", "rec"})
 # A record name ending a string after one of these is a path built by formatting or joining: "{}:name"
@@ -312,22 +327,83 @@ def _parse_python(path, rel):
 
 # The nodes that open a new binding scope. A comprehension is its own scope: its targets resolve
 # keys only for reads inside it, never for a read in the enclosing scope that at run time sees an
-# outer binding of the same name.
+# outer binding of the same name. A class body is its own scope too: a name it binds is a class
+# attribute, never a binding of the enclosing function or module.
 _SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda,
-                ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+                ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.ClassDef)
+_COMP_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _comp_first_iter(node):
+    """The first (outermost) iterable of a comprehension, the one part of it Python evaluates in the
+    enclosing scope rather than inside the comprehension; None for any other node."""
+    if isinstance(node, _COMP_NODES):
+        return node.generators[0].iter
+    return None
+
+
+def _all_args(args):
+    """Every ast.arg of one ast.arguments node, positional-only, positional, keyword-only, *args and
+    **kwargs included."""
+    extras = [a for a in (args.vararg, args.kwarg) if a is not None]
+    return list(args.posonlyargs) + list(args.args) + list(args.kwonlyargs) + extras
+
+
+def _outer_parts(node):
+    """The parts of one scope-opening node that Python evaluates in the ENCLOSING scope, at the point
+    where the node appears: a def's decorators, parameter defaults and annotations, a lambda's
+    parameter defaults, a class's decorators, bases and keyword arguments, and a comprehension's
+    first (outermost) iterable. A def's or class's type-parameter list is routed here only so every
+    node gets an owner; its registry uses are refused outright (they evaluate lazily)."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        parts = list(node.decorator_list) + list(node.type_params) + list(node.args.defaults)
+        parts += [d for d in node.args.kw_defaults if d is not None]
+        parts += [a.annotation for a in _all_args(node.args) if a.annotation is not None]
+        if node.returns is not None:
+            parts.append(node.returns)
+        return parts
+    if isinstance(node, ast.Lambda):
+        return list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]
+    if isinstance(node, ast.ClassDef):
+        return (list(node.decorator_list) + list(node.type_params) + list(node.bases)
+                + [k.value for k in node.keywords])
+    return [_comp_first_iter(node)]
+
+
+def _inner_parts(node):
+    """The parts of one scope-opening node that belong to ITS OWN scope: a def's or lambda's body and
+    parameter names, a class's body, and a comprehension's element (or key and value), targets,
+    conditions and every iterable after the first."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return list(node.body) + _all_args(node.args)
+    if isinstance(node, ast.Lambda):
+        return [node.body] + _all_args(node.args)
+    if isinstance(node, ast.ClassDef):
+        return list(node.body)
+    inner = list(node.generators)
+    if isinstance(node, ast.DictComp):
+        return inner + [node.key, node.value]
+    return inner + [node.elt]
 
 
 def _scope_walk(scope):
-    """Every node of one scope (the module, a def, an async def, a lambda or a comprehension), not
-    descending into a nested function, lambda or comprehension, so a loop or comprehension target
-    resolves a key only for reads inside the scope that binds it. Class bodies and decorators are
-    walked as part of the scope that holds them."""
-    stack = list(ast.iter_child_nodes(scope))
+    """Every node Python evaluates in one scope (the module, a def, an async def, a lambda, a
+    comprehension or a class body), following run-time evaluation: a nested scope-opening node is
+    yielded here (so nested rebinding analysis sees it) together with the parts of it the enclosing
+    scope evaluates (a def's decorators, defaults and annotations, a lambda's defaults, a class's
+    decorators, bases and keyword arguments, and a comprehension's first iterable), while its own
+    parts (a body, parameter names, a comprehension's targets, conditions and later iterables) are
+    walked only by its own scope's walk. An ast.arg is yielded without descent: its annotation is
+    routed to the scope that evaluates it."""
+    first_iter = _comp_first_iter(scope)
+    stack = _inner_parts(scope) if isinstance(scope, _SCOPE_NODES) else list(ast.iter_child_nodes(scope))
     while stack:
         node = stack.pop()
         yield node
-        if not isinstance(node, _SCOPE_NODES):
-            stack.extend(ast.iter_child_nodes(node))
+        if isinstance(node, _SCOPE_NODES):
+            stack.extend(_outer_parts(node))
+        elif not isinstance(node, ast.arg):
+            stack.extend(child for child in ast.iter_child_nodes(node) if child is not first_iter)
 
 
 def _nested_rebinders(node, at_module):
@@ -392,10 +468,11 @@ def _loop_key_strings(scope):
 
 
 def _module_helpers(tree):
-    """name -> the arguments of the module-level def with that name, for names the whole module binds
-    exactly once: a name also bound anywhere else (another def, an assignment, an import, a class, a
-    parameter, a nested rebinding) cannot be resolved to one signature and is absent, so a registry
-    name handed to a call through it fails closed."""
+    """name -> the arguments of the undecorated module-level def with that name, for names the whole
+    module binds exactly once: a name also bound anywhere else (another def, an assignment, an import,
+    a class, a parameter, a nested rebinding) cannot be resolved to one signature and is absent, and a
+    decorated def is absent too (the name is bound to the decorator's result, whose parameters are not
+    the def's), so a registry name handed to a call through either fails closed."""
     counts = {}
     for node in ast.walk(tree):
         names = ()
@@ -418,7 +495,44 @@ def _module_helpers(tree):
         for name in names:
             counts[name] = counts.get(name, 0) + 1
     return {node.name: node.args for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and counts.get(node.name) == 1}
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and not node.decorator_list and counts.get(node.name) == 1}
+
+
+_DYNAMIC_NAMESPACES = frozenset({"globals", "locals", "vars"})
+
+
+def _writes_dynamic_namespace(tree):
+    """True when the module can rebind names through a dynamic namespace: a subscript store or delete
+    on the result of calling globals, locals or vars, or any attribute reached on such a result (a
+    method call such as globals().update; no method list is kept, fail closed). Such a module can
+    rebind any name at run time, so no literal-loop pin and no hand-off callee binding is certain, and
+    the caller refuses every pin and hand-off. The residual: a namespace object held first in a
+    variable (g = globals, then g()[k] = v) is not seen."""
+    def _namespace_call(node):
+        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _DYNAMIC_NAMESPACES)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Subscript) and _namespace_call(node.value)
+                and isinstance(node.ctx, (ast.Store, ast.Del))):
+            return True
+        if isinstance(node, ast.Attribute) and _namespace_call(node.value):
+            return True
+    return False
+
+
+def _lazy_nodes(tree):
+    """The ids of every node inside a type-parameter list or a type-alias statement. Python evaluates
+    both lazily, in their own annotation scope, so no binding visible there is certain at the later
+    evaluation time; the caller refuses every registry use among them."""
+    lazy = set()
+    for node in ast.walk(tree):
+        parts = list(getattr(node, "type_params", ()) or ())
+        if isinstance(node, ast.TypeAlias):
+            parts.append(node.value)
+        for part in parts:
+            lazy.update(id(inner) for inner in ast.walk(part))
+    return lazy
 
 
 def _helper_param(args, position, keyword):
@@ -455,12 +569,13 @@ def _accepted_read(node, parents, scope_loops, helpers):
     """The frozenset of keys one Load-context registry occurrence yields when it is an accepted access
     form: R.get(K), R.get(K, default), R[K], (R or {}).get(K) or (R or {})[K], with K a string constant
     or a literal-loop variable nothing else in its scope rebinds; or the empty frozenset when the
-    registry name is itself an argument, positional or keyword, of a call whose callee is a
-    module-level def of the hook library (helpers) and the matching parameter of that def is itself a
-    registry name in HOOK_REGISTRY_NAMES, so the hand-off's reads are derived where that parameter is
-    read. None for every other occurrence (any other callee, a non-registry parameter name, an
-    argument landing in *args or **kwargs, or a callee that cannot be resolved): the caller fails
-    closed on it."""
+    registry name is itself an argument, positional or keyword, of a call that holds no starred or
+    double-starred argument and whose callee is an undecorated module-level def of the hook library
+    (helpers) whose matching parameter is itself a registry name in HOOK_REGISTRY_NAMES, so the
+    hand-off's reads are derived where that parameter is read. None for every other occurrence (any
+    other callee, a decorated def, a non-registry parameter name, an argument landing in *args or
+    **kwargs, a call holding any starred or double-starred argument, whose run-time parameter binding
+    is not the counted one, or a callee that cannot be resolved): the caller fails closed on it."""
     receiver, parent = node, parents.get(node)
     if (isinstance(parent, ast.BoolOp) and isinstance(parent.op, ast.Or) and len(parent.values) == 2
             and parent.values[0] is node and isinstance(parent.values[1], ast.Dict)
@@ -483,7 +598,9 @@ def _accepted_read(node, parents, scope_loops, helpers):
     elif (isinstance(direct, ast.keyword) and direct.arg is not None and direct.value is node
           and isinstance(parents.get(direct), ast.Call)):
         call, keyword = parents.get(direct), direct.arg
-    if call is not None and isinstance(call.func, ast.Name):
+    if (call is not None and isinstance(call.func, ast.Name)
+            and not any(isinstance(a, ast.Starred) for a in call.args)
+            and all(kw.arg is not None for kw in call.keywords)):
         signature = helpers.get(call.func.id)
         if signature is not None:
             bound = _helper_param(signature, position, keyword)
@@ -508,10 +625,16 @@ def hook_registry_keys(root, registry_use=()):
     in HOOK_REGISTRY_NAMES) must be one of the accepted access forms, each yielding its key: R.get(K),
     R.get(K, default), R[K], (R or {}).get(K) or (R or {})[K], with K a string constant or a loop
     variable over a literal tuple, list or set of string constants bound in exactly the scope of the
-    read (a comprehension is its own scope) and rebound by nothing, including any nested scope's
-    nonlocal (or global, for a module-level read); or the registry name handed, positionally or by
-    keyword, to a call whose callee is a module-level def whose matching parameter is itself a
+    read and rebound by nothing, including any nested scope's nonlocal (or global, for a module-level
+    read); scopes follow run-time evaluation, so a comprehension is its own scope but its first
+    (outermost) iterable belongs to the enclosing scope, a def's decorators, parameter defaults and
+    annotations and a lambda's defaults belong to the enclosing scope, and a class body is its own
+    scope; or the registry name handed, positionally or by keyword, by a call holding no starred or
+    double-starred argument, to an undecorated module-level def whose matching parameter is itself a
     registry name, yielding no key (the hand-off's reads are derived at that parameter's own reads).
+    A registry use inside a type-parameter list or a type-alias statement is refused (both evaluate
+    lazily, so no binding there is certain), and when the module writes globals(), locals() or vars()
+    by a subscript or a method call such as globals().update, every pin and hand-off is refused.
     The result is the union of those keys and the keys-read asserted by registry_use, the validated
     (line-anchor, keys-read, uses) triples of the [[detect.registry-use]] allowlist. Refused uses are
     keyed by occurrence (line and column). Refused (CannotEvaluate): any other occurrence, naming its
@@ -523,7 +646,8 @@ def hook_registry_keys(root, registry_use=()):
     matches; a hook library that cannot be read or parsed; and one that yields no key at all (a
     derivation that finds nothing would pass every list vacuously). The residual: a registry object
     reached under a name not in HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library
-    is not seen, and an allowlisted use is covered only by its asserted keys-read."""
+    is not seen, a dynamic namespace held first in a variable (g = globals, then g()) is not seen, and
+    an allowlisted use is covered only by its asserted keys-read."""
     tree, text = _parse_python_text(os.path.join(root, HOOK_LIBRARY), HOOK_LIBRARY)
     keys = set()
     refused = {}
@@ -532,12 +656,14 @@ def hook_registry_keys(root, registry_use=()):
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 parents[child] = node
-        helpers = _module_helpers(tree)
+        dynamic = _writes_dynamic_namespace(tree)
+        lazy = _lazy_nodes(tree)
+        helpers = {} if dynamic else _module_helpers(tree)
         owner, loops = {}, {}
         stack = [tree]
         while stack:
             scope = stack.pop()
-            loops[id(scope)] = _loop_key_strings(scope)
+            loops[id(scope)] = {} if dynamic else _loop_key_strings(scope)
             for node in _scope_walk(scope):
                 owner[id(node)] = scope
                 if isinstance(node, _SCOPE_NODES):
@@ -546,7 +672,8 @@ def hook_registry_keys(root, registry_use=()):
             if not (isinstance(node, ast.Name) and node.id in HOOK_REGISTRY_NAMES
                     and isinstance(node.ctx, ast.Load)):
                 continue
-            got = _accepted_read(node, parents, loops[id(owner.get(id(node), tree))], helpers)
+            got = None if id(node) in lazy else _accepted_read(
+                node, parents, loops[id(owner.get(id(node), tree))], helpers)
             if got is None:
                 refused[(node.lineno, node.col_offset + 1)] = (node.id, _use_text(text, node, parents))
             else:
@@ -594,8 +721,9 @@ def hook_registry_keys(root, registry_use=()):
         raise CannotEvaluate(
             "{}: the registry use of {!r} at line {} column {} is outside the accepted access forms "
             "(R.get(K), R.get(K, default), R[K], (R or {{}}).get(K) or (R or {{}})[K], K a string "
-            "constant or a literal-loop variable bound in the read's own scope, or the registry handed "
-            "to a module-level def whose matching parameter is a registry name) and no "
+            "constant or a literal-loop variable bound in the read's own scope, or the registry handed, "
+            "with no starred or double-starred argument, to an undecorated module-level def whose "
+            "matching parameter is a registry name) and no "
             "[[detect.registry-use]] entry excuses it; {} such use(s) in all".format(
                 HOOK_LIBRARY, refused[leftover[0]][0], line, column, len(leftover)))
     if not keys:
@@ -784,7 +912,8 @@ def run_gate(root):
         return 1
     print("PASS: {} record reader(s) under {} are each on {} with a disposition (the residual: a "
           "registry object reached under a name not in HOOK_REGISTRY_NAMES is not seen, a key used "
-          "outside the hook library is not seen, and an allowlisted use is covered only by its "
+          "outside the hook library is not seen, a dynamic namespace held first in a variable is not "
+          "seen, and an allowlisted use is covered only by its "
           "asserted keys-read)".format(len(detected), " and ".join(SCAN_ROOTS), SWITCH_LIST))
     return 0
 
@@ -1114,7 +1243,16 @@ def _self_test():
              "lacks 'ledger_each'"),
             ("derive/with-context-read-key",
              'def a(root, reg):\n    with reg.get("ledger_ctx") as c:\n        _orch_path(root, c)\n',
-             "lacks 'ledger_ctx'")):
+             "lacks 'ledger_ctx'"),
+            # A comprehension's first (outermost) iterable is evaluated in the enclosing scope, so a
+            # key the enclosing loop pins is accepted there.
+            ("derive/comprehension-first-iter-outer-pinned-key",
+             'def a(root, reg):\n    for k in ("ledger_a",):\n        _ = [x for x in reg.get(k)]\n',
+             "lacks 'ledger_a'"),
+            # A class body is its own scope: a literal loop in it pins a read in the same class body.
+            ("derive/class-body-loop-key",
+             'class C:\n    for k in ("ledger_cb",):\n        V = reg.get(k)\n',
+             "lacks 'ledger_cb'")):
         rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
         check(case_id, rc == 2 and needle in out, (rc, out))
 
@@ -1251,10 +1389,99 @@ def _self_test():
              '            case str() as key:\n                pass\n        reg.get(key)\n', 6),
             ("refuse/except-capture-loop-key",
              'def a(root, reg):\n    for key in ("ledger_e",):\n        try:\n            pass\n'
-             '        except ValueError as key:\n            pass\n        reg.get(key)\n', 7)):
+             '        except ValueError as key:\n            pass\n        reg.get(key)\n', 7),
+            # A comprehension's first iterable is evaluated in the enclosing scope: a read there is
+            # never pinned by the comprehension's own targets, for each comprehension kind and each
+            # access form (get, subscript, (R or {}).get(K, default)).
+            ("refuse/listcomp-first-iter-enclosing-binding",
+             'def a(root, reg):\n    k = "ledger_other"\n'
+             '    return [x for x in reg.get(k) for k in ("ledger_a",)]\n', 3),
+            ("refuse/setcomp-first-iter-enclosing-binding",
+             'def a(root, reg):\n    k = "ledger_other"\n'
+             '    return {x for x in reg[k] for k in ("ledger_a",)}\n', 3),
+            ("refuse/dictcomp-first-iter-enclosing-binding",
+             'def a(root, reg):\n    k = "ledger_other"\n'
+             '    return {x: 1 for x in (reg or {}).get(k, ()) for k in ("ledger_a",)}\n', 3),
+            ("refuse/genexp-first-iter-enclosing-binding",
+             'def a(root, reg):\n    k = "ledger_other"\n'
+             '    return list(x for x in reg[k] for k in ("ledger_a",))\n', 3),
+            # A hand-off is accepted only on a callee and call shape whose run-time binding is
+            # certain: a decorated def binds its name to the decorator's result, and a starred or
+            # double-starred argument makes the counted parameter position or keyword uncertain.
+            ("refuse/helper-decorated-callee",
+             'def _deco(f):\n    return f\n@_deco\ndef _take(reg, root):\n'
+             '    return reg.get("ledger_path")\ndef a(root, reg):\n    return _take(reg, root)\n', 7),
+            ("refuse/helper-starred-argument-call",
+             'def _take(a, reg={}):\n    return reg.get("ledger_path")\ndef a(root, reg, pre):\n'
+             '    return _take(*pre, reg)\n', 4),
+            ("refuse/helper-doublestar-argument-call",
+             'def _take(reg, root=None):\n    return reg.get("ledger_path")\ndef a(root, reg, kw):\n'
+             '    return _take(reg, **kw)\n', 4),
+            # A def's decorators, parameter defaults and annotations and a lambda's defaults are
+            # evaluated in the enclosing scope: a walrus there rebinds the enclosing loop key, and a
+            # read there is never pinned by a loop inside the def.
+            ("refuse/def-default-walrus-rebound-loop-key",
+             'def a(root, reg):\n    for k in ("ledger_a",):\n'
+             '        def g(x=(k := "ledger_other")):\n            return x\n        reg.get(k)\n', 5),
+            ("refuse/lambda-default-walrus-rebound-loop-key",
+             'def a(root, reg):\n    for k in ("ledger_a",):\n'
+             '        f = lambda x=(k := "ledger_other"): x\n        reg.get(k)\n', 4),
+            ("refuse/lambda-default-comprehension-walrus-loop-key",
+             'def a(root, reg):\n    for k in ("ledger_a",):\n'
+             '        f = lambda x=[(k := "ledger_other") for _ in (1,)]: x\n        reg.get(k)\n', 4),
+            ("refuse/decorator-walrus-rebound-loop-key",
+             'def d(x):\n    return lambda f: f\nfor k in ("ledger_a",):\n'
+             '    @d((k := "ledger_other"))\n    def h():\n        return None\n    reg.get(k)\n', 7),
+            ("refuse/module-def-default-walrus-loop-key",
+             'for k in ("ledger_a",):\n    def h(x=(k := "ledger_other")):\n        return x\n'
+             '    reg.get(k)\n', 4),
+            ("refuse/def-default-read-pinned-by-inner-loop",
+             'def a(root, reg, k):\n    def g(x=reg.get(k)):\n        for k in ("ledger_a",):\n'
+             '            pass\n        return x\n    return g()\n', 2),
+            ("refuse/decorator-read-pinned-by-inner-loop",
+             'def d(x):\n    return lambda f: f\nk = "ledger_other"\n@d(reg.get(k))\ndef h():\n'
+             '    for k in ("ledger_a",):\n        pass\n', 4),
+            ("refuse/annotation-read-pinned-by-inner-loop",
+             'def a(root, reg, k):\n    def g(x: reg.get(k) = None):\n        for k in ("ledger_a",):\n'
+             '            pass\n        return x\n    return g()\n', 2),
+            # A class body is its own scope: its loop targets never pin a read in the enclosing
+            # scope (which at run time resolves the enclosing or module binding), and a read inside
+            # it is never pinned by the enclosing function's loop (fail closed on the cross-scope
+            # pin, even where the closure read would see it).
+            ("refuse/class-body-loop-pins-enclosing-read",
+             'k = "ledger_other"\ndef a(root, reg):\n    class C:\n        for k in ("ledger_a",):\n'
+             '            pass\n    return reg.get(k)\n', 6),
+            ("refuse/class-body-read-enclosing-loop-pin",
+             'def a(root, reg):\n    for k in ("ledger_a",):\n        class C:\n'
+             '            V = reg.get(k)\n', 4),
+            # A module that writes globals(), locals() or vars() by subscript or a method call can
+            # rebind any name at run time, so every pin and hand-off in it is refused.
+            ("refuse/globals-subscript-write-voids-pin",
+             'def a(root, reg):\n    for k in ("ledger_a",):\n        reg.get(k)\n'
+             'globals()["x"] = 1\n', 3),
+            ("refuse/globals-update-voids-handoff",
+             'def _take(reg, root):\n    return reg.get("ledger_path")\ndef a(root, reg):\n'
+             '    return _take(reg, root)\nglobals().update({})\n', 4),
+            ("refuse/locals-subscript-write-voids-pin",
+             'def a(root, reg):\n    for k in ("ledger_a",):\n        reg.get(k)\n'
+             '    locals()["k"] = "ledger_other"\n', 3),
+            ("refuse/vars-method-call-voids-pin",
+             'def a(root, reg):\n    for k in ("ledger_a",):\n        reg.get(k)\n'
+             '    vars().update(k="ledger_other")\n', 3),
+            # A type-parameter list and a type-alias statement evaluate lazily, in their own
+            # annotation scope, so no registry use inside one is accepted, constant key included.
+            ("refuse/type-param-registry-read",
+             'def a[T: reg.get("ledger_tp")](root):\n    return None\n', 1),
+            ("refuse/type-alias-registry-read",
+             'type Alias = reg.get("ledger_ta")\n', 1)):
         rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
         check(case_id, rc == 2 and "outside the accepted access forms" in out
               and "at line {} column".format(line) in out, (rc, out))
+
+    # A dynamic-namespace write voids pins and hand-offs only: a constant-key read stays accepted.
+    hook_dyn = 'def a(root, reg):\n    return reg.get("ledger_path")\nglobals()["flag"] = 1\n'
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_dyn}))
+    check("pass/dynamic-write-constant-key-kept", rc == 0, (rc, out))
 
     # The hand-off rule's accepted side: a registry name passed, positionally or by keyword, to a
     # module-level def whose matching parameter is a registry name needs no allowlist entry.
@@ -1442,11 +1669,16 @@ def _self_test():
           "nested, duplicated, unknown-disposition or indirect-via-cycle list exit 2; the hook library is "
           "scanned whole (module, class bodies, decorators, lambdas, comprehensions and nested defs): every "
           "accepted access form (R.get(K), R.get(K, default), R[K], (R or {{}}).get(K), (R or {{}})[K], a "
-          "literal-loop key bound in the read's own scope, and a hand-off to a module-level def whose "
-          "matching parameter is a registry name) derives its key, and [detect] keys is checked as a "
-          "superset of the derived set; a comprehension target pins keys only inside the comprehension, and "
-          "a loop key a nested scope rebinds by nonlocal or global, or that a global, match or except "
-          "capture also binds, never pins; every registry use outside those forms (a non-constant key, "
+          "literal-loop key bound in the read's own scope, and a hand-off, with no starred or double-starred "
+          "argument, to an undecorated module-level def whose matching parameter is a registry name) derives "
+          "its key, and [detect] keys is checked as a superset of the derived set; scopes follow run-time "
+          "evaluation (a comprehension target pins keys only inside the comprehension while its first "
+          "iterable belongs to the enclosing scope, a def's decorators, defaults and annotations and a "
+          "lambda's defaults belong to the enclosing scope, and a class body is its own scope), a loop key "
+          "a nested scope rebinds by nonlocal or global, or that a global, match or except capture also "
+          "binds, never pins, a type-parameter list and a type-alias statement accept no registry use, and "
+          "a module writing globals(), locals() or vars() by subscript or method call has every pin and "
+          "hand-off refused; every registry use outside those forms (a non-constant key, "
           "another method or attribute, a call argument through any other callee or parameter, a match, "
           "except or loop capture, an alias, a splat, a conditional or or-fallback receiver, and the rest) "
           "exits 2 naming its line and column unless a [[detect.registry-use]] entry anchors it exactly "
@@ -1455,7 +1687,8 @@ def _self_test():
           "declaration each exit 2; asserted keys-read join the derived set); [detect.non-record-keys] "
           "excludes derived keys that name no record path (a key in both lists or an exclusion nothing "
           "derives exits 2); the residual: a registry object reached under a name not in "
-          "HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, and an "
+          "HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a dynamic "
+          "namespace held first in a variable is not seen, and an "
           "allowlisted use is covered only by its asserted keys-read; the parse site handles "
           "RecursionError, MemoryError and ValueError; the live tree passes)".format(len(EXECUTED)))
     return 0
