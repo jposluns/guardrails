@@ -70,8 +70,8 @@ import _opf_store  # noqa: E402
 from _semver import _parse as _parse_version  # noqa: E402
 
 DECLARATION_NAME = "opf-declaration.toml"
-# The release identity this build carries apart from the declaration file: the pack release version (VERSION
-# and the release-version of .aiqt/manifest.toml), which tools/check_opf_declaration.py pins equal to it.
+# The release identity this build carries apart from the declaration file: OPF's own release version in
+# opf/VERSION, which tools/check_opf_declaration.py pins equal to it; the pack release version is not it.
 RELEASE_IDENTITY = "1.0.5"
 # The declaration file's bytes as this release ships them, and their SHA-256 digest (the shipped-file digest).
 SHIPPED_DECLARATION_BYTES = b'release = "1.0.5"\nspec_version = "1.2.0"\nhomes = 1\nworklog = 1\n'

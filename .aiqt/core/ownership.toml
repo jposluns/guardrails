@@ -166,6 +166,11 @@ class = "pack-immutable"
 note = "The OPF enforcement pack: adopter-installed CI, pre-commit, hook and instruction files, starting with the CI floor under ci/. Shipped pack content, byte-exact. No new class family."
 
 [[release-class]]
+path = "opf/VERSION"
+class = "pack-immutable"
+note = "OPF's own release version, one line, apart from the pack's root VERSION; tools/check_opf_declaration.py holds RELEASE_IDENTITY in opf/tools/_opf_declaration.py equal to it. Shipped pack content, byte-exact, like VERSION. No new class family."
+
+[[release-class]]
 pattern = ".preview/**"
 class = "pack-immutable"
 note = "The public hooks preview channel: standalone hook files, their README.md install page, and SHA256SUMS, byte-exact shipped content like the other top-level surfaces. Removed with the directory when the last preview hook moves into the plugin."
