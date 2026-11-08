@@ -2285,6 +2285,23 @@ def _cat_file(repo, commit, path):
                           capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
 
 
+def _ls_tree_entry(repo, commit, path):
+    """git ls-tree -l of `path` at `commit` in `repo` under _no_replace_env(), output captured: the entry
+    read_at_revision checks (mode, type and size) before it reads any bytes, named through a :(literal)
+    pathspec so no wildcard is applied, from the genuine tree of the genuine commit."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "ls-tree", "-l", "--full-tree",
+                           commit, "--", ":(literal)" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
+
+
+def _cat_blob(repo, commit, path):
+    """git cat-file blob of `path` at `commit` in `repo` under _no_replace_env(), output captured: the bytes
+    read_at_revision returns, from the same genuine objects the ls-tree entry named."""
+    return subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "cat-file", "blob",
+                           commit + ":" + path],
+                          capture_output=True, timeout=GIT_READ_TIMEOUT, env=_no_replace_env())
+
+
 def _ownership_refused(probe):
     """Whether a failed git read was git refusing the repository for its ownership."""
     stderr = probe.stderr.decode("utf-8", "replace")
@@ -3107,19 +3124,17 @@ def read_at_revision(repo, commit, path):
     """The bytes of `path` at `commit` in `repo`, read from the object store (never HEAD, the index or the
     working tree), or None when the commit has no entry at that path. Both reads run under GIT_READ_TIMEOUT
     and _no_replace_env(), hermetic like the P3 reads (_cat_file keeps checking existence only). git ls-tree
-    names the entry first, through a :(literal) pathspec so no wildcard is applied: only a regular-file blob
-    (mode 100644 or 100755) of at most P7_READ_MAX_BYTES is then read, with git cat-file blob; any other
+    (_ls_tree_entry) names the entry first, through a :(literal) pathspec so no wildcard is applied: only a
+    regular-file blob (mode 100644 or 100755) of at most P7_READ_MAX_BYTES is then read, with git cat-file
+    blob (_cat_blob); any other
     entry (a symlink, a submodule, a directory), an oversized blob, a repository git refuses for its
     ownership, and a git that fails, cannot be launched or times out are CannotEvaluate, never a pass. Both
     reads disable object substitution (--no-replace-objects and GIT_NO_REPLACE_OBJECTS=1, as the release
     schema and branch-root readers do), so a refs/replace/* entry cannot decide which bytes are read."""
     def refusal(why):
         return CannotEvaluate("cannot read {} at {} in {}: {}".format(path, commit, repo, why))
-    env = _no_replace_env()
     try:
-        probe = subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "ls-tree", "-l", "--full-tree",
-                                commit, "--", ":(literal)" + path],
-                               capture_output=True, timeout=GIT_READ_TIMEOUT, env=env)
+        probe = _ls_tree_entry(repo, commit, path)
     except (OSError, subprocess.SubprocessError) as exc:
         raise refusal(exc)
     if _ownership_refused(probe):
@@ -3135,9 +3150,7 @@ def read_at_revision(repo, commit, path):
     if not fields[3].isdigit() or int(fields[3]) > P7_READ_MAX_BYTES:
         raise refusal("larger than {} bytes".format(P7_READ_MAX_BYTES))
     try:
-        blob = subprocess.run(["git", "--no-replace-objects", "-C", str(repo), "cat-file", "blob",
-                               commit + ":" + path],
-                              capture_output=True, timeout=GIT_READ_TIMEOUT, env=env)
+        blob = _cat_blob(repo, commit, path)
     except (OSError, subprocess.SubprocessError) as exc:
         raise refusal(exc)
     if _ownership_refused(blob):
@@ -4471,13 +4484,16 @@ P7_MODULE_NEW = P7_MODULE_OLD.replace("needle inside old", "needle inside new")
 # each row pins: a lone CR line end before the def, a lone CR inside a string literal, only lone CR line
 # ends, and CRLF line ends (the parser's line split); latin_first, valid UTF-8 whose first line declares
 # latin-1 (the cookie refusal itself); latin_second, bytes that are not UTF-8 declaring latin-1 on the
-# second line after a lone-CR shebang (the second-line cookie refusal: with the strict decode weakened,
-# the cookie still refuses it, so it does not pin the decode); latin_body and latin_body_utf8_cookie,
-# bytes that are not UTF-8 only after the second line, with no cookie and with a UTF-8 cookie (no cookie
-# check refuses them, so only the strict decode does: they pin it); gbk_cr_blank and gbk_shebang, valid
-# UTF-8 declaring gbk on the second line after a lone-CR blank line and after a shebang (the second-line
-# cookie refusal, found only when the first two lines are split at a lone CR too and the second is read);
-# a UTF-8 cookie in two spellings (read, not refused); and source ast cannot parse
+# second line after a lone-CR shebang (the strict decode and the second-line cookie check each refuse it,
+# so it pins the second-line cookie refusal only together with a weakened decode, and with the decode
+# weakened alone the cookie still refuses it, so it does not pin the decode either); latin_body and
+# latin_body_utf8_cookie, bytes that are not UTF-8 only after the second line, with no cookie and with a
+# UTF-8 cookie (no cookie check refuses them, so only the strict decode does: they pin it); gbk_cr_blank
+# and gbk_shebang, valid UTF-8 declaring gbk on the second line after a lone-CR blank line and after a
+# shebang (the second-line cookie refusal, found only when the first two lines are split at a lone CR too
+# and the second is read; gbk_shebang, with the revert/p7-cookie-second-line-red flip that reads only the
+# first line, is the single-mutation pin of the second-line check); a UTF-8 cookie in two spellings (read,
+# not refused); and source ast cannot parse
 P7_TAIL = b"\n\n\nAFTER = 'needle after'\n"
 P7_SOURCES = {
     "pkg/cr_line.py": b"def first():\r    return 1\n\n\ndef target():\n    return 'needle target'\n" + P7_TAIL,
@@ -4531,8 +4547,10 @@ def _p7_repo(base):
     first commit, returned as the tag-object pin, gets a refs/replace entry pointing it at an annotated tag
     of the second commit, which a resolution that honoured replace objects would peel to the second commit.
     Last, a commit outside every branch with the first commit's tree, returned as the replaced commit, gets a
-    refs/replace entry pointing it at a commit with the fifth commit's tree, so a path the fifth adds is
-    absent at the replaced commit but found by an existence probe that honoured replace objects."""
+    refs/replace entry pointing it at a commit with the fifth commit's tree except that pkg/mod.py holds the
+    P7_READ_MAX_BYTES plus one byte source, so a path the fifth adds is absent at the replaced commit but
+    found by an existence probe or an ls-tree read that honoured replace objects, and the replaced commit's
+    small pkg/mod.py is listed, or read, as oversized by an ls-tree or a blob read that honoured them."""
     repo = base / "p7-repo"
     os.makedirs(repo / ".aiqt" / "core" / "gates")
     os.makedirs(repo / ".aiqt" / "core" / "hooks")
@@ -4583,6 +4601,14 @@ def _p7_repo(base):
     subprocess.run(git + ["replace", tags[0], tags[1]], check=True, capture_output=True, timeout=60, env=env)
     trees = [subprocess.run(git + ["rev-parse", commit + "^{tree}"], check=True, capture_output=True, timeout=60,
                             env=env).stdout.decode("ascii").strip() for commit in (commits[0], commits[4])]
+    over = subprocess.run(git + ["rev-parse", commits[4] + ":pkg/big_over.py"], check=True, capture_output=True,
+                          timeout=60, env=env).stdout.decode("ascii").strip()
+    index_env = dict(env, GIT_INDEX_FILE=str(base / "p7-replacement-index"))
+    subprocess.run(git + ["read-tree", trees[1]], check=True, capture_output=True, timeout=60, env=index_env)
+    subprocess.run(git + ["update-index", "--cacheinfo", "100644,{},pkg/mod.py".format(over)],
+                   check=True, capture_output=True, timeout=60, env=index_env)
+    trees[1] = subprocess.run(git + ["write-tree"], check=True, capture_output=True, timeout=60,
+                              env=index_env).stdout.decode("ascii").strip()
     made = [subprocess.run(git + ["commit-tree", "-m", message, tree], check=True, capture_output=True,
                            timeout=60, env=env).stdout.decode("ascii").strip()
             for message, tree in (("genuine paths", trees[0]), ("replacement paths", trees[1]))]
@@ -7521,6 +7547,15 @@ def self_test(report_path=None):
         check("preflight/p7-exists-replace-ignored",
               [p7("Read pkg/cr_line.py before you answer.\n", p7_replaced),
                p7("Read pkg/mod.py before you answer.\n", p7_replaced)], [(0, [("P3", "ADVISORY")]), (0, [])])
+        # the residual reads at the replaced commit list its genuine tree: a path only the replacement adds
+        # has no entry there, so the anchor is HARD as for any missing file (and P3 ADVISORY)
+        check("preflight/p7-read-replaced-added-path-hard",
+              p7("ACCEPTED-RESIDUAL: pkg/cr_line.py :: target :: needle target\n", p7_replaced),
+              (1, [("P3", "ADVISORY"), ("P7", "HARD")]))
+        # the replacement holds an oversized pkg/mod.py where the genuine tree holds the small one: the
+        # entry's size and bytes are the genuine ones, so the anchor holds
+        check("preflight/p7-read-replaced-size-ignored",
+              p7("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced), (0, []))
         # REVIEWED HEAD lines with no BRIEF-PIN line, which the conflict checks do not compare, must all
         # resolve to one commit; two that agree pass
         check("preflight/p7-reviewed-heads-cannot-evaluate",
@@ -7573,6 +7608,31 @@ def self_test(report_path=None):
             [p7_case("Read pkg/cr_line.py before you answer.\n", p7_replaced)], [(0, [])],
             _cat_file=replaced_cat_file))
 
+        def replaced_ls_tree(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "ls-tree", "-l", "--full-tree", commit, "--",
+                                   ":(literal)" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the residual read's ls-tree again, the replaced commit lists its
+        # replacement's tree: the added path is found (and its genuine blob read then fails), and the small
+        # pkg/mod.py is listed at the replacement's oversized length
+        check("revert/p7-read-ls-tree-replace-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/cr_line.py :: target :: needle target\n", p7_replaced),
+             p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced)],
+            ["CannotEvaluate"] * 2, _ls_tree_entry=replaced_ls_tree))
+
+        def replaced_cat_blob(repo, commit, path):
+            return subprocess.run(["git", "-C", str(repo), "cat-file", "blob", commit + ":" + path],
+                                  capture_output=True, timeout=GIT_READ_TIMEOUT, env=_git_read_env())
+
+        # with replace objects honoured in the residual read's blob read again, the replaced commit's
+        # pkg/mod.py is read from its replacement's tree (oversized), and the first pin's module blob is read
+        # as its replacement (the second commit's content), so the old excerpt goes missing
+        check("revert/p7-read-blob-replace-red", *flip(
+            [p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n", p7_replaced),
+             p7_case("ACCEPTED-RESIDUAL: pkg/mod.py :: outer :: needle inside old\n")],
+            ["CannotEvaluate", p7_hard], _cat_blob=replaced_cat_blob))
+
         def p7_cookie_mutant(heads, errors="strict"):
             def mutant(data, path, commit):
                 text = data.decode("utf-8-sig", errors)
@@ -7602,7 +7662,7 @@ def self_test(report_path=None):
                 lambda data: data.replace(b"\r\n", b"\n").replace(b"\r", b"\n").split(b"\n", 2)[:2], "replace")))
     finally:
         shutil.rmtree(p7_base, ignore_errors=True)
-    check("revert/every-flip-ran", len(flipped), 228)
+    check("revert/every-flip-ran", len(flipped), 230)
 
     for check_id in sorted(expected - _EXECUTED_SET):
         FAILURES.append("execution-set/missing: {}".format(check_id))
