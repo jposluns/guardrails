@@ -2130,6 +2130,21 @@ class _FixtureProcess:
                     break
                 try:
                     if not os.read(self.peer.fileno(), 1):
+                        # Control-channel EOF is the caller collecting the
+                        # tree, and the caller's backstop closes this channel
+                        # at its own copy of the SAME armed deadline, so the
+                        # clock is re-sampled HERE, after the EOF is read: a
+                        # guardian preempted between the loop's pre-expiry
+                        # sample above and this read would otherwise record a
+                        # collection that happened at the deadline as
+                        # timed_out=False. Both clocks are the one shared
+                        # monotonic clock, so with this re-sample expiry is
+                        # judged on every exit from this loop and starvation
+                        # can only delay a sample, never un-expire it; an EOF
+                        # read while the clock still sits before the deadline
+                        # remains an early cancellation, never a timeout.
+                        if time.monotonic() >= self.deadline:
+                            timed_out = True
                         break
                     raise ChildStatusUnavailable("unexpected guardian control byte")
                 except BlockingIOError:
@@ -3211,6 +3226,25 @@ def bounded_probe_unestablished(result, elapsed, timeout_s, started):
     unstarted, the same inclusive end _watchdog_window_verdict uses); one
     tick under it has not (the caller's check keeps the definite failure)."""
     return result == "TIMEOUT" and elapsed >= timeout_s and not started
+
+
+def bounded_probe_starved_suspect(result, elapsed, timeout_s, started):
+    """True when a run_bounded PROBE's TIMEOUT carries the probe's start
+    receipt and the caller's measured `elapsed` reached `timeout_s`: the probe
+    was observed to start and the bound then elapsed. That observation alone
+    cannot separate a probe that BLOCKED (the definite regression) from a
+    correct probe the host starved AFTER its first statement, because the
+    start receipt only bounds where the stall began, never why. Such a run is
+    therefore never judged on its own: the caller re-runs the same probe once
+    under a bound several times longer and judges a definite failure only
+    when this same shape repeats under that longer bound (a probe that
+    blocks forever repeats it under any bound; a starved correct probe,
+    given several times its measured running time, returns its value). The
+    ends of the elapsed window match bounded_probe_unestablished: at exactly
+    `timeout_s` the bound has elapsed; one tick under it is an early trip of
+    the bound (a run_bounded regression, the caller's own definite failure,
+    never retried here)."""
+    return result == "TIMEOUT" and elapsed >= timeout_s and started
 
 
 def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
