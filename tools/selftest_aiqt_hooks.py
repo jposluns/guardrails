@@ -4324,6 +4324,488 @@ def _test_pgrep_self_match(failures):
         failures.append("(psm-wiring) pgrep_self_match handler/event wiring is missing or wrong")
 
 
+# python_stdin_program rows (trkasy): the guard is fail-closed by inversion. A command that carries a
+# python-program-from-stdin invocation anywhere is DENIED unless the whole command is one of three fed
+# allowlist shapes. Each deny and over-deny row goes red when the default is made allow (_spg_invocation_present
+# forced to find nothing); each fed row goes red when its shape matcher is broken; allow rows carry no
+# invocation at all.
+# Deny rows: python reading its program from an unfed stdin, so bash would block each; denied.
+_SPG_DENY_ROWS = (
+    ("(spg-d1) bare python3 -", "python3 -"),
+    ("(spg-d2) python3 -I -", "python3 -I -"),
+    ("(spg-d3) python -", "python -"),
+    ("(spg-d4) an option then a lone -", "python3.12 -B -"),
+    ("(spg-d5) a path to python3", "/usr/bin/python3 -"),
+    ("(spg-d6) after --", "python3 -- -"),
+    ("(spg-d7) with script arguments", "python3 - a b"),
+    ("(spg-d8) behind timeout", "timeout 60 python3 -"),
+    ("(spg-d9) behind env with an option", "env -i python3 -"),
+    ("(spg-d10) after an option value", "python3 -W ignore -"),
+    ("(spg-d11) inside a command substitution", "x=$(python3 -)"),
+    ("(spg-d12) inside backticks", "x=`python3 -`"),
+    ("(spg-d13) after a list separator", "echo a; python3 -"),
+    ("(spg-d14) a second command after a newline", "echo a\npython3 -"),
+    ("(spg-d15) inside an if", "if true; then python3 -I -; fi"),
+    ("(spg-d16) an unfed { } group", "{ cd /; python3 -; }"),
+    ("(spg-d17) a redirect on another fd", "python3 - 3< prog.py"),
+    ("(spg-d18) a self-input fd", "python3 - <&0"),
+    ("(spg-d19) a self-input fd with digits", "python3 - 0<&0"),
+    ("(spg-d20) a self-input path", "python3 - < /dev/stdin"),
+    ("(spg-d21) a process substitution argument", "python3 - <(echo x)"),
+    ("(spg-d22) a pipe ended by a list separator", "cat prog.py | true; python3 -"),
+    ("(spg-d23) after a here-document body", "python3 - <<'EOF'\nprint(1)\nEOF\npython3 -"),
+    ("(spg-d24) an & inside a pattern substitution", "python3 - ${q//&/+}"),
+    ("(spg-d25) a < inside a parameter substitution", "python3 - ${v:-<x}"),
+    ("(spg-d26) a substitution inside ${ }", "echo ${v:-$(python3 -)}"),
+    ("(spg-d27) a $'...' escape then a substitution", "echo $'\\x7b' $(python3 -)"),
+    ("(spg-d28) a $$ before a brace then a substitution", "echo $${ $(python3 -)"),
+    ("(spg-d29) job control on before a background hit", "set -m; python3 - & wait"),
+    ("(spg-d30) a subshell in a $(( whose closers stand apart", "x=$((python3 -) )"),
+    ("(spg-d31) an & inside a group after a hit", "python3 - && (true &)"),
+    ("(spg-d32) a newline after a pipe, then an unfed line", "echo \"print('fed')\" |\npython3 -\npython3 -"),
+    ("(spg-d33) a command after a fed group closes", "echo \"print('fed')\" | (cd /); python3 -"),
+    ("(spg-d34) apostrophes inside comments", "echo ok # it's here\npython3 -\n# that's all"),
+    ("(spg-d35) an arithmetic shift", "x=$((1<<2))\npython3 -"),
+    ("(spg-d36) a free-threaded python3.14t", "python3.14t -"),
+    ("(spg-d37) a free-threaded python3.13t", "python3.13t -I -"),
+    ("(spg-d38) python3-dbg", "python3-dbg -"),
+    ("(spg-d39) timeout infinity", "timeout infinity python3 -"),
+    ("(spg-d40) a background pipeline holds the session input", "python3 - | cat & wait"),
+    ("(spg-d41) a background pipeline into tee", "python3 - | tee /dev/null &"),
+    ("(spg-d42) a |& background pipeline", "python3 - |& cat &"),
+    ("(spg-d43) a background pipeline into a group", "python3 - | (cat) &"),
+    ("(spg-d44) an & inside a { } group after a hit", "python3 - || { true & }"),
+    ("(spg-d45) an & inside a substitution after a hit", "python3 - && x=$(true &)"),
+    ("(spg-d46) an & inside a second group after a group hit", "(python3 -) && (true &)"),
+    ("(spg-d47) an & inside backquotes after a hit", "python3 - && echo `true &`"),
+    ("(spg-d48) a substitution expanded before the background redirect", "x=$(python3 -) &"),
+    ("(spg-d49) an echoed substitution in a background command", "echo $(python3 -) &"),
+    ("(spg-d50) a process substitution in a background command", "cat <(python3 -) &"),
+    ("(spg-d51) a $(( subshell with a command before the hit", "x=$((cd /; python3 -) )"),
+    ("(spg-d52) a $(( subshell ended by a separator", "echo $((python3 -) ; true)"),
+    ("(spg-d53) a literal ( inside ${ } in a fed group", "echo x | (echo ${v:-(}); python3 -"),
+    ("(spg-d54) a # right after a closing substitution", "echo $(echo a)#; python3 -"),
+    ("(spg-d55) a # right after a closing backquote", "echo `echo a`#; python3 -"),
+    ("(spg-d56) a # right after an arithmetic $(( ))", "echo $((1))#; python3 -"),
+    ("(spg-d57) a substitution inside ${ } in an assignment", "x=${v:-$(python3 -)}"),
+    ("(spg-d58) a process substitution inside ${ }", "echo ${v:-<(python3 -)}"),
+    ("(spg-d59) a backquote substitution inside ${ }", "echo ${v:-`python3 -`}"),
+    ("(spg-d60) a $$ before a literal { then a separator", "echo $${ ; python3 -"),
+    ("(spg-d61) an & inside ${ } after a hit", "python3 - && echo ${v:-&}"),
+    ("(spg-d62) job control on by option name", "set -o monitor; python3 - & wait"),
+    ("(spg-d63) an unfed group", "(cd /; python3 -)"),
+    # A redirect target word does not end the word run and must be dropped from it, never read as a script
+    # operand: python3 2>/dev/null - reads its program from stdin and bash blocks on it.
+    ("(spg-d64) a redirect does not pull its target into the run", "python3 2>/dev/null -"),
+    ("(spg-d65) a stdout redirect before a lone -", "python3 >/dev/null -"),
+    ("(spg-d66) a self-input fd dup before a lone -", "python3 <&0 -"),
+    # A '#' after a subshell ')', an arithmetic command '))' or an opening backquote is a comment in bash, not
+    # glue, so the scan must not read a '<<' in that comment as a here-document and skip the python3 - line.
+    ("(spg-d67) a comment after a subshell, not glue", "(true)#<<true\npython3 -\ntrue"),
+    ("(spg-d68) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue"),
+    ("(spg-d69) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`"),
+    # A pipeline producer that itself reads its program from stdin leaves it reading the never-fed input.
+    ("(spg-d70) a producer that itself reads stdin", "python3 - | python3 -"),
+    # An ANSI-C $'...' quote is one word and must not swallow the newline and the python3 - after it.
+    ("(spg-d71) an ANSI-C quote does not swallow the next command", "echo $'\\''\npython3 -\necho '"),
+    # A '#' right after a ')' bash keeps as glue (a process substitution, an array assignment, or the real ')'
+    # of a $( ) whose inner case pattern's ')' the scan cannot match): the '; python3 -' kept after it runs,
+    # so the glue reading of the '#' must find it.
+    ("(spg-d72) a # glued after a process substitution )", "echo <(true)#; python3 -"),
+    ("(spg-d73) a # glued after an array assignment )", "a=(x)#; python3 -"),
+    ("(spg-d74) a # glued after an array-append )", "a+=(x)#; python3 -"),
+    ("(spg-d75) a # glued after a declare -a array )", "declare -a a=(x)#; python3 -"),
+    ("(spg-d76) a # glued after the real ) of a $( ) holding a case", "echo $(case x in x) true;; esac)#; python3 -"),
+    # The same case pattern read the other way: the scan matches the case pattern's ')' as the $( ) closer, so
+    # it meets the '#' early; the COMMENT reading of that '#' drops the rest of its line (opening no
+    # here-document from the '<<E' inside it) and still finds the python3 - bash runs in the case body.
+    ("(spg-d77) a # the scan meets at a case pattern ), comment reading", "echo $(case x in x)#<<E\npython3 -\nE\n;; esac)"),
+    # A {name} descriptor prefix is part of the redirect, not a word of the run, and is dropped with its target,
+    # so the lone - after it still reads the program from stdin.
+    ("(spg-d78) a named-descriptor output redirect prefix", "python3 {fd}>/dev/null -"),
+    ("(spg-d79) a named-descriptor input redirect prefix", "python3 {fd}< /dev/null -"),
+    # A {name} descriptor feed opens a NEW descriptor, not fd 0, so python3 - still reads its program from the
+    # unfed stdin: an input feed, a here-document and a here-string on a named descriptor are each outside the
+    # three fed shapes (which require the feed on fd 0), and the lone - before or after the feed reads stdin.
+    ("(spg-d80) a named-descriptor input feed, program still from stdin", "python3 - {fd}<f"),
+    ("(spg-d81) a named-descriptor here-document feed, program still from stdin", "python3 - {fd}<<E\nx\nE"),
+    ("(spg-d82) a named-descriptor here-string feed, program still from stdin", "python3 - {fd}<<<x"),
+    ("(spg-d83) a named-descriptor input feed before python3 -", "{fd}<f python3 -"))
+# Over-deny rows: a fed or harmless form outside the three shapes; bash does not block, the hook denies, a
+# disclosed over-deny. Each goes red with the default made allow, as the deny rows do.
+_SPG_OVERDENY_ROWS = (
+    ("(spg-od1) a background command", "python3 - &"),
+    ("(spg-od2) a background group", "(cd /; python3 -) &"),
+    ("(spg-od3) a |& pipeline", "echo \"print('fed')\" |& python3 -"),
+    ("(spg-od4) a pipe into a ( ) group", "echo \"print('fed')\" | (python3 -)"),
+    ("(spg-od5) a pipe into a { } group", "echo \"print('fed')\" | { python3 -; }"),
+    ("(spg-od6) a group fed by an enclosing redirect", "{ python3 -; } < /dev/null"),
+    ("(spg-od7) a newline after the pipe", "echo \"print('fed')\" |\npython3 -"),
+    ("(spg-od8) a pipeline of three commands", "echo x | cat | python3 -"),
+    ("(spg-od9) blank lines and a comment after a pipe", "echo \"print('fed')\" |  # feed it\n\n    python3 -"),
+    ("(spg-od10) a pipe into a ( ) group, python not first", "echo \"print('fed')\" | (cd /; python3 -)"),
+    ("(spg-od11) a pipe into a { } group, python not first", "echo \"print('fed')\" | { cd /; python3 -; }"),
+    ("(spg-od12) a pipe into a group after &&", "echo \"print('fed')\" | (cd / && python3 -)"),
+    ("(spg-od13) a process substitution fed by its writer", "echo \"print('fed')\" > >(python3 -)"),
+    ("(spg-od14) a fed background pipeline", "echo \"print('fed')\" | python3 - | cat & wait"),
+    ("(spg-od15) a fed hit before an & inside a group", "echo \"print('fed')\" | python3 - && (true &)"),
+    ("(spg-od16) a fed substitution in a background command", "x=$(echo \"print('fed')\" | python3 -) &"),
+    ("(spg-od17) a fed subshell in a $(( whose closers stand apart",
+     "x=$((echo \"print('fed')\" | python3 -) )"),
+    ("(spg-od18) a fed hit after a literal ( inside ${ }", "echo \"print('fed')\" | (echo ${v:-(}; python3 -)"),
+    ("(spg-od19) a fed substitution inside ${ }", "echo ${v:-$(echo \"print('fed')\" | python3 -)}"),
+    ("(spg-od20) a fed substitution inside ${ } in an assignment",
+     "x=${v:-$(echo \"print('fed')\" | python3 -)}"),
+    ("(spg-od21) a fed process substitution inside ${ }", "echo ${v:-<(echo \"print('fed')\" | python3 -)}"),
+    ("(spg-od22) a fed group reading a $$ and its closing )",
+     "echo \"print('fed')\" | (echo $(echo $${); python3 -)"),
+    ("(spg-od23) a fed hit with an & inside a pattern substitution",
+     "echo \"print('fed')\" | python3 - ${q//&/+}"),
+    ("(spg-od24) a fed hit before an & inside ${ }", "echo \"print('fed')\" | python3 - && echo ${v:-&}"),
+    ("(spg-od25) a fed hit with a < inside ${ }", "echo \"print('fed')\" | python3 - ${v:-<x}"),
+    ("(spg-od26) job control turned back off", "set -m; set +m; python3 - & wait"),
+    ("(spg-od27) a fed background hit under job control", "set -m; echo \"print('fed')\" | python3 - & wait"),
+    ("(spg-od28) job control off again by option name", "set -o monitor; set +o monitor; python3 - & wait"),
+    ("(spg-od29) a |& pipe into python3 -I -", "echo 'print(1)' |& python3 -I -"),
+    ("(spg-od30) a pipe into a subshell", "echo 'print(1)' | (python3 -)"),
+    ("(spg-od31) a duplicated fd", "python3 - <&3"),
+    ("(spg-od32) a duplicated fd after exec opens it", "exec 3< /dev/null; python3 - <&3"))
+# Fed allowlist shapes: allowed; each tied to the shape matcher whose break turns it red.
+_SPG_FED_ROWS = (
+    ("(spg-f1) a pipeline", "echo \"print('fed')\" | python3 -", "pipeline"),
+    ("(spg-f2) a pipeline with args", "cat prog | python3 - a b", "pipeline"),
+    ("(spg-f3) a pipeline into python3 -I -", "echo x | python3 -I -", "pipeline"),
+    ("(spg-f4) a < redirect", "python3 - < prog.py", "redirect"),
+    ("(spg-f5) a 0< redirect", "python3 - 0< prog.py", "redirect"),
+    ("(spg-f6) a < redirect with args", "python3 - a b < prog.py", "redirect"),
+    ("(spg-f7) a quoted here-document", "python3 - <<'EOF'\nprint(1)\nEOF", "heredoc"),
+    ("(spg-f8) an unquoted here-document", "python3 -I - <<EOF\nprint(1)\nEOF", "heredoc"),
+    ("(spg-f9) a tab-stripped here-document", "python3 - <<-'EOF'\n\tprint(1)\n\tEOF", "heredoc"),
+    ("(spg-f10) a here-string", "python3 - <<< 'print(1)'", "heredoc"),
+    ("(spg-f11) fd 00", "python3 - 00< /dev/null", "redirect"),
+    ("(spg-f12) a non-ASCII digit before <", "python3 - ٠< /dev/null", "redirect"),
+    ("(spg-f13) a pipe", "echo 'print(1)' | python3 -", "pipeline"),
+    ("(spg-f14) a here-document", "python3 - <<'EOF'\nprint('fed')\nEOF", "heredoc"),
+    ("(spg-f15) a here-string in double quotes", "python3 - <<< \"print('fed')\"", "heredoc"),
+    ("(spg-f16) a < redirect from /dev/null", "python3 - < /dev/null", "redirect"),
+    ("(spg-f17) a 0< redirect from /dev/null", "python3 - 0< /dev/null", "redirect"))
+# Allow rows that carry no stdin-program invocation at all (present is False), so the guard allows.
+_SPG_ALLOW_ROWS = (
+    ("(spg-a1) python3 -c", "python3 -c 'print(1)'"),
+    ("(spg-a2) a script file", "python3 file.py"),
+    ("(spg-a3) -c in a cluster", "python3 -Ic 'print(1)'"),
+    ("(spg-a4) python3 -m", "python3 -m json.tool f.json"),
+    ("(spg-a5) python3 - as echo text", "echo python3 -"),
+    ("(spg-a6) python3 - in a quoted message", "git commit -m 'python3 -'"),
+    ("(spg-a7) --version", "python3 --version"),
+    ("(spg-a8) a here-document body naming python3 -", "cat <<'EOF'\npython3 -\nEOF"),
+    ("(spg-a9) a script after an option value", "python3 -W ignore f.py"),
+    ("(spg-a10) a comment holding a separator", "echo ok # step; python3 -"),
+    ("(spg-a11) an option CPython rejects", "python3 -Z -"),
+    ("(spg-a12) a long option CPython rejects", "python3 --frob -"),
+    ("(spg-a13) a # standing apart after a substitution", "echo $(echo a) #; python3 -"))
+# Real-bash oracle rows: (label, command, whether the hook denies, whether bash blocks). bash runs each with
+# its standard input an open pipe that nothing writes or closes, as the session's input is; a blocking row
+# must be denied, and a disclosed over-deny denies a row bash does not block.
+_SPG_ORACLE_ROWS = (
+    ("(spg-o1) bare python3 -", "python3 -", True, True),
+    ("(spg-o2) python3 -I -", "python3 -I -", True, True),
+    ("(spg-o3) with script arguments", "python3 - a b", True, True),
+    ("(spg-o4) after a list separator", "echo a; python3 -", True, True),
+    ("(spg-o5) an unfed { } group", "{ cd /; python3 -; }", True, True),
+    ("(spg-o6) an unfed subshell", "(cd /; python3 -)", True, True),
+    ("(spg-o7) inside an if", "if true; then python3 -; fi", True, True),
+    ("(spg-o8) a self-input fd", "python3 - <&0", True, True),
+    ("(spg-o9) a self-input path", "python3 - < /dev/stdin", True, True),
+    ("(spg-o10) a process substitution argument", "python3 - <(echo x)", True, True),
+    ("(spg-o11) a pipeline", "echo \"print('fed')\" | python3 -", False, False),
+    ("(spg-o12) a < redirect", "python3 - < /dev/null", False, False),
+    ("(spg-o13) a 0< redirect", "python3 - 0< /dev/null", False, False),
+    ("(spg-o14) a here-document", "python3 - <<'EOF'\nprint('fed')\nEOF", False, False),
+    ("(spg-o15) a here-string", "python3 - <<< \"print('fed')\"", False, False),
+    ("(spg-o16) a background command (over-deny)", "python3 - &", True, False),
+    ("(spg-o17) a pipe into a group (over-deny)", "echo \"print('fed')\" | (python3 -)", True, False),
+    ("(spg-o18) a |& pipeline (over-deny)", "echo \"print('fed')\" |& python3 -", True, False),
+    ("(spg-o19) a group fed by a redirect (over-deny)", "{ python3 -; } < /dev/null", True, False),
+    ("(spg-o20) a newline after the pipe (over-deny)", "echo \"print('fed')\" |\npython3 -", True, False),
+    ("(spg-o21) blank lines and a comment after a pipe (over-deny)",
+     "echo \"print('fed')\" |  # feed it\n\n    python3 -", True, False),
+    ("(spg-o22) a newline after a pipe, then an unfed line", "echo \"print('fed')\" |\npython3 -\npython3 -",
+     True, True),
+    ("(spg-o23) a pipe into a ( ) group, python not first (over-deny)",
+     "echo \"print('fed')\" | (cd /; python3 -)", True, False),
+    ("(spg-o24) a pipe into a { } group, python not first (over-deny)",
+     "echo \"print('fed')\" | { cd /; python3 -; }", True, False),
+    ("(spg-o25) a pipe into a group after && (over-deny)", "echo \"print('fed')\" | (cd / && python3 -)",
+     True, False),
+    ("(spg-o26) a command after a fed group closes", "echo \"print('fed')\" | (cd /); python3 -", True, True),
+    ("(spg-o27) a comment holding a separator", "echo ok # step; python3 -", False, False),
+    ("(spg-o28) apostrophes inside comments", "echo ok # it's here\npython3 -\n# that's all", True, True),
+    ("(spg-o29) a background group (over-deny)", "(cd /; python3 -) &", True, False),
+    ("(spg-o30) a process substitution fed by its writer (over-deny)", "echo \"print('fed')\" > >(python3 -)",
+     True, False),
+    ("(spg-o31) fd 00", "python3 - 00< /dev/null", False, False),
+    ("(spg-o32) 0<&0", "python3 - 0<&0", True, True),
+    ("(spg-o33) an arithmetic shift", "x=$((1<<2))\npython3 -", True, True),
+    ("(spg-o34) timeout infinity", "timeout infinity python3 -", True, True),
+    ("(spg-o35) an option CPython rejects", "python3 -Z -", False, False),
+    ("(spg-o36) a long option CPython rejects", "python3 --frob -", False, False),
+    ("(spg-o37) a non-ASCII digit before <", "python3 - ٠< /dev/null", False, False),
+    ("(spg-o38) a background pipeline holds the session input", "python3 - | cat & wait", True, True),
+    ("(spg-o39) a fed background pipeline (over-deny)", "echo \"print('fed')\" | python3 - | cat & wait",
+     True, False),
+    ("(spg-o40) an & inside a ( ) group after a hit", "python3 - && (true &)", True, True),
+    ("(spg-o41) a fed hit before an & inside a group (over-deny)", "echo \"print('fed')\" | python3 - && (true &)",
+     True, False),
+    ("(spg-o42) an & inside a second group after a group hit", "(python3 -) && (true &)", True, True),
+    ("(spg-o43) a substitution expanded before the background redirect", "x=$(python3 -) &", True, True),
+    ("(spg-o44) a fed substitution in a background command (over-deny)",
+     "x=$(echo \"print('fed')\" | python3 -) &", True, False),
+    ("(spg-o45) a process substitution in a background command", "cat <(python3 -) &", True, True),
+    ("(spg-o46) a subshell in a $(( whose closers stand apart", "x=$((python3 -) )", True, True),
+    ("(spg-o47) a fed subshell in a $(( whose closers stand apart (over-deny)",
+     "x=$((echo \"print('fed')\" | python3 -) )", True, False),
+    ("(spg-o48) a literal ( inside ${ } in a fed group", "echo x | (echo ${v:-(}); python3 -", True, True),
+    ("(spg-o49) a fed hit after a literal ( inside ${ } (over-deny)",
+     "echo \"print('fed')\" | (echo ${v:-(}; python3 -)", True, False),
+    ("(spg-o50) a # right after a closing substitution", "echo $(echo a)#; python3 -", True, True),
+    ("(spg-o51) a # standing apart after a substitution", "echo $(echo a) #; python3 -", False, False),
+    ("(spg-o52) a substitution inside ${ }", "echo ${v:-$(python3 -)}", True, True),
+    ("(spg-o53) a fed substitution inside ${ } (over-deny)", "echo ${v:-$(echo \"print('fed')\" | python3 -)}",
+     True, False),
+    ("(spg-o54) a substitution inside ${ } in an assignment", "x=${v:-$(python3 -)}", True, True),
+    ("(spg-o55) a fed substitution inside ${ } in an assignment (over-deny)",
+     "x=${v:-$(echo \"print('fed')\" | python3 -)}", True, False),
+    ("(spg-o56) a process substitution inside ${ }", "echo ${v:-<(python3 -)}", True, True),
+    ("(spg-o57) a fed process substitution inside ${ } (over-deny)",
+     "echo ${v:-<(echo \"print('fed')\" | python3 -)}", True, False),
+    ("(spg-o58) a backquote substitution inside ${ }", "echo ${v:-`python3 -`}", True, True),
+    ("(spg-o59) a $$ before a literal { then a substitution", "echo $${ $(python3 -)", True, True),
+    ("(spg-o60) a $$ before a literal { then a separator", "echo $${ ; python3 -", True, True),
+    ("(spg-o61) a fed group reading a $$ and its closing ) (over-deny)",
+     "echo \"print('fed')\" | (echo $(echo $${); python3 -)", True, False),
+    ("(spg-o62) an & inside a pattern substitution", "python3 - ${q//&/+}", True, True),
+    ("(spg-o63) a fed hit with an & inside a pattern substitution (over-deny)",
+     "echo \"print('fed')\" | python3 - ${q//&/+}", True, False),
+    ("(spg-o64) an & inside ${ } after a hit", "python3 - && echo ${v:-&}", True, True),
+    ("(spg-o65) a fed hit before an & inside ${ } (over-deny)", "echo \"print('fed')\" | python3 - && echo ${v:-&}",
+     True, False),
+    ("(spg-o66) a < inside ${ }", "python3 - ${v:-<x}", True, True),
+    ("(spg-o67) a fed hit with a < inside ${ } (over-deny)", "echo \"print('fed')\" | python3 - ${v:-<x}",
+     True, False),
+    ("(spg-o68) job control on before a background hit", "set -m; python3 - & wait", True, True),
+    ("(spg-o69) job control on by option name", "set -o monitor; python3 - & wait", True, True),
+    ("(spg-o70) job control turned back off (over-deny)", "set -m; set +m; python3 - & wait", True, False),
+    ("(spg-o71) a fed background hit under job control (over-deny)",
+     "set -m; echo \"print('fed')\" | python3 - & wait", True, False),
+    ("(spg-o72) job control off again by option name (over-deny)",
+     "set -o monitor; set +o monitor; python3 - & wait", True, False),
+    ("(spg-o73) a duplicated fd after exec opens it (over-deny)", "exec 3< /dev/null; python3 - <&3", True, False),
+    ("(spg-o74) a redirect does not pull its target into the run", "python3 2>/dev/null -", True, True),
+    ("(spg-o75) a stdout redirect before a lone -", "python3 >/dev/null -", True, True),
+    ("(spg-o76) a self-input fd dup before a lone -", "python3 <&0 -", True, True),
+    ("(spg-o77) a comment after a subshell, not glue", "(true)#<<true\npython3 -\ntrue", True, True),
+    ("(spg-o78) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue", True, True),
+    ("(spg-o79) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`", True, True),
+    ("(spg-o80) a producer that itself reads stdin", "python3 - | python3 -", True, True),
+    ("(spg-o81) an ANSI-C quote does not swallow the next command", "echo $'\\''\npython3 -\necho '", True, True),
+    ("(spg-o82) a # glued after a process substitution )", "echo <(true)#; python3 -", True, True),
+    ("(spg-o83) a # glued after an array assignment )", "a=(x)#; python3 -", True, True),
+    ("(spg-o84) a # glued after an array-append )", "a+=(x)#; python3 -", True, True),
+    ("(spg-o85) a # glued after a declare -a array )", "declare -a a=(x)#; python3 -", True, True),
+    ("(spg-o86) a # glued after the real ) of a $( ) holding a case", "echo $(case x in x) true;; esac)#; python3 -",
+     True, True),
+    ("(spg-o87) a # the scan meets at a case pattern ), comment reading", "echo $(case x in x)#<<E\npython3 -\nE\n;; esac)",
+     True, True),
+    ("(spg-o88) a named-descriptor output redirect prefix", "python3 {fd}>/dev/null -", True, True),
+    ("(spg-o89) a named-descriptor input redirect prefix", "python3 {fd}< /dev/null -", True, True),
+    # A {name} descriptor feed opens a new descriptor, not fd 0, so bash runs python3 - with its program read
+    # from the unfed session stdin and blocks; the hook denies, the feed being outside the three fed shapes.
+    ("(spg-o90) a named-descriptor here-document feed", "python3 - {fd}<<E\nx\nE", True, True),
+    ("(spg-o91) a named-descriptor here-string feed", "python3 - {fd}<<<x", True, True),
+    ("(spg-o92) a named-descriptor input feed, program from stdin", "python3 - {fd}</dev/null", True, True),
+    ("(spg-o93) a named-descriptor input feed before python3 -", "{fd}</dev/null python3 -", True, True))
+_SPG_ORACLE_WAIT = 4
+
+
+def _spg_flips():
+    """Each flip name mapped to the aiqt_hooks attributes that break it: the three shape matchers (break one
+    and its fed rows deny), the default (make the invocation scan find nothing, so every deny and over-deny row
+    allows), the glue reading (make _spg_glue_reading_range defer no tail, which reverts a '#' after a ')' or a
+    backquote to a comment-only reading, so every deny row whose invocation survives only because the glue
+    reading reads the rest of that line allows), and the comment reading (make _spg_comment_reading_tail stop the
+    scan at the current physical line, so every deny row whose invocation survives only because the comment
+    reading reaches a LATER line allows)."""
+    return {
+        "pipeline": {"_spg_shape_pipeline": lambda left, right: False},
+        "redirect": {"_spg_shape_redirect": lambda cleaned: False},
+        "heredoc": {"_spg_shape_heredoc": lambda cleaned: False},
+        "default": {"_spg_invocation_present": lambda command: False},
+        "glue": {"_spg_glue_reading_range": lambda command, start, line_end: None},
+        "comment": {"_spg_comment_reading_tail": lambda command, start, line_end, hi: hi}}
+
+
+# Reading-flip rows: each deny row paired with the reading flip (_spg_flips) that turns it red by removing one of
+# the two readings of a '#' bash's grammar leaves ambiguous.
+#   - glue: the invocation lives only on the rest of the line after a '#' bash keeps as glue; with the glue
+#     reading deferring no tail the '#' is read as a comment, its line tail is dropped, and the python3 - after
+#     the '; ' is no longer found.
+#   - comment: the invocation lives only on a LATER line past a '#' bash keeps as a comment; with the comment
+#     reading stopped at the current line the continued scan never reaches that line, so the python3 - is no
+#     longer found.
+# (d78 and d79 depend on the {name} redirect regex, not either reading, so they go red only under the default
+# flip.)
+_SPG_READING_FLIP_ROWS = (
+    ("glue", "(spg-d54) a # right after a closing substitution", "echo $(echo a)#; python3 -"),
+    ("glue", "(spg-d55) a # right after a closing backquote", "echo `echo a`#; python3 -"),
+    ("glue", "(spg-d56) a # right after an arithmetic $(( ))", "echo $((1))#; python3 -"),
+    ("glue", "(spg-d72) a # glued after a process substitution )", "echo <(true)#; python3 -"),
+    ("glue", "(spg-d73) a # glued after an array assignment )", "a=(x)#; python3 -"),
+    ("glue", "(spg-d74) a # glued after an array-append )", "a+=(x)#; python3 -"),
+    ("glue", "(spg-d75) a # glued after a declare -a array )", "declare -a a=(x)#; python3 -"),
+    ("glue", "(spg-d76) a # glued after the real ) of a $( ) holding a case", "echo $(case x in x) true;; esac)#; python3 -"),
+    ("comment", "(spg-d67) a comment after a subshell, not glue", "(true)#<<true\npython3 -\ntrue"),
+    ("comment", "(spg-d68) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue"),
+    ("comment", "(spg-d69) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`"),
+    ("comment", "(spg-d77) a # the scan meets at a case pattern ), comment reading", "echo $(case x in x)#<<E\npython3 -\nE\n;; esac)"))
+
+
+def _spg_oracle(failures, handler):
+    """Run each _SPG_ORACLE_ROWS command under real bash, standard input an open pipe that is never written,
+    in its own session under _SPG_ORACLE_WAIT seconds; a run still waiting then is killed by its process group
+    and counts as blocked. The pipe's write end is closed right after the kill so a surviving job reads end of
+    file and exits instead of holding the output pipes open. Each row names whether the hook denies and whether
+    bash blocks: the hook decision must match, bash must block as stated, and every blocking row must deny (a
+    disclosed over-deny denies a row bash does not block)."""
+    if shutil.which("bash") is None or shutil.which("python3") is None:
+        failures.append("(spg-oracle) the real-bash oracle needs bash and python3 on PATH")
+        return
+    for label, command, hook_denies, bash_blocks in _SPG_ORACLE_ROWS:
+        denied = _decision(handler, command) == "deny"
+        read_end, write_end = os.pipe()
+        try:
+            try:
+                proc = subprocess.Popen(["bash", "-c", command], stdin=read_end, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, start_new_session=True)
+            finally:
+                os.close(read_end)
+            try:
+                proc.communicate(timeout=_SPG_ORACLE_WAIT)
+                blocked = False
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                fd, write_end = write_end, -1
+                os.close(fd)
+                proc.communicate()
+                blocked = True
+        finally:
+            if write_end != -1:
+                os.close(write_end)
+        if blocked != bash_blocks:
+            failures.append("{}: real bash blocked {} (expected {}), exit {}".format(
+                label, blocked, bash_blocks, proc.returncode))
+        if denied != hook_denies:
+            failures.append("{}: hook denied {} (expected {})".format(label, denied, hook_denies))
+        if bash_blocks and not denied:
+            failures.append("{}: a command that blocks real bash must be denied".format(label))
+
+
+def _test_python_stdin_program(failures):
+    """python_stdin_program rows; only the real-bash oracle rows (_spg_oracle) execute a command. Each deny and
+    over-deny row denies; each fed and allow row allows. Breaking a shape matcher turns its fed rows red; making
+    the invocation scan find nothing turns the deny and over-deny rows red."""
+    handler = aiqt_hooks.python_stdin_program
+    _spg_oracle(failures, handler)
+    for label, command in _SPG_DENY_ROWS + _SPG_OVERDENY_ROWS:
+        got = _decision(handler, command)
+        if got != "deny":
+            failures.append("{}: expected deny, got {}".format(label, got))
+    for label, command, _flip in _SPG_FED_ROWS:
+        got = _decision(handler, command)
+        if got != "allow":
+            failures.append("{}: expected silent allow, got {}".format(label, got))
+    for label, command in _SPG_ALLOW_ROWS:
+        got = _decision(handler, command)
+        if got != "allow":
+            failures.append("{}: expected silent allow, got {}".format(label, got))
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "tool_input": {"command": "python3 -I -"}})
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    if ("pipeline" not in reason or "here-document" not in reason or "FILE" not in reason
+            or "'python3 -I -'" not in reason):
+        failures.append("(spg-reason) the deny reason must name the command and the three fed shapes (a "
+                        "pipeline, a FILE redirect, a here-document), got {!r}".format(reason))
+    flips = _spg_flips()
+    used = {flip for _label, _command, flip in _SPG_FED_ROWS}
+    used_reading = {flip for flip, _label, _command in _SPG_READING_FLIP_ROWS}
+    if used | used_reading | {"default"} != set(flips):
+        failures.append("(spg-flip-names) flips used by rows {} plus default differ from flips defined {}"
+                        .format(sorted(used | used_reading), sorted(flips)))
+    for shape in ("pipeline", "redirect", "heredoc"):
+        patches = flips[shape]
+        saved = {name: getattr(aiqt_hooks, name) for name in patches}
+        for name, value in patches.items():
+            setattr(aiqt_hooks, name, value)
+        try:
+            flipped = [(label, _decision(handler, command))
+                       for label, command, row_flip in _SPG_FED_ROWS if row_flip == shape]
+        finally:
+            for name, value in saved.items():
+                setattr(aiqt_hooks, name, value)
+        for label, got in flipped:
+            if got != "deny":
+                failures.append("{}: with the {} matcher broken this fed row must go red (deny), got {}"
+                                .format(label, shape, got))
+    patches = flips["default"]
+    saved = {name: getattr(aiqt_hooks, name) for name in patches}
+    for name, value in patches.items():
+        setattr(aiqt_hooks, name, value)
+    try:
+        defaulted = [(label, _decision(handler, command))
+                     for label, command in _SPG_DENY_ROWS + _SPG_OVERDENY_ROWS]
+    finally:
+        for name, value in saved.items():
+            setattr(aiqt_hooks, name, value)
+    for label, got in defaulted:
+        if got != "allow":
+            failures.append("{}: with the default made allow this deny row must go red (allow), got {}"
+                            .format(label, got))
+    for flip_name, label, command in _SPG_READING_FLIP_ROWS:
+        patches = flips[flip_name]
+        saved = {name: getattr(aiqt_hooks, name) for name in patches}
+        for name, value in patches.items():
+            setattr(aiqt_hooks, name, value)
+        try:
+            got = _decision(handler, command)
+        finally:
+            for name, value in saved.items():
+                setattr(aiqt_hooks, name, value)
+        if got != "allow":
+            failures.append("{}: with the {} reading disabled this deny row must go red (allow), got {}"
+                            .format(label, flip_name, got))
+    for label, data in (
+            ("(spg-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
+                                            "tool_input": {"command": "python3 -"}}),
+            ("(spg-m2) None tool_name", {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": None,
+                                         "tool_input": {"command": "python3 -"}})):
+        if handler(data) != aiqt_hooks._deny_missing_tool_name("trkasy"):
+            failures.append("{}: expected the shared missing-tool deny".format(label))
+    for tool_input in (None, [], {}, {"command": None}, {"command": 42}):
+        code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                             "tool_input": tool_input})
+        if _reduce_result(code, stdout_obj) != "deny":
+            failures.append("(spg-unreadable) a non-string command {!r} must deny fail-safe".format(tool_input))
+    if _decision(handler, "python3 -", tool="Read") != "allow":
+        failures.append("(spg-other-tool) a different tool must silently allow")
+    code, stdout_obj, stderr = handler({"hook_event_name": "Stop", "tool_name": "Bash",
+                                        "tool_input": {"command": "python3 -"}})
+    if not (code == 2 and stdout_obj is None and "python_stdin_program wired to unexpected event" in (stderr or "")):
+        failures.append("(spg-event) an unexpected event must use the sibling hard-block contract")
+    if (aiqt_hooks.HANDLERS.get("python_stdin_program") is not handler or
+            aiqt_hooks.HANDLER_EVENT.get("python_stdin_program") != aiqt_hooks.PRETOOL):
+        failures.append("(spg-wiring) python_stdin_program handler/event wiring is missing or wrong")
+
+
 # === PreToolUse deadline posture ======================================================================
 # main() runs every PreToolUse mode that is not fail-open inside one aiqt_hooks._DeadlineWindow of
 # PRETOOL_BUDGET_SECONDS and fails closed (exit 2) when its check has not decided by then, and the raw
@@ -6380,6 +6862,19 @@ _DEADLINE_SHAPES = {
     "pgrep_distinct": lambda n, base: ("Bash", {"command": "".join(
         "pgrep -x p{:07d}; ".format(k) for k in range(n // 19))}),
     "pgrep_self_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "pgrep -f job7 || run job7")}),
+    # python_stdin_program: many here-documents (each body skipped; the run is several commands, so outside
+    # the single fed shape and denied), long runs of pipes and of an unbalanced quote, and an unfed python3 -
+    # after a long prefix.
+    "stdin_py_heredocs": lambda n, base: ("Bash", {"command": _repeat("python3 - <<E\nx\nE\n", n)}),
+    "stdin_py_pipes": lambda n, base: ("Bash", {"command": _repeat("x | ", n, "python3 -")}),
+    "stdin_py_open_quote": lambda n, base: ("Bash", {"command": "'" + _repeat("a ", n - 1)}),
+    "stdin_py_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "python3 -")}),
+    # A run of ')#' pairs, each '#' directly after a ')': every one is a glue '#', so the two-reading union
+    # reads each one. The whole command is one physical line (no newline), so the comment reading drops to its
+    # end and the glue reading of each '#' is deferred onto a work list of index ranges; a reading that recursed
+    # one level per pair (and copied the line tail at each level) exhausted the stack here. No invocation
+    # anywhere, so the decision is allow. 32,768 pairs at 64 KB, 131,072 at 256 KB and 524,288 at 1 MB.
+    "stdin_py_glue_run": lambda n, base: ("Bash", {"command": _repeat(")#", n)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -6460,6 +6955,8 @@ _DEADLINE_CASES = {
     "orch_untracked_wait_loop": ("git_words", "nest_cmdsubst"),
     "orch_yield_tool": ("wakeup_long",),
     "pgrep_self_match": ("git_words", "nest_parens", "pgrep_distinct", "pgrep_self_after"),
+    "python_stdin_program": ("nest_parens", "stdin_py_heredocs", "stdin_py_pipes", "stdin_py_open_quote",
+                             "stdin_py_after", "stdin_py_glue_run"),
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
@@ -6481,8 +6978,9 @@ _DEADLINE_DENY_CASES = frozenset((
     ("commit_msg_subst", "subst_after"), ("diff_source_pretool", "diff_after"),
     ("gate_weakening", "noverify_after"), ("gate_weakening", "ansi_c_noverify_after"),
     ("git_explicit_binding", "breadth_push_after_unbal"), ("pgrep_self_match", "pgrep_self_after"),
-    ("protected_line", "push_force_after"), ("protected_line", "mirror_cfg_run_after"),
-    ("protected_line", "procsubst_run_after")))
+    ("python_stdin_program", "stdin_py_after"), ("python_stdin_program", "stdin_py_heredocs"),
+    ("protected_line", "push_force_after"),
+    ("protected_line", "mirror_cfg_run_after"), ("protected_line", "procsubst_run_after")))
 # The (handler, shape) cases whose note must still arrive, each within its bound. For inline_errexit: on
 # errexit_note_after errexit is on for the whole long prefix and the hazard is at its end, and on
 # errexit_unread_after the set -e is in the rest past the long prefix that the lexer did not read. For
@@ -6511,7 +7009,8 @@ _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs"),
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
-    ("pgrep_self_match", "pgrep_distinct")))
+    ("pgrep_self_match", "pgrep_distinct"),
+    ("python_stdin_program", "stdin_py_glue_run")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
@@ -29913,6 +30412,7 @@ def _main_isolated(monitor):
         _test_git_stash_ref(failures)
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
+        _test_python_stdin_program(failures)
         _test_trkasy_no_amp(failures, tmp)
         _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)

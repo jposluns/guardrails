@@ -19368,6 +19368,446 @@ def pgrep_self_match(data):
         "completion file captured at launch.")
 
 
+# --- trkasy: a python interpreter told to read its program from a stdin nothing feeds ----------------
+# python3 - (or python3 -I -) reads its program from standard input until end of file. With no
+# here-document, here-string, < redirection or pipe feeding it, that input is the session's own, which the
+# Bash tool holds open and never closes, so the call waits until its timeout instead of running anything.
+#
+# This guard is FAIL-CLOSED by inversion, not a grammar predictor. A command that carries a
+# python-program-from-stdin invocation ANYWHERE (_spg_invocation_present, a conservative scan that errs
+# toward finding one) is DENIED unless the WHOLE command is one of a small, exactly defined allowlist of fed
+# shapes (_spg_allowed): (1) PRODUCER | python3 - [args], one pipeline of exactly two simple commands, no
+# other operator anywhere, PRODUCER a plain command; (2) python3 - [args] < FILE or 0< FILE, FILE a plain
+# word that is not the session's own input (/dev/stdin, /dev/fd/0, /proc/self/fd/0, <&0); (3) python3 -
+# [args] fed by a <<, <<- here-document or a <<< here-string on fd 0, with nothing else beyond the body.
+# Anything else that carries such an invocation -- a $( ), backquote, process substitution, ${ }, $'...', a
+# compound or grouped command, a background &, set, eval, a function, a second command or an extra redirect
+# -- is DENIED, over-denying some genuinely fed forms (disclosed in the hook manifest residue). The scan is
+# lexical over the raw text: a quoted string is one word, a comment and a here-document body hold no command.
+_STDIN_PY_TOKEN_RE = re.compile(
+    r"(?P<space>[ \t\r\f\v]+|\\\n)"
+    r"|(?P<redir>(?:\{[A-Za-z_]\w*\}|\d*)(?:&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||[<>]))"
+    r"|(?P<op>\|&|\|\||&&|;;|[|&;()`\n])"
+    r"|(?P<comment>#[^\n]*)"
+    r"|(?P<word>(?:\$'(?:[^'\\]|\\.)*'|[^\s<>|&;()`'\"\\]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)"
+    r"|(?P<stray>.)", re.S | re.ASCII)
+# Redirect targets that are the session's own input, so a < redirect to one feeds nothing.
+_STDIN_PY_SELF_PATHS = frozenset(("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"))
+_STDIN_PY_NAME_RE = re.compile(r"python(?:[0-9]+(?:\.[0-9]+)?t?)?(?:-dbg)?")
+# Wrappers read past to the interpreter, with their options, a duration word and any word after an option.
+_STDIN_PY_WRAPPERS = frozenset(("env", "timeout", "command", "exec", "nohup", "nice", "stdbuf", "time", "sudo",
+                                "setsid", "ionice", "doas"))
+_STDIN_PY_DURATIONS = frozenset(("inf", "infinity"))
+# CPython options: the letters that take a value (glued or as the next word), and the letters whose value is
+# the program (-c, -m), so no program is read from standard input.
+_STDIN_PY_VALUE_LETTERS = frozenset("WX")
+_STDIN_PY_PROGRAM_LETTERS = frozenset("cm")
+_STDIN_PY_EXITING = frozenset(("-h", "-?", "--help", "-V", "--version", "--help-env", "--help-xoptions",
+                               "--help-all"))
+# Every option letter some CPython 2 or 3 accepts, and the long options it accepts besides the exiting ones;
+# any other option makes CPython exit with status 2 before it reads a program.
+_STDIN_PY_LETTERS = frozenset("bBcdEhiIJmOPqQRsStUuvVWxX3?")
+_STDIN_PY_LONG_OPTIONS = frozenset(("--check-hash-based-pycs",))
+
+
+def _stdin_py_rejected(word):
+    """Whether the option word is one CPython rejects at once (an unknown long option, or an unknown letter
+    before any letter whose value ends the cluster)."""
+    if word.startswith("--"):
+        return word.split("=", 1)[0] not in _STDIN_PY_LONG_OPTIONS
+    for letter in word[1:]:
+        if letter in _STDIN_PY_PROGRAM_LETTERS or letter in _STDIN_PY_VALUE_LETTERS:
+            return False
+        if letter not in _STDIN_PY_LETTERS:
+            return True
+    return False
+
+
+def _stdin_py_fd0(prefix):
+    """Whether a redirect's file descriptor digits (empty when implied) name fd 0 (0, 00 and so on)."""
+    return not prefix.strip("0")
+
+
+def _spg_redir_parts(text):
+    """A redirect token split into its leading prefix and its operator. The prefix is either a {name}
+    descriptor-variable that bash opens and assigns (part of the redirect, not a word of the run) or the
+    explicit fd digits (empty when implied); the operator is the rest."""
+    if text.startswith("{"):
+        brace = text.index("}") + 1
+        return text[:brace], text[brace:]
+    op = text.lstrip("0123456789")
+    return text[:len(text) - len(op)], op
+
+
+def _spg_glue_reading_range(command, start, line_end):
+    """The GLUE reading of a '#' at command[start] that directly follows a ')' or a backquote: bash may keep
+    such a '#' as a literal part of the preceding word rather than begin a comment, in which case the rest of
+    that physical line (command[start + 1:line_end]) is still command text. Return the (lo, hi) index range of
+    that tail, which the scan driver reads as its own command; returning None drops the glue reading."""
+    return (start + 1, line_end)
+
+
+def _spg_comment_reading_tail(command, start, line_end, hi):
+    """The COMMENT reading of such a '#': drop the rest of that physical line and report the index the scan
+    resumes from (the line's end, line_end), so an invocation on a LATER line is still reached. The dropped tail
+    opens no here-document or quote of its own, so it can never skip or swallow a later line."""
+    return line_end
+
+
+def _spg_invocation_present(command):
+    """Whether any simple-command word run in the raw text runs python with program `-` (_stdin_py_reads_stdin).
+    Conservative, erring toward finding one. The scan reads the command once (_spg_scan_range) under the COMMENT
+    reading of every glue '#'; each such '#' also defers its GLUE reading -- the rest of that physical line, read
+    as its own command -- onto a work list of index ranges that this driver reads in turn. The union of the two
+    readings is reported, True as soon as any range finds an invocation. The work list holds index ranges into
+    the one command string (no string copies) and the scan never recurses, so recursion depth is constant and the
+    extra memory is linear in the number of glue '#'s, bounded by the command length; the whole scan is linear in
+    the command, each byte read under the comment reading or in exactly one glue tail. A glue tail is one physical
+    line, so its range carries its own end and a run of glue '#'s on it needs no per-'#' newline search."""
+    work = [(0, len(command), False)]
+    while work:
+        lo, hi, single_line = work.pop()
+        if _spg_scan_range(command, lo, hi, work, single_line):
+            return True
+    return False
+
+
+def _spg_scan_range(command, lo, hi, work, single_line):
+    """Read command[lo:hi] as its own command and report whether a python-program-from-stdin invocation runs in
+    it under the COMMENT reading of every glue '#'; each glue '#' appends its GLUE-reading range onto `work` for
+    the driver (_spg_invocation_present) to read in turn, so the two-reading union is taken iteratively with
+    constant recursion depth and no string copies.
+
+    Conservative, erring toward finding one: every operator, redirect, group boundary and substitution opener
+    ends the current word run and each run is tested, so an invocation inside a $( ), backquote, ${ } or
+    process substitution is still found. A here-document body and a comment hold no command and are skipped, and
+    a quoted string (including an ANSI-C $'...' quote) stays one de-quoted word, so python named only as an
+    argument (echo python3 -), in a quoted message, or in a here-document body is not found. A redirect's target
+    word is dropped from the run, never read as a script operand (python3 2>/dev/null - reads program from
+    stdin), and a redirect's {name} descriptor prefix is part of the redirect, not a word of the run
+    (python3 {fd}>/dev/null - reads program from stdin, and python3 - {fd}<f feeds a named fd, never stdin). A <<
+    inside an arithmetic (( )) or $(( )) is a shift, so it opens no here-document and hides no line.
+
+    A '#' that directly follows a ')' or a backquote is the one place the scan cannot tell bash's reading: bash
+    keeps it as literal glue on the preceding word after a word-building ')' (a $( ), a <( )/>( ) process
+    substitution, an array a=( )/a+=( ), or the real ')' of a $( ) whose inner case pattern's ')' the scan
+    cannot match) but begins a comment after a command ')' (a subshell, an arithmetic (( )) command) or an
+    opening backquote. Rather than guess, the union reports an invocation if EITHER reading finds one:
+      - GLUE reading: _spg_glue_reading_range gives the rest of that physical line (command[start + 1:line_end]),
+        appended to `work` and read as its own command, so a '; python3 -' kept after the '#' is found.
+      - COMMENT reading: _spg_comment_reading_tail drops the rest of that physical line and the scan continues
+        from the line's end, so a python3 - on a LATER line is found; the dropped tail opens no here-document and
+        no quote, so a '<<' or a quote that bash never read (it was inside the comment) can never skip or swallow
+        a later line.
+    This never finds fewer than bash. Where bash keeps the '#' as glue, any invocation it runs on that line is in
+    the tail the GLUE reading reads, and any invocation on a later line is reached by the continued scan, which
+    reads every later physical line as command text (it hides a later line only through a here-document or quote
+    opened by text before the '#', which bash, also reading the '#' as glue, opens too). Where bash reads the '#'
+    as a comment, bash drops that same line, and the COMMENT reading matches it while opening no construct of its
+    own, so it keeps every later line bash keeps. Each glue tail is a strictly shorter, newline-free sub-range, so
+    the deferred ranges are finite and the union terminates."""
+    i = lo
+    words, bodies, pending = [], [], None
+    depth, arith = 0, []
+    while i < hi:
+        start = i
+        # A '#' at a token boundary is a comment opener; when it directly follows a ')' or a backquote it is the
+        # glue candidate. Handle that case HERE, before matching the (line-long) comment token, so a run of such
+        # '#'s on one physical line costs O(1) each (constant depth, no per-'#' newline search) rather than a
+        # fresh end-of-line scan apiece. A glue tail is one physical line, so its range's end (hi) is its line
+        # end; only the top-level, multi-line range looks for the newline.
+        if command[start] == "#" and start > lo and command[start - 1] in (")", "`"):
+            if single_line:
+                line_end = hi
+            else:
+                line_end = command.find("\n", start)
+                line_end = hi if line_end == -1 or line_end > hi else line_end
+            glue = _spg_glue_reading_range(command, start, line_end)
+            if glue is not None:
+                work.append(glue + (True,))   # GLUE reading, one physical line, read by the driver
+            i = _spg_comment_reading_tail(command, start, line_end, hi)   # COMMENT reading: drop this line
+            continue
+        match = _STDIN_PY_TOKEN_RE.match(command, i, hi)
+        kind, i = match.lastgroup, match.end()
+        if kind == "space" or kind == "comment":
+            continue
+        if kind == "word" or kind == "stray":
+            word = command[start:i].translate(_PSM_UNQUOTE)
+            if pending in ("<<", "<<-"):
+                bodies.append((word, pending == "<<-"))
+            elif pending is None:
+                words.append(word)
+            # else: this word is a redirect's target, not a command word, so it is dropped from the run
+            pending = None
+            continue
+        if kind == "redir":
+            pending = _spg_redir_parts(match.group())[1]
+            if arith and pending in ("<<", "<<-"):
+                pending = None
+            continue
+        if match.group() == "(":
+            depth += 1
+            if command.startswith("(", i):
+                arith.append(depth)
+        elif match.group() == ")":
+            while arith and arith[-1] >= depth:
+                arith.pop()
+            depth = max(depth - 1, 0)
+        if words and _stdin_py_reads_stdin(words):
+            return True
+        words, pending = [], None
+        if match.group() == "\n":
+            for delim, tabs in bodies:
+                while i < hi:
+                    end = command.find("\n", i)
+                    end = hi if end == -1 or end > hi else end
+                    line = command[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if tabs else line) == delim:
+                        break
+            bodies = []
+    return bool(words) and _stdin_py_reads_stdin(words)
+
+
+def _spg_tokens(command):
+    """The raw command tokenized for the allowlist check: a list of (kind, text) with spaces dropped and
+    here-document bodies and delimiters removed; kinds are word (de-quoted), redir, op, comment and stray. A
+    here-document delimiter word is consumed by its << redirect, and its body (from the newline after the
+    redirect to the delimiter line, a leading tab stripped for <<-) is skipped. Returns (tokens, ok); ok is
+    False when a here-document has no delimiter word, so the command cannot be judged a fed shape."""
+    n, i = len(command), 0
+    tokens, bodies, pending = [], [], None
+    while i < n:
+        match = _STDIN_PY_TOKEN_RE.match(command, i)
+        kind, i = match.lastgroup, match.end()
+        if kind == "space":
+            continue
+        text = match.group()
+        if kind == "word":
+            if pending is not None:
+                bodies.append((text.translate(_PSM_UNQUOTE), pending == "<<-"))
+                pending = None
+                continue
+            tokens.append(("word", text.translate(_PSM_UNQUOTE)))
+            continue
+        if kind == "stray":
+            tokens.append(("stray", text))
+            continue
+        if kind == "comment":
+            tokens.append(("comment", text))
+            continue
+        if kind == "redir":
+            op = _spg_redir_parts(text)[1]
+            tokens.append(("redir", text))
+            if op in ("<<", "<<-"):
+                pending = op
+            continue
+        tokens.append(("op", text))
+        if text == "\n" and bodies:
+            for delim, tabs in bodies:
+                while i < n:
+                    end = command.find("\n", i)
+                    end = n if end == -1 else end
+                    line = command[i:end]
+                    i = end + 1
+                    if (line.lstrip("\t") if tabs else line) == delim:
+                        break
+            bodies = []
+    return tokens, pending is None
+
+
+def _spg_parse_cmd(cleaned):
+    """A flat token list with no control operators parsed into (words, redirects), or None on a comment,
+    stray, or a redirect with no target word. redirects is a list of (fd_prefix, op, target); target is the
+    following de-quoted word, None for a << or <<- here-document whose delimiter and body are gone."""
+    words, redirects = [], []
+    i, n = 0, len(cleaned)
+    while i < n:
+        kind, text = cleaned[i]
+        if kind == "word":
+            words.append(text)
+            i += 1
+            continue
+        if kind == "redir":
+            prefix, op = _spg_redir_parts(text)
+            if op in ("<<", "<<-"):
+                redirects.append((prefix, op, None))
+                i += 1
+                continue
+            if i + 1 >= n or cleaned[i + 1][0] != "word":
+                return None
+            redirects.append((prefix, op, cleaned[i + 1][1]))
+            i += 2
+            continue
+        return None
+    return words, redirects
+
+
+def _spg_allowed(command):
+    """Whether the WHOLE command is one of the three fed allowlist shapes. Anything with a comment, a stray
+    character, a group or substitution operator (( ) or a backquote), a control operator other than a single
+    pipe, a second command after a newline, or an unterminated here-document is not an allowed shape."""
+    tokens, ok = _spg_tokens(command)
+    if not ok:
+        return False
+    cleaned, pipe_at, seen_nl = [], None, False
+    for kind, text in tokens:
+        if kind == "comment" or kind == "stray":
+            return False
+        if kind == "word" and "${" in text:
+            return False            # a ${ } parameter expansion is not one of the plain fed shapes; a < or
+                                    # & inside it is not the feed/operator it looks like, so deny fail-closed
+        if kind == "op":
+            if text == "\n":
+                seen_nl = True
+                continue
+            if text != "|" or seen_nl or pipe_at is not None:
+                return False
+            pipe_at = len(cleaned)
+            cleaned.append(("op", "|"))
+            continue
+        if seen_nl:
+            return False
+        cleaned.append((kind, text))
+    if pipe_at is not None:
+        return _spg_shape_pipeline(cleaned[:pipe_at], cleaned[pipe_at + 1:])
+    return _spg_shape_redirect(cleaned) or _spg_shape_heredoc(cleaned)
+
+
+def _spg_shape_pipeline(left, right):
+    """Shape (1): PRODUCER | python3 - [args]. PRODUCER is a plain command (words only, at least one) that does
+    NOT itself read its program from stdin (python3 - | python3 - would leave the producer reading the never-fed
+    session input), and the pipe's second command runs python with program `-` (_stdin_py_reads_stdin) with no
+    redirect."""
+    if not left or any(kind != "word" for kind, _ in left):
+        return False
+    if any(kind != "word" for kind, _ in right):
+        return False
+    if _stdin_py_reads_stdin([text for _, text in left]):
+        return False
+    return _stdin_py_reads_stdin([text for _, text in right])
+
+
+def _spg_shape_redirect(cleaned):
+    """Shape (2): python3 - [args] < FILE (or 0< FILE). Exactly one redirect, an fd-0 < input redirect whose
+    target is a plain word that is not the session's own input, and the words run python with program `-`."""
+    parsed = _spg_parse_cmd(cleaned)
+    if parsed is None:
+        return False
+    words, redirects = parsed
+    if len(redirects) != 1:
+        return False
+    prefix, op, target = redirects[0]
+    if op != "<" or not _stdin_py_fd0(prefix) or target is None:
+        return False
+    if "$" in target or "`" in target or target in _STDIN_PY_SELF_PATHS:
+        return False
+    return _stdin_py_reads_stdin(words)
+
+
+def _spg_shape_heredoc(cleaned):
+    """Shape (3): python3 - [args] with a <<, <<- here-document or a <<< here-string on fd 0 and nothing else.
+    Exactly one redirect, an fd-0 <<, <<- or <<< feed, and the words run python with program `-`."""
+    parsed = _spg_parse_cmd(cleaned)
+    if parsed is None:
+        return False
+    words, redirects = parsed
+    if len(redirects) != 1:
+        return False
+    prefix, op, _target = redirects[0]
+    if op not in ("<<", "<<-", "<<<") or not _stdin_py_fd0(prefix):
+        return False
+    return _stdin_py_reads_stdin(words)
+
+
+def _stdin_py_reads_stdin(words):
+    """Whether the simple command words (de-quoted) run a python interpreter whose program argument is `-`: the
+    command word past leading reserved words, VAR=value words and the wrappers in _STDIN_PY_WRAPPERS (with their
+    options and values) names python, python3 or python3.N (a path ending in one included), and its options are
+    followed by a lone `-`. -c and -m, a script operand, and an option that exits at once read no program from
+    standard input."""
+    wrapped = value = False
+    at = None
+    for k, word in enumerate(words):
+        name = word.rsplit("/", 1)[-1]
+        if _STDIN_PY_NAME_RE.fullmatch(name):
+            at = k
+            break
+        if wrapped and word.startswith("-") and len(word) > 1:
+            value = "=" not in word
+        elif name in _STDIN_PY_WRAPPERS:
+            wrapped, value = True, False
+        elif value or word in _CMTIDN_RESERVED or _ENV_ASSIGN_RE.match(word) or (
+                wrapped and (_PSM_DURATION_RE.fullmatch(word) or word in _STDIN_PY_DURATIONS)):
+            value = False
+        else:
+            return False
+    if at is None:
+        return False
+    rest, i = words[at + 1:], 0
+    while i < len(rest):
+        word = rest[i]
+        i += 1
+        if word == "-":
+            return True
+        if word == "--":
+            return i < len(rest) and rest[i] == "-"
+        if word in _STDIN_PY_EXITING or not word.startswith("-") or _stdin_py_rejected(word):
+            return False
+        if word.startswith("--"):
+            i += 0 if "=" in word or word != "--check-hash-based-pycs" else 1
+            continue
+        for k, letter in enumerate(word[1:], 2):
+            if letter in _STDIN_PY_PROGRAM_LETTERS:
+                return False
+            if letter in _STDIN_PY_VALUE_LETTERS:
+                i += 0 if k < len(word) else 1
+                break
+    return False
+
+
+def python_stdin_program(data):
+    """trkasy (integ/track-launched-work), PreToolUse/Bash. DENY-and-educate, fail-closed by inversion: a
+    command that carries a python-program-from-stdin invocation anywhere (python, python3 or python3.N with
+    program `-`, _spg_invocation_present) is DENIED unless the whole command is one of three fed allowlist
+    shapes (_spg_allowed): a pipeline PRODUCER | python3 - , a redirect python3 - < FILE (FILE not the
+    session's own input), or a python3 - fed by a << here-document or a <<< here-string on fd 0. Everything
+    else that carries such an invocation is denied, over-denying some genuinely fed forms (the residue in the
+    hook manifest discloses them). python3 -c, python3 file.py and the exit-at-once options are allowed as
+    before, by carrying no stdin-program invocation. Hooks never ask. A missing tool_name takes the shared
+    deny and a non-string command denies fail-safe, as the sibling deny hooks do."""
+    if data.get("hook_event_name") != PRETOOL:
+        return _hard_block("aiqt_hooks: python_stdin_program wired to unexpected event {!r}; failing closed"
+                           .format(data.get("hook_event_name")))
+    tool_name = data.get("tool_name")
+    if tool_name is None:
+        return _deny_missing_tool_name("trkasy")
+    if tool_name != "Bash":
+        return _allow()                     # a present-but-different tool is out of scope
+    tool_input = data.get("tool_input")
+    command = tool_input.get("command") if isinstance(tool_input, dict) else None
+    if not isinstance(command, str):
+        return _deny(
+            "AIQT rule trkasy (track-launched-work): the Bash payload carried no readable command string, so "
+            "the stdin program check could not run; it is denied fail-safe. Re-issue a well-formed Bash "
+            "command.",
+            "AIQT guardrail: denied a Bash call with no readable command (rule trkasy, fail-safe).")
+    if not _spg_invocation_present(command):
+        return _allow()
+    if _spg_allowed(command):
+        return _allow()
+    return _deny(
+        "AIQT rule trkasy (track-launched-work): {!r} runs python with its program read from standard input "
+        "(python - or python -I -), and the command is not one of the fed shapes this guard can confirm, so "
+        "if its input is the session's own, which is never closed, the call waits until its timeout instead "
+        "of running. This guard allows only three fed shapes: a pipeline PRODUCER | python3 - , a redirect "
+        "python3 - < FILE (FILE a plain file, not the session's own input), or a python3 - fed by a << "
+        "here-document or a <<< here-string on fd 0. Use one of those, or put the program in a file and run "
+        "python3 FILE.".format(command[:120]),
+        "AIQT guardrail: denied python reading its program from a stdin this guard cannot confirm is fed "
+        "(rule trkasy); use a pipeline, a < FILE redirect or a here-document, or put the program in a file.")
+
+
 # --- secsec: an obvious hardcoded secret in a Write/Edit/MultiEdit/Bash write-form -------------------
 # A COMPENSATING, shift-left control: it does NOT replace the CI secret-scan and gitleaks gates (they
 # remain the real backstop), it moves the same high-signal detection to the moment a secret would be
@@ -37036,6 +37476,7 @@ HANDLERS = {
     "gate_weakening": gate_weakening,
     "commit_msg_subst": commit_msg_subst,
     "pgrep_self_match": pgrep_self_match,
+    "python_stdin_program": python_stdin_program,
     "secrets_shift_left": secrets_shift_left,
     "gensrc_guard": gensrc_guard,
     "write_scope_guard": write_scope_guard,
@@ -37079,6 +37520,7 @@ HANDLER_EVENT = {
     "gate_weakening": PRETOOL,
     "commit_msg_subst": PRETOOL,
     "pgrep_self_match": PRETOOL,
+    "python_stdin_program": PRETOOL,
     "secrets_shift_left": PRETOOL,
     "gensrc_guard": PRETOOL,
     "write_scope_guard": PRETOOL,
