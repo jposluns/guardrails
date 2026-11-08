@@ -339,7 +339,7 @@ def _brief_fixture(base):
 def _manifest_text(brief, brief_sha, families=("alpha", "beta"), critical=False, required=None,
                    version="1", rule=PANEL_RULE, leg_ids=None):
     required_names = list(families) if required is None else list(required)
-    head = ["format-version = {}".format(version), 'round = "round-1"',
+    head = ["format-version = {}".format(version), 'round = "fixture-pass"',
             'revision = "{}"'.format(REV), 'repository = "fixture"', "", "[policy]",
             'rule = "{}"'.format(rule), "critical = {}".format("true" if critical else "false"),
             "required = [{}]".format(", ".join('"{}"'.format(name) for name in required_names))]
