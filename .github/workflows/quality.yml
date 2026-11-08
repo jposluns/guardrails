@@ -470,6 +470,10 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_headers.py
 
+      - name: Site card renderer self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite og-cards-selftest
+
       - name: Render driver behaviour self-test
         shell: bash
         run: python3 -I -B tools/selftest_opf_render.py

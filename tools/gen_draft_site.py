@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the template sites (shared site template, baseline 1.7.0) at each site's root, plus the /draft/
+"""Generate the template sites (shared site template, baseline 1.11.1) at each site's root, plus the /draft/
 placeholder page each keeps (noindex, linking the root).
 
   gen_draft_site.py              write every registered page
@@ -85,8 +85,11 @@ ASSETS = "assets/baseline/"
 # meta that every page carried while staging.
 DRAFT_DIR = "draft/"
 MAX_PAGE_BYTES = 1 << 20
-# The link-preview card each site's pages name as og:image and twitter:image: a PNG under the site's live root
-# (rendered by tools/render_og_cards.py from tools/og-cards/), at the size the link previews ask for.
+# The link-preview card each site's pages name as og:image and twitter:image: the owner-approved PNG under the
+# site's live root (/assets/<site>-og.png, 1200 by 627, from pull request #973), with its alt text. The image and
+# its copy change only on the owner's instruction. Neither tools/render_og_cards.py nor .baseline/build_card.js
+# reproduces it, so neither is run over it without that instruction, and these values are not derived from the
+# card builder's data files.
 CARD = "assets/{}-og.png"
 CARD_WIDTH, CARD_HEIGHT = 1200, 627
 # The light and dark switch (template specification section 7.33): scheme.js loads in the head on every page,
@@ -327,6 +330,11 @@ def _footer(site):
                     '<span class="vh"> (opens in a new tab)</span></a>').format(domain, image, name)
         cards.append('<li class="slice slice-{}">{}</li>'.format(number, link))
     newtab = '<span class="vh"> (opens in a new tab)</span>'
+    # The seventh card (template 1.11.0, specification 7.19): vendorreplies.ai, outside the rainbow cycle,
+    # always last after the 6 rotated cards, with its PNG logo; it is never the current site here.
+    cards.append('<li class="slice slice-vr"><a class="card" href="https://vendorreplies.ai/" target="_blank" '
+                 'rel="noopener noreferrer"><img src="{}" alt=""><span class="cname">VendorReplies<span '
+                 'class="tld">.ai</span></span>{}</a></li>'.format(_asset(site, "logos/vendorreplies.png"), newtab))
     tail = (
         '<li class="tile tile-1"><a class="card" href="https://github.com/jposluns" target="_blank" '
         'rel="noopener noreferrer"><img class="only-light" src="{}" alt=""><img class="only-dark" src="{}" '
@@ -341,7 +349,7 @@ def _footer(site):
            'rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new '
            'tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span>'
            '<span class="post"> Project</span></a></div>')
-    return ('<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project '
+    return ('<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 7 project '
             'sites">{}</ul><ul class="tail" aria-label="Jeff Posluns elsewhere">{}</ul>{}</div></footer>').format(
                 "".join(cards), tail, sig)
 
@@ -1858,7 +1866,13 @@ def _self_test():
                       '<meta name="twitter:card" content="summary_large_image">',
                       '<meta name="twitter:image" content="{}">'.format(card)]
             head = built.split("</head>", 1)[0].split("\n")
-            expect("meta/card-metas " + target, all(head.count(meta) == 1 for meta in wanted), head)
+            # Exactly the owner-approved card metas: each wanted line once, and no other og: or twitter: meta
+            # beside og:description (checked above), so no image type or second alt text the approved cards
+            # do not carry.
+            social = [line for line in head if line.startswith(('<meta property="og:', '<meta name="twitter:'))
+                      and not line.startswith('<meta property="og:description"')]
+            expect("meta/card-metas " + target,
+                   all(head.count(meta) == 1 for meta in wanted) and sorted(social) == sorted(wanted), head)
     expect("meta/card-url-home", '<meta property="og:url" content="https://opfiles.ai/">'
            in live_outputs["opf/site/index.html"], live_outputs["opf/site/index.html"][:2000])
     expect("meta/card-url-staged", '<meta property="og:url" content="https://aiqt.ai/draft/install/">'
@@ -1880,6 +1894,10 @@ def _self_test():
         '<p class="vh" id="copy-status" role="status" aria-live="polite"></p>\n</body>\n</html>\n'))
     slices = re.findall(r'<li class="slice slice-(\d)">', page)
     expect("footer/aiqt-first-cycle", slices == ["5", "6", "1", "2", "3", "4"], slices)
+    expect("footer/seventh-card-last", re.findall(r'<li class="slice slice-(\w+)">', page)[-1:] == ["vr"]
+           and page.count('<li class="slice slice-vr">') == 1
+           and '<img src="/draft/assets/baseline/logos/vendorreplies.png" alt="">' in page
+           and 'aria-label="The 7 project sites"' in page)
     expect("footer/current-card", page.count('aria-current="page"><img src="/draft/assets/baseline/logos/aiqt.svg"') == 1)
     navs = [re.search(r'<nav class="nav" aria-label="Site">(.*?)</nav>', outputs["site/draft/" + rel]).group(1)
             for rel in ("index.html", "disclosure/index.html", "license/index.html")]
@@ -2353,6 +2371,10 @@ def _self_test():
            '<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/opfiles-touch.png">' in home)
     opf_slices = re.findall(r'<li class="slice slice-(\d)">', home)
     expect("opfiles/footer-cycle", opf_slices == ["2", "3", "4", "5", "6", "1"], opf_slices)
+    expect("opfiles/footer-seventh-card-last",
+           re.findall(r'<li class="slice slice-(\w+)">', home)[-1:] == ["vr"]
+           and home.count('<li class="slice slice-vr">') == 1
+           and 'aria-label="The 7 project sites"' in home)
     expect("opfiles/footer-current-card",
            home.count('aria-current="page"><img src="/draft/assets/baseline/logos/opfiles.svg"') == 1)
     opf_nav = re.search(r'<nav class="nav" aria-label="Site">(.*?)</nav>',

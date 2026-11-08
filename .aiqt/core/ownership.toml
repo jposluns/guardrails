@@ -413,7 +413,10 @@ class = "pack-immutable"
 path = "site/assets/baseline/logos/aiqt-touch.png"
 class = "pack-immutable"
 
-# The aiqt.ai link-preview card, rendered by tools/render_og_cards.py and named as og:image on every page.
+# The aiqt.ai link-preview card, named as og:image and twitter:image on every page: the owner-approved image
+# from pull request #973, committed as a finished PNG. It changes only on the owner's instruction. Neither
+# tools/render_og_cards.py nor .baseline/build_card.js reproduces it, so neither is run over it without that
+# instruction.
 [[release-class]]
 path = "site/assets/aiqt-og.png"
 class = "pack-immutable"
@@ -446,6 +449,29 @@ class = "pack-immutable"
 # served.
 [[release-class]]
 path = ".baseline/check_palette.py"
+class = "pack-immutable"
+
+# The site template's link-preview card builder, copied byte for byte from the template package's
+# tools/build_card.js and pinned in .baseline/pin.toml; run by hand on a machine with Node.js and Playwright to
+# build a card for the owner's review, never in a deploy build, and never served.
+[[release-class]]
+path = ".baseline/build_card.js"
+class = "pack-immutable"
+
+# The card builder's Inter fonts and their SIL OFL 1.1 licence file, copied byte for byte from the template
+# package's tools/card-fonts/ and pinned in .baseline/pin.toml; read only by .baseline/build_card.js, never served.
+[[release-class]]
+pattern = ".baseline/card-fonts/**"
+class = "pack-immutable"
+
+# The card builder's data files, 1 per site, in the shape of the template's tools/site-card.example.toml: the
+# site's approved card copy, colours and illustration path; read only by .baseline/build_card.js, never served.
+[[release-class]]
+path = ".baseline/aiqt-card.toml"
+class = "pack-immutable"
+
+[[release-class]]
+path = ".baseline/opfiles-card.toml"
 class = "pack-immutable"
 
 # --- concern-1: the opfiles.ai site subtree (opf/site) -------------------------------------------------
@@ -526,13 +552,15 @@ note = "The documented adopter vendoring location; reserved, never a pack-immuta
 # PNG images, so they are marked binary: git applies no text conversion and byte-canon does not read them;
 # their bytes match the template's SHA256SUMS and are pinned by the release manifest.
 # The site/draft/assets/baseline/ files are an unchanged copy of the published site template, pinned by
-# SHA-256 in .baseline/pin.toml: the fonts, the touch icons and the LinkedIn mark are binary formats, and palettes.css (2
+# SHA-256 in .baseline/pin.toml: the fonts, the touch icons, the vendorreplies.ai PNG logo and the LinkedIn mark are binary formats, and palettes.css (2
 # trailing newlines) and marks/orcid-id.svg (no trailing newline) ship upstream outside the text canon, so all
 # of them are marked binary and keep their published bytes. The opf/site/draft/assets/baseline/ files are a
 # second copy of the same version, pinned in .baseline/opfiles-pin.toml, with the same binary set.
+# The .baseline/card-fonts/ Inter fonts are OpenType binaries copied unchanged from the template package and
+# pinned by SHA-256 in .baseline/pin.toml, so they are marked binary too.
 
 [checkout]
-binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml", "site/assets/baseline/logos/aiqt-touch.png", "opf/site/assets/baseline/logos/opfiles-touch.png", "site/assets/aiqt-og.png", "opf/site/assets/opfiles-og.png","site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2", "site/draft/assets/baseline/logos/aiqt-touch.png", "site/draft/assets/baseline/logos/auditthis-touch.png", "site/draft/assets/baseline/logos/cleanlanguage-touch.png", "site/draft/assets/baseline/logos/grclibrary-touch.png", "site/draft/assets/baseline/logos/opfiles-touch.png", "site/draft/assets/baseline/logos/secureconfig-touch.png", "site/draft/assets/baseline/marks/linkedin-in-bug.png", "site/draft/assets/baseline/marks/orcid-id.svg", "site/draft/assets/baseline/palettes.css", "opf/site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/logos/aiqt-touch.png", "opf/site/draft/assets/baseline/logos/auditthis-touch.png", "opf/site/draft/assets/baseline/logos/cleanlanguage-touch.png", "opf/site/draft/assets/baseline/logos/grclibrary-touch.png", "opf/site/draft/assets/baseline/logos/opfiles-touch.png", "opf/site/draft/assets/baseline/logos/secureconfig-touch.png", "opf/site/draft/assets/baseline/marks/linkedin-in-bug.png", "opf/site/draft/assets/baseline/marks/orcid-id.svg", "opf/site/draft/assets/baseline/palettes.css"]
+binary = ["site/downloads/aiqt-skill.zip", "site/downloads/aiqt-skill-1.0.6.zip", "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json", "opf/tools/_vendor/marko/py.typed", "opf/tools/opf-declaration.toml", "site/assets/baseline/logos/aiqt-touch.png", "opf/site/assets/baseline/logos/opfiles-touch.png", "site/assets/aiqt-og.png", "opf/site/assets/opfiles-og.png","site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2", "site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2", "site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2", "site/draft/assets/baseline/logos/aiqt-touch.png", "site/draft/assets/baseline/logos/auditthis-touch.png", "site/draft/assets/baseline/logos/cleanlanguage-touch.png", "site/draft/assets/baseline/logos/grclibrary-touch.png", "site/draft/assets/baseline/logos/opfiles-touch.png", "site/draft/assets/baseline/logos/secureconfig-touch.png", "site/draft/assets/baseline/logos/vendorreplies.png","site/draft/assets/baseline/marks/linkedin-in-bug.png", "site/draft/assets/baseline/marks/orcid-id.svg", "site/draft/assets/baseline/palettes.css", "opf/site/draft/assets/baseline/fonts/dancing-script-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/jetbrains-mono-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/newsreader-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-italic.woff2", "opf/site/draft/assets/baseline/fonts/public-sans-latin-wght-normal.woff2", "opf/site/draft/assets/baseline/logos/aiqt-touch.png", "opf/site/draft/assets/baseline/logos/auditthis-touch.png", "opf/site/draft/assets/baseline/logos/cleanlanguage-touch.png", "opf/site/draft/assets/baseline/logos/grclibrary-touch.png", "opf/site/draft/assets/baseline/logos/opfiles-touch.png", "opf/site/draft/assets/baseline/logos/secureconfig-touch.png", "opf/site/draft/assets/baseline/logos/vendorreplies.png","opf/site/draft/assets/baseline/marks/linkedin-in-bug.png", "opf/site/draft/assets/baseline/marks/orcid-id.svg", "opf/site/draft/assets/baseline/palettes.css", ".baseline/card-fonts/Inter-Bold.otf", ".baseline/card-fonts/Inter-ExtraBold.otf", ".baseline/card-fonts/Inter-Regular.otf"]
 
 # --- concern-3 hook: the adopter-installed extent is defined in the adopter-experience spec -------------
 

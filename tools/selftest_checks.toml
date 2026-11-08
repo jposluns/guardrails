@@ -4918,6 +4918,21 @@ expected-check-ids = [
   "woff2/utf8-without-signature-refused",
   "woff2/woff1-suffix-unevaluable",
   "woff2/file-size-bound-ends",
+  # ---------- the pinned-vendor exemptions: path and sha256 bound, each vector and its flip ----------
+  "pinned-binary/pinned-bytes-pass",
+  "pinned-binary/pinned-bytes-pass-flip",
+  "pinned-binary/byte-changed-unevaluable",
+  "pinned-binary/byte-changed-unevaluable-flip",
+  "pinned-binary/other-path-unevaluable",
+  "pinned-binary/other-path-unevaluable-flip",
+  "pinned-binary/pinned-bytes-scanned",
+  "pinned-binary/pinned-bytes-scanned-flip",
+  "tracker/frozen-pinned-vendor-passes",
+  "tracker/frozen-pinned-vendor-passes-flip",
+  "tracker/frozen-pinned-vendor-byte-changed",
+  "tracker/frozen-pinned-vendor-byte-changed-flip",
+  "tracker/frozen-pinned-vendor-other-path",
+  "tracker/frozen-pinned-vendor-other-path-flip",
 ]
 
 [[suite]]
@@ -5324,6 +5339,58 @@ expected-check-ids = [
   "bound/size-at",
   "bound/size-over",
   "live/real-tree-passes",
+]
+
+[[suite]]
+id = "og-cards-selftest"
+runner = "tools/render_og_cards.py"
+expected-check-ids = [
+  # ---------- the output-path decision: each refusal, then each with the decision removed ----------
+  "served/aiqt-card-refused",
+  "served/opfiles-card-refused",
+  "assets/aiqt-path-refused",
+  "assets/opfiles-path-refused",
+  "symlink/out-entry-to-served-card-refused",
+  "symlink/out-dir-into-assets-refused",
+  "relative/into-assets-refused",
+  "bound/assets-dir-itself-refused",
+  "guard-removed/served/aiqt-card-refused",
+  "guard-removed/served/opfiles-card-refused",
+  "guard-removed/assets/aiqt-path-refused",
+  "guard-removed/assets/opfiles-path-refused",
+  "guard-removed/symlink/out-entry-to-served-card-refused",
+  "guard-removed/symlink/out-dir-into-assets-refused",
+  "guard-removed/relative/into-assets-refused",
+  "guard-removed/bound/assets-dir-itself-refused",
+  "scratch/ordinary-dir-accepted",
+  "bound/assets-prefix-sibling-accepted",
+  "bound/assets-child-refused",
+  "refuse/empty-out-refused",
+  # ---------- the command line and the write path, Chrome never started ----------
+  "refuse/unrecognized-argument",
+  "main/refused-out-exit-2-before-chrome",
+  "main/scratch-out-reaches-render",
+  "render/recheck-refuses-before-write",
+  "render/recheck-refuses-before-chrome",
+  # ---------- another checkout's assets directory by name; the rename-based write ----------
+  "refuse/other-checkout-assets-suffix",
+  "guard-removed/refuse/other-checkout-assets-suffix",
+  "bound/suffix-component-boundary-accepted",
+  "refuse/symlinked-other-checkout-assets",
+  "refuse/symlinked-other-checkout-assets-dotdot",
+  "refuse/inside-other-checkout-assets",
+  "guard-removed/refuse/symlinked-other-checkout-assets",
+  "write/hard-link-to-served-card-left-unchanged",
+  "write/symlink-planted-after-last-check-left-unchanged",
+  "write/aliased-assets-dir-refused-by-inode",
+  "write/assets-ancestor-dir-refused-by-inode",
+  # ---------- the write-time identity walk and its bounds; the temporary-file cleanup ----------
+  "write/parent-swapped-into-assets-subdir-refused-by-inode",
+  "bound/dir-above-root-accepted",
+  "write/dir-named-assets-refused-by-name",
+  "write/symlinked-out-dir-not-followed",
+  "write/temp-removed-on-interrupt",
+  "main/identity-refused-out-exit-2-before-chrome",
 ]
 
 [[suite]]

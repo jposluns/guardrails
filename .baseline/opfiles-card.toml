@@ -1,0 +1,16 @@
+# The link-preview card data of opfiles.ai for .baseline/build_card.js (baseline 1.11.1), in the shape of
+# the template's tools/site-card.example.toml. Not served. The served card, opf/site/assets/opfiles-og.png, is
+# the owner-approved image from pull request #973 and changes only on the owner's instruction. Neither this
+# builder nor tools/render_og_cards.py reproduces it, so neither is run over it without that instruction. Here
+# the copy is the owner's approved card text (the subline approved 2026-11-06, on the centred layout), and the colours are the family card colours with the site's dark --brand (#f68622). Change the copy, colours or illustration only on the owner's instruction.
+
+site = "opfiles"
+name = "OPFiles"
+tld = ".ai"
+line1 = "Operational records,"
+line2 = "governed like code."
+sub = "Records are machine-written; the readable version is generated from them, and a required check fails if they disagree."
+art = "../opf/site/draft/assets/baseline/logos/opfiles-card.svg"
+word_colour = "#f68622"
+background = "radial-gradient(900px 620px at 1040px 560px,rgba(246,134,34,.4),rgba(246,134,34,0) 60%),radial-gradient(700px 500px at 120px 60px,rgba(41,64,102,.7),rgba(41,64,102,0) 60%),#0b1730"
+layout = "centre"
