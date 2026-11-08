@@ -9657,9 +9657,11 @@ def _segment_repo_dir(tokens, cwd):
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
     path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs.
-    A leading GIT_DIR+= reads exactly as GIT_DIR= does (with no ambient GIT_DIR, which takes the caller's
-    override path first, '+=' sets the value as '=' does), so it returns None too, with or without -C:
-    git uses the git dir that assignment names, not the -C directory."""
+    A leading GIT_DIR+= reads exactly as GIT_DIR= does, so it returns None too, with or without -C: git
+    uses the git dir that assignment yields, not the -C directory. '+=' sets the value as '=' does unless
+    GIT_DIR already holds one (an ambient GIT_DIR takes the caller's override path first; a shell variable
+    set earlier on the command line is not read here, and '+=' appends to it, a value this call cannot pin
+    either)."""
     if _segment_has_gitdir_redirect(tokens):
         return None
     cw = _command_word_index(tokens)
@@ -10436,7 +10438,7 @@ def _deny_with_recovery(kind, snap, note=""):
     return _discard_deny(kind, recovery + note)
 
 
-def _segment_has_gitdir_redirect(tokens, appended=True):
+def _segment_has_gitdir_redirect(tokens):
     """True when a git segment carries a --git-dir / GIT_DIR= redirect. Unlike --work-tree (which moves only
     the worktree), --git-dir/GIT_DIR names a DIFFERENT repository, so it changes which repo a `git stash
     drop`/`clear` acts on. The stash-recovery paths use this to REFUSE (deny) a stash discard whose target
@@ -10444,13 +10446,15 @@ def _segment_has_gitdir_redirect(tokens, appended=True):
     preserve the wrong repo's stash."""
     # A leading GIT_DIR+= names the git dir just as GIT_DIR= does (no ambient GIT_DIR reaches a caller: a
     # non-cosmetic ambient GIT_* takes the override path first), so it counts too, which only sends more
-    # segments to the session-read denies. appended=False reads the '=' spelling alone. _segment_repo_dir
-    # counts both spellings, so a GIT_DIR+= segment, with or without -C, names a repository it does not
-    # resolve (None), as a GIT_DIR= segment does: git_discard asks git for that repository, and the
-    # branch-root guard allows the creation with its cannot-pin note instead of probing the -C directory.
+    # segments to the session-read denies. _segment_repo_dir calls this too, so a GIT_DIR+= segment, with or
+    # without -C, names a repository it does not resolve (None), as a GIT_DIR= segment does: git_discard
+    # then reads the session directory as its base (the GIT_DIR+= is itself a path redirect, so for a
+    # destructive form it also asks git where that command lands, unless a non-cosmetic ambient GIT_*
+    # variable denies first), and the branch-root guard allows the creation with its cannot-pin note instead
+    # of probing the -C directory.
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
-        if tok.startswith("GIT_DIR=") or (appended and tok.startswith("GIT_DIR+=")):
+        if tok.startswith(("GIT_DIR=", "GIT_DIR+=")):
             return True
     i = cw + 1
     n = len(tokens)
@@ -12395,7 +12399,7 @@ def git_discard(data):
                     "index/worktree state this guard cannot snapshot (rule prsunc); run it from the target "
                     "worktree, or commit or stash first.")
         # The base read above without asking git (the -C directory, or the session directory beside a
-        # --git-dir or leading GIT_DIR=) also stays a floor under git's answer: when it lies in another
+        # --git-dir or a leading GIT_DIR= or GIT_DIR+=) also stays a floor under git's answer: when it lies in another
         # repository than the one git resolved, it is probed and, when not provably clean, snapshotted as well
         # below. A failed snapshot there is allowed past, with the failure named, only when the repository git
         # resolved, which the command acts on, was probed and is provably clean or was snapshotted
@@ -14886,7 +14890,8 @@ def branch_root(data):
     branch is created in, whatever the worktree value: '--work-tree=/etc' and an empty '--work-tree=' follow
     the session repository's ancestry (a rooted start ALLOWS, an orphaned one DENIES). With no -C, such a
     redirect ALLOWS-WITH-NOTE only when the call carries no session directory or the command also carries a
-    '--git-dir' option or a 'GIT_DIR=' prefix, which this guard cannot pin (the cannot-pin sentence below).
+    '--git-dir' option or a leading 'GIT_DIR=' or 'GIT_DIR+=' prefix, which this guard cannot pin (the
+    cannot-pin sentence below).
     A CHECKOUT/SWITCH '--track <ref>' names a rooted real start and ALLOWS (a 'git branch --track' is an
     unclassifiable form and DENIES, not an allow). A 'git worktree add --detach|-d <path> <commit-ish>'
     (the detach option in any position before any '--', the operands optionally after it) creates no

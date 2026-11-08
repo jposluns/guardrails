@@ -12463,6 +12463,26 @@ def _main_isolated(monitor):
         gdc("(gdc-env-gitdir-append-joined) two GIT_DIR+= assignments joined into one value DENY",
             "GIT_DIR+=.gi GIT_DIR+=t git restore file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
             _gdc_keep_gitdir)
+        # A leading GIT_DIR+= names the git dir as GIT_DIR= does, so the repository read without asking git
+        # is the session directory, not the -C directory, and each GIT_DIR+= row below decides as its GIT_DIR=
+        # twin. Beside an empty -C the scoped discard allows with a note (read as a bare -C, the empty -C took
+        # the unresolvable -C deny); beside -C <target> --work-tree=<target> from another session repository
+        # the worktree lies outside the session repository, so the discard denies (read as a bare -C, the
+        # worktree lay inside the -C target and the discard allowed).
+        for _gda_op in ("+=", "="):
+            _gda_tag = "append" if _gda_op == "+=" else "set"
+            gdc("(gdc-env-gitdir-{}-emptyC-own) GIT_DIR{}<session>/.git with -C '' on a scoped checkout allows "
+                "with a note".format(_gda_tag, _gda_op),
+                "GIT_DIR" + _gda_op + "{S}/.git git -C '' checkout -- file.txt", "allow-note", "clean",
+                {"tgt": 0, "sess": 0})
+            gdc("(gdc-env-gitdir-{}-emptyC-staged) GIT_DIR{}.git with -C '' on restore --staged allows with a "
+                "note".format(_gda_tag, _gda_op),
+                "GIT_DIR" + _gda_op + ".git git -C '' restore --staged file.txt", "allow-note", "clean",
+                {"tgt": 0, "sess": 0})
+            gdc("(gdc-env-gitdir-{}-C-worktree) GIT_DIR{}.git with -C <target> --work-tree=<target> from "
+                "another session repository DENIES".format(_gda_tag, _gda_op),
+                "GIT_DIR" + _gda_op + ".git git -C {T} --work-tree={T} checkout -- file.txt", "deny", "dirty",
+                {"tgt": 1, "sess": 0}, _gdc_keep_wt)
         # A leading GIT_DIR+= on a stash drop/clear names the git dir just as GIT_DIR= does, so it DENIES
         # rather than preserve the -C repository's stash (here none, a silent allow on the unfixed guard)
         # while the command clears the stash of the repository GIT_DIR names.
@@ -16795,8 +16815,8 @@ def _main_isolated(monitor):
                      cwd=str(_f12_plain)) != "deny":
             failures.append("(f12-C-orphan) a -C <repo> creation from an ORPHAN start must still DENY "
                             "(the -C target's ancestry is checked, not blindly allowed)")
-        # A leading GIT_DIR+= with no ambient GIT_DIR sets the value as GIT_DIR= does, so git uses the git dir
-        # it names, not the -C directory: the creation is in a repository this guard cannot pin, and it allows
+        # A leading GIT_DIR+= with no GIT_DIR already set sets the value as GIT_DIR= does, so git uses the git
+        # dir it names, not the -C directory: the creation is in a repository this guard cannot pin, and it allows
         # with the cannot-pin note on a rooted and an orphaned start alike, as the GIT_DIR= spelling does. Read
         # as a bare -C, the -C target was probed instead (the rooted start allowed with no note, the orphaned
         # one denied), though git creates the branch elsewhere.
