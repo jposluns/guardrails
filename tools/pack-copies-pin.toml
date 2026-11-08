@@ -1,12 +1,17 @@
 # The pack's own copies of the opf/tools modules its tools import or load, so that the pack keeps working
-# when opf/ moves to its own repository. Each copy is byte-identical to the original it was copied from,
-# except that a copy which is a guarded surface (tools/_pack_child_status.py, tools/_pack_journal.py) names its
-# own file in its floor-guard refusal, as tools/check_python_floor.py requires: the copy's path, then the
-# original's path and the SHA-256 of that original at copy time.
+# when opf/ moves to its own repository. Each [files] row names the copy's path, then the origin's path
+# (a plain relative path under opf/) and the SHA-256 of that origin's bytes at copy time. A copy is
+# byte-identical to its origin, except that a copy which is a guarded surface (tools/_pack_child_status.py,
+# tools/_pack_journal.py) names its own file in its floor-guard refusal, as tools/check_python_floor.py
+# requires; that one refusal name is put back to the origin's file name before any hashing or comparison.
 # tools/_vendor/ holds the pack's copy of the vendored Marko parser and its MIT licence text (see NOTICE).
-# tools/check_byte_canon.py checks on every run that each copy still hashes to its row (with that one refusal
-# name put back to the original's file name before hashing) and fails when one drifts.
-# Update a copy only together with its row here.
+# tools/check_byte_canon.py checks on every run that each copy still hashes to its row, and, while the
+# origin is present in this repository, that the copy still matches the origin's live bytes, so a change
+# to either side apart from the other fails until opf/ leaves. It also fails closed on a malformed origin
+# path, a copy or origin that is a symlink, and any file under tools/_pack_* or tools/_vendor/ that no
+# [files] row names; a file deliberately left unpinned there (for example a vendored manifest, provenance
+# or spec file) must be listed in an [[exclude]] row with a path and a reason.
+# Update a copy only together with its row here, and with its origin while opf/ is in this repository.
 
 [files."tools/_pack_semver.py"]
 origin = "opf/tools/_semver.py"

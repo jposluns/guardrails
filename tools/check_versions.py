@@ -50,10 +50,12 @@ from _pack_semver import SEMVER, _parse  # noqa: E402  re-exported so `from chec
 
 def main():
     root = repo_root()
-    # Single-source pin (OPF-SELF-CONTAIN): the bare-SemVer grammar and parser this gate uses ARE the
-    # _semver objects, never a second copy. A future re-implementation that shadowed the import with a local
-    # definition would fork the grammar silently; this identity check fails closed if it ever does. It runs
-    # here, in the gate's own executed path, so run_all_checks exercises it on every run.
+    # The bare-SemVer grammar and parser this gate uses ARE the objects of the pack's pinned copy
+    # _pack_semver (tools/check_byte_canon.py holds that copy to its pin row and, while opf/ is in this
+    # repository, to its origin opf/tools/_semver.py). A re-implementation that shadowed the import with a
+    # local definition would fork the grammar silently from that pinned copy; this identity check fails
+    # closed if it ever does. It runs here, in the gate's own executed path, so run_all_checks exercises it
+    # on every run.
     import _pack_semver as _semver  # noqa: E402
     if not (_parse is _semver._parse and SEMVER is _semver.SEMVER):
         print("error: SemVer primitives are not the single _semver source (a silent fork); fail-closed",

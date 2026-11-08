@@ -61,8 +61,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 import _pack_containment as _containment  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated scope loader; never a second parser
-# The pure byte legs and forbidden-codepoint sets are the ONE shared source in _byte_canon; re-imported
-# here so this gate and the OPF tooling scan identical bytes and cannot fork (OPF-SELF-CONTAIN).
+# The pure byte legs and forbidden-codepoint sets come from the pack's pinned copy in _pack_byte_canon.
+# While opf/ is in this repository, pack_copy_findings below compares that copy with its origin
+# opf/tools/_byte_canon.py on every run, so this gate and the OPF tooling scan identical bytes and a fork
+# of either side is caught; once opf/ leaves, the copy stands alone against its pin row.
 from _pack_byte_canon import (  # noqa: E402
     ZERO_WIDTH, BIDI, FORBIDDEN, FORBIDDEN_RE, BOM, LINE_SEPARATORS, scan_bytes, _is_two_space_break,
 )
@@ -199,7 +201,49 @@ def load_policy(root):
 
 PACK_COPIES_REL = "tools/pack-copies-pin.toml"
 PACK_COPY_KEYS = frozenset(("origin", "sha256"))
+PACK_EXCLUDE_KEYS = frozenset(("path", "reason"))
 PACK_COPY_SHA_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _origin_ok(origin):
+    """A pin row's origin must be a plain relative path inside opf/: nonempty, not absolute, no empty,
+    '.' or '..' component, and at least one component below opf/."""
+    if type(origin) is not str or not origin or origin.startswith("/"):
+        return False
+    parts = origin.split("/")
+    if "" in parts or "." in parts or ".." in parts:
+        return False
+    return parts[0] == "opf" and len(parts) >= 2
+
+
+def _swept_copy_files(root):
+    """Every file under tools/_pack_* or tools/_vendor/ (the trees the pin file governs), as sorted
+    root-relative paths. __pycache__ byte-code directories are not part of the pinned tree and are
+    skipped. A symlink anywhere in that scope is GateError: the pin holds bytes, and a link aliases
+    them."""
+    tools_dir = root / "tools"
+    try:
+        tops = sorted(tools_dir.iterdir())
+    except OSError as exc:
+        raise GateError("cannot list tools/ ({})".format(exc))
+    out = []
+    stack = [p for p in tops if p.name.startswith("_pack_") or p.name == "_vendor"]
+    while stack:
+        p = stack.pop()
+        rel = p.relative_to(root).as_posix()
+        if p.is_symlink():
+            raise GateError("{}: a symlink inside the pinned-copy scope tools/_pack_*, tools/_vendor/"
+                            .format(rel))
+        if p.is_dir():
+            if p.name == "__pycache__":
+                continue
+            try:
+                stack.extend(sorted(p.iterdir()))
+            except OSError as exc:
+                raise GateError("cannot list {} ({})".format(rel, exc))
+        else:
+            out.append(rel)
+    return sorted(out)
 
 
 def pack_copy_digest(rel, origin, data):
@@ -217,17 +261,34 @@ def pack_copy_digest(rel, origin, data):
 
 
 def pack_copy_findings(root):
-    """Each pack copy pinned in tools/pack-copies-pin.toml must still hash to the SHA-256 its row records (the
-    origin's digest at copy time, taken as pack_copy_digest describes), so a copy edited or replaced apart from
-    its row is a finding. The origin itself is not read: the copies must keep working when opf/ is absent. A
-    malformed pin file is GateError."""
+    """The pinned pack copies under tools/ (tools/pack-copies-pin.toml). Each pinned copy must still hash to
+    the SHA-256 its row records (the origin's digest at copy time, taken as pack_copy_digest describes), so a
+    copy edited or replaced apart from its row is a finding. While the origin is present in this repository
+    (opf/ has not yet moved to its own repository), the copy is ALSO compared with the origin's live bytes,
+    under the same own-name refusal normalization, so editing an origin without re-copying is a finding too;
+    once opf/ is absent the copies stand alone against their rows. Fail-closed (GateError, exit 2): a
+    malformed pin file, a malformed origin path, a pinned copy or origin that is a symlink, a file under
+    tools/_pack_* or tools/_vendor/ that no [files] row names (an [[exclude]] row with a path and a reason
+    may deliberately leave such a file unpinned), and an [[exclude]] row naming no file in that scope."""
     try:
         data = load_toml(root / PACK_COPIES_REL)
     except (OSError, ValueError, RecursionError, MemoryError) as exc:
         raise GateError("cannot read {} ({})".format(PACK_COPIES_REL, exc))
     rows = data.get("files")
-    if set(data) != {"files"} or not isinstance(rows, dict) or not rows:
-        raise GateError("{}: exactly one non-empty [files] table is required".format(PACK_COPIES_REL))
+    if not set(data) <= {"files", "exclude"} or not isinstance(rows, dict) or not rows:
+        raise GateError("{}: exactly one non-empty [files] table is required (plus an optional "
+                        "[[exclude]] array)".format(PACK_COPIES_REL))
+    ex_rows = data.get("exclude", [])
+    if not isinstance(ex_rows, list):
+        raise GateError("{}: [[exclude]] is not an array".format(PACK_COPIES_REL))
+    excluded = set()
+    for i, ex in enumerate(ex_rows, 1):
+        if (not isinstance(ex, dict) or set(ex) != PACK_EXCLUDE_KEYS
+                or type(ex["path"]) is not str or type(ex["reason"]) is not str
+                or not ex["reason"] or ex["path"] in rows or ex["path"] in excluded):
+            raise GateError("{}: malformed, duplicate, or pinned-path exclude row #{}".format(
+                PACK_COPIES_REL, i))
+        excluded.add(ex["path"])
     findings = []
     for rel in sorted(rows):
         row = rows[rel]
@@ -235,14 +296,41 @@ def pack_copy_findings(root):
                 or set(row) != PACK_COPY_KEYS or not isinstance(row["origin"], str)
                 or not isinstance(row["sha256"], str) or PACK_COPY_SHA_RE.match(row["sha256"]) is None):
             raise GateError("{}: malformed row {!r}".format(PACK_COPIES_REL, rel))
+        if not _origin_ok(row["origin"]):
+            raise GateError("{}: row {!r} has a malformed origin path {!r} (must be a plain relative "
+                            "path under opf/)".format(PACK_COPIES_REL, rel, row["origin"]))
+        copy_path = root / rel
+        if copy_path.is_symlink():
+            raise GateError("{}: pinned pack copy is a symlink".format(rel))
         try:
-            digest = pack_copy_digest(rel, row["origin"], (root / rel).read_bytes())
+            digest = pack_copy_digest(rel, row["origin"], copy_path.read_bytes())
         except OSError as exc:
             findings.append("{}: pinned pack copy cannot be read ({})".format(rel, exc))
             continue
         if digest != row["sha256"]:
             findings.append("{}: pack copy drifted from its pinned origin digest ({} pins {} for {})".format(
                 rel, PACK_COPIES_REL, row["sha256"], row["origin"]))
+        origin_path = root / row["origin"]
+        if origin_path.is_symlink():
+            raise GateError("{}: origin {} is a symlink".format(rel, row["origin"]))
+        if origin_path.is_file():
+            try:
+                origin_digest = hashlib.sha256(origin_path.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise GateError("{}: origin {} is present but cannot be read ({})".format(
+                    rel, row["origin"], exc))
+            if digest != origin_digest:
+                findings.append("{}: pack copy and its present origin {} disagree (a forked copy); "
+                                "update the copy and its pin row together".format(rel, row["origin"]))
+    swept = _swept_copy_files(root)
+    for path in swept:
+        if path not in rows and path not in excluded:
+            raise GateError("{}: {} is in the pinned-copy scope but no [files] row or [[exclude]] row "
+                            "names it".format(PACK_COPIES_REL, path))
+    stale = excluded - set(swept)
+    if stale:
+        raise GateError("{}: exclude row(s) name no file in the pinned-copy scope: {}".format(
+            PACK_COPIES_REL, ", ".join(sorted(stale))))
     return findings
 
 
@@ -423,7 +511,8 @@ def run(root):
             print("  " + f)
         return 1
     print("PASS: every released text file is byte-canonical; .gitattributes covers the release "
-          "scope; the platform matrix holds; every pinned pack copy matches its origin digest")
+          "scope; the platform matrix holds; every pinned pack copy matches its pin row and, while "
+          "its origin is in the tree, the origin itself")
     return 0
 
 
@@ -474,9 +563,10 @@ def _load_vectors(root):
 
 def self_test_main():
     failures = []
-    # Single-source pin (OPF-SELF-CONTAIN, c.1 risk 2): the pure byte legs and forbidden sets this gate
-    # uses ARE the _byte_canon objects, never a second copy. A future re-implementation that shadowed the
-    # import with a local definition would fork silently; this identity check fails closed if it ever does.
+    # The pure byte legs and forbidden sets this gate uses ARE the objects of the pack's pinned copy
+    # _pack_byte_canon (held to its origin by pack_copy_findings while opf/ is in this repository). A
+    # re-implementation that shadowed the import with a local definition would fork silently from that
+    # pinned copy; this identity check fails closed if it ever does.
     import _pack_byte_canon as _bc
     if not (scan_bytes is _bc.scan_bytes and FORBIDDEN is _bc.FORBIDDEN
             and FORBIDDEN_RE is _bc.FORBIDDEN_RE and BOM is _bc.BOM
@@ -908,14 +998,123 @@ def self_test_main():
         _copy_body = _guard.replace(b"{}", b"_pack_x.py")
         (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_origin_body).hexdigest()),
                                              encoding="utf-8")
-        for _label, _body, _want in (("a copy whose guard names its own file", _copy_body, 0),
-                                     ("a copy whose guard still names the origin", _origin_body, 0),
-                                     ("a renamed guard plus one other changed byte",
-                                      _copy_body.replace(b"x = 1", b"x = 2"), 1),
-                                     ("a renamed guard written twice", _copy_body + _copy_body[6:], 1)):
-            (_root / "tools" / "_pack_x.py").write_bytes(_body)
+        for _label, _body2, _want in (("a copy whose guard names its own file", _copy_body, 0),
+                                      ("a copy whose guard still names the origin", _origin_body, 0),
+                                      ("a renamed guard plus one other changed byte",
+                                       _copy_body.replace(b"x = 1", b"x = 2"), 1),
+                                      ("a renamed guard written twice", _copy_body + _copy_body[6:], 1)):
+            (_root / "tools" / "_pack_x.py").write_bytes(_body2)
             if len(pack_copy_findings(_root)) != _want:
                 failures.append("pack copy: {} gave the wrong finding count".format(_label))
+        # While the origin is PRESENT in the tree, the copy is also held to the origin's live bytes, so a
+        # fork of either side fires until opf/ leaves; the own-name refusal normalization governs this
+        # comparison too.
+        (_root / "opf" / "tools").mkdir(parents=True)
+        (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_body).hexdigest()),
+                                             encoding="utf-8")
+        (_root / "tools" / "_pack_x.py").write_bytes(_body)
+        (_root / "opf" / "tools" / "_x.py").write_bytes(_body)
+        if pack_copy_findings(_root) != []:
+            failures.append("a pack copy matching its present origin was not quiet")
+        (_root / "opf" / "tools" / "_x.py").write_bytes(b"x = 3\n")
+        _got = pack_copy_findings(_root)
+        if len(_got) != 1 or "disagree" not in _got[0]:
+            failures.append("an origin edited apart from its copy did not fire while present")
+        (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_origin_body).hexdigest()),
+                                             encoding="utf-8")
+        (_root / "tools" / "_pack_x.py").write_bytes(_copy_body)
+        (_root / "opf" / "tools" / "_x.py").write_bytes(_origin_body)
+        if pack_copy_findings(_root) != []:
+            failures.append("own-name refusal normalization was not applied against the present origin")
+        (_root / "opf" / "tools" / "_x.py").unlink()
+        # A malformed origin path (empty, absolute, a '..' component, outside opf/, or opf/ itself with
+        # nothing below it) fails closed.
+        for _bad in ("", "/opf/tools/_x.py", "opf/../tools/_x.py", "tools/_y.py", "opf"):
+            (_root / PACK_COPIES_REL).write_text(
+                '[files."tools/_pack_x.py"]\norigin = "{}"\nsha256 = "{}"\n'.format(_bad, "0" * 64),
+                encoding="utf-8")
+            try:
+                pack_copy_findings(_root)
+                failures.append("a malformed origin path {!r} was not fail-closed".format(_bad))
+            except GateError:
+                pass
+        # A pinned copy that is a symlink fails closed on its own row, even when the copy sits outside
+        # the swept tools/_pack_* and tools/_vendor/ trees (whose sweep refuses symlinks separately).
+        _pin_aux = (_pin + '\n[files."tools/aux_copy.py"]\norigin = "opf/tools/_aux.py"\n'
+                    'sha256 = "{}"\n'.format("0" * 64))
+        (_root / PACK_COPIES_REL).write_text(_pin_aux.format(hashlib.sha256(_body).hexdigest()),
+                                             encoding="utf-8")
+        (_root / "tools" / "_pack_x.py").unlink()
+        (_root / "tools" / "_pack_x.py").write_bytes(_body)
+        try:
+            (_root / "tools" / "aux_copy.py").symlink_to(_root / PACK_COPIES_REL)
+            _sym_ok = True
+        except OSError:
+            _sym_ok = False
+        if _sym_ok:
+            try:
+                pack_copy_findings(_root)
+                failures.append("a pinned pack copy that is a symlink was not fail-closed")
+            except GateError:
+                pass
+            (_root / "tools" / "aux_copy.py").unlink()
+        # A file in the pinned-copy scope that no row names fails closed; an [[exclude]] row with a
+        # reason clears exactly it; each malformed exclude row (no reason, an empty reason, a pinned
+        # path) fails closed while the excluded file exists, so the row schema is what fires.
+        (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_body).hexdigest()),
+                                             encoding="utf-8")
+        (_root / "tools" / "_vendor").mkdir()
+        (_root / "tools" / "_vendor" / "stray.txt").write_bytes(b"s\n")
+        try:
+            pack_copy_findings(_root)
+            failures.append("an unpinned file under tools/_vendor/ was not fail-closed")
+        except GateError:
+            pass
+        _excl = '\n[[exclude]]\npath = "tools/_vendor/stray.txt"\nreason = "left unpinned deliberately"\n'
+        (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_body).hexdigest()) + _excl,
+                                             encoding="utf-8")
+        if pack_copy_findings(_root) != []:
+            failures.append("a deliberately excluded unpinned file was not quiet")
+        for _bad_excl in ('\n[[exclude]]\npath = "tools/_vendor/stray.txt"\n',
+                          '\n[[exclude]]\npath = "tools/_vendor/stray.txt"\nreason = ""\n',
+                          '\n[[exclude]]\npath = "tools/_pack_x.py"\nreason = "also pinned"\n' + _excl):
+            (_root / PACK_COPIES_REL).write_text(
+                _pin.format(hashlib.sha256(_body).hexdigest()) + _bad_excl, encoding="utf-8")
+            try:
+                pack_copy_findings(_root)
+                failures.append("a malformed exclude row was not fail-closed: {!r}".format(_bad_excl))
+            except GateError:
+                pass
+        # A symlink inside the swept scope fails closed even when an exclude row names it, so the sweep's
+        # own symlink refusal (not the unpinned-file refusal) is what fires.
+        if _sym_ok:
+            (_root / "tools" / "_vendor" / "stray.txt").unlink()
+            (_root / "tools" / "_vendor" / "stray.txt").symlink_to(_root / PACK_COPIES_REL)
+            (_root / PACK_COPIES_REL).write_text(
+                _pin.format(hashlib.sha256(_body).hexdigest()) + _excl, encoding="utf-8")
+            try:
+                pack_copy_findings(_root)
+                failures.append("a symlink inside the swept scope was not fail-closed")
+            except GateError:
+                pass
+            (_root / "tools" / "_vendor" / "stray.txt").unlink()
+            (_root / "tools" / "_vendor" / "stray.txt").write_bytes(b"s\n")
+        # A stale exclude row (naming no file in the swept scope) fails closed; __pycache__ byte-code
+        # under the scope is skipped.
+        (_root / "tools" / "_vendor" / "stray.txt").unlink()
+        (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_body).hexdigest()) + _excl,
+                                             encoding="utf-8")
+        try:
+            pack_copy_findings(_root)
+            failures.append("a stale exclude row (naming no file in scope) was not fail-closed")
+        except GateError:
+            pass
+        (_root / PACK_COPIES_REL).write_text(_pin.format(hashlib.sha256(_body).hexdigest()),
+                                             encoding="utf-8")
+        (_root / "tools" / "_vendor" / "__pycache__").mkdir()
+        (_root / "tools" / "_vendor" / "__pycache__" / "stray.pyc").write_bytes(b"\x00")
+        if pack_copy_findings(_root) != []:
+            failures.append("__pycache__ byte-code under the pinned-copy scope was not skipped")
     if failures:
         print("SELF-TEST FAIL:")
         for f in failures:
@@ -924,8 +1123,9 @@ def self_test_main():
     print("SELF-TEST PASS: byte-format legs, the line and paragraph separator leg (direct and through "
           "run() over a temp tree), allowance scoping, "
           "coverage logic, the containment "
-          "mode table and probe fail-safe, the policy and vector schema fail-closed legs, and the "
-          "published vectors all hold")
+          "mode table and probe fail-safe, the policy and vector schema fail-closed legs, the "
+          "published vectors, and the pinned pack-copy legs (the pin row, the live-origin comparison "
+          "while the origin is present, and their refusals) all hold")
     return 0
 
 

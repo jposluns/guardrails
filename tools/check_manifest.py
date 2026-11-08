@@ -72,9 +72,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import repo_root, load_toml  # noqa: E402
 import gen_manifest  # noqa: E402  reuse the validated loader/expansion; recompute, never trust output
 
-_OPF_TOOLS = str(Path(__file__).resolve().parent.parent / "opf" / "tools")
-if _OPF_TOOLS not in sys.path:
-    sys.path.insert(0, _OPF_TOOLS)
+def _opf_tools_on_path():
+    """DEFERRED OPF INTEGRATION POINT, kept at step 1 of the opf/ split. The release-manifest grammar
+    is the shared _opf_pack_manifest module, with its refusal statuses in _opf_adopt, loaded from
+    opf/tools when a manifest is actually parsed (load_manifest and the self-test), never at import:
+    importing this module for apply_minimums (as gen_manifest does) loads nothing from opf/ and does
+    not touch sys.path. The grammar is not copied to tools/_pack_* like the other pinned copies because
+    its import closure is large (_opf_adopt, _opf_adopt_plan, _opf_store and _opf_emit, about 1.1 MB of
+    opf's core modules); replacing this loader with a pack-held copy or package of the grammar is
+    deferred to step 2 of the opf/ split, which removes this function."""
+    opf_tools = str(Path(__file__).resolve().parent.parent / "opf" / "tools")
+    if opf_tools not in sys.path:
+        sys.path.insert(0, opf_tools)
 
 # The verifier-carried ABSOLUTE-MINIMUM-CLASS table (4.2): first match wins; the final row is the
 # category default. Strength order: pack-immutable > managed-block > manifest-self = derived >
@@ -120,6 +129,7 @@ def apply_minimums(classes):
 
 def load_manifest(root):
     """Use the shared pack grammar; map every refusal to GateError/exit 2."""
+    _opf_tools_on_path()  # the deferred OPF integration point: see that function's comment
     from _opf_pack_manifest import parse_manifest, MAX_FILE_BYTES
     from _opf_adopt import VALID
 
@@ -464,6 +474,7 @@ def _self_test_main_isolated():
             failures.append("clean fixture expected exit 0")
 
         # Shared-parser/generator recipe parity on actual fixture output.
+        _opf_tools_on_path()  # the deferred OPF integration point: see that function's comment
         import _opf_pack_manifest as pack_manifest
         from _opf_adopt import VALID, INVALID, CANNOT_EVALUATE, AdoptValidation
         from unittest.mock import patch

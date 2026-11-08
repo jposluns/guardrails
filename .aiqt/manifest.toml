@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "31c62c37986f47e11563ba39db8466fbde69488f866004e8757ffb27e817fc30"
+tree-sha256 = "f79665bb2418eebb01de75113b396f1cbb325e12f24a7b16085352b5ff44bba8"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4306,13 +4306,13 @@ sha256 = "d08823d2cc9ed3a0c5a28d73358be42ae3d8f483512aef8b8ae5642f963adc8d"
 
 [[sources]]
 path = "tools/check_byte_canon.py"
-bytes = 54798
-sha256 = "51504376f83d977f37d0f68da1577f4bbea5ca98cf7abd662019f2247c2a4851"
+bytes = 66595
+sha256 = "f28385d17a90ad87ec7100f3ede7d7df62fa51935bc7316d1368924bd1f93a6e"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 219633
-sha256 = "f40b7169fa7fb8907fd327ca7af030efda7b719e2154ac8c03d6af9940ddd3ed"
+bytes = 219772
+sha256 = "e2d1778b3f6f98841dc326949a4fd312e2e29a27534cd8b61421f4fb5e7402f8"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4406,8 +4406,8 @@ sha256 = "13656efcd050e81dd108897731553da740d372d002ebcdf5bc96681b8f9e3b6b"
 
 [[sources]]
 path = "tools/check_manifest.py"
-bytes = 38774
-sha256 = "f71af857e298779f7134566dfb5411b25ffa5c84222569bea667358eda53df71"
+bytes = 39779
+sha256 = "594ebc5810798e71b21b63fe7c30d2f6ceaaf46a63bd1dcc5991bbd9764af8d1"
 
 [[sources]]
 path = "tools/check_mappings.py"
@@ -4471,8 +4471,8 @@ sha256 = "ec1cf77885f467ad74e94587104a53d2460b907802225a47ba5e6991f9701a79"
 
 [[sources]]
 path = "tools/check_python_floor.py"
-bytes = 279476
-sha256 = "767576b9ff9cdb3fc53c5b984cff94527090803c248a382f4b93fb8884eb15c0"
+bytes = 279636
+sha256 = "140664ac8f00aaf822a9da9d0abcde5f3d3b74ab1c3feedc4eb2932b512e5596"
 
 [[sources]]
 path = "tools/check_python_host_pin.py"
@@ -4581,8 +4581,8 @@ sha256 = "ffc4ac5b2f13d737d825edc59217895eb4bd9b790966f1e9a336988cd4eef8e9"
 
 [[sources]]
 path = "tools/check_versions.py"
-bytes = 6603
-sha256 = "e8b8f61614e4e57d2aa532224a2a35769b9908be7aa236abc7bec2a4c60ace2f"
+bytes = 6735
+sha256 = "5b655266ba8e5ef64f93909772f523e13fc5d4801a0ef9b30dc2914c8e4acd07"
 
 [[sources]]
 path = "tools/ci-status.sh"
@@ -4791,8 +4791,8 @@ sha256 = "638d00c75327faadbffdc5ac9d902ca0e22adb76f91b612260dc66766f24062d"
 
 [[sources]]
 path = "tools/pack-copies-pin.toml"
-bytes = 6147
-sha256 = "9f6520a90e03c66e5d5ee2e8b8d2966d00597c705924c1e2d5bc96443d360f00"
+bytes = 6740
+sha256 = "dca5dc9721b18ef8e7274b7cd92a2a0c28057d6fd79b6b3afeb8b6e902fc0ab1"
 
 [[sources]]
 path = "tools/pin.py"
