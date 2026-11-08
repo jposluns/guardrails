@@ -65,6 +65,7 @@ Fill significant gaps: strengthen capabilities that exist but are too thin to re
 
 | ID | Status | Item | Tags |
 | --- | --- | --- | --- |
+| MAPPINGS-FIT-SWEEP | Not started | Published framework mappings: remove or downgrade weak and over-labelled fits, then judge the rest (M, M) | `[public]` `[corpus]` |
 | GD-152 | Not started | A portable way for an adopting project to track review findings to an outcome: queue them, bring overdue ones back at the start of a session, and escalate any left unhandled (M, L) | `[public]` |
 | PYTHON-FLOOR-U7 | Not started | Python 3.14 floor: the release note, written into the changelog in step 1 of the 1.1.1 cut (M, XS) | `[public]` `[adopter]` `[release]` `[1.1.1 cut]` |
 | AIQT-INSTRUCTION-BUDGET | In progress (#392) | Cut the pack's instructions that load in every session from 112,222 to at most 90,000 characters: decide where each rule's detail belongs, move that detail into the layer loaded only on demand, then make the size check enforce the 90,000 limit (H, L) | `[public]` |

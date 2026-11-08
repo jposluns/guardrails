@@ -61,6 +61,7 @@ import time
 import datetime
 import hashlib
 import unicodedata
+from fractions import Fraction
 from pathlib import Path
 try:
     import tomllib
@@ -1737,49 +1738,251 @@ def _rdp_label_screen_sweep(ls):
         tally.get(("ascii-letter-or-digit", "before-colon", "passed"), 0) > 0), ([], True, True, True))
 
 
+# The linear-time row (rdp/label-screen-linear-time). Each shape is (name, repeated unit, tail, ratio): the
+# ratio is a typical least-time ratio of the label screen to _rdp_reference_scan over the same brief,
+# measured at 256 KiB, 512 KiB and 1 MiB (Python 3.14.4, x86_64). It is not an upper bound on what a run
+# measures: later runs on the same host measured up to about 1.05 times it (lookalike-between-marks 12.86
+# against 12.3, name-prefix-and-colon 13.68 against 13.5, short-lines 10.35 against 10, names-then-words
+# 16.31 against 16). A shape passes the ratio bound when the screen's least time is under
+# _RDP_TIMING_MARGIN times that ratio times the reference's least time, so the bound sits 2.5 times above
+# the typical ratio and about 2.39 times above the largest ratio measured (2.5 times 12.3 over 12.86): a
+# real screen may run about 2.39 times slower against the reference than the slowest measured run (another
+# host, another build) and still pass, while a screen 5 times slower, which this ratio bound exists to
+# catch, exceeds it with room to spare (5 times the least measured ratio of every shape is over 1.7 times
+# its bound).
+_RDP_TIMING_SHAPES = (
+    ("backtick-fence-line", "`", "x`", "2.1"), ("name-prefix-and-colon", "reviewpa\u0435:", "", "13.5"),
+    ("lookalike-pairs", "r\u0435", ":", "14.4"), ("short-lines", "a:\n", "", "10"),
+    ("names-then-words", "reviewpath x ", ":", "16"),
+    ("lookalike-between-marks", "r\u0301\u0435\u0300", ":", "12.3"), ("marks", "\u0903", "", "8.9"))
+_RDP_TIMING_SIZES = (262144, 524288, 1048576)
+_RDP_TIMING_MARGIN = Fraction(5, 2)
+# One timing over this many CPU seconds is a runaway: the shape fails and is not timed again.
+_RDP_TIMING_RUNAWAY = 10.0
+# The CPU seconds every timing in the row may spend together. A timing starts only while the total is under
+# it, so when no timing is a runaway the row's timings spend less than this plus one timing of at most
+# _RDP_TIMING_RUNAWAY: under 190 CPU seconds, against about 30 for the real screen on the measuring host. A
+# runaway is one call the row cannot cut short; it ends its shape, and the budget still holds for the rest.
+_RDP_TIMING_BUDGET = 180.0
+
+
+def _rdp_reference_scan(text):
+    """The linear reference for rdp/label-screen-linear-time: one pass in Python over every character of
+    text counting its colons, the least per-character work the label screen's name test does."""
+    count = 0
+    for ch in text:
+        if ch == ":":
+            count += 1
+    return count
+
+
+def _rdp_timing_group(least, lengths, bound):
+    """The faults of one group of rounds, an empty list when it passes. least maps (kind, size) to the least
+    CPU seconds over the group's rounds, kind "screen" or "reference"; lengths maps each size to its brief's
+    length in bytes; bound is the shape's ratio bound. The group passes when both hold, each compared
+    exactly in rationals (Fraction), so a value exactly at a bound fails:
+    - growth: from each size to the next, the screen's time grows by a factor under the length factor to
+      the power 1.5 (t2 * t2 * n1 ** 3 < t1 * t1 * n2 ** 3); about 1 is linear and about 2 quadratic, so
+      each doubling must grow less than about 2.83 times, and the 512 KiB time is checked against both its
+      neighbours; and
+    - ratio: at each size, the screen's time is under bound times the reference's time.
+    A time of zero, below the clock's resolution, cannot show growth and fails."""
+    sizes = sorted(lengths)
+    faults = []
+    # The growth bound is the tightest of the row's bounds and, unlike the ratio bound, is not normalised by
+    # the reference, so load that lifts only the larger size's time counts against it in full (short-lines
+    # from 512 KiB to 1 MiB has measured 2.212 and 2.034 against the limit of about 2.828).
+    for small, large in zip(sizes, sizes[1:]):
+        t1, t2 = Fraction(least[("screen", small)]), Fraction(least[("screen", large)])
+        if not t2 * t2 * lengths[small] ** 3 < t1 * t1 * lengths[large] ** 3:
+            faults.append("growth {:.3f}s to {:.3f}s from {} to {} bytes".format(
+                float(t1), float(t2), small, large))
+    for size in sizes:
+        screen, reference = least[("screen", size)], least[("reference", size)]
+        if not Fraction(screen) < bound * Fraction(reference):
+            faults.append("screen {:.4f}s against reference {:.4f}s at {} bytes, not under {} times".format(
+                screen, reference, size, float(bound)))
+    return faults
+
+
+def _rdp_timing_rows(shapes, timer, budget=_RDP_TIMING_BUDGET, runaway=_RDP_TIMING_RUNAWAY):
+    """([(shape, verdict)], CPU seconds spent) for shapes, each (shape, lengths, bound) as _rdp_timing_group
+    reads them; timer(shape, kind, size, round_number) times one run and returns its CPU seconds. A shape is
+    timed in up to three groups of three rounds; each round times every size once, ascending in an even
+    round and descending in an odd one, and at each size the reference and the screen back to back (their
+    order also alternating), so a burst of load falls on small and large briefs and on both kinds alike.
+    Stray work only adds time, so each group keeps each (kind, size)'s least time over its own rounds, and
+    the shape passes ("linear") when two groups pass (_rdp_timing_group) and fails ("not linear") when two
+    fail: a pass needs two groups' rounds to agree, so one burst that lifts the small sizes' times in every
+    round of one group cannot pass a screen that grows too fast. Three groups always decide, since one of
+    the two counts then reaches two, so the third group is timed only after one pass and one fail, and an
+    AssertionError marks the unreachable end of the loop. A timing over runaway CPU seconds fails the
+    shape at once ("runaway") and the shape is not timed again. A timing starts only while the row has spent
+    under budget CPU seconds; once it has not, the shape and every later one fail untimed ("over budget")."""
+    spent = 0.0
+    rows = []
+
+    def _shape(shape, lengths, bound):
+        nonlocal spent
+        passed, failed = 0, []
+        for group in range(3):
+            least = {}
+            for round_number in range(3 * group, 3 * group + 3):
+                ascending = round_number % 2 == 0
+                for size in sorted(lengths, reverse=not ascending):
+                    for kind in ("reference", "screen") if ascending else ("screen", "reference"):
+                        if spent >= budget:
+                            return "over budget: the row spent {:.1f} CPU seconds of {}; not timed".format(
+                                spent, budget)
+                        took = timer(shape, kind, size, round_number)
+                        spent += took
+                        if took > runaway:
+                            return "runaway: {} at {} bytes took {:.1f} CPU seconds, over {}; not timed again".format(
+                                kind, size, took, runaway)
+                        least[(kind, size)] = min(least.get((kind, size), took), took)
+            faults = _rdp_timing_group(least, lengths, bound)
+            if faults:
+                failed.append("group {}: {}".format(group, ", ".join(faults)))
+            else:
+                passed += 1
+            if passed == 2:
+                return "linear"
+            if len(failed) == 2:
+                return "not linear: " + "; ".join(failed)
+        raise AssertionError("three groups of rounds always decide, yet {} passed and {} failed".format(
+            passed, len(failed)))
+
+    for shape, lengths, bound in shapes:
+        rows.append((shape, _shape(shape, lengths, bound)))
+    return (rows, spent)
+
+
 def _rdp_label_screen_timing(ls):
-    """Linear time: the label screen over seven adversarial briefs, each at 256 KiB and at 1 MiB: a line of
-    backticks that ends in a letter and a backtick (a pattern that backtracks over it takes time quadratic
-    in its length), a name's first eight letters with a look-alike and a colon, repeated (every attempt
-    reaches deep into a name), a letter and a look-alike, repeated (a NUL at every other character), a
-    short line, repeated (the most lines), a whole name and a word, repeated on one line that ends in a
-    colon (a name ended at every word), a letter and a look-alike between two marks, repeated (every mark a
-    colon the look-alike test passes over), and a mark, repeated (a colon at every character). At 1 MiB
-    each takes under a second of this process's CPU time, and each grows less than eightfold from 256 KiB
-    (about fourfold is linear, about sixteenfold quadratic). Stray work only adds time, so the 256 KiB brief
-    is timed three times and the least time kept, and the 1 MiB brief up to five times until its least time
-    passes; a 256 KiB time over a second ends the row's timing for that shape."""
+    """Linear time: the label screen over seven adversarial briefs, each at 256 KiB, 512 KiB and 1 MiB (the
+    default brief cap): a line of backticks that ends in a letter and a backtick (a pattern that backtracks
+    over it takes time quadratic in its length), a name's first eight letters with a look-alike and a colon,
+    repeated (every attempt reaches deep into a name), a letter and a look-alike, repeated (a NUL at every
+    other character), a short line, repeated (the most lines), a whole name and a word, repeated on one line
+    that ends in a colon (a name ended at every word), a letter and a look-alike between two marks, repeated
+    (every mark a colon the look-alike test passes over), and a mark, repeated (a colon at every character).
+    Each brief is timed in this process's CPU time against a linear reference over the same brief
+    (_rdp_reference_scan), and a shape passes when its time grows less than the size to the power 1.5 over
+    each doubling and stays under its ratio bound to the reference at every size (_rdp_timing_group,
+    _RDP_TIMING_SHAPES), in two groups of rounds (_rdp_timing_rows). Every bound is a ratio of times taken
+    in the same run, so it holds on a fast or a slow host; the ratio bound also fails a screen that grows
+    linearly but runs several times slower. A runaway timing ends its shape untimed, and the row's timings
+    share a CPU budget (_RDP_TIMING_BUDGET), so a failing row ends with a named failure. Then the decision
+    itself, over simulated times (_rdp_timing_decision_cases)."""
     labels = ls.binding["labels"]
     lead = _rdp_screen_text(ls, [])
-
-    def _cpu(text):
-        started = time.process_time()
-        aiqt_hooks._rdp_labels(text, labels)
-        return time.process_time() - started
+    texts = {}
 
     def _brief(unit, tail, size):
         return lead + unit * ((size - len(lead) - len(tail.encode())) // len(unit.encode())) + tail + "\n"
-    shapes = (("backtick-fence-line", "`", "x`"), ("name-prefix-and-colon", "reviewpa\u0435:", ""),
-              ("lookalike-pairs", "r\u0435", ":"), ("short-lines", "a:\n", ""),
-              ("names-then-words", "reviewpath x ", ":"), ("lookalike-between-marks", "r\u0301\u0435\u0300", ":"),
-              ("marks", "\u0903", ""))
-    rows = []
-    for shape, unit, tail in shapes:
-        small = _cpu(_brief(unit, tail, 262144))
-        for _attempt in range(2):
-            if small > 1.0:
-                break
-            small = min(small, _cpu(_brief(unit, tail, 262144)))
-        big = None
-        if small <= 1.0:
-            text = _brief(unit, tail, 1048576)
-            for _attempt in range(5):
-                took = _cpu(text)
-                big = took if big is None else min(big, took)
-                if big < min(1.0, 8 * small + 0.01) or big > 8.0:
-                    break
-        rows.append((shape, big is not None and big < 1.0, big is not None and big < 8 * small + 0.01))
-    check("rdp/label-screen-linear-time", rows, [(shape, True, True) for shape, _unit, _tail in shapes])
+
+    def _timer(shape, kind, size, _round_number):
+        text = texts[(shape, size)]
+        started = time.process_time()
+        if kind == "screen":
+            aiqt_hooks._rdp_labels(text, labels)
+        else:
+            _rdp_reference_scan(text)
+        return time.process_time() - started
+    shapes = []
+    for shape, unit, tail, ratio in _RDP_TIMING_SHAPES:
+        for size in _RDP_TIMING_SIZES:
+            texts[(shape, size)] = _brief(unit, tail, size)
+        shapes.append((shape, {size: len(texts[(shape, size)].encode()) for size in _RDP_TIMING_SIZES},
+                       Fraction(ratio) * _RDP_TIMING_MARGIN))
+    rows, _spent = _rdp_timing_rows(shapes, _timer)
+    check("rdp/label-screen-linear-time", rows, [(shape, "linear") for shape, _l, _b in shapes])
+    _rdp_timing_decision_cases()
+
+
+def _rdp_timing_decision_cases():
+    """The linear-time decision over simulated times (rdp/label-screen-linear-time-decision), no screen run:
+    each bound fails exactly at its value and passes just inside it; a quadratic screen fails, also when a
+    burst of load lifts its small sizes' times through a whole group of rounds; a linear screen passes
+    through a burst that lifts its largest size through one group; a runaway ends its shape untimed while
+    the next shape is still timed; and timings that each take just under the runaway bound end the row
+    over budget, every shape failed by name, within the stated bound of the budget plus one timing."""
+    sizes = {262144: 262144, 524288: 524288, 1048576: 1048576}
+    bound = Fraction("13.5") * _RDP_TIMING_MARGIN
+
+    def _group(screen, reference=(1.0, 1.0, 1.0), lengths=sizes):
+        least = {}
+        for size, took, ref in zip(sorted(lengths), screen, reference):
+            least[("screen", size)], least[("reference", size)] = took, ref
+        return len(_rdp_timing_group(least, lengths, bound))
+    quarter = {262144: 262144, 1048576: 1048576}
+    at_ratio = float(bound)
+    bounds = [
+        ("growth-4x-exactly-8", _group((1.0, 8.0), lengths=quarter)),
+        ("growth-4x-just-under-8", _group((1.0, 7.999999), lengths=quarter)),
+        ("growth-4x-just-over-8", _group((1.0, 8.000001), lengths=quarter)),
+        ("ratio-exactly-at", _group((at_ratio, at_ratio * 2, at_ratio * 4), (1.0, 2.0, 4.0))),
+        ("ratio-just-under", _group((at_ratio - 1e-6, (at_ratio - 1e-6) * 2, (at_ratio - 1e-6) * 4),
+                                    (1.0, 2.0, 4.0))),
+        ("ratio-just-over", _group((at_ratio + 1e-6, 2.0, 4.0), (1.0, 2.0, 4.0))),
+        ("middle-size-decides", _group((1.0, 4.0, 5.0)))]
+
+    def _simulate(screen, reference, runaway_at=None, budget=_RDP_TIMING_BUDGET, shapes=("a",)):
+        calls = []
+
+        def _timer(shape, kind, size, round_number):
+            calls.append((shape, kind, size))
+            if runaway_at is not None and (shape, kind, size) == runaway_at:
+                return _RDP_TIMING_RUNAWAY + 0.5
+            return (screen if kind == "screen" else reference)(size, round_number)
+        rows, spent = _rdp_timing_rows([(shape, sizes, bound) for shape in shapes], _timer, budget=budget)
+        return ([verdict.split(":")[0] for _shape, verdict in rows], spent, calls)
+
+    def _linear(size, _round):
+        return 0.4 * size / 1048576
+
+    def _reference(size, _round):
+        return 0.03 * size / 1048576
+
+    def _quadratic(size, _round):
+        return 0.1 * (size / 262144) ** 2
+    # A quadratic screen with its 256 KiB time lifted 2.1 times through the first group of rounds, and one
+    # with its 256 KiB and 512 KiB times lifted so that the first group looks linear (4, 2 and 1 times).
+    lifted = {262144: 2.1}
+    flattened = {262144: 4.0, 524288: 2.0}
+    cases = [
+        ("linear", _simulate(_linear, _reference)[0]),
+        ("quadratic", _simulate(_quadratic, _reference)[0]),
+        ("quadratic-small-lifted-one-group", _simulate(
+            lambda size, rnd: _quadratic(size, rnd) * (lifted.get(size, 1.0) if rnd < 3 else 1.0),
+            _reference)[0]),
+        ("quadratic-flattened-one-group", _simulate(
+            lambda size, rnd: _quadratic(size, rnd) * (flattened.get(size, 1.0) if rnd < 3 else 1.0),
+            lambda size, rnd: 0.04 * size / 262144)[0]),
+        ("linear-large-lifted-one-group", _simulate(
+            lambda size, rnd: _linear(size, rnd) * (3.0 if size == 1048576 and 3 <= rnd < 6 else 1.0),
+            _reference)[0]),
+        ("five-times-slower", _simulate(lambda size, rnd: 5 * _linear(size, rnd),
+                                        lambda size, rnd: _linear(size, rnd) / 13.5)[0])]
+    verdicts, _spent, calls = _simulate(_linear, _reference, runaway_at=("a", "screen", 1048576),
+                                        shapes=("a", "b"))
+    runaway = calls.index(("a", "screen", 1048576))
+    cases.append(("runaway", verdicts, [call for call in calls[runaway + 1:] if call[0] == "a"],
+                  len([call for call in calls if call[0] == "b"]) > 0))
+    verdicts, spent, calls = _simulate(lambda size, rnd: _RDP_TIMING_RUNAWAY - 1e-6,
+                                       lambda size, rnd: _RDP_TIMING_RUNAWAY - 1e-6, shapes=("a", "b", "c"))
+    cases.append(("just-under-runaway-every-timing", verdicts, len(calls),
+                  _RDP_TIMING_BUDGET <= spent < _RDP_TIMING_BUDGET + _RDP_TIMING_RUNAWAY))
+    check("rdp/label-screen-linear-time-decision", (bounds, cases), (
+        [("growth-4x-exactly-8", 1), ("growth-4x-just-under-8", 0), ("growth-4x-just-over-8", 1),
+         ("ratio-exactly-at", 3), ("ratio-just-under", 0), ("ratio-just-over", 1),
+         ("middle-size-decides", 1)],
+        [("linear", ["linear"]), ("quadratic", ["not linear"]),
+         ("quadratic-small-lifted-one-group", ["not linear"]),
+         ("quadratic-flattened-one-group", ["not linear"]),
+         ("linear-large-lifted-one-group", ["linear"]),
+         ("five-times-slower", ["not linear"]),
+         ("runaway", ["runaway", "linear"], [], True),
+         ("just-under-runaway-every-timing", ["over budget", "over budget", "over budget"], 19, True)]))
 
 
 def _rwh_iso(hours=0):
@@ -11771,6 +11974,149 @@ def _record_surface_cases(tmp, hooks=aiqt_hooks, hooks_file=None):
         check(cid, (len(want), got[1] == got[0], got[2] == got[0]), (len(starts), True, True))
 
 
+# Enumerator-supplied text in the stop-family reasons: each named id, title and reason field is one line and
+# cut to its fixed maximum with a visible mark, so a reason stays bounded however long or however many lines
+# that text has. Every row below fails with aiqt_hooks._orch_clip replaced by plain str.
+_NAMED_TEXT_TOTAL_MAX = 6000  # characters: the stated ceiling on one reason built from 256 maximum-length items
+_NAMED_TEXT_BREAKS = "\n\r\x0b\x0c\x1c\x85\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}"  # what str.splitlines breaks on
+
+
+class _EnumeratorRunStub:
+    """Stands in for the hooks module's subprocess so _orch_enumerate sees a chosen run outcome."""
+    SubprocessError = subprocess.SubprocessError
+
+    def __init__(self, run):
+        self.run = run
+
+
+def _one_line(text):
+    return len(text.splitlines()) == 1
+
+
+def _named_field_kept(hooks, reason, fill, length, limit):
+    """True when a field of `length` copies of `fill` appears in reason exactly as the clip renders it: whole
+    up to limit, else cut to limit characters ending in the clip mark, with no longer run of fill present."""
+    mark = hooks._ORCH_CLIP_MARK
+    kept = length if length <= limit else limit - len(mark)
+    rendered = fill * kept + ("" if length <= limit else mark)
+    return rendered in reason and fill * (kept + 1) not in reason
+
+
+def _named_text_cases(hooks):
+    """(check id, got, want) rows for the bounded named-text checks, built against hooks."""
+    base = {"kind": "stop", "escape": False, "loop_signal": False, "counter": 0,
+            "enum_status": "ok", "enum_detail": "", "actionable": [], "waiting": [],
+            "blocked": [], "proposed": [], "wake_named": None,
+            "schedule_denials": 0, "basis_unchanged": False}
+    id_max, title_max = hooks._ORCH_NAMED_ID_MAX, hooks._ORCH_NAMED_TITLE_MAX
+    reason_max, brk = hooks._ORCH_NAMED_REASON_MAX, _NAMED_TEXT_BREAKS
+    kinds = ("stop", "schedule_idle", "ask")
+    rows = []
+
+    def reason(**kw):
+        return hooks.decide_yield(dict(base, **kw))[1]
+
+    def limits(fill, limit, build):
+        # just inside, exactly at, and one over the field limit
+        return tuple(_named_field_kept(hooks, build(fill * n), fill, n, limit)
+                     for n in (limit - 1, limit, limit + 1))
+
+    def bounded(r):
+        return (len(r) <= _NAMED_TEXT_TOTAL_MAX, _one_line(r), "; and 246 more" in r)
+
+    def ids(n):
+        return ["{:03d}".format(j) + "~" * (n - 3) for j in range(256)]
+
+    for kind in kinds:
+        k = {"kind": kind}
+        r = reason(actionable=[("A" + brk + "B", "t" + brk, "w" + brk)], **k)
+        rows.append(("core/named-text-one-line-actionable-" + kind,
+                     (_one_line(r), "A" + " " * len(brk) + "B" in r, "Two" in r), (True, True, True)))
+        r = reason(actionable=[("A", "^" * 2048, "w")], **k)
+        rows.append(("core/named-text-2kb-title-cut-" + kind,
+                     (_named_field_kept(hooks, r, "^", 2048, title_max), len(r) < 2048), (True, True)))
+        for field, fill, limit in (("id", "~", id_max), ("title", "^", title_max),
+                                   ("reason", "@", reason_max)):
+            def build(v, field=field, k=k):
+                entry = dict({"id": "I", "title": "T", "reason": "W"}, **{field: v})
+                return reason(actionable=[(entry["id"], entry["title"], entry["reason"])], **k)
+            rows.append(("core/named-text-{}-limit-{}".format(field, kind),
+                         limits(fill, limit, build), (True, True, True)))
+        sizes = []
+        for n_id, n_text in ((id_max, title_max), (4096, 4096)):
+            act = [(i, "^" * n_text, "@" * max(n_text, reason_max)) for i in ids(n_id)]
+            held = [(i, "cannot-evaluate", "held") for i in ids(n_id)] if kind == "ask" else []
+            sizes.append(bounded(reason(actionable=act, cannot_evaluate=held, **k)))
+        rows.append(("core/named-text-256-items-bounded-" + kind, sizes, [(True, True, True)] * 2))
+        r = reason(cannot_evaluate=[("C" + brk + "E", "cannot-evaluate", "held")], **k)
+        rows.append(("core/named-text-one-line-cannot-evaluate-" + kind,
+                     (_one_line(r), "(cannot-evaluate)" in r), (True, True)))
+        rows.append(("core/named-text-cannot-evaluate-id-limit-" + kind,
+                     limits("~", id_max, lambda v, k=k: reason(
+                         cannot_evaluate=[(v, "cannot-evaluate", "held")], **k)), (True, True, True)))
+        rows.append(("core/named-text-256-cannot-evaluate-bounded-" + kind,
+                     [bounded(reason(cannot_evaluate=[(i, "cannot-evaluate", "held") for i in ids(n)], **k))
+                      for n in (id_max, 4096)], [(True, True, True)] * 2))
+    held_ctx = {"kind": "ask", "actionable": [("A", "T", "W")]}
+    r = reason(cannot_evaluate=[("H" + brk + "D", "cannot-evaluate", "held")], **held_ctx)
+    rows.append(("core/named-text-one-line-held-ask", (_one_line(r), "Additionally" in r), (True, True)))
+    rows.append(("core/named-text-held-id-limit-ask",
+                 limits("~", id_max, lambda v: reason(
+                     cannot_evaluate=[(v, "cannot-evaluate", "held")], **held_ctx)), (True, True, True)))
+    pend = {"kind": "schedule_idle", "wake_named": False}
+    r = reason(waiting=[("P" + brk + "D", "tracked-task", "t9")], **pend)
+    rows.append(("core/named-text-one-line-pending-schedule_idle",
+                 (_one_line(r), r.startswith("wake hygiene")), (True, True)))
+    rows.append(("core/named-text-pending-id-limit-schedule_idle",
+                 limits("~", id_max, lambda v: reason(waiting=[(v, "tracked-task", "t9")], **pend)),
+                 (True, True, True)))
+    # the enumerator-error detail: the two named formats, then their raw-id and raw-text siblings
+    envelope = {"version": 1, "generated_at_utc": now_iso(0), "source": {"locator": "selftest"}}
+    long_id = ("~" + brk) * 400
+    detail_max = id_max + reason_max + 60
+
+    def detail(**fields):
+        raw = dict({"id": "X", "title": "t", "state": "open", "granted": True, "blocker": None}, **fields)
+        return hooks.validate_enumeration(dict(envelope, items=[raw]))[1]
+    d = detail(id=long_id, state="s" + brk * 400)
+    rows.append(("core/enum-detail-invalid-state-one-line-bounded",
+                 ("invalid state" in d, _one_line(d), len(d) <= detail_max,
+                  [_one_line(reason(kind=kind, enum_status="ENUMERATOR_ERROR", enum_detail=d))
+                   for kind in kinds]),
+                 (True, True, True, [True, True, True])))
+    dup = {"id": long_id, "title": "t", "state": "open", "granted": True}
+    siblings = [detail(id=long_id, title=7), detail(id=long_id, granted="yes"),
+                detail(id=long_id, blocker={"kind": "bogus"}),
+                detail(id=long_id, blocker={"kind": "external", "ref": "r", "evidence": 7}),
+                hooks.validate_enumeration(dict(envelope, items=[dup, dict(dup)]))[1],
+                hooks.validate_enumeration(dict(envelope, version="v" * 4096, items=[]))[1]]
+    rows.append(("core/enum-detail-raw-id-formats-one-line-bounded",
+                 [(_one_line(x), len(x) <= detail_max) for x in siblings], [(True, True)] * 6))
+
+    def fail_run(*_a, **_k):
+        raise OSError("enumerator " + ("x" + brk) * 1000)
+
+    def exit_run(argv, **_k):
+        return subprocess.CompletedProcess(argv, 3, "", ("e" + brk) * 1000)
+    for name, run in (("core/enum-detail-failed-to-run-one-line-bounded", fail_run),
+                      ("core/enum-detail-exit-stderr-one-line-bounded", exit_run)):
+        saved = hooks.subprocess
+        hooks.subprocess = _EnumeratorRunStub(run)
+        try:
+            status, d = hooks._orch_enumerate({"enumerator": {"argv": ["selftest-enumerator"]}}, ".")
+        finally:
+            hooks.subprocess = saved
+        rows.append((name, (status, _one_line(d), len(d) <= detail_max), ("ENUMERATOR_ERROR", True, True)))
+    # keyed by check id so the call site can name every id literally; a repeated id would let one
+    # row silently replace another, so it is a failure here
+    table = {}
+    for name, got, want in rows:
+        if name in table:
+            FAILURES.append("named-text case id {!r} built twice".format(name))
+        table[name] = (got, want)
+    return table
+
+
 def main(report_path=None):
     if report_path is not None:
         # The execution report is finalized at interpreter exit, after this run's cleanup
@@ -16565,6 +16911,53 @@ def _main_isolated(report_path=None):
         check("core/ask-enum-error-with-actionable-cap-still-denies", v, "DENY")
         v, _r, _d = aiqt_hooks.decide_yield(dict(_core_ask_mixed, actionable=[]))
         check("core/ask-cannot-evaluate-only-cap-relieves", v, "ALLOW_WITH_FINDINGS")
+        # every id is a literal row so check_selftest_execution.py can resolve it statically; the
+        # listed ids must equal the ids _named_text_cases builds, so a case added, renamed or
+        # dropped on one side only fails the suite
+        _named_text = _named_text_cases(aiqt_hooks)
+        _named_text_listed = []
+        for (name,) in (("core/named-text-one-line-actionable-stop",),
+                        ("core/named-text-2kb-title-cut-stop",),
+                        ("core/named-text-id-limit-stop",),
+                        ("core/named-text-title-limit-stop",),
+                        ("core/named-text-reason-limit-stop",),
+                        ("core/named-text-256-items-bounded-stop",),
+                        ("core/named-text-one-line-cannot-evaluate-stop",),
+                        ("core/named-text-cannot-evaluate-id-limit-stop",),
+                        ("core/named-text-256-cannot-evaluate-bounded-stop",),
+                        ("core/named-text-one-line-actionable-schedule_idle",),
+                        ("core/named-text-2kb-title-cut-schedule_idle",),
+                        ("core/named-text-id-limit-schedule_idle",),
+                        ("core/named-text-title-limit-schedule_idle",),
+                        ("core/named-text-reason-limit-schedule_idle",),
+                        ("core/named-text-256-items-bounded-schedule_idle",),
+                        ("core/named-text-one-line-cannot-evaluate-schedule_idle",),
+                        ("core/named-text-cannot-evaluate-id-limit-schedule_idle",),
+                        ("core/named-text-256-cannot-evaluate-bounded-schedule_idle",),
+                        ("core/named-text-one-line-actionable-ask",),
+                        ("core/named-text-2kb-title-cut-ask",),
+                        ("core/named-text-id-limit-ask",),
+                        ("core/named-text-title-limit-ask",),
+                        ("core/named-text-reason-limit-ask",),
+                        ("core/named-text-256-items-bounded-ask",),
+                        ("core/named-text-one-line-cannot-evaluate-ask",),
+                        ("core/named-text-cannot-evaluate-id-limit-ask",),
+                        ("core/named-text-256-cannot-evaluate-bounded-ask",),
+                        ("core/named-text-one-line-held-ask",),
+                        ("core/named-text-held-id-limit-ask",),
+                        ("core/named-text-one-line-pending-schedule_idle",),
+                        ("core/named-text-pending-id-limit-schedule_idle",),
+                        ("core/enum-detail-invalid-state-one-line-bounded",),
+                        ("core/enum-detail-raw-id-formats-one-line-bounded",),
+                        ("core/enum-detail-failed-to-run-one-line-bounded",),
+                        ("core/enum-detail-exit-stderr-one-line-bounded",)):
+            _named_text_listed.append(name)
+            if name in _named_text:
+                check(name, *_named_text[name])
+        if set(_named_text_listed) != set(_named_text):
+            FAILURES.append("named-text ids drift: listed but not built {}; built but not listed {}".format(
+                sorted(set(_named_text_listed) - set(_named_text)),
+                sorted(set(_named_text) - set(_named_text_listed))))
 
         # Load-shed characterization pins (the load-shed mechanism itself was declined): decide_yield
         # sets no live-worker count floor, and a shed recorded as a fresh external blocker on queued

@@ -66,11 +66,11 @@ html = '''The durable operational record: one entry per change, correctable in p
 
 [[body.items]]
 term = "Typed indexes"
-html = '''The eleven baseline typed indexes, each a <code>.index.toml</code> file, empty to start.'''
+html = '''The eleven baseline typed indexes, each a <code>.index.toml</code> file that starts with no records, in the canonical form the reference tooling writes, never as a zero-byte file.'''
 
 [[body]]
 component = "prose"
-html = '''<p>The imported leaves: one <code>&lt;type&gt;.imported.index.toml</code> beside each of those eleven indexes, plus <code>worklog.imported.toml</code> for the worklog, each empty to start. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2).</p>
+html = '''<p>The imported leaves: one <code>&lt;type&gt;.imported.index.toml</code> beside each of those eleven indexes, plus <code>worklog.imported.toml</code> for the worklog, each starting with no records in the same canonical form, never as a zero-byte file. The standard requires them in every store (OPF-SPEC.md sections 4.2 and 8.2). The "Hand-start file contents" section of OPF-QUICKSTART.md gives the exact starting bytes of these files.</p>
 <p>Then write the committed pointer <code>.opf.toml</code> at your product repository root, so the store resolves from a stable location (specification section 4.3). In the manifest, a <code>[profiles.aiqt]</code> table is optional and is ignored by base-only tooling; a base adopter need not add it.</p>
 <p>The illustrative base <code>[opf]</code> table of a manifest, not a complete manifest: also set <code>layout</code>, <code>posture</code> and <code>import_status</code>, register each enabled type in <code>[types]</code>, and declare views and the other settings (see <a href="$BASE/standard/">the standard</a> for the normative shape, and <a href="$BASE/core-files/">the core store files</a> for every table it can carry):</p>'''
 

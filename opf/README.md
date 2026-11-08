@@ -9,8 +9,7 @@ disagree.
 The website is [opfiles.ai](https://opfiles.ai). The standard is open source under the Apache
 License 2.0, except vendored third-party material, which remains under its own terms.
 
-Status: the specification is a working draft. 2 of its 10 commands are not yet implemented, and
-adoption cannot finish yet (see [Adoption](#adoption)).
+Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
 
 ## Why it exists
 
@@ -53,7 +52,7 @@ Read https://opfiles.ai/llms.txt and https://opfiles.ai/adopt.md, then inspect t
 
 Adopting by hand is the fallback when you cannot use an assistant; both paths target the same
 store format. In this build, `opf adopt` can plan, approve, reconcile and report status, but its
-apply step refuses every plan and `complete` refuses with exit 2, so adoption cannot finish yet.
+apply step refuses every plan and `complete` refuses with exit 2.
 `opf init` scaffolds a new store today.
 
 ## The files and what they do
@@ -107,8 +106,8 @@ The specification defines 12 baseline record types (11 typed indexes plus the wo
 | `adopt` | plan, approve, reconcile and status run; apply and complete refuse | partly implemented |
 | `upgrade` | refuses with exit 2; no store upgrade is defined | refuses |
 | `import` | ordinary modes retired; refuse with exit 2 | retired |
-| `migrate` | specified, not yet implemented | planned |
-| `sync` | specified, not yet implemented | planned |
+| `migrate` | specified; exits 2 in this build | in progress |
+| `sync` | specified; exits 2 in this build | in progress |
 
 The `opf` reference CLI is 1 implementation of the standard's command vocabulary. You can use your
 own tooling instead, or adopt by hand.

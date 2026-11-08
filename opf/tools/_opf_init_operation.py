@@ -579,9 +579,9 @@ def _pv(status, code, location, detail):
 def _roster_namespaces():
     """(baseline, importer, module) namespace sets, derived from the store vocabulary.
 
-    Only `baseline` is REQUIRED of an ancestral seed. `importer` (legacy_fragment, LF) is deprecated
-    for new stores (spec 8.1): it is accepted and copied when an ancestral store carried it, never
-    required, and never scaffolded on a fresh store. `module` is the module tier."""
+    Only `baseline` is REQUIRED of an ancestral seed. `importer` is LF, which the standard reserves
+    unassigned and no record type uses (spec 8.1): it is accepted and copied when an ancestral store
+    carried it, never required, and never scaffolded on a fresh store. `module` is the module tier."""
     baseline = frozenset(_opf_store.BASELINE_TYPES.values())
     importer = frozenset(_opf_store.IMPORTER_TYPES.values())
     module = frozenset(ns for ns, _mod in _opf_store.MODULE_TYPES.values())
@@ -4571,7 +4571,7 @@ def _b6_tests(base, env, ok, refuses):
     counters = tomllib.loads(_opf_init.build_counters(seed=seed.counters))
     ok("B2-wl-next-allocation", high_water(counters["counters"], "WL") + 1 == 8)
     ok("B2-lf-copied", seed.counters.get("LF") == 5 and counters["counters"].get("LF") == 5)
-    # B3: LF is accepted-if-present, never required (spec 8.1), so a snapshot WITHOUT LF is a
+    # B3: LF is accepted-if-present, never required, so a snapshot WITHOUT LF is a
     # complete seed whose counters carry no LF; a snapshot missing a BASELINE namespace (HO) is still
     # UNKNOWN (never zero) and the plan refuses it.
     nolf = dict.fromkeys(_opf_store.BASELINE_TYPES.values(), 1)

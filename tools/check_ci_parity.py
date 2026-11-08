@@ -745,9 +745,11 @@ CONCURRENCY_BLOCK = (
 
 # The one job-level if: line a job other than Quality gates may carry, exactly as
 # written, and the quality.yml jobs that must carry it (module docstring, LANES): a
-# heavy job runs on a push and on a pull request whose head is a merge-train-*
-# branch of this repository, and is skipped on every other pull request, which
-# Quality gates reads as not success. The site fast lane adds the leading
+# heavy job runs on a push, on a workflow_dispatch or schedule run of
+# refs/heads/main (a manual or nightly full run; on any other ref it is
+# skipped), and on a pull request whose head is a merge-train-* branch of this
+# repository, and is skipped on every other pull request, which Quality gates
+# reads as not success. The site fast lane adds the leading
 # needs.scope condition: when the scope job reads the pull request as site-only
 # (every changed path in the site allowlist), the heavy job is skipped and
 # Quality gates passes that one skip; on a push the scope job always emits
@@ -757,6 +759,8 @@ CONCURRENCY_BLOCK = (
 HEAVY_JOB_IF_LINE = (
     "    if: needs.scope.outputs.site_only != 'true' && "
     "(github.event_name == 'push' || "
+    "((github.event_name == 'workflow_dispatch' || "
+    "github.event_name == 'schedule') && github.ref == 'refs/heads/main') || "
     "(startsWith(github.head_ref, 'merge-train-') && "
     "github.event.pull_request.head.repo.full_name == github.repository))")
 HEAVY_JOB_NEEDS_LINE = "    needs: scope"
@@ -921,6 +925,17 @@ ALLOWLIST = (
     },
     {
         "side": "ci-only",
+        "identity": "tools/check_release_cut.py --protected <ref:origin/${GITHUB_REF_NAME}>",
+        "reason": (
+            "A workflow_dispatch or schedule run has no pushed range, so the CI "
+            "job supplies only its runtime-derived origin ref and the gate "
+            "compares the checked-out tip with its first parent. The bare leg "
+            "runs locally."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
         "identity": "tools/check_version_monotonicity.py --base <ref:origin/${GITHUB_BASE_REF}>",
         "reason": (
             "CI derives the comparison base from trusted event and repository "
@@ -955,9 +970,10 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_branch_root.py --protected <ref:origin/${GITHUB_REF_NAME}> --max-lag 200",
         "reason": (
-            "The push-to-main CI job self-checks the protected line against its "
-            "runtime-derived origin ref; there is no local equivalent of the "
-            "protected-ref comparison."
+            "The CI job's leg for a push to main, a workflow_dispatch or a "
+            "schedule run checks HEAD against the runtime-derived origin ref of "
+            "the ref the run is for (on a push, a self-check of the protected "
+            "line); there is no local equivalent of the protected-ref comparison."
         ),
         "backlog": "GD-123",
     },
@@ -5037,7 +5053,9 @@ def _dirname_guard_outcome(text, relative, scenario):
 def _passing_status(text):
     """The exit status a passing run of a runner text gives, read from the
     runner itself: its one pass summary echo (the last line of a
-    TERMINAL_SUMMARIES entry) and every line after it, run under bash. None
+    TERMINAL_SUMMARIES entry) and every line after it, run under bash. The
+    echo is matched on the line the grammar reads (_strip_comment, then
+    strip), so an indented echo or one with a trailing comment is found. None
     when the text holds no single pass echo, so no exit status matches it."""
     import shutil
     import subprocess
@@ -5047,7 +5065,8 @@ def _passing_status(text):
         raise RuntimeError("bash not found")
     lines = text.splitlines()
     ends = {summary[-1] for summary in TERMINAL_SUMMARIES}
-    starts = [index for index, line in enumerate(lines) if line in ends]
+    starts = [index for index, line in enumerate(lines)
+              if _strip_comment(line).strip() in ends]
     if len(starts) != 1:
         return None
     proc = subprocess.run(
@@ -5057,17 +5076,31 @@ def _passing_status(text):
     return proc.returncode
 
 
+def _passing_status_wrong(passing):
+    """True when the status a passing run gives is not 0 (or there is no
+    single pass echo, None): every stub gate passes, so a pass path that
+    exits non-zero is itself a fault, whatever the run's own status."""
+    return passing != 0
+
+
+def _status_differs(rc, passing):
+    """True when a run's exit status is not the status a passing run gives;
+    the dirname control and the CDPATH run each compare through here."""
+    return rc != passing
+
+
 def dirname_guard_problems(text, relative):
-    """The scenarios a runner text fails: each faulty dirname must exit 2
-    with no gate launched, and the control must launch gates and exit with
-    the status a passing run gives (_passing_status). Every stub gate passes,
-    so a control that launched gates and then failed is not a pass."""
+    """The scenarios a runner text fails: "pass-status" when the status a
+    passing run gives (_passing_status) is not 0, each faulty dirname must
+    exit 2 with no gate launched, and the control must launch gates and exit
+    with that status. Every stub gate passes, so a control that launched
+    gates and then failed is not a pass."""
     passing = _passing_status(text)
-    problems = []
+    problems = ["pass-status"] if _passing_status_wrong(passing) else []
     for scenario in ("missing", "failed", "empty", "control"):
         rc, absent = _dirname_guard_outcome(text, relative, scenario)
         if scenario == "control":
-            if absent or rc != passing:
+            if absent or _status_differs(rc, passing):
                 problems.append(scenario)
         elif (rc, absent) != (2, True):
             problems.append(scenario)
@@ -5132,20 +5165,21 @@ def _cdpath_outcome(text, relative):
 
 
 def cdpath_problems(text, relative):
-    """What a relative start under a hostile CDPATH does wrong: "no-gate" when
-    no gate launches from the true tree, "moved" when any logged gate line
-    names the decoy (a moved root, or a printed CDPATH match in a captured
-    directory), and "exit" when the run does not exit with the status a
-    passing run gives (_passing_status): every stub gate passes, so a run
-    that logged a true-tree gate line and then failed is not a pass."""
+    """What a relative start under a hostile CDPATH does wrong: "pass-status"
+    when the status a passing run gives (_passing_status) is not 0, "no-gate"
+    when no gate launches from the true tree, "moved" when any logged gate
+    line names the decoy (a moved root, or a printed CDPATH match in a
+    captured directory), and "exit" when the run does not exit with that
+    status: every stub gate passes, so a run that logged a true-tree gate
+    line and then failed is not a pass."""
     passing = _passing_status(text)
     rc, tree, decoy, calls = _cdpath_outcome(text, relative)
-    problems = []
+    problems = ["pass-status"] if _passing_status_wrong(passing) else []
     if not any(call.startswith(tree + " python3 ") for call in calls):
         problems.append("no-gate")
     if any(decoy in call for call in calls):
         problems.append("moved")
-    if rc != passing:
+    if _status_differs(rc, passing):
         problems.append("exit")
     return problems
 
@@ -8879,7 +8913,38 @@ def self_test():
             ("always()", "    if: always()"),
             ("the line wrapped in ${{ }}",
              "    if: ${{ " + HEAVY_JOB_IF_LINE[8:] + " }}"),
-            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy")):
+            ("a trailing comment", HEAVY_JOB_IF_LINE + "  # heavy"),
+            # A manual or scheduled run runs the heavy jobs only on main: the
+            # ref condition dropped, widened to every branch, or moved off the
+            # dispatch arm would run them on a dispatch of any other ref.
+            ("the dispatch arm without its main ref condition",
+             HEAVY_JOB_IF_LINE.replace(
+                 " && github.ref == 'refs/heads/main'", "", 1)),
+            ("the dispatch arm on every branch",
+             HEAVY_JOB_IF_LINE.replace(
+                 "github.ref == 'refs/heads/main'",
+                 "startsWith(github.ref, 'refs/heads/')", 1)),
+            ("the dispatch arm on another ref",
+             HEAVY_JOB_IF_LINE.replace(
+                 "'refs/heads/main'", "'refs/heads/dev'", 1)),
+            ("the dispatch arm's ref condition negated",
+             HEAVY_JOB_IF_LINE.replace(
+                 "github.ref == 'refs/heads/main'",
+                 "github.ref != 'refs/heads/main'", 1)),
+            ("the ref condition bound to the schedule event alone",
+             HEAVY_JOB_IF_LINE.replace(
+                 "((github.event_name == 'workflow_dispatch' || "
+                 "github.event_name == 'schedule') && "
+                 "github.ref == 'refs/heads/main')",
+                 "(github.event_name == 'workflow_dispatch' || "
+                 "github.event_name == 'schedule' && "
+                 "github.ref == 'refs/heads/main')", 1)),
+            ("the previous line, without the dispatch arm",
+             "    if: needs.scope.outputs.site_only != 'true' && "
+             "(github.event_name == 'push' || "
+             "(startsWith(github.head_ref, 'merge-train-') && "
+             "github.event.pull_request.head.repo.full_name == "
+             "github.repository))")):
         lane_case("39e a widened or respelled heavy-job if: is a lane "
                   "finding: " + label,
                   evaluate(multi_local, lane_ci(heavy_if=line), ()), 1,
@@ -9377,6 +9442,12 @@ def self_test():
                  labeled + "  pull_request_target:\n    types: [labeled]\n", 1,
                  "pull_request_target")
     labeled_case("41h control: types: [labeled] passes", labeled, 0)
+    labeled_case("41h control: a workflow_dispatch trigger beside the labeled "
+                 "pull_request and push passes",
+                 labeled + "  push:\n    branches: [main]\n  workflow_dispatch:\n", 0)
+    labeled_case("41h control: a schedule trigger beside the labeled pull_request "
+                 "passes",
+                 labeled + "  schedule:\n    - cron: '17 3 * * *'\n", 0)
     labeled_case("41h control: a plain scalar types: labeled passes",
                  pr_types("labeled"), 0)
     # A quality.yml with no top-level on: line schedules no Quality run for the
@@ -9806,33 +9877,54 @@ def self_test():
     # 44. Each runner's checked directory binding, RUN under bash: a missing
     # dirname, one that fails (printing .) and one that prints nothing each
     # exit 2 with no gate launched, while the true directory launches gates
-    # and exits with the status a passing run gives (_passing_status).
-    # Each guard is held by its own named mutant: without the status check
-    # the failing dirname runs every gate from the calling directory's
-    # parent (or from it, standalone); without the non-empty check the empty
-    # name runs every gate from /. The pinned lines are the live ones. The
+    # and exits with the status a passing run gives (_passing_status), which
+    # must itself be 0. Each guard is held by its own named mutant: without
+    # the status check the failing dirname runs every gate from the calling
+    # directory's parent (or from it, standalone); without the non-empty
+    # check the empty name runs every gate from /. The pinned lines are the
+    # live ones. The
     # gate-then-fail runner (the live one with exit 3 after its first gate)
     # launches a gate under the control and then fails, so only the control's
-    # exit status holds it red; the flip restores the helper that read the
-    # control by its gate launch alone, which passed it.
+    # exit status holds it red; its flip patches the status comparison inside
+    # the real helper (_status_differs) to never differ, which reads the
+    # control by its gate launch alone and passes it. The pass-then-fail
+    # runner (the live one with exit 3 after its pass echo) exits under the
+    # control with the same status as its own pass path, so only the
+    # requirement that a passing run gives 0 holds it red; its flip patches
+    # that requirement (_passing_status_wrong) out of the real helper, which
+    # passes it. The pass echo indented, or with a trailing comment, is a form
+    # the grammar accepts, so each runner must be found passing (status 0).
     def gate_then_fail(text):
         first_gate = re.search(r"^run_gate .*\n", text, re.M)
         if first_gate is None:
             return None
         return text[:first_gate.end()] + "exit 3\n" + text[first_gate.end():]
 
-    def control_launch_only(text, relative):
-        problems = []
-        for scenario in ("missing", "failed", "empty", "control"):
-            rc, absent = _dirname_guard_outcome(text, relative, scenario)
-            if scenario == "control":
-                if absent:
-                    problems.append(scenario)
-            elif (rc, absent) != (2, True):
-                problems.append(scenario)
-        return problems
+    def pass_echo_variant(text, rewrite):
+        echoes = [match for summary in TERMINAL_SUMMARIES
+                  for match in re.finditer(
+                      "^" + re.escape(summary[-1]) + "\n", text, re.M)]
+        if len(echoes) != 1:
+            return None
+        echo = echoes[0]
+        return (text[:echo.start()] + rewrite(echo.group()[:-1]) + "\n"
+                + text[echo.end():])
 
-    count += 2
+    def grammar_diagnostics(text, relative):
+        if relative == STANDALONE_SOURCE:
+            text, diagnostic = adapt_standalone_runner(text)
+            if diagnostic is not None:
+                return (diagnostic,)
+        return extract_local(text).diagnostics
+
+    echo_rewrites = (
+        ("pass-then-fail", lambda echo: echo + "\nexit 3"),
+        ("indented pass echo", lambda echo: "    " + echo),
+        ("pass echo with a trailing comment", lambda echo: echo + "  # all gates passed"),
+    )
+    module = sys.modules[__name__]
+
+    count += 8
     for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
                               (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
         runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
@@ -9847,14 +9939,39 @@ def self_test():
             if got != ["control"]:
                 failures.append("44 {} gate-then-fail runner gave {}, expected "
                                 "['control']".format(relative, got))
-            with patch.object(sys.modules[__name__], "dirname_guard_problems",
-                              control_launch_only):
+            with patch.object(module, "_status_differs", lambda rc, passing: False):
                 flipped = dirname_guard_problems(failing, relative)
             if flipped:
                 failures.append(
                     "44 {} gate-then-fail runner: not red on the flip to the "
                     "launch-only control (the flip gives {}, not [])".format(
                         relative, flipped))
+        for label, rewrite in echo_rewrites:
+            variant = pass_echo_variant(runner_text, rewrite)
+            if variant is None:
+                failures.append("44 {} has no single pass echo".format(relative))
+                break
+            got = dirname_guard_problems(variant, relative)
+            if label == "pass-then-fail":
+                if got != ["pass-status"]:
+                    failures.append("44 {} {} runner gave {}, expected "
+                                    "['pass-status']".format(relative, label, got))
+                with patch.object(module, "_passing_status_wrong", lambda passing: False):
+                    flipped = dirname_guard_problems(variant, relative)
+                if flipped:
+                    failures.append(
+                        "44 {} {} runner: not red on the flip that drops the "
+                        "zero passing status (the flip gives {}, not [])".format(
+                            relative, label, flipped))
+                continue
+            diagnostics = grammar_diagnostics(variant, relative)
+            if diagnostics:
+                failures.append("44 {} {}: the grammar refuses it: {!r}".format(
+                    relative, label, diagnostics))
+            passing = _passing_status(variant)
+            if passing != 0 or got:
+                failures.append("44 {} {} runner: passing status {}, problems {}, "
+                                "expected 0 and []".format(relative, label, passing, got))
         problems = dirname_guard_problems(runner_text, relative)
         if problems:
             failures.append("44 {} dirname guard failed: {}".format(relative, problems))
@@ -9881,18 +9998,13 @@ def self_test():
     # top-level runner's root there and printing the decoy into the standalone
     # runner's captured directory. The gate-then-fail runner of vector 44 logs
     # a true-tree gate line and then fails, so only the exit status holds it
-    # red; the flip restores the helper that never read the exit status, which
-    # passed it.
-    def cdpath_status_unread(text, relative):
-        _rc, tree, decoy, calls = _cdpath_outcome(text, relative)
-        problems = []
-        if not any(call.startswith(tree + " python3 ") for call in calls):
-            problems.append("no-gate")
-        if any(decoy in call for call in calls):
-            problems.append("moved")
-        return problems
-
-    count += 2
+    # red; its flip patches the status comparison inside the real helper
+    # (_status_differs) to never differ, as the helper that never read the
+    # exit status did, which passes it. The pass-then-fail runner of vector 44
+    # is held red only by the requirement that a passing run gives 0; its flip
+    # patches that requirement (_passing_status_wrong) out of the real helper.
+    # The indented and commented pass echoes of vector 44 each pass.
+    count += 8
     for relative, binding in (("tools/run_all_checks.sh", LOCAL_BINDING_LINES),
                               (STANDALONE_SOURCE, STANDALONE_BINDING_LINES)):
         runner_text, runner_diagnostic = read_runner_text(ROOT / relative, relative)
@@ -9910,14 +10022,33 @@ def self_test():
             if got != ["exit"]:
                 failures.append("45 {} gate-then-fail runner gave {}, expected "
                                 "['exit']".format(relative, got))
-            with patch.object(sys.modules[__name__], "cdpath_problems",
-                              cdpath_status_unread):
+            with patch.object(module, "_status_differs", lambda rc, passing: False):
                 flipped = cdpath_problems(failing, relative)
             if flipped:
                 failures.append(
                     "45 {} gate-then-fail runner: not red on the flip to the "
                     "helper that never read the exit status (the flip gives "
                     "{}, not [])".format(relative, flipped))
+        for label, rewrite in echo_rewrites:
+            variant = pass_echo_variant(runner_text, rewrite)
+            if variant is None:
+                failures.append("45 {} has no single pass echo".format(relative))
+                break
+            got = cdpath_problems(variant, relative)
+            if label == "pass-then-fail":
+                if got != ["pass-status"]:
+                    failures.append("45 {} {} runner gave {}, expected "
+                                    "['pass-status']".format(relative, label, got))
+                with patch.object(module, "_passing_status_wrong", lambda passing: False):
+                    flipped = cdpath_problems(variant, relative)
+                if flipped:
+                    failures.append(
+                        "45 {} {} runner: not red on the flip that drops the "
+                        "zero passing status (the flip gives {}, not [])".format(
+                            relative, label, flipped))
+            elif got:
+                failures.append("45 {} {} runner gave {}, expected []".format(
+                    relative, label, got))
         line = binding[2]
         if runner_text.count(line + "\n") != 1 or line.count("CDPATH= cd -- ") != 1:
             failures.append("45 {} binding drift: {}".format(relative, line))

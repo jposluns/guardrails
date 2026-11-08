@@ -182,9 +182,9 @@ def build_counters(*, seed=None, manifest=None):
     """Return a counters.toml high-water ledger for a fresh store.
 
     With `seed` omitted (the clean first-adoption bootstrap), returns a ZERO high-water for every
-    baseline namespace, including worklog (WL), and for no other namespace: the legacy_fragment
-    importer namespace (LF) is deprecated for new stores and MUST NOT be scaffolded (spec 8.1), so a
-    fresh store carries no LF counter.
+    baseline namespace, including worklog (WL), and for no other namespace: the standard reserves LF
+    unassigned and no record type uses it, so it is never scaffolded (spec 8.1) and a fresh store
+    carries no LF counter.
 
     With `seed` supplied (B6 re-adoption: a validated ancestral high-water, e.g. from
     _opf_init_operation.read_ancestral_counter_seed), the ancestral values are COPIED WITHOUT MUTATION,
@@ -465,8 +465,8 @@ def _self_test_body():
         check("counters validate and are complete", not findings and high == {
             ns: 0 for ns in namespaces
         })
-        # Spec 8.1: legacy_fragment is deprecated for new stores and MUST NOT be scaffolded, so a fresh
-        # ledger carries no importer namespace (the revert-flip for a re-seeded LF, beside the pinned
+        # Spec 8.1: the standard reserves LF unassigned and no record type uses it, so it is never
+        # scaffolded and a fresh ledger carries no importer namespace (the revert-flip for a re-seeded LF, beside the pinned
         # "counters canonical bytes" check above).
         check("fresh counters contain no LF",
               "LF" not in counters["counters"]

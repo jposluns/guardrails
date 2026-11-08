@@ -92,7 +92,7 @@ html = "<code>opf render</code>, <code>opf doctor</code>, <code>opf absorb</code
 
 [[body.items]]
 term = "Written by"
-html = "<code>opf init</code>, a reviewed adopter edit, and <code>opf migrate</code> (planned; not yet implemented in the reference CLI)"
+html = "<code>opf init</code>, a reviewed adopter edit, and <code>opf migrate</code> (in progress; it exits 2 in the reference CLI)"
 
 [[body]]
 component = "section"
@@ -294,7 +294,7 @@ rail = "Tooling"
 
 [[body]]
 component = "prose"
-html = '''<p>The <code>opf</code> reference CLI is 1 implementation of the standard's 10 command verbs. It implements 5 in full (init, render, doctor, absorb, and record) and adopt in part; upgrade and the ordinary import modes refuse with exit 2, and migrate and sync are planned. A base adopter can use their own tooling instead, or adopt by hand.</p>'''
+html = '''<p>$OPF_STATUS A base adopter can use their own tooling instead, or adopt by hand.</p>'''
 
 [[body]]
 component = "table"
@@ -303,14 +303,14 @@ head = ["Verb", "What it does"]
 rows = [
   ["<code>init</code>", "Scaffolds validated store sources and the committed pointer; surfaces, never absorbs, anything already at the store location."],
   ["<code>render</code>", "Regenerates the declared views. <code>--check</code> compares bytes read-only and exits 1 on drift."],
-  ["<code>doctor</code>", "Runs the whole-store integrity layer read-only: exit 0 valid, 1 on a finding, 2 when it cannot evaluate."],
+  ["<code>doctor</code>", "Runs the whole-store integrity layer read-only: exit 0 valid, 1 on a finding, 2 when it cannot evaluate. <code>--require-store</code> makes a missing store a cannot-evaluate for CI. <code>--store-identity</code> instead compares the committed pointer's target and the SHA-256 of the store's <code>init.toml</code> with the values pinned in <code>.github/opf-store-identity.toml</code> (<code>schema = 1</code>, <code>target</code>, <code>init_sha256</code>), and treats a <code>.opf.local.toml</code> override as a mismatch only when every other input evaluates; otherwise the result is cannot-evaluate."],
   ["<code>absorb</code>", "Drafts changelog entries for human curation, or computes a curated entry's freeze digest; writes no files."],
   ["<code>record</code>", "Authors 1 record change at a time and leaves it uncommitted for your review."],
-  ["<code>adopt</code>", "Plan, approve, reconcile, and status run; apply and complete refuse, so adoption cannot finish yet."],
+  ["<code>adopt</code>", "Plan, approve, reconcile, and status run; apply and complete refuse with exit 2."],
   ["<code>upgrade</code>", "Refuses with exit 2 and writes nothing: the reference tooling defines no store upgrade."],
   ["<code>import</code>", "The ordinary modes are retired and refuse with exit 2; clean-start adoption is the intake."],
-  ["<code>migrate</code>", "Planned: relocate the whole store, keeping git history and the worklog."],
-  ["<code>sync</code>", "Planned: the pull and push step of the store consistency contract."],
+  ["<code>migrate</code>", "In progress; exits 2 in this build. Relocates the whole store, keeping git history and the worklog."],
+  ["<code>sync</code>", "In progress; exits 2 in this build. The pull and push step of the store consistency contract."],
 ]
 
 [[body]]
