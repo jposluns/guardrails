@@ -16,3 +16,6 @@ not that destination, verified there, and only then is that same verified artefa
 destination, on a recorded pass. Promotion that races ahead of verification, or that ships a different
 artefact than the one verified, is the failure this prevents. This governs an artefact reaching a runtime
 or distribution target, and is distinct from integrating a change into the protected line of development.
+The same order extends to a multi-step change to a live system: a tool's expected side effects come from
+observing it first on a disposable copy or one canary step with a rehearsed undo, and the first harmless
+surprise revises them all, not just the tripped item, while other checks stay as strict.
