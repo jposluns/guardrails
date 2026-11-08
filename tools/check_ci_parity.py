@@ -132,6 +132,16 @@ runner image, runs-on labels, services and environment values (a job or step env
 can set a variable such as BASH_ENV that changes what an accepted gate command
 does). Inside a run: block the exact line exit 1 is accepted, because it can only
 end a step red; every other exit spelling stays unclassified.
+GITLEAKS DOWNLOAD. A run: | block holding a line that names curl, wget, sha256sum or
+gitleaks.tar.gz, or one of the retry loop's lines, must equal GITLEAKS_STEP_RUN line
+for line (indentation removed, blank lines and shell comments skipped): the bounded
+retry of the Secrets (gitleaks) step, which checks every downloaded archive against
+the pinned checksum, removes a failed or mismatched one before the next attempt and
+exits 1 when no attempt matched. Any departure (the checksum line dropped, the loop
+or its failure exit removed, another attempt count) is cannot-evaluate
+(gitleaks-download-pin), and curl, tar and a checksum pipeline are no longer accepted
+by the generic run-line grammar anywhere else. Not checked: the pinned version and
+checksum values, and bash's own behaviour on the pinned body.
 TWO WORKFLOWS. The CI side is the union of the named workflows in CI_WORKFLOWS:
 quality.yml and msg-leaks.yml, which holds the message/metadata leak scan alone
 so that only its one job re-runs on a PR title/body edit. A gate may run in
@@ -847,6 +857,67 @@ SCOPE_DECIDE_RUN_LINES = frozenset({
     'python3 -I -B "${RUNNER_TEMP}/ci_site_scope_base.py" --ci-decide',
     'echo "site_only=false" >> "${GITHUB_OUTPUT}"',
 })
+
+# The Secrets (gitleaks) step's run: body, pinned line for line (each line with its
+# indentation removed; blank lines and shell comments skipped): a bounded retry of the
+# release download (3 attempts, 10 seconds apart) in which each downloaded archive is
+# checked against the pinned GITLEAKS_SHA256, a failed or mismatched archive is removed
+# before the next attempt, the step exits 1 when no attempt matched, and only a matched
+# archive is extracted and run. Any run: block holding a line of GITLEAKS_FETCH_LINES,
+# or a line naming curl, wget, sha256sum or gitleaks.tar.gz, must equal this tuple
+# exactly (gitleaks-download-pin, cannot-evaluate), so a download whose checksum check
+# is dropped, reordered, bypassed or made optional is refused. This gate does not model
+# bash and does not run this body: an exact pin was chosen so that any edit to the
+# step's script is a finding until the pin and the workflow change together under
+# review. This pin is a consistency check within the reviewed repository, not an
+# authorization, and it does not check the pinned version or checksum values
+# (tools/check_gitleaks_pin.py reads the version pin).
+GITLEAKS_SCAN_LINE = "./gitleaks dir . --no-banner --redact --exit-code 1"
+GITLEAKS_STEP_RUN = (
+    "set -euo pipefail",
+    'url="https://github.com/gitleaks/gitleaks/releases/download/'
+    'v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"',
+    'verified="no"',
+    "for attempt in 1 2 3; do",
+    'if curl -fsSL -o gitleaks.tar.gz "$url"; then',
+    'if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then',
+    'verified="yes"',
+    "break",
+    "fi",
+    "fi",
+    'echo "gitleaks download attempt ${attempt} of 3 failed or did not match '
+    'the pinned checksum"',
+    "rm -f gitleaks.tar.gz",
+    'if [ "${attempt}" -lt 3 ]; then',
+    "sleep 10",
+    "fi",
+    "done",
+    'if [ "${verified}" != "yes" ]; then',
+    'echo "FAIL: no gitleaks download matched the pinned checksum in 3 attempts"',
+    "exit 1",
+    "fi",
+    "tar -xzf gitleaks.tar.gz gitleaks",
+    GITLEAKS_SCAN_LINE,
+)
+# The pinned lines the generic run-line grammar refuses, admitted only inside a block
+# equal to GITLEAKS_STEP_RUN (anywhere else each one triggers the pin and is refused).
+# The scan line keeps its member route and every other pinned line is already in the
+# generic grammar.
+GITLEAKS_FETCH_LINES = frozenset({
+    "for attempt in 1 2 3; do",
+    'if curl -fsSL -o gitleaks.tar.gz "$url"; then',
+    'if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then',
+    "break",
+    "rm -f gitleaks.tar.gz",
+    "sleep 10",
+    "done",
+    "tar -xzf gitleaks.tar.gz gitleaks",
+})
+# A run line that downloads or verifies an archive, or names the gitleaks archive: its
+# block must be the pinned one.
+GITLEAKS_FETCH_MARK_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:curl|wget|sha256sum)(?![A-Za-z0-9_.-])"
+    r"|gitleaks\.tar\.gz")
 
 # The members that may run only in a job carrying the pinned HEAVY_JOB_IF_LINE
 # (module docstring, LANES): each is an expensive suite the lowered-spend lanes
@@ -2465,6 +2536,11 @@ def _classify_ci_command(
                 "tools/ci_site_scope.py")
         return
 
+    if block and stripped in GITLEAKS_FETCH_LINES:
+        # A pinned download-and-verify line (GITLEAKS_STEP_RUN); _gitleaks_fetch_pin
+        # refuses its block unless the block equals the pin line for line.
+        return
+
     tokenized = _tokenize(stripped)
     if not tokenized.ok:
         diagnostics.append(_diagnostic(
@@ -2509,15 +2585,6 @@ def _classify_ci_command(
         benign = True
     elif (block
             and tokens
-            and tokens[0] in ("curl", "tar")
-            and _safe_simple(tokens)):
-        benign = True
-    elif (block
-            and re.fullmatch(
-                r"echo .+ \| sha256sum -c -", stripped)):
-        benign = True
-    elif (block
-            and tokens
             and tokens[0] == "echo"
             and _safe_simple(tokens)):
         benign = True
@@ -2552,6 +2619,38 @@ def _classify_ci_command(
             "workflow command is outside the disclosed parity grammar: "
             "{!r}".format(stripped),
         ))
+
+
+def _gitleaks_fetch_pin(block_lines, source):
+    """Diagnostics for one run: | block, given as (line number, line with its
+    indentation removed) for each line that is not blank or a shell comment: none
+    when no line is a GITLEAKS_FETCH_LINES line or matches GITLEAKS_FETCH_MARK_RE,
+    or when the block equals GITLEAKS_STEP_RUN line for line; otherwise one
+    gitleaks-download-pin diagnostic naming the first line that departs."""
+    if not any(text in GITLEAKS_FETCH_LINES or GITLEAKS_FETCH_MARK_RE.search(text)
+               for _, text in block_lines):
+        return []
+    got = tuple(text for _, text in block_lines)
+    if got == GITLEAKS_STEP_RUN:
+        return []
+    for position in range(max(len(got), len(GITLEAKS_STEP_RUN))):
+        have = got[position] if position < len(got) else None
+        want = (GITLEAKS_STEP_RUN[position]
+                if position < len(GITLEAKS_STEP_RUN) else None)
+        if have != want:
+            break
+    line_number = (block_lines[position][0] if position < len(block_lines)
+                   else block_lines[-1][0])
+    return [_diagnostic(
+        source,
+        line_number,
+        "gitleaks-download-pin",
+        "a run: block that downloads, verifies or names the gitleaks archive "
+        "departs from the pinned Secrets (gitleaks) body (GITLEAKS_STEP_RUN) at "
+        "line {} of it: got {!r}, expected {!r}; only the pinned bounded retry, "
+        "which checks the pinned checksum on every attempt, is accepted".format(
+            position + 1, have, want),
+    )]
 
 
 def _classify_uses(value, source, line_number, diagnostics):
@@ -3577,6 +3676,7 @@ def extract_ci(text, source=CI_SOURCE):
                     index += 1
                     content_indent = None
                     leading_blank = None
+                    block_lines = []
                     while index < len(lines):
                         body_raw = lines[index]
                         body_number = index + 1
@@ -3670,6 +3770,7 @@ def extract_ci(text, source=CI_SOURCE):
                             index += 1
                             continue
 
+                        block_lines.append((body_number, body_code.strip()))
                         _classify_ci_command(
                             body_code.strip(),
                             source,
@@ -3682,6 +3783,8 @@ def extract_ci(text, source=CI_SOURCE):
                                 current_job[:-1], set()),
                         )
                         index += 1
+                    diagnostics.extend(
+                        _gitleaks_fetch_pin(block_lines, source))
                     continue
 
                 if not value:
@@ -10059,6 +10162,122 @@ def self_test():
         if "moved" not in got:
             failures.append("45 {} mutant (CDPATH= removed) gave {}, expected moved".format(
                 relative, got))
+
+    # 46 GITLEAKS DOWNLOAD PIN: a run: block that downloads, verifies or names the
+    # gitleaks archive is accepted only as GITLEAKS_STEP_RUN, the bounded retry that
+    # checks the pinned checksum on every attempt. Each departure below is refused
+    # (gitleaks-download-pin), the step without a checksum line among them; before
+    # this pin, the pre-retry step and the same step without its checksum line both
+    # passed the generic grammar (curl, tar and the checksum pipeline were each
+    # accepted alone).
+    def gitleaks_step(body):
+        return (
+            "      - name: Secrets (gitleaks)",
+            "        shell: bash",
+            "        env:",
+            "          GITLEAKS_VERSION: 8.30.1",
+            "          GITLEAKS_SHA256: 00",
+            "        run: |",
+        ) + tuple("          " + line if line else "" for line in body)
+
+    def gitleaks_codes(extra_steps):
+        return sorted({
+            item.code for item in extract_ci(
+                ci_fixture(common, extra_steps)).diagnostics})
+
+    def gitleaks_case(name, extra_steps, want):
+        nonlocal count
+        count += 1
+        got = gitleaks_codes(extra_steps)
+        if got != want:
+            failures.append("46 {}: diagnostics {}, expected {}".format(
+                name, got, want))
+
+    pinned = list(GITLEAKS_STEP_RUN)
+    checksum = pinned.index(
+        'if echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -; then')
+    old_step = [
+        pinned[0], pinned[1],
+        'curl -sSL -o gitleaks.tar.gz "$url"',
+        'echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -',
+        "tar -xzf gitleaks.tar.gz gitleaks",
+        GITLEAKS_SCAN_LINE,
+    ]
+    verified_check = pinned.index('if [ "${verified}" != "yes" ]; then')
+    pin_only = ["gitleaks-download-pin"]
+    pin_and_grammar = ["gitleaks-download-pin", "unclassified-command"]
+    gitleaks_case("pinned body accepted", gitleaks_step(pinned), [])
+    gitleaks_case("pinned body with a shell comment and a blank line accepted",
+                  gitleaks_step(pinned[:3] + ["# retry the download", ""]
+                                + pinned[3:]), [])
+    for name, body, want in (
+            # The checksum check dropped: its if line and the matching fi.
+            ("checksum line removed",
+             pinned[:checksum] + pinned[checksum + 1:checksum + 3]
+             + pinned[checksum + 4:], pin_only),
+            ("pre-retry single-attempt step", old_step, pin_and_grammar),
+            ("pre-retry step without its checksum line",
+             old_step[:3] + old_step[4:], pin_and_grammar),
+            ("failure exit removed",
+             [line for line in pinned if line != "exit 1"], pin_only),
+            ("verified check removed",
+             pinned[:verified_check] + pinned[verified_check + 4:], pin_only),
+            ("four attempts",
+             [line.replace("in 1 2 3;", "in 1 2 3 4;") for line in pinned],
+             pin_and_grammar),
+            ("curl failure masked",
+             [line.replace('"$url"; then', '"$url" || true; then')
+              for line in pinned], pin_and_grammar),
+            ("checksum after extraction",
+             pinned[:checksum] + pinned[checksum + 1:-2] + [pinned[-2],
+                                                           pinned[checksum]]
+             + pinned[-1:], pin_only),
+            ("extraction ahead of the loop",
+             pinned[:3] + [pinned[-2]] + pinned[3:-2] + pinned[-1:], pin_only)):
+        gitleaks_case(name, gitleaks_step(body), want)
+    # A pinned loop line, or a checksum pipeline or download, in another step's
+    # block (the generic grammar accepted the last two alone before this pin).
+    for name, body, want in (
+            ("pinned sleep line in another step", ["sleep 10"], pin_only),
+            ("bare checksum pipeline in another step",
+             ['echo "00  x.tar.gz" | sha256sum -c -'], pin_and_grammar),
+            ("bare curl download in another step",
+             ['curl -fsSL -o x.tar.gz "https://x.invalid/x.tar.gz"'],
+             pin_and_grammar)):
+        gitleaks_case(name, (
+            "      - name: Other",
+            "        shell: bash",
+            "        run: |",
+        ) + tuple("          " + line for line in body), want)
+    # Flip: with the block pin disabled, the step without its checksum line is
+    # accepted, so the pin (not the generic grammar) is what refuses it.
+    no_checksum = gitleaks_step(
+        pinned[:checksum] + pinned[checksum + 1:checksum + 3]
+        + pinned[checksum + 4:])
+    with patch.object(module, "_gitleaks_fetch_pin",
+                      lambda block_lines, source: []):
+        count += 1
+        flipped = gitleaks_codes(no_checksum)
+    if flipped:
+        failures.append(
+            "46 flip: with the pin disabled the step without its checksum line "
+            "gave {}, expected [] (the vector does not isolate the pin)".format(
+                flipped))
+    # The live quality.yml carries the pinned body.
+    count += 1
+    live_text, live_why = read_runner_text(ROOT / CI_SOURCE, CI_SOURCE)
+    if live_text is None:
+        failures.append("46 live: {} cannot be read: {}".format(
+            CI_SOURCE, live_why))
+    elif any(item.code == "gitleaks-download-pin"
+             for item in extract_ci(live_text).diagnostics):
+        failures.append("46 live: {} departs from GITLEAKS_STEP_RUN".format(
+            CI_SOURCE))
+    elif "\n            {}\n".format(GITLEAKS_STEP_RUN[4]) not in live_text:
+        # Without a download line the pin never triggers, so the rows above
+        # would hold for a workflow that downloads nothing.
+        failures.append("46 live: {} carries no pinned gitleaks body".format(
+            CI_SOURCE))
 
     if failures:
         print("SELF-TEST FAIL:")
