@@ -1850,13 +1850,36 @@ def _self_test():
                     self.assertEqual(p.stdout, b"", raw)
                 else:
                     self.is_deny(json.loads(p.stdout))
+
+            def close_once(stream):
+                """Close stream unless it is closed already. Closing a child's stdin first flushes what is still
+                buffered there, which raises BrokenPipeError once the child has exited; the descriptor is released
+                all the same, and a child that has exited is an outcome these launches expect (see send)."""
+                if not stream.closed:
+                    try:
+                        stream.close()
+                    except BrokenPipeError:
+                        pass
+
+            def send(p, data):
+                """Write data to the child's stdin and flush it. On a loaded host this process can be descheduled
+                between the launch and the write for longer than the child's read deadline: the child then reads
+                nothing, reports that its payload did not end within the deadline (the note each launch below
+                asserts) and exits, and the write or flush raises BrokenPipeError with data still buffered. That
+                is the expected outcome, not a fault of the test: stdin is closed then, dropping the buffer, so no
+                later flush or close raises again; the assertions on the child's output decide the test."""
+                try:
+                    p.stdin.write(data)
+                    p.stdin.flush()
+                except BrokenPipeError:
+                    close_once(p.stdin)
+
             # through the hook as launched: a complete payload on a pipe that stays open, and (with the deadline
             # lowered to 0.5 seconds) an end of input sent 1.5 seconds after the hook says it is about to read
             p = subprocess.Popen(launch, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  env=env)
             try:
-                p.stdin.write(good)
-                p.stdin.flush()
+                send(p, good)
                 rc = p.wait(timeout=60)
                 out, err = p.stdout.read(), p.stderr.read()
             finally:
@@ -1864,7 +1887,7 @@ def _self_test():
                     p.kill()
                     p.wait()
                 for stream in (p.stdin, p.stdout, p.stderr):
-                    stream.close()
+                    close_once(stream)
             self.assertEqual((rc, err), (0, b""))
             self.is_unchecked(json.loads(out), "did not end within the read deadline")
             late = ("import importlib.util, sys\n"
@@ -1878,11 +1901,10 @@ def _self_test():
             p = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", late, here], stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
             try:
-                p.stdin.write(good)
-                p.stdin.flush()
+                send(p, good)
                 ready = p.stderr.readline()
                 time.sleep(1.5)
-                p.stdin.close()
+                close_once(p.stdin)
                 rc = p.wait(timeout=60)
                 out, err = p.stdout.read(), p.stderr.read()
             finally:
@@ -1890,7 +1912,7 @@ def _self_test():
                     p.kill()
                     p.wait()
                 for stream in (p.stdin, p.stdout, p.stderr):
-                    stream.close()
+                    close_once(stream)
             self.assertEqual((ready, rc, err), (b"ready\n", 0, b""))
             self.is_unchecked(json.loads(out), "ending within 0.5 seconds (ValueError: the hook payload did not "
                                                "end within the read deadline)")
