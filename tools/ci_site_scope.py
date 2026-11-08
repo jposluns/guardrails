@@ -65,8 +65,9 @@ and always exits 0: a malformed or missing base registry, any cannot-evaluate, a
 that is not a merge-train pull request each print a cannot-evaluate or full-run plan and never
 fail or change the run. Selection is fail-closed toward the full run: an empty diff, a path
 shape that is not plain repo-relative, a changed CI or selector file (FULL_RUN_PATHS), a path
-no trigger claims, and a path claimed only by universal triggers (the ** glob, or any other
-spelling that claims paths whatever their names, such as **/* or */**) each decide the full run.
+no trigger claims, and a path claimed only by universal triggers (a trigger that matches it by
+its depth alone, every segment ** or any name: **, **/*, */**, and a bounded-depth wildcard
+such as * or */* for paths at its own depth) each decide the full run.
 Trigger globs match per path segment (** spans whole segments and needs at least one; * and ?
 never cross a /), exactly as tools/check_ci_selection.py declares them. --explain --base REV
 prints the same plan locally, over the diff against REV and the working tree's registry.
@@ -209,9 +210,9 @@ FULL_RUN_PATHS = (
 )
 # A path matched by no trigger of any entry decides the full run.
 REQUIRE_CLAIMED = True
-# A path whose every matching trigger is universal (_universal_glob: ** and any other spelling
-# that claims paths whatever their names, such as **/*, */** or **/**) decides the full run: no
-# entry claims it specifically, so the mapping for it is effectively undeclared.
+# A path whose every matching trigger is universal (_universal_glob: a trigger that matches it by
+# depth alone, such as **, **/*, */**, or a bounded-depth * or */* at its own depth) decides the
+# full run: no entry claims it specifically, so the mapping for it is effectively undeclared.
 REQUIRE_SPECIFIC_CLAIM = True
 # An entry nobody has reviewed is always selected, whatever its triggers say.
 ALWAYS_RUN_UNREVIEWED = True
@@ -280,16 +281,18 @@ def _segment_matches_any_name(part):
 
 
 def _universal_glob(glob):
-    """Whether a trigger claims paths by their depth alone, whatever their names, under
-    _glob_match's meaning: every segment is ** or matches any name, and at least one ** lets it
-    reach every depth from its fewest segments up. ** itself, **/* and **/** match every plain
-    path; */** misses only the top-level files, which it cannot claim at all, and claims every
-    deeper path just as unspecifically as **. Judged by meaning, not by one spelling, so none
-    of them passes as a specific claim. A bounded-depth wildcard such as * or *** (no **
-    segment) is not universal."""
-    parts = glob.split("/")
-    return "**" in parts and all(
-        part == "**" or _segment_matches_any_name(part) for part in parts)
+    """Whether a trigger claims every path it matches by that path's depth alone, whatever the
+    names, under _glob_match's meaning: every segment is ** or matches any name. select() asks
+    this only of triggers that already match the path, so a True here means the trigger would
+    match every other path at that depth too, and so says nothing specific about this one.
+    ** itself, **/* and **/** match every plain path; */** misses only the top-level files,
+    which it cannot claim at all. A bounded-depth wildcard is universal for paths at its own
+    depth: * (or *** or *?) matches every top-level file and */* every two-segment path, so one
+    such trigger in the registry would otherwise make every path at that depth read as
+    specifically claimed. Judged by meaning, not by one spelling, so none of them passes as a
+    specific claim; a segment with a literal character, or a ? that needs exactly one
+    character, is specific."""
+    return all(part == "**" or _segment_matches_any_name(part) for part in glob.split("/"))
 
 
 def _glob_shape_error(glob):
@@ -350,8 +353,9 @@ def select(paths, registry):
     both sides here), and "jobs" maps each registry job, in first-appearance order, to
     {"run": bool, "why": str}. Fail-closed: an empty list, a path that is not a plain
     repo-relative file path, a FULL_RUN_PATHS match, an unclaimed path and a path claimed only
-    by universal triggers (_universal_glob) each decide the full run; an unreviewed entry and an entry with
-    no triggers are always selected. The site_only decision above is never read or written."""
+    by universal triggers (_universal_glob) each decide the full run; an unreviewed entry and
+    an entry with no triggers are always selected. The site_only decision above is never read
+    or written."""
     rows, problem = _registry_entries(registry)
     if problem is not None:
         return None, problem
@@ -380,8 +384,8 @@ def select(paths, registry):
                 break
             if REQUIRE_SPECIFIC_CLAIM and claims and all(
                     _universal_glob(glob) for glob in claims):
-                reason = "{} is claimed only by the universal ** glob or an equivalent".format(
-                    path)
+                reason = ("{} is claimed only by the universal ** glob or an equivalent that "
+                          "matches by depth alone".format(path))
                 break
     if reason is not None:
         for job in jobs:
@@ -1127,30 +1131,40 @@ def self_test(report_path=None):
           "claimed only by the universal" in (
               select(["README.md"], select_registry)[0]["full_run"] or ""),
           True)
-    # a trigger is universal by its meaning, not by one spelling: every spelling that claims
-    # paths whatever their names is universal, and each boundary is tested just inside, at and
-    # outside it (a ? that needs exactly one character against *? that needs at least one, a
-    # bounded-depth *** against ***/**, a literal or suffix in any segment)
-    universal_spellings = ("**", "**/*", "*/**", "**/**", "***/**", "**/*?", "*/*/**")
-    specific_spellings = ("*", "***", "*/*", "docs/**", "**/*.md", "**/?", "**/??*", "**/a*",
-                          "?/**")
+    # a trigger is universal by its meaning, not by one spelling: every spelling that matches a
+    # path by its depth alone (every segment ** or any name) is universal, the bounded-depth
+    # wildcards * and */* included, and each boundary is tested just inside, at and outside it
+    # (a ? that needs exactly one character against *? and ?* that need at least one, a literal
+    # or suffix in any segment)
+    universal_spellings = ("**", "**/*", "*/**", "**/**", "***/**", "**/*?", "*/*/**",
+                           "*", "***", "*?", "?*", "*/*", "*/*/*")
+    specific_spellings = ("docs/**", "**/*.md", "**/?", "**/??*", "**/a*", "?/**", "?", "??*",
+                          "*.md", "*/?", "a*/*")
     check("select/universal-glob-by-meaning",
           ([_universal_glob(glob) for glob in universal_spellings],
            [_universal_glob(glob) for glob in specific_spellings]),
           ([True] * len(universal_spellings), [False] * len(specific_spellings)))
-    # the classification agrees with the matcher: a universal spelling matches every path deep
-    # enough for it to reach (*/*/** every path of three or more segments, the others every
-    # path of two or more), and every other spelling misses at least one two-segment or deeper
-    # path; of them, only **, **/* and **/** also reach a top-level file
-    deep_paths = ("a/b", "ab/cd", "x.y/z", "a/b/c/d", "deep/er/path/file.txt")
+    # the classification agrees with the matcher on sampled paths of one to four segments: a
+    # universal spelling gives one answer for every sampled path of the same depth (it matches
+    # all of them or none) and matches at least one sampled path, while every specific spelling
+    # matches one sampled path and misses another of the same depth; of the unbounded ones,
+    # only **, **/* and **/** also reach a top-level file
+    sampled_paths = ("a", "README.md", "x.y", "ab", "a/b", "ab/cd", "x.y/z", "docs/q",
+                     "a/b/c", "deep/er/file.txt", "a/b/c/d", "deep/er/path/file.txt")
+
+    def _answers_by_depth(glob):
+        answers = {}
+        for path in sampled_paths:
+            answers.setdefault(path.count("/"), set()).add(_glob_match(glob, path))
+        return list(answers.values())
     check("select/universal-glob-agrees-with-matching",
-          ([all(_glob_match(glob, path) for path in deep_paths
-                if glob != "*/*/**" or path.count("/") >= 2)
+          ([all(len(seen) == 1 for seen in _answers_by_depth(glob))
+            and any(True in seen for seen in _answers_by_depth(glob))
             for glob in universal_spellings],
-           [all(_glob_match(glob, path) for path in deep_paths)
+           [any(len(seen) == 2 for seen in _answers_by_depth(glob))
             for glob in specific_spellings],
            [_glob_match(glob, "README.md") for glob in ("**", "**/*", "**/**", "*/**")]),
-          ([True] * len(universal_spellings), [False] * len(specific_spellings),
+          ([True] * len(universal_spellings), [True] * len(specific_spellings),
            [True, True, True, False]))
 
     def _spelled_registry(glob):
@@ -1159,10 +1173,14 @@ def self_test(report_path=None):
             _select_entry("scan", "Whole-repo scan", [glob])]}
     # README.md and an unlisted two-segment path, each claimed only by a spelling other than
     # the bare **, decide the full run; */** cannot claim a top-level file at all, so only its
-    # two-segment path is a universal-only claim (README.md is unclaimed under it)
+    # two-segment path is a universal-only claim (README.md is unclaimed under it); a
+    # bounded-depth wildcard claims only the paths at its own depth, each of them by depth alone
     spelled_vectors = (("**/*", "README.md"), ("**/*", "misc/a.txt"),
                        ("*/**", "misc/a.txt"),
-                       ("**/**", "README.md"), ("**/**", "misc/a.txt"))
+                       ("**/**", "README.md"), ("**/**", "misc/a.txt"),
+                       ("*", "README.md"), ("***", "README.md"), ("*?", "README.md"),
+                       ("*/*", "misc/a.txt"))
+    bounded_spellings = ("*", "***", "*?", "*/*")
     check("select/universal-spellings-full-run",
           ["claimed only by the universal" in (
               select([path], _spelled_registry(glob))[0]["full_run"] or "")
@@ -1172,6 +1190,17 @@ def self_test(report_path=None):
           "matches no trigger" in (
               select(["README.md"], _spelled_registry("*/**"))[0]["full_run"] or ""),
           True)
+    # a bounded-depth wildcard claims nothing at another depth (those paths stay unclaimed),
+    # and a path it shares with a specific trigger (tools/x.py, claimed by tools/*.py too)
+    # still selects by that specific claim
+    check("select/bounded-wildcard-claims-only-its-depth",
+          ("matches no trigger" in (
+              select(["README.md"], _spelled_registry("*/*"))[0]["full_run"] or ""),
+           "matches no trigger" in (
+               select(["misc/a.txt"], _spelled_registry("*"))[0]["full_run"] or ""),
+           select(["tools/x.py"], _spelled_registry("*/*"))[0]["full_run"],
+           select(["tools/x.py"], _spelled_registry("*/*"))[0]["jobs"]["lint"]["run"]),
+          (True, True, None, True))
     check("select/full-run-paths",
           [select([path], select_registry)[0]["full_run"] is not None
            for path in (".github/workflows/quality.yml", ".gitattributes",
@@ -1251,6 +1280,16 @@ def self_test(report_path=None):
                   [select([path], _spelled_registry(glob))[0]["full_run"] is None
                    for spelled, path in spelled_vectors if spelled == glob],
                   [True] * sum(1 for spelled, _path in spelled_vectors if spelled == glob))
+    # the universal rule restricted to spellings with a ** segment reads a bounded-depth
+    # wildcard as a specific claim, so each bounded spelling's universal-only claim above turns
+    # into a selective plan
+    by_depth_rule = _universal_glob
+    with _patched(_universal_glob=lambda glob: (
+            "**" in glob.split("/") and by_depth_rule(glob))):
+        check("revert/universal-bounded-depth-dropped-red",
+              [select([path], _spelled_registry(glob))[0]["full_run"] is None
+               for glob, path in spelled_vectors if glob in bounded_spellings],
+              [True] * len(bounded_spellings))
     with _patched(_glob_match=lambda glob, path: fnmatch.fnmatchcase(path, glob)):
         # fnmatch lets * cross a /, so the segment rule's vector flips to a lint match
         check("revert/segment-glob-crossing-red",
@@ -1636,17 +1675,18 @@ def self_test(report_path=None):
                   (lambda result: (result[0], "CHECKS_REGISTRY is not set" in result[1]))(
                       _ci_select_run(repo, "pull_request", head_sha=train_tip)),
                   (0, True))
-            # a cannot-evaluate plan states what really happens: the run follows the site_only
-            # decision already written (which a site-only train like this one decides true), and
-            # the note never claims the full suite runs
-            check("ciselect/cannot-evaluate-states-run-follows-site-only",
-                  [("the plan is advisory and the run follows site_only" in out,
-                    "full suite" in out)
-                   for out in (_ci_select_run(repo, "pull_request", head_sha=train_tip,
-                                              registry=registry)[1]
-                               for registry in (Path(scratch) / "absent.toml", broken_file,
-                                                None))],
-                  [(True, False)] * 3)
+            # the runs behind every cannot-evaluate note of ci_select(), each with the cause its
+            # note names: an absent, a broken and an unset registry and, on this two-parent
+            # merge, a head sha that is not its second parent; the linear head of the next
+            # fixture adds the parent-read failure
+            follows_runs = [
+                (cause, _ci_select_run(repo, "pull_request", head_sha=head_sha,
+                                       registry=registry)[1])
+                for cause, head_sha, registry in (
+                    ("cannot read the registry", train_tip, Path(scratch) / "absent.toml"),
+                    ("not valid TOML", train_tip, broken_file),
+                    ("CHECKS_REGISTRY is not set", train_tip, None),
+                    ("is not the pull request's head commit", "0" * 40, registry_file))]
         with tempfile.TemporaryDirectory() as scratch:
             # a linear head is cannot-evaluate for the shadow plan too, still exit 0
             repo, base = _fixture_repo(Path(scratch), env)
@@ -1660,6 +1700,20 @@ def self_test(report_path=None):
                       _ci_select_run(repo, "pull_request", head_sha="0" * 40,
                                      registry=registry_file)),
                   (0, True))
+            follows_runs.append(
+                ("HEAD has one parent (a linear commit)",
+                 _ci_select_run(repo, "pull_request", head_sha="0" * 40,
+                                registry=registry_file)[1]))
+            # the five runs reach all four cannot-evaluate notes of ci_select() (unset registry,
+            # parent read, second-parent mismatch, registry read); each output names its cause,
+            # states what really happens (the run follows the site_only decision already
+            # written, which a site-only train can decide true) and never claims the full suite
+            # runs
+            check("ciselect/cannot-evaluate-states-run-follows-site-only",
+                  [(cause in out, "the plan is advisory and the run follows site_only" in out,
+                    "full suite" in out)
+                   for cause, out in follows_runs],
+                  [(True, True, False)] * 5)
         with tempfile.TemporaryDirectory() as scratch:
             # ---------- the local --explain --base REV query ----------
             repo, base = _fixture_repo(Path(scratch), env)
@@ -1748,10 +1802,12 @@ def self_test(report_path=None):
           "shadow selection maps each changed path to the registry triggers that claim it per "
           "path segment, decides the full run on an empty diff, a bad path shape, a CI or "
           "selector file, an unclaimed path and a path claimed only by ** or another universal "
-          "spelling (**/*, */**, **/**, judged by meaning), each selection rule patched out "
-          "flips its vector, the site_only decision reads the same before and after "
-          "a selection pass, --ci-select --shadow exits 0 and writes no output on every event, "
-          "head shape and registry failure, recording both sides of a rename, and --explain "
+          "spelling (**/*, */**, **/**, and a bounded-depth * or */* at its own depth, judged "
+          "by meaning), each selection rule patched out flips its vector, the site_only "
+          "decision reads the same before and after a selection pass, --ci-select --shadow "
+          "exits 0 and writes no output on every event, head shape and registry failure, every "
+          "cannot-evaluate note names its cause and states that the run follows site_only, "
+          "recording both sides of a rename, and --explain "
           "prints the same plan locally, exiting 2 on a bad revision or a missing or malformed "
           "registry); "
           "execution set "

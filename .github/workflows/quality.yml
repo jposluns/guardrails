@@ -201,10 +201,14 @@ jobs:
       # fail or change the run: the jobs still run or skip by the site_only decision already
       # written, which can be true (the if ! guard keeps even an unexpected selector failure
       # from ending this step red). The launch is bounded by timeout -k 10 300 (TERM at 300
-      # seconds, KILL 10 seconds later), far above the selector's measured run time (about 15
-      # seconds for a selection over every tracked file, on a loaded development host), so a hang
+      # seconds, KILL 10 seconds later), far above the selector's measured run time, so a hang
       # cannot time out this job: the bound's expiry exits nonzero, which the same if ! guard
-      # reports as cannot-evaluate with the step green.
+      # reports as cannot-evaluate with the step green. Measurement (2026-11-08): select() alone,
+      # timed with time.perf_counter in one Python 3.14.4 process, over the 966 of the 979
+      # tracked files that match no FULL_RUN_PATHS glob, against tools/ci_checks.toml's
+      # 273 entries and 10204 triggers, so no path ends the loop early: three runs took 15.5,
+      # 15.9 and 16.2 seconds on a shared 80-CPU development host at a one-minute load average
+      # of 39.5 to 40.8. Process start-up and the git reads are not included.
       - name: Site fast-lane scope decision
         id: decide
         shell: bash
