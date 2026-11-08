@@ -10439,19 +10439,21 @@ def _deny_with_recovery(kind, snap, note=""):
 
 
 def _segment_has_gitdir_redirect(tokens):
-    """True when a git segment carries a --git-dir / GIT_DIR= redirect. Unlike --work-tree (which moves only
-    the worktree), --git-dir/GIT_DIR names a DIFFERENT repository, so it changes which repo a `git stash
-    drop`/`clear` acts on. The stash-recovery paths use this to REFUSE (deny) a stash discard whose target
-    repository this guard cannot confidently resolve to a plain `git -C <dir>` invocation, rather than
-    preserve the wrong repo's stash."""
+    """True when a git segment carries a --git-dir or a leading GIT_DIR= / GIT_DIR+= redirect. Unlike
+    --work-tree (which moves only the worktree), --git-dir/GIT_DIR names a DIFFERENT repository, so it
+    changes which repo a `git stash drop`/`clear` acts on. The stash-recovery paths use this to REFUSE (deny)
+    a stash discard whose target repository this guard cannot confidently resolve to a plain `git -C <dir>`
+    invocation, rather than preserve the wrong repo's stash."""
     # A leading GIT_DIR+= names the git dir just as GIT_DIR= does (no ambient GIT_DIR reaches a caller: a
     # non-cosmetic ambient GIT_* takes the override path first), so it counts too, which only sends more
     # segments to the session-read denies. _segment_repo_dir calls this too, so a GIT_DIR+= segment, with or
     # without -C, names a repository it does not resolve (None), as a GIT_DIR= segment does: git_discard
     # then reads the session directory as its base (the GIT_DIR+= is itself a path redirect, so for a
     # destructive form it also asks git where that command lands, unless a non-cosmetic ambient GIT_*
-    # variable denies first), and the branch-root guard allows the creation with its cannot-pin note instead
-    # of probing the -C directory.
+    # variable denies first). A call that carries no cwd has no session directory, so there is no base: a
+    # destructive form denies (the GIT_DIR value cannot be shown to name the session repository's git dir),
+    # and a non-destructive form that no earlier rule denies allows with its note and takes no snapshot. The
+    # branch-root guard allows the creation with its cannot-pin note instead of probing the -C directory.
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
         if tok.startswith(("GIT_DIR=", "GIT_DIR+=")):
@@ -12399,9 +12401,9 @@ def git_discard(data):
                     "index/worktree state this guard cannot snapshot (rule prsunc); run it from the target "
                     "worktree, or commit or stash first.")
         # The base read above without asking git (the -C directory, or the session directory beside a
-        # --git-dir or a leading GIT_DIR= or GIT_DIR+=) also stays a floor under git's answer: when it lies in another
-        # repository than the one git resolved, it is probed and, when not provably clean, snapshotted as well
-        # below. A failed snapshot there is allowed past, with the failure named, only when the repository git
+        # --git-dir or a leading GIT_DIR= or GIT_DIR+=) also stays a floor under git's answer: when it lies in
+        # another repository than the one git resolved, it is probed and, when not provably clean, snapshotted
+        # as well below. A failed snapshot there is allowed past, with the failure named, only when the repository git
         # resolved, which the command acts on, was probed and is provably clean or was snapshotted
         # successfully; otherwise it DENIES. The repository git resolved is snapshotted in either case.
         pre_base = pre_desc = None
