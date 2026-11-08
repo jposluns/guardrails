@@ -3168,6 +3168,20 @@ _WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
 _WAIT_LOOP_CHECKS_API_COMMANDS = ("gh pr checks", "gh pr status", "gh run watch")
 
 
+# The only spans of a poll-loop deny text (flattened and lower-cased) that may name the foreground, the
+# background dispatch flag, or the loop itself ("a foreground command" only describes the denied call): the
+# clause that forbids resubmitting the loop, and exit (1)'s
+# dispatch of the CI status reader (a different command, not the loop). Outside them, any word of
+# _WAIT_LOOP_RERUN_WORDS offers the loop again in some form (in the foreground, as a tracked dispatch, or by a
+# rerun), which contradicts the denial even where it never says "resubmit".
+_WAIT_LOOP_SANCTIONED_SPANS = (
+    "do not resubmit the loop in any form (neither as a tracked background dispatch nor in the foreground)",
+    "a background dispatch (run_in_background: true) that runs that reader",
+    "do not resubmit the loop")
+_WAIT_LOOP_RERUN_WORDS = ("in the foreground", "foreground wait", "run it foreground", "run_in_background",
+                          "the loop", "this loop", "rerun", "re-run")
+
+
 def _wait_loop_deny_text_faults(reason, banner):
     """The faults of a deny text for a backgrounded polling loop (orch_untracked_wait_loop's, and
     orch_truncation_guard's bare-'&' detach deny on the same loop). Neither the reason nor the banner may name
@@ -3175,8 +3189,11 @@ def _wait_loop_deny_text_faults(reason, banner):
     read, as tools/ci-status.sh's header says). Each must forbid resubmitting the loop: it carries "do not
     resubmit the loop", every "resubmit" in it is inside that phrase, and it never says "same loop" or gives
     the generic detach advice that would resubmit it (use the tracked background dispatch, or keep the
-    command in the foreground). The remedy is one tracked task read by its exit status, never by output
-    words; the reason confines that exit to a CI wait in a repository that has such a reader and sends every
+    command in the foreground). Outside the do-not-resubmit clause and exit (1)'s dispatch of the reader
+    (_WAIT_LOOP_SANCTIONED_SPANS) it offers neither a foreground run or wait, run_in_background, the loop,
+    nor a rerun (_WAIT_LOOP_RERUN_WORDS), so a reworded offer to run the loop again ("run the loop in the foreground",
+    "rerun the loop with run_in_background") is a fault. The remedy is one tracked task read by its exit
+    status, never by output words; the reason confines that exit to a CI wait in a repository that has such a reader and sends every
     other wait to the tracked wake. The hook ships to adopter repositories that may have no
     tools/ci-status.sh, so that path is not required; where the text names it, it must be only an example
     ("such as tools/ci-status.sh")."""
@@ -3201,6 +3218,13 @@ def _wait_loop_deny_text_faults(reason, banner):
             if advice in flat:
                 faults.append("the {} gives the generic detach advice {!r}, which resubmits the loop"
                               .format(where, advice))
+        rest = flat
+        for span in _WAIT_LOOP_SANCTIONED_SPANS:
+            rest = rest.replace(span, " ")
+        for word in _WAIT_LOOP_RERUN_WORDS:
+            if word in rest:
+                faults.append("the {} offers to run the loop again ({!r} outside the do-not-resubmit clause and "
+                              "exit (1))".format(where, word))
     flat = " ".join(reason.split()).lower()
     if "never by matching success or failure words" not in flat:
         faults.append("the reason does not forbid matching success or failure words in the output")
@@ -3231,7 +3255,9 @@ _WAIT_LOOP_DENY_MUTANTS = (
     ("gh-pr-checks", " (for example: timeout <seconds> gh pr checks <ref> --watch)", "names gh pr checks"),
     ("resubmit-tracked", " (3) resubmit this loop with run_in_background: true.", "resubmit other than"),
     ("gh-run-watch", " (3) run gh run watch <id>.", "names gh run watch"),
-    ("gh-pr-status", " (3) run gh pr status.", "names gh pr status"))
+    ("gh-pr-status", " (3) run gh pr status.", "names gh pr status"),
+    ("foreground-wait", " Or run the loop in the foreground and wait.", "run the loop again"),
+    ("rerun-tracked", " (3) rerun the loop with run_in_background: true.", "run the loop again"))
 
 
 def _test_wait_loop_deny_text(failures, tmp):
@@ -3286,6 +3312,63 @@ def _test_wait_loop_deny_text(failures, tmp):
     if not any("generic detach advice" in fault for fault in flipped):
         failures.append("(wl-deny-text-truncation-guard-flip) with the truncation guard's generic detach text "
                         "restored for the poll loop the row must go red, got {!r}".format(flipped))
+    _wait_loop_overmatch_rows(failures, root)
+
+
+# A detach whose '#' the shared lexer cannot judge under both readings, with the poll shape's words only in
+# quoted text: _orch_bg_poll_loop's text-scan fallback reads it as 'match' (the wait-loop hook's disclosed
+# over-match), but it is not a polling loop, so the truncation guard's deny keeps its generic detach advice.
+_WAIT_LOOP_OVERMATCH_COMMAND = "npm run serve & x=\"$(echo # (\n)\"; echo \"for gh sleep done\""
+
+
+def _wait_loop_overmatch_faults(root):
+    """The faults of orch_truncation_guard's deny on _WAIT_LOOP_OVERMATCH_COMMAND (a foreground call in
+    registry scope at root): it must deny with the generic detach advice and without the poll-loop exits."""
+    code, stdout_obj, _stderr = aiqt_hooks.orch_truncation_guard(
+        {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(root),
+         "tool_input": {"command": _WAIT_LOOP_OVERMATCH_COMMAND}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        return ["the over-matched detach did not deny ({})".format(_reduce_result(code, stdout_obj))]
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    if not isinstance(reason, str):
+        return ["the reason is not a string"]
+    faults = []
+    if aiqt_hooks._ORCH_POLL_LOOP_EXITS in reason:
+        faults.append("the reason gives the poll-loop exits on a command the lexer did not read as a poll loop")
+    if "keep the command in the foreground" not in reason:
+        faults.append("the reason lacks the generic detach advice")
+    return faults
+
+
+def _wait_loop_overmatch_rows(failures, root):
+    """orch_truncation_guard on _WAIT_LOOP_OVERMATCH_COMMAND: the precondition (the shared lexer refuses it
+    with _UncertainHashError, and the wait-loop classifier's text-scan fallback then reads it as 'match'),
+    the row (_wait_loop_overmatch_faults), and a flip that gates the poll-loop text on the classifier's
+    answer, fallback included, under which the row must go red."""
+    try:
+        aiqt_hooks._lex_readings(_WAIT_LOOP_OVERMATCH_COMMAND)
+        lexed = True
+    except aiqt_hooks._UncertainHashError:
+        lexed = False
+    except ValueError:
+        lexed = True
+    if lexed or aiqt_hooks._orch_bg_poll_loop(_WAIT_LOOP_OVERMATCH_COMMAND) != "match":
+        failures.append("(wl-deny-text-overmatch-cannot-evaluate) the over-match fixture no longer reads 'match' "
+                        "only through the text-scan fallback, so the row below tests nothing")
+        return
+    faults = _wait_loop_overmatch_faults(root)
+    if faults:
+        failures.append("(wl-deny-text-overmatch) the truncation guard's deny of an over-matched detach is "
+                        "wrong: {}".format("; ".join(faults)))
+    saved_poll = aiqt_hooks._orch_detach_poll_loop
+    aiqt_hooks._orch_detach_poll_loop = lambda command: aiqt_hooks._orch_bg_poll_loop(command) == "match"
+    try:
+        flipped = _wait_loop_overmatch_faults(root)
+    finally:
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+    if not any("poll-loop exits" in fault for fault in flipped):
+        failures.append("(wl-deny-text-overmatch-flip) with the poll-loop text gated on the fallback's 'match' "
+                        "the row must go red, got {!r}".format(flipped))
 
 
 def _test_pgrep_self_match(failures):
