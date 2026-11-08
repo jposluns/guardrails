@@ -225,8 +225,12 @@ the PYTHONPATH environment), a
 sys.path.insert or append whose path is a string literal, and one in a scope with no importer
 call (the mutation runs nothing by itself, though any import evaluated after it, a plain
 import statement in the same scope included, can then load from the mutated path; pairing is
-by the exact enclosing scope, so an insert
-in one function and the import in another, or in a nested function, are not paired); a plain
+by the dotted name of the enclosing def, async def or class, not by the true Python scope: a
+lambda or comprehension shares the name of the function, class or module around it, and two
+scopes with one dotted name, such as a function defined twice, one name in both branches of an
+if, or a class and a function of one name, are paired, which errs toward reporting; an insert
+in one function and the importer in a function of another name, and a mutation whose importer
+is in a nested function, are not paired); a plain
 import statement after a sys.path insert or append in the same scope (not counted because it
 matches about 160 live scopes, most of them a tool importing its own directory, so counting
 it would over-fire); a literal module name for a file the code itself writes under a name the
