@@ -232,10 +232,12 @@ matches about 160 live scopes, most of them a tool importing its own directory, 
 it would over-fire); a literal module name for a file the code itself writes under a name the
 tree or the standard library already holds (the literal is read as known), a dotted name
 whose first part is a standard-library name included; importlib.util.find_spec of a dotted
-name (it imports the parent packages of that name); any other API outside the named importer
-set that imports a module by name or from a path is not counted either (among those reviewed:
-pkgutil.walk_packages, pkgutil.get_data, importlib.resources.files, a string target of
-mock.patch, and unittest's TestLoader loadTestsFromName and discover); an importer reached
+name (it imports the parent packages of that name); any API other than the importers named
+above (importlib.import_module, the __import__ spellings, pkgutil.resolve_name, pydoc.locate
+and importlib.reload) that imports a module by name or from a path is not counted either
+(among those reviewed: pkgutil.walk_packages, pkgutil.get_data, importlib.resources.files, a
+string target of mock.patch, and unittest's TestLoader loadTestsFromName and discover); an
+importer reached
 through an alias of getattr (g = getattr, then g(importlib, "import_module")(n)) is not
 followed, since only a getattr called directly in the call position is; while a
 repository module is known only by the stem of a scanned *.py file, so a literal dotted
@@ -481,6 +483,10 @@ _IMPORTERS = _IMPORT_DUNDERS | frozenset({"importlib.import_module"})
 # runs a module's code again, so every call of any of them is a code site (fail closed,
 # whatever the argument).
 _REIMPORTERS = frozenset({"pkgutil.resolve_name", "pydoc.locate", "importlib.reload"})
+# Every importer whose call makes its scope one a non-literal sys.path mutation pairs with:
+# a resolve_name, locate or reload call after the mutation imports from (or reloads over) the
+# mutated path just as import_module or __import__ does.
+_SCOPE_IMPORTERS = _IMPORTERS | _REIMPORTERS
 # The sys.path mutators that can make a directory the code wrote importable (or shadow a
 # known module name), with the positional index of the path each takes.
 _SYS_PATH_MUTATORS = {"sys.path.insert": 1, "sys.path.append": 0}
@@ -2007,8 +2013,9 @@ class _Scanner(ast.NodeVisitor):
                 self.based.add(id(target))
                 if name in _SETATTR:
                     self._check_store(attr.value, _positional(node, 2), node, True)
-        if name in _IMPORTERS:
+        if name in _SCOPE_IMPORTERS:
             self.importer_scopes.add(".".join(self.qual) if self.qual else "<module>")
+        if name in _IMPORTERS:
             target = _first(_positional(node, 0), _kw(pairs, "name"))
             if self.on("module-escape") and isinstance(target, ast.Constant) \
                     and isinstance(target.value, str) \
@@ -2757,6 +2764,11 @@ POSITIVE_VECTORS = (
     ("import pydoc\npydoc.locate('json')\n", ("code-import",)),
     ("import importlib\nimportlib.reload(mod)\n", ("code-import",)),
     ("import importlib\ngetattr(importlib, 'reload')(mod)\n", ("code-import",)),
+    # The non-direct pydoc.locate spellings are counted as the direct one is.
+    ("from pydoc import locate\nlocate(spec)\n", ("alias", "code-import")),
+    ("from pydoc import locate as L\nL(spec)\n", ("alias", "code-import")),
+    ("import pydoc as p\np.locate(spec)\n", ("alias", "code-import")),
+    ("import pydoc\ngetattr(pydoc, 'locate')(spec)\n", ("code-import",)),
     # A non-literal sys.path mutation in a scope that also imports by name (the import itself
     # is a literal standard-library module, so only the mutation is the site), in either order.
     ("import importlib, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
@@ -2958,6 +2970,26 @@ _IMPORT_STDLIB = (
 # A literal import of a module file the tree holds is not a code site; the same literal with
 # no such file is (the flip), and is admitted by an allowlist entry like any other site.
 _IMPORT_REPO = b"import importlib\nimportlib.import_module('helper')\n"
+
+# A non-literal sys.path mutation beside each importer judged by its call alone: the scope of
+# a pkgutil.resolve_name, pydoc.locate or importlib.reload call pairs with the mutation as an
+# import_module or __import__ scope does. The self-test also reads these with the reimporters
+# dropped from the scope registration (only that registration removed, each call still
+# counted), where none may report code-syspath.
+_SYSPATH_REIMPORTERS = (
+    "import pkgutil, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    return pkgutil.resolve_name('a.b:c')\n",
+    "import pkgutil, sys\ndef load(td):\n    sys.path.append(str(td))\n"
+    "    return pkgutil.resolve_name('a.b:c')\n",
+    "import pydoc, sys\ndef load(td):\n    sys.path.insert(0, str(td))\n"
+    "    return pydoc.locate('json')\n",
+    "import pydoc, sys\ndef load(td):\n    sys.path.append(str(td))\n"
+    "    return pydoc.locate('json')\n",
+    "import importlib, sys\ndef load(td, mod):\n    sys.path.insert(0, str(td))\n"
+    "    return importlib.reload(mod)\n",
+    "import importlib, sys\ndef load(td, mod):\n    sys.path.append(str(td))\n"
+    "    return importlib.reload(mod)\n",
+)
 
 # Negative vectors: the safe spellings each check must leave alone.
 NEGATIVE_VECTORS = (
@@ -3504,6 +3536,21 @@ def self_test():
                 failures.append("not counted with the stdlib roster emptied: " + repr(source))
     finally:
         _STDLIB_MODULES = stdlib
+    # A non-literal sys.path mutation pairs with a reimporter call as it does with a direct
+    # importer; with the reimporters dropped from the scope registration (only the
+    # registration removed, each call still counted), no vector reports code-syspath.
+    for source in _SYSPATH_REIMPORTERS:
+        if not any(item[4] == "code-syspath" for item in scan_source(source)):
+            failures.append("sys.path mutation beside a reimporter not counted: " + repr(source))
+    global _SCOPE_IMPORTERS
+    scope_importers, _SCOPE_IMPORTERS = _SCOPE_IMPORTERS, _IMPORTERS
+    try:
+        for source in _SYSPATH_REIMPORTERS:
+            if any(item[4] == "code-syspath" for item in scan_source(source)):
+                failures.append("code-syspath with the reimporters not registering their scope: "
+                                + repr(source))
+    finally:
+        _SCOPE_IMPORTERS = scope_importers
     # \z is read as an end anchor: with it dropped from the end anchors, its vectors pass.
     global _REGEX_ENDS
     ends, _REGEX_ENDS = _REGEX_ENDS, tuple(end for end in _REGEX_ENDS if end != "\\z")
@@ -3574,13 +3621,14 @@ def self_test():
           " (each fails without its check), {} negatives, {} fail-closed and allowlist tree"
           " vectors (each changes outcome without its check), 4 admission vectors, {} literal-"
           "import vectors (the repository module file and the emptied stdlib roster flip"
-          " them), {} \\z vectors"
+          " them), {} reimporter sys.path vectors (each loses its code-syspath with the"
+          " reimporters dropped from the scope registration), {} \\z vectors"
           " that pass without \\z as an end anchor, {} leading comment-group vectors that flip"
           " with only flag groups read as leading, {} scoped u vectors that pass with u not"
           " clearing ASCII, {} getattr(x, \"getattr\") and {} __builtins__ vectors that pass"
           " without that reading.".format(
               len(POSITIVE_VECTORS), len(generated), len(NEGATIVE_VECTORS), len(TREE_VECTORS),
-              2 + len(_IMPORT_STDLIB),
+              2 + len(_IMPORT_STDLIB), len(_SYSPATH_REIMPORTERS),
               len(_REGEX_END_Z), len(_REGEX_LEADING_COMMENT) + len(_REGEX_LEADING_ASCII),
               len(_REGEX_SCOPE_U), len(_GETATTR_BY_NAME),
               len(_BUILTINS_DUNDER) + len(_BUILTINS_BOUND)))
