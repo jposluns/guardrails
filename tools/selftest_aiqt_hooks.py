@@ -2891,8 +2891,8 @@ _PSM_IDIOM_ROWS = (
     ("(psm-i8) pidwait -f with the bracket idiom", "pidwait -f '[j]ob7'"))
 # Long bracket idioms, each one scan of the command: (label, command, decision). A test that searched the
 # whole command once per class letter used about 104 s of CPU on the first at 400 KB; each row must stay
-# under _PSM_TIMED_BOUND CPU seconds (about 0.01 to 0.06 s in-process on an 80-core host with Python 3.14.4,
-# 2026-10-29). The last is a literal whose period letter is the class letter, which is not judged and denies.
+# under _PSM_TIMED_BOUND CPU seconds of the calling thread's own work (_hook_cpu_timed; about 0.01 to
+# 0.06 s in-process on an 80-core host with Python 3.14.4, 2026-10-29). The last is a literal whose period letter is the class letter, which is not judged and denies.
 _PSM_TIMED_ROWS = (
     ("(psm-t1) a 200,000-letter class", "pgrep -f '[" + "a" * 200000 + "]x' " + "b" * 200000, "allow"),
     ("(psm-t2) a 200,000-letter literal", "pgrep -f '[b]" + "a" * 199999 + "c' " + "a" * 200000, "allow"),
@@ -3168,9 +3168,8 @@ def _test_pgrep_self_match(failures):
     this hook's decision, and each bracket idiom row must be red with the idiom exception removed."""
     handler = aiqt_hooks.pgrep_self_match
     for label, command, want in _PSM_TIMED_ROWS:
-        start = time.process_time()
-        got = _decision(handler, command)
-        spent = time.process_time() - start
+        got, spent = _hook_cpu_timed(lambda command=command: _decision(handler, command),
+                                     bound=_PSM_TIMED_BOUND)
         if got != want or spent > _PSM_TIMED_BOUND:
             failures.append("{}: expected {} within {} s of CPU, got {} in {:.3f} s".format(
                 label, want, _PSM_TIMED_BOUND, got, spent))
@@ -5361,6 +5360,48 @@ def _cpu_seconds():
     """CPU seconds this process has used (every thread), plus those of the child processes it reaped."""
     children = os.times()
     return time.process_time() + children.children_user + children.children_system
+
+
+def _hook_cpu_timed(call, bound=None, runs=3):
+    """(the last call()'s result, the least CPU seconds the calling thread spent in one call()): the
+    clock of every row that holds one in-process handler call to a fixed absolute CPU bound. It charges
+    the call only for its own work, which a fixed bound can judge, where one process-CPU reading also
+    charges it for work it did not do (a commit-identity row so charged measured 2.43 s inside the full
+    suite on a host at a load near half its CPUs, against at most 0.03 s for the same call alone, about
+    80 times; at these rows the suite runs one thread, arms no interval timer and triggers no cyclic
+    collection, so that charge came from outside the call). Three guards, each against a charge a fixed
+    absolute bound cannot absorb: time.thread_time charges only the calling thread, so work another
+    thread does while the call runs is never billed to it; the cyclic collector is held off across the
+    call, the prior state restored after the second clock reading, so a collection that the call's own
+    allocations tip over a generation threshold cannot bill a pass over the whole suite heap, which a
+    hook process at its production size never carries, to the one call that tipped it (the deferred
+    collection runs outside every timed region, charged to no row); and with a bound the call is
+    re-timed, up to runs times in all, only while the least reading so far is at or over it, and that
+    least reading is judged, since stray charges the clock cannot see apart (kernel reclaim billed to
+    an allocating thread as system time, a co-scheduled sibling's cache pressure) only ever add time,
+    so the least of three is the fairest reading of the call's own cost, while a real super-linear
+    regression of the measured path is over the bound on every run and still fails in seconds. The
+    call's own work, its reference counting included, is always charged. The re-timed call must be
+    deterministic: same input, same decision, no state carried across runs (a counting shim is reset
+    inside the call). The median-judged rows (_timed_runs over the lex-cost and deadline-shape cases)
+    keep _cpu_seconds: they time handlers that reap child processes, which no thread clock sees, and
+    their three-run median already tolerates one slowed run."""
+    import gc
+    spent = None
+    for _ in range(max(1, runs)):
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            started = time.thread_time()
+            result = call()
+            once = time.thread_time() - started
+        finally:
+            if enabled:
+                gc.enable()
+        spent = once if spent is None else min(spent, once)
+        if bound is None or spent < bound:
+            break
+    return result, spent
 
 
 def _judged(times):
@@ -24662,7 +24703,8 @@ def _main_isolated(monitor):
         # Each rebase reads its options only up to the next rebase subcommand that the segment's git commands read,
         # so a segment of many wrapped rebase commands costs time linear in its length, where reading the rest of
         # the segment for each of them cost time quadratic in it (about 1.5 s to 4 s of CPU time at 65,536
-        # characters for the two forms below). The bound is the handler's CPU time in this process over 'sudo -E git
+        # characters for the two forms below). The bound is the CPU time the calling thread spends in the
+        # handler (_hook_cpu_timed: the thread clock, the cyclic collector held off) over 'sudo -E git
         # rebase x ...' and over 'sudo -E git rebase -x x ...', each padded to 65,536 characters and to
         # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): 0.5 s at 65,536 and 1 s at
         # 131,072, the same bound per character, against at most about 0.035 s and 0.07 s measured, a margin of
@@ -24688,10 +24730,10 @@ def _main_isolated(monitor):
                     _ci_cmd = "sudo" + _ci_unit * _ci_reps
                     _ci_cmd += " " * (_ci_size - len(_ci_cmd))
                     _ci_want = [_ci_reps, _ci_reps if " -x " in _ci_unit else 0]
-                    _ci_counts[:] = [0, 0]
-                    _ci_start = time.process_time()
-                    _ci_got = _decision(cig, _ci_cmd)
-                    _ci_spent = time.process_time() - _ci_start
+                    def _ci_reset_and_decide(_cmd=_ci_cmd):
+                        _ci_counts[:] = [0, 0]
+                        return _decision(cig, _cmd)
+                    _ci_got, _ci_spent = _hook_cpu_timed(_ci_reset_and_decide, bound=_ci_cap)
                     if _ci_got != "allow" or _ci_spent > _ci_cap or _ci_counts != _ci_want:
                         failures.append("(ci-wr-rebase-cpu) {} characters of 'sudo{} ...' gave {} after {:.2f} s of "
                                         "CPU time, {} rebase reads and {} run lines built (want allow within {} s, "
@@ -24706,7 +24748,8 @@ def _main_isolated(monitor):
         # raw-string scan that judges a command the tokenizer cannot parse (_RAW_IDENTITY_CONTEXTS) take each
         # whitespace run whole, so a long run costs time linear in its length, where giving it back one character at
         # a time cost time quadratic in it (about 53 s and 130 s of CPU time at _CMTIDN_READ_LIMIT characters for
-        # the two forms below). The bound is the handler's CPU time in this process over a commit message of a
+        # the two forms below). The bound is the CPU time the calling thread spends in the handler
+        # (_hook_cpu_timed: the thread clock, the cyclic collector held off) over a commit message of a
         # co-author name and a run of newlines, before a second message with an AI co-author trailer, which the
         # reader denies (ci-wr172), and over user.name, a run of spaces and a quote that does not close, before an
         # AI user.name value, which the raw-string scan denies (ci-wr173), each padded to 16,384 characters and to
@@ -24724,10 +24767,10 @@ def _main_isolated(monitor):
                  "' user.name Claude", ("could not be read in full", "(user.name/user.email value 'Claude')"))):
             for _ci_size, _ci_cap in ((16 << 10, 0.125), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
                 _ci_cmd = _ci_head + _ci_run * (_ci_size - len(_ci_head) - len(_ci_tail)) + _ci_tail
-                _ci_start = time.process_time()
-                _ci_code, _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                                         "tool_input": {"command": _ci_cmd}})[:2]
-                _ci_spent = time.process_time() - _ci_start
+                _ci_result, _ci_spent = _hook_cpu_timed(
+                    lambda _cmd=_ci_cmd: cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                              "tool_input": {"command": _cmd}}), bound=_ci_cap)
+                _ci_code, _ci_out = _ci_result[:2]
                 _ci_got = _reduce_result(_ci_code, _ci_out)
                 _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
                 if _ci_got != "deny" or _ci_spent > _ci_cap or not all(_ci_w in _ci_reason for _ci_w in _ci_wants):
@@ -25149,9 +25192,8 @@ def _main_isolated(monitor):
                  "denies (the disclosed over-deny)", '; git commit -m "thanks Claudette"', "deny"),
                 ("(ci-wr-c47) a command past the read limit that names no AI identity allows",
                  "; git commit -m x", "allow")):
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_wide + _ci_tail)
-            _ci_spent = time.process_time() - _ci_start
+            _ci_got, _ci_spent = _hook_cpu_timed(
+                lambda _cmd=_ci_wide + _ci_tail: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
                 failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
                                 .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_got, _ci_spent))
@@ -25191,9 +25233,7 @@ def _main_isolated(monitor):
                  _ci_body + "\nsetconf user.name Claude", "deny"),
                 ("(ci-wr165) an AI identity variable spelled in lower case, which the reader also judges, with no git "
                  "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny")):
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_long)
-            _ci_spent = time.process_time() - _ci_start
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_long: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
                 failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
                                 .format(_ci_label, len(_ci_long), _ci_want, _ci_got, _ci_spent))
@@ -27971,18 +28011,16 @@ def _main_isolated(monitor):
         # COST: an escaped '>' run inside one absolute target word is passed over, so the scan makes one word
         # read for that run, not one per '>' (a read per '>' grows with the square of the run's length).
         _ut_cost_cmd = "cat <<<y > /" + "\\>/" * 8000
-        _ut_t0 = time.process_time()
-        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
-        _ut_cpu = time.process_time() - _ut_t0
+        _ut_cost_got, _ut_cpu = _hook_cpu_timed(
+            lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
             failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s"
                             .format(_ut_cost_got, _ut_cpu))
         # the second reading a backquote starts cuts each run to two, so each '>' it reads ends the word before
         # it and the reads stay linear in the command's length.
         _ut_cost_cmd = "echo `true`; cat <<<y > /" + "\\\\\\>/" * 8000
-        _ut_t0 = time.process_time()
-        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
-        _ut_cpu = time.process_time() - _ut_t0
+        _ut_cost_got, _ut_cpu = _hook_cpu_timed(
+            lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
             failures.append("(ap-c95f) the odd backslash runs after a backquote must allow in under 1 s of CPU; "
                             "got {} in {:.2f} s".format(_ut_cost_got, _ut_cpu))
