@@ -45,9 +45,12 @@ source that defines its input forms. The cases cover the outcomes the fix change
 the boundaries it affects. The tests of changed outcomes are observed to fail with the fix reverted; tests of
 preserved outcomes need not, since they exist to catch a fix that wrongly moves a sibling's verdict.
 
-A move of executable code, or a rewrite of paths code depends on, meant to preserve behaviour carries checks
-that run the affected code, its tests, and each build or generator that reads an affected directory, with the
-old locations absent or unreachable. Any behaviour the change alters still carries the check the first
-sentence requires. Treat replayed edits, byte comparisons of rewritten lines, stale-reference searches, and
-passing textual gates as evidence about the edits, not the result. A result that cannot be exercised is
-reported unverified.
+A move of executable code, or rewrite of paths code depends on, meant in either case to preserve behaviour,
+carries checks that run the affected code, its tests, and each build or generator that reads an affected
+directory, with the old locations absent or unreachable. Any behaviour altered by a move of executable code,
+or rewrite of paths code depends on, meant in either case to preserve behaviour, is guarded by an automated
+test or gate that lands with and fails without the move or rewrite. For a move of executable code, or rewrite
+of paths code depends on, meant in either case to preserve behaviour, treat replayed edits, byte comparisons
+of rewritten lines, stale-reference searches, and passing textual gates as evidence about its edits, not its
+result. A move of executable code, or rewrite of paths code depends on, meant in either case to preserve
+behaviour, is reported unverified when its result cannot be exercised.
