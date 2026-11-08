@@ -1839,9 +1839,18 @@ def _rdp_screen_ops(text, labels):
     equal, every shape), so a loaded or small runner cannot move it, where it moves any CPU time. Work a
     stage does through plain str operations is counted once per stage, by its input's length, so extra
     passes of a C primitive looped from Python inside a stage show only as time; those are the timing
-    bounds' job: the normalized growth bound catches such work when it grows super-linearly, the ratio
-    bound when it is merely several times slower, and the runaway bound when it is gross
-    (_rdp_timing_group, _rdp_timing_rows)."""
+    bounds' job (_rdp_timing_group, _rdp_timing_rows), and how much of such work they catch depends on its
+    size. The normalized growth bound fails a super-linear term only when it lifts the screen's multiple
+    of the reference by the square root of the length factor (about 1.414 per doubling) in two of three
+    groups; a smaller term passes, and whether one near that size fails depends on the host. On one host
+    a prefix-count mutant (text.count("\\n", 0, i) every 2400 characters inside _rdp_hidden) failed only
+    in the backtick-fence-line shape, and only by 0.8 to 5.8 percent over the bound in five runs. When the
+    reference's own growth per doubling exceeds the length factor, raw screen growth up to the raw bound
+    (the length factor to the power 1.5) times the reference's growth over the length factor passes:
+    about 4 percent over it at a reference growth of 2.08, about 11 percent at 2.22, both observed on one
+    host. No rule that cancels load can close that band, since a rule that cancels a load factor shared
+    by both legs depends only on the two multiples and the length factor. The ratio bound catches work
+    that is merely several times slower, and the runaway bound work that is gross."""
     count = [len(text)]
     patched = ("_RDP_NOT_WORD", "_RDP_UNLETTER", "_RDP_LOOKALIKE", "_RDP_NOT_ASCII", "re",
                "unicodedata", "_rdp_hidden", "_rdp_screened", "_rdp_named", "_rdp_read_labels")
@@ -1901,19 +1910,23 @@ def _rdp_timing_group(least, lengths, bound):
       factor under the length factor to the power 0.5 (s2 * s2 * r1 * r1 * n1 < s1 * s1 * r2 * r2 * n2),
       the 512 KiB multiple checked against both its neighbours. The reference is linear, so a linear
       screen's multiple holds near 1 per doubling while a screen with a dominant quadratic term reaches 2,
-      against the bound's square root of 2 (about 1.414); with a linear reference this is as sensitive as
-      holding raw screen time under the length factor to the power 1.5 per step, divided through by the
-      reference's own doubling.
+      against the bound's square root of 2 (about 1.414); when the reference grows by exactly the length
+      factor this is as sensitive as holding raw screen time under the length factor to the power 1.5 per
+      step. When the reference grows by more, it is less sensitive by that excess (the band
+      _rdp_screen_ops and _rdp_label_screen_timing state).
     The screen and the reference are timed back to back over the same brief, so load, frequency scaling
     and cache contention lift both legs together and cancel out of both bounds. Raw CPU time is never
-    compared across sizes: a loaded or small runner lifts a larger brief's per-character CPU time on its
-    own, so a raw growth bound fails linear code under load where the normalized one holds (the measured
-    margins are in the comment above _RDP_TIMING_SHAPES and the growth cases of
-    _rdp_timing_decision_cases). Growth the operation counts can see is judged on them first
-    (_rdp_ops_growth), which load cannot move; this growth bound exists for super-linear work the counts
-    cannot see, extra passes of a C primitive looped from Python inside one stage. A time of zero, below
-    the clock's resolution, cannot anchor either bound and fails: a zero reference fails its size's ratio
-    term, and a zero screen time at the smaller size fails the growth term it anchors."""
+    compared across sizes: a loaded or small runner can lift a larger brief's per-character CPU time on
+    its own, and a raw growth bound would then fail linear code where the normalized one holds. The
+    decision cases show that on synthetic times, not measured ones (growth-load-lifts-both-legs and
+    linear-both-legs-loaded-every-group in _rdp_timing_decision_cases). Growth the operation counts can
+    see is judged on them first (_rdp_ops_growth), which load cannot move; this growth bound exists for
+    super-linear work the counts cannot see, extra passes of a C primitive looped from Python inside one
+    stage. A time of zero, below the clock's resolution, gives these outcomes (decision cases zero-*): a
+    zero reference fails its size's ratio term (nothing is under a bound times zero) and the growth term
+    it ends at the larger size, but passes the growth term it starts at the smaller size; a zero screen
+    time fails the growth term it starts at the smaller size, and at the larger size passes both its
+    growth term and its ratio term, reading as no growth."""
     sizes = sorted(lengths)
     faults = []
     for small, large in zip(sizes, sizes[1:]):
@@ -1998,10 +2011,20 @@ def _rdp_label_screen_timing(ls):
     under its ratio bound to the reference at every size, and its multiple of the reference must grow
     under the length factor to the power 0.5 from each size to the next (_rdp_timing_group,
     _RDP_TIMING_SHAPES), in two groups of rounds (_rdp_timing_rows). Every timing bound is a ratio of
-    times taken back to back in the same run, so it holds on a fast, slow or loaded host; the growth
-    bound fails super-linear work the counts cannot see, the ratio bound also fails a screen that grows
-    linearly but runs several times slower, and the runaway bound fails gross work outright (a C str
-    primitive looped per character exceeds it at these sizes). A runaway timing ends
+    times taken back to back in the same run, so it holds on a fast, slow or loaded host. The growth
+    bound fails super-linear work the counts cannot see only when that work lifts the screen's multiple
+    of the reference by the square root of the length factor (about 1.414 per doubling) in two of three
+    groups; a smaller term passes, and whether one near that size fails depends on the host (on one host
+    a prefix-count mutant, text.count("\\n", 0, i) every 2400 characters inside _rdp_hidden, failed only
+    in the backtick-fence-line shape and only by 0.8 to 5.8 percent over the bound in five runs). When
+    the reference's own growth per doubling exceeds the length factor, raw screen growth up to the raw
+    bound (the length factor to the power 1.5) times the reference's growth over the length factor
+    passes: about 4 percent over it at a reference growth of 2.08, about 11 percent at 2.22, both
+    observed on one host. No rule that cancels load can close that band, since a rule that cancels a
+    load factor shared by both legs depends only on the two multiples and the length factor. The ratio
+    bound also fails a screen that grows linearly but runs several times slower, and the runaway bound
+    fails gross work outright (a C str primitive looped per character exceeds it at these sizes). A
+    runaway timing ends
     its shape untimed, and the row's timings share a CPU budget (_RDP_TIMING_BUDGET), so a failing row
     ends with a named failure. Then the decision itself, over simulated counts and times
     (_rdp_timing_decision_cases)."""
@@ -2043,8 +2066,10 @@ def _rdp_timing_decision_cases():
     """The linear-time decision over simulated counts and times (rdp/label-screen-linear-time-decision),
     no screen run: each bound fails exactly at its value and passes just inside it, the growth bound on
     integer operation counts (_rdp_ops_growth), and the normalized growth and ratio bounds on times
-    (_rdp_timing_group); load that lifts both legs of one size cancels out of the timing bounds; a
-    quadratic screen's times fail, also when a burst of load lifts its small sizes' times through a whole
+    (_rdp_timing_group); a time of zero at either end of a growth step gives the outcomes
+    _rdp_timing_group states; load that lifts both legs of one size cancels out of the timing bounds,
+    also when it lifts every group of rounds, where a raw growth bound would fail; a quadratic screen's
+    times fail, also when a burst of load lifts its small sizes' times through a whole
     group of rounds, and also when the quadratic stays under the ratio bound and only the normalized
     growth sees it; a linear screen passes through a burst that lifts its largest size through one group;
     a runaway ends its shape untimed while the next shape is still timed; and timings that each take just
@@ -2067,8 +2092,13 @@ def _rdp_timing_decision_cases():
     # The normalized time bound allows a growth factor of exactly 2 for the screen-over-reference multiple
     # over one quadrupling (the length factor to the power 0.5): with a linear reference quadrupling from
     # 1.0 to 4.0, a screen going from 1.0 to 8.0 sits exactly at it and fails, 7.999999 just inside
-    # passes, 8.000001 just outside fails; both legs of one size lifted together (both 6 times at 1 MiB)
-    # cancel and pass; and a middle multiple that grew too fast from the smallest size decides alone.
+    # passes, 8.000001 just outside fails; both legs of one size lifted together (each grows 6 times from
+    # 512 KiB to 1 MiB) cancel and pass; and a middle multiple that grew too fast from the smallest size
+    # decides alone. A time of zero over one quadrupling: a zero screen time at the larger size passes
+    # both terms (no growth, and zero is under any ratio bound), a zero reference at the smaller size
+    # fails only that size's ratio term (its growth term reads zero on the left and passes), a zero
+    # screen time at the smaller size fails only the growth term, and a zero reference at the larger
+    # size fails both its growth term and its ratio term.
     bounds = [
         ("ops-growth-4x-exactly-8", len(_rdp_ops_growth({262144: 1000, 1048576: 8000}, quarter))),
         ("ops-growth-4x-just-under-8", len(_rdp_ops_growth({262144: 1000, 1048576: 7999}, quarter))),
@@ -2081,6 +2111,10 @@ def _rdp_timing_decision_cases():
         ("growth-4x-just-over-2", _group((1.0, 8.000001), (1.0, 4.0), lengths=quarter)),
         ("growth-load-lifts-both-legs", _group((1.0, 2.0, 12.0), (1.0, 2.0, 12.0))),
         ("growth-middle-size-decides", _group((1.0, 4.0, 5.0), (1.0, 2.0, 4.0))),
+        ("zero-screen-at-larger", _group((1.0, 0.0), (1.0, 4.0), lengths=quarter)),
+        ("zero-reference-at-smaller", _group((1.0, 4.0), (0.0, 4.0), lengths=quarter)),
+        ("zero-screen-at-smaller", _group((0.0, 4.0), (1.0, 4.0), lengths=quarter)),
+        ("zero-reference-at-larger", _group((1.0, 4.0), (1.0, 0.0), lengths=quarter)),
         ("ratio-exactly-at", _group((at_ratio, at_ratio * 2, at_ratio * 4), (1.0, 2.0, 4.0))),
         ("ratio-just-under", _group((at_ratio - 1e-6, (at_ratio - 1e-6) * 2, (at_ratio - 1e-6) * 4),
                                     (1.0, 2.0, 4.0))),
@@ -2110,9 +2144,10 @@ def _rdp_timing_decision_cases():
     # multiple of its reference between 2.5 and 10 against a bound of 33.75), which only the normalized
     # growth bound sees; and one whose first group of rounds is flattened to look linear (4, 2 and 1
     # times), which the second and third groups' unflattened multiples fail. A linear screen whose 1 MiB
-    # screen AND reference timings are lifted 3 times through the first group (a load burst falls on both
-    # legs timed back to back) still passes: the lift cancels out of the multiple, where a raw-time growth
-    # bound would read 6 per doubling and fail linear code.
+    # screen AND reference timings are lifted 3 times through every group of rounds (sustained load falls
+    # on both legs timed back to back) still passes: the lift cancels out of the multiple, where a raw-time
+    # growth bound, or one that divides each size's screen time by the reference's least time per byte
+    # over all sizes, reads 6 per doubling in every group and fails linear code.
     lifted = {262144: 2.1}
     flattened = {262144: 4.0, 524288: 2.0}
     cases = [
@@ -2126,9 +2161,9 @@ def _rdp_timing_decision_cases():
         ("quadratic-flattened-one-group", _simulate(
             lambda size, rnd: _quadratic(size, rnd) * (flattened.get(size, 1.0) if rnd < 3 else 1.0),
             lambda size, rnd: 0.04 * size / 262144)[0]),
-        ("linear-both-legs-loaded-one-group", _simulate(
-            lambda size, rnd: _linear(size, rnd) * (3.0 if size == 1048576 and rnd < 3 else 1.0),
-            lambda size, rnd: _reference(size, rnd) * (3.0 if size == 1048576 and rnd < 3 else 1.0))[0]),
+        ("linear-both-legs-loaded-every-group", _simulate(
+            lambda size, rnd: _linear(size, rnd) * (3.0 if size == 1048576 else 1.0),
+            lambda size, rnd: _reference(size, rnd) * (3.0 if size == 1048576 else 1.0))[0]),
         ("linear-large-lifted-one-group", _simulate(
             lambda size, rnd: _linear(size, rnd) * (3.0 if size == 1048576 and 3 <= rnd < 6 else 1.0),
             _reference)[0]),
@@ -2148,12 +2183,14 @@ def _rdp_timing_decision_cases():
          ("ops-growth-4x-just-over-8", 1), ("ops-quadratic", 2), ("ops-middle-size-decides", 1),
          ("growth-4x-exactly-2", 1), ("growth-4x-just-under-2", 0), ("growth-4x-just-over-2", 1),
          ("growth-load-lifts-both-legs", 0), ("growth-middle-size-decides", 1),
+         ("zero-screen-at-larger", 0), ("zero-reference-at-smaller", 1),
+         ("zero-screen-at-smaller", 1), ("zero-reference-at-larger", 2),
          ("ratio-exactly-at", 3), ("ratio-just-under", 0), ("ratio-just-over", 1)],
         [("linear", ["linear"]), ("quadratic", ["not linear"]),
          ("quadratic-small-lifted-one-group", ["not linear"]),
          ("quadratic-under-ratio-bound", ["not linear"]),
          ("quadratic-flattened-one-group", ["not linear"]),
-         ("linear-both-legs-loaded-one-group", ["linear"]),
+         ("linear-both-legs-loaded-every-group", ["linear"]),
          ("linear-large-lifted-one-group", ["linear"]),
          ("five-times-slower", ["not linear"]),
          ("runaway", ["runaway", "linear"], [], True),
