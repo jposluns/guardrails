@@ -5990,14 +5990,68 @@ def _watchdog_completion_case(mode, tree=None):
         # proves the guardian fired by its own deadline. The flip deletes
         # exactly that check from the guardian's source (the post-EOF
         # re-sample stays): with no EOF to re-sample the mutant can never
-        # leave the loop, so the flip passes ONLY when its wait is observed
-        # held through the whole execution bound with no receipt at all.
+        # leave the loop, so the flip passes ONLY when a poll made at or
+        # after the execution bound finds no receipt at all.
         import inspect
         import textwrap
 
         def stalling_subject():
             while True:
                 time.sleep(60)
+
+        def watch_through(proc, bound):
+            # Poll `proc` until `bound`, then poll once more after the loop.
+            # Returns "expired" or "unexpired" for a receipt (timed_out set
+            # or not), "held" ONLY when that last poll, made after a clock
+            # sample at or past `bound`, found no receipt, and otherwise
+            # "unwatched": a starvation shape the rows retry, never "held".
+            # A host stall can leave the loop with no poll at all, or with
+            # its last poll well short of the bound, so the loop's polls
+            # alone never establish "held".
+            while time.monotonic() < bound:
+                if proc.poll() is not None:
+                    return "expired" if proc.timed_out else "unexpired"
+                time.sleep(0.005)
+            watched = time.monotonic() >= bound
+            if proc.poll() is not None:
+                return "expired" if proc.timed_out else "unexpired"
+            return "held" if watched else "unwatched"
+
+        # The watch, pinned on a stand-in fixture and a scripted clock (no
+        # bounded wait is charged): a stall that carries the clock past
+        # the bound before the first poll must still poll after the bound,
+        # so a receipt waiting there is judged, never "held"; with no
+        # receipt the one post-bound poll is what makes it "held"; and a
+        # last sample short of the bound (just inside it) is the retried
+        # "unwatched" shape, while one exactly at or just past it holds.
+        import types
+
+        watch_bound = 64.0
+
+        def watch_case(receipt, timed_out, clock):
+            polls = []
+
+            def poll():
+                polls.append(None)
+                return 0 if receipt else None
+            stand_in = types.SimpleNamespace(poll=poll, timed_out=timed_out)
+            with patch.object(time, "monotonic", side_effect=clock), \
+                    patch.object(time, "sleep"):
+                return watch_through(stand_in, watch_bound), len(polls)
+
+        stalled = [watch_bound + 30, watch_bound + 30]
+        assert watch_case(True, False, stalled) == ("unexpired", 1), \
+            "own-deadline watch: a stalled attempt held past a receipt"
+        assert watch_case(True, True, stalled) == ("expired", 1), \
+            "own-deadline watch: a stalled attempt held past a receipt"
+        assert watch_case(False, False, stalled) == ("held", 1), \
+            "own-deadline watch: held without exactly one post-bound poll"
+        for last, shape in ((watch_bound - 0.5, "unwatched"),
+                            (watch_bound, "held"),
+                            (watch_bound + 0.5, "held")):
+            assert watch_case(False, False, [watch_bound - 1, watch_bound,
+                                             last]) == (shape, 2), (
+                "own-deadline watch: last sample", last, shape)
 
         def own_deadline_attempt(guardian):
             # One held-open supervision wait against `guardian`. Returns
@@ -6006,11 +6060,12 @@ def _watchdog_completion_case(mode, tree=None):
             # cleanup-deadline refusal through poll() or close() re-raising
             # the recorded failure, which a starved drain on a correct
             # guardian can produce: a retried shape, never a crash of this
-            # leg), "expired" (a receipt with timed_out set arrived while
-            # the control channel stayed open), "unexpired" (a receipt
-            # without expiry arrived during the held wait: positive
-            # evidence, returned for the rows to judge) or "held" (no
-            # receipt inside the execution bound).
+            # leg), or the watch's own outcome (see watch_through):
+            # "expired" (a receipt with timed_out set arrived while the
+            # control channel stayed open), "unexpired" (a receipt without
+            # expiry: positive evidence, returned for the rows to judge),
+            # "held" (a poll at or after the execution bound found no
+            # receipt) or "unwatched" (no such poll was made).
             begin = time.monotonic()
             proc = emit._FixtureProcess(begin + _DEADLINE_CASE_TIMEOUT,
                                         subject=stalling_subject)
@@ -6023,14 +6078,8 @@ def _watchdog_completion_case(mode, tree=None):
                             proc.start()
                     except emit.ChildStatusDeadline:
                         return outcome
-                    outcome = "held"
-                    bound = _watchdog_deadline(_DEADLINE_EXECUTION_BOUND)
-                    while time.monotonic() < bound:
-                        if proc.poll() is not None:
-                            outcome = ("expired" if proc.timed_out
-                                       else "unexpired")
-                            break
-                        time.sleep(0.005)
+                    outcome = watch_through(
+                        proc, _watchdog_deadline(_DEADLINE_EXECUTION_BOUND))
                 finally:
                     proc.close()
             except emit.ChildStatusDeadline:
@@ -6049,13 +6098,14 @@ def _watchdog_completion_case(mode, tree=None):
                     break
             return outcome
 
-        # Green leg: on a correct guardian, "unstarted", "drain-starved"
-        # and "held" (no receipt inside the execution bound) are all shapes
-        # starvation can produce, so each is retried; either receipt
-        # outcome is judged as it stands, and only the expired receipt
-        # collected on the held-open channel passes.
+        # Green leg: on a correct guardian, "unstarted", "drain-starved",
+        # "held" (no receipt at a poll at or after the execution bound) and
+        # "unwatched" are all shapes starvation can produce, so each is
+        # retried; either receipt outcome is judged as it stands, and only
+        # the expired receipt collected on the held-open channel passes.
         outcome = own_deadline_wait(emit._FixtureProcess._guardian,
-                                    ("unstarted", "drain-starved", "held"))
+                                    ("unstarted", "drain-starved", "held",
+                                     "unwatched"))
         assert outcome == "expired", (
             "own-deadline row: no expired receipt while the control "
             "channel stayed open", outcome)
@@ -6078,18 +6128,18 @@ def _watchdog_completion_case(mode, tree=None):
              mutant_namespace)
         unchecked_guardian = mutant_namespace["_guardian"]
         # Fail closed: the flip passes ONLY when the mutant guardian
-        # actually started and its supervision wait was observed held
-        # through the whole execution bound without an expired receipt. A
-        # starved or unstarted attempt is retried within the priced
-        # attempts, and an exhausted retry fails the row by name, never
-        # passes it; a receipt of either kind during the held wait fails
+        # actually started and a poll made at or after the execution bound
+        # found no receipt. A starved, unstarted or unwatched attempt is
+        # retried within the priced attempts, and an exhausted retry fails
+        # the row by name, never passes it; a receipt of either kind fails
         # it by name too.
         outcome = own_deadline_wait(unchecked_guardian,
-                                    ("unstarted", "drain-starved"))
+                                    ("unstarted", "drain-starved",
+                                     "unwatched"))
         assert outcome == "held", (
-            "own-deadline flip: the mutant guardian must start and its "
-            "wait must be observed through the execution bound without an "
-            "expired receipt", outcome)
+            "own-deadline flip: the mutant guardian must start and a poll "
+            "at or after the execution bound must find no receipt",
+            outcome)
         # The armed-reading term of the deadline-expiry judgement, pinned
         # at both ends of its boundary with an exactly controlled reading:
         # a deadline-expiry result with no recorded cancel is a starvation
@@ -16696,7 +16746,8 @@ def _watchdog_regression_self_test():
         # confirm run at four times the requested timeout). The three
         # armed-reading boundary rows substitute run_bounded entirely and
         # run on a pinned clock, so they charge no bounded wait and add no
-        # term. And 4 for conversion ticks the host's scheduling can add to
+        # term, nor do the own-deadline watch rows (a stand-in fixture on a
+        # scripted clock). And 4 for conversion ticks the host's scheduling can add to
         # the charged waits.
         ("deadline-flips", 3 * (6 * _deadline_case_budget()
          + (_opf_emit._FIXTURE_CLEANUP_GRACE + _DEADLINE_RECEIPT_ALLOWANCE + 0.2)
