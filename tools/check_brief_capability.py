@@ -589,10 +589,12 @@ number of git or python options; a closed shape is matched once per sentence at 
 command line is split on whitespace once and its tokens classified by a plain predicate (argument_token), once per
 command line end; per opener, R6 measures its subject's length before reading it; and every word-run, command and
 file-name pattern is anchored at a token start. THE MEASURED SHAPES: in a child process capped at 1 GiB of address
-space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print two finite, nonnegative times,
-each shape at 64 KiB must take at most LINEAR_FACTOR times as long as at 8 KiB plus LINEAR_SLACK seconds
-(the input is eight times larger; a pass whose time grows with the square of the input takes about 64 times as
-long). Every shape carries a lead that holds "nput", so each runs through the shared parsed-document reading, never
+space (RLIMIT_AS) with a LINEAR_TIMEOUT-second timeout, which must exit 0 and print LINEAR_RUNS pairs of finite,
+nonnegative times, each shape is evaluated LINEAR_RUNS times at each size, every brief built afresh, each run timed
+in CPU seconds of the child and of the processes it reaped (the parse child among them), so a busy host's wait for a
+CPU is not counted; the median at 64 KiB must be at most LINEAR_FACTOR times the median at 8 KiB plus LINEAR_SLACK
+seconds (the input is eight times larger; a pass whose time grows with the square of the input takes about 64 times
+as long). Every shape carries a lead that holds "nput", so each runs through the shared parsed-document reading, never
 the ASCII fast path, and the larger size sits exactly at that reading's text ceiling; a shape the reading's own
 bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the nesting prescan)
 is timed through its refusal, which is the bounded behaviour an oversized or pathological brief gets. A shape is
@@ -638,6 +640,7 @@ import shlex
 import shutil
 import signal
 import stat
+import statistics
 import subprocess
 import tempfile
 import time
@@ -3899,6 +3902,13 @@ P5_CLONE_REVISION = (P5_PIN + "Use `git clone --revision={0} <url> w` and review
                      P5_PIN + "Use `git clone --revision {0} <url> w` and review w.\n",
                      P5_PIN + "Use `git clone --revision=main <url> w` and review w.\n")
 LINEAR_FACTOR, LINEAR_SLACK, LINEAR_TIMEOUT = 16, 1.0, 120
+# fresh evaluations per size whose median CPU time is judged. Wall clock measured the host, not the work:
+# with eight busy loops sharing the measuring CPU in a square wave, one 64 KiB run of "git -c " took
+# 4.185 s of wall clock against 0.191 s for 8 KiB (ratio 21.9, over the bound) while its CPU time was
+# 0.496 s against 0.190 s (ratio 2.6). CPU time alone also strayed: under the same load 2 of 50 single
+# runs were charged 1.9 s and 3.3 s against a usual 0.2 to 0.6 s, so one run is never the verdict, and
+# a median of five needs three stray runs at one size before it moves
+LINEAR_RUNS = 5
 # the measured slack over the parse deadline for one whole read() through the killed child: the child
 # start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
 # old-ceiling shapes (an 80-cpu host at one-minute load averages 35 to 43), so three seconds is wide
@@ -4129,12 +4139,16 @@ def _child_commit(repo, commit):
                            "maintenance.auto=false", "commit-tree", commit + "^{tree}", "-p", commit, "-m", "child"],
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
-# The child caps its address space at 1 GiB, then times evaluate() on 8 KiB and 64 KiB briefs (the
-# larger exactly at the shared reading's text ceiling), each a lead that forces the parsed-document path
-# (it holds "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix.
-# A refusal (a prescan or deadline cannot-evaluate) is still a bounded evaluation and is timed as one.
+# The child caps its address space at 1 GiB, then evaluates 8 KiB and 64 KiB briefs (the larger exactly
+# at the shared reading's text ceiling) in turn, LINEAR_RUNS times each, every brief built afresh: a lead
+# that forces the parsed-document path (it holds "nput", so the ASCII fast path never answers it), a
+# prefix, one unit repeated, and a suffix. A refusal (a prescan or deadline cannot-evaluate) is still a
+# bounded evaluation and is timed as one. Each run is timed in CPU seconds, user plus system, of this
+# process and of the children it reaped during the run (the parse child among them), so time the
+# measured work spends waiting for a busy host's CPUs is not counted. One line per run pair: the 8 KiB
+# then the 64 KiB CPU time.
 LINEAR_CHILD = (
-    "import resource, sys, time\n"
+    "import resource, sys\n"
     "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
     "soft = 1 << 30 if hard == resource.RLIM_INFINITY else min(1 << 30, hard)\n"
     "resource.setrlimit(resource.RLIMIT_AS, (soft, hard))\n"
@@ -4143,36 +4157,49 @@ LINEAR_CHILD = (
     "table = m.parse_table(m.TABLE_FIXTURE.encode('utf-8'))\n"
     "prefix, unit, suffix = sys.argv[2:5]\n"
     "lead = 'Input notes.\\n\\n'\n"
-    "for size in (1 << 13, 1 << 16):\n"
-    "    body = size - len(lead) - len(prefix) - len(suffix)\n"
-    "    data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
-    "    began = time.perf_counter()\n"
-    "    try:\n"
-    "        m.evaluate(data, 'gamma', table)\n"
-    "    except m.CannotEvaluate:\n"
-    "        pass\n"
-    "    print(time.perf_counter() - began)\n")
+    "def cpu():\n"
+    "    own = resource.getrusage(resource.RUSAGE_SELF)\n"
+    "    reaped = resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+    "    return own.ru_utime + own.ru_stime + reaped.ru_utime + reaped.ru_stime\n"
+    "for _ in range(int(sys.argv[5])):\n"
+    "    times = []\n"
+    "    for size in (1 << 13, 1 << 16):\n"
+    "        body = size - len(lead) - len(prefix) - len(suffix)\n"
+    "        data = (lead + prefix + (unit * (body // len(unit) + 1))[:body] + suffix).encode('utf-8')\n"
+    "        began = cpu()\n"
+    "        try:\n"
+    "            m.evaluate(data, 'gamma', table)\n"
+    "        except m.CannotEvaluate:\n"
+    "            pass\n"
+    "        times.append(cpu() - began)\n"
+    "    print(*times, flush=True)\n")
 
 
 def _linear(unit, prefix="", suffix=""):
-    """True when evaluate() on a 64 KiB brief (a parse-forcing lead, `prefix`, `unit` repeated, `suffix`)
-    takes at most LINEAR_FACTOR times as long as on the 8 KiB one plus LINEAR_SLACK seconds, both timed
-    in a child capped at 1 GiB (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went
-    wrong. The child must exit 0 and print exactly two finite, nonnegative times."""
+    """True when the median CPU time of LINEAR_RUNS fresh evaluate() runs on a 64 KiB brief (a
+    parse-forcing lead, `prefix`, `unit` repeated, `suffix`) is at most LINEAR_FACTOR times the median of
+    as many runs on the 8 KiB one plus LINEAR_SLACK seconds, all timed in one child capped at 1 GiB
+    (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went wrong. The child must exit 0
+    and print exactly LINEAR_RUNS lines of two finite, nonnegative times each."""
     try:
         done = subprocess.run([sys.executable, "-I", "-B", "-c", LINEAR_CHILD, str(Path(__file__).resolve().parent),
-                               prefix, unit, suffix], capture_output=True, text=True, timeout=LINEAR_TIMEOUT)
+                               prefix, unit, suffix, str(LINEAR_RUNS)], capture_output=True, text=True,
+                              timeout=LINEAR_TIMEOUT)
     except subprocess.TimeoutExpired:
         return "timed out after {} s".format(LINEAR_TIMEOUT)
     try:
-        small, large = (float(value) for value in done.stdout.split())
+        pairs = [tuple(float(value) for value in line.split()) for line in done.stdout.splitlines()]
     except ValueError:
-        small = large = float("nan")
-    if done.returncode != 0 or not all(0.0 <= value < float("inf") for value in (small, large)):
+        pairs = []
+    if (done.returncode != 0 or len(pairs) != LINEAR_RUNS or any(len(pair) != 2 for pair in pairs)
+            or not all(0.0 <= value < float("inf") for pair in pairs for value in pair)):
         return "child exit {}, output {!r}: {}".format(done.returncode, done.stdout.strip()[-80:],
                                                       done.stderr.strip()[-200:])
-    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or "64 KiB took {:.3f} s, 8 KiB {:.3f} s".format(
-        large, small)
+    small = statistics.median(pair[0] for pair in pairs)
+    large = statistics.median(pair[1] for pair in pairs)
+    return large <= LINEAR_FACTOR * small + LINEAR_SLACK or (
+        "64 KiB median {:.3f} CPU s, 8 KiB {:.3f} CPU s over {} runs each (64 KiB runs {})".format(
+            large, small, LINEAR_RUNS, ", ".join("{:.3f}".format(pair[1]) for pair in pairs)))
 
 
 # THE REGEX AUDIT. Each compiled pattern reachable from this module's namespace (a global, an item of a tuple, list,
@@ -4961,11 +4988,34 @@ def self_test(report_path=None):
         probed = sorted(name for name in regex_audit()[1] if name.startswith("_AUDIT_PROBE"))
     check("perf/regex-audit-reads-containers", probed, ["_AUDIT_PROBE[0]", "_AUDIT_PROBE_CLASS.X",
                                                         "_AUDIT_PROBE_MAP['k'][0]", "_AUDIT_PROBE_SET{0}"])
-    with _patched(LINEAR_CHILD="import sys\nprint(0.1)\nprint(0.2)\nsys.exit(9)\n"):
+    def judged(*pairs):
+        """_linear()'s verdict on a stand-in child that prints `pairs` (8 KiB, 64 KiB CPU times), one per
+        line, and exits 0."""
+        with _patched(LINEAR_CHILD="".join("print({!r})\n".format(" ".join(pair)) for pair in pairs)):
+            return _linear("a")
+
+    with _patched(LINEAR_CHILD="import sys\n" + "print('0.1 0.2')\n" * LINEAR_RUNS + "sys.exit(9)\n"):
         failed_child = _linear("a")
-    with _patched(LINEAR_CHILD="print('nan')\nprint('nan')\n"):
+    with _patched(LINEAR_CHILD="print('nan nan')\n" * LINEAR_RUNS):
         nan_child = _linear("a")
-    check("perf/failed-child-not-linear", (failed_child is True, nan_child is True), (False, False))
+    check("perf/failed-child-not-linear", (failed_child is True, nan_child is True,
+                                           judged(*[("0.1", "0.2")] * (LINEAR_RUNS - 1)) is True,
+                                           judged(*[("0.1", "0.2")] * (LINEAR_RUNS + 1)) is True,
+                                           judged(*[("0.1",)] * LINEAR_RUNS) is True),
+          (False,) * 5)
+    # the verdict is the median at each size: stray runs short of a majority at either size move nothing,
+    # while a majority of quadratic 64 KiB runs (64 times the 8 KiB time) is red
+    stray = LINEAR_RUNS // 2
+    check("perf/linear-median-not-one-run", (
+        judged(*[("0.25", "0.5")] * (LINEAR_RUNS - stray) + [("0.25", "40.0")] * stray),
+        judged(*[("0.25", "0.5")] * (LINEAR_RUNS - stray) + [("3.0", "0.5")] * stray),
+        judged(*[("0.25", "0.5")] * (LINEAR_RUNS - stray - 1) + [("0.25", "40.0")] * (stray + 1)) is True,
+        judged(*[("0.25", "16.0")] * LINEAR_RUNS) is True), (True, True, False, False))
+    # the bound's one end, 64 KiB at LINEAR_FACTOR * 8 KiB + LINEAR_SLACK (5.0 CPU s for 8 KiB at 0.25,
+    # exact in binary, and repr() reads back exactly): just inside, exactly at, and just outside it
+    edge = LINEAR_FACTOR * 0.25 + LINEAR_SLACK
+    check("perf/linear-bound-edges", [judged(*[("0.25", repr(large))] * LINEAR_RUNS) is True
+                                      for large in (edge - 0.001, edge, edge + 0.001)], [True, True, False])
     for check_id, unit, prefix, suffix in (
             ("perf/single-word-linear", "a", "", ""),
             ("perf/noun-run-linear", "a, ", "", ""),
@@ -6969,7 +7019,8 @@ def self_test(report_path=None):
           "the regex audit reads the module-level patterns and COMMAND_FORMS (and, without claiming completeness, "
           "container and class globals and the production source's re calls), flags no pattern, "
           "detects the previous revisions' and loses its canary with each guard patched out; 37 repeated shapes "
-          "each evaluate within the linear growth bound at 64 KiB, through the parsed-document reading "
+          "each evaluate within the linear growth bound at 64 KiB by the median CPU time of fresh runs at each "
+          "size, through the parsed-document reading "
           "with its size, whitespace-run and nesting bounds and its killed-at-the-deadline parse child, "
           "in a capped child that must exit 0; the parse child's process group is killed after a normal "
           "exit too, a non-zero or signalled child and a result of the wrong shape or depth are refused, "
