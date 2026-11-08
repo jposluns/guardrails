@@ -338,22 +338,25 @@ _ROUTE_EXTERNAL_IMPORTS = dict(
 # The fresh-init entries outside opf.py that choose a store's homes generation. opf.py's _init_main
 # is held to the one rule by its roster above (it admits _opf_store.init_writes_homes2, never
 # SUPPORTED_HOMES). _homes_rule_violations never reads a closed call-site list for coverage: it
-# DISCOVERS every call to run_init_operation in the production code of the sources it is given
-# (every module-level statement and every module-level function outside the self-test split of
-# _selftest_production_split, nested functions and lambdas included) and requires each call to pass
-# homes2 as exactly <alias>.init_writes_homes2() with no arguments and no * or ** splat, where
-# <alias> is the name that module binds with a module-level `import _opf_store [as alias]`. The
-# production unit holding such a call must name SUPPORTED_HOMES nowhere -- not as a name, not as an
-# attribute, and not as the string "SUPPORTED_HOMES" (which a getattr read would carry). No
-# production code in any scanned module may bind the name init_writes_homes2 anywhere (assignment
-# to a name or an attribute, an import alias, a nested def, a class, a loop or with or except
-# target), so a rebinding of the rule before a call is a finding; the one allowed binding is the
-# rule's own module-level `def init_writes_homes2`. A module whose production code calls
-# run_init_operation may not carry the exact string "init_writes_homes2" anywhere in production
-# code either (a setattr rebinding would carry it). The rows below are the minimum PRESENCE roster:
-# each named function must still exist exactly once at module level and call run_init_operation
-# exactly once, so a required entry renamed or dropped stays a finding even though discovery holds
-# whatever replaced it. Rows are (file in this directory, function).
+# DISCOVERS every production REFERENCE to run_init_operation in the sources it is given (every
+# module-level statement and every module-level function outside the self-test split of
+# _selftest_production_split, nested functions and lambdas included) and is fail-closed over FORM:
+# a reference that is not the callee of a direct call of the imported name (an alias, a getattr
+# string, a functools.partial, a __call__ spelling, a rebinding, a passed value) is a finding, and
+# each direct call must pass homes2 as exactly <alias>.init_writes_homes2() with no arguments and
+# no * or ** splat, where <alias> is a name the module binds with a module-level `import
+# _opf_store [as alias]` that the calling unit never rebinds or shadows (a parameter or local of
+# that name is a finding). The production unit holding such a call must name SUPPORTED_HOMES
+# nowhere -- not as a name, not as an attribute, and not as the string "SUPPORTED_HOMES" (which a
+# getattr read would carry). No production code in any scanned module may bind init_writes_homes2
+# or SUPPORTED_HOMES (assignment to a name or an attribute, a del, an import alias, a def, a
+# class, a parameter, a loop or with or except target), write any attribute of the store module,
+# reach its namespace through setattr, delattr, vars(<alias>) or <alias>.__dict__, or carry the
+# exact string "init_writes_homes2" (a dynamic rebinding would ride it); the one allowed binding
+# is the store module's own module-level definition. The rows below are the minimum PRESENCE
+# roster: each named function must still exist exactly once at module level and call
+# run_init_operation exactly once, so a required entry renamed or dropped stays a finding even
+# though discovery holds whatever replaced it. Rows are (file in this directory, function).
 _HOMES_RULE_SITES = (
     ("_opf_adopt_apply.py", "_init_store_run"),
     ("_opf_init_operation.py", "init_operation"),
@@ -361,11 +364,12 @@ _HOMES_RULE_SITES = (
 )
 
 
-def _homes_rule_call(node, alias):
-    """True only for the exact spelling <alias>.init_writes_homes2() with no arguments."""
+def _homes_rule_call(node, aliases):
+    """True only for the exact spelling <alias>.init_writes_homes2() with no arguments, where
+    <alias> is a name bound by a module-level `import _opf_store [as alias]`."""
     return (isinstance(node, ast.Call) and not node.args and not node.keywords
             and isinstance(node.func, ast.Attribute) and node.func.attr == "init_writes_homes2"
-            and isinstance(node.func.value, ast.Name) and node.func.value.id == alias)
+            and isinstance(node.func.value, ast.Name) and node.func.value.id in aliases)
 
 
 def _is_run_init_call(node):
@@ -376,30 +380,97 @@ def _is_run_init_call(node):
                      and node.func.attr == "run_init_operation")))
 
 
-def _selftest_production_split(tree):
-    """The names of `tree`'s module-level functions that are SELF-TEST functions, by RULE, never a
-    hand list: seed with every module-level function whose name contains "self_test" (the
-    convention the close sweep already keys on), then absorb, to a fixpoint, every module-level
-    function whose name is referenced ONLY from functions already in the set (a self-reference is
-    discounted). Module-level code outside any function is a production referrer, and a function
-    referenced from nowhere in its own module is production (an exported seam), so a new entry
-    cannot hide by being uncalled."""
+def _selftest_dispatch_guard(test):
+    """True when an `if` test carries a string constant naming a self-test dispatch (the house
+    `--self-test` and `--selftest-*-child` argv verbs): the guarded branch is entered by the
+    self-test harness alone, never by production control flow."""
+    for sub in ast.walk(test):
+        if (isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                and ("self-test" in sub.value or "selftest" in sub.value)):
+            return True
+    return False
+
+
+def _module_function_references(tree):
+    """Every reference to a module-level function of `tree`, as (referrer, target, dispatch)
+    rows: referrer is the enclosing module-level function's name (None for module-level code) and
+    dispatch is True when the reference sits inside an `if` branch whose test
+    _selftest_dispatch_guard recognizes. A direct self-reference is discounted."""
     names = {node.name for node in tree.body
              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
-    referrers = {name: set() for name in names}
+    rows = []
+
+    def scan(node, referrer, dispatch):
+        if isinstance(node, ast.If):
+            scan_each([node.test], referrer, dispatch)
+            scan_each(node.body, referrer, dispatch or _selftest_dispatch_guard(node.test))
+            scan_each(node.orelse, referrer, dispatch)
+            return
+        if isinstance(node, ast.Name) and node.id in names and node.id != referrer:
+            rows.append((referrer, node.id, dispatch))
+        scan_each(list(ast.iter_child_nodes(node)), referrer, dispatch)
+
+    def scan_each(children, referrer, dispatch):
+        for child in children:
+            scan(child, referrer, dispatch)
+
     for node in tree.body:
-        src = node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and sub.id in referrers and sub.id != src:
-                referrers[sub.id].add(src)
-    selftest = {name for name in names if "self_test" in name}
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            scan_each(list(ast.iter_child_nodes(node)), node.name, False)
+        else:
+            scan(node, None, False)
+    return names, rows
+
+
+def _selftest_production_split(tree, cross_refs=frozenset(), forced=frozenset()):
+    """The names of `tree`'s module-level functions that are SELF-TEST functions, by REACHABILITY
+    from the self-test entry points, never by a hand list and never by a bare name: a function
+    stays self-test only while every reference to it is test-side, and a function reachable from
+    production code is production whatever its name is.
+
+    - A CANDIDATE entry is a function whose name carries the house convention ("self_test" in
+      the name) or whose every in-module reference sits under a self-test dispatch guard (the
+      `--selftest-*-child` children).
+    - A reference is test-side when it is dispatch-guarded, made from a self-test function, or is
+      the dispatch of a candidate from `main` or from module-level code (how every suite starts).
+    - A function reached from production through any other reference is production, so a helper
+      with "self_test" in its name that production calls is held to the rules.
+    - A function referenced from nowhere in its own module is production (an exported seam), a
+      candidate included, unless another scanned module names it (`cross_refs`), as the
+      cross-module self-test seams are; a mutant therefore cannot mint an unreferenced
+      self-test-named referrer to launder a new seam into the split.
+    - Names in `forced` (the presence roster) are always production.
+    """
+    names, rows = _module_function_references(tree)
+    return _split_from_references(names, rows, cross_refs, forced)
+
+
+def _split_from_references(names, rows, cross_refs, forced):
+    """_selftest_production_split over precomputed (names, rows) reference data."""
+    referenced = {}
+    for referrer, target, dispatch in rows:
+        referenced.setdefault(target, []).append((referrer, dispatch))
+    candidates = {name for name in names if "self_test" in name}
+    candidates |= {name for name in names
+                   if referenced.get(name) and all(d for _, d in referenced[name])}
+    candidates -= set(forced)
+    selftest = {name for name in candidates if referenced.get(name) or name in cross_refs}
+    selftest |= {name for name in names if referenced.get(name)} - set(forced)
     changed = True
     while changed:
         changed = False
-        for name in sorted(names - selftest):
-            refs = referrers[name]
-            if refs and refs <= selftest:
-                selftest.add(name)
+        for name in sorted(selftest):
+            refs = referenced.get(name, [])
+            if not refs:
+                if name in candidates and name in cross_refs:
+                    continue
+                selftest.discard(name)
+                changed = True
+                continue
+            allowed = {None, "main"} if name in candidates else set()
+            if not all(d or (r in selftest and r != name) or r in allowed
+                       for r, d in refs):
+                selftest.discard(name)
                 changed = True
     return selftest
 
@@ -415,131 +486,358 @@ def _store_import_aliases(tree):
     return aliases
 
 
-def _binds_init_rule(node):
-    """True when `node` BINDS the name init_writes_homes2: an assignment (plain, augmented,
-    annotated or walrus) whose target is that Name or that Attribute of anything, an import alias,
-    a def or class of that name, a loop, with or except target, or a global/nonlocal declaration.
-    Reading or calling it is not a binding."""
-    targets = []
+def _init_callee_spellings(tree):
+    """The spellings a module may use for a DIRECT run_init_operation call: the plain names (its
+    own module-level `def run_init_operation`, or `from _opf_init_operation import
+    run_init_operation [as name]`) and the module aliases (`import _opf_init_operation [as
+    name]`) whose .run_init_operation attribute is the callee."""
+    direct = set()
+    modules = set()
+    for node in tree.body:
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "run_init_operation"):
+            direct.add(node.name)
+        elif isinstance(node, ast.Import):
+            for name in node.names:
+                if name.name == "_opf_init_operation":
+                    modules.add(name.asname or "_opf_init_operation")
+        elif isinstance(node, ast.ImportFrom) and node.module == "_opf_init_operation":
+            for name in node.names:
+                if name.name == "run_init_operation":
+                    direct.add(name.asname or "run_init_operation")
+    return direct, modules
+
+
+def _bind_targets(node):
+    """The target expressions `node` writes, for every binding statement form."""
     if isinstance(node, ast.Assign):
-        targets = list(node.targets)
-    elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr, ast.For, ast.AsyncFor)):
-        targets = [node.target]
-    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-        targets = [node.optional_vars]
-    for target in targets:
-        for sub in ast.walk(target):
-            if ((isinstance(sub, ast.Name) and sub.id == "init_writes_homes2")
-                    or (isinstance(sub, ast.Attribute) and sub.attr == "init_writes_homes2")):
+        return list(node.targets)
+    if isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr, ast.For, ast.AsyncFor)):
+        return [node.target]
+    if isinstance(node, ast.Delete):
+        return list(node.targets)
+    if isinstance(node, ast.withitem) and node.optional_vars is not None:
+        return [node.optional_vars]
+    return []
+
+
+def _write_positions(target):
+    """The nodes a target expression actually WRITES: names and attributes in binding position,
+    tuple, list and starred elements, and a subscript's container chain. A subscript's slice is a
+    READ and is never a write position (`d[store.KEY] = v` writes d, not the store)."""
+    out = []
+    stack = [target]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Tuple, ast.List)):
+            stack.extend(node.elts)
+        elif isinstance(node, ast.Starred):
+            stack.append(node.value)
+        elif isinstance(node, ast.Subscript):
+            stack.append(node.value)
+        else:
+            out.append(node)
+    return out
+
+
+def _binds_name(node, name):
+    """True when `node` BINDS `name`: an assignment (plain, augmented, annotated or walrus) or a
+    del whose write position is that Name or that Attribute of anything, an import alias, a def,
+    class or parameter of that name, a loop, with or except target, or a global/nonlocal
+    declaration. Reading or calling it is not a binding."""
+    for target in _bind_targets(node):
+        for sub in _write_positions(target):
+            if ((isinstance(sub, ast.Name) and sub.id == name)
+                    or (isinstance(sub, ast.Attribute) and sub.attr == name)):
                 return True
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        return node.name == "init_writes_homes2"
+        if node.name == name:
+            return True
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        args = node.args
+        for arg in (args.posonlyargs + args.args + args.kwonlyargs
+                    + ([args.vararg] if args.vararg else [])
+                    + ([args.kwarg] if args.kwarg else [])):
+            if arg.arg == name:
+                return True
     if isinstance(node, (ast.Import, ast.ImportFrom)):
-        return any((name.asname or name.name).split(".")[0] == "init_writes_homes2"
-                   for name in node.names)
+        return any((alias.asname or alias.name).split(".")[0] == name
+                   for alias in node.names)
     if isinstance(node, (ast.Global, ast.Nonlocal)):
-        return "init_writes_homes2" in node.names
+        return name in node.names
     if isinstance(node, ast.ExceptHandler):
-        return node.name == "init_writes_homes2"
+        return node.name == name
     return False
 
 
-def _homes_rule_unit_findings(fname, unit_name, nodes, aliases, calls_here):
-    """Findings for one production unit (a module-level function's body, or the module-level code):
-    every run_init_operation call in it passes the one rule, and a unit holding such a call names
-    SUPPORTED_HOMES nowhere, the exact string included (the getattr read)."""
+def _protected_bind_allowed(fname, unit_name, node, name):
+    """The one allowed binding per protected name: the store module's own module-level
+    `SUPPORTED_HOMES = ...` assignment and its own module-level `def init_writes_homes2`."""
+    if fname != "_opf_store.py":
+        return False
+    if name == "SUPPORTED_HOMES":
+        return unit_name is None and isinstance(node, (ast.Assign, ast.AnnAssign))
+    return (unit_name == name and node.name == name
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else False)
+
+
+def _is_store_namespace_handle(node, store_aliases):
+    """True for an expression that IS the live namespace of a store alias: vars(<alias>) or
+    <alias>.__dict__."""
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "vars"
+            and any(isinstance(arg, ast.Name) and arg.id in store_aliases
+                    for arg in node.args)):
+        return True
+    return (isinstance(node, ast.Attribute) and node.attr == "__dict__"
+            and isinstance(node.value, ast.Name) and node.value.id in store_aliases)
+
+
+def _store_write_findings(fname, label, node, store_aliases):
+    """Findings for one node that writes THROUGH the store module object: an assignment or del
+    whose write position is an attribute of a store alias or an item of vars(<alias>) or
+    <alias>.__dict__, a setattr or delattr on a store alias or with a rule-name string, or a raw
+    namespace handle bound to a name (which a later write would ride). A read-only use such as
+    dict(vars(<alias>)) or a handle passed into a callee is not a finding here; the callee's own
+    writes are scanned where its source is handed in."""
     found = []
+    for target in _bind_targets(node):
+        for sub in _write_positions(target):
+            if (isinstance(sub, ast.Attribute) and sub.attr != "__dict__"
+                    and isinstance(sub.value, ast.Name) and sub.value.id in store_aliases):
+                found.append("{}: {} writes an attribute of the store module (line {})".format(
+                    fname, label, node.lineno))
+            elif _is_store_namespace_handle(sub, store_aliases):
+                via = "vars()" if isinstance(sub, ast.Call) else "__dict__"
+                found.append("{}: {} writes into the store module's namespace through {} "
+                             "(line {})".format(fname, label, via, node.lineno))
+    if isinstance(node, ast.Assign) and _is_store_namespace_handle(node.value, store_aliases):
+        found.append("{}: {} binds a raw handle on the store module's namespace (line {})"
+                     .format(fname, label, node.lineno))
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        if node.func.id in ("setattr", "delattr"):
+            hit = (node.args and isinstance(node.args[0], ast.Name)
+                   and node.args[0].id in store_aliases)
+            hit = hit or (len(node.args) > 1 and isinstance(node.args[1], ast.Constant)
+                          and node.args[1].value in ("init_writes_homes2", "SUPPORTED_HOMES"))
+            if hit:
+                found.append("{}: {} rebinds a store module attribute through {} (line {})"
+                             .format(fname, label, node.func.id, node.lineno))
+    return found
+
+
+def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_names, init_aliases):
+    """Findings for one production unit (a module-level function's body, or the module-level
+    code), fail-closed over FORM: (a) every reference to run_init_operation (a Name, an attribute
+    or the exact string) that is not the callee of a direct call is a finding, and every direct
+    call must pass homes2=<alias>.init_writes_homes2() with no splat and exactly one homes2; (b)
+    every write to the rule's names or through the store module object is a finding wherever it
+    appears, and so is the exact string "init_writes_homes2"; (c) a unit holding such a call may
+    not rebind the store alias or the callee's spelling and names SUPPORTED_HOMES nowhere."""
+    found = []
+    label = unit_name or "module-level code"
     walked = [sub for node in nodes for sub in ast.walk(node)]
+    calls = []
+    callee_nodes = set()
     for node in walked:
-        if _binds_init_rule(node) and not (
-                unit_name == "init_writes_homes2" and node in nodes
-                and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
-            found.append("{}: {} binds init_writes_homes2 (line {}); only the rule's own "
-                         "module-level definition binds that name".format(
-                             fname, unit_name or "module-level code", node.lineno))
-    if calls_here:
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in direct_names:
+                calls.append(node)
+                callee_nodes.add(id(func))
+            elif (isinstance(func, ast.Attribute) and func.attr == "run_init_operation"
+                  and isinstance(func.value, ast.Name) and func.value.id in init_aliases):
+                calls.append(node)
+                callee_nodes.add(id(func))
+    for node in walked:
+        if id(node) in callee_nodes:
+            continue
+        if ((isinstance(node, ast.Name) and node.id == "run_init_operation")
+                or (isinstance(node, ast.Attribute) and node.attr == "run_init_operation")
+                or (isinstance(node, ast.Constant) and node.value == "run_init_operation")):
+            found.append(
+                "{}: {} references run_init_operation other than as a direct call of the "
+                "imported name (line {}); an alias, a getattr string, a partial, a __call__, a "
+                "rebinding or a passed value cannot carry the homes rule".format(
+                    fname, label, node.lineno))
+    for node in walked:
+        for name in ("init_writes_homes2", "SUPPORTED_HOMES"):
+            if _binds_name(node, name) and not _protected_bind_allowed(
+                    fname, unit_name, node, name):
+                found.append("{}: {} binds {} (line {}); only the store module's own "
+                             "module-level definition binds the rule's names".format(
+                                 fname, label, name, node.lineno))
+        found.extend(_store_write_findings(fname, label, node, store_aliases))
+        if isinstance(node, ast.Constant) and node.value == "init_writes_homes2":
+            found.append("{}: {} carries the string \"init_writes_homes2\" (line {}); a "
+                         "dynamic rebinding could ride it".format(fname, label, node.lineno))
+    rule_calls = {id(node): node for node in walked if _is_run_init_call(node)}
+    rule_calls.update({id(node): node for node in calls})
+    if rule_calls:
+        shadow = set(store_aliases) | set(init_aliases) | set(direct_names)
         for node in walked:
+            if any(_binds_name(node, name) for name in shadow) and not (
+                    unit_name in direct_names and node in nodes
+                    and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                found.append("{}: {} binds the store module alias or the callee's name "
+                             "(line {}); the rule must be read through the module-level "
+                             "imports".format(fname, label, node.lineno))
             if ((isinstance(node, ast.Name) and node.id == "SUPPORTED_HOMES")
                     or (isinstance(node, ast.Attribute) and node.attr == "SUPPORTED_HOMES")
                     or (isinstance(node, ast.Constant) and node.value == "SUPPORTED_HOMES")):
                 found.append("{}: {} names SUPPORTED_HOMES (line {})".format(
-                    fname, unit_name or "module-level code", node.lineno))
-    for call in calls_here:
+                    fname, label, node.lineno))
+    for call in rule_calls.values():
         rule = [kw for kw in call.keywords if kw.arg == "homes2"]
         if (any(isinstance(arg, ast.Starred) for arg in call.args)
                 or any(kw.arg is None for kw in call.keywords)):
             found.append("{}: {} splats its run_init_operation arguments (line {})".format(
-                fname, unit_name or "module-level code", call.lineno))
-        elif len(rule) != 1 or not aliases or not any(
-                _homes_rule_call(rule[0].value, alias) for alias in aliases):
+                fname, label, call.lineno))
+        elif len(rule) != 1 or not _homes_rule_call(rule[0].value, store_aliases):
             found.append("{}: {} does not pass homes2=<_opf_store alias>.init_writes_homes2() "
-                         "to run_init_operation (line {})".format(
-                             fname, unit_name or "module-level code", call.lineno))
+                         "to run_init_operation (line {})".format(fname, label, call.lineno))
     return found
+
+
+_HOMES_SCAN_CACHE = {}
+
+
+def _homes_module_summary(text):
+    """The per-source data _homes_rule_violations needs, memoized on the source TEXT, so a
+    mutated directory scan (one changed file among many) never re-walks the unchanged trees: the
+    parse outcome, the cross-module mention set, the function reference rows for the self-test
+    split, the roster def and call counts, and a per-split findings memo. No AST is retained; a
+    findings miss re-parses its one source."""
+    key = (len(text), hash(text))
+    cached = _HOMES_SCAN_CACHE.get(key)
+    if cached is not None and cached["text"] == text:
+        return cached
+    summary = {"text": text, "error": None, "findings": {}}
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        summary["error"] = type(exc).__name__
+        _HOMES_SCAN_CACHE[key] = summary
+        return summary
+    mentions = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            mentions.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            mentions.add(node.attr)
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and len(node.value) < 200):
+            mentions.add(node.value)
+    names, rows = _module_function_references(tree)
+    defcounts = {}
+    callcounts = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defcounts[node.name] = defcounts.get(node.name, 0) + 1
+            callcounts[node.name] = sum(
+                1 for sub in ast.walk(node) if _is_run_init_call(sub))
+    referenced_names = {target for _, target, _ in rows}
+    summary.update(
+        mentions=mentions, names=names, rows=rows, defcounts=defcounts,
+        callcounts=callcounts,
+        unref_selftest={name for name in names
+                        if "self_test" in name and name not in referenced_names})
+    _HOMES_SCAN_CACHE[key] = summary
+    return summary
 
 
 def _homes_rule_violations(sources):
     """Findings over `sources`, a dict of file name to source text covering the production
     opf/tools modules; an empty list means every production run_init_operation call reads the one
-    homes rule (see the roster comment: discovery over every production unit, the self-test split
-    excluded by rule, plus the minimum presence roster). A missing or unparsable source, or a
-    roster function absent or defined more than once at module level or not calling
-    run_init_operation exactly once, is itself a finding."""
+    homes rule and nothing in production writes the rule out from under it (see the roster
+    comment: fail-closed discovery over every production unit, the self-test split excluded by
+    reachability, plus the minimum presence roster). A missing or unparsable source, or a roster
+    function absent or defined more than once at module level or not calling run_init_operation
+    exactly once, is itself a finding.
+
+    What this check CAN see: every spelling in the handed sources' ASTs, over every production
+    unit of every module (module-level code and module-level functions, nested functions and
+    lambdas included): indirect references to run_init_operation (an alias, a getattr string, a
+    functools.partial, a __call__ spelling, a rebinding, a passed value), a non-rule homes2, a
+    splat, bindings of init_writes_homes2 or SUPPORTED_HOMES anywhere, writes to any store-module
+    attribute (assignment, del, setattr, delattr, vars(<alias>), <alias>.__dict__), shadowing of
+    the store alias in a calling unit, and the exact rule-name strings.
+
+    What it CANNOT see: a call or write assembled at runtime (exec or eval on built text, a name
+    spelled in pieces such as "run_init_" + "operation", a sys.modules or importlib lookup, or a
+    mock/patch helper writing on its behalf); code never handed to it (modules outside
+    opf/tools/*.py, extension modules, or a subprocess running python elsewhere); a seam
+    referenced only from genuine self-test code, which the reachability split classifies
+    test-side; and semantics (it proves the one-rule FORM, not what a compliant callee does with
+    the value). The maintenance-pin scan refuses exec and eval in these trees, and opf.py's own
+    init path is held by the route roster above, so the uncovered forms sit behind adjacent gates
+    where they are covered at all.
+    """
     found = []
-    trees = {}
+    summaries = {}
     for fname in sorted(sources):
         text = sources[fname]
         if type(text) is not str:
             found.append("{}: source not supplied".format(fname))
             continue
-        try:
-            trees[fname] = ast.parse(text)
-        except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
-            found.append("{}: cannot parse ({})".format(fname, type(exc).__name__))
+        summary = _homes_module_summary(text)
+        if summary["error"] is not None:
+            found.append("{}: cannot parse ({})".format(fname, summary["error"]))
+            continue
+        summaries[fname] = summary
     for fname, func in _HOMES_RULE_SITES:
         if fname not in sources:
             found.append("{}: source not supplied".format(fname))
             continue
-        tree = trees.get(fname)
-        if tree is None:
+        summary = summaries.get(fname)
+        if summary is None:
             continue
-        defs = [node for node in tree.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func]
-        if len(defs) != 1:
-            found.append("{}: {} is defined {} times at module level".format(fname, func, len(defs)))
+        count = summary["defcounts"].get(func, 0)
+        if count != 1:
+            found.append("{}: {} is defined {} times at module level".format(fname, func, count))
             continue
-        calls = [node for node in ast.walk(defs[0]) if _is_run_init_call(node)]
-        if len(calls) != 1:
+        calls = summary["callcounts"].get(func, 0)
+        if calls != 1:
             found.append("{}: {} calls run_init_operation {} times, not once".format(
-                fname, func, len(calls)))
-    for fname in sorted(trees):
-        tree = trees[fname]
-        selftest = _selftest_production_split(tree)
+                fname, func, calls))
+    for fname in sorted(summaries):
+        summary = summaries[fname]
         # A roster entry is production BY CONTRACT, whatever its in-module referrers: a public seam
         # called only from other modules (and exercised by this module's own self-test) must never
         # be absorbed into the self-test split.
-        selftest -= set(func for site_fname, func in _HOMES_RULE_SITES if site_fname == fname)
-        aliases = _store_import_aliases(tree)
-        units = [(None, [node for node in tree.body
-                         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))])]
-        units += [(node.name, [node]) for node in tree.body
-                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                  and node.name not in selftest]
-        module_calls = False
-        for unit_name, nodes in units:
-            calls_here = [sub for node in nodes for sub in ast.walk(node)
-                          if _is_run_init_call(sub)]
-            module_calls = module_calls or bool(calls_here)
-            found.extend(_homes_rule_unit_findings(fname, unit_name, nodes, aliases, calls_here))
-        if module_calls:
+        forced = frozenset(func for site_fname, func in _HOMES_RULE_SITES
+                           if site_fname == fname)
+        cross = set()
+        for other in summaries:
+            if other != fname:
+                cross |= summaries[other]["mentions"]
+        # The split consults the cross-module mentions only for this module's unreferenced
+        # self-test-named candidates, so the findings memo keys on exactly that slice and a
+        # change in ANOTHER file re-evaluates this one only when it could change the split.
+        cross_key = frozenset(name for name in summary["unref_selftest"] if name in cross)
+        cache_key = (fname, cross_key, forced)
+        cached = summary["findings"].get(cache_key)
+        if cached is None:
+            try:
+                tree = ast.parse(summary["text"])
+            except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+                found.append("{}: cannot parse ({})".format(fname, type(exc).__name__))
+                continue
+            selftest = _split_from_references(summary["names"], summary["rows"],
+                                              cross_key, forced)
+            store_aliases = set(_store_import_aliases(tree))
+            direct_names, init_aliases = _init_callee_spellings(tree)
+            units = [(None, [node for node in tree.body
+                             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))])]
+            units += [(node.name, [node]) for node in tree.body
+                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and node.name not in selftest]
+            cached = []
             for unit_name, nodes in units:
-                for node in nodes:
-                    for sub in ast.walk(node):
-                        if isinstance(sub, ast.Constant) and sub.value == "init_writes_homes2":
-                            found.append(
-                                "{}: {} carries the string \"init_writes_homes2\" (line {}); a "
-                                "production rebinding could ride it".format(
-                                    fname, unit_name or "module-level code", sub.lineno))
+                cached.extend(_homes_rule_unit_findings(
+                    fname, unit_name, nodes, store_aliases, direct_names, init_aliases))
+            summary["findings"][cache_key] = cached
+        found.extend(cached)
     return found
 
 
@@ -4265,13 +4563,15 @@ def _suite_isolated(invoke):
                     encoding="utf-8")
                 check("route gate: the real source is clean",
                       _init_route_violations(gate_source) == [])
-                # The homes rule outside opf.py, held by DISCOVERY over every production module in
-                # this directory (never a closed site list): the real adoption-coupled init, the
-                # substrate's public seam and its kill-point child each pass homes2 from the one
-                # rule, and a mutant that re-derives the generation, passes a constant, omits the
-                # argument, splats it, drops a required site, adds a NEW production caller without
-                # the rule or with a constant, rebinds init_writes_homes2 before the call, or reads
-                # SUPPORTED_HOMES through getattr is a finding.
+                # The homes rule outside opf.py, held by DISCOVERY over every production module
+                # in this directory (never a closed site list) and fail-closed over FORM: any
+                # production reference to run_init_operation that is not a direct call of the
+                # imported name passing homes2 from the one rule is a finding, any production
+                # write through the store module object is a finding wherever it sits, the rule
+                # is read only through the never-shadowed module-level _opf_store import, and
+                # self-test code is split off by reachability from the self-test entry points,
+                # never by a bare name. One seeded mutant per escape form below; each row asserts
+                # the SPECIFIC finding its form must raise, never only a non-empty list.
                 rule_dir = Path(__file__).resolve().parent
                 rule_sources = dict(
                     (path.name, path.read_text(encoding="utf-8"))
@@ -4285,54 +4585,133 @@ def _suite_isolated(invoke):
                              "                              homes2=_opf_store.init_writes_homes2())")
                 rule_child = "operation_id=opid, homes2=_opf_store.init_writes_homes2())"
                 rule_coupled = "            result = init_op.run_init_operation("
+                rule_seam_def = ("def init_operation(product_root, *, ancestral=None, "
+                                 "recover=False, admitted=None,")
                 check("homes rule sites: the mutation anchors are present once",
                       rule_sources["_opf_adopt_apply.py"].count(rule_adopt) == 1
                       and rule_sources["_opf_adopt_apply.py"].count(rule_coupled) == 1
                       and rule_sources["_opf_init_operation.py"].count(rule_seam) == 1
                       and rule_sources["_opf_init_operation.py"].count(rule_child) == 1
+                      and rule_sources["_opf_init_operation.py"].count(rule_seam_def) == 1
                       and rule_sources["_opf_init_operation.py"].count(
                           "\ndef init_operation(") == 1)
                 rule_mutants = [
                     ("the adoption-coupled init re-deriving SUPPORTED_HOMES >= 2",
-                     "_opf_adopt_apply.py", rule_adopt, "homes2=store.SUPPORTED_HOMES >= 2)"),
+                     "_opf_adopt_apply.py", rule_adopt, "homes2=store.SUPPORTED_HOMES >= 2)",
+                     "names SUPPORTED_HOMES"),
                     ("the adoption-coupled init splatting its arguments",
                      "_opf_adopt_apply.py", rule_adopt,
-                     "homes2=store.init_writes_homes2(), **{})"),
+                     "homes2=store.init_writes_homes2(), **{})",
+                     "splats its run_init_operation arguments"),
                     ("the public seam omitting homes2",
                      "_opf_init_operation.py", rule_seam,
-                     "                              admitted_dirs=admitted_dirs)"),
+                     "                              admitted_dirs=admitted_dirs)",
+                     "does not pass homes2"),
                     ("the public seam re-deriving SUPPORTED_HOMES >= 2",
                      "_opf_init_operation.py", rule_seam,
                      rule_seam.replace("_opf_store.init_writes_homes2()",
-                                       "_opf_store.SUPPORTED_HOMES >= 2")),
+                                       "_opf_store.SUPPORTED_HOMES >= 2"),
+                     "does not pass homes2"),
                     ("the kill-point child passing a constant",
-                     "_opf_init_operation.py", rule_child, "operation_id=opid, homes2=False)"),
+                     "_opf_init_operation.py", rule_child, "operation_id=opid, homes2=False)",
+                     "does not pass homes2"),
                     ("the public seam renamed away",
                      "_opf_init_operation.py", "\ndef init_operation(",
-                     "\ndef init_operation_v1("),
+                     "\ndef init_operation_v1(", "is defined 0 times"),
                     ("a new production function calling run_init_operation without the rule",
                      "_opf_init_operation.py", "\ndef init_operation(",
                      "\ndef _init_rehearse(root):\n    return run_init_operation(root)\n\n\n"
-                     "def init_operation("),
+                     "def init_operation(", "does not pass homes2"),
                     ("a new seam passing homes2=False",
                      "_opf_init_operation.py", "\ndef init_operation(",
                      "\ndef _init_quick(root):\n    return run_init_operation(root, homes2=False)"
-                     "\n\n\ndef init_operation("),
+                     "\n\n\ndef init_operation(", "does not pass homes2"),
                     ("a rebinding of init_writes_homes2 before the call",
                      "_opf_adopt_apply.py", rule_coupled,
                      "            store.init_writes_homes2 = lambda: False\n"
-                     "            result = init_op.run_init_operation("),
+                     "            result = init_op.run_init_operation(",
+                     "binds init_writes_homes2"),
                     ("a getattr read of SUPPORTED_HOMES at the call site",
                      "_opf_adopt_apply.py", rule_coupled,
                      "            homes_now = getattr(store, \"SUPPORTED_HOMES\")\n"
-                     "            result = init_op.run_init_operation("),
+                     "            result = init_op.run_init_operation(",
+                     "names SUPPORTED_HOMES"),
+                    ("a local alias of run_init_operation",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _init_alias(root):\n    op = run_init_operation\n    return op(root)"
+                     "\n\n\ndef init_operation(",
+                     "references run_init_operation"),
+                    ("a getattr string naming the callee",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _init_dyn(mod, root):\n"
+                     "    return getattr(mod, \"run_init_operation\")(root)\n\n\n"
+                     "def init_operation(",
+                     "references run_init_operation"),
+                    ("a functools.partial of the callee",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _init_partial(root):\n    import functools\n"
+                     "    return functools.partial(run_init_operation, root)\n\n\n"
+                     "def init_operation(",
+                     "references run_init_operation"),
+                    ("a __call__ spelling of the callee",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _init_dunder(root):\n    return run_init_operation.__call__(root)"
+                     "\n\n\ndef init_operation(",
+                     "references run_init_operation"),
+                    ("a self_test-named helper that production calls",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _homes_probe_self_test(root):\n    return run_init_operation(root)"
+                     "\n\n\ndef _init_probe(root):\n    return _homes_probe_self_test(root)"
+                     "\n\n\ndef init_operation(",
+                     "does not pass homes2"),
+                    ("a new seam referenced only by a minted self-test function",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _init_seam(root):\n    return run_init_operation(root, homes2=False)"
+                     "\n\n\ndef _mint_self_test():\n    return _init_seam\n\n\n"
+                     "def init_operation(",
+                     "does not pass homes2"),
+                    ("a local rebinding of the store alias before the call",
+                     "_opf_adopt_apply.py", rule_coupled,
+                     "            store = None\n"
+                     "            result = init_op.run_init_operation(",
+                     "binds the store module alias"),
+                    ("a parameter shadowing the store alias at the seam",
+                     "_opf_init_operation.py", rule_seam_def,
+                     "def init_operation(product_root, _opf_store=None, *, ancestral=None, "
+                     "recover=False, admitted=None,",
+                     "binds the store module alias"),
+                    ("a setattr rebinding of the rule in a module that never calls the seam",
+                     "_zz_homes_mutant.py", None,
+                     "import _opf_store\n\n\ndef _tune():\n"
+                     "    setattr(_opf_store, \"init_writes_homes2\", lambda: False)\n",
+                     "through setattr"),
+                    ("a vars() rebinding of the rule in a module that never calls the seam",
+                     "_zz_homes_mutant.py", None,
+                     "import _opf_store\n\n\ndef _tune():\n"
+                     "    vars(_opf_store)[\"init_writes_homes2\"] = lambda: False\n",
+                     "through vars()"),
+                    ("a SUPPORTED_HOMES write in a helper away from the call",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _init_tune():\n    _opf_store.SUPPORTED_HOMES = 2\n\n\n"
+                     "def init_operation(",
+                     "binds SUPPORTED_HOMES"),
+                    ("a production rebinding of run_init_operation itself",
+                     "_opf_adopt_apply.py", rule_coupled,
+                     "            init_op.run_init_operation = None\n"
+                     "            result = init_op.run_init_operation(",
+                     "references run_init_operation"),
                 ]
-                for mutant_label, fname, old, new in rule_mutants:
+                for mutant_label, fname, old, new, expect in rule_mutants:
                     mutated_sources = dict(rule_sources)
-                    mutated_sources[fname] = rule_sources[fname].replace(old, new)
+                    if old is None:
+                        mutated = fname not in rule_sources
+                        mutated_sources[fname] = new
+                    else:
+                        mutated_sources[fname] = rule_sources[fname].replace(old, new)
+                        mutated = mutated_sources[fname] != rule_sources[fname]
+                    mutant_rows = _homes_rule_violations(mutated_sources)
                     check("homes rule sites flag " + mutant_label,
-                          mutated_sources[fname] != rule_sources[fname]
-                          and _homes_rule_violations(mutated_sources) != [])
+                          mutated and any(expect in row for row in mutant_rows))
                 gate_anchor = '    stage = "preflight"'
                 check("route gate: the mutation anchor is present once",
                       gate_source.count(gate_anchor) == 1)
