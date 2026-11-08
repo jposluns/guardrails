@@ -1900,6 +1900,14 @@ def _rdp_ops_growth(ops, lengths):
     return faults
 
 
+def _rdp_unresolved(least, sizes):
+    """The zero times among the screen's and the reference's least times at sizes, named in one string
+    ("screen time zero at 1048576 bytes, ..."), or "" when every one is above zero. A zero time is below
+    the clock's resolution: no measurement, so a term holding one cannot be evaluated."""
+    return ", ".join("{} time zero at {} bytes".format(kind, size) for size in sizes
+                     for kind in ("screen", "reference") if Fraction(least[(kind, size)]) == 0)
+
+
 def _rdp_timing_group(least, lengths, bound):
     """The faults of one group of rounds, an empty list when it passes. least maps (kind, size) to the least
     CPU seconds over the group's rounds, kind "screen" or "reference"; lengths maps each size to its brief's
@@ -1922,14 +1930,19 @@ def _rdp_timing_group(least, lengths, bound):
     linear-both-legs-loaded-every-group in _rdp_timing_decision_cases). Growth the operation counts can
     see is judged on them first (_rdp_ops_growth), which load cannot move; this growth bound exists for
     super-linear work the counts cannot see, extra passes of a C primitive looped from Python inside one
-    stage. A time of zero, below the clock's resolution, gives these outcomes (decision cases zero-*): a
-    zero reference fails its size's ratio term (nothing is under a bound times zero) and the growth term
-    it ends at the larger size, but passes the growth term it starts at the smaller size; a zero screen
-    time fails the growth term it starts at the smaller size, and at the larger size passes both its
-    growth term and its ratio term, reading as no growth."""
+    stage. A time of zero, below the clock's resolution, is not a measurement, so it can neither anchor
+    nor judge a bound: a zero screen or reference time at any size makes every term it takes part in
+    (its size's ratio term and each growth term that starts or ends at its size) a cannot-evaluate fault
+    instead, "cannot evaluate" and the term, naming each zero time in it, and that term is not compared,
+    so it never passes (decision cases zero-*, and rdp/label-screen-linear-time-zero-flip, where reading
+    every time as a measurement again turns those cases red). The other terms are judged as above."""
     sizes = sorted(lengths)
     faults = []
     for small, large in zip(sizes, sizes[1:]):
+        unresolved = _rdp_unresolved(least, (small, large))
+        if unresolved:
+            faults.append("cannot evaluate growth from {} to {} bytes: {}".format(small, large, unresolved))
+            continue
         s1, r1 = Fraction(least[("screen", small)]), Fraction(least[("reference", small)])
         s2, r2 = Fraction(least[("screen", large)]), Fraction(least[("reference", large)])
         if not s2 * s2 * r1 * r1 * lengths[small] < s1 * s1 * r2 * r2 * lengths[large]:
@@ -1937,6 +1950,10 @@ def _rdp_timing_group(least, lengths, bound):
                 "screen over reference grew from {:.4f}s/{:.4f}s at {} bytes to {:.4f}s/{:.4f}s at"
                 " {} bytes".format(float(s1), float(r1), small, float(s2), float(r2), large))
     for size in sizes:
+        unresolved = _rdp_unresolved(least, (size,))
+        if unresolved:
+            faults.append("cannot evaluate ratio at {} bytes: {}".format(size, unresolved))
+            continue
         screen, reference = least[("screen", size)], least[("reference", size)]
         if not Fraction(screen) < bound * Fraction(reference):
             faults.append("screen {:.4f}s against reference {:.4f}s at {} bytes, not under {} times".format(
@@ -2066,8 +2083,10 @@ def _rdp_timing_decision_cases():
     """The linear-time decision over simulated counts and times (rdp/label-screen-linear-time-decision),
     no screen run: each bound fails exactly at its value and passes just inside it, the growth bound on
     integer operation counts (_rdp_ops_growth), and the normalized growth and ratio bounds on times
-    (_rdp_timing_group); a time of zero at either end of a growth step gives the outcomes
-    _rdp_timing_group states; load that lifts both legs of one size cancels out of the timing bounds,
+    (_rdp_timing_group); a screen or reference time of zero at either end of a growth step gives a
+    named cannot-evaluate fault for each term it takes part in, never a pass, while the least positive
+    time is judged as a measurement, and a flip that judges zero as a measurement again turns the zero
+    cases red (rdp/label-screen-linear-time-zero-flip); load that lifts both legs of one size cancels out of the timing bounds,
     also when it lifts every group of rounds, where a raw growth bound would fail; a quadratic screen's
     times fail, also when a burst of load lifts its small sizes' times through a whole
     group of rounds, and also when the quadratic stays under the ratio bound and only the normalized
@@ -2078,11 +2097,14 @@ def _rdp_timing_decision_cases():
     sizes = {262144: 262144, 524288: 524288, 1048576: 1048576}
     bound = Fraction("13.5") * _RDP_TIMING_MARGIN
 
-    def _group(screen, reference=(1.0, 1.0, 1.0), lengths=sizes):
+    def _faults(screen, reference=(1.0, 1.0, 1.0), lengths=sizes):
         least = {}
         for size, took, ref in zip(sorted(lengths), screen, reference):
             least[("screen", size)], least[("reference", size)] = took, ref
-        return len(_rdp_timing_group(least, lengths, bound))
+        return _rdp_timing_group(least, lengths, bound)
+
+    def _group(screen, reference=(1.0, 1.0, 1.0), lengths=sizes):
+        return len(_faults(screen, reference, lengths))
     quarter = {262144: 262144, 1048576: 1048576}
     at_ratio = float(bound)
     # Over one quadrupling of size the ops bound is a growth factor of exactly 8 (the length factor to the
@@ -2094,11 +2116,28 @@ def _rdp_timing_decision_cases():
     # 1.0 to 4.0, a screen going from 1.0 to 8.0 sits exactly at it and fails, 7.999999 just inside
     # passes, 8.000001 just outside fails; both legs of one size lifted together (each grows 6 times from
     # 512 KiB to 1 MiB) cancel and pass; and a middle multiple that grew too fast from the smallest size
-    # decides alone. A time of zero over one quadrupling: a zero screen time at the larger size passes
-    # both terms (no growth, and zero is under any ratio bound), a zero reference at the smaller size
-    # fails only that size's ratio term (its growth term reads zero on the left and passes), a zero
-    # screen time at the smaller size fails only the growth term, and a zero reference at the larger
-    # size fails both its growth term and its ratio term.
+    # decides alone. A time of zero over one quadrupling, screen or reference, at the smaller size or the
+    # larger: the growth term and that size's ratio term are each a named cannot-evaluate fault, and the
+    # other size's ratio term, with no zero in it, is judged and passes. The least positive float time
+    # at the larger size is a measurement and is judged: it passes both terms.
+    zeros = [
+        ("zero-screen-at-larger", (1.0, 0.0), (1.0, 4.0)), ("zero-reference-at-smaller", (1.0, 4.0), (0.0, 4.0)),
+        ("zero-screen-at-smaller", (0.0, 4.0), (1.0, 4.0)), ("zero-reference-at-larger", (1.0, 4.0), (1.0, 0.0))]
+    growth, small_ratio, large_ratio = ("cannot evaluate growth from 262144 to 1048576 bytes: ",
+                                        "cannot evaluate ratio at 262144 bytes: ",
+                                        "cannot evaluate ratio at 1048576 bytes: ")
+    zero_faults = [
+        ("zero-screen-at-larger", [growth + "screen time zero at 1048576 bytes",
+                                   large_ratio + "screen time zero at 1048576 bytes"]),
+        ("zero-reference-at-smaller", [growth + "reference time zero at 262144 bytes",
+                                       small_ratio + "reference time zero at 262144 bytes"]),
+        ("zero-screen-at-smaller", [growth + "screen time zero at 262144 bytes",
+                                    small_ratio + "screen time zero at 262144 bytes"]),
+        ("zero-reference-at-larger", [growth + "reference time zero at 1048576 bytes",
+                                      large_ratio + "reference time zero at 1048576 bytes"])]
+
+    def _zero_cases():
+        return [(case, _faults(screen, reference, lengths=quarter)) for case, screen, reference in zeros]
     bounds = [
         ("ops-growth-4x-exactly-8", len(_rdp_ops_growth({262144: 1000, 1048576: 8000}, quarter))),
         ("ops-growth-4x-just-under-8", len(_rdp_ops_growth({262144: 1000, 1048576: 7999}, quarter))),
@@ -2111,10 +2150,8 @@ def _rdp_timing_decision_cases():
         ("growth-4x-just-over-2", _group((1.0, 8.000001), (1.0, 4.0), lengths=quarter)),
         ("growth-load-lifts-both-legs", _group((1.0, 2.0, 12.0), (1.0, 2.0, 12.0))),
         ("growth-middle-size-decides", _group((1.0, 4.0, 5.0), (1.0, 2.0, 4.0))),
-        ("zero-screen-at-larger", _group((1.0, 0.0), (1.0, 4.0), lengths=quarter)),
-        ("zero-reference-at-smaller", _group((1.0, 4.0), (0.0, 4.0), lengths=quarter)),
-        ("zero-screen-at-smaller", _group((0.0, 4.0), (1.0, 4.0), lengths=quarter)),
-        ("zero-reference-at-larger", _group((1.0, 4.0), (1.0, 0.0), lengths=quarter)),
+        *_zero_cases(),
+        ("least-positive-screen-at-larger", _group((1.0, 5e-324), (1.0, 4.0), lengths=quarter)),
         ("ratio-exactly-at", _group((at_ratio, at_ratio * 2, at_ratio * 4), (1.0, 2.0, 4.0))),
         ("ratio-just-under", _group((at_ratio - 1e-6, (at_ratio - 1e-6) * 2, (at_ratio - 1e-6) * 4),
                                     (1.0, 2.0, 4.0))),
@@ -2183,8 +2220,7 @@ def _rdp_timing_decision_cases():
          ("ops-growth-4x-just-over-8", 1), ("ops-quadratic", 2), ("ops-middle-size-decides", 1),
          ("growth-4x-exactly-2", 1), ("growth-4x-just-under-2", 0), ("growth-4x-just-over-2", 1),
          ("growth-load-lifts-both-legs", 0), ("growth-middle-size-decides", 1),
-         ("zero-screen-at-larger", 0), ("zero-reference-at-smaller", 1),
-         ("zero-screen-at-smaller", 1), ("zero-reference-at-larger", 2),
+         *zero_faults, ("least-positive-screen-at-larger", 0),
          ("ratio-exactly-at", 3), ("ratio-just-under", 0), ("ratio-just-over", 1)],
         [("linear", ["linear"]), ("quadratic", ["not linear"]),
          ("quadratic-small-lifted-one-group", ["not linear"]),
@@ -2195,6 +2231,21 @@ def _rdp_timing_decision_cases():
          ("five-times-slower", ["not linear"]),
          ("runaway", ["runaway", "linear"], [], True),
          ("just-under-runaway-every-timing", ["over budget", "over budget", "over budget"], 19, True)]))
+    # The flip: with _rdp_unresolved patched to find no zero time, every time is judged as a measurement
+    # again, the behaviour before zero times failed closed. Each zero case then gives its old outcome (a
+    # zero screen time at the larger size no fault at all, reading as no growth) and differs from its
+    # expected faults, so the decision row above would go red. The patch is restored in a finally.
+    saved = globals()["_rdp_unresolved"]
+    globals()["_rdp_unresolved"] = lambda least, at: ""
+    try:
+        flipped = _zero_cases()
+    finally:
+        globals()["_rdp_unresolved"] = saved
+    expected = dict(zero_faults)
+    check("rdp/label-screen-linear-time-zero-flip",
+          [(case, len(faults), faults == expected[case]) for case, faults in flipped],
+          [("zero-screen-at-larger", 0, False), ("zero-reference-at-smaller", 1, False),
+           ("zero-screen-at-smaller", 1, False), ("zero-reference-at-larger", 2, False)])
 
 
 def _rwh_iso(hours=0):
