@@ -1517,7 +1517,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 13
 end-line = 14
 canonical-text = "An artefact is never installed, published, or promoted to a live or otherwise consumer-accessible\ndestination before the verification it must pass has passed."
-source-digest = "c4e11fb0d373127c7646cdc5eda4f0b0b52cf744a20dde78f4582c7b7b84a558"
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
 
 [[clause]]
 clause-id = "stgprm.2"
@@ -1526,7 +1526,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 14
 end-line = 16
 canonical-text = "It is placed first in a staging area that is\nnot that destination, verified there, and only then is that same verified artefact promoted to the live\ndestination, on a recorded pass."
-source-digest = "c4e11fb0d373127c7646cdc5eda4f0b0b52cf744a20dde78f4582c7b7b84a558"
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
 
 [[clause]]
 clause-id = "stgprm.3"
@@ -1535,7 +1535,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 14
 end-line = 16
 canonical-text = "It is placed first in a staging area that is\nnot that destination, verified there, and only then is that same verified artefact promoted to the live\ndestination, on a recorded pass."
-source-digest = "c4e11fb0d373127c7646cdc5eda4f0b0b52cf744a20dde78f4582c7b7b84a558"
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
 
 [[clause]]
 clause-id = "stgprm.4"
@@ -1544,7 +1544,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 14
 end-line = 16
 canonical-text = "It is placed first in a staging area that is\nnot that destination, verified there, and only then is that same verified artefact promoted to the live\ndestination, on a recorded pass."
-source-digest = "c4e11fb0d373127c7646cdc5eda4f0b0b52cf744a20dde78f4582c7b7b84a558"
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
 
 [[clause]]
 clause-id = "stgprm.5"
@@ -1553,7 +1553,7 @@ source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 14
 end-line = 16
 canonical-text = "It is placed first in a staging area that is\nnot that destination, verified there, and only then is that same verified artefact promoted to the live\ndestination, on a recorded pass."
-source-digest = "c4e11fb0d373127c7646cdc5eda4f0b0b52cf744a20dde78f4582c7b7b84a558"
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
 
 [[clause]]
 clause-id = "stgprm.6"
@@ -1561,8 +1561,35 @@ corpus-id = "stgprm"
 source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
 start-line = 19
 end-line = 21
-canonical-text = "The same order extends to a multi-step change to a live system: a tool's expected side effects come from\nobserving it first on a disposable copy or one canary step with a rehearsed undo, and the first harmless\nsurprise revises them all, not just the tripped item, while other checks stay as strict."
-source-digest = "c4e11fb0d373127c7646cdc5eda4f0b0b52cf744a20dde78f4582c7b7b84a558"
+canonical-text = "In a multi-step change to a live system, each tool's side effects are\nrecorded from observing it first on a non-live replica or one canary step whose undo is confirmed against\nthe actual target;"
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
+
+[[clause]]
+clause-id = "stgprm.7"
+corpus-id = "stgprm"
+source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
+start-line = 21
+end-line = 21
+canonical-text = "any unrecorded effect, harmless or not, halts the change;"
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
+
+[[clause]]
+clause-id = "stgprm.8"
+corpus-id = "stgprm"
+source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
+start-line = 21
+end-line = 22
+canonical-text = "it resumes only once every\ntool's effects are re-observed and recorded;"
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
+
+[[clause]]
+clause-id = "stgprm.9"
+corpus-id = "stgprm"
+source-path = ".aiqt/core/rules/integ-stage-then-promote-on-green.md"
+start-line = 22
+end-line = 22
+canonical-text = "no check is relaxed."
+source-digest = "5f85ad2351e75d54f2ae217bc5a37c4ce9abbf54894ca94b3059e239b0300a12"
 
 [[clause]]
 clause-id = "valgat.1"
