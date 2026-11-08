@@ -18832,7 +18832,7 @@ _STDIN_PY_TOKEN_RE = re.compile(
     r"|(?P<redir>\d*(?:&>>|&>|>>|>&|<&|<<<|<<-|<<|<>|>\||[<>]))"
     r"|(?P<op>\|&|\|\||&&|;;|[|&;()`\n])"
     r"|(?P<comment>#[^\n]*)"
-    r"|(?P<word>(?:[^\s<>|&;()`'\"\\]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)"
+    r"|(?P<word>(?:\$'(?:[^'\\]|\\.)*'|[^\s<>|&;()`'\"\\]|\\.|'[^']*'|\"(?:[^\"\\]|\\.)*\")+)"
     r"|(?P<stray>.)", re.S | re.ASCII)
 # Redirect targets that are the session's own input, so a < redirect to one feeds nothing.
 _STDIN_PY_SELF_PATHS = frozenset(("/dev/stdin", "/dev/fd/0", "/proc/self/fd/0"))
@@ -18877,23 +18877,39 @@ def _spg_redir_parts(text):
     return text[:len(text) - len(op)], op
 
 
+def _spg_hash_is_glue(prev_char, rparen_subst, backquote_closing):
+    """Whether a '#' immediately following prev_char is glued onto the preceding word as a literal '#', the
+    way bash reads it only after a substitution's closing ')' (a '$( )' or '$(( ))') or a closing backquote.
+    After a subshell's ')', an arithmetic '(( ))' command's '))', or an opening backquote, bash begins a
+    comment instead, so the scan must read the rest of that line as command text and never skip a later line
+    as a here-document body; reading such a '#' as glue could drop a line and find fewer invocations."""
+    return (prev_char == ")" and rparen_subst) or (prev_char == "`" and backquote_closing)
+
+
 def _spg_invocation_present(command):
     """Whether any simple-command word run in the raw text runs python with program `-` (_stdin_py_reads_stdin).
     Conservative, erring toward finding one: every operator, redirect, group boundary and substitution opener
     ends the current word run and each run is tested, so an invocation inside a $( ), backquote, ${ } or
     process substitution is still found. A here-document body and a comment hold no command and are skipped, and
-    a quoted string stays one de-quoted word, so python named only as an argument (echo python3 -), in a quoted
-    message, or in a here-document body is not found. Two readings err toward finding one: a << inside an
-    arithmetic (( )) or $(( )) is a shift, so it opens no here-document and hides no line, and a # glued right
-    after a closing ) or backquote is part of that word, as in bash, not a comment."""
+    a quoted string (including an ANSI-C $'...' quote) stays one de-quoted word, so python named only as an
+    argument (echo python3 -), in a quoted message, or in a here-document body is not found. A redirect's target
+    word is dropped from the run, never read as a script operand (python3 2>/dev/null - reads program from
+    stdin). Several readings err toward finding one: a << inside an arithmetic (( )) or $(( )) is a shift, so it
+    opens no here-document and hides no line; a # glued right after a substitution's closing ) or a closing
+    backquote is part of that word, as in bash, not a comment, while a # after a subshell ), an arithmetic
+    command )) or an opening backquote is a comment whose rest-of-line (a << among it) can never skip a line
+    (_spg_hash_is_glue)."""
     n, i = len(command), 0
     words, bodies, pending = [], [], None
-    depth, arith = 0, []
+    depth, arith, paren = 0, [], []
+    in_backquote = False
+    prev_rparen_subst = prev_backquote_closing = False
     while i < n:
         start = i
         match = _STDIN_PY_TOKEN_RE.match(command, i)
         kind, i = match.lastgroup, match.end()
-        if kind == "comment" and start and command[start - 1] in ")`":
+        if (kind == "comment" and start
+                and _spg_hash_is_glue(command[start - 1], prev_rparen_subst, prev_backquote_closing)):
             kind, i = "word", start + 1
         if kind == "space" or kind == "comment":
             continue
@@ -18901,8 +18917,9 @@ def _spg_invocation_present(command):
             word = command[start:i].translate(_PSM_UNQUOTE)
             if pending in ("<<", "<<-"):
                 bodies.append((word, pending == "<<-"))
-            else:
+            elif pending is None:
                 words.append(word)
+            # else: this word is a redirect's target, not a command word, so it is dropped from the run
             pending = None
             continue
         if kind == "redir":
@@ -18911,13 +18928,21 @@ def _spg_invocation_present(command):
                 pending = None
             continue
         if match.group() == "(":
+            paren.append(start >= 1 and command[start - 1] == "$")
             depth += 1
             if command.startswith("(", i):
                 arith.append(depth)
+            prev_rparen_subst = prev_backquote_closing = False
         elif match.group() == ")":
+            prev_rparen_subst = paren.pop() if paren else False
+            prev_backquote_closing = False
             while arith and arith[-1] >= depth:
                 arith.pop()
             depth = max(depth - 1, 0)
+        elif match.group() == "`":
+            in_backquote = not in_backquote
+            prev_backquote_closing = not in_backquote
+            prev_rparen_subst = False
         if words and _stdin_py_reads_stdin(words):
             return True
         words, pending = [], None
@@ -19040,11 +19065,15 @@ def _spg_allowed(command):
 
 
 def _spg_shape_pipeline(left, right):
-    """Shape (1): PRODUCER | python3 - [args]. PRODUCER is a plain command (words only, at least one), and the
-    pipe's second command runs python with program `-` (_stdin_py_reads_stdin) with no redirect."""
+    """Shape (1): PRODUCER | python3 - [args]. PRODUCER is a plain command (words only, at least one) that does
+    NOT itself read its program from stdin (python3 - | python3 - would leave the producer reading the never-fed
+    session input), and the pipe's second command runs python with program `-` (_stdin_py_reads_stdin) with no
+    redirect."""
     if not left or any(kind != "word" for kind, _ in left):
         return False
     if any(kind != "word" for kind, _ in right):
+        return False
+    if _stdin_py_reads_stdin([text for _, text in left]):
         return False
     return _stdin_py_reads_stdin([text for _, text in right])
 

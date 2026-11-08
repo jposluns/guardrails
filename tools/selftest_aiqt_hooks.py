@@ -3302,7 +3302,21 @@ _SPG_DENY_ROWS = (
     ("(spg-d60) a $$ before a literal { then a separator", "echo $${ ; python3 -"),
     ("(spg-d61) an & inside ${ } after a hit", "python3 - && echo ${v:-&}"),
     ("(spg-d62) job control on by option name", "set -o monitor; python3 - & wait"),
-    ("(spg-d63) an unfed group", "(cd /; python3 -)"))
+    ("(spg-d63) an unfed group", "(cd /; python3 -)"),
+    # A redirect target word does not end the word run and must be dropped from it, never read as a script
+    # operand: python3 2>/dev/null - reads its program from stdin and bash blocks on it.
+    ("(spg-d64) a redirect does not pull its target into the run", "python3 2>/dev/null -"),
+    ("(spg-d65) a stdout redirect before a lone -", "python3 >/dev/null -"),
+    ("(spg-d66) a self-input fd dup before a lone -", "python3 <&0 -"),
+    # A '#' after a subshell ')', an arithmetic command '))' or an opening backquote is a comment in bash, not
+    # glue, so the scan must not read a '<<' in that comment as a here-document and skip the python3 - line.
+    ("(spg-d67) a comment after a subshell, not glue", "(true)#<<true\npython3 -\ntrue"),
+    ("(spg-d68) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue"),
+    ("(spg-d69) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`"),
+    # A pipeline producer that itself reads its program from stdin leaves it reading the never-fed input.
+    ("(spg-d70) a producer that itself reads stdin", "python3 - | python3 -"),
+    # An ANSI-C $'...' quote is one word and must not swallow the newline and the python3 - after it.
+    ("(spg-d71) an ANSI-C quote does not swallow the next command", "echo $'\\''\npython3 -\necho '"))
 # Over-deny rows: a fed or harmless form outside the three shapes; bash does not block, the hook denies, a
 # disclosed over-deny. Each goes red with the default made allow, as the deny rows do.
 _SPG_OVERDENY_ROWS = (
@@ -3472,19 +3486,43 @@ _SPG_ORACLE_ROWS = (
      "set -m; echo \"print('fed')\" | python3 - & wait", True, False),
     ("(spg-o72) job control off again by option name (over-deny)",
      "set -o monitor; set +o monitor; python3 - & wait", True, False),
-    ("(spg-o73) a duplicated fd after exec opens it (over-deny)", "exec 3< /dev/null; python3 - <&3", True, False))
+    ("(spg-o73) a duplicated fd after exec opens it (over-deny)", "exec 3< /dev/null; python3 - <&3", True, False),
+    ("(spg-o74) a redirect does not pull its target into the run", "python3 2>/dev/null -", True, True),
+    ("(spg-o75) a stdout redirect before a lone -", "python3 >/dev/null -", True, True),
+    ("(spg-o76) a self-input fd dup before a lone -", "python3 <&0 -", True, True),
+    ("(spg-o77) a comment after a subshell, not glue", "(true)#<<true\npython3 -\ntrue", True, True),
+    ("(spg-o78) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue", True, True),
+    ("(spg-o79) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`", True, True),
+    ("(spg-o80) a producer that itself reads stdin", "python3 - | python3 -", True, True),
+    ("(spg-o81) an ANSI-C quote does not swallow the next command", "echo $'\\''\npython3 -\necho '", True, True))
 _SPG_ORACLE_WAIT = 4
 
 
 def _spg_flips():
     """Each flip name mapped to the aiqt_hooks attributes that break it: the three shape matchers (break one
-    and its fed rows deny) and the default (make the invocation scan find nothing, so every deny and over-deny
-    row allows)."""
+    and its fed rows deny), the default (make the invocation scan find nothing, so every deny and over-deny row
+    allows), and the two glue readings (force a '#' to glue after any ')' or any backquote, the pre-fix reading
+    that let a '<<' in the comment skip the python3 - line, so the rows that depend on the comment reading
+    allow)."""
     return {
         "pipeline": {"_spg_shape_pipeline": lambda left, right: False},
         "redirect": {"_spg_shape_redirect": lambda cleaned: False},
         "heredoc": {"_spg_shape_heredoc": lambda cleaned: False},
-        "default": {"_spg_invocation_present": lambda command: False}}
+        "default": {"_spg_invocation_present": lambda command: False},
+        "hash_paren": {"_spg_hash_is_glue": lambda prev_char, rparen_subst, backquote_closing:
+                       prev_char == ")" or (prev_char == "`" and backquote_closing)},
+        "hash_backquote": {"_spg_hash_is_glue": lambda prev_char, rparen_subst, backquote_closing:
+                           (prev_char == ")" and rparen_subst) or prev_char == "`"}}
+
+
+# The glue-reading flips, each mapped to a deny row that the pre-fix reading (glue after any ')' or any
+# backquote) turns into a silent allow: glued, the '<<' in the comment text opens a here-document whose body
+# skip swallows the python3 - line. hash_paren covers the subshell and arithmetic-command cases, hash_backquote
+# the opening-backquote case.
+_SPG_HASH_FLIP_ROWS = (
+    ("hash_paren", "(spg-d67) a comment after a subshell, not glue", "(true)#<<true\npython3 -\ntrue"),
+    ("hash_paren", "(spg-d68) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue"),
+    ("hash_backquote", "(spg-d69) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`"))
 
 
 def _spg_oracle(failures, handler):
@@ -3554,9 +3592,10 @@ def _test_python_stdin_program(failures):
                         "pipeline, a FILE redirect, a here-document), got {!r}".format(reason))
     flips = _spg_flips()
     used = {flip for _label, _command, flip in _SPG_FED_ROWS}
-    if used | {"default"} != set(flips):
+    used_hash = {flip for flip, _label, _command in _SPG_HASH_FLIP_ROWS}
+    if used | used_hash | {"default"} != set(flips):
         failures.append("(spg-flip-names) flips used by rows {} plus default differ from flips defined {}"
-                        .format(sorted(used), sorted(flips)))
+                        .format(sorted(used | used_hash), sorted(flips)))
     for shape in ("pipeline", "redirect", "heredoc"):
         patches = flips[shape]
         saved = {name: getattr(aiqt_hooks, name) for name in patches}
@@ -3586,6 +3625,19 @@ def _test_python_stdin_program(failures):
         if got != "allow":
             failures.append("{}: with the default made allow this deny row must go red (allow), got {}"
                             .format(label, got))
+    for flip_name, label, command in _SPG_HASH_FLIP_ROWS:
+        patches = flips[flip_name]
+        saved = {name: getattr(aiqt_hooks, name) for name in patches}
+        for name, value in patches.items():
+            setattr(aiqt_hooks, name, value)
+        try:
+            got = _decision(handler, command)
+        finally:
+            for name, value in saved.items():
+                setattr(aiqt_hooks, name, value)
+        if got != "allow":
+            failures.append("{}: with the {} glue reading forced this deny row must go red (allow), got {}"
+                            .format(label, flip_name, got))
     for label, data in (
             ("(spg-m1) missing tool_name", {"hook_event_name": aiqt_hooks.PRETOOL,
                                             "tool_input": {"command": "python3 -"}}),
