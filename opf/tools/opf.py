@@ -4413,7 +4413,14 @@ def _watchdog_deadline_case(mode, timeout_s=_DEADLINE_CASE_TIMEOUT, _confirmed=F
             suspect = "armed deadline read late with every other observation held"
         elif (isinstance(result, str)
               and result.startswith("SETUP-ERROR:ChildStatusDeadline")
+              and tripped is not None and tripped >= timeout_s
               and (cancelled is None or (late_reading and cancel_sound))):
+            # The armed-reading term keeps an EARLY armed deadline out of the
+            # confirm run even when no cancel was recorded: starvation can
+            # only INFLATE the reading (run_bounded computes the armed value
+            # from a clock sampled after this measurement's own `start`), so
+            # an early reading is positive evidence and stays an immediate
+            # definite failure, exactly as the comment above declares.
             suspect = ("deadline expiry whose remaining failing evidence "
                        "starvation can produce")
     if suspect and not _confirmed:
@@ -5900,7 +5907,12 @@ def _watchdog_completion_case(mode, tree=None):
             assert rc == EXIT_FINDING, (rc, out)
         # An already-expired cleanup deadline is deadline expiry alone in the
         # guardian receipt: the distinct no-verdict (a starved host can reach
-        # any cleanup deadline on a correct drain), never a pass.
+        # any cleanup deadline on a correct drain), never a pass. A host
+        # stall that inflates the first run's armed READING past the
+        # execution bound makes that run a starvation suspect instead, and
+        # the case then runs its one confirm run (priced by this leg's
+        # budget); the confirm run repeats this stub, so either path prints
+        # the expiry's distinct marker and token asserted here.
         with patch.object(emit, "_fixture_cleanup_deadline",
                           side_effect=lambda deadline=None: time.monotonic() - 1):
             rc, out = settled("pipe-stall")
@@ -5948,14 +5960,20 @@ def _watchdog_completion_case(mode, tree=None):
                 patch.object(emit, "_fixture_drain", never_kills):
             rc, out = settled("pipe-stall")
             assert rc == EXIT_FINDING, (rc, out)
-        # A guardian that ignores its own armed deadline is collected by the
-        # caller-side backstop at that same armed value, and that collection
-        # still triggers the guardian's control-channel cleanup (an owned
-        # kill and a clean receipt), so the run returns TIMEOUT with every
-        # observation held EXCEPT the receipt's own deadline expiry: exactly
-        # that missing expiry must turn it red. The shift runs in the forked
-        # guardian only; the caller's copy of the armed deadline (its
-        # backstop, and the judged value) is untouched.
+        # A guardian that MIS-HOLDS its armed deadline (the shift below moves
+        # the forked guardian's copy only, so every comparison it makes --
+        # the loop-top check and the post-EOF re-sample alike -- runs against
+        # the shifted value) is collected by the caller-side backstop at the
+        # true armed value, and that collection still triggers the guardian's
+        # control-channel cleanup (an owned kill and a clean receipt), so the
+        # run returns TIMEOUT with every observation held EXCEPT the
+        # receipt's own deadline expiry: exactly that missing expiry must
+        # turn it red. A guardian that merely IGNORES its loop-top deadline
+        # check while still re-sampling the shared clock at EOF is NOT
+        # pinned here (the backstop's EOF would let its re-sample record the
+        # expiry): the own-deadline row below pins the loop-top check, and
+        # the backstop-EOF row pins the re-sample. The caller's copy of the
+        # armed deadline (its backstop, and the judged value) is untouched.
         real_guardian = emit._FixtureProcess._guardian
         def deaf_guardian(proc):
             proc.deadline += 3600
@@ -5963,6 +5981,82 @@ def _watchdog_completion_case(mode, tree=None):
         with patch.object(emit._FixtureProcess, "_guardian", deaf_guardian):
             rc, out = settled("pipe-stall")
             assert rc == EXIT_FINDING, (rc, out)
+        # The guardian's own loop-top deadline check, pinned directly: a
+        # subject that never exits gives the supervising guardian no
+        # completion to accept, and a caller that keeps the control channel
+        # open until the receipt arrives gives it no EOF to re-sample, so
+        # that check is the ONLY exit from the supervision wait, and a
+        # receipt collected with the channel still open and timed_out set
+        # proves the guardian fired by its own deadline. The flip deletes
+        # exactly that check from the guardian's source (the post-EOF
+        # re-sample stays): with no EOF to re-sample the mutant can never
+        # leave the loop, the poll stays empty through the execution bound,
+        # and the row turns red. A starved attempt (startup never reached
+        # READY inside the requested window, or no receipt inside the
+        # execution bound) is retried like the settled rows, bounded by the
+        # same three attempts the budget prices.
+        import importlib
+        import inspect
+        import textwrap
+
+        def stalling_subject():
+            while True:
+                time.sleep(60)
+
+        def own_deadline_fired(guardian, attempts=3):
+            for _ in range(attempts):
+                begin = time.monotonic()
+                proc = emit._FixtureProcess(begin + _DEADLINE_CASE_TIMEOUT,
+                                            subject=stalling_subject)
+                fired = False
+                try:
+                    try:
+                        with patch.object(emit._FixtureProcess, "_guardian",
+                                          guardian):
+                            proc.start()
+                    except emit.ChildStatusDeadline:
+                        continue  # startup starved: nothing established, retry
+                    bound = _watchdog_deadline(_DEADLINE_EXECUTION_BOUND)
+                    while time.monotonic() < bound:
+                        if proc.poll() is not None:
+                            fired = bool(proc.timed_out)
+                            break
+                        time.sleep(0.005)
+                finally:
+                    proc.close()
+                if fired:
+                    return True
+            return False
+
+        assert own_deadline_fired(emit._FixtureProcess._guardian), \
+            "no expired receipt while the control channel stayed open"
+        guardian_source = textwrap.dedent(
+            inspect.getsource(emit._FixtureProcess._guardian))
+        loop_top_check = ("            if time.monotonic() >= self.deadline:\n"
+                          "                timed_out = True\n"
+                          "                break\n")
+        assert guardian_source.count(loop_top_check) == 1, \
+            guardian_source.count(loop_top_check)
+        # The mutant is built as a scratch module: the file holds only the
+        # mutated guardian source, it is imported once and dropped from
+        # sys.modules, and its namespace is then filled from the emit
+        # module's own so the guardian's helpers resolve there, the same
+        # namespace the sibling mutant rows rebuild their members into.
+        with tempfile.TemporaryDirectory(prefix="opf-guardian-flip-") as directory:
+            Path(directory, "_opf_guardian_flip_mutant.py").write_text(
+                guardian_source.replace(loop_top_check, ""), encoding="utf-8")
+            sys.path.insert(0, directory)
+            try:
+                importlib.invalidate_caches()
+                mutant_module = importlib.import_module(
+                    "_opf_guardian_flip_mutant")
+            finally:
+                sys.path.remove(directory)
+                sys.modules.pop("_opf_guardian_flip_mutant", None)
+        vars(mutant_module).update(vars(emit))
+        unchecked_guardian = mutant_module._guardian
+        assert not own_deadline_fired(unchecked_guardian, attempts=1), \
+            "a guardian without its loop-top deadline check ended the wait"
         # The backstop-EOF ordering of the deadline race, forced
         # deterministically: the guardian's supervision loop is held one
         # tick before its armed deadline until the caller's backstop EOF is
@@ -5991,10 +6085,19 @@ def _watchdog_completion_case(mode, tree=None):
                 return now
             with patch.object(time, "monotonic", held_back):
                 return real_guardian_eof(proc)
+        # A host stall that inflates the armed READING past the execution
+        # bound makes the first run a starvation suspect, and the case then
+        # runs its one confirm run (priced by this leg's budget). A passing
+        # confirm run prints the confounded-pair no-verdict, which is this
+        # row's starvation outcome, never a defect's: a guardian that honors
+        # the EOF without re-sampling fails the confirm run the same way it
+        # failed the first (missing receipt expiry is positive evidence,
+        # judged without a confirm run), so the red below is never hidden.
         with patch.object(emit._FixtureProcess, "_guardian", eof_first_guardian):
             rc, out = settled("pipe-stall")
-            assert (rc == EXIT_OK and "PASS" in out
-                    and _WATCHDOG_CANNOT_EVALUATE not in out), (rc, out)
+            assert (rc == EXIT_OK
+                    and ("PASS" in out
+                         or "confirm run held every observation" in out)), (rc, out)
         # A LATE armed deadline whose run also ends in deadline expiry in
         # the guardian receipt (the forced-late timeout plus an
         # already-expired cleanup deadline) is a definite failure: the
@@ -16465,30 +16568,43 @@ def _watchdog_regression_self_test():
          + 6 * _TREE_STARTUP_BACKSTOP + 4 * _TREE_VECTOR_BACKSTOP),
         ("no-signal-echild", 15), ("guardian-error", 48), ("empty-children", 48),
         ("bounded-diagnostics", 66), ("cleanup-budget", 21),
-        # deadline-flips, term by term: ten settled deadline-case flips,
+        # deadline-flips, term by term: eleven settled deadline-case flips,
         # each priced at its worst case of three attempts (a starved run is
         # retried). Per attempt: six single runs at the requested 0.25 s
         # timeout (the expired-cleanup, lost-ownership, deaf-guardian,
         # swallowed-census and backstop-EOF rows, and the late-observation
         # row's own run), plus the late-observation hold (cleanup grace +
-        # receipt allowance + 0.2) its stand-in sleeps; the never-kills row
-        # at the requested timeout plus its confirm run at four times it
-        # (both allowances 11, both under the execution bound); and the
-        # three forced-late rows (late, never-kills-late, late-expired)
+        # receipt allowance + 0.2) its stand-in sleeps; the confirm runs at
+        # four times the requested timeout that the expired-cleanup and
+        # backstop-EOF rows start when a host stall (4.75 s or more between
+        # the case's start sample and run_bounded's adjacent reading)
+        # inflates their first run's armed reading past the execution bound
+        # (two); the never-kills row at the requested timeout plus its
+        # confirm run at four times it (both allowances 11, both under the
+        # execution bound); the own-deadline row's green attempt, its
+        # charged polling deadline at the execution bound plus its
+        # fixture's cleanup grace and receipt allowance (its retry loop is
+        # its own, one attempt per priced attempt); and the three
+        # forced-late rows (late, never-kills-late, late-expired)
         # each charging a first run AND a confirm run at the forced late
         # deadline (the execution bound + 1). Then the un-retried flips:
-        # one starved-start fixture call, and the first-run-only late
+        # one starved-start fixture call; the first-run-only late
         # reading (one forced-late run and one confirm run at four times
-        # the requested timeout). And 4 for conversion ticks the host's
+        # the requested timeout); and the own-deadline flip's single
+        # mutant attempt at the same charged polling deadline and
+        # allowances. And 4 for conversion ticks the host's
         # scheduling can add to the charged waits.
         ("deadline-flips", 3 * (6 * _deadline_case_budget()
          + (_opf_emit._FIXTURE_CLEANUP_GRACE + _DEADLINE_RECEIPT_ALLOWANCE + 0.2)
+         + 2 * _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT)
          + (_deadline_case_budget()
             + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT))
+         + _deadline_case_budget()
          + 3 * 2 * _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1))
          + _deadline_case_budget()
          + _deadline_case_budget(_DEADLINE_EXECUTION_BOUND + 1)
-         + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT) + 4),
+         + _deadline_case_budget(4 * _DEADLINE_CASE_TIMEOUT)
+         + _deadline_case_budget() + 4),
         ("subject-setup", 22), ("overdue-success", 161.0 + 0.01), ("launch-ownership", 60),
         ("launch-cancel", 33), ("fd-hygiene-total", 92), ("nested-keep", 108),
         ("fd-census", 48), ("subject-gc", 32), ("guardian-preload", 20),

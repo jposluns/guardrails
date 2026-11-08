@@ -3174,8 +3174,14 @@ def run_status_owned(argv, *, fixture_id, expected_returncode=0, process_fixture
     result = _run_fixture_process(command, timeout=timeout, cwd=cwd, env=env)
     trailer = ("\nOPF-FIXTURE " + json.dumps([nonce, fixture_id]) + "\n").encode()
     if not result.stdout.endswith(trailer):
-        raise FixtureIncomplete("missing/mismatched completion for " + fixture_id
-                                + ": " + result.stderr.decode("utf-8", "replace"))
+        # Keep BOTH of the failing child's streams, bounded to their final
+        # bytes: the completion assertion's own traceback reaches stderr, but
+        # the fixture body's diagnostic for WHY it exited nonzero is printed
+        # to stdout, and a failure text without it cannot be acted on.
+        raise FixtureIncomplete(
+            "missing/mismatched completion for " + fixture_id
+            + "; stdout tail: " + result.stdout[-8192:].decode("utf-8", "replace")
+            + "; stderr tail: " + result.stderr[-8192:].decode("utf-8", "replace"))
     if result.returncode != 0:
         raise subprocess.CalledProcessError(result.returncode, command, result.stdout, result.stderr)
     result.stdout = result.stdout[:-len(trailer)]
