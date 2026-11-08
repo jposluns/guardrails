@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en" class="site-opfiles">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="The store&#x27;s control and ledger files: the manifest that declares the store, the ID counters, the version ledger, the worklog (appended per change, correctable until released, then frozen), and the concurrency lease. The record indexes and the files around them follow, 1 line each, then the reference tooling: its commands, what it checks, and how to verify it.">
+<meta property="og:description" content="The store&#x27;s control and ledger files: the manifest that declares the store, the ID counters, the version ledger, the worklog (appended per change, correctable until released, then frozen), and the concurrency lease. The record indexes and the files around them follow, 1 line each, then the reference tooling: its commands, what it checks, and how to verify it.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Technical details | OPFiles.ai">
+<meta property="og:url" content="https://opfiles.ai/core-files/">
+<meta property="og:site_name" content="OPFiles.ai">
+<meta property="og:image" content="https://opfiles.ai/assets/opfiles-og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="627">
+<meta property="og:image:alt" content="OPFiles.ai: A machine-written source record and its generated view, joined by a drift gate">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://opfiles.ai/assets/opfiles-og.png">
+<title>Technical details | OPFiles.ai</title>
+<link rel="icon" href="/draft/assets/baseline/logos/opfiles-favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/draft/assets/baseline/logos/opfiles-touch.png">
+<script data-cfasync="false" src="/draft/assets/baseline/scheme.js"></script>
+<link rel="stylesheet" href="/draft/assets/baseline/fonts.css">
+<link rel="stylesheet" href="/draft/assets/baseline/palettes.css">
+<link rel="stylesheet" href="/draft/assets/baseline/baseline.css">
+<script src="/draft/assets/baseline/copy.js" defer></script>
+<script src="/draft/assets/baseline/rail.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main-content">Skip to content</a>
+<header class="mast"><a class="brand" href="/"><span class="name">OPFiles<span class="tld">.ai</span></span><span class="rule" aria-hidden="true"></span></a><nav class="nav" aria-label="Site"><a href="/model/">The model</a><a href="/standard/">The standard</a><a href="/core-files/" aria-current="page">Technical details</a><a href="/adopt/">Adopt</a><a href="https://github.com/jposluns/guardrails/tree/main/opf" target="_blank" rel="noopener noreferrer">GitHub<span class="vh"> (opens in a new tab)</span></a></nav><button class="scheme" type="button" data-scheme-toggle aria-pressed="false" hidden><svg class="moon" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20.5 14.2A8.5 8.5 0 0 1 9.8 3.5a8.5 8.5 0 1 0 10.7 10.7z"/></svg><svg class="sun" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><span class="vh">Dark mode</span></button></header>
+<main id="main-content">
+<div class="wrap"><div class="doc"><p class="lbl first">Reference</p>
+<h1>Technical details: the store and the tooling</h1>
+<nav class="rail" aria-label="On this page"><img class="rail-logo" src="/draft/assets/baseline/logos/opfiles.svg" alt="A machine-written source record and its generated view, joined by a drift gate"><p class="lbl">On this page</p><ol><li><a href="#manifest">The store manifest</a></li><li><a href="#counters">The ID counters</a></li><li><a href="#version">The version ledger</a></li><li><a href="#worklog">The worklog</a></li><li><a href="#lease">The single-writer lease</a></li><li><a href="#backlog-item">Record indexes</a></li><li><a href="#pointer">Pointer, archive and projection</a></li><li><a href="#tooling">Tooling</a></li></ol></nav>
+<p class="meta">The store's control and ledger files: the manifest that declares the store, the ID counters, the version ledger, the worklog (appended per change, correctable until released, then frozen), and the concurrency lease. The record indexes and the files around them follow, 1 line each, then the reference tooling: its commands, what it checks, and how to verify it.</p>
+<p class="lbl sec">manifest.toml</p>
+<h2 id="manifest">The store manifest</h2>
+<p class="lead">The store's control document and discovery marker: declarations for its schema, types, views, modules, and enforcement posture. Closed keysets throughout: an unknown key in any base section is a validation finding. The base <code>[opf]</code> table carries the exact discovery token <code>standard = "opf"</code>, the spec version the store conforms to, and the homes generation. The base of a spec 2.0.0 store:</p>
+<p class="lbl file">.working/toml/manifest.toml</p>
+<pre id="manifest-toml" class="hascopy"><button class="copy" type="button" data-copy="manifest-toml" hidden>Copy</button>[opf]
+standard = "opf"
+spec_version = "2.0.0"
+homes = 2
+layout = "inline"
+posture = "required"
+import_status = "none"
+
+[modules]
+governance = false</pre>
+<p class="lbl accent blk">Note</p>
+<div class="callout"><p>The reference tooling does not yet implement spec 2.0.0: its scaffold still writes <code>spec_version = "1.2.0"</code> with no <code>homes</code> key.</p></div>
+<h3>The top-level tables</h3>
+<p class="lbl blk">11 tables</p>
+<div class="wide"><div class="tablewrap" tabindex="0"><table class=""><caption class="vh">The top-level tables of the store manifest</caption><thead><tr><th>Table</th><th>Holds</th></tr></thead><tbody><tr><td><code>[opf]</code> </td><td>standard, spec_version, homes (2), layout (inline | per-record), posture (off | warn | required), import_status (none | partial | complete)</td></tr><tr><td><code>[store]</code></td><td>sync_target (empty under the in-repo default)</td></tr><tr><td><code>[modules]</code></td><td>governance, delivery_assurance, operational_policy, concurrent_operation</td></tr><tr><td><code>[profiles.*]</code></td><td>additive requirement bundles; may only add requirements</td></tr><tr><td><code>[types.*]</code></td><td>1 table per enabled type, carrying its normative namespace</td></tr><tr><td><code>[providers.*]</code></td><td>handler and roles (create, auth, sync); local-directory and generic-git-remote ship as universal fallbacks</td></tr><tr><td><code>[views.*]</code></td><td>kind (deterministic, composed or projection), sources, target</td></tr><tr><td><code>[deliverables.*]</code></td><td>the curated CHANGELOG.md declaration</td></tr><tr><td><code>[archive]</code></td><td>period ("year")</td></tr><tr><td><code>[unmanaged]</code></td><td>pre-existing files kept in place, enumerated</td></tr><tr><td><code>[vendors]</code></td><td>registered x-&lt;vendor&gt; extension namespaces</td></tr></tbody></table></div></div>
+<blockquote><p>Declare the store contract so tools need not infer it.</p></blockquote>
+<p>A tool validates the base before operating, enforces only what is declared, and records a profile it does not support as present-but-unevaluated rather than failing over it. Tooling locates the machine store by finding exactly 1 immediate subdirectory of <code>.working/</code> whose manifest declares the token. 0 matches or more than 1 stops the tool, never guesses.</p>
+<p class="lbl blk">At a glance</p>
+<dl class="record"><div><dt>Declares</dt><dd><code>[opf]</code> <code>[modules]</code> <code>[types.*]</code> <code>[views.*]</code> <code>[providers.*]</code> <code>[profiles.*]</code></dd></div><div><dt>Read by</dt><dd><code>opf render</code>, <code>opf doctor</code>, <code>opf absorb</code>, <code>opf record</code></dd></div><div><dt>Written by</dt><dd><code>opf init</code>, a reviewed adopter edit, and <code>opf migrate</code> (in progress; it exits 2 in the reference CLI)</dd></div></dl>
+<p class="lbl sec">counters.toml</p>
+<h2 id="counters">The ID counters</h2>
+<p>The ID authority: 1 monotonic high-water value per record namespace.</p>
+<p class="lbl sec">version.toml</p>
+<h2 id="version">The version ledger</h2>
+<p>The version and release ledger: numbers, dates, spans, and digests, never release prose.</p>
+<p class="lbl sec">worklog.toml</p>
+<h2 id="worklog">The worklog</h2>
+<p>The detailed operational record: 1 entry per change, appended as the work happens. Entries are correctable until released, then frozen.</p>
+<p class="lbl sec">lease.toml</p>
+<h2 id="lease">The single-writer lease</h2>
+<p>Present only while a run holds the store's single-writer lease; its absence is the normal state.</p>
+<p class="lbl sec">Record indexes</p>
+<h2 id="backlog-item">The backlog</h2>
+<p>11 baseline typed indexes, their declared generated views, and the planned module schemas. One record per unit of planned work, with a permanent ID, a closed set of states, and a "done" that is ratified.</p>
+<h3 id="done">Completion receipts</h3>
+<p>A durable completion receipt, created in its single terminal state and immutable from birth.</p><p>Created by <code>opf init</code> (empty index), by the ratified-done transition, and, as migrated history with provenance, by import (the reference CLI's retired importer, or post-adoption import, which the reference CLI does not implement yet); never updated, since records are immutable, though rotation relocates aged receipts to the archive; read by <code>opf render</code> (DONE.md and the mirror) and validated by <code>opf doctor</code> (schema, uniqueness, the one-to-one receipt link).</p>
+<h3 id="finding">The finding register</h3>
+<p>An observation worth acting on, which links its remediation rather than containing it.</p>
+<h3 id="pending-decision">Pending decisions</h3>
+<p>A question that must be answered before dependent work settles.</p>
+<h3 id="autonomous-decision">Self-made decisions, on the record</h3>
+<p>A call an actor was authorized to make itself, with its basis, the action taken, and links to what it affected.</p>
+<h3 id="maintainer-decision">Rulings the maintainer made</h3>
+<p>A created-terminal, immutable ruling carrying its decision, the answer plus its rationale.</p>
+<h3 id="preference-pattern">Standing preferences, distilled</h3>
+<p>The reusable rule beneath a family of individual rulings.</p>
+<h3 id="block">Blocks</h3>
+<p>A record that named work cannot proceed; it scopes an enumerated list of record IDs.</p>
+<h3 id="handoff">The session handoff</h3>
+<p>The durable state snapshot a session resumes from, with at most 1 current handoff at any time.</p>
+<h3 id="reference">Sources, captured at the claim</h3>
+<p>An immutable captured source, recorded at the moment a claim or artefact that rests on it is produced.</p>
+<h3 id="contribution">Work proposed or sent to a peer project</h3>
+<p>It tracks proposal, delivery, and outcome.</p>
+<h3 id="modules">Optional modules and importer types</h3>
+<p>4 optional modules, default-off.</p>
+<p><strong>Reserved namespace</strong> No module toggle: the standard reserves <code>LF</code> unassigned, with no record type on it (spec section 8.1). The reference tooling still recognizes <code>legacy_fragment</code> (<code>LF</code>, <code>quarantined &#8594; resolved | ignored</code>) in stores that hold such records from its retired import path; nothing in the reference CLI creates it now.</p><p><strong>(none)</strong> <code>LF</code> reserved unassigned; the reference tooling still recognizes <code>legacy_fragment</code> (<code>quarantined &#8594; resolved | ignored</code>) in stores holding such records from its retired import path.</p>
+<p>The standard reserves the <code>LF</code> namespace unassigned and defines no <code>legacy_fragment</code> type (spec section 8.1); the reference tooling still recognizes the type in existing stores and never scaffolds it.</p><p>Under the reference tooling's retired import contract, everything an import could not confidently map became quarantined fragment data with source path, digest, span, and run ID, so nothing was dropped.</p><p>Ordinary import is now retired and refuses with exit 2, nothing in the reference CLI creates <code>legacy_fragment</code> records, and the standard directs new imports to the imported series with verbatim unparsed text instead (spec section 8.1); the type remains in the tooling for existing stores and evidence.</p><p>A new store's counters file has no <code>LF</code> namespace; a store scaffolded by earlier reference tooling may carry <code>LF</code> (at zero, or higher if it imported records), and doctor and re-adoption accept it. That acceptance is the reference tooling's 1.2.0 behaviour and diverges from the standard, whose section 9.2 validation refuses a 1.2.0 manifest as a store.</p>
+<p class="lbl sec">Around the records</p>
+<h2 id="pointer">The store pointer</h2>
+<p>The committed pointer that names where the store repository lives. A pointer that does not resolve stops the tool and never falls back silently to the default location.</p>
+<h3 id="archive">The archive</h3>
+<p>1 rotation manifest per calendar-year bucket: rotation is relocation, never deletion, and never ID reuse.</p>
+<h3 id="decisions-projection">The decisions projection</h3>
+<p>The machine projection, generated at <code>.working/DECISIONS.toml</code> and rendered from the 4 decision types.</p>
+<p class="lbl sec">Tooling</p>
+<h2 id="tooling">The reference tooling</h2>
+<p>Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build. A base adopter can use their own tooling instead, or adopt by hand.</p>
+<div class="wide"><div class="tablewrap" tabindex="0"><table class=""><caption class="vh">The command verbs</caption><thead><tr><th>Verb</th><th>What it does</th></tr></thead><tbody><tr><td><code>init</code></td><td>Scaffolds validated store sources and the committed pointer; surfaces, never absorbs, anything already at the store location.</td></tr><tr><td><code>render</code></td><td>Regenerates the declared views. <code>--check</code> compares bytes read-only and exits 1 on drift.</td></tr><tr><td><code>doctor</code></td><td>Runs the whole-store integrity layer read-only: exit 0 valid, 1 on a finding, 2 when it cannot evaluate. <code>--require-store</code> makes a missing store a cannot-evaluate for CI. <code>--store-identity</code> instead compares the committed pointer's target and the SHA-256 of the store's <code>init.toml</code> with the values pinned in <code>.github/opf-store-identity.toml</code> (<code>schema = 1</code>, <code>target</code>, <code>init_sha256</code>), and treats a <code>.opf.local.toml</code> override as a mismatch only when every other input evaluates; otherwise the result is cannot-evaluate.</td></tr><tr><td><code>absorb</code></td><td>Drafts changelog entries for human curation, or computes a curated entry's freeze digest; writes no files.</td></tr><tr><td><code>record</code></td><td>Authors 1 record change at a time and leaves it uncommitted for your review.</td></tr><tr><td><code>adopt</code></td><td>Plan, approve, reconcile, and status run; apply and complete refuse with exit 2.</td></tr><tr><td><code>upgrade</code></td><td>Refuses with exit 2 and writes nothing: the reference tooling defines no store upgrade.</td></tr><tr><td><code>import</code></td><td>The ordinary modes are retired and refuse with exit 2; clean-start adoption is the intake.</td></tr><tr><td><code>migrate</code></td><td>In progress; exits 2 in this build. Relocates the whole store, keeping git history and the worklog.</td></tr><tr><td><code>sync</code></td><td>In progress; exits 2 in this build. The pull and push step of the store consistency contract.</td></tr></tbody></table></div></div>
+<p class="lbl sec">Coverage</p>
+<h2 id="doctor-checks">What doctor checks</h2>
+<p>Schema validity; ID uniqueness and counter monotonicity; bidirectional index reconciliation; transition legality where observations suffice; byte drift for the declared baseline views; the root release-version file; worklog span tiling and frozen digests; changelog coverage and freeze; archive integrity; the tracked-store requirement; pointer and sync-target agreement; and path containment. At the strictest posture, an unreadable, unparseable, or unresolvable declared input is a failure, never an empty or clean result.</p>
+<p class="lbl sec">Integrity</p>
+<h2 id="integrity">Verify what you install</h2>
+<p>Before applying a downloaded pack, compare its digest with the reference published for that release at <a href="https://posluns.dev/hashes.txt" target="_blank" rel="noopener noreferrer">posluns.dev/hashes.txt<span class="vh"> (opens in a new tab)</span></a>, and refuse on a mismatch. The tooling also checks its own declaration file, <code>opf/tools/opf-declaration.toml</code>, against a shipped digest before it touches a store, and refuses with exit 2 if the file is missing or altered. <code>python3 -I -B opf/tools/opf.py --declaration</code> runs that check alone.</p>
+<p class="lbl file">opf/tools/opf-declaration.toml</p>
+<pre id="declaration" class="hascopy"><button class="copy" type="button" data-copy="declaration" hidden>Copy</button>release = "1.0.5"
+spec_version = "1.2.0"
+homes = 1
+worklog = 1</pre>
+<div class="next"><p class="lbl">Next</p><p>Create the store with <code>opf init</code>, or ask your assistant for a plan.</p><a class="start" href="/adopt/">Adopt it <span class="arrow" aria-hidden="true">&rarr;</span></a></div>
+</div></div>
+</main>
+<footer class="family wrap"><div class="bar"><ul class="cards rainbow" aria-label="The 6 project sites"><li class="slice slice-2"><a class="card" href="/" aria-current="page"><img src="/draft/assets/baseline/logos/opfiles.svg" alt=""><span class="cname">OPFiles<span class="tld">.ai</span></span><span class="vh"> (this site)</span></a></li><li class="slice slice-3"><a class="card" href="https://auditthis.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/auditthis.svg" alt=""><span class="cname">AuditThis<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-4"><a class="card" href="https://cleanlanguage.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/cleanlanguage.svg" alt=""><span class="cname">CleanLanguage<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-5"><a class="card" href="https://aiqt.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/aiqt.svg" alt=""><span class="cname">AIQT<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-6"><a class="card" href="https://grclibrary.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/grclibrary.svg" alt=""><span class="cname">GRCLibrary<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li><li class="slice slice-1"><a class="card" href="https://secureconfig.ai/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/logos/secureconfig.svg" alt=""><span class="cname">SecureConfig<span class="tld">.ai</span></span><span class="vh"> (opens in a new tab)</span></a></li></ul><ul class="tail" aria-label="Jeff Posluns elsewhere"><li class="tile tile-1"><a class="card" href="https://github.com/jposluns" target="_blank" rel="noopener noreferrer"><img class="only-light" src="/draft/assets/baseline/marks/github-invertocat-black.svg" alt=""><img class="only-dark" src="/draft/assets/baseline/marks/github-invertocat-white.svg" alt=""><span class="cname vh">GitHub</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-2"><a class="card" href="https://www.linkedin.com/in/jposluns/" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/linkedin-in-bug.png" alt=""><span class="cname vh">LinkedIn</span><span class="vh"> (opens in a new tab)</span></a></li><li class="tile tile-3"><a class="card" href="https://orcid.org/0009-0000-7775-2233" target="_blank" rel="noopener noreferrer"><img src="/draft/assets/baseline/marks/orcid-id.svg" alt=""><span class="cname vh">ORCID</span><span class="vh"> (opens in a new tab)</span></a></li></ul><div class="tile sigtile"><a class="sig" href="https://posluns.ca/" target="_blank" rel="noopener noreferrer" aria-label="A Jeff at Posluns dot ca project: posluns.ca (opens in a new tab)"><span class="pre">A </span>Jeff<span class="gold">@</span>Posluns<span class="gold">.ca</span><span class="post"> Project</span></a></div></div></footer>
+<p class="vh" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

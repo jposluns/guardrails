@@ -94,7 +94,9 @@ def _roster_checks():
           (None, None))
     if local_diagnostic is not None or ci_diagnostic is not None:
         return
-    binding = 'here="$(cd "$(dirname "$0")" && pwd)" || exit 2'
+    binding = ('dir=$(dirname -- "$0") || exit 2\n'
+               '[ -n "$dir" ] || exit 2\n'
+               'here="$(CDPATH= cd -- "$dir/." && pwd)" || exit 2')
     # The valid failure-state initializers, so an empty-roster fixture reaches
     # its own guard rather than the missing-initializer diagnostic.
     state = 'failed=0\nfailed_names=""\n'
@@ -1962,8 +1964,8 @@ def _member_bound_checks(roster):
     check("config/member-roster-figures",
           (problems, len(SIZING_ACCOUNT_ROSTER), SIZING_ACCOUNT_TIMED, len(SIZING_MEASURED),
            len(SIZING_MALFORMED_MEASURED), hashlib.sha256(frozen.encode("utf-8")).hexdigest()),
-          ([], 100, 88, 10, 9,
-           "7e2bb7449914bbeb00a01c96d7d680cf24ddf57755bd2b56306815577e37b94d"))
+          ([], 98, 88, 10, 9,
+           "aab3007c03d0392a2c99a57d440bd774b1b3f20b5842a296cb15898dfc1cb741"))
     # The oracle recomputes every live figure from the roster and the frozen constants, so an
     # expectation no longer inherits a drifted figure through the baseline above. It is not an
     # independent derivation: every expression but members mirrors _roster_figures's, so an

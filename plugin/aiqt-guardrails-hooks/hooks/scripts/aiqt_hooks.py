@@ -371,7 +371,8 @@ DENY_CONSTRUCTORS = (
     "_commit_identity_fallback", "_commit_msg_subst_fallback", "_deny_missing_tool_name", "_deny_relative",
     "_deny_with_recovery", "_discard_deny", "_expbnd_breadth_publish_deny", "_gate_alias_deny",
     "_gate_runtime_deny", "_git_discard_alias_deny", "_git_discard_fallback", "_hash_doubt_opaque_deny",
-    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny", "_wrtscp_deny")
+    "_protected_line_fallback", "_raw_push_guard", "_reading_limit_deny", "_redirect_deny",
+    "_reset_ancestry_deny", "_wrtscp_deny")
 
 def _allow():
     """A clean pass: no decision at all (never an explicit allow, which would bypass the user's own
@@ -4286,7 +4287,7 @@ def _is_diff_producer(tokens):
         # show ARGS): a genuine suppression flag in a real option position, no patch-enabling option
         # (-p/-u/--patch*/-U/--unified/-c/--cc or a p/u short cluster), and no unknown option. A suppression
         # token after '--' (a pathspec) or consumed as a value-taking option's argument (git show -S -s) does
-        # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). cleanlanguage adopter
+        # NOT earn it, and any patch enabler re-enables the diff (git show -s -p). Adopter
         # report 2026-09-12; position- and cluster-aware hardening 2026-09-12.
         if _show_no_patch_exempt(rest):
             return False
@@ -7531,8 +7532,16 @@ def _git_alias_spelled_segments(command):
             last_end = -1
         if words:
             segments.append(words)
+    # A word holding no '$', backquote or '{' is all literal, with no brace and no unquoted part: each of the three
+    # searches below finds nothing in it. Where the text holds none, every word is such a word, so each gets its
+    # record (the shared one the lexer gives it, _WORD_SPELLINGS) with no search.
+    marked = "$" in text or "`" in text or "{" in text
     spelled = []
     for seg in segments:
+        if not marked:
+            spelled.append(_SpelledWords(seg, [_WORD_SPELLINGS[4 * len(word)] if len(word) < 64
+                                               else _WordSpelling(len(word), False, False) for word in seg]))
+            continue
         spelling = []
         for word in seg:
             mark = _GIT_ALIAS_SPELLED_MARK_RE.search(word)
@@ -9144,6 +9153,152 @@ def _reset_role(args):
     if mode == "soft":
         return ("allow", None)  # HEAD-only: the index and worktree are untouched
     return ("scoped", "git reset (an index or worktree reset that can drop staged or unstaged changes)")
+
+
+# git reset modes, for the ancestry check below. A soft reset keeps the older tree in the index and a mixed
+# reset (also the default) keeps it in the worktree, where a later 'git add -A' stages it again, so the next
+# commit records that tree. --hard, --keep and --merge rewrite tracked content to the target's tree, so they
+# leave no older tree to commit and are not judged by the ancestry check.
+_RESET_MODES = ("soft", "mixed", "hard", "keep", "merge")
+_RESET_ANCESTRY_MODES = frozenset(("soft", "mixed"))
+
+
+def _reset_commit_operand(args):
+    """(mode, operand) when a git reset moves HEAD to ONE commit operand under --soft, --mixed or no mode
+    (mode is "soft" or "mixed"); None otherwise: no operand, more than one operand (a path reset), any path
+    after '--', a path-scoped form (-p/--patch, --pathspec-from-file), or an effective --hard, --keep or
+    --merge. The last mode given wins and a mode is matched by unambiguous prefix, as git does; the ambiguous
+    '--m' (mixed or merge) is read as mixed, so it is judged. Options may follow operands, as git accepts;
+    '--end-of-options' ends the option region and '--' starts the paths. A lone '-' is git's shorthand for the
+    previous branch and is read as '@{-1}'. Pure: it runs nothing."""
+    mode = "mixed"
+    operands = []
+    end_of_options = False
+    for idx, a in enumerate(args):
+        if a == "--":
+            if args[idx + 1:]:
+                return None  # 'git reset <tree-ish> -- <paths>' resets paths and leaves HEAD where it is
+            break
+        if end_of_options or not a.startswith("-"):
+            operands.append(a)
+            continue
+        if a == "--end-of-options":
+            end_of_options = True
+            continue
+        if a == "-":
+            operands.append("@{-1}")
+            continue
+        if not a.startswith("--"):
+            if "p" in a[1:]:
+                return None  # a clustered -p: interactive patch mode is path-scoped
+            continue
+        name = a[2:].split("=", 1)[0]
+        if not name:
+            continue
+        if "patch".startswith(name) or "pathspec-from-file".startswith(name):
+            return None  # a path-scoped reset
+        if "=" in a:
+            continue  # no mode takes a value
+        matches = [m for m in _RESET_MODES if m.startswith(name)]
+        if len(matches) == 1:
+            mode = matches[0]
+        elif matches and set(matches) <= {"mixed", "merge"}:
+            mode = "mixed"  # an ambiguous '--m': judged, the safe direction
+    if mode not in _RESET_ANCESTRY_MODES or len(operands) != 1:
+        return None
+    return (mode, operands[0])
+
+
+def _reset_ancestry(repo, operand):
+    """Ask git, read-only and offline, whether a reset target is an ancestor of HEAD in `repo`. Returns
+    ('ancestor'|'not-ancestor'|'not-a-commit'|'no-commit-object'|'unknown', detail), read only from unmasked
+    git exit statuses, with the scrubbed environment of _branch_root_git. The operand is resolved alone and
+    the object it names is then peeled to a commit: appending '^{commit}' to the operand itself would change
+    what some operands name (everything after ':/' is a commit-message pattern, so ':/<text>^{commit}'
+    searches for the suffix too). 'not-a-commit': the operand resolves to no object (git then reads a single
+    operand as a path). 'no-commit-object': the operand resolves to an object that peels to no commit (a tree
+    or a blob), which git does not read as a path. 'unknown': no repository directory is known, git cannot be
+    launched or does not finish, HEAD resolves to no commit (an unborn branch or an unreadable repository),
+    the ancestry walk exits with anything but 0 or 1, or a repository that is shallow (or whose shallowness
+    cannot be read) answers 'not an ancestor' over history it may not hold."""
+    if not isinstance(repo, str) or not repo:
+        return ("unknown", "no repository directory could be resolved for it")
+    found = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", operand)
+    if found is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if found.returncode == 1 and not found.stdout.strip():
+        return ("not-a-commit", "{!r} resolves to no commit".format(operand))
+    if found.returncode != 0 or not found.stdout.strip():
+        return ("unknown", "git rev-parse exited {} resolving {!r}".format(found.returncode, operand))
+    found_sha = found.stdout.strip()
+    target = _branch_root_git(
+        repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "{}^{{commit}}".format(found_sha))
+    if target is None:
+        return ("unknown", "git rev-parse could not be launched or did not finish")
+    if target.returncode == 1 and not target.stdout.strip():
+        return ("no-commit-object", found_sha)
+    if target.returncode != 0 or not target.stdout.strip():
+        return ("unknown", "git rev-parse exited {} peeling {} to a commit".format(target.returncode, found_sha))
+    target_sha = target.stdout.strip()
+    head = _branch_root_git(repo, "rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}")
+    if head is None or head.returncode != 0 or not head.stdout.strip():
+        return ("unknown", "HEAD resolves to no commit (an unborn branch or an unreadable repository)")
+    walk = _branch_root_git(repo, "merge-base", "--is-ancestor", target_sha, head.stdout.strip())
+    if walk is None:
+        return ("unknown", "git merge-base could not be launched or did not finish")
+    if walk.returncode == 0:
+        return ("ancestor", target_sha)
+    if walk.returncode != 1:
+        return ("unknown", "git merge-base --is-ancestor exited {}".format(walk.returncode))
+    shallow = _branch_root_git(repo, "rev-parse", "--is-shallow-repository")
+    if shallow is None or shallow.returncode != 0 or shallow.stdout.strip() != "false":
+        return ("unknown", "the repository is shallow, or its shallowness cannot be read, so a missing "
+                           "ancestry may only be missing history")
+    return ("not-ancestor", target_sha)
+
+
+def _reset_ancestry_refusal(args, repo, cannot):
+    """(mode, operand, what) for a git reset that moves HEAD to one commit (_reset_commit_operand) which is
+    not an ancestor of HEAD, or None when the reset is outside this check or its target is an ancestor. Such a
+    reset keeps the older tree in the index or worktree, so the next commit records it on top of the newer
+    history and reverts every change made since (a fold onto a newer main reverts that main). A probe that
+    cannot evaluate denies: `cannot` is a reason the repository the reset acts on cannot be established from
+    the command (the probe is then not run), and an 'unknown' probe denies as well. A soft reset whose operand
+    resolves to no object denies; a mixed reset whose single operand resolves to no object is a path reset,
+    and the caller's decision stands. An operand that resolves to an object that peels to no commit denies in
+    every mode. A target that equals HEAD or lies behind it is an ancestor and passes. The undo-amend
+    form 'HEAD@{1}' names the pre-amend commit, which is not an ancestor of the amended one, so it denies.
+    The caller returns _reset_ancestry_deny of a refusal."""
+    found = _reset_commit_operand(args)
+    if found is None:
+        return None
+    mode, operand = found
+    verdict, detail = ("unknown", cannot) if cannot is not None else _reset_ancestry(repo, operand)
+    if verdict == "ancestor" or (verdict == "not-a-commit" and mode == "mixed"):
+        return None
+    if verdict == "not-ancestor":
+        what = "moves HEAD to {}, which is not an ancestor of HEAD".format(detail)
+    elif verdict == "not-a-commit":
+        what = "names {!r}, which resolves to no commit".format(operand)
+    elif verdict == "no-commit-object":
+        what = "names {!r}, which resolves to {}, an object that is no commit".format(operand, detail)
+    else:
+        what = "could not be checked against HEAD's ancestry ({})".format(detail)
+    return (mode, operand, what)
+
+
+def _reset_ancestry_deny(refusal, alts):
+    """The deny for a refusal from _reset_ancestry_refusal; it gives the portable fold recipe and names no
+    repository-local tool."""
+    mode, operand, what = refusal
+    return _deny(
+        "AIQT rule brnrot (branch-rooted-on-live-main): this {} reset to {!r} {}. A reset that moves HEAD to a "
+        "commit that is not an ancestor of HEAD keeps the older tree in the index or worktree, so the next "
+        "commit records that tree on top of the newer history and reverts every change made there since; "
+        "denied rather than run. To fold a branch's commits onto its base, run git merge-base HEAD <ref> "
+        "and then git reset --soft <printed sha>, which this guard allows. {}".format(mode, operand, what, alts),
+        "AIQT guardrail: denied a git reset to a commit that is not an ancestor of HEAD (rule brnrot); "
+        "reset to the merge base instead.")
 
 
 # git clean options that CONSUME the following token (so its value must not be read as a flag): '-e'/
@@ -11272,6 +11427,20 @@ def _discard_cd_target(operands):
     return _discard_literal_abs_path(path)
 
 
+def _discard_grammar_git_target(words, eff):
+    """(directory, subcommand, args) of a git segment the grammar ACCEPTED (_discard_git_segment_grammar):
+    its only global options are '-C <absolute literal path>' pairs, the last of which names the directory;
+    otherwise the directory is `eff` (None when unprovable)."""
+    seg_dir = eff
+    i = 1
+    while i + 1 < len(words) and words[i][0] == "-C":
+        seg_dir = _discard_literal_abs_path(words[i + 1][0])
+        i += 2
+    if i >= len(words):
+        return (seg_dir, None, [])
+    return (seg_dir, words[i][0], [t for t, _q in words[i + 1:]])
+
+
 def _discard_git_segment_grammar(words, eff):
     """Validate ONE segment whose bare command word is 'git' against the positive grammar. `words` is
     the full (text, quoted) token list (words[0] is 'git'); `eff` is the tracked effective directory,
@@ -11398,8 +11567,11 @@ def _discard_positive_grammar(command, cwd):
       deny            - None, or (kind, what) naming the first grammar violation
       snapshot_bases  - the resolved repo dir of every accepted worktree-discard segment
       stash_ops       - (repo dir, op word) of every accepted stash drop/clear segment
-      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)"""
-    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set()}
+      subs            - the snapshottable subcommands seen (the recovery-ledger verb label)
+      reset_checks    - (directory or None, args, moved) of every accepted git reset that moves HEAD to one
+                        commit (_reset_commit_operand); moved says an earlier segment is a recognized lossy
+                        verb, which may already have moved HEAD before the reset runs"""
+    out = {"deny": None, "snapshot_bases": [], "stash_ops": [], "subs": set(), "reset_checks": []}
     items, bad = _discard_grammar_lex(command)
     if bad is None:
         segments, bad = _discard_grammar_segments(items)
@@ -11439,6 +11611,9 @@ def _discard_positive_grammar(command, cwd):
                 out["deny"] = (res[1], res[2])
                 return out
             _act, _base, _label = res[1], res[2], res[3]
+            r_dir, r_sub, r_args = _discard_grammar_git_target(words, eff)
+            if r_sub == "reset" and _reset_commit_operand(r_args) is not None:
+                out["reset_checks"].append((r_dir, r_args, lossy_segs > 0))
             if _act is not None:
                 lossy_segs += 1  # every action but None marks a recognized-lossy-verb segment
             if _act == "snapshot":
@@ -11735,7 +11910,8 @@ def git_discard(data):
     non-pristine path and the unparseable fallback never read the name, so there the prefixed command gets
     exactly what FOO=<the same value> gets); the guarantee is bounded to
     working-tree content (ref-level moves such as reset --soft moving HEAD or a merged-branch delete are
-    reflog-recoverable) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
+    reflog-recoverable; a reset that moves HEAD to one commit that is not an ancestor of HEAD, or whose
+    ancestry cannot be evaluated, DENIES under brnrot, see _reset_ancestry_refusal) and is best-effort against the disclosed obfuscation/config residuals. Fail-open ALLOW is
     reserved for the TRUE boundary (a present non-Bash tool, a non-git command, or no recognized lossy
     verb); a payload with NO tool_name is malformed, not another tool, and DENIES under the shared
     missing-tool_name contract, and a tool_input whose command is MISSING or NOT A STRING is a
@@ -11966,6 +12142,19 @@ def git_discard(data):
             g_kind, g_what = walk["deny"]
             g_reason, g_banner = _DISCARD_GRAMMAR_DENY_TEXTS[g_kind]
             return _deny(g_reason.format(g_what, _DISCARD_ALTS), g_banner)
+        # Every accepted reset that moves HEAD to one commit is judged against HEAD's ancestry in the
+        # directory the grammar resolved for it, before any preservation or snapshot. An earlier lossy
+        # segment may move HEAD before the reset runs, and an unprovable directory names no repository, so
+        # either cannot be evaluated here and denies.
+        for r_dir, r_args, r_moved in walk["reset_checks"]:
+            r_cannot = None
+            if r_moved:
+                r_cannot = "an earlier segment of this command may move HEAD before the reset runs"
+            elif r_dir is None:
+                r_cannot = "the directory it runs in cannot be established"
+            r_refusal = _reset_ancestry_refusal(r_args, r_dir, r_cannot)
+            if r_refusal is not None:
+                return _reset_ancestry_deny(r_refusal, _DISCARD_ALTS)
         np_verb = next(iter(sorted(walk["subs"])), "discard")
         # Preserve the stash of every RESOLVED stash drop/clear target repo first (fail closed on a repo
         # whose stash cannot be preserved), so a resolved stash removal never notes a recovery that omits
@@ -12061,6 +12250,26 @@ def git_discard(data):
     # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
     # target a DESTRUCTIVE form DENIES below (fail closed): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
+    # A reset that moves HEAD to one commit is judged against HEAD's ancestry before any snapshot or role
+    # decision (_reset_ancestry_refusal); a reset with no commit operand is untouched. The probe reads the
+    # repository the reset acts on: the session directory, or the -C target. Under an ambient GIT_* override,
+    # a --git-dir/--work-tree/--bare redirect, a leading GIT_DIR/GIT_WORK_TREE assignment or an unresolvable
+    # -C, that repository cannot be established from the command, so the reset denies.
+    if sub == "reset":
+        r_cwd = data.get("cwd")
+        r_cwd = r_cwd if isinstance(r_cwd, str) and r_cwd else None
+        r_cannot = None
+        if ambient_override:
+            r_cannot = "a non-cosmetic ambient GIT_* variable shapes the repository it acts on"
+        elif _segment_has_path_redirect(pristine):
+            r_cannot = ("a --git-dir, --work-tree or --bare redirect, or a leading GIT_DIR or GIT_WORK_TREE "
+                        "assignment, shapes the repository it acts on")
+        r_repo = None if r_cannot is not None else _segment_repo_dir(pristine, r_cwd)
+        if r_repo == "opaque":
+            r_cannot = "its -C target cannot be resolved"
+        r_refusal = _reset_ancestry_refusal(args, r_cwd if r_repo is None else r_repo, r_cannot)
+        if r_refusal is not None:
+            return _reset_ancestry_deny(r_refusal, alts)
     if ambient_override or not _segment_dir_simple(pristine):
         ao_cwd = data.get("cwd")
         cwd_base = ao_cwd if isinstance(ao_cwd, str) and ao_cwd else None
@@ -16355,7 +16564,12 @@ def _gate_grammar_messages(kind, what, how, unparsed):
         "grammar (rule gatdis, fail-closed).".format(what[:40]))
 
 
-def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
+# The kind a caller of _gate_weakening_fallback passes when it has not read _gate_weakening_fallback_kind of the
+# command (whose own results include None), so the fallback reads it itself.
+_GATE_KIND_UNREAD = object()
+
+
+def _gate_weakening_fallback(command, heredoc_message=False, runtime=False, kind=_GATE_KIND_UNREAD):
     """FAIL-SAFE conservative scan when the shared tokenizer cannot parse the command (an unbalanced quote or an unsupported construct): an apparent
     git hook bypass (a no-verify verb plus a --no-ver spelling) DENIES; an apparent git commit/am with
     a short -n cluster DENIES fail-safe too (the raw string cannot bind the cluster to its subcommand,
@@ -16372,8 +16586,10 @@ def _gate_weakening_fallback(command, heredoc_message=False, runtime=False):
     text names (_gate_unread_bypass) or that only a de-quoted reading spells (_decoded_readings), before
     it calls this with runtime, which reads a git word built at run time (_gate_runtime_bypass) after the
     denies here and before the note, so a command these denies refuse keeps their message and one they would
-    only note or allow ($G commit -nv <<<x) denies."""
-    kind = _gate_weakening_fallback_kind(command)
+    only note or allow ($G commit -nv <<<x) denies. kind, when given, is _gate_weakening_fallback_kind(command)
+    as the caller has just read it, so the raw probes are not run over the command a second time."""
+    if kind is _GATE_KIND_UNREAD:
+        kind = _gate_weakening_fallback_kind(command)
     if kind == "no-verify":
         return _deny(
             "AIQT rule gatdis (gate-discipline): the command could not be parsed by the shell lexer "
@@ -16604,9 +16820,11 @@ def _gate_weakening_fallback_kind(command):
         return "no-verify"
     if _RAW_SHORT_NOVERIFY_VERB_RE.search(command) and _RAW_SHORT_N_RE.search(command):
         return "short-n"
-    if _RAW_CHECKER_RE.search(command) and (
-            _RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
-            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command))):
+    # The swallow and sink probes are read first: each is a short literal scan, where the checker keyword
+    # alternation tries every word start, so a command with no such spelling skips that scan.
+    if ((_RAW_SWALLOW_RE.search(command) or _RAW_TRUNCATE_RE.search(command)
+            or (_RAW_FLOW_RE.search(command) and _RAW_SINK_WORD_RE.search(command)))
+            and _RAW_CHECKER_RE.search(command)):
         return "swallow"
     return None
 
@@ -16715,6 +16933,8 @@ _GATE_BASH_ESCAPE_RE = re.compile(
     r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]*)\}?|x([0-9A-Fa-f]{1,2})|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})"
     r"|c(\\\\|.)|(.))", re.S)
 _GATE_ANSI_C_BODY_RE = re.compile(r"(?:[^'\\]|\\.)*", re.S)
+# A run of characters _gate_shell_level keeps as they stand: none is a backslash, a quote or a '$'.
+_GATE_SHELL_LEVEL_PLAIN_RE = re.compile(r"[^\\'\"$]+")
 
 # Where the bash-model readings split words: bash's blanks (space, tab and newline, not the other characters
 # Python's str.split() treats as whitespace) and every shell operator character and opener (; & | ( ) < > and
@@ -16790,8 +17010,15 @@ def _gate_shell_level(text):
                 i += 1
             i += 1
         else:
-            out.append(c)
-            i += 1
+            # A run of characters none of which opens anything at this level is kept as it stands, in one copy
+            # rather than one step per character; a '$' before no quote is kept on its own.
+            run = _GATE_SHELL_LEVEL_PLAIN_RE.match(text, i)
+            if run is None:
+                out.append(c)
+                i += 1
+            else:
+                out.append(run.group())
+                i = run.end()
     return "".join(out)
 
 
@@ -16800,8 +17027,18 @@ def _gate_reading_words(text):
     stands, a '$' before a quote and every quote character and backslash left in text removed, the rest split at
     _GATE_WORD_BREAK_RE, and a 'git' word added after an option word whose attached value names git, as in
     _gate_dequoted_words."""
+    return _gate_plain_words(_gate_reading_plain(text))
+
+
+def _gate_reading_plain(text):
+    """The text _gate_reading_words splits into words: env -S's \\_ read as a blank, then a '$' before a quote and
+    every quote character and backslash removed."""
     plain = re.sub(r"\$(?=['\"])", "", text.replace("\\_", " "))
-    plain = plain.replace("'", "").replace('"', "").replace(chr(92), "")
+    return plain.replace("'", "").replace('"', "").replace(chr(92), "")
+
+
+def _gate_plain_words(plain):
+    """The words of _gate_reading_words for its text made plain (_gate_reading_plain)."""
     words = []
     for w in _GATE_WORD_BREAK_RE.split(plain):
         if not w:
@@ -16819,12 +17056,20 @@ def _gate_bash_readings(text):
     """The word lists of the bash-model readings of text, its line continuations joined first: the text at its
     own quoting level as bash reads it (_gate_shell_level), that result read once more as the shell it is handed
     to reads it (sh -c, eval or env -S, one level in), and the text with every ANSI-C $'...' quote the raw match
-    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words."""
+    finds decoded as bash decodes it, at any depth (_gate_ansi_c_text). Each is split by _gate_reading_words.
+    Readings that are the same text once made plain (_gate_reading_plain) have the same words, so those words are
+    split once and the one list stands for each such reading; no reader of the lists changes one."""
     joined = _join_continuations(text)[0]
     outer = _gate_shell_level(joined)
     decoded = _GATE_ANSI_C_RE.sub(lambda m: _gate_ansi_c_text(m.group(1)), joined)
-    return (_gate_reading_words(outer), _gate_reading_words(_gate_shell_level(outer)),
-            _gate_reading_words(decoded))
+    split = {}
+    readings = []
+    for reading in (outer, _gate_shell_level(outer), decoded):
+        plain = _gate_reading_plain(reading)
+        if plain not in split:
+            split[plain] = _gate_plain_words(plain)
+        readings.append(split[plain])
+    return tuple(readings)
 
 
 def _gate_any_word_bypass(words, first=None):
@@ -16847,7 +17092,8 @@ def _gate_any_word_bypass(words, first=None):
                 found = (w, "a --no-verify spelling")
             elif short_at is not None and w in _NOVERIFY_SHORT_N_VERBS:
                 found = (w, "the short -n (--no-verify) in {!r}".format(words[short_at][:40]))
-        if _has_long_prefix((w,), "no-verify"):
+        # _has_long_prefix reads only a word starting with '--', so the test before it skips the call for any other.
+        if w[:2] == "--" and _has_long_prefix((w,), "no-verify"):
             long_at = p
         elif w[:1] == "-" and w[1:2] != "-" and "n" in w:
             short_at = p
@@ -16892,7 +17138,13 @@ def _gate_text_bypass(text, skip_own=False):
     readings."""
     if not _gate_text_may_name_git(text):
         return None
+    walked = []
     for words in (_gate_dequoted_words(text),) + _gate_bash_readings(text):
+        # The walk below reads nothing but the words, so a reading whose words equal those of one already walked
+        # (which gave None, or this would have returned) gives None again and is not walked a second time.
+        if words in walked:
+            continue
+        walked.append(words)
         if skip_own:
             k = next((k for k, w in enumerate(words) if _gate_word(w) == "git"), len(words))
             words = words[k + 1:]
@@ -17807,7 +18059,8 @@ def gate_weakening(data):
             # each ANSI-C quote's escapes decoded). Quoting alone is no ground to deny: a quoted argument that
             # spells no bypass (wc -l <<<"hello") keeps the raw probes' decision, and on a roster-verb git
             # segment (git commit -m "fix bug" <<<x) that decision is the closed grammar's deny.
-            if (_gate_weakening_fallback_kind(command) not in _GATE_FALLBACK_DENIES
+            raw_kind = _gate_weakening_fallback_kind(command)
+            if (raw_kind not in _GATE_FALLBACK_DENIES
                     and any(_gate_weakening_fallback_kind(text) in _GATE_FALLBACK_DENIES
                             for text in _decoded_readings(command))):
                 return _deny(
@@ -17824,7 +18077,7 @@ def gate_weakening(data):
             # A word built at run time that may be git ($G commit -nv <<<x) is read over the whole command as
             # on the parsed path (_gate_runtime_bypass), inside the fallback after its own denies, so each deny
             # above and each of the fallback's keeps its message.
-            return _gate_weakening_fallback(command, runtime=True)
+            return _gate_weakening_fallback(command, runtime=True, kind=raw_kind)
         # Behind a '#' the lexer could not judge under both readings, a command whose quoting the fallback
         # text does not decode may hide a hook bypass or a sink there, so it denies.
         if _hash_doubt_opaque(command):
@@ -17983,8 +18236,9 @@ def gate_weakening(data):
         if hit is not None:
             reason, banner = _verification_sink_message(hit)
             return _deny(reason, banner)
-        if _gate_weakening_fallback_kind(command) in _GATE_FALLBACK_DENIES:
-            return _gate_weakening_fallback(command, heredoc_message=True)
+        raw_kind = _gate_weakening_fallback_kind(command)
+        if raw_kind in _GATE_FALLBACK_DENIES:
+            return _gate_weakening_fallback(command, heredoc_message=True, kind=raw_kind)
     # A word bash builds at run time ($G, g$(true)it, $(echo git)) may be git, which no reading above sees: one
     # followed in the same command piece by a roster verb carrying a hook-skip spelling denies fail-closed
     # (_gate_runtime_bypass), read over the whole raw text, so a wrapper, an sh -c or eval script and a
@@ -20877,6 +21131,13 @@ _ORCH_STATES = frozenset(("open", "closed", "proposed"))
 _ORCH_LOOP_BOUND = 2          # stop-path denies per epoch before ALLOW_WITH_FINDINGS
 _ORCH_SCHEDULE_CAP = 3        # schedule-path denies on an unchanged basis before findings
 _ORCH_MAX_NAMED = 10          # actionable items named in a deny message
+# Enumerator-supplied text reaches a deny message only through _orch_clip, so each named field is one bounded
+# line: an id, a title, and a reason or detail field are each cut to these many characters (mark included).
+_ORCH_NAMED_ID_MAX = 80
+_ORCH_NAMED_TITLE_MAX = 120
+_ORCH_NAMED_REASON_MAX = 200
+_ORCH_CLIP_MARK = "[...]"
+_ORCH_CLIP_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f" "\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
 # The `Operating-mode:` declaration is parsed per PHYSICAL line (the reader splits on newlines first, so the
 # value can never cross a line boundary): optional leading horizontal whitespace, then the key, then the value
 # is the REST OF THAT LINE ONLY. A present declaration whose value does not classify (empty or unrecognized)
@@ -20888,6 +21149,11 @@ _ORCH_MODE_DECL_LINE_RE = re.compile(r"^[ \t]*Operating-mode:[ \t]*(.*)$")
 # `attended (ipad); continuous mode` begin with the mode word and classify. Order: unattended before attended.
 _ORCH_MODE_UNATTENDED_RE = re.compile(r"unattended(\b|$)")
 _ORCH_MODE_ATTENDED_RE = re.compile(r"attended(\b|$)")
+# The structured operating-mode record a JSON mode file may carry instead of the bare {"mode": ...} object:
+# its keys include `mode` and are otherwise drawn only from these, and its `set_at` is a UTC time written
+# YYYY-MM-DDTHH:MM:SSZ in ASCII digits (matched whole, so a trailing newline or offset does not pass).
+_ORCH_MODE_RECORD_KEYS = frozenset(("mode", "phase", "set_by", "set_at"))
+_ORCH_MODE_SET_AT_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 # The guards-armed posture a present-but-unusable mode marker fails closed to: it carries the `unattended`
 # token, so the ask blocker arms on it and _orch_scope_live reads it as a live (non-None) mode. A recognized
 # mode value carries the `attended`/`unattended` family token (so both `unattended` and `attended` spellings,
@@ -21599,6 +21865,33 @@ def _orch_reject_duplicate_keys(pairs):
     return seen
 
 
+def _orch_mode_object_ok(obj):
+    """True when a parsed JSON object is a mode marker whose `mode` string the reader classifies: the bare
+    {"mode": str} object, or a structured operating-mode record whose keys include `mode` and are otherwise
+    drawn only from `phase`, `set_by` and `set_at` (_ORCH_MODE_RECORD_KEYS), with `mode` a string, `phase`
+    null or a string, `set_by` a string, and `set_at` a string of the form YYYY-MM-DDTHH:MM:SSZ that names a
+    real calendar time. False for anything else (another key, a wrong type, a malformed or impossible
+    `set_at`), which the caller fails closed to guards-armed. A duplicate key never reaches here: the parse
+    refuses it first (_orch_reject_duplicate_keys)."""
+    if not isinstance(obj, dict) or not isinstance(obj.get("mode"), str):
+        return False
+    if not set(obj) <= _ORCH_MODE_RECORD_KEYS:
+        return False
+    if "phase" in obj and obj["phase"] is not None and not isinstance(obj["phase"], str):
+        return False
+    if "set_by" in obj and not isinstance(obj["set_by"], str):
+        return False
+    if "set_at" in obj:
+        m = _ORCH_MODE_SET_AT_RE.fullmatch(obj["set_at"]) if isinstance(obj["set_at"], str) else None
+        if m is None:
+            return False
+        try:
+            datetime.datetime(*(int(part) for part in m.groups()))
+        except ValueError:
+            return False                  # the form matched but the time does not exist (month 13, 24:00:00)
+    return True
+
+
 def _orch_mode_read(path):
     """Read the mode file at path without waiting for a FIFO writer and without reading past the bound:
     ('absent', None) when the open reports not found, ('ok', text) for a regular file of at most
@@ -21681,9 +21974,11 @@ def _orch_mode_detail(reg, root):
         a present `Operating-mode:` declaration line whose value is empty or does not begin with attended or
         unattended; or, when no declaration line is present, a JSON-shaped marker (the content begins with
         `{`, `[`, or `"`) that is malformed or partial (an unterminated string, trailing garbage, or duplicate
-        keys), or that parses to anything other than a dict with EXACTLY the single key `mode` whose value is a
-        string beginning with attended or unattended (a scalar, an array, an object with extra keys, or an
-        object whose `mode` is absent, non-string, or an unrecognized value all fail closed here);
+        keys), or that parses to anything other than an accepted mode object (_orch_mode_object_ok: the bare
+        {"mode": str} object, or a structured operating-mode record that adds only `phase`, `set_by` and
+        `set_at` of their stated types) whose `mode` string begins with attended or unattended (a scalar, an
+        array, an object with another key or a wrong-typed value or a malformed `set_at`, or an object whose
+        `mode` is absent, non-string, or an unrecognized value all fail closed here);
       - "attended" when a recognized attended marker is present: a non-None value that does NOT contain
         `unattended`, so _orch_scope_live reads scope as live AND orch_ask_guard judges the ask against
         the fresh backlog (_orch_ask_attended) rather than taking the unattended deny.
@@ -21696,8 +21991,9 @@ def _orch_mode_detail(reg, root):
       3. The value and the JSON `mode` string are classified by the word-anchored mode grammar
          (_orch_mode_classify), a prefix match at the start, never a substring, so `disattended` and
          `not-attended` do NOT match `attended`.
-      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and an exactly-{"mode": str} shape,
-         so duplicate keys, extra keys, and non-object or non-string-mode values all fail closed."""
+      4. JSON is parsed strict-exact with a duplicate-key-rejecting hook and a closed shape (the bare
+         {"mode": str} object or the structured record of _orch_mode_object_ok), so duplicate keys, other
+         keys, wrong-typed record fields, and non-object or non-string-mode values all fail closed."""
     path = _orch_path(root, (reg.get("mode") or {}).get("path") if isinstance(
         reg.get("mode"), dict) else None)
     if not path:
@@ -21733,11 +22029,11 @@ def _orch_mode_classify_text(text):
         # `{`, `[`, or `"`) fails CLOSED; anything else is ordinary prose with no declaration and no JSON, the
         # no-marker None (fail open, because the file is shared).
         return _ORCH_MODE_ARMED if stripped[:1] in ("{", "[", '"') else None
-    if isinstance(obj, dict) and set(obj) == {"mode"} and isinstance(obj["mode"], str):
+    if _orch_mode_object_ok(obj):
         classified = _orch_mode_classify(obj["mode"])
         return classified if classified is not None else _ORCH_MODE_ARMED
-    # Any other JSON (a scalar, an array, an object with extra keys, or a dict without a string `mode`) is a
-    # present-but-unrecognized marker and fails CLOSED to guards-armed.
+    # Any other JSON (a scalar, an array, an object with a key outside the record keys or a value of the wrong
+    # type, or a dict without a string `mode`) is a present-but-unrecognized marker and fails CLOSED.
     return _ORCH_MODE_ARMED
 
 
@@ -21919,6 +22215,17 @@ def _orch_escape_active(reg, root):
     return (True, None)
 
 
+def _orch_clip(value, limit):
+    """value as one bounded line for a deny message: every control character (LF and CR included) and
+    every Unicode line or paragraph separator becomes a space, and text longer than limit is cut to
+    exactly limit characters ending in _ORCH_CLIP_MARK, so enumerator-supplied text can neither split a
+    reason across lines nor grow it without bound."""
+    text = _ORCH_CLIP_CONTROL_RE.sub(" ", str(value))
+    if len(text) > limit:
+        text = text[:limit - len(_ORCH_CLIP_MARK)] + _ORCH_CLIP_MARK
+    return text
+
+
 def validate_enumeration(obj):
     """AEI v1 strict validation: (items, None) on a valid enumeration, (None, detail) otherwise. A
     duplicate id, a malformed item or field, an unknown version, a missing envelope, or a non-dict
@@ -21928,7 +22235,8 @@ def validate_enumeration(obj):
         return (None, "payload is not a JSON object")
     version = obj.get("version")
     if type(version) is not int or version != 1:
-        return (None, "unknown AEI version {!r} (an exact integer 1 is required)".format(version))
+        return (None, "unknown AEI version {} (an exact integer 1 is required)".format(
+            _orch_clip(repr(version), _ORCH_NAMED_REASON_MAX)))
     gen = obj.get("generated_at_utc")
     gen_ts = _orch_parse_utc(gen) if isinstance(gen, str) else None
     if gen_ts is None:
@@ -21949,29 +22257,31 @@ def validate_enumeration(obj):
         iid = raw.get("id")
         if not isinstance(iid, str) or not iid:
             return (None, "an item has no string id")
+        named_iid = _orch_clip(iid, _ORCH_NAMED_ID_MAX)
         if iid in seen:
-            return (None, "duplicate item id {!r}".format(iid))
+            return (None, "duplicate item id {}".format(_orch_clip(repr(iid), _ORCH_NAMED_ID_MAX)))
         seen.add(iid)
         title = raw.get("title")
         if title is not None and not isinstance(title, str):
-            return (None, "item {} has a non-string title".format(iid))
+            return (None, "item {} has a non-string title".format(named_iid))
         state = raw.get("state")
         if state not in _ORCH_STATES:
-            return (None, "item {} has invalid state {!r}".format(iid, state))
+            return (None, "item {} has invalid state {}".format(
+                named_iid, _orch_clip(repr(state), _ORCH_NAMED_REASON_MAX)))
         granted = raw.get("granted")
         if not isinstance(granted, bool):
-            return (None, "item {} has a non-boolean granted".format(iid))
+            return (None, "item {} has a non-boolean granted".format(named_iid))
         blocker = raw.get("blocker")
         if blocker is not None:
             if not isinstance(blocker, dict) or blocker.get("kind") not in _ORCH_BLOCKER_KINDS \
                     or not isinstance(blocker.get("ref"), str) or not blocker.get("ref").strip():
-                return (None, "item {} has a malformed blocker".format(iid))
+                return (None, "item {} has a malformed blocker".format(named_iid))
             ev = blocker.get("evidence")
             obs = blocker.get("observed_at_utc")
             if (ev is not None and not isinstance(ev, str)) \
                     or (obs is not None and not isinstance(obs, str)):
                 return (None, "item {} has a malformed blocker field (evidence/observed_at_utc)"
-                        .format(iid))
+                        .format(named_iid))
         out.append({"id": iid, "title": title if isinstance(title, str) and title else iid,
                     "state": state, "granted": granted, "blocker": blocker})
     return (out, None)
@@ -21997,10 +22307,12 @@ def _orch_enumerate(reg, root):
     try:
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=root)
     except (OSError, subprocess.SubprocessError) as exc:
-        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(exc))
+        return ("ENUMERATOR_ERROR", "enumerator failed to run: {}".format(
+            _orch_clip(exc, _ORCH_NAMED_REASON_MAX)))
     if result.returncode != 0:
         return ("ENUMERATOR_ERROR",
-                "enumerator exit {}: {}".format(result.returncode, (result.stderr or "")[:200]))
+                "enumerator exit {}: {}".format(result.returncode,
+                                                _orch_clip(result.stderr or "", _ORCH_NAMED_REASON_MAX)))
     try:
         payload = json.loads(result.stdout)
     except ValueError as exc:
@@ -22057,16 +22369,18 @@ def _orch_pending_haystack(reg, root):
     forge a row via the id-colon match). Returns None when no surface is declared or it is
     unreadable, so an undeclared/unreadable surface HOLDS a human-decision item (cannot-evaluate) rather
     than demoting it to a definite actionable; FIX 1 DENIES the stop on that cannot-evaluate below the loop
-    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block."""
+    bound (ignorance refuses the wind-down), the operator escape releasing a genuine block. The surface is
+    read by _orch_record_surface_read, so a FIFO, a device or a directory there is unreadable at once
+    rather than stalling the hook, and a file longer than _ORCH_BARRIER_MAX_BYTES is unreadable too,
+    since a truncated record could hide a decision row."""
     rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
     declared = _orch_path(root, rec.get("pending_decisions"))
     if not declared:
         return None
-    try:
-        with open(declared, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
+    data, detail = _orch_record_surface_read(declared)
+    if detail is not None or len(data) > _ORCH_BARRIER_MAX_BYTES:
         return None
+    return _orch_record_surface_text(data)
 
 
 def _orch_attestation_refs(reg, root, staleness):
@@ -22285,7 +22599,8 @@ def decide_yield(ctx):
         # the unevaluable items are NAMED here exactly as on the stop path below, so a
         # scope-level cannot-evaluate such as lease:max_age_hours tells the operator WHAT to
         # correct, not only that one exists
-        named_sched = ", ".join(i for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
+        named_sched = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                for i, _c, _p in sched_cannot[:_ORCH_MAX_NAMED])
         if len(sched_cannot) > _ORCH_MAX_NAMED:
             named_sched += "; and {} more".format(len(sched_cannot) - _ORCH_MAX_NAMED)
         return ("DENY",
@@ -22309,12 +22624,14 @@ def decide_yield(ctx):
             return ("DENY",
                     "wake hygiene: a permitted idle must name the item or blocker it will recheck; "
                     "pending: {}".format(
-                        ", ".join(i for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
+                        ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                  for i, _c, _p in rechecked[:_ORCH_MAX_NAMED])), disposition)
         if ctx.get("cannot_evaluate", []):
             cannot_items = ctx.get("cannot_evaluate", [])
             # the unevaluable items are NAMED (bounded), so a scope-level cannot-evaluate such as
             # lease:max_age_hours tells the operator WHAT to correct, not only that one exists
-            named_cannot = ", ".join(i for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
+            named_cannot = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                     for i, _c, _p in cannot_items[:_ORCH_MAX_NAMED])
             if len(cannot_items) > _ORCH_MAX_NAMED:
                 named_cannot += "; and {} more".format(len(cannot_items) - _ORCH_MAX_NAMED)
             return ("DENY",
@@ -22336,7 +22653,9 @@ def decide_yield(ctx):
                 .format(ctx["schedule_denials"]), disposition)
     named = ctx["actionable"][:_ORCH_MAX_NAMED]
     more = len(ctx["actionable"]) - len(named)
-    listing = "; ".join("{} ({}: {})".format(i, t, w) for i, t, w in named)
+    listing = "; ".join("{} ({}: {})".format(_orch_clip(i, _ORCH_NAMED_ID_MAX),
+                                             _orch_clip(t, _ORCH_NAMED_TITLE_MAX),
+                                             _orch_clip(w, _ORCH_NAMED_REASON_MAX)) for i, t, w in named)
     if more > 0:
         listing += "; and {} more".format(more)
     if kind == "ask":
@@ -22345,7 +22664,8 @@ def decide_yield(ctx):
         if held:
             # the mixed backlog names BOTH sets in one reason: the actionable items above carry the
             # two exits, and the held items are named so the operator knows what to repair
-            named_held = ", ".join(i for i, _c, _p in held[:_ORCH_MAX_NAMED])
+            named_held = ", ".join(_orch_clip(i, _ORCH_NAMED_ID_MAX)
+                                   for i, _c, _p in held[:_ORCH_MAX_NAMED])
             if len(held) > _ORCH_MAX_NAMED:
                 named_held += "; and {} more".format(len(held) - _ORCH_MAX_NAMED)
             held_note = (" Additionally, a proof source for {} open item(s) is unreadable "
@@ -23471,6 +23791,65 @@ def _orch_lexed_amp_places(command, amps):
     return kinds
 
 
+# Runtime start forms: words and forms that can start a background job in a command with no '&' byte, so
+# an open quote or an uncertain '#' in such a command still denies (_orch_foreground_detach_lexed). coproc
+# runs its command asynchronously; eval reads a string, and an '&' built in it at run time, as code;
+# setsid can return before its command finishes (always under -f); disown leaves a job no one waits for;
+# source and a lone '.' (one at the start, or after whitespace (a blank, a newline or other whitespace),
+# ';', '|', '(', '{' or a backquote, with a blank after it) read a file as code, and a here-string (<<<)
+# fed to a shell is code too; a process substitution, <( ) or >( ), runs its command asynchronously. The
+# search reads two texts, each with every quote and backslash removed, so e'v'al, "eval" and \eval match
+# as well: the command as written, which reads a start form written whole, and the command with every
+# backslash-newline pair removed first, which reads a form split by a pair bash joins (ev\<newline>al is
+# eval, <\<newline>( a process substitution) whole. Not every pair is one bash joins (one whose backslash
+# is itself escaped, one ending a comment line, one inside single quotes), and removing such a pair can
+# glue a start word on the next line to the word before it, so a start form in EITHER text keeps the scan's
+# verdict: removing the pairs never lifts a deny the first text gives. '<<<', '<(' and '>(' have no
+# lookbehind, so the second text reads them wherever they sit, whatever is glued in front. The start words
+# and the '.' have one: the start words coproc, eval, setsid, disown and source refuse a match after a word
+# character, a '.' or a '-', and the '.' matches only after whitespace (a blank, a newline or other
+# whitespace), ';', '|', '(', '{' or a backquote, or at the start of the text. When a start word, or a '.'
+# and the blank after it, is split by a backslash-newline pair and any other backslash-newline pair comes
+# before it in the command, the search may miss it: the first text keeps it split, and the second also
+# removes the earlier pair, so the split word can be glued to whatever stood before that pair, and where
+# its lookbehind refuses what is glued in front it is read in neither text. Where the search misses such a
+# form that bash runs, the no-'&' allow can be taken (a disclosed residual). Known shapes, examples and not
+# the full set, each missed in both contexts the self-test pins while bash runs the form:
+# : x\\<newline>ev\<newline>al, : x.\\<newline>ev\<newline>al, # c\<newline>sou\<newline>rce,
+# #-\<newline>sou\<newline>rce, : x\<newline>\\<newline>ev\<newline>al and
+# : x\\<newline>\\<newline>ev\<newline>al (each earlier pair removed, eval glued to the x),
+# : x\\<newline>.\<newline> f, : x\<newline>\\<newline>.\<newline> f and #\<newline>.\<newline> f. Others
+# are read: a blank in : \\<newline>ev\<newline>al, a '/' in : /\\<newline>ev\<newline>al and the '#' of a
+# bare comment line in #\<newline>sou\<newline>rce are not refused, nor is the blank in
+# : \\<newline>.\<newline> f. A start word right after a pair inside single quotes, before the closing quote
+# or directly after it (echo 'x\<newline>'eval), is part of the quoted word, so bash runs no start word
+# there; a start word later in the command can run, as eval does in echo 'x\<newline>'; ev\<newline>al,
+# which the second text reads. A word that matches only after a removal, or one in a body or comment, reads
+# as a start form all the same, which only keeps the scan's verdict. A '.' right after a ')' is not read
+# (prose ends a sentence that way far more often than a case pattern runs '.'), nor is a start word built
+# at run time (from a variable or an ANSI-C escape).
+_ORCH_RUNTIME_START_RE = re.compile(
+    r"(?<![\w.-])(?:coproc|eval|setsid|disown|source)(?![\w.-])|(?<![^\s;|({`])\.(?=[ \t])|<<<|[<>]\(")
+_ORCH_RUNTIME_START_UNQUOTE = str.maketrans("", "", "'\"\\")
+
+
+def _orch_runtime_start_readings(command):
+    """The two texts the runtime start search (_ORCH_RUNTIME_START_RE) reads, a start form in either keeping
+    the scan's verdict: the command with every quote and backslash removed, which reads a start word written
+    whole (one after a pair bash does not join included), and the command with every backslash-newline pair
+    removed first, then every quote and backslash, which reads a form split by a pair bash joins. When a
+    start word, or a '.' and the blank after it, is split by a backslash-newline pair and any other
+    backslash-newline pair comes before it in the command, the search may miss it (a disclosed residual): the
+    first text keeps it split, and the second also removes the earlier pair, so the split word can be glued
+    to whatever stood before that pair, where a start word's lookbehind refuses a word character, a '.' or a
+    '-' and the '.' matches only after whitespace (a blank, a newline or other whitespace), ';', '|', '(',
+    '{' or a backquote, or at the start of the text. '<<<', '<(' and '>(' have no lookbehind and match in
+    the second text wherever they sit. A start word right after a pair inside single quotes, before the
+    closing quote or directly after it, is part of the quoted word, so bash runs no start word there."""
+    return (command.translate(_ORCH_RUNTIME_START_UNQUOTE),
+            command.replace("\\\n", "").translate(_ORCH_RUNTIME_START_UNQUOTE))
+
+
 def _orch_foreground_detach_lexed(command, lifts=None):
     """The foreground detach verdict orch_truncation_guard acts on: "detach", "unbalanced" or None, as the raw
     scan (_orch_foreground_detach_kind) returns them, read beside the shared lexer. The lexer decides first
@@ -23504,14 +23883,20 @@ def _orch_foreground_detach_lexed(command, lifts=None):
     and the same scan reading every here-document body as text reads a "detach" the narrowing lifts, so a
     caller that must know whether it did reads the list instead of running the scan again.
 
-    COST: a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for the
-    scan, so neither the lex nor the narrowing can change what the scan returns, and the lex (which can
-    cost more than both scan rules together) is not run; a command that also holds no '#' and no quote
-    gives None from both scan rules (they return anything else only at one of those four characters, or
-    at the end inside a quote one of them opened), so the scan is not run either. The verdict is the same
-    either way."""
+    NO '&': a command with no '&' anywhere holds no bare `&` separator for the lexer and no bare `&` for
+    the scan, so the lex (which can cost more than both scan rules together) is not run. Its "unbalanced"
+    (an open quote or an uncertain '#') says only that a LATER '&' might be hidden, and there is none, so
+    it is None without the scan (an apostrophe in a quoted here-document body the scan reads as code, ahead
+    of any later command, was denied as a possible detach although the command holds no '&' at all), UNLESS
+    the command holds a runtime start form (_ORCH_RUNTIME_START_RE) that can start a background job with no
+    '&' byte: there the scan decides as it does for any command, so an open quote or an uncertain '#' still
+    denies. A command that also holds no '#' and no quote gives None from both scan rules (they return
+    anything else only at one of those four characters, or at the end inside a quote one of them opened),
+    so the scan is not run either. The verdict is the same either way."""
     if "&" not in command:
         if "#" not in command and "'" not in command and '"' not in command:
+            return None
+        if not any(_ORCH_RUNTIME_START_RE.search(text) for text in _orch_runtime_start_readings(command)):
             return None
         return _orch_foreground_detach_kind(command)
     try:
@@ -23605,12 +23990,14 @@ def _orch_foreground_detach(command):
     b"` in the commit-message form) is allowed where the scan reads the rest of the command to its end. A
     body the scan reads as code at the outer quoting level with an unbalanced apostrophe (`cat <<'EOF'`
     to standard output, or one with no delimiter line), or one whose quote leaves the scan open at the end,
-    is still DENIED although nothing detaches, and so is a body `&` under an unquoted delimiter, which the
-    lexer refuses. The commit-message form's body is NOT denied for an unbalanced apostrophe: it sits
-    inside the outer double quotes, where the scan reads an apostrophe as a literal character. The remedy
-    is to quote the delimiter and write the content with `cat > file` in a call of its own that holds
-    nothing but such writes, then run any other command in a separate call, or to write the text to a file
-    and pass the file.
+    is still DENIED although nothing detaches where the command holds an `&` or a runtime start form
+    (_ORCH_RUNTIME_START_RE), and so is a body `&` under an unquoted delimiter, which the lexer refuses; the
+    guard allows such a body in a command that holds neither (_orch_foreground_detach_lexed), where the
+    open quote has no `&` to hide. The commit-message form's body is NOT denied for an unbalanced
+    apostrophe: it sits inside the outer double quotes, where the scan reads an apostrophe as a literal
+    character. The remedy is to quote the delimiter and write the content with `cat > file` in a call of its
+    own that holds nothing but such writes, then run any other command in a separate call, or to write the
+    text to a file and pass the file.
 
     KNOWN FALSE-ALLOW RESIDUAL OF THIS SCAN (confirmed against real bash, disclosed in the manifest, which
     lists the same cases): the scan reads only the outer quoting level, and its quote and comment tracking
@@ -31309,20 +31696,121 @@ def _orch_resume_audit_findings(status, reg, root):
     return findings
 
 
+def _orch_record_value_kind(value):
+    """The kind of a registry value in plain words, for a cannot-evaluate finding: an empty string, null,
+    a boolean (tested before a number, since a JSON boolean is a Python int), a number, a list or an
+    object; never a Python type name."""
+    if isinstance(value, str):
+        return "an empty string" if not value else "a string"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, (int, float)):
+        return "a number"
+    if isinstance(value, list):
+        return "a list"
+    return "an object" if isinstance(value, dict) else "a value of another kind"
+
+
+def _orch_record_unusable(key, value):
+    """The finding for a record key that is present with a value _orch_path refuses. It names the key
+    and the value's kind, never the value itself, so a large value stays out of the text."""
+    return ("the registry declares record.{} with an unusable value ({}), not a non-empty path string: "
+            "cannot-evaluate".format(key, _orch_record_value_kind(value)))
+
+
+def _orch_record_block(reg):
+    """(record table, finding or None). An absent record block is ({}, None): nothing is declared. A
+    record block that is present and not a table (a list, a string, a number, a boolean or null) is
+    ({}, a cannot-evaluate finding naming the block and its kind), so it never reads as nothing to check."""
+    if "record" not in reg:
+        return ({}, None)
+    rec = reg["record"]
+    if isinstance(rec, dict):
+        return (rec, None)
+    return ({}, "the registry declares the record block as {}, not a table, so no record surface can be "
+                "probed: cannot-evaluate".format(_orch_record_value_kind(rec)))
+
+
+def _orch_record_surface_read(path):
+    """Read a declared record surface without waiting for a FIFO writer and without reading past the
+    bound: (data, None) with at most _ORCH_BARRIER_MAX_BYTES + 1 bytes, or (None, detail). The open is
+    os.open(O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC), so a FIFO with no writer opens at once instead
+    of waiting for one; the opened descriptor is fstat'ed and anything not a regular file (a FIFO, a
+    device, a directory) is (None, "not a regular file") without a read; a UNIX socket fails the open
+    (ENXIO). The read asks for at most _ORCH_BARRIER_MAX_BYTES + 1 bytes in all, so a caller tells a file
+    longer than the bound by len(data) > _ORCH_BARRIER_MAX_BYTES and decides what that means for its
+    surface. A failed open (a missing file, a NUL character in the path), read or close is (None, its
+    text). The descriptor is closed exactly once on every path. Not bounded here: the path lookup can
+    stall on a hung mount, and a regular file on a stalled filesystem can stall the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+                     | getattr(os, "O_CLOEXEC", 0))
+    except (OSError, ValueError) as exc:  # ValueError: a path with a NUL character
+        return (None, str(exc))
+    chunks, total, detail = [], 0, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            detail = "not a regular file"
+        else:
+            while total <= _ORCH_BARRIER_MAX_BYTES:
+                chunk = os.read(fd, _ORCH_BARRIER_MAX_BYTES + 1 - total)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+    except OSError as exc:
+        detail = str(exc)
+    finally:
+        try:
+            os.close(fd)  # once: after a failed close the descriptor number may already be reused
+        except OSError as exc:
+            detail = detail or str(exc)
+    if detail is not None:
+        return (None, detail)
+    return (b"".join(chunks), None)
+
+
+def _orch_record_surface_text(data):
+    """Decode the bytes _orch_record_surface_read gave for a record surface (handoff, findings or
+    pending_decisions) with the newline translation a text-mode open applies: a CRLF and then a lone CR
+    each become LF, so a Branch or Gate line, a findings row or a decision row after a CR still starts a
+    line. The bound is judged on the bytes, before this."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _orch_resume_probes(reg, root):
     """The resume-audit probes (shared with tools/orch_doctor.py --resume-audit). Returns a list of
-    finding strings; empty means the recorded state matches observed reality."""
+    finding strings; empty means the recorded state matches observed reality. A record block that is
+    present and not a table is one cannot-evaluate finding (_orch_record_block). Each of handoff,
+    findings and pending_decisions that is present in the record with a value _orch_path refuses (an
+    empty string, null, a number, a boolean, a list or an object) is a cannot-evaluate finding naming the
+    key and the value's kind; an absent key is undeclared. Each declared surface is read by
+    _orch_record_surface_read: a FIFO, a device, a directory or anything else not a regular file is a
+    finding without a read, and no read takes more than _ORCH_BARRIER_MAX_BYTES + 1 bytes. A handoff
+    longer than the bound is a finding, since its Branch and Gate lines are parsed and a truncated handoff
+    cannot be judged; the findings register's content is parsed by _orch_merge_pending_findings, which
+    makes a longer register a finding there; pending_decisions is only required to be readable here, so a
+    longer regular file is no finding from this probe."""
     findings = []
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    rec, block_finding = _orch_record_block(reg)
+    if block_finding is not None:
+        findings.append(block_finding)
+    for key in ("handoff", "findings", "pending_decisions"):
+        if key in rec and _orch_path(root, rec[key]) is None:
+            findings.append(_orch_record_unusable(key, rec[key]))
     handoff_path = _orch_path(root, rec.get("handoff"))
     if handoff_path:
-        try:
-            with open(handoff_path, "r", encoding="utf-8", errors="replace") as fh:
-                handoff = fh.read()
-        except OSError as exc:
+        data, detail = _orch_record_surface_read(handoff_path)
+        if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+            detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+        if detail is not None:
             findings.append("declared handoff unreadable ({}): cannot-evaluate, the barrier holds"
-                            .format(exc))
+                            .format(detail))
             handoff = ""
+        else:
+            handoff = _orch_record_surface_text(data)
         m = re.search(r"^Branch:\s*(\S+)\s*$", handoff, re.MULTILINE)
         if m:
             actual = _head_branch(root)
@@ -31344,12 +31832,10 @@ def _orch_resume_probes(reg, root):
     for key in ("findings", "pending_decisions"):
         path = _orch_path(root, rec.get(key))
         if path:
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    fh.read()
-            except OSError as exc:
+            _data, detail = _orch_record_surface_read(path)
+            if detail is not None:
                 findings.append("declared record surface {} unreadable ({}): cannot-evaluate"
-                                .format(key, exc))
+                                .format(key, detail))
     lease = reg.get("lease") if isinstance(reg.get("lease"), dict) else None
     if lease:
         path = _orch_path(root, lease.get("path"))
@@ -31384,16 +31870,21 @@ def _orch_resume_probes(reg, root):
 def _orch_merge_pending_findings(reg, root):
     """The cheap in-hook layer of the record-drift check: an OPEN merge_pending row whose pr:N ref
     already has first-parent merge evidence is a divergence finding. tools/check_record_drift.py is
-    the authoritative gate; this probe only feeds the resume audit."""
-    rec = reg.get("record") if isinstance(reg.get("record"), dict) else {}
+    the authoritative gate; this probe only feeds the resume audit. A record block that is not a table
+    and an unusable findings value are reported once, by _orch_resume_probes; here they declare nothing.
+    The register is read by _orch_record_surface_read; one that is not a regular file, cannot be read,
+    or is longer than _ORCH_BARRIER_MAX_BYTES is a cannot-evaluate finding, since a truncated register
+    could hide a merge_pending row."""
+    rec = _orch_record_block(reg)[0]
     path = _orch_path(root, rec.get("findings"))
     if not path:
         return []
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-    except OSError as exc:
-        return ["declared findings register unreadable ({}): cannot-evaluate".format(exc)]
+    data, detail = _orch_record_surface_read(path)
+    if detail is None and len(data) > _ORCH_BARRIER_MAX_BYTES:
+        detail = "larger than the {}-byte bound".format(_ORCH_BARRIER_MAX_BYTES)
+    if detail is not None:
+        return ["declared findings register unreadable ({}): cannot-evaluate".format(detail)]
+    text = _orch_record_surface_text(data)
     prs = set()
     for line in text.splitlines():
         if "merge_pending" in line:
@@ -35196,7 +35687,7 @@ _WRTSCP_MAX_BYTES = 64 * 1024                    # 64 KB: both artifacts are sma
 # SAME human-authorization discipline as any other scope widening (guardrail-config-integrity), so the actor
 # must not be able to self-declare a companion-store widening through a covered write; freezing the registry
 # against its own covered writes closes that self-widening residual (raised independently by our own QA and
-# the cleanlanguage adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
+# an adopter). BOTH registry files are frozen, not only the LOCAL one: _wrtscp_companion_stores
 # reads companion_stores from EITHER file (via _orch_registry, which falls back to the committed
 # .aiqt/orchestration.json when the LOCAL file is absent), so freezing only the LOCAL file left a covered
 # Write of companion_stores into .aiqt/orchestration.json to take effect IN-SESSION (its cross-repo allow
@@ -36315,9 +36806,10 @@ class _DeadlineWindow:
 
     def _take(self):
         """The take, run with every maskable signal blocked, in the order the class docstring gives. The
-        clock is read just before the take, so the window's use is never undercounted (a caller timer comes
-        back at most microseconds early, never late). Anything that raises once the timer is taken gives it
-        back, with the disposition, before the exception goes on."""
+        clock is read just before the take, so the take itself counts as time the window used. That does
+        not keep the restore from being late: _give_back says by how much a caller timer can come back late.
+        Anything that raises once the timer is taken gives it back, with the disposition, before the
+        exception goes on."""
         handler = signal.getsignal(signal.SIGALRM)
         began = time.monotonic()
         timer = self._as_taken(signal.setitimer(signal.ITIMER_REAL, 0))
@@ -36339,8 +36831,12 @@ class _DeadlineWindow:
 
     def _give_back(self):
         """The restore, run with every maskable signal blocked, in the order the class docstring gives: each
-        operation through _twice, the clock read once to decide whether the caller's timer came due, and a
-        due expiry queued last. `armed` is False when it returns or raises."""
+        operation through _twice, the clock read once to decide whether the caller's timer came due and what
+        it has left, and a due expiry queued last. setitimer counts the countdown from the moment the re-arm
+        runs, so a caller timer comes back late by the time between that clock read and the re-arm (normally
+        microseconds; a stall of the process in between adds its whole length) plus up to a microsecond from
+        setitimer rounding up; a relative re-arm computed before it runs cannot avoid this. `armed` is False
+        when it returns or raises."""
         self._live = False
         if not self.armed:
             return

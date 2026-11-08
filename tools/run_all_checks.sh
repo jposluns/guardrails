@@ -2,7 +2,13 @@
 # Run every quality gate, in the same order CI runs them.
 # Never pipe this to a truncating sink: a masked exit code defeats the gate.
 set -uo pipefail
-cd "$(dirname "$0")/.." || exit 2
+# The repository root, resolved in checked steps: a dirname that fails or prints nothing exits 2 here,
+# before any gate, rather than leaving the runner in the calling directory's parent or at /. CDPATH is
+# cleared for the cd, as in opf/enforcement/ci/opf-ci.sh: a relative start (tools/run_all_checks.sh)
+# would otherwise resolve through a CDPATH entry holding a tools directory and run that tree's gates.
+dir=$(dirname -- "$0") || exit 2
+[ -n "$dir" ] || exit 2
+CDPATH= cd -- "$dir/.." || exit 2
 
 # Every gate below launches isolated: `python3 -I -B tools/<gate>.py`. `-I` (isolated mode) drops the
 # script's own directory from sys.path so a tool-written sibling (a stray tools/os.py) cannot shadow a
@@ -95,8 +101,9 @@ run_gate "dashes"    python3 -I -B tools/check_no_dashes.py
 run_gate "dashes-selftest" python3 -I -B tools/check_no_dashes.py --self-test
 run_gate "dashes-default-parity" python3 -I -B tools/check_no_dashes.py --default-parity
 run_gate "links"     python3 -I -B tools/check_links.py
-run_gate "site-selftest" python3 -I -B tools/check_site.py --self-test
+run_gate "site-selftest" python3 -I -B tools/check_selftest_execution.py --suite site-selftest
 run_gate "site"      python3 -I -B tools/check_site.py
+run_gate "site-scope-selftest" python3 -I -B tools/ci_site_scope.py --self-test
 run_gate "overclaim-selftest" python3 -I -B tools/check_overclaim.py --self-test
 run_gate "overclaim" python3 -I -B tools/check_overclaim.py
 run_gate "license-qual-selftest" python3 -I -B tools/check_license_qualification.py --self-test
@@ -109,6 +116,18 @@ run_gate "newtab-selftest" python3 -I -B tools/check_newtab.py --self-test
 run_gate "newtab" python3 -I -B tools/check_newtab.py
 run_gate "site-versions-selftest" python3 -I -B tools/check_site_versions.py --self-test
 run_gate "site-versions" python3 -I -B tools/check_site_versions.py
+run_gate "draft-site-selftest" python3 -I -B tools/gen_draft_site.py --self-test
+run_gate "draft-site-drift" python3 -I -B tools/gen_draft_site.py --check
+run_gate "baseline-pin-selftest" python3 -I -B tools/check_selftest_execution.py --suite baseline-pin-selftest
+run_gate "baseline-pin" python3 -I -B tools/check_baseline_pin.py
+run_gate "palette-aiqt" python3 -I -B .baseline/check_palette.py --site aiqt --palettes site/draft/assets/baseline/palettes.css
+run_gate "palette-opfiles" python3 -I -B .baseline/check_palette.py --site opfiles --palettes opf/site/draft/assets/baseline/palettes.css
+run_gate "security-txt-selftest" python3 -I -B tools/check_selftest_execution.py --suite security-txt-selftest
+run_gate "security-txt" python3 -I -B tools/check_security_txt.py
+run_gate "sitemap-selftest" python3 -I -B tools/check_selftest_execution.py --suite sitemap-selftest
+run_gate "sitemap" python3 -I -B tools/check_sitemap.py
+run_gate "headers-selftest" python3 -I -B tools/check_selftest_execution.py --suite headers-selftest
+run_gate "headers" python3 -I -B tools/check_headers.py
 run_gate "opf-render-selftest" python3 -I -B tools/selftest_opf_render.py
 run_gate "opf-homes-selftest" python3 -I -B opf/tools/check_opf_homes.py --self-test
 run_gate "opf-homes-contract" python3 -I -B opf/tools/check_opf_homes.py
@@ -145,6 +164,8 @@ run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pac
 run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
 run_gate "opf-enforce-platforms-selftest" python3 -I -B tools/check_opf_enforce_platforms.py --self-test
 run_gate "opf-enforce-platforms" python3 -I -B tools/check_opf_enforce_platforms.py
+run_gate "opf-enforce-residuals-selftest" python3 -I -B tools/check_opf_enforce_residuals.py --self-test
+run_gate "opf-enforce-residuals" python3 -I -B tools/check_opf_enforce_residuals.py
 run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --self-test
@@ -211,10 +232,6 @@ run_gate "reference-facts-selftest" python3 -I -B tools/check_reference_facts.py
 run_gate "reference-facts" python3 -I -B tools/check_reference_facts.py
 run_gate "disclosure-selftest" python3 -I -B tools/gen_disclosure.py --self-test
 run_gate "disclosure-drift"    python3 -I -B tools/gen_disclosure.py --check
-run_gate "install-selftest" python3 -I -B tools/gen_install.py --self-test
-run_gate "install-drift"    python3 -I -B tools/gen_install.py --check
-run_gate "install-page-selftest" python3 -I -B tools/check_install_page.py --self-test
-run_gate "install-page" python3 -I -B tools/check_install_page.py
 run_gate "sized-instructions-selftest" python3 -I -B tools/check_sized_instructions.py --self-test
 run_gate "sized-instructions" python3 -I -B tools/check_sized_instructions.py
 run_gate "instruction-budget-selftest" python3 -I -B tools/check_instruction_budget.py --self-test
@@ -240,6 +257,7 @@ run_gate "hooks-preview" python3 -I -B tools/check_hooks_preview.py
 run_gate "selftest-execution-selftest" python3 -I -B tools/check_selftest_execution.py --self-test
 run_gate "orch-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite orch-behaviour-selftest
 run_gate "ci-status-behaviour-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-status-behaviour-selftest
+run_gate "ci-site-scope-selftest" python3 -I -B tools/check_selftest_execution.py --suite ci-site-scope-selftest
 run_gate "git-fixture-env-core" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-core
 run_gate "git-fixture-env-config-combined" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-combined
 run_gate "git-fixture-env-config-malformed" python3 -I -B tools/check_selftest_execution.py --suite git-fixture-env-config-malformed
@@ -295,6 +313,7 @@ run_gate "placement-selftest" python3 -I -B tools/check_selftest_execution.py --
 run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
+run_gate "mappings-selftest" python3 -I -B tools/check_selftest_execution.py --suite mappings-selftest
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 # Repository-only assertion lives outside the shipped tooling: it pins the corpus below and the whole permitted
 # gate invocation in both runners (--config .aiqt/cited-standards.toml and nothing else, so an appended --root

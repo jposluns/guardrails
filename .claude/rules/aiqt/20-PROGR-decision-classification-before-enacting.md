@@ -8,7 +8,7 @@ secondary: [TRUST]
 slug: decision-classification-before-enacting
 map-nist-airmf-tight: [GOVERN 3.2, MAP 3.5]
 map-iso-42001-broad: [A.9.2]
-map-iso-23894-tight: [A.2, B.4]
+map-iso-23894-broad: [A.2, B.4]
 ---
 
 # Decision classification before enacting
