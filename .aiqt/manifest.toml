@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "2d05ddc3d7dcdce00f341155cdf5ebe59ac2dbed5e2437ba722584bb9cc47324"
+tree-sha256 = "bceca4bc7ac3254bdbcde6f9c0f106cff092e864f0cb47099d6324b8e394864d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3221,8 +3221,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_premise_gate.py"
-bytes = 36843
-sha256 = "afd2266d8bfb521bc7180d1a88c276c454c7928701fcccd1e406f1f2808517f6"
+bytes = 41194
+sha256 = "76d7b0e9d5c80433d6ebc51923f638b997c5ac405e8b620b0fa8f7c3ed1b7b4f"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
@@ -4156,8 +4156,8 @@ sha256 = "9387831df89640649d02a6382c5714bbcd2afc7079a5ccba60c8632d3f3349d2"
 
 [[sources]]
 path = "tools/check_child_status_coverage.py"
-bytes = 219543
-sha256 = "28a366672e3597a990f62a096acce4f3b700eeceed7dc289341998fcdebf7035"
+bytes = 219578
+sha256 = "fab1685d03f6bfa2b4caaca650ec0f68e625e59cdacea38984f6c6e8042c43aa"
 
 [[sources]]
 path = "tools/check_ci_parity.py"
@@ -4316,8 +4316,8 @@ sha256 = "ec1cf77885f467ad74e94587104a53d2460b907802225a47ba5e6991f9701a79"
 
 [[sources]]
 path = "tools/check_premise_gate.py"
-bytes = 40163
-sha256 = "5c7d26360c9f85ecf61774601e2913093eb7c47a7018aa56eb2621f83c83da93"
+bytes = 51315
+sha256 = "bf18452edf285b9f8eb6a089f97eeac6290a9f1c3823dafab3985fc3abd109bf"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -4666,8 +4666,8 @@ sha256 = "cc0464c20f62e7c83131c52c90ff9eafa40bcdd2f425fa158496c83e326a9b7c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 223005
-sha256 = "22773af5b08a66690caf2d5a6c49ae5c5ce7346a01d9ac284961239fe324895f"
+bytes = 223891
+sha256 = "0e9ded3befa17dd40e9ea4f1e7a754e88d7566ceb8ef0a03b7473c1a6f0f3c74"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

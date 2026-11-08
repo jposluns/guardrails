@@ -8,6 +8,10 @@ record-rotation archive read together, the unit's flow entries parsed under the 
 the writer's lifecycle lines, and the unit's records, all behind the section 8.6 firewall (only
 clean WL-series entries and records by non-importer actors count; an `imported:` id or an
 importer-authored entry or record is history, never read as live state, and never an obligation).
+Every row read is validated before the firewall may hold it out: a clean-series row against its
+clean schema, and a row carrying an `imported:` id against the closed imported envelope
+(OPF-SPEC.md section 8.3, _opf_schema.validate_imported_record); a malformed row of either series
+is record-invalid, never a silent skip.
 
 This draft carries the read side only. Its outcomes:
 
@@ -32,12 +36,15 @@ Cannot-evaluate causes, fail-closed and never read as an empty history:
                          span, or a moved record's destination cannot be read as declared: a
                          worklog_moved row missing a required key or carrying an invalid value, a
                          bucket worklog file the bucket does not declare, declared spans without
-                         that file, spans that do not cover exactly the WL numbers read from it,
+                         that file, spans that overlap one another, spans that do not cover
+                         exactly the WL numbers read from it (decided arithmetically from the
+                         span bounds; a declared span is never expanded into its numbers),
                          or a moved record not seated exactly once at its destination
   index-unreadable       a <type>.index.toml this evaluator reads is absent, unreadable, or not a
                          schema-1 {schema, record} index
-  record-invalid         a worklog entry or record fails its _opf_schema validation, carries a
-                         non-WL id, or an id is seated twice
+  record-invalid         a worklog entry or record fails its _opf_schema validation (a clean row
+                         against the clean schema, an `imported:` row against the section 8.3
+                         imported envelope), carries a non-WL id, or an id is seated twice
   duplicate-wl           two worklog entries carry the same WL number
   unknown-flow-event     a `flow ` detail line carries an event outside the section 5 set (the
                          section 5 run entry, `flow run ...`, is recognised and never read as a
@@ -57,7 +64,12 @@ Cannot-evaluate causes, fail-closed and never read as an empty history:
 
 Boundary notes. The head WL is the highest number over every WL-series entry read, active and
 archived, importer-authored entries included (an importer append still moves the store), while the
-`imported:` series is separate and never counted. Zero rounds is a positive reading (a `flow
+`imported:` series is separate and never counted (each such row is validated against the imported
+envelope, then held out). Declared rotated spans are reconciled arithmetically against the WL
+numbers read from the bucket's worklog file: the sorted spans must not overlap (a WL number lives
+in exactly one rotated span, the same refusal _opf_check.py's archive reconciliation makes), every
+number read must sit inside one span, and the count of distinct numbers read must equal the sum of
+the span widths, so a declared span of any width costs only its two bounds. Zero rounds is a positive reading (a `flow
 start` and no non-failed DISCOVERY `verdict` in the unit's clean history; the window count takes
 every such verdict wherever it sits relative to the start entry), never a stand-in for an
 unreadable store. A
@@ -217,7 +229,9 @@ def _require_flow_relates(entry, item, number):
 
 
 def _ignored_by_firewall(ident, actor_kind):
-    """The section 8.6 firewall: imported-series ids and importer-authored writes are history."""
+    """The section 8.6 firewall: imported-series ids and importer-authored writes are history.
+    An `imported:` id reaches this test only after the row passed the section 8.3 imported
+    envelope; a row of either series is validated before it may be held out."""
     return ident.startswith(_opf_schema.IMPORTED_PREFIX) or actor_kind == "importer"
 
 
@@ -338,6 +352,16 @@ def _validate_clean_record(row, rtype, where):
             where, "; ".join(validation.findings) or validation.status))
 
 
+def _validate_imported_record(row, rtype, where):
+    """One imported-series row through the closed imported envelope (OPF-SPEC.md section 8.3,
+    _opf_schema.validate_imported_record); anything but VALID fails closed. The section 8.6
+    firewall may hold a row out as history only after it validated."""
+    validation = _opf_schema.validate_imported_record(row, expected_type=rtype)
+    if validation.status != _opf_store.VALID:
+        raise PremiseGateCannot("record-invalid", "{}: {}".format(
+            where, "; ".join(validation.findings) or validation.status))
+
+
 def _require_item(records, item):
     """The unit's item must be a clean non-importer backlog_item in the store read."""
     if item not in records["backlog_item"]:
@@ -388,11 +412,19 @@ def _archive_stat_failed(exc):
 def _require_span_row(row, bucket, destination):
     """One worklog_moved row carries every required key with a valid value: span, a two-element
     [low, high] of canonical WL-n references whose low end does not exceed its high end, and
-    destination, the bucket's own worklog file. Returns the WL numbers the span covers, both
-    ends inclusive."""
+    destination, the bucket's own worklog file. Returns a one-element tuple holding the span's
+    inclusive (low, high) bounds; the span is never expanded into its numbers, so a span of any
+    width costs only its two bounds."""
     if not (isinstance(row, dict) and set(row) == ARCHIVE_WLMOVED_KEYS):
         raise PremiseGateCannot("archive-unreadable", bucket + ": malformed worklog_moved row")
-    bounds = row["span"]
+    low, high = _require_span_bounds(row["span"], bucket)
+    _require_own_destination(row["destination"], destination, bucket)
+    return ((low, high),)
+
+
+def _require_span_bounds(bounds, bucket):
+    """A span is [low, high]: two canonical suffix-free WL-n references with low not above high;
+    a suffixed bound is refused, never parsed down to its number. Returns (low, high)."""
     refs = ([_opf_worklog._valid_wl_ref(bound) for bound in bounds]
             if isinstance(bounds, list) and len(bounds) == 2 else [None])
     if any(ref is None or ref[1] is not None for ref in refs):
@@ -402,11 +434,15 @@ def _require_span_row(row, bucket, destination):
     if refs[0][0] > refs[1][0]:
         raise PremiseGateCannot("archive-unreadable",
                                 bucket + ": worklog_moved span low end is above its high end")
-    if row["destination"] != destination:
+    return (refs[0][0], refs[1][0])
+
+
+def _require_own_destination(dest, expected, bucket):
+    """A worklog_moved destination is the declaring bucket's own worklog file, nothing else."""
+    if dest != expected:
         raise PremiseGateCannot("archive-unreadable",
                                 "{}: worklog_moved destination must be the bucket's own "
-                                "worklog file {}".format(bucket, destination))
-    return range(refs[0][0], refs[1][0] + 1)
+                                "worklog file {}".format(bucket, expected))
 
 
 def _require_declared_worklog(declared, document, bucket):
@@ -420,13 +456,33 @@ def _require_declared_worklog(declared, document, bucket):
 
 
 def _require_span_match(declared, entries, bucket):
-    """The declared spans and the bucket's worklog entries must cover the same WL numbers."""
+    """The declared spans and the bucket's worklog entries must cover the same WL numbers,
+    decided arithmetically over the (low, high) bounds, never by expanding a span: the sorted
+    spans must not overlap (a WL number lives in exactly one rotated span; the same refusal
+    _opf_check.py's archive reconciliation makes), every WL number read must sit inside one
+    declared span, and the count of distinct WL numbers read must equal the sum of the span
+    widths, which over disjoint spans decides exact coverage in both directions."""
     read = set()
     for entry in entries:
         ref = _opf_worklog._valid_wl_ref(entry.get("id")) if isinstance(entry, dict) else None
         if ref is not None:
             read.add(ref[0])
-    if read != declared:
+    spans = sorted(declared)
+    for previous, current in zip(spans, spans[1:]):
+        if current[0] <= previous[1]:
+            raise PremiseGateCannot("archive-unreadable",
+                                    "{}: worklog_moved spans WL-{}..WL-{} and WL-{}..WL-{} "
+                                    "overlap".format(bucket, previous[0], previous[1],
+                                                     current[0], current[1]))
+    position = 0
+    for number in sorted(read):
+        while position < len(spans) and spans[position][1] < number:
+            position += 1
+        if position >= len(spans) or number < spans[position][0]:
+            raise PremiseGateCannot("archive-unreadable",
+                                    "{}: archived worklog WL-{} is outside every declared "
+                                    "rotated span".format(bucket, number))
+    if len(read) != sum(high - low + 1 for low, high in spans):
         raise PremiseGateCannot("archive-unreadable",
                                 bucket + ": the declared rotated spans do not match the WL "
                                 "numbers read from its worklog.toml")
@@ -535,9 +591,9 @@ def _read_archive(root_fd, machine_rel, snapshot):
             raise PremiseGateCannot("archive-unreadable",
                                     bucket + "/archive.toml moved/worklog_moved must be arrays")
         wl_rel = ARCHIVE_DIRNAME + "/" + name + "/" + _opf_worklog.LEGACY_NAME
-        declared = set()
+        declared = []
         for span in spans:
-            declared.update(_require_span_row(span, bucket, wl_rel))
+            declared.extend(_require_span_row(span, bucket, wl_rel))
         try:
             document = _opf_worklog.load_archive_worklog_at(
                 root_fd, bucket + "/" + _opf_worklog.LEGACY_NAME, on_read=snapshot.feed)
@@ -591,8 +647,14 @@ def _collect_worklog(entries):
         ident = entry.get("id")
         if not isinstance(ident, str):
             raise PremiseGateCannot("record-invalid", where + " carries no string id")
+        actor = entry.get("actor")
+        kind = actor.get("kind") if isinstance(actor, dict) else None
         if ident.startswith(_opf_schema.IMPORTED_PREFIX):
-            continue                    # the imported series is a separate number line
+            # The imported series is a separate number line, never counted toward the head, but
+            # a row is validated (section 8.3 envelope) before the firewall may hold it out.
+            _validate_imported_record(entry, "worklog", ident)
+            if _ignored_by_firewall(ident, kind):
+                continue
         ref = _opf_worklog._valid_wl_ref(ident)
         if ref is None:
             raise PremiseGateCannot("record-invalid",
@@ -601,8 +663,6 @@ def _collect_worklog(entries):
         _require_fresh_wl(seen, number, ident)
         seen.add(number)
         _validate_clean_record(entry, "worklog", ident)
-        actor = entry.get("actor")
-        kind = actor.get("kind") if isinstance(actor, dict) else None
         if _ignored_by_firewall(ident, kind):
             continue                    # importer-authored: validated, then kept out of live history
         clean.append((number, entry))
@@ -660,11 +720,15 @@ def _collect_records(root_fd, machine_rel, snapshot, archived):
             ident = row.get("id")
             if not isinstance(ident, str):
                 raise PremiseGateCannot("record-invalid", rel + " carries a record with no string id")
-            if ident.startswith(_opf_schema.IMPORTED_PREFIX):
-                continue
-            _validate_clean_record(row, rtype, ident)
             actor = row.get("actor")
             kind = actor.get("kind") if isinstance(actor, dict) else None
+            if ident.startswith(_opf_schema.IMPORTED_PREFIX):
+                # Validated against the section 8.3 imported envelope before the firewall may
+                # hold the row out of the live record set.
+                _validate_imported_record(row, rtype, ident)
+                if _ignored_by_firewall(ident, kind):
+                    continue
+            _validate_clean_record(row, rtype, ident)
             if _ignored_by_firewall(ident, kind):
                 continue
             if ident in byid:

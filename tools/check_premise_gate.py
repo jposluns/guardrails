@@ -10,9 +10,13 @@ Each input/* and history/* outcome row asserts one evaluation outcome (the exit 
 refusal, its cause token), and its flip/* companion repeats the same fixture with that row's one
 guard removed (a module attribute replaced in process through unittest.mock; nothing is executed
 from text) and asserts the outcome CHANGES, so a build that loses the guard turns the row red.
+Each flip removes exactly the guard its row's comment names, so a red flip points at that guard.
 The *-first-line rows pin the rendered first line of a result another row already asserts and
-carry no flip. The evaluator is loaded from its repository path with importlib; the fixtures are
-synthetic stores under a tempdir, and no live store is read or written.
+carry no flip; input/archive-span-huge also carries no flip (it pins the arithmetic span read, a
+property of the reconciliation itself, not a removable guard) and runs its evaluation in a child
+process under a memory limit so an expanding build dies there, never in this runner. The
+evaluator is loaded from its repository path with importlib; the fixtures are synthetic stores
+under a tempdir, and no live store is read or written.
 """
 import sys
 
@@ -29,6 +33,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
     os._exit(2)
 
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -474,6 +479,114 @@ def _self_test():
         check("input/archive-span-mismatch", plain[0], plain[1])
         check("flip/input/archive-span-mismatch", red[0], red[1])
 
+        # input/archive-span-huge: a tiny archive.toml declaring span WL-1..WL-100000000000 is a
+        # definite exit-2 refusal, never a memory crash: the span is reconciled from its two
+        # bounds, never expanded. Run in a child process under a memory limit so a build that
+        # expands the span dies in the child instead of this runner; the row carries no flip (the
+        # arithmetic read is the property under test, not a removable guard).
+        os.makedirs(base / "spanhuge")
+        spanhuge = Fixture(base / "spanhuge").unit()
+        spanhuge_path = spanhuge.write()
+        spanhuge.bucket("2026", 'schema = 1\n[[worklog_moved]]\n'
+                        'span = ["WL-1", "WL-100000000000"]\n'
+                        'destination = "archive/2026/worklog.toml"\n', entries=[])
+        child = ("import resource, sys, importlib.util\n"
+                 "resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)\n"
+                 "spec = importlib.util.spec_from_file_location('_opf_premise_gate', sys.argv[1])\n"
+                 "module = importlib.util.module_from_spec(spec)\n"
+                 "spec.loader.exec_module(module)\n"
+                 "result = module.evaluate(sys.argv[2], sys.argv[3])\n"
+                 "print(result.exit_code, result.cause)\n")
+        proc = subprocess.run([sys.executable, "-I", "-B", "-c", child, str(ROOT / GATE_REL),
+                               spanhuge_path, ITEM], capture_output=True, text=True, timeout=60)
+        check("input/archive-span-huge",
+              proc.returncode == 0 and proc.stdout.strip() == "2 archive-unreadable",
+              (proc.returncode, proc.stdout[-500:], proc.stderr[-500:]))
+
+        # input/archive-span-overlap: two declared spans share WL-6; a WL number lives in exactly
+        # one rotated span, so overlap is refused (the choice the archive reconciliation in
+        # opf/tools/_opf_check.py makes). The flip removes the whole span reconciliation.
+        os.makedirs(base / "spanov")
+        spanov = Fixture(base / "spanov").unit()
+        spanov_path = spanov.write()
+        spanov_side = Fixture(base / "spanov")
+        for number in (5, 6, 7):
+            spanov_side.entry("WL-{}".format(number), summary="rotated bookkeeping")
+        spanov.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-5", "WL-6"]\n'
+                      'destination = "archive/2026/worklog.toml"\n[[worklog_moved]]\n'
+                      'span = ["WL-6", "WL-7"]\ndestination = "archive/2026/worklog.toml"\n',
+                      spanov_side.entries)
+        plain, red, _got = _vector(gate, spanov_path, 2, "archive-unreadable",
+                                   ("_require_span_match", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-span-overlap", plain[0], plain[1])
+        check("flip/input/archive-span-overlap", red[0], red[1])
+
+        # input/archive-wl-outside-spans: the bucket worklog holds WL-5 and WL-9 while the spans
+        # declare WL-5..WL-6, so the distinct-number count matches the span widths and only the
+        # membership test catches WL-9 outside every declared span.
+        os.makedirs(base / "spanout")
+        spanout = Fixture(base / "spanout").unit()
+        spanout_path = spanout.write()
+        spanout_side = Fixture(base / "spanout")
+        for number in (5, 9):
+            spanout_side.entry("WL-{}".format(number), summary="rotated bookkeeping")
+        spanout.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-5", "WL-6"]\n'
+                       'destination = "archive/2026/worklog.toml"\n', spanout_side.entries)
+        plain, red, _got = _vector(gate, spanout_path, 2, "archive-unreadable",
+                                   ("_require_span_match", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-wl-outside-spans", plain[0], plain[1])
+        check("flip/input/archive-wl-outside-spans", red[0], red[1])
+
+        # input/archive-span-foreign-destination: a well-formed span whose destination is not the
+        # declaring bucket's own worklog file. The flip removes the own-destination guard.
+        os.makedirs(base / "spandest")
+        spandest = Fixture(base / "spandest").unit()
+        spandest_path = spandest.write()
+        spandest_side = Fixture(base / "spandest")
+        spandest_side.entry("WL-5", summary="rotated bookkeeping")
+        spandest.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-5", "WL-5"]\n'
+                        'destination = "archive/2026/other.toml"\n', spandest_side.entries)
+        plain, red, _got = _vector(gate, spandest_path, 2, "archive-unreadable",
+                                   ("_require_own_destination", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-span-foreign-destination", plain[0], plain[1])
+        check("flip/input/archive-span-foreign-destination", red[0], red[1])
+
+        # input/archive-span-suffixed-bound: a span bound with a suffix (WL-5.abcd) is refused,
+        # never parsed down to its number. The flip replaces the bound guard with a lax parser
+        # that strips the suffix.
+        os.makedirs(base / "spansuf")
+        spansuf = Fixture(base / "spansuf").unit()
+        spansuf_path = spansuf.write()
+        spansuf_side = Fixture(base / "spansuf")
+        spansuf_side.entry("WL-5", summary="rotated bookkeeping")
+        spansuf.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-5", "WL-5.abcd"]\n'
+                       'destination = "archive/2026/worklog.toml"\n', spansuf_side.entries)
+
+        def lax_bounds(bounds, _bucket):
+            return tuple(int(str(bound).split("-", 1)[1].split(".", 1)[0]) for bound in bounds)
+
+        plain, red, _got = _vector(gate, spansuf_path, 2, "archive-unreadable",
+                                   ("_require_span_bounds", lax_bounds),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-span-suffixed-bound", plain[0], plain[1])
+        check("flip/input/archive-span-suffixed-bound", red[0], red[1])
+
+        # input/archive-spans-without-worklog: a bucket declares rotated spans but carries no
+        # worklog.toml at all. The flip removes the declared/present agreement guard.
+        os.makedirs(base / "spannofile")
+        spannofile = Fixture(base / "spannofile").unit()
+        spannofile_path = spannofile.write()
+        spannofile.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-5", "WL-5"]\n'
+                          'destination = "archive/2026/worklog.toml"\n')
+        plain, red, _got = _vector(gate, spannofile_path, 2, "archive-unreadable",
+                                   ("_require_declared_worklog", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-spans-without-worklog", plain[0], plain[1])
+        check("flip/input/archive-spans-without-worklog", red[0], red[1])
+
         # input/archive-stat-oserror: the archive-directory stat raises a bare OSError (the
         # contained walker's own descriptor duplication can); the evaluator maps it to the
         # archive cause instead of crashing. The flip treats the failed stat as an absent archive.
@@ -533,6 +646,60 @@ def _self_test():
                                    lambda res: res.exit_code == 0)
         check("input/importer-record-invalid", plain[0], plain[1])
         check("flip/input/importer-record-invalid", red[0], red[1])
+
+        # input/imported-entry-unknown-kind: an `imported:` worklog row must pass the imported
+        # envelope (spec 8.3) before the firewall may hold it out; an unknown change kind is
+        # record-invalid, never a skip. The flip removes the imported-envelope validation, so the
+        # firewall holds the malformed row out as history and the store is allowed.
+        os.makedirs(base / "impkind")
+        impkind = Fixture(base / "impkind").unit()
+        impkind.entry("imported:WL-1", actor="importer", kind="no-such-kind",
+                      summary="imported history")
+        plain, red, _got = _vector(gate, impkind.write(), 2, "record-invalid",
+                                   ("_validate_imported_record", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/imported-entry-unknown-kind", plain[0], plain[1])
+        check("flip/input/imported-entry-unknown-kind", red[0], red[1])
+
+        # input/imported-entry-unknown-actor-kind: an `imported:` worklog row whose actor kind is
+        # outside the vocabulary (the imported envelope requires an importer actor).
+        os.makedirs(base / "impactor")
+        impactor = Fixture(base / "impactor").unit()
+        impactor.entry("imported:WL-2", actor="no-such-actor", summary="imported history")
+        plain, red, _got = _vector(gate, impactor.write(), 2, "record-invalid",
+                                   ("_validate_imported_record", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/imported-entry-unknown-actor-kind", plain[0], plain[1])
+        check("flip/input/imported-entry-unknown-actor-kind", red[0], red[1])
+
+        # input/imported-record-bad-status: an `imported:` index record whose status is outside
+        # its type's state set.
+        os.makedirs(base / "impstat")
+        impstat = Fixture(base / "impstat").unit()
+        impstat.record("finding", "imported:FN-1", "no-such-status", actor="importer",
+                       links=[relates(ITEM)])
+        plain, red, _got = _vector(gate, impstat.write(), 2, "record-invalid",
+                                   ("_validate_imported_record", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/imported-record-bad-status", plain[0], plain[1])
+        check("flip/input/imported-record-bad-status", red[0], red[1])
+
+        # input/imported-moved-record-junk: an archived moved record whose seated row carries its
+        # id and nothing but junk = 1; it must fail the imported envelope, never ride the archive
+        # into a silent skip.
+        os.makedirs(base / "impjunk")
+        impjunk = Fixture(base / "impjunk").unit()
+        impjunk_path = impjunk.write()
+        impjunk.bucket("2026", 'schema = 1\n[[moved]]\nid = "imported:BI-9"\n'
+                       'type = "backlog_item"\ndestination = "archive/2026/backlog_item.toml"\n')
+        with open(impjunk.machine / "archive" / "2026" / "backlog_item.toml", "w",
+                  encoding="utf-8") as handle:
+            handle.write('schema = 1\n\n[[record]]\nid = "imported:BI-9"\njunk = 1\n')
+        plain, red, _got = _vector(gate, impjunk_path, 2, "record-invalid",
+                                   ("_validate_imported_record", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/imported-moved-record-junk", plain[0], plain[1])
+        check("flip/input/imported-moved-record-junk", red[0], red[1])
 
         # input/worklog-not-schema-1: the active ledger parses as TOML but is not the declared
         # schema-1 {schema, entry} shape.
@@ -798,15 +965,18 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_premise_gate {} checks (an unresolved store, an unreadable, "
           "empty or mis-shaped worklog, an unreadable archive bucket or failed archive stat, an "
-          "undeclared bucket worklog, a malformed, inverted or mismatched rotated span, a "
-          "twice-seated moved record, an invalid record (importer-authored rows included), a "
-          "mis-shaped index, a duplicate WL, an unknown flow event, a malformed scope=, a "
-          "verdict without rev=, an unrelated flow entry, a start entry missing its fields, a "
-          "missing start entry, a missing item, a finding without its create entry, a moved or "
-          "non-canonical expected head and a unit with any finding each refuse with their cause; "
-          "a started unit, a baseline round, failed rounds and ignored importer flow lines each "
-          "allow; every outcome row turns red under the flip that removes its one guard, and the "
-          "*-first-line rows pin rendering without a flip)".format(len(EXECUTED)))
+          "undeclared bucket worklog, a malformed, inverted, mismatched, overlapping, suffixed, "
+          "foreign-destination or file-less rotated span, a huge span refused arithmetically in "
+          "a memory-limited child, a WL number outside every declared span, a twice-seated "
+          "moved record, an invalid record (importer-authored and imported-series rows "
+          "included), a mis-shaped index, a duplicate WL, an unknown flow event, a malformed "
+          "scope=, a verdict without rev=, an unrelated flow entry, a start entry missing its "
+          "fields, a missing start entry, a missing item, a finding without its create entry, a "
+          "moved or non-canonical expected head and a unit with any finding each refuse with "
+          "their cause; a started unit, a baseline round, failed rounds and ignored importer "
+          "flow lines each allow; every outcome row turns red under the flip that removes the "
+          "guard it names, and the *-first-line and huge-span rows pin their behaviour without "
+          "a flip)".format(len(EXECUTED)))
     return 0
 
 

@@ -3310,7 +3310,8 @@ expected-check-ids = [
 # The premise-review evaluator's read-side vectors (opf/tools/_opf_premise_gate.py), replayed over
 # synthetic stores by its tools/ runner: each input/* and history/* outcome row asserts one
 # evaluation outcome, and its flip/* companion asserts the same fixture turns red with that row's
-# one guard removed in process; the *-first-line rows pin rendering and carry no flip.
+# one guard removed in process; the *-first-line rows pin rendering and carry no flip, and the
+# huge-span row pins the arithmetic span read in a memory-limited child process, also with no flip.
 id = "premise-gate-selftest"
 runner = "tools/check_premise_gate.py"
 args = ["--self-test"]
@@ -3330,6 +3331,17 @@ expected-check-ids = [
   "flip/input/archive-span-inverted",
   "input/archive-span-mismatch",
   "flip/input/archive-span-mismatch",
+  "input/archive-span-huge",
+  "input/archive-span-overlap",
+  "flip/input/archive-span-overlap",
+  "input/archive-wl-outside-spans",
+  "flip/input/archive-wl-outside-spans",
+  "input/archive-span-foreign-destination",
+  "flip/input/archive-span-foreign-destination",
+  "input/archive-span-suffixed-bound",
+  "flip/input/archive-span-suffixed-bound",
+  "input/archive-spans-without-worklog",
+  "flip/input/archive-spans-without-worklog",
   "input/archive-stat-oserror",
   "flip/input/archive-stat-oserror",
   "input/moved-record-seated-twice",
@@ -3338,6 +3350,14 @@ expected-check-ids = [
   "flip/input/importer-entry-invalid",
   "input/importer-record-invalid",
   "flip/input/importer-record-invalid",
+  "input/imported-entry-unknown-kind",
+  "flip/input/imported-entry-unknown-kind",
+  "input/imported-entry-unknown-actor-kind",
+  "flip/input/imported-entry-unknown-actor-kind",
+  "input/imported-record-bad-status",
+  "flip/input/imported-record-bad-status",
+  "input/imported-moved-record-junk",
+  "flip/input/imported-moved-record-junk",
   "input/worklog-not-schema-1",
   "flip/input/worklog-not-schema-1",
   "input/empty-worklog",
