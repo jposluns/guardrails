@@ -1711,19 +1711,28 @@ def _load_case_leaky_bound_problems(leaky_budget_s, exit_allowance_s, stall_s, m
     """The load-tolerance self-test case's three leaky lanes, checked against the poll loop of
     _load_bound._watch at the injected maximum load factor: an empty list, or one line per bound
     that fails. A leaky generator makes CPU or output progress until its own exit (and its leaked
-    child's start-up), which may come as late as exit_allowance_s wall seconds after launch. The
-    first poll after that last progress, at most POLL_S + SCAN_S later, is the last progress poll;
-    idle time is tested only at polls at most POLL_S + SCAN_S apart, so the stall fires at most
-    stall_s + POLL_S + SCAN_S after that poll: at most exit_allowance_s + 2 * (POLL_S + SCAN_S) +
-    stall_s wall seconds after launch. That must come at least margin_s before the leaky budget in
-    wall seconds, so the stall, not the budget, stops each leaky lane."""
-    poll_and_scan = _load_bound.POLL_S + _load_bound.SCAN_S
-    latest_stall = exit_allowance_s + 2 * poll_and_scan + stall_s
+    child's start-up), at X wall seconds after launch; X is ASSUMED to be at most exit_allowance_s
+    (the shared budget at the cap, which the slow lane's own exit must meet on the same host), not
+    measured on the leaky lanes. _watch samples progress while its process-table scan reads the
+    generator's CPU, but timestamps it (last_progress) only after that scan ends: a scan may read
+    just before X and take up to SCAN_S, the next poll waits POLL_S and its scan may read at its
+    own end, up to SCAN_S later, so the last progress timestamp is at most
+    X + POLL_S + 2 * SCAN_S. The stall itself can then fire as late as that timestamp plus stall_s
+    plus POLL_S + SCAN_S, which may pass the budget; what keeps the stall the stop is the order in
+    _watch: at every poll it tests the stall BEFORE the budget, so at the first poll at or after
+    the budget the stall fires instead if idle time has reached stall_s by then. The condition is
+    therefore that the last progress timestamp plus stall_s, plus margin_s, is at most the leaky
+    budget in wall seconds: exit_allowance_s + POLL_S + 2 * SCAN_S + stall_s + margin_s <=
+    leaky_budget_s * MAX_LOAD_FACTOR. A leaky generator whose X exceeds the assumption can only
+    let the budget stop it first, which the lane's ['stall'] stop-kind check turns red."""
+    latest_progress = exit_allowance_s + _load_bound.POLL_S + 2 * _load_bound.SCAN_S
     budget_wall = leaky_budget_s * _load_bound.MAX_LOAD_FACTOR
-    if latest_stall + margin_s > budget_wall:
-        return ["a leaky lane's stall can fire as late as {:g} wall s (last progress at {:g} s), less "
-                "than {:g} s before its {:g} wall s budget".format(latest_stall, exit_allowance_s, margin_s,
-                                                                   budget_wall)]
+    if latest_progress + stall_s + margin_s > budget_wall:
+        return ["a leaky lane's last progress can be timestamped as late as {:g} wall s (progress until "
+                "{:g} s, plus POLL_S + 2 * SCAN_S), so its {:g} s stall bound is reached at {:g} wall s, "
+                "less than {:g} s before its {:g} wall s budget, which _load_bound._watch tests after "
+                "the stall at each poll".format(latest_progress, exit_allowance_s, stall_s,
+                                                latest_progress + stall_s, margin_s, budget_wall)]
     return []
 
 
@@ -2152,7 +2161,8 @@ def _self_test_main_isolated():
         #     ended the sweep cannot-evaluate (exit 2) before any probe ran, at whichever position it hit.
         #   * The stall bound is 3 wall s. At 1 s, one poll in which a starved child showed no output and no
         #     CPU tick already fired it, so a slow or leaky generator could be stopped before its own exit.
-        #     Measured on 2026-11-08, 12 runs each of the hang and the idle fixture, 4 of each beside 8
+        #     One host's observation, with no artefact kept (not a guarantee for another host or load):
+        #     measured on 2026-11-08, 12 runs each of the hang and the idle fixture, 4 of each beside 8
         #     busy-loop processes, on an 80-CPU host whose 1-minute load average stayed between 39.5 and
         #     45.4 throughout (other work; the 8 busy loops added little): launch to the first progress
         #     poll took 1.04 to 1.07 s in every run of both fixtures; every hang run had exactly one
@@ -2168,9 +2178,9 @@ def _self_test_main_isolated():
         #     it runs the slow lane and the three leaky lanes N times each under this case's injection and
         #     bounds and prints, per probe, the largest no-progress gap tested before the own exit, the
         #     last progress poll, the stop, and the 1-minute load average before and after. The figures
-        #     that follow are a record of one measurement on one host at one load, taken before that mode
-        #     existed with the same injection; they are not a guarantee for another host or load.
-        #     Measured on 2026-11-08,
+        #     that follow are one host's observation at one load, with no artefact kept, taken before
+        #     that mode existed with the same injection; they are not a guarantee for another host or
+        #     load. Measured on 2026-11-08,
         #     12 runs each of the slow fixture and of the three leaky fixtures, the cap injected as this
         #     case injects it (the budget clock's load factor pinned at MAX_LOAD_FACTOR; the children run
         #     at real host speed, no extra load added), on an 80-CPU host whose 1-minute load average
@@ -2208,16 +2218,25 @@ def _self_test_main_isolated():
         #     on its leaked descendant: each leaky lane's stop kinds are recorded and required to be
         #     exactly ['stall'], so a lane the budget stops is red. Unlike the hang, a leaky generator
         #     does real work (CPU and output progress) until its own exit and its leaked child's
-        #     start-up, so its last progress poll can come late on a slow host. With that last progress
-        #     X wall s after launch, the last progress poll lands at most X + POLL_S + SCAN_S and the
-        #     stall at most 3 + POLL_S + SCAN_S after that: at most X + 2 * (POLL_S + SCAN_S) + 3 =
-        #     X + 15 s after launch. X is allowed up to the shared budget at the cap, 16 wall s (the
-        #     bound the slow generator's own exit must meet on the same host), so the latest stall is
-        #     31 s; the leaky lanes' own budget of 2.125 s is 34 wall s at the cap, a margin of 3 s (the
-        #     hang lane's row requires at least 2 s). The shared 16 wall s budget left no margin at all
-        #     once an exit at about 1 s was allowed progress until then. Every budget a leaky probe's
-        #     _load_bound.run received is recorded and required to equal that constant, and
-        #     _load_case_leaky_bound_problems checks this derivation, fed the recorded budget, as a row.
+        #     start-up, so its last progress can come late on a slow host. With that last progress X
+        #     wall s after launch: _load_bound._watch samples progress when its scan reads the
+        #     generator's CPU but timestamps it only after the scan ends, so a scan that read just
+        #     before X (up to SCAN_S long), the next poll's POLL_S wait and that poll's scan (up to
+        #     SCAN_S, reading at its end) put the last progress timestamp at most X + POLL_S + 2 * SCAN_S
+        #     = X + 11 s after launch. The stall itself can fire as late as that plus 3 + POLL_S + SCAN_S
+        #     (X + 20 s), which is NOT what keeps the lane safe: _watch tests the stall before the budget
+        #     at every poll, so at the first poll at or after the budget the stall fires instead once
+        #     the idle time since the last progress timestamp has reached 3 s. The condition is that
+        #     X + 11 + 3 s, plus a 2 s margin, is at most the budget in wall seconds. X is ASSUMED to be
+        #     at most the shared budget at the cap, 16 wall s (the bound the slow lane's own exit must
+        #     meet on the same host); it is not measured on the leaky lanes, and a later X can only let
+        #     the budget stop a leaky lane first, which the ['stall'] stop-kind check turns red. At
+        #     X = 16 the last progress timestamp is at most 27 s and the stall bound is reached by 30 s;
+        #     the leaky lanes' own budget of 2.125 s is 34 wall s at the cap, 4 s after that (the row
+        #     requires at least 2 s). The shared 16 wall s budget cannot meet this condition once
+        #     progress is allowed until 16 s. Every budget a leaky probe's _load_bound.run received is
+        #     recorded and required to equal that constant, and _load_case_leaky_bound_problems checks
+        #     this condition, fed the recorded budget, as a row.
         #   * On the idle clock the budget is 1 wall s and the slow generator sleeps 2 s, so the budget
         #     fires before it can exit; the stop kind is checked, so that position fails if anything
         #     other than the budget ends the run.
@@ -2312,7 +2331,7 @@ def _self_test_main_isolated():
             recorded_hang = sorted(set(received["hang"]))
             if recorded_hang != [_LOAD_CASE_HANG_BUDGET_S]:
                 failures.append("load tolerance: expected every hang-lane probe to pass the hang lane's "
-                                "own budget ([{!r}]) to _run_check, got {!r}"
+                                "own budget ([{!r}]) to _load_bound.run, got {!r}"
                                 .format(_LOAD_CASE_HANG_BUDGET_S, recorded_hang))
             # The hang lane's derived bound (sizing notes above), fed the budget the lane ACTUALLY
             # passed down, so a lane put back onto the shared budget turns this row red as well: its
@@ -2322,13 +2341,15 @@ def _self_test_main_isolated():
             failures.extend("load tolerance: " + problem for problem in _load_case_hang_bound_problems(
                 recorded_hang[0] if recorded_hang else _LOAD_CASE_HANG_BUDGET_S, _LOAD_CASE_STALL_S))
             # The same for the leaky lanes: each must have run under the leaky budget, and that
-            # recorded budget must leave the derived latest stall (last progress allowed up to the
-            # shared budget at the cap) at least 2 s under it (sizing notes above).
+            # recorded budget must be at least 2 s past the point where the stall bound is reached
+            # (the latest last-progress timestamp, with progress assumed until the shared budget at
+            # the cap, plus the stall bound), because _load_bound._watch tests the stall before the
+            # budget at each poll (sizing notes above).
             for leaky_lane in ("leaky", "leaky_reject", "leaky_reject_escape"):
                 recorded_leaky = sorted(set(received[leaky_lane]))
                 if recorded_leaky != [_LOAD_CASE_LEAKY_BUDGET_S]:
                     failures.append("load tolerance: expected every {} probe to pass the leaky lanes' "
-                                    "own budget ([{!r}]) to _run_check, got {!r}"
+                                    "own budget ([{!r}]) to _load_bound.run, got {!r}"
                                     .format(leaky_lane, _LOAD_CASE_LEAKY_BUDGET_S, recorded_leaky))
                 failures.extend("load tolerance: " + problem for problem in _load_case_leaky_bound_problems(
                     recorded_leaky[0] if recorded_leaky else _LOAD_CASE_LEAKY_BUDGET_S,
