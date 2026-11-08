@@ -564,14 +564,17 @@ _SPEC_VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9]
 
 
 def _reject_dynamic_stores(tree, wanted, where):
-    """Refuse (RefusedPage) the dynamic store shapes a static constant reader must not accept, anywhere in
-    `tree`: an attribute store or delete whose attribute name is in `wanted` (so `anything.CONSTANT = ...`
-    never slips past the name walk), a subscript store or delete whose container is a direct call of vars,
-    globals or locals, whatever the key (a computed key defeats key matching, so every such store is
-    refused), and any possible sys.modules reference, judged conservatively as any attribute access named
-    `modules` or an `from sys import modules` form (an alias of sys cannot be tracked statically, so the
-    attribute name alone decides). Shapes outside these (an alias of globals(), a helper call, another
-    module assigning the constant) stay outside any static reader and are disclosed by the caller."""
+    """Refuse (RefusedPage) exactly four dynamic store shapes, anywhere in `tree`: an attribute store or
+    delete whose attribute name is in `wanted` (so `anything.CONSTANT = ...` never slips past the name
+    walk); a subscript store or delete whose container is a direct call of vars, globals or locals,
+    whatever the key (a computed key defeats key matching, so every such store is refused); any attribute
+    access named `modules` (an alias of sys cannot be tracked statically, so the attribute name alone
+    decides); and a `from sys import modules` form. No completeness is claimed beyond those four shapes.
+    Routes this walk does not see include getattr(sys, "mod" + "ules"), sys.__dict__["modules"],
+    globals().update / __setitem__ / pop / setdefault, exec, builtins.globals(), a walrus alias of
+    globals(), setattr on importlib.import_module(__name__), a helper inside the module that stores into
+    its namespace, and another module assigning the constant; those stay outside any static reader and
+    are disclosed by the caller."""
     for node in ast.walk(tree):
         if (isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del))
                 and node.attr in wanted):
@@ -605,13 +608,15 @@ def _store_constants(data, where):
     of the name, an except-as, a match capture, a parameter, a global or nonlocal declaration, or a type
     alias. The walk is conservative and fails safe: it also refuses a function local, a class-body attribute
     or a comprehension variable that reuses one of these names, though none of those binds the module
-    constant. Three dynamic store shapes are refused anywhere in the tree as well (_reject_dynamic_stores):
-    an attribute store or delete whose attribute name is a read constant, a subscript store or delete on a
-    direct call of vars, globals or locals (whatever the key), and any possible sys.modules reference (an
-    attribute named `modules` on anything, or importing `modules` from sys), each fail closed. Disclosed
-    residual: a dynamic store in any other shape is beyond this static reader and is not refused, for
-    example a store through an alias of globals() or through a helper call inside the module (the tooling's
-    own self-test rebinds constants through one such helper at run time and restores them, which leaves the
+    constant. Exactly four dynamic store shapes are refused anywhere in the tree as well
+    (_reject_dynamic_stores): an attribute store or delete whose attribute name is a read constant, a
+    subscript store or delete on a direct call of vars, globals or locals (whatever the key), any attribute
+    access named `modules`, and a `from sys import modules` form, each fail closed. No completeness is
+    claimed beyond those four shapes. Disclosed residual, dynamic stores this static reader does not see
+    and does not refuse: a rebind through getattr(sys, "mod" + "ules"), sys.__dict__["modules"],
+    globals().update / __setitem__ / pop / setdefault, exec, builtins.globals(), a walrus alias of
+    globals(), setattr on importlib.import_module(__name__), a helper call inside the module (the tooling's
+    own self-test patches constants at run time through unittest.mock and restores them, which leaves the
     import-time value this reads unchanged), or another module assigning _opf_store.<constant>. A PEP 695
     type parameter of the name binds only in its own scope and is not inspected."""
     try:

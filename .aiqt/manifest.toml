@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "89eddfb380d1ff9e989e99e5aaabf850f7f90b1ea4ae509117d857541f6863c1"
+tree-sha256 = "d6c0279d6563633cf8cf9e977cea504600ba94991bff869dc4093d1cda10741d"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2471,8 +2471,8 @@ sha256 = "0e69654bbade4954c032a6134d3d8c9ea4cb1c5fd00654c48ea6be1c83e4cc8c"
 
 [[sources]]
 path = "docs/evidence.md"
-bytes = 5313
-sha256 = "6e839099548d399ce7086a86d18ca5d6e1a09bdf719925f1e3e70d69d1b07e73"
+bytes = 5451
+sha256 = "636170e61bc57a486e6d4c4a6a4740d9525e1863c41595aba6d35c5f3baf67ca"
 
 [[sources]]
 path = "docs/tech-details.md"
@@ -3246,8 +3246,8 @@ sha256 = "d52153e0beba31eb14719713348e4a471231a35d503fee0d7ed337d784ded216"
 
 [[sources]]
 path = "opf/tools/_opf_store.py"
-bytes = 367486
-sha256 = "610e25a2a90dc6ba16b5411a83ba815eb2b3309c00bd9f42b708ffddac320cf8"
+bytes = 366778
+sha256 = "65a74add764e841d6b0551be8e59d9605d92bb8cd7a0800dcc2dc27203d3160d"
 
 [[sources]]
 path = "opf/tools/_opf_views.py"
@@ -3971,8 +3971,8 @@ sha256 = "0e78786e2be2bfc810b96d37be5e26351588359f18edfaab806aa128cc501b0b"
 
 [[sources]]
 path = "site/evidence.html"
-bytes = 12863
-sha256 = "a34b92f7b785bbc6cfe9310368aeabe99b5e619e41323f5a7c2209f128ccc088"
+bytes = 13001
+sha256 = "c19e94a0abb1e6eafcbc542f468001ddd615441ccd3111f92b9d931227477348"
 
 [[sources]]
 path = "site/favicon.svg"
@@ -4486,8 +4486,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 200465
-sha256 = "c1f0b82c14137c41670ce8ccf34ffba1c9b7ac753b55c2ee801727f46de8acf7"
+bytes = 200861
+sha256 = "a95978c87ec66c9163c9799da1ea4c93bb01e1223508345a32b5cc39d87469a3"
 
 [[sources]]
 path = "tools/gen_enforceability.py"
