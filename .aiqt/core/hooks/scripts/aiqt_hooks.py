@@ -18882,16 +18882,45 @@ def _spg_redir_parts(text):
     return text[:len(text) - len(op)], op
 
 
-def _spg_glue_reading_present(command, start, line_end):
+def _spg_glue_reading_range(command, start, line_end):
     """The GLUE reading of a '#' at command[start] that directly follows a ')' or a backquote: bash may keep
     such a '#' as a literal part of the preceding word rather than begin a comment, in which case the rest of
-    that physical line (command[start + 1:line_end]) is still command text. Scan that tail as its own command
-    and report whether a python-program-from-stdin invocation runs in it."""
-    return _spg_invocation_present(command[start + 1:line_end])
+    that physical line (command[start + 1:line_end]) is still command text. Return the (lo, hi) index range of
+    that tail, which the scan driver reads as its own command; returning None drops the glue reading."""
+    return (start + 1, line_end)
+
+
+def _spg_comment_reading_tail(command, start, line_end, hi):
+    """The COMMENT reading of such a '#': drop the rest of that physical line and report the index the scan
+    resumes from (the line's end, line_end), so an invocation on a LATER line is still reached. The dropped tail
+    opens no here-document or quote of its own, so it can never skip or swallow a later line."""
+    return line_end
 
 
 def _spg_invocation_present(command):
     """Whether any simple-command word run in the raw text runs python with program `-` (_stdin_py_reads_stdin).
+    Conservative, erring toward finding one. The scan reads the command once (_spg_scan_range) under the COMMENT
+    reading of every glue '#'; each such '#' also defers its GLUE reading -- the rest of that physical line, read
+    as its own command -- onto a work list of index ranges that this driver reads in turn. The union of the two
+    readings is reported, True as soon as any range finds an invocation. The work list holds index ranges into
+    the one command string (no string copies) and the scan never recurses, so recursion depth is constant and the
+    extra memory is linear in the number of glue '#'s, bounded by the command length; the whole scan is linear in
+    the command, each byte read under the comment reading or in exactly one glue tail. A glue tail is one physical
+    line, so its range carries its own end and a run of glue '#'s on it needs no per-'#' newline search."""
+    work = [(0, len(command), False)]
+    while work:
+        lo, hi, single_line = work.pop()
+        if _spg_scan_range(command, lo, hi, work, single_line):
+            return True
+    return False
+
+
+def _spg_scan_range(command, lo, hi, work, single_line):
+    """Read command[lo:hi] as its own command and report whether a python-program-from-stdin invocation runs in
+    it under the COMMENT reading of every glue '#'; each glue '#' appends its GLUE-reading range onto `work` for
+    the driver (_spg_invocation_present) to read in turn, so the two-reading union is taken iteratively with
+    constant recursion depth and no string copies.
+
     Conservative, erring toward finding one: every operator, redirect, group boundary and substitution opener
     ends the current word run and each run is tested, so an invocation inside a $( ), backquote, ${ } or
     process substitution is still found. A here-document body and a comment hold no command and are skipped, and
@@ -18899,39 +18928,50 @@ def _spg_invocation_present(command):
     argument (echo python3 -), in a quoted message, or in a here-document body is not found. A redirect's target
     word is dropped from the run, never read as a script operand (python3 2>/dev/null - reads program from
     stdin), and a redirect's {name} descriptor prefix is part of the redirect, not a word of the run
-    (python3 {fd}>/dev/null - reads program from stdin). A << inside an arithmetic (( )) or $(( )) is a shift,
-    so it opens no here-document and hides no line.
+    (python3 {fd}>/dev/null - reads program from stdin, and python3 - {fd}<f feeds a named fd, never stdin). A <<
+    inside an arithmetic (( )) or $(( )) is a shift, so it opens no here-document and hides no line.
 
     A '#' that directly follows a ')' or a backquote is the one place the scan cannot tell bash's reading: bash
     keeps it as literal glue on the preceding word after a word-building ')' (a $( ), a <( )/>( ) process
     substitution, an array a=( )/a+=( ), or the real ')' of a $( ) whose inner case pattern's ')' the scan
     cannot match) but begins a comment after a command ')' (a subshell, an arithmetic (( )) command) or an
-    opening backquote. Rather than guess, the scan reports an invocation if EITHER reading finds one:
-      - GLUE reading: _spg_glue_reading_present scans the rest of that physical line as its own command, so a
-        '; python3 -' kept after the '#' is found.
-      - COMMENT reading: the scan drops the rest of that physical line and continues from the newline, so a
-        python3 - on a LATER line is found; the dropped tail opens no here-document and no quote, so a '<<' or a
-        quote that bash never read (it was inside the comment) can never skip or swallow a later line.
+    opening backquote. Rather than guess, the union reports an invocation if EITHER reading finds one:
+      - GLUE reading: _spg_glue_reading_range gives the rest of that physical line (command[start + 1:line_end]),
+        appended to `work` and read as its own command, so a '; python3 -' kept after the '#' is found.
+      - COMMENT reading: _spg_comment_reading_tail drops the rest of that physical line and the scan continues
+        from the line's end, so a python3 - on a LATER line is found; the dropped tail opens no here-document and
+        no quote, so a '<<' or a quote that bash never read (it was inside the comment) can never skip or swallow
+        a later line.
     This never finds fewer than bash. Where bash keeps the '#' as glue, any invocation it runs on that line is in
-    the tail the GLUE reading scans, and any invocation on a later line is reached by the continued scan, which
+    the tail the GLUE reading reads, and any invocation on a later line is reached by the continued scan, which
     reads every later physical line as command text (it hides a later line only through a here-document or quote
     opened by text before the '#', which bash, also reading the '#' as glue, opens too). Where bash reads the '#'
     as a comment, bash drops that same line, and the COMMENT reading matches it while opening no construct of its
-    own, so it keeps every later line bash keeps. The cost is bounded: the GLUE reading recurses only on the
-    strictly shorter suffix after each such '#', so a command with k such '#'s costs at most k + 1 linear scans."""
-    n, i = len(command), 0
+    own, so it keeps every later line bash keeps. Each glue tail is a strictly shorter, newline-free sub-range, so
+    the deferred ranges are finite and the union terminates."""
+    i = lo
     words, bodies, pending = [], [], None
     depth, arith = 0, []
-    while i < n:
+    while i < hi:
         start = i
-        match = _STDIN_PY_TOKEN_RE.match(command, i)
+        # A '#' at a token boundary is a comment opener; when it directly follows a ')' or a backquote it is the
+        # glue candidate. Handle that case HERE, before matching the (line-long) comment token, so a run of such
+        # '#'s on one physical line costs O(1) each (constant depth, no per-'#' newline search) rather than a
+        # fresh end-of-line scan apiece. A glue tail is one physical line, so its range's end (hi) is its line
+        # end; only the top-level, multi-line range looks for the newline.
+        if command[start] == "#" and start > lo and command[start - 1] in (")", "`"):
+            if single_line:
+                line_end = hi
+            else:
+                line_end = command.find("\n", start)
+                line_end = hi if line_end == -1 or line_end > hi else line_end
+            glue = _spg_glue_reading_range(command, start, line_end)
+            if glue is not None:
+                work.append(glue + (True,))   # GLUE reading, one physical line, read by the driver
+            i = _spg_comment_reading_tail(command, start, line_end, hi)   # COMMENT reading: drop this line
+            continue
+        match = _STDIN_PY_TOKEN_RE.match(command, i, hi)
         kind, i = match.lastgroup, match.end()
-        if kind == "comment" and start and command[start - 1] in (")", "`"):
-            line_end = command.find("\n", start)
-            line_end = n if line_end == -1 else line_end
-            if _spg_glue_reading_present(command, start, line_end):
-                return True
-            i = line_end                    # COMMENT reading: drop the rest of this physical line
         if kind == "space" or kind == "comment":
             continue
         if kind == "word" or kind == "stray":
@@ -18961,9 +19001,9 @@ def _spg_invocation_present(command):
         words, pending = [], None
         if match.group() == "\n":
             for delim, tabs in bodies:
-                while i < n:
+                while i < hi:
                     end = command.find("\n", i)
-                    end = n if end == -1 else end
+                    end = hi if end == -1 or end > hi else end
                     line = command[i:end]
                     i = end + 1
                     if (line.lstrip("\t") if tabs else line) == delim:

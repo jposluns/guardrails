@@ -3332,7 +3332,14 @@ _SPG_DENY_ROWS = (
     # A {name} descriptor prefix is part of the redirect, not a word of the run, and is dropped with its target,
     # so the lone - after it still reads the program from stdin.
     ("(spg-d78) a named-descriptor output redirect prefix", "python3 {fd}>/dev/null -"),
-    ("(spg-d79) a named-descriptor input redirect prefix", "python3 {fd}< /dev/null -"))
+    ("(spg-d79) a named-descriptor input redirect prefix", "python3 {fd}< /dev/null -"),
+    # A {name} descriptor feed opens a NEW descriptor, not fd 0, so python3 - still reads its program from the
+    # unfed stdin: an input feed, a here-document and a here-string on a named descriptor are each outside the
+    # three fed shapes (which require the feed on fd 0), and the lone - before or after the feed reads stdin.
+    ("(spg-d80) a named-descriptor input feed, program still from stdin", "python3 - {fd}<f"),
+    ("(spg-d81) a named-descriptor here-document feed, program still from stdin", "python3 - {fd}<<E\nx\nE"),
+    ("(spg-d82) a named-descriptor here-string feed, program still from stdin", "python3 - {fd}<<<x"),
+    ("(spg-d83) a named-descriptor input feed before python3 -", "{fd}<f python3 -"))
 # Over-deny rows: a fed or harmless form outside the three shapes; bash does not block, the hook denies, a
 # disclosed over-deny. Each goes red with the default made allow, as the deny rows do.
 _SPG_OVERDENY_ROWS = (
@@ -3520,31 +3527,44 @@ _SPG_ORACLE_ROWS = (
     ("(spg-o87) a # the scan meets at a case pattern ), comment reading", "echo $(case x in x)#<<E\npython3 -\nE\n;; esac)",
      True, True),
     ("(spg-o88) a named-descriptor output redirect prefix", "python3 {fd}>/dev/null -", True, True),
-    ("(spg-o89) a named-descriptor input redirect prefix", "python3 {fd}< /dev/null -", True, True))
+    ("(spg-o89) a named-descriptor input redirect prefix", "python3 {fd}< /dev/null -", True, True),
+    # A {name} descriptor feed opens a new descriptor, not fd 0, so bash runs python3 - with its program read
+    # from the unfed session stdin and blocks; the hook denies, the feed being outside the three fed shapes.
+    ("(spg-o90) a named-descriptor here-document feed", "python3 - {fd}<<E\nx\nE", True, True),
+    ("(spg-o91) a named-descriptor here-string feed", "python3 - {fd}<<<x", True, True),
+    ("(spg-o92) a named-descriptor input feed, program from stdin", "python3 - {fd}</dev/null", True, True),
+    ("(spg-o93) a named-descriptor input feed before python3 -", "{fd}</dev/null python3 -", True, True))
 _SPG_ORACLE_WAIT = 4
 
 
 def _spg_flips():
     """Each flip name mapped to the aiqt_hooks attributes that break it: the three shape matchers (break one
     and its fed rows deny), the default (make the invocation scan find nothing, so every deny and over-deny row
-    allows), and the glue reading (make _spg_glue_reading_present always report nothing, which reverts a '#'
-    after a ')' or a backquote to a comment-only reading, so every deny row whose invocation survives only
-    because the glue reading scans the rest of that line allows)."""
+    allows), the glue reading (make _spg_glue_reading_range defer no tail, which reverts a '#' after a ')' or a
+    backquote to a comment-only reading, so every deny row whose invocation survives only because the glue
+    reading reads the rest of that line allows), and the comment reading (make _spg_comment_reading_tail stop the
+    scan at the current physical line, so every deny row whose invocation survives only because the comment
+    reading reaches a LATER line allows)."""
     return {
         "pipeline": {"_spg_shape_pipeline": lambda left, right: False},
         "redirect": {"_spg_shape_redirect": lambda cleaned: False},
         "heredoc": {"_spg_shape_heredoc": lambda cleaned: False},
         "default": {"_spg_invocation_present": lambda command: False},
-        "glue": {"_spg_glue_reading_present": lambda command, start, line_end: False}}
+        "glue": {"_spg_glue_reading_range": lambda command, start, line_end: None},
+        "comment": {"_spg_comment_reading_tail": lambda command, start, line_end, hi: hi}}
 
 
-# The glue-reading flip, mapped to each deny row whose invocation lives only on the rest of the line after a '#'
-# that bash keeps as glue: with the glue reading disabled the '#' is read as a comment, its line tail is
-# dropped, and the python3 - after the '; ' is no longer found. (The comment-reading rows d67 to d69 and d77 are
-# NOT listed: their invocation is on a later line the continued scan still reads, so the glue flip leaves them
-# denied; they go red only under the default flip. d78 and d79 depend on the {name} redirect regex, not the glue
-# reading, so they too go red only under the default flip.)
-_SPG_GLUE_FLIP_ROWS = (
+# Reading-flip rows: each deny row paired with the reading flip (_spg_flips) that turns it red by removing one of
+# the two readings of a '#' bash's grammar leaves ambiguous.
+#   - glue: the invocation lives only on the rest of the line after a '#' bash keeps as glue; with the glue
+#     reading deferring no tail the '#' is read as a comment, its line tail is dropped, and the python3 - after
+#     the '; ' is no longer found.
+#   - comment: the invocation lives only on a LATER line past a '#' bash keeps as a comment; with the comment
+#     reading stopped at the current line the continued scan never reaches that line, so the python3 - is no
+#     longer found.
+# (d78 and d79 depend on the {name} redirect regex, not either reading, so they go red only under the default
+# flip.)
+_SPG_READING_FLIP_ROWS = (
     ("glue", "(spg-d54) a # right after a closing substitution", "echo $(echo a)#; python3 -"),
     ("glue", "(spg-d55) a # right after a closing backquote", "echo `echo a`#; python3 -"),
     ("glue", "(spg-d56) a # right after an arithmetic $(( ))", "echo $((1))#; python3 -"),
@@ -3552,7 +3572,11 @@ _SPG_GLUE_FLIP_ROWS = (
     ("glue", "(spg-d73) a # glued after an array assignment )", "a=(x)#; python3 -"),
     ("glue", "(spg-d74) a # glued after an array-append )", "a+=(x)#; python3 -"),
     ("glue", "(spg-d75) a # glued after a declare -a array )", "declare -a a=(x)#; python3 -"),
-    ("glue", "(spg-d76) a # glued after the real ) of a $( ) holding a case", "echo $(case x in x) true;; esac)#; python3 -"))
+    ("glue", "(spg-d76) a # glued after the real ) of a $( ) holding a case", "echo $(case x in x) true;; esac)#; python3 -"),
+    ("comment", "(spg-d67) a comment after a subshell, not glue", "(true)#<<true\npython3 -\ntrue"),
+    ("comment", "(spg-d68) a comment after an arithmetic command, not glue", "((1))#<<true\npython3 -\ntrue"),
+    ("comment", "(spg-d69) a comment after an opening backquote, not glue", "echo `#<<E\npython3 -\nE`"),
+    ("comment", "(spg-d77) a # the scan meets at a case pattern ), comment reading", "echo $(case x in x)#<<E\npython3 -\nE\n;; esac)"))
 
 
 def _spg_oracle(failures, handler):
@@ -3622,10 +3646,10 @@ def _test_python_stdin_program(failures):
                         "pipeline, a FILE redirect, a here-document), got {!r}".format(reason))
     flips = _spg_flips()
     used = {flip for _label, _command, flip in _SPG_FED_ROWS}
-    used_glue = {flip for flip, _label, _command in _SPG_GLUE_FLIP_ROWS}
-    if used | used_glue | {"default"} != set(flips):
+    used_reading = {flip for flip, _label, _command in _SPG_READING_FLIP_ROWS}
+    if used | used_reading | {"default"} != set(flips):
         failures.append("(spg-flip-names) flips used by rows {} plus default differ from flips defined {}"
-                        .format(sorted(used | used_glue), sorted(flips)))
+                        .format(sorted(used | used_reading), sorted(flips)))
     for shape in ("pipeline", "redirect", "heredoc"):
         patches = flips[shape]
         saved = {name: getattr(aiqt_hooks, name) for name in patches}
@@ -3655,7 +3679,7 @@ def _test_python_stdin_program(failures):
         if got != "allow":
             failures.append("{}: with the default made allow this deny row must go red (allow), got {}"
                             .format(label, got))
-    for flip_name, label, command in _SPG_GLUE_FLIP_ROWS:
+    for flip_name, label, command in _SPG_READING_FLIP_ROWS:
         patches = flips[flip_name]
         saved = {name: getattr(aiqt_hooks, name) for name in patches}
         for name, value in patches.items():
@@ -5632,6 +5656,12 @@ _DEADLINE_SHAPES = {
     "stdin_py_pipes": lambda n, base: ("Bash", {"command": _repeat("x | ", n, "python3 -")}),
     "stdin_py_open_quote": lambda n, base: ("Bash", {"command": "'" + _repeat("a ", n - 1)}),
     "stdin_py_after": lambda n, base: ("Bash", {"command": _repeat("true; ", n, "python3 -")}),
+    # A run of ')#' pairs, each '#' directly after a ')': every one is a glue '#', so the two-reading union
+    # reads each one. The whole command is one physical line (no newline), so the comment reading drops to its
+    # end and the glue reading of each '#' is deferred onto a work list of index ranges; a reading that recursed
+    # one level per pair (and copied the line tail at each level) exhausted the stack here. No invocation
+    # anywhere, so the decision is allow. 32,768 pairs at 64 KB, 131,072 at 256 KB and 524,288 at 1 MB.
+    "stdin_py_glue_run": lambda n, base: ("Bash", {"command": _repeat(")#", n)}),
     # Uncertain '#' shapes (_DEADLINE_HASH_SHAPES): a run of separators inside a subshell before four '#'
     # characters whose comment reading depends on context (five readings), the same with each '#' on its own
     # line (sixteen readings), inside three parentheses, inside runs of parentheses on both sides, and with a
@@ -5709,7 +5739,7 @@ _DEADLINE_CASES = {
     "orch_yield_tool": ("wakeup_long",),
     "pgrep_self_match": ("git_words", "nest_parens", "pgrep_distinct", "pgrep_self_after"),
     "python_stdin_program": ("nest_parens", "stdin_py_heredocs", "stdin_py_pipes", "stdin_py_open_quote",
-                             "stdin_py_after"),
+                             "stdin_py_after", "stdin_py_glue_run"),
     "protected_line": ("git_words_unbal_dq", "push_force_after", "mirror_cfg_run_after",
                        "procsubst_run_after"),
     "review_dispatch_pin": ("git_add_parsed", "nest_cmdsubst"),
@@ -5758,7 +5788,8 @@ _DEADLINE_ALLOW_CASES = frozenset((
     ("orch_truncation_guard", "fg_subshells"),
     ("orch_truncation_guard", "fg_nested_glued_substs"),
     ("orch_truncation_guard", "fg_quoted_heredoc_amps"),
-    ("pgrep_self_match", "pgrep_distinct")))
+    ("pgrep_self_match", "pgrep_distinct"),
+    ("python_stdin_program", "stdin_py_glue_run")))
 _DEADLINE_SIZES = (65536, 262144, 1048576)
 # CPU seconds one in-process handler call may use on a shape of that size (_cpu_seconds: this process's
 # CPU time, plus that of the child processes it reaped). Over two runs on a 24-core host with Python
