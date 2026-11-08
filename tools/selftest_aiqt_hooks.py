@@ -6843,6 +6843,25 @@ def _deadline_cut_problems(label, what, code, err, want, seconds, reads):
     return []
 
 
+def _deadline_note_cut_problems(label, what, code, streams, want, seconds, reads):
+    """What one run of a note-only mode (NOTE_ONLY_PRETOOL_MODES) got wrong with its cut, as a list of
+    phrases ([] for none), in the shape of _deadline_cut_problems: streams is the pair (stdout text,
+    stderr text) of the run, want the text its stdout must hold. A note-only mode's deadline never blocks:
+    the run must exit 0 with the warning on stdout, carry no fail-closed refusal on stderr, and the deadline
+    must still cut the stub's sleep short. As there, whether the deadline fired is judged by the stub's
+    reads, not by the run's wall-clock time (reported only), which a loaded host can stretch with nothing
+    wrong; the run's time after the cut is judged separately, over a row's runs (_deadline_row_problems)."""
+    printed, err = streams
+    finished = "end" in reads and reads.get("reached", float("-inf")) >= reads["end"]
+    if code != 0 or want not in printed or "could not reach a decision" in err or finished:
+        return ["({}) expected exit 0 with {} on stdout and no fail-closed refusal on stderr before the "
+                "stub's {:g}-second sleep ended, got exit {} after {:.2f}s with the stub's sleep {}, stdout "
+                "{!r} and stderr {!r}".format(
+                    label, what, _DEADLINE_STUB_SECONDS, code, seconds,
+                    "run to its end" if finished else "cut short", printed, err)]
+    return []
+
+
 def _deadline_tail_span(reads, returned):
     """Seconds from the arming of the run's deadline window (reads["armed"], the clock read _armed_window
     takes just before the take that arms the timer) to `returned`, a clock read taken right after main()
@@ -6893,10 +6912,12 @@ def _deadline_total_problems(label, walls):
                 label, ", ".join(repr(wall) for wall in walls), len(walls), _DEADLINE_TOTAL_SECONDS)]
 
 
-def _deadline_row_problems(label, what, want, run_once):
+def _deadline_row_problems(label, what, want, run_once, cut=_deadline_cut_problems):
     """Problems for one deadline-firing row ([] for none), run_once one fresh run of it (a new stub with
     new clock reads) returning (code, err, seconds, reads, returned). The cut judgement is behavioural and
-    single-run: the first run with a cut problem fails the row at once, with no further run. The tail
+    single-run: cut(label, what, code, err, want, seconds, reads) judges each run (a note-only row passes
+    _deadline_note_cut_problems, its err the pair (stdout text, stderr text)), and the first run with a cut
+    problem fails the row at once, with no further run. The tail
     judgement is a wall-clock bound, the only evidence there is for a stall between the deadline's cut and
     its refusal reaching the caller, so no single span decides it: the row is run fresh until it has
     _DEADLINE_TAIL_RUNS spans, whatever an earlier span gave, and fails when their median is over the bound
@@ -6915,7 +6936,7 @@ def _deadline_row_problems(label, what, want, run_once):
         runs += 1
         code, err, seconds, reads, returned = run_once()
         walls.append(seconds)
-        problems = _deadline_cut_problems(label, what, code, err, want, seconds, reads)
+        problems = cut(label, what, code, err, want, seconds, reads)
         if problems:
             return problems
         span = _deadline_tail_span(reads, returned)
@@ -6928,15 +6949,17 @@ def _deadline_path_failures():
     """(dl-fires, dl-note-only, dl-read, dl-fail-open, dl-cancelled) The deadline path, driven by handler stubs
     that sleep past a short test budget: every PreToolUse mode exits 2 with the refusal naming the handler,
     the budget and the input size, except a note-only one (NOTE_ONLY_PRETOOL_MODES), whose deadline fires as
-    soon and warns on exit 0 within 0.8 s (a single-run check); a deadline during the payload read exits 2
-    too; a fail-open mode keeps its result
+    soon, cuts the stub short and warns on exit 0 with no fail-closed refusal, judged like the firing rows
+    (its cut by _deadline_note_cut_problems, its tail and whole-run times over fresh runs); a deadline
+    during the payload read exits 2 too; a fail-open mode keeps its result
     (no deadline); and the timer is cancelled, with the caller's SIGALRM disposition back, before the
     decision is written. A firing deadline is judged by whether it cut the stub's sleep short, single-run
     and behavioural, by the time from the window's arming (_armed_window) to main()'s return, judged as
     the median of _DEADLINE_TAIL_RUNS spans, each from a fresh run of the row (_deadline_row_problems),
     and by each run's whole wall-clock time, judged over every fresh run the row took under a rule that
     fails a stall on half of the runs or more (_deadline_total_problems, _judged_half_fails);
-    (dl-cut-judged) recorded runs pin the cut judgement at the sleep's end,
+    (dl-cut-judged) recorded runs pin the cut judgement at the sleep's end, (dl-note-only-cut-judged)
+    recorded runs pin the note-only cut judgement at the sleep's end and on its exit and streams,
     (dl-tail-span) recorded reads pin the span's measurement from the arming, however late or absent the
     stub's own reads, (dl-tail-median) recorded spans pin the
     median judgement at the bound's ends and a row short of spans, (dl-tail-rerun) recorded rows pin which
@@ -6950,14 +6973,17 @@ def _deadline_path_failures():
     size = len(_DEADLINE_PAYLOAD.encode("utf-8"))
     for mode, event in sorted(aiqt_hooks.HANDLER_EVENT.items()):
         if mode in aiqt_hooks.NOTE_ONLY_PRETOOL_MODES:
-            printed = io.StringIO()
-            with _stub_handler(mode, _sleeper(1.0)):
-                code, err, seconds = _main_run(mode, budget=0.1, stdout=printed)
-            if (code != 0 or "no decision within its deadline" not in printed.getvalue() or seconds >= 0.8
-                    or "could not reach a decision" in err):
-                out.append("(dl-note-only-{}) a note-only mode's deadline must warn on exit 0 within 0.8s, got "
-                           "exit {} after {:.2f}s, stdout {!r} and stderr {!r}".format(
-                               mode, code, seconds, printed.getvalue(), err))
+            def note_run(mode=mode):
+                reads = {}
+                printed = io.StringIO()
+                stub = _clocked_sleeper(_DEADLINE_STUB_SECONDS, reads)
+                with _stub_handler(mode, stub), _armed_window(reads):
+                    code, err, seconds = _main_run(mode, budget=0.1, stdout=printed)
+                    returned = time.monotonic()
+                return code, (printed.getvalue(), err), seconds, reads, returned
+            note = "the {} check could not run (no decision within its deadline)".format(mode)
+            out.extend(_deadline_row_problems("dl-note-only-" + mode, "the deadline warning", note, note_run,
+                                              cut=_deadline_note_cut_problems))
             continue
         if event in aiqt_hooks.FAIL_OPEN_EVENTS:
             with _stub_handler(mode, _sleeper(0.3)):
@@ -7006,6 +7032,23 @@ def _deadline_path_failures():
         if len(lines) != want_lines:
             out.append("(dl-cut-judged) a recorded run whose stub sleep was {} must give {} line(s), got {!r}"
                        .format(edge, want_lines, lines))
+
+    warning = "recorded warning"
+    for edge, code, streams, reads, want_lines in (
+            ("cut just inside its end, after 2.06 s of wall-clock time", 0, (warning, ""),
+             {"end": 10.0, "reached": 10.0 - 1e-6}, 0),
+            ("run exactly to its end", 0, (warning, ""), {"end": 10.0, "reached": 10.0}, 1),
+            ("run just past its end", 0, (warning, ""), {"end": 10.0, "reached": 10.0 + 1e-6}, 1),
+            ("never started", 0, (warning, ""), {}, 0),
+            ("cut short, the run exiting 2", 2, (warning, ""), {"end": 10.0, "reached": 9.0}, 1),
+            ("cut short, the run without the warning", 0, ("", ""), {"end": 10.0, "reached": 9.0}, 1),
+            ("cut short, the warning given with a fail-closed refusal on stderr", 0,
+             (warning, "AIQT guardrail: the check could not reach a decision within its budget"),
+             {"end": 10.0, "reached": 9.0}, 1)):
+        lines = _deadline_note_cut_problems("recorded", "the warning", code, streams, warning, 0.15, reads)
+        if len(lines) != want_lines:
+            out.append("(dl-note-only-cut-judged) a recorded note-only run whose stub sleep was {} must give {} "
+                       "line(s), got {!r}".format(edge, want_lines, lines))
 
     tail = _DEADLINE_TAIL_SECONDS
     for edge, reads, returned, want_span in (
