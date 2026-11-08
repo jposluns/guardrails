@@ -41,8 +41,29 @@ yields no key; its reads are derived where that parameter is read; any other cal
 a non-registry parameter name, *args or **kwargs, a call holding a starred or double-starred argument,
 or a callee that cannot be resolved is refused naming its line). A registry use inside a
 type-parameter list or a type-alias statement is refused (both evaluate lazily, so no binding there is
-certain), and a module that writes globals(), locals() or vars() by a subscript or a method call such
-as globals().update can rebind any name at run time, so every pin and hand-off in it is refused.
+certain). Every pin and hand-off is voided, fail closed by construction, in a module that holds any
+construct that can rebind names at run time or that reaches a machinery able to: any reference at all,
+read-only included, to exec, eval, compile, setattr, delattr, __import__ or import_module, as a bare
+name or as an attribute of any object (so an alias such as e = exec and a spelling such as
+builtins.exec or importlib.import_module are both seen); any reference at all to globals, locals,
+vars, modules (sys.modules under any alias), _getframe, f_locals, f_globals or __dict__, calls and
+read-only mentions alike; a star import anywhere; and a store or delete to an attribute whose chain
+root is an import-bound name (a module object's namespace). Exactly two forms stop voiding, because
+neither can rebind a name or run code in this module: (a) an attribute named compile whose object is
+a name bound, at module level and only there, by `import re` (or `import re as <alias>`) and never
+rebound anywhere in the module (re.compile builds a regular expression object; it cannot rebind a
+name); (b) a call __import__(<one string literal>) or importlib.import_module(<one string literal>)
+whose literal names a module in sys.stdlib_module_names, with no other arguments, import_module
+reached through a name bound, at module level and only there, by `import importlib` (or an alias of
+it) and never rebound (importing a literal standard-library module by name returns a module object
+and rebinds nothing in this module's namespace; its result cannot be star-imported, and a star
+import anywhere still voids on its own). Every other form voids as before: a bare compile, compile
+reached through any other object or through a rebound alias, an uncalled __import__ or
+import_module, a non-literal or non-stdlib argument, and any extra argument. A voided module keeps
+only its constant-key reads and its allowlisted uses. Independently of module voiding, a literal-loop pin or a
+hand-off written in a class body whose class has any base, keyword or decorator is refused: the
+metaclass's __prepare__ mapping can resolve any name in that body, so no binding there is certain,
+while a constant-key read stays accepted.
 The derived key set is the union over all accepted reads, plus the
 keys-read each [[detect.registry-use]] entry asserts. Every other occurrence (a non-constant key, any
 other method or attribute, the receiver passed otherwise as a call argument, assigned, returned,
@@ -63,9 +84,9 @@ key held in a named collection before a loop iterates it, a module loaded throug
 given only on a command line whose flag is not declared, a .sh file that runs a record-reading module, paths
 kept in the untracked orchestration registry, readers outside tools/, and a read that never names a file,
 key, flag or module. The residual of the key derivation: a registry object reached under a name not in
-HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a dynamic namespace
-held first in a variable (g = globals, then g()[k] = v) is not seen, and an allowlisted use is covered
-only by its asserted keys-read.
+HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a rebinding reached
+only through a computed string (such as getattr with a built name) or performed by code outside the
+hook library is not seen, and an allowlisted use is covered only by its asserted keys-read.
 A self-test that writes record fixtures is detected like a reader; the
 fixture-only disposition records it. A tool that imports a declared module for some other part of it is
 detected too; the not-a-reader disposition records it, with the reason.
@@ -129,16 +150,27 @@ REGISTRY_USE_FIELDS = frozenset({"line-anchor", "reason", "keys-read", "uses"})
 # undecorated module-level def of the hook library whose matching parameter is itself a registry name
 # (any other callee, a decorated def, another parameter name, *args, **kwargs, a starred call or an
 # unresolvable callee is refused). A use inside a type-parameter list or type-alias statement is
-# refused (lazy evaluation), and a module writing globals(), locals() or vars() by subscript or method
-# call has every pin and hand-off refused. Any other occurrence is a refused use, keyed by line
-# and column, and cannot-evaluate unless a [[detect.registry-use]] allowlist entry excuses it (an
+# refused (lazy evaluation). Every pin and hand-off is voided, fail closed, in a module holding any
+# reference at all (read-only included) to exec, eval, compile, setattr, delattr, __import__ or
+# import_module as a bare name or an attribute of any object, any reference at all to globals, locals,
+# vars, modules, _getframe, f_locals, f_globals or __dict__, a star import anywhere, or a store or
+# delete to an attribute rooted in an import-bound name, excepting exactly two forms that can neither
+# rebind a name nor run code here: (a) an attribute named compile whose object is a name bound, at
+# module level and only there, by `import re` (or `import re as <alias>`) and never rebound anywhere
+# in the module, and (b) a call __import__(<one string literal>) or
+# importlib.import_module(<one string literal>) whose literal names a module in
+# sys.stdlib_module_names, with no other arguments, import_module reached through a module-level,
+# never rebound import of importlib; a pin or hand-off in the body of a class with
+# any base, keyword or decorator is refused too (its metaclass's __prepare__ mapping can resolve any
+# name there), while constant-key reads stay accepted. Any other occurrence is a refused use, keyed by
+# line and column, and cannot-evaluate unless a [[detect.registry-use]] allowlist entry excuses it (an
 # anchor must match exactly one place, cover at least one refused use, and declare each excused use's
 # exact source text in uses, so an extra or changed use on an anchored line fails closed; its
 # keys-read join the derived set). A derived key must be in [detect] keys or excluded in
 # [detect.non-record-keys] with a reason. The residual: a registry object reached under a name not in
-# HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a dynamic
-# namespace held first in a variable is not seen, and an allowlisted use is covered only by its
-# asserted keys-read.
+# HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a rebinding
+# reached only through a computed string or performed by code outside the hook library is not seen,
+# and an allowlisted use is covered only by its asserted keys-read.
 HOOK_LIBRARY = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 HOOK_REGISTRY_NAMES = frozenset({"reg", "reg_data", "rec"})
 # A record name ending a string after one of these is a path built by formatting or joining: "{}:name"
@@ -350,11 +382,13 @@ def _all_args(args):
 
 
 def _outer_parts(node):
-    """The parts of one scope-opening node that Python evaluates in the ENCLOSING scope, at the point
-    where the node appears: a def's decorators, parameter defaults and annotations, a lambda's
-    parameter defaults, a class's decorators, bases and keyword arguments, and a comprehension's
-    first (outermost) iterable. A def's or class's type-parameter list is routed here only so every
-    node gets an owner; its registry uses are refused outright (they evaluate lazily)."""
+    """The parts of one scope-opening node that resolve against the ENCLOSING scope: a def's
+    decorators and parameter defaults, a lambda's parameter defaults, a class's decorators, bases and
+    keyword arguments, and a comprehension's first (outermost) iterable are evaluated there at the
+    point where the node appears; a def's parameter and return annotations are compiled against that
+    scope but evaluated only when __annotations__ is accessed, so they are routed here, to the scope
+    whose bindings they will then see. A def's or class's type-parameter list is routed here only so
+    every node gets an owner; its registry uses are refused outright (they evaluate lazily)."""
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
         parts = list(node.decorator_list) + list(node.type_params) + list(node.args.defaults)
         parts += [d for d in node.args.kw_defaults if d is not None]
@@ -424,6 +458,17 @@ def _nested_rebinders(node, at_module):
     return names
 
 
+_TYPE_PARAM_NODES = (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
+
+
+def _type_param_binds(node):
+    """The name one type-parameter node binds. A def's type parameter shadows a module-level name of
+    the same spelling inside the def it parameterizes, so it counts as a binding wherever bindings are
+    counted, fail closed: def a[_take](...) must never resolve its _take call to the module-level
+    hand-off callee."""
+    return (node.name,) if isinstance(node, _TYPE_PARAM_NODES) else ()
+
+
 def _loop_key_strings(scope):
     """name -> the frozenset of strings a plain for or async-for target over a literal tuple, list or
     set of string constants can hold within scope (the module, one def, one lambda or one
@@ -462,6 +507,8 @@ def _loop_key_strings(scope):
             bound_otherwise.add(node.name)
         elif isinstance(node, ast.MatchMapping) and node.rest:
             bound_otherwise.add(node.rest)
+        elif isinstance(node, _TYPE_PARAM_NODES):
+            bound_otherwise.update(_type_param_binds(node))
         if isinstance(node, _SCOPE_NODES):
             bound_otherwise |= _nested_rebinders(node, isinstance(scope, ast.Module))
     return {name: frozenset(value) for name, value in strings.items() if name not in bound_otherwise}
@@ -470,9 +517,10 @@ def _loop_key_strings(scope):
 def _module_helpers(tree):
     """name -> the arguments of the undecorated module-level def with that name, for names the whole
     module binds exactly once: a name also bound anywhere else (another def, an assignment, an import,
-    a class, a parameter, a nested rebinding) cannot be resolved to one signature and is absent, and a
-    decorated def is absent too (the name is bound to the decorator's result, whose parameters are not
-    the def's), so a registry name handed to a call through either fails closed."""
+    a class, a parameter, a type-parameter name, a nested rebinding) cannot be resolved to one
+    signature and is absent, and a decorated def is absent too (the name is bound to the decorator's
+    result, whose parameters are not the def's), so a registry name handed to a call through either
+    fails closed."""
     counts = {}
     for node in ast.walk(tree):
         names = ()
@@ -492,6 +540,8 @@ def _module_helpers(tree):
             names = (node.name,)
         elif isinstance(node, ast.MatchMapping) and node.rest:
             names = (node.rest,)
+        elif isinstance(node, _TYPE_PARAM_NODES):
+            names = _type_param_binds(node)
         for name in names:
             counts[name] = counts.get(name, 0) + 1
     return {node.name: node.args for node in tree.body
@@ -499,26 +549,155 @@ def _module_helpers(tree):
             and not node.decorator_list and counts.get(node.name) == 1}
 
 
-_DYNAMIC_NAMESPACES = frozenset({"globals", "locals", "vars"})
+# Callables that can rebind a name or load code: a module reaching any of them, by any spelling, can
+# rebind any of its names at run time.
+_VOID_CALLABLES = frozenset({"exec", "eval", "compile", "setattr", "delattr",
+                             "__import__", "import_module"})
+# Namespace objects through which any name of the module can be rebound; a read-only mention already
+# places the namespace in the module's hands, so every reference counts, fail closed.
+_VOID_NAMESPACES = frozenset({"globals", "locals", "vars", "modules",
+                              "_getframe", "f_locals", "f_globals", "__dict__"})
+_VOID_NAMES = _VOID_CALLABLES | _VOID_NAMESPACES
 
 
-def _writes_dynamic_namespace(tree):
-    """True when the module can rebind names through a dynamic namespace: a subscript store or delete
-    on the result of calling globals, locals or vars, or any attribute reached on such a result (a
-    method call such as globals().update; no method list is kept, fail closed). Such a module can
-    rebind any name at run time, so no literal-loop pin and no hand-off callee binding is certain, and
-    the caller refuses every pin and hand-off. The residual: a namespace object held first in a
-    variable (g = globals, then g()[k] = v) is not seen."""
-    def _namespace_call(node):
-        return (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id in _DYNAMIC_NAMESPACES)
+def _certain_module_aliases(tree, module_name):
+    """The names that certainly hold the standard-library module module_name throughout the module:
+    every binding occurrence of the name anywhere in the module (an assignment, a deletion, a
+    parameter, a def or class name, any other import, an except, global, nonlocal or match binding,
+    a type-parameter name) is a module-level `import module_name` or `import module_name as <alias>`
+    statement, and at least one such import exists. One rebinding anywhere, or an import of the
+    module inside a function or class body, drops the name, so the two voiding exceptions never
+    apply to it and the reference voids as before, fail closed."""
+    module_imports = set()
+    for node in _scope_walk(tree):
+        if isinstance(node, ast.Import):
+            module_imports.add(id(node))
+    accepted, other = set(), set()
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Subscript) and _namespace_call(node.value)
-                and isinstance(node.ctx, (ast.Store, ast.Del))):
-            return True
-        if isinstance(node, ast.Attribute) and _namespace_call(node.value):
-            return True
-    return False
+        names = ()
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names = (node.id,)
+        elif isinstance(node, ast.arg):
+            names = (node.arg,)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = (node.name,)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if (isinstance(node, ast.Import) and alias.name == module_name
+                        and id(node) in module_imports):
+                    accepted.add(bound)
+                else:
+                    other.add(bound)
+            continue
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names = (node.name,)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names = tuple(node.names)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            names = (node.name,)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names = (node.rest,)
+        elif isinstance(node, _TYPE_PARAM_NODES):
+            names = _type_param_binds(node)
+        other.update(names)
+    return frozenset(name for name in accepted if name not in other)
+
+
+def _void_exception_ids(tree):
+    """The ids of the reference nodes the two narrow voiding exceptions accept; _voiding_constructs
+    skips exactly these. Exactly two forms stop voiding, because neither can rebind a name or run
+    code in this module: (a) a Load of an attribute named compile whose object is a name bound, at
+    module level and only there, by `import re` (or `import re as <alias>`) and never rebound
+    anywhere in the module (re.compile builds a regular expression object; it cannot rebind a name);
+    (b) a call __import__(<one string literal>) or importlib.import_module(<one string literal>)
+    whose literal names a module in sys.stdlib_module_names, with no other arguments, import_module
+    reached through a name bound, at module level and only there, by `import importlib` (or an alias
+    of it) and never rebound (importing a literal standard-library module by name returns a module
+    object and rebinds nothing in this module's namespace; its result cannot be star-imported, and a
+    star import anywhere still voids on its own). Every other form voids as before: a bare compile,
+    compile reached through any other object or through a rebound alias, an uncalled __import__ or
+    import_module, a non-literal or non-stdlib argument, and any extra argument."""
+    re_names = _certain_module_aliases(tree, "re")
+    importlib_names = _certain_module_aliases(tree, "importlib")
+    excepted = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and node.attr == "compile"
+                and isinstance(node.ctx, ast.Load) and isinstance(node.value, ast.Name)
+                and isinstance(node.value.ctx, ast.Load) and node.value.id in re_names):
+            excepted.add(id(node))
+        elif (isinstance(node, ast.Call) and not node.keywords and len(node.args) == 1
+                and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)
+                and node.args[0].value in sys.stdlib_module_names):
+            func = node.func
+            if (isinstance(func, ast.Name) and func.id == "__import__"
+                    and isinstance(func.ctx, ast.Load)):
+                excepted.add(id(func))
+            elif (isinstance(func, ast.Attribute) and func.attr == "import_module"
+                    and isinstance(func.ctx, ast.Load) and isinstance(func.value, ast.Name)
+                    and isinstance(func.value.ctx, ast.Load)
+                    and func.value.id in importlib_names):
+                excepted.add(id(func))
+    return excepted
+
+
+def _voiding_constructs(tree):
+    """The sorted (line, description) list of every construct after which no literal-loop pin and no
+    hand-off callee binding in the module is certain, fail closed by construction rather than by
+    listing rebinding shapes: any reference at all, read-only included, to exec, eval, compile,
+    setattr, delattr, __import__ or import_module as a bare name or as an attribute of any object
+    (an alias such as e = exec is a reference to the bare name; builtins.exec and
+    importlib.import_module are attribute spellings); any reference at all to globals, locals, vars,
+    modules (sys.modules under any alias), _getframe, f_locals, f_globals or __dict__; a star import
+    anywhere; and a store or delete to an attribute whose chain root is an import-bound name (a
+    module object's namespace). Exactly two forms are excepted (_void_exception_ids), because
+    neither can rebind a name or run code in this module: (a) an attribute named compile whose
+    object is a name bound, at module level and only there, by `import re` (or
+    `import re as <alias>`) and never rebound anywhere in the module; (b) a call
+    __import__(<one string literal>) or importlib.import_module(<one string literal>) whose literal
+    names a module in sys.stdlib_module_names, with no other arguments, import_module reached
+    through a module-level, never rebound import of importlib. The caller refuses every pin and
+    hand-off in a module with any hit; constant-key reads and allowlisted uses stay accepted. The
+    residual: a rebinding reached only through a computed string (such as getattr with a built name)
+    or performed by code outside the hook library is not seen."""
+    excepted = _void_exception_ids(tree)
+    hits = set()
+    imported_roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_roots.update(a.asname or a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*":
+                    hits.add((node.lineno, "a star import"))
+                else:
+                    imported_roots.add(alias.asname or alias.name)
+    for node in ast.walk(tree):
+        if id(node) in excepted:
+            continue
+        if isinstance(node, ast.Name) and node.id in _VOID_NAMES:
+            hits.add((node.lineno, "a reference to the name {!r}".format(node.id)))
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _VOID_NAMES:
+                hits.add((node.lineno, "a reference to the attribute {!r}".format(node.attr)))
+            elif isinstance(node.ctx, (ast.Store, ast.Del)):
+                root = node.value
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if isinstance(root, ast.Name) and root.id in imported_roots:
+                    hits.add((node.lineno,
+                              "a store or delete to attribute {!r} of the imported name {!r}".format(
+                                  node.attr, root.id)))
+    return sorted(hits)
+
+
+def _unvetted_class(scope):
+    """True for a class body whose run-time namespace is not a plain dict for certain: any base,
+    keyword or decorator lets a metaclass's __prepare__ mapping resolve any name in the body, so no
+    literal-loop pin and no hand-off callee binding there is certain, and the caller refuses both;
+    a constant-key read in the body stays accepted."""
+    return isinstance(scope, ast.ClassDef) and bool(
+        scope.bases or scope.keywords or scope.decorator_list)
 
 
 def _lazy_nodes(tree):
@@ -633,8 +812,20 @@ def hook_registry_keys(root, registry_use=()):
     double-starred argument, to an undecorated module-level def whose matching parameter is itself a
     registry name, yielding no key (the hand-off's reads are derived at that parameter's own reads).
     A registry use inside a type-parameter list or a type-alias statement is refused (both evaluate
-    lazily, so no binding there is certain), and when the module writes globals(), locals() or vars()
-    by a subscript or a method call such as globals().update, every pin and hand-off is refused.
+    lazily, so no binding there is certain). Every pin and hand-off is refused, fail closed, when the
+    module holds any certainty-voiding construct (_voiding_constructs): any reference at all,
+    read-only included, to exec, eval, compile, setattr, delattr, __import__ or import_module as a
+    bare name or an attribute of any object, any reference at all to globals, locals, vars, modules,
+    _getframe, f_locals, f_globals or __dict__, a star import anywhere, or a store or delete to an
+    attribute rooted in an import-bound name, excepting exactly two forms that can neither rebind a
+    name nor run code in the module: (a) an attribute named compile whose object is a name bound, at
+    module level and only there, by `import re` (or `import re as <alias>`) and never rebound
+    anywhere in the module, and (b) a call __import__(<one string literal>) or
+    importlib.import_module(<one string literal>) whose literal names a module in
+    sys.stdlib_module_names, with no other arguments, import_module reached through a module-level,
+    never rebound import of importlib; and a pin or hand-off in the body of a class with any
+    base, keyword or decorator is refused (its metaclass's __prepare__ mapping can resolve any name
+    there), while constant-key reads stay accepted in both cases.
     The result is the union of those keys and the keys-read asserted by registry_use, the validated
     (line-anchor, keys-read, uses) triples of the [[detect.registry-use]] allowlist. Refused uses are
     keyed by occurrence (line and column). Refused (CannotEvaluate): any other occurrence, naming its
@@ -646,8 +837,9 @@ def hook_registry_keys(root, registry_use=()):
     matches; a hook library that cannot be read or parsed; and one that yields no key at all (a
     derivation that finds nothing would pass every list vacuously). The residual: a registry object
     reached under a name not in HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library
-    is not seen, a dynamic namespace held first in a variable (g = globals, then g()) is not seen, and
-    an allowlisted use is covered only by its asserted keys-read."""
+    is not seen, a rebinding reached only through a computed string (such as getattr with a built
+    name) or performed by code outside the hook library is not seen, and an allowlisted use is
+    covered only by its asserted keys-read."""
     tree, text = _parse_python_text(os.path.join(root, HOOK_LIBRARY), HOOK_LIBRARY)
     keys = set()
     refused = {}
@@ -656,14 +848,14 @@ def hook_registry_keys(root, registry_use=()):
         for node in ast.walk(tree):
             for child in ast.iter_child_nodes(node):
                 parents[child] = node
-        dynamic = _writes_dynamic_namespace(tree)
+        voided = _voiding_constructs(tree)
         lazy = _lazy_nodes(tree)
-        helpers = {} if dynamic else _module_helpers(tree)
+        helpers = {} if voided else _module_helpers(tree)
         owner, loops = {}, {}
         stack = [tree]
         while stack:
             scope = stack.pop()
-            loops[id(scope)] = {} if dynamic else _loop_key_strings(scope)
+            loops[id(scope)] = {} if voided or _unvetted_class(scope) else _loop_key_strings(scope)
             for node in _scope_walk(scope):
                 owner[id(node)] = scope
                 if isinstance(node, _SCOPE_NODES):
@@ -672,8 +864,13 @@ def hook_registry_keys(root, registry_use=()):
             if not (isinstance(node, ast.Name) and node.id in HOOK_REGISTRY_NAMES
                     and isinstance(node.ctx, ast.Load)):
                 continue
+            read_scope = owner.get(id(node), tree)
             got = None if id(node) in lazy else _accepted_read(
-                node, parents, loops[id(owner.get(id(node), tree))], helpers)
+                node, parents, loops[id(read_scope)], helpers)
+            if got is not None and not got and _unvetted_class(read_scope):
+                # A hand-off in the body of a class with a base, keyword or decorator: the metaclass's
+                # __prepare__ mapping can resolve the callee name there, so the binding is not certain.
+                got = None
             if got is None:
                 refused[(node.lineno, node.col_offset + 1)] = (node.id, _use_text(text, node, parents))
             else:
@@ -718,14 +915,20 @@ def hook_registry_keys(root, registry_use=()):
     leftover = sorted(place for place in refused if place not in excused)
     if leftover:
         line, column = leftover[0]
+        voiding_note = ""
+        if voided:
+            first_line, first_what = voided[0]
+            voiding_note = ("; the module holds {} certainty-voiding construct(s), the first being {} "
+                            "at line {}, so every literal-loop pin and hand-off in it is refused"
+                            .format(len(voided), first_what, first_line))
         raise CannotEvaluate(
             "{}: the registry use of {!r} at line {} column {} is outside the accepted access forms "
             "(R.get(K), R.get(K, default), R[K], (R or {{}}).get(K) or (R or {{}})[K], K a string "
             "constant or a literal-loop variable bound in the read's own scope, or the registry handed, "
             "with no starred or double-starred argument, to an undecorated module-level def whose "
             "matching parameter is a registry name) and no "
-            "[[detect.registry-use]] entry excuses it; {} such use(s) in all".format(
-                HOOK_LIBRARY, refused[leftover[0]][0], line, column, len(leftover)))
+            "[[detect.registry-use]] entry excuses it; {} such use(s) in all{}".format(
+                HOOK_LIBRARY, refused[leftover[0]][0], line, column, len(leftover), voiding_note))
     if not keys:
         raise CannotEvaluate("{}: no registry key is read in an accepted access form, so the [detect] "
                              "keys cannot be checked against the hook library".format(HOOK_LIBRARY))
@@ -912,9 +1115,10 @@ def run_gate(root):
         return 1
     print("PASS: {} record reader(s) under {} are each on {} with a disposition (the residual: a "
           "registry object reached under a name not in HOOK_REGISTRY_NAMES is not seen, a key used "
-          "outside the hook library is not seen, a dynamic namespace held first in a variable is not "
-          "seen, and an allowlisted use is covered only by its "
-          "asserted keys-read)".format(len(detected), " and ".join(SCAN_ROOTS), SWITCH_LIST))
+          "outside the hook library is not seen, a rebinding reached only through a computed string "
+          "or performed by code outside the hook library is not seen, and an allowlisted use is "
+          "covered only by its asserted keys-read)".format(
+              len(detected), " and ".join(SCAN_ROOTS), SWITCH_LIST))
     return 0
 
 
@@ -1026,6 +1230,50 @@ def _without_rule(table, name, files, switch=None):
         return _gate(files, switch)
     finally:
         table[name] = saved
+
+
+def _gate_without_voiding(files):
+    """The gate's exit on files with the module-voiding rule removed: the flip proving a row that
+    refuses under the rule is accepted without it."""
+    saved = _voiding_constructs
+    globals()["_voiding_constructs"] = lambda tree: []
+    try:
+        return _gate(files)
+    finally:
+        globals()["_voiding_constructs"] = saved
+
+
+def _gate_without_void_exceptions(files):
+    """The gate's exit on files with the two narrow voiding exceptions removed (no reference is
+    excepted): the flip proving each exception row depends on its exception."""
+    saved = _void_exception_ids
+    globals()["_void_exception_ids"] = lambda tree: set()
+    try:
+        return _gate(files)
+    finally:
+        globals()["_void_exception_ids"] = saved
+
+
+def _gate_every_class_vetted(files):
+    """The gate's exit on files with the unvetted-class rule removed: the flip proving a row that
+    refuses under the rule is accepted without it."""
+    saved = _unvetted_class
+    globals()["_unvetted_class"] = lambda scope: False
+    try:
+        return _gate(files)
+    finally:
+        globals()["_unvetted_class"] = saved
+
+
+def _gate_without_type_param_binds(files):
+    """The gate's exit on files with type-parameter bindings ignored: the flip proving the shadowed
+    hand-off row depends on counting them."""
+    saved = _type_param_binds
+    globals()["_type_param_binds"] = lambda node: ()
+    try:
+        return _gate(files)
+    finally:
+        globals()["_type_param_binds"] = saved
 
 
 def _self_test():
@@ -1483,6 +1731,231 @@ def _self_test():
     rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_dyn}))
     check("pass/dynamic-write-constant-key-kept", rc == 0, (rc, out))
 
+    # Fail-closed voiding by construction: a module holding any construct that can rebind names at
+    # run time (or reach a machinery able to) keeps no literal-loop pin and no hand-off. Each shape
+    # is refused with the rule present (void/), its quiet twin without the construct passes (quiet/),
+    # and the flip that removes the rule accepts the same module (flip/), so each row depends on it.
+    for void_id, quiet_id, flip_id, hook, twin, line in (
+            ("void/setattr-modules-attr-rebinding", "quiet/setattr-modules-attr-rebinding",
+             "flip/setattr-modules-attr-rebinding",
+             'import sys\nfor k in ("ledger_path",):\n    reg.get(k)\n'
+             'setattr(sys.modules[__name__], "k", "x")\n',
+             'import sys\nfor k in ("ledger_path",):\n    reg.get(k)\nset_attr = sys.intern("x")\n', 3),
+            ("void/exec-statement-rebinding", "quiet/exec-statement-rebinding",
+             "flip/exec-statement-rebinding",
+             'for k in ("ledger_path",):\n    reg.get(k)\nexec("k = 0")\n',
+             'for k in ("ledger_path",):\n    reg.get(k)\ndef executor():\n    return None\n', 2),
+            ("void/dict-update-globals-rebinding", "quiet/dict-update-globals-rebinding",
+             "flip/dict-update-globals-rebinding",
+             'for k in ("ledger_path",):\n    reg.get(k)\ndict.update(globals(), k="x")\n',
+             'D = {}\nfor k in ("ledger_path",):\n    reg.get(k)\ndict.update(D, other="x")\n', 2),
+            ("void/builtins-globals-subscript-rebinding", "quiet/builtins-globals-subscript-rebinding",
+             "flip/builtins-globals-subscript-rebinding",
+             'import builtins\nfor k in ("ledger_path",):\n    reg.get(k)\n'
+             'builtins.globals()["k"] = "x"\n',
+             'import builtins\nfor k in ("ledger_path",):\n    reg.get(k)\nX = builtins.id\n', 3),
+            ("void/getframe-f-locals-write", "quiet/getframe-f-locals-write",
+             "flip/getframe-f-locals-write",
+             'import sys\ndef a(root, reg):\n    for k in ("ledger_path",):\n        reg.get(k)\n'
+             '        sys._getframe().f_locals["k"] = "x"\n',
+             'import sys\ndef a(root, reg):\n    for k in ("ledger_path",):\n        reg.get(k)\n'
+             '        x = sys.maxsize\n', 4),
+            ("void/star-import-inside-loop", "quiet/star-import-inside-loop",
+             "flip/star-import-inside-loop",
+             'for k in ("ledger_path",):\n    from os.path import *\n    reg.get(k)\n',
+             'from os.path import join\nfor k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("void/setattr-redirected-handoff-callee", "quiet/setattr-redirected-handoff-callee",
+             "flip/setattr-redirected-handoff-callee",
+             'import sys\ndef _take(reg, root):\n    return reg.get("ledger_path")\n'
+             'def _other(x, root):\n    return None\nsetattr(sys.modules[__name__], "_take", _other)\n'
+             'def a(root, reg):\n    return _take(reg, root)\n',
+             'def _take(reg, root):\n    return reg.get("ledger_path")\n'
+             'def _other(x, root):\n    return None\ndef a(root, reg):\n    return _take(reg, root)\n', 8),
+            ("void/imported-module-attribute-store", "quiet/imported-module-attribute-store",
+             "flip/imported-module-attribute-store",
+             'import os\nfor k in ("ledger_path",):\n    reg.get(k)\nos.lab_marker = "x"\n',
+             'import os\ndef f(box):\n    box.lab_marker = "x"\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 3),
+            ("void/sys-modules-attribute-store", "quiet/sys-modules-attribute-store",
+             "flip/sys-modules-attribute-store",
+             'import sys\nfor k in ("ledger_path",):\n    reg.get(k)\nsys.modules[__name__].k = "x"\n',
+             'import sys\nSM = sys.argv\nfor k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("void/dunder-dict-subscript-write", "quiet/dunder-dict-subscript-write",
+             "flip/dunder-dict-subscript-write",
+             'def f(o):\n    o.__dict__["k"] = "x"\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'def f(o):\n    o.store["k"] = "x"\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("void/f-globals-reference", "quiet/f-globals-reference", "flip/f-globals-reference",
+             'def f(frame):\n    return frame.f_globals\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'def f(frame):\n    return frame.f_lineno\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("void/star-import-before-handoff", "quiet/star-import-before-handoff",
+             "flip/star-import-before-handoff",
+             'from os.path import *\ndef _take(reg, root):\n    return reg.get("ledger_path")\n'
+             'def a(root, reg):\n    return _take(reg, root)\n',
+             'from os.path import basename\ndef _take(reg, root):\n    return reg.get("ledger_path")\n'
+             'def a(root, reg):\n    return _take(reg, root)\n', 5),
+            ("void/eval-name-binding", "quiet/eval-name-binding", "flip/eval-name-binding",
+             'E = eval\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'evaluate = None\nfor k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("void/compile-attribute-call", "quiet/compile-attribute-call",
+             "flip/compile-attribute-call",
+             'def f(box):\n    return box.compile("x")\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'import re\nR = re.escape("x")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("void/delattr-call", "quiet/delattr-call", "flip/delattr-call",
+             'def f(o):\n    delattr(o, "x")\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'def f(o):\n    return hasattr(o, "x")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("void/dunder-import-call", "quiet/dunder-import-call", "flip/dunder-import-call",
+             'M = __import__("os", None)\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'NOTE = "__import__ named only inside a string constant"\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("void/import-module-attribute-call", "quiet/import-module-attribute-call",
+             "flip/import-module-attribute-call",
+             'import importlib\nM = importlib.import_module("ledger_dynamic_plugin")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n',
+             'import importlib\nX = importlib.machinery\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             4),
+            ("void/globals-bare-reference", "quiet/globals-bare-reference",
+             "flip/globals-bare-reference",
+             'def f():\n    return globals\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'globs = None\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("void/locals-name-binding", "quiet/locals-name-binding", "flip/locals-name-binding",
+             'L = locals\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'locale = None\nfor k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("void/vars-name-binding", "quiet/vars-name-binding", "flip/vars-name-binding",
+             'V = vars\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'variants = None\nfor k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("void/f-locals-read-reference", "quiet/f-locals-read-reference",
+             "flip/f-locals-read-reference",
+             'def f(frame):\n    return frame.f_locals\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'def f(frame):\n    return frame.f_back\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("void/sys-modules-read-reference", "quiet/sys-modules-read-reference",
+             "flip/sys-modules-read-reference",
+             'import sys\nM = sys.modules\nfor k in ("ledger_path",):\n    reg.get(k)\n',
+             'import sys\nM = sys.platform\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4)):
+        files = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook})
+        rc, out = _gate(files)
+        check(void_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} column".format(line) in out, (rc, out))
+        rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: twin}))
+        check(quiet_id, rc == 0, (rc, out))
+        rc, out = _gate_without_voiding(files)
+        check(flip_id, rc == 0, (rc, out))
+
+    # The two narrow voiding exceptions, the only forms that stop voiding because neither can rebind
+    # a name or run code in the module: (a) an attribute named compile whose object is a name bound,
+    # at module level and only there, by `import re` (or `import re as <alias>`) and never rebound
+    # anywhere in the module; (b) a call __import__(<one string literal>) or
+    # importlib.import_module(<one string literal>) whose literal names a module in
+    # sys.stdlib_module_names, with no other arguments. Each excepted shape passes quietly, and the
+    # flip that removes the exceptions refuses the same module, so each row depends on its exception.
+    for quiet_id, flip_id, hook, line in (
+            ("exception/re-compile-import-re", "flip/re-compile-import-re",
+             'import re\nR = re.compile("x")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("exception/re-alias-compile", "flip/re-alias-compile",
+             'import re as r\nR = r.compile("x")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("exception/dunder-import-stdlib-literal", "flip/dunder-import-stdlib-literal",
+             'H = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("exception/import-module-stdlib-literal", "flip/import-module-stdlib-literal",
+             'import importlib\nJ = importlib.import_module("json")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 4)):
+        files = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook})
+        rc, out = _gate(files)
+        check(quiet_id, rc == 0, (rc, out))
+        rc, out = _gate_without_void_exceptions(files)
+        check(flip_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} column".format(line) in out, (rc, out))
+
+    # The near neighbours of the two exceptions stay voided: compile through an alias of re that the
+    # module later rebinds, a bare compile brought in by `from re import compile`, __import__ of a
+    # literal that names no sys.stdlib_module_names module, and __import__ of a variable. The flip
+    # that removes voiding entirely accepts each, so each row depends on the voiding rule.
+    for void_id, flip_id, hook, line in (
+            ("void/re-compile-rebound-alias", "flip/re-compile-rebound-alias",
+             'import re\nR = re.compile("x")\nre = None\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 5),
+            ("void/from-re-import-compile-call", "flip/from-re-import-compile-call",
+             'from re import compile\nC = compile("x")\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4),
+            ("void/dunder-import-non-stdlib-literal", "flip/dunder-import-non-stdlib-literal",
+             'M = __import__("not_a_stdlib_module_xyz")\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 3),
+            ("void/dunder-import-variable-argument", "flip/dunder-import-variable-argument",
+             'def f(name):\n    return __import__(name)\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4)):
+        files = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook})
+        rc, out = _gate(files)
+        check(void_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} column".format(line) in out, (rc, out))
+        rc, out = _gate_without_voiding(files)
+        check(flip_id, rc == 0, (rc, out))
+
+    # A class with any base, keyword or decorator: its metaclass's __prepare__ mapping can resolve
+    # any name in the body, so a pin or a hand-off there is refused while a constant-key read in the
+    # same body stays accepted; the flip that vets every class accepts each refused shape.
+    for void_id, quiet_id, flip_id, hook, twin, line in (
+            ("void/class-metaclass-prepare-pin", "quiet/class-metaclass-prepare-pin",
+             "flip/class-metaclass-prepare-pin",
+             'class M(type):\n    pass\nclass C(metaclass=M):\n    for k in ("ledger_path",):\n'
+             '        V = reg.get(k)\n',
+             'class C:\n    for k in ("ledger_path",):\n        V = reg.get(k)\n', 5),
+            ("void/class-base-pin", "quiet/class-base-pin", "flip/class-base-pin",
+             'class C(dict):\n    for k in ("ledger_path",):\n        V = reg.get(k)\n',
+             'class C(dict):\n    V = reg.get("ledger_path")\n', 3),
+            ("void/class-decorator-pin", "quiet/class-decorator-pin", "flip/class-decorator-pin",
+             'def d(c):\n    return c\n@d\nclass C:\n    for k in ("ledger_path",):\n'
+             '        V = reg.get(k)\n',
+             'def d(c):\n    return c\n@d\nclass C:\n    V = reg.get("ledger_path")\n', 6),
+            ("void/class-keyword-handoff", "quiet/class-keyword-handoff",
+             "flip/class-keyword-handoff",
+             'def _take(reg, root):\n    return reg.get("ledger_path")\nclass M(type):\n    pass\n'
+             'class C(metaclass=M):\n    V = _take(reg, None)\n',
+             'def _take(reg, root):\n    return reg.get("ledger_path")\nclass C:\n'
+             '    V = _take(reg, None)\n', 6)):
+        files = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook})
+        rc, out = _gate(files)
+        check(void_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} column".format(line) in out, (rc, out))
+        rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: twin}))
+        check(quiet_id, rc == 0, (rc, out))
+        rc, out = _gate_every_class_vetted(files)
+        check(flip_id, rc == 0, (rc, out))
+
+    # A def's type parameter shadows a module-level name inside the def it parameterizes, so
+    # def a[_take](...) never resolves its _take call to the module-level hand-off callee; an
+    # unrelated type parameter leaves the hand-off accepted, and the flip that ignores type-parameter
+    # bindings accepts the shadowed shape.
+    hook_tp = ('def _take(reg, root):\n    return reg.get("ledger_path")\n'
+               'def a[_take](root, reg):\n    return _take(reg, root)\n')
+    files_tp = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_tp})
+    rc, out = _gate(files_tp)
+    check("void/type-param-shadowed-handoff-callee", rc == 2
+          and "outside the accepted access forms" in out and "at line 4 column" in out, (rc, out))
+    rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook_tp.replace("def a[_take]", "def a[T]")}))
+    check("quiet/type-param-shadowed-handoff-callee", rc == 0, (rc, out))
+    rc, out = _gate_without_type_param_binds(files_tp)
+    check("flip/type-param-shadowed-handoff-callee", rc == 0, (rc, out))
+
+    # Each routing a scope-opening node owes the ENCLOSING scope, one row per routed part: a walrus in
+    # a keyword-only default, a class base or a class keyword rebinds the enclosing loop key, and a
+    # return-annotation read resolves against the enclosing scope, never an inner loop's pin, so
+    # rerouting any of these parts to the inner scope makes its row fail.
+    for case_id, hook, line in (
+            ("route/kwonly-default-walrus-rebinds-loop-key",
+             'def a(root, reg):\n    for k in ("ledger_path",):\n'
+             '        def g(*, x=(k := "ledger_other")):\n            return x\n        reg.get(k)\n', 5),
+            ("route/return-annotation-read-enclosing-scope",
+             'def a(root, reg, k):\n    def g() -> reg.get(k):\n        for k in ("ledger_path",):\n'
+             '            pass\n    return g()\n', 2),
+            ("route/class-base-walrus-rebinds-loop-key",
+             'def a(root, reg):\n    for k in ("ledger_path",):\n'
+             '        class C((k := "ledger_other") and object):\n            pass\n        reg.get(k)\n',
+             5),
+            ("route/class-keyword-walrus-rebinds-loop-key",
+             'def a(root, reg):\n    for k in ("ledger_path",):\n'
+             '        class C(metaclass=(k := type)):\n            pass\n        reg.get(k)\n', 5)):
+        rc, out = _gate(dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook}))
+        check(case_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} column".format(line) in out, (rc, out))
+
     # The hand-off rule's accepted side: a registry name passed, positionally or by keyword, to a
     # module-level def whose matching parameter is a registry name needs no allowlist entry.
     hook_hand = ('def _take(reg, root):\n    return reg.get("ledger_path")\n'
@@ -1676,9 +2149,23 @@ def _self_test():
           "iterable belongs to the enclosing scope, a def's decorators, defaults and annotations and a "
           "lambda's defaults belong to the enclosing scope, and a class body is its own scope), a loop key "
           "a nested scope rebinds by nonlocal or global, or that a global, match or except capture also "
-          "binds, never pins, a type-parameter list and a type-alias statement accept no registry use, and "
-          "a module writing globals(), locals() or vars() by subscript or method call has every pin and "
-          "hand-off refused; every registry use outside those forms (a non-constant key, "
+          "binds, never pins, a type-parameter list and a type-alias statement accept no registry use, a "
+          "def's type parameter shadows a module-level hand-off callee, every pin and hand-off is voided, "
+          "fail closed, in a module holding any reference (read-only included) to exec, eval, compile, "
+          "setattr, delattr, __import__ or import_module as a bare name or an attribute, any reference to "
+          "globals, locals, vars, modules, _getframe, f_locals, f_globals or __dict__, a star import, or "
+          "a store or delete to an attribute rooted in an import-bound name (each voided shape has a "
+          "quiet twin that passes and a flip that accepts it with the voiding removed), excepting "
+          "exactly two forms that can neither rebind a name nor run code in the module: an attribute "
+          "named compile whose object is a name bound, at module level and only there, by import re "
+          "(or import re as <alias>) and never rebound anywhere in the module, and a call "
+          "__import__(<one string literal>) or importlib.import_module(<one string literal>) whose "
+          "literal names a module in sys.stdlib_module_names, with no other arguments (each excepted "
+          "shape passes and is refused by the flip that removes the exceptions, and its near "
+          "neighbours, a rebound alias of re, a bare compile from re, a non-stdlib literal and a "
+          "variable argument, stay voided), and a pin or "
+          "hand-off in the body of a class with any base, keyword or decorator is refused while "
+          "constant-key reads stay accepted; every registry use outside those forms (a non-constant key, "
           "another method or attribute, a call argument through any other callee or parameter, a match, "
           "except or loop capture, an alias, a splat, a conditional or or-fallback receiver, and the rest) "
           "exits 2 naming its line and column unless a [[detect.registry-use]] entry anchors it exactly "
@@ -1687,9 +2174,9 @@ def _self_test():
           "declaration each exit 2; asserted keys-read join the derived set); [detect.non-record-keys] "
           "excludes derived keys that name no record path (a key in both lists or an exclusion nothing "
           "derives exits 2); the residual: a registry object reached under a name not in "
-          "HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a dynamic "
-          "namespace held first in a variable is not seen, and an "
-          "allowlisted use is covered only by its asserted keys-read; the parse site handles "
+          "HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a rebinding "
+          "reached only through a computed string or performed by code outside the hook library is not "
+          "seen, and an allowlisted use is covered only by its asserted keys-read; the parse site handles "
           "RecursionError, MemoryError and ValueError; the live tree passes)".format(len(EXECUTED)))
     return 0
 
