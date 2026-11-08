@@ -60,13 +60,17 @@ whose literal names a module in sys.stdlib_module_names, with no other arguments
 reached through a name bound, at module level and only there, by `import importlib` (or an alias of
 it) and never rebound (importing a literal standard-library module by name returns a module object
 and rebinds nothing in this module's namespace; its result cannot be star-imported, and a star
-import anywhere still voids on its own); form (b) accepts __import__ only when the name __import__
-has no binding occurrence anywhere in the module (an assignment, a deletion, a parameter, a def or
-class name, an import alias, an except, global, nonlocal or match binding, or a type-parameter
-name), so only the builtin can be the callee (a module that references __builtins__ voids on that
-occurrence itself, so the exception never lets anything through there). Every
+import anywhere still voids on its own); form (b) accepts __import__ only when neither the name
+__import__ nor the name __builtins__ has a binding occurrence anywhere in the module (an
+assignment, a deletion, a parameter, a def or class name, an import alias, an except, global,
+nonlocal or match binding, or a type-parameter name), so only the builtin can be the callee: a
+bound __import__ need not be the builtin, and a bound __builtins__ is the mapping a bare-name
+__import__ resolves through, and the module can bind it with no bare-name or attribute occurrence
+the scan reads (import shim as __builtins__, a def, class, parameter, except, match or
+type-parameter binding of that name), while a stored or deleted bare-name __builtins__ is already
+a voiding occurrence of its own. Every
 other form voids as before: a bare compile, compile reached through any other object or through a
-rebound alias, an uncalled __import__ or import_module, a __import__ the module
+rebound alias, an uncalled __import__ or import_module, a __import__ or __builtins__ the module
 binds, a non-literal or non-stdlib argument, and any extra argument. A
 voided module keeps only its constant-key reads and its allowlisted uses. Independently of module voiding, a literal-loop pin or a
 hand-off written in a class body whose class has any base, keyword or decorator is refused: the
@@ -176,8 +180,8 @@ REGISTRY_USE_FIELDS = frozenset({"line-anchor", "reason", "keys-read", "uses"})
 # in the module, and (b) a call __import__(<one string literal>) or
 # importlib.import_module(<one string literal>) whose literal names a module in
 # sys.stdlib_module_names, with no other arguments, import_module reached through a module-level,
-# never rebound import of importlib, __import__ only when the name __import__ has no binding
-# occurrence anywhere in the module; a pin or hand-off
+# never rebound import of importlib, __import__ only when neither __import__ nor __builtins__ has
+# a binding occurrence anywhere in the module; a pin or hand-off
 # in the body of a class with
 # any base, keyword or decorator is refused too (its metaclass's __prepare__ mapping can resolve any
 # name there), while constant-key reads stay accepted. Any other occurrence is a refused use, keyed by
@@ -594,6 +598,13 @@ _ATTR_ACCESSORS = frozenset({"getattr", "__getattribute__"})
 # accessor bound to no name this scan spells, so a later call of it would not be seen; refusing the
 # literal closes that route where it is built).
 _VOID_ATTR_LITERALS = _VOID_NAMES | _ATTR_ACCESSORS
+# The names whose binding anywhere in the module stops the __import__ voiding exception: a bound
+# __import__ need not be the builtin, and a bound __builtins__ is the mapping a bare-name
+# __import__ resolves through, and the module can bind it with no bare-name or attribute
+# occurrence the scan reads (an import alias, a def or class name, a parameter, an except, match
+# or type-parameter binding). A stored or deleted bare name is also such a binding, but that
+# occurrence already voids on its own.
+_DUNDER_IMPORT_EXCEPTION_BLOCKERS = frozenset({"__import__", "__builtins__"})
 
 
 def _from_import_void_names(alias):
@@ -607,9 +618,15 @@ def _from_import_void_names(alias):
     return tuple(dict.fromkeys(n for n in names if n in _VOID_NAMES))
 
 
-# Each binding construct _bound_anywhere counts, one branch per construct; the self-test removes
-# each branch in turn to prove the row guarding it depends on that branch. A MatchAs or MatchStar
-# name and a MatchMapping rest are one branch: each is a match capture.
+# Each binding construct _bound_anywhere counts, one branch per construct. Every branch except
+# store-or-delete is guarded by a self-test row that fails with that branch removed; no row can
+# guard store-or-delete, because a stored or deleted bare-name __import__ or __builtins__ is
+# itself a voiding occurrence, so removing that branch never changes the exit (the branch is kept
+# for completeness of _bound_anywhere and is covered by the occurrence check). The branch flips
+# the self-test runs remove the except, global-nonlocal, match-capture and type-parameter
+# branches, narrow the match-capture branch to drop its MatchStar and its MatchMapping-rest form,
+# and drop __builtins__ from the exception condition. A MatchAs or MatchStar name and a
+# MatchMapping rest are one branch: each is a match capture.
 _BINDING_BRANCHES = {
     "store-or-delete": lambda node: (
         (node.id,) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
@@ -699,19 +716,22 @@ def _void_exception_ids(tree):
     reached through a name bound, at module level and only there, by `import importlib` (or an alias
     of it) and never rebound (importing a literal standard-library module by name returns a module
     object and rebinds nothing in this module's namespace; its result cannot be star-imported, and a
-    star import anywhere still voids on its own). Form (b) accepts __import__ only when the name
-    __import__ has no binding occurrence anywhere in the module (_bound_anywhere: an assignment, a
-    deletion, a parameter, a def or class name, an import alias, an except, global, nonlocal or
-    match binding, or a type-parameter name), so only the builtin can be the callee. No separate
-    __builtins__ clause is needed: every bare-name or attribute occurrence of __builtins__ is
-    itself a voiding hit no exception covers, so in a module that references __builtins__ every pin
-    and hand-off is already refused whether or not this call is excepted. Every other
+    star import anywhere still voids on its own). Form (b) accepts __import__ only when neither the
+    name __import__ nor the name __builtins__ has a binding occurrence anywhere in the module
+    (_bound_anywhere over _DUNDER_IMPORT_EXCEPTION_BLOCKERS: an assignment, a deletion, a
+    parameter, a def or class name, an import alias, an except, global, nonlocal or match binding,
+    or a type-parameter name), so only the builtin can be the callee: a bound __import__ need not
+    be the builtin, and a bound __builtins__ is the mapping a bare-name __import__ resolves
+    through, and the module can bind it with no bare-name or attribute occurrence the scan reads
+    (import shim as __builtins__, a def, class, parameter, except, match or type-parameter binding
+    of that name), while a stored or deleted bare-name __builtins__ is already a voiding occurrence
+    of its own. Every other
     form voids as before: a bare compile, compile reached through any other object or through a
-    rebound alias, an uncalled __import__ or import_module, a __import__ the module
+    rebound alias, an uncalled __import__ or import_module, a __import__ or __builtins__ the module
     binds, a non-literal or non-stdlib argument, and any extra argument."""
     re_names = _certain_module_aliases(tree, "re")
     importlib_names = _certain_module_aliases(tree, "importlib")
-    dunder_import_certain = "__import__" not in _bound_anywhere(tree)
+    dunder_import_certain = not (_DUNDER_IMPORT_EXCEPTION_BLOCKERS & _bound_anywhere(tree))
     excepted = set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Attribute) and node.attr == "compile"
@@ -755,8 +775,8 @@ def _voiding_constructs(tree):
     `import re as <alias>`) and never rebound anywhere in the module; (b) a call
     __import__(<one string literal>) or importlib.import_module(<one string literal>) whose literal
     names a module in sys.stdlib_module_names, with no other arguments, import_module reached
-    through a module-level, never rebound import of importlib, and __import__ only when the name
-    __import__ has no binding occurrence anywhere in the module.
+    through a module-level, never rebound import of importlib, and __import__ only when neither
+    __import__ nor __builtins__ has a binding occurrence anywhere in the module.
     The caller refuses every pin and hand-off in a module with any hit; constant-key
     reads and allowlisted uses stay accepted. The residual: any run-time route that reaches the
     module namespace or a voiding callable without a bare-name, attribute, from-import or
@@ -954,8 +974,8 @@ def hook_registry_keys(root, registry_use=()):
     anywhere in the module, and (b) a call __import__(<one string literal>) or
     importlib.import_module(<one string literal>) whose literal names a module in
     sys.stdlib_module_names, with no other arguments, import_module reached through a module-level,
-    never rebound import of importlib, __import__ only when the name __import__ has no binding
-    occurrence anywhere in the module; and a pin or
+    never rebound import of importlib, __import__ only when neither __import__ nor __builtins__
+    has a binding occurrence anywhere in the module; and a pin or
     hand-off in the body of a class with any
     base, keyword or decorator is refused (its metaclass's __prepare__ mapping can resolve any name
     there), while constant-key reads stay accepted in both cases.
@@ -1446,6 +1466,30 @@ def _gate_without_binding_branch(files, branch):
         return _gate(files)
     finally:
         _BINDING_BRANCHES[branch] = saved
+
+
+def _gate_with_binding_branch(files, branch, binds):
+    """The gate's exit on files with one binding branch of _bound_anywhere replaced by a narrower
+    form: the flip proving a row depends on the exact form the replacement drops, which a
+    whole-branch removal cannot show."""
+    saved = _BINDING_BRANCHES[branch]
+    _BINDING_BRANCHES[branch] = binds
+    try:
+        return _gate(files)
+    finally:
+        _BINDING_BRANCHES[branch] = saved
+
+
+def _gate_without_builtins_blocker(files):
+    """The gate's exit on files with __builtins__ dropped from the names whose binding stops the
+    __import__ voiding exception: the flip proving each __builtins__-binding row depends on that
+    part of the condition."""
+    saved = _DUNDER_IMPORT_EXCEPTION_BLOCKERS
+    globals()["_DUNDER_IMPORT_EXCEPTION_BLOCKERS"] = frozenset({"__import__"})
+    try:
+        return _gate(files)
+    finally:
+        globals()["_DUNDER_IMPORT_EXCEPTION_BLOCKERS"] = saved
 
 
 def _self_test():
@@ -2017,7 +2061,9 @@ def _self_test():
     # at module level and only there, by `import re` (or `import re as <alias>`) and never rebound
     # anywhere in the module; (b) a call __import__(<one string literal>) or
     # importlib.import_module(<one string literal>) whose literal names a module in
-    # sys.stdlib_module_names, with no other arguments. Each excepted shape passes quietly, and the
+    # sys.stdlib_module_names, with no other arguments, __import__ only when neither __import__
+    # nor __builtins__ has a binding occurrence anywhere in the module. Each excepted shape passes
+    # quietly, and the
     # flip that removes the exceptions refuses the same module, so each row depends on its exception.
     for quiet_id, flip_id, hook, line in (
             ("exception/re-compile-import-re", "flip/re-compile-import-re",
@@ -2135,8 +2181,15 @@ def _self_test():
     # Each binding branch of _bound_anywhere that stops the __import__ exception on its own: the
     # module binds the name __import__ by exactly one construct (an except capture, a bare global
     # declaration, a match capture, a type-parameter name), so the call is not excepted and voids;
-    # the flip that removes only that branch accepts the same module. The other branches (a store
-    # or delete, a parameter, a def or class name, an import alias) have their own rows above.
+    # the flip that removes only that branch accepts the same module. The parameter, def-or-class
+    # and import-alias branches are guarded by their rows above: each of those rows binds
+    # __import__ by exactly one construct beside no other voiding shape, so it fails with its
+    # branch removed too. No row can guard the store-or-delete branch: a stored or deleted
+    # bare-name __import__ or __builtins__ is itself a voiding occurrence, so removing that branch
+    # never changes the exit; the branch is kept for completeness of _bound_anywhere and is
+    # covered by the occurrence check. The branch flips the self-test runs are exactly the four
+    # removals below, the two match-capture narrowings after them, and the __builtins__
+    # exception-condition drop after those.
     for void_id, flip_id, branch, hook, line in (
             ("void/dunder-import-except-bound", "flip/dunder-import-except-bound", "except",
              'try:\n    pass\nexcept ValueError as __import__:\n    pass\n'
@@ -2158,6 +2211,87 @@ def _self_test():
         check(void_id, rc == 2 and "outside the accepted access forms" in out
               and "at line {} column".format(line) in out, (rc, out))
         rc, out = _gate_without_binding_branch(files, branch)
+        check(flip_id, rc == 0, (rc, out))
+
+    # The match-capture branch counts three forms: a MatchAs name, a MatchStar name and a
+    # MatchMapping rest. The whole-branch removal above cannot tell a branch that keeps one form
+    # and drops another from the full branch, so the star and the mapping-rest form each have
+    # their own row, refused with the branch whole and accepted by the flip that narrows the
+    # branch to the other two forms.
+    def _match_without_star(node):
+        if isinstance(node, ast.MatchAs) and node.name:
+            return (node.name,)
+        if isinstance(node, ast.MatchMapping) and node.rest:
+            return (node.rest,)
+        return ()
+
+    def _match_without_rest(node):
+        return (node.name,) if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name else ()
+
+    for void_id, flip_id, binds, hook, line in (
+            ("void/dunder-import-match-star-bound", "flip/dunder-import-match-star-bound",
+             _match_without_star,
+             'def f(v):\n    match v:\n        case [*__import__]:\n            pass\n'
+             'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7),
+            ("void/dunder-import-match-mapping-rest-bound",
+             "flip/dunder-import-match-mapping-rest-bound", _match_without_rest,
+             'def f(v):\n    match v:\n        case {**__import__}:\n            pass\n'
+             'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7)):
+        files = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook})
+        rc, out = _gate(files)
+        check(void_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} column".format(line) in out, (rc, out))
+        rc, out = _gate_with_binding_branch(files, "match-capture", binds)
+        check(flip_id, rc == 0, (rc, out))
+
+    # A binding of __builtins__ with no bare-name or attribute occurrence the scan reads: the
+    # bound object is the mapping a bare-name __import__ resolves through, so the __import__
+    # exception applies only when neither __import__ nor __builtins__ has a binding occurrence
+    # anywhere in the module. One row per binding construct, each beside an otherwise excepted
+    # __import__("hashlib") call and a pin, refused with the condition whole and accepted by the
+    # flip that drops __builtins__ from it. A stored or deleted bare-name __builtins__ has no row
+    # here: the occurrence itself voids (void/dunder-import-builtins-assignment above), so that
+    # module can never be accepted by this flip; a from-import binding of __builtins__ likewise
+    # voids on the from-import itself (the void/from-import-* rows guard that check), so the
+    # import-alias construct is exercised by its plain-import spelling.
+    for void_id, flip_id, hook, line in (
+            ("void/builtins-import-alias-blocks-exception",
+             "flip/builtins-import-alias-blocks-exception",
+             'import shim as __builtins__\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("void/builtins-def-bound-blocks-exception",
+             "flip/builtins-def-bound-blocks-exception",
+             'def __builtins__():\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("void/builtins-class-bound-blocks-exception",
+             "flip/builtins-class-bound-blocks-exception",
+             'class __builtins__:\n    pass\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("void/builtins-parameter-bound-blocks-exception",
+             "flip/builtins-parameter-bound-blocks-exception",
+             'def f(__builtins__):\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("void/builtins-except-bound-blocks-exception",
+             "flip/builtins-except-bound-blocks-exception",
+             'try:\n    pass\nexcept ValueError as __builtins__:\n    pass\n'
+             'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7),
+            ("void/builtins-global-declared-blocks-exception",
+             "flip/builtins-global-declared-blocks-exception",
+             'def f():\n    global __builtins__\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("void/builtins-match-capture-blocks-exception",
+             "flip/builtins-match-capture-blocks-exception",
+             'def f(v):\n    match v:\n        case str() as __builtins__:\n            pass\n'
+             'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7),
+            ("void/builtins-type-param-blocks-exception",
+             "flip/builtins-type-param-blocks-exception",
+             'def f[__builtins__]():\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5)):
+        files = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook})
+        rc, out = _gate(files)
+        check(void_id, rc == 2 and "outside the accepted access forms" in out
+              and "at line {} column".format(line) in out, (rc, out))
+        rc, out = _gate_without_builtins_blocker(files)
         check(flip_id, rc == 0, (rc, out))
 
     # A getattr call whose attribute name is a string literal outside the voiding and accessor
@@ -2448,14 +2582,22 @@ def _self_test():
           "(or import re as <alias>) and never rebound anywhere in the module, and a call "
           "__import__(<one string literal>) or importlib.import_module(<one string literal>) whose "
           "literal names a module in sys.stdlib_module_names, with no other arguments, __import__ only "
-          "when the name __import__ has no binding occurrence in the module, each binding branch "
-          "counted there (a store or delete, a parameter, a def or class name, an import alias, an "
-          "except capture, a global or nonlocal declaration, a match capture, a type-parameter name) "
-          "guarded by a row that fails with that branch removed (each excepted "
+          "when neither __import__ nor __builtins__ has a binding occurrence anywhere in the module, "
+          "every binding branch counted there except store-or-delete (a parameter, a def or class "
+          "name, an import alias, an except capture, a global or nonlocal declaration, a match "
+          "capture in its as, star and mapping-rest forms, a type-parameter name) guarded by a row "
+          "that fails with that branch removed, while no row can guard the store-or-delete branch "
+          "(a stored or deleted bare-name __import__ or __builtins__ is itself a voiding occurrence, "
+          "so that branch never changes the exit; it is kept for completeness of _bound_anywhere and "
+          "is covered by the occurrence check), the flips the self-test runs removing the except, "
+          "global-nonlocal, match-capture and type-parameter branches, narrowing the match-capture "
+          "branch to drop its star and its mapping-rest form, and dropping __builtins__ from the "
+          "exception condition (each excepted "
           "shape passes and is refused by the flip that removes the exceptions, and its near "
           "neighbours, a rebound alias of re, a bare compile from re, a non-stdlib literal, a "
-          "variable argument, a keyword argument, a function-level import of re, each binding of the "
-          "name __import__ and a __builtins__ reference or assignment, stay voided), and a pin or "
+          "variable argument, a keyword argument, a function-level import of re, each binding of "
+          "the name __import__ or __builtins__ and a __builtins__ reference or assignment, stay "
+          "voided), and a pin or "
           "hand-off in the body of a class with any base, keyword or decorator is refused while "
           "constant-key reads stay accepted; every registry use outside those forms (a non-constant key, "
           "another method or attribute, a call argument through any other callee or parameter, a match, "
