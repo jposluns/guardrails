@@ -46,8 +46,10 @@ construct that can rebind names at run time or that reaches a machinery able to:
 read-only included, to exec, eval, compile, setattr, delattr, __import__ or import_module, as a bare
 name or as an attribute of any object (so an alias such as e = exec and a spelling such as
 builtins.exec or importlib.import_module are both seen); any reference at all to globals, locals,
-vars, modules (sys.modules under any alias), _getframe, f_locals, f_globals or __dict__, calls and
-read-only mentions alike; a star import anywhere; and a store or delete to an attribute whose chain
+vars, modules (sys.modules under any alias), _getframe, f_locals, f_globals, __dict__, __globals__
+or __builtins__, calls and read-only mentions alike; a call of getattr or __getattribute__ whose
+attribute-name argument is a string literal naming one of those callables or namespaces, or is not
+a string literal at all; a star import anywhere; and a store or delete to an attribute whose chain
 root is an import-bound name (a module object's namespace). Exactly two forms stop voiding, because
 neither can rebind a name or run code in this module: (a) an attribute named compile whose object is
 a name bound, at module level and only there, by `import re` (or `import re as <alias>`) and never
@@ -57,10 +59,14 @@ whose literal names a module in sys.stdlib_module_names, with no other arguments
 reached through a name bound, at module level and only there, by `import importlib` (or an alias of
 it) and never rebound (importing a literal standard-library module by name returns a module object
 and rebinds nothing in this module's namespace; its result cannot be star-imported, and a star
-import anywhere still voids on its own). Every other form voids as before: a bare compile, compile
-reached through any other object or through a rebound alias, an uncalled __import__ or
-import_module, a non-literal or non-stdlib argument, and any extra argument. A voided module keeps
-only its constant-key reads and its allowlisted uses. Independently of module voiding, a literal-loop pin or a
+import anywhere still voids on its own); form (b) accepts __import__ only when the name __import__
+has no binding occurrence anywhere in the module (an assignment, a deletion, a parameter, a def or
+class name, an import alias, an except, global, nonlocal or match binding, or a type-parameter
+name) and the module never references __builtins__, so only the builtin can be the callee. Every
+other form voids as before: a bare compile, compile reached through any other object or through a
+rebound alias, an uncalled __import__ or import_module, a __import__ the module binds or reaches
+beside a __builtins__ reference, a non-literal or non-stdlib argument, and any extra argument. A
+voided module keeps only its constant-key reads and its allowlisted uses. Independently of module voiding, a literal-loop pin or a
 hand-off written in a class body whose class has any base, keyword or decorator is refused: the
 metaclass's __prepare__ mapping can resolve any name in that body, so no binding there is certain,
 while a constant-key read stays accepted.
@@ -84,9 +90,10 @@ key held in a named collection before a loop iterates it, a module loaded throug
 given only on a command line whose flag is not declared, a .sh file that runs a record-reading module, paths
 kept in the untracked orchestration registry, readers outside tools/, and a read that never names a file,
 key, flag or module. The residual of the key derivation: a registry object reached under a name not in
-HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a rebinding reached
-only through a computed string (such as getattr with a built name) or performed by code outside the
-hook library is not seen, and an allowlisted use is covered only by its asserted keys-read.
+HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a rebinding
+reached through getattr or __getattribute__ bound to another name, through an accessor the scan
+does not model (such as operator.attrgetter) or performed by code outside the hook library is not
+seen, and an allowlisted use is covered only by its asserted keys-read.
 A self-test that writes record fixtures is detected like a reader; the
 fixture-only disposition records it. A tool that imports a declared module for some other part of it is
 detected too; the not-a-reader disposition records it, with the reason.
@@ -153,14 +160,18 @@ REGISTRY_USE_FIELDS = frozenset({"line-anchor", "reason", "keys-read", "uses"})
 # refused (lazy evaluation). Every pin and hand-off is voided, fail closed, in a module holding any
 # reference at all (read-only included) to exec, eval, compile, setattr, delattr, __import__ or
 # import_module as a bare name or an attribute of any object, any reference at all to globals, locals,
-# vars, modules, _getframe, f_locals, f_globals or __dict__, a star import anywhere, or a store or
+# vars, modules, _getframe, f_locals, f_globals, __dict__, __globals__ or __builtins__, a call of
+# getattr or __getattribute__ whose attribute-name argument is a string literal naming one of those
+# callables or namespaces or is not a string literal at all, a star import anywhere, or a store or
 # delete to an attribute rooted in an import-bound name, excepting exactly two forms that can neither
 # rebind a name nor run code here: (a) an attribute named compile whose object is a name bound, at
 # module level and only there, by `import re` (or `import re as <alias>`) and never rebound anywhere
 # in the module, and (b) a call __import__(<one string literal>) or
 # importlib.import_module(<one string literal>) whose literal names a module in
 # sys.stdlib_module_names, with no other arguments, import_module reached through a module-level,
-# never rebound import of importlib; a pin or hand-off in the body of a class with
+# never rebound import of importlib, __import__ only when the name __import__ has no binding
+# occurrence anywhere in the module and the module never references __builtins__; a pin or hand-off
+# in the body of a class with
 # any base, keyword or decorator is refused too (its metaclass's __prepare__ mapping can resolve any
 # name there), while constant-key reads stay accepted. Any other occurrence is a refused use, keyed by
 # line and column, and cannot-evaluate unless a [[detect.registry-use]] allowlist entry excuses it (an
@@ -169,8 +180,9 @@ REGISTRY_USE_FIELDS = frozenset({"line-anchor", "reason", "keys-read", "uses"})
 # keys-read join the derived set). A derived key must be in [detect] keys or excluded in
 # [detect.non-record-keys] with a reason. The residual: a registry object reached under a name not in
 # HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a rebinding
-# reached only through a computed string or performed by code outside the hook library is not seen,
-# and an allowlisted use is covered only by its asserted keys-read.
+# reached through getattr or __getattribute__ bound to another name, through an accessor the scan
+# does not model (such as operator.attrgetter) or performed by code outside the hook library is not
+# seen, and an allowlisted use is covered only by its asserted keys-read.
 HOOK_LIBRARY = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
 HOOK_REGISTRY_NAMES = frozenset({"reg", "reg_data", "rec"})
 # A record name ending a string after one of these is a path built by formatting or joining: "{}:name"
@@ -554,10 +566,46 @@ def _module_helpers(tree):
 _VOID_CALLABLES = frozenset({"exec", "eval", "compile", "setattr", "delattr",
                              "__import__", "import_module"})
 # Namespace objects through which any name of the module can be rebound; a read-only mention already
-# places the namespace in the module's hands, so every reference counts, fail closed.
+# places the namespace in the module's hands, so every reference counts, fail closed. __globals__ is
+# a function's module namespace reached as an attribute; __builtins__ is the mapping the module's
+# builtin lookups (the builtin __import__ included) resolve through.
 _VOID_NAMESPACES = frozenset({"globals", "locals", "vars", "modules",
-                              "_getframe", "f_locals", "f_globals", "__dict__"})
+                              "_getframe", "f_locals", "f_globals", "__dict__",
+                              "__globals__", "__builtins__"})
 _VOID_NAMES = _VOID_CALLABLES | _VOID_NAMESPACES
+# Computed-attribute accessors: a call of getattr or __getattribute__ resolves an attribute by a
+# run-time string, so the call voids unless its attribute-name argument is a string literal outside
+# _VOID_NAMES (getattr(builtins, "exec") reaches a voiding callable by literal; a non-literal name
+# can be built to reach one).
+_ATTR_ACCESSORS = frozenset({"getattr", "__getattribute__"})
+
+
+def _bound_anywhere(tree):
+    """Every name with a binding occurrence anywhere in the module, counted by the same binding
+    constructs _certain_module_aliases counts: a Store or Del name, a parameter, a def or class
+    name, an import alias (any import, at any level), an except, global, nonlocal or match binding,
+    and a type-parameter name."""
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound.update(a.asname or a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
+        elif isinstance(node, _TYPE_PARAM_NODES):
+            bound.update(_type_param_binds(node))
+    return frozenset(bound)
 
 
 def _certain_module_aliases(tree, module_name):
@@ -615,11 +663,20 @@ def _void_exception_ids(tree):
     reached through a name bound, at module level and only there, by `import importlib` (or an alias
     of it) and never rebound (importing a literal standard-library module by name returns a module
     object and rebinds nothing in this module's namespace; its result cannot be star-imported, and a
-    star import anywhere still voids on its own). Every other form voids as before: a bare compile,
-    compile reached through any other object or through a rebound alias, an uncalled __import__ or
-    import_module, a non-literal or non-stdlib argument, and any extra argument."""
+    star import anywhere still voids on its own). Form (b) accepts __import__ only when the name
+    __import__ has no binding occurrence anywhere in the module (_bound_anywhere: an assignment, a
+    deletion, a parameter, a def or class name, an import alias, an except, global, nonlocal or
+    match binding, or a type-parameter name) and the module never references __builtins__ (the
+    mapping the builtin lookup resolves through), so only the builtin can be the callee. Every other
+    form voids as before: a bare compile, compile reached through any other object or through a
+    rebound alias, an uncalled __import__ or import_module, a __import__ the module binds or reaches
+    beside a __builtins__ reference, a non-literal or non-stdlib argument, and any extra argument."""
     re_names = _certain_module_aliases(tree, "re")
     importlib_names = _certain_module_aliases(tree, "importlib")
+    dunder_import_certain = ("__import__" not in _bound_anywhere(tree) and not any(
+        (isinstance(node, ast.Name) and node.id == "__builtins__")
+        or (isinstance(node, ast.Attribute) and node.attr == "__builtins__")
+        for node in ast.walk(tree)))
     excepted = set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Attribute) and node.attr == "compile"
@@ -631,7 +688,7 @@ def _void_exception_ids(tree):
                 and node.args[0].value in sys.stdlib_module_names):
             func = node.func
             if (isinstance(func, ast.Name) and func.id == "__import__"
-                    and isinstance(func.ctx, ast.Load)):
+                    and isinstance(func.ctx, ast.Load) and dunder_import_certain):
                 excepted.add(id(func))
             elif (isinstance(func, ast.Attribute) and func.attr == "import_module"
                     and isinstance(func.ctx, ast.Load) and isinstance(func.value, ast.Name)
@@ -648,18 +705,22 @@ def _voiding_constructs(tree):
     setattr, delattr, __import__ or import_module as a bare name or as an attribute of any object
     (an alias such as e = exec is a reference to the bare name; builtins.exec and
     importlib.import_module are attribute spellings); any reference at all to globals, locals, vars,
-    modules (sys.modules under any alias), _getframe, f_locals, f_globals or __dict__; a star import
-    anywhere; and a store or delete to an attribute whose chain root is an import-bound name (a
-    module object's namespace). Exactly two forms are excepted (_void_exception_ids), because
+    modules (sys.modules under any alias), _getframe, f_locals, f_globals, __dict__, __globals__ or
+    __builtins__; a call of getattr or __getattribute__ whose attribute-name argument is a string
+    literal naming one of those callables or namespaces, or is not a string literal at all; a star
+    import anywhere; and a store or delete to an attribute whose chain root is an import-bound name
+    (a module object's namespace). Exactly two forms are excepted (_void_exception_ids), because
     neither can rebind a name or run code in this module: (a) an attribute named compile whose
     object is a name bound, at module level and only there, by `import re` (or
     `import re as <alias>`) and never rebound anywhere in the module; (b) a call
     __import__(<one string literal>) or importlib.import_module(<one string literal>) whose literal
     names a module in sys.stdlib_module_names, with no other arguments, import_module reached
-    through a module-level, never rebound import of importlib. The caller refuses every pin and
-    hand-off in a module with any hit; constant-key reads and allowlisted uses stay accepted. The
-    residual: a rebinding reached only through a computed string (such as getattr with a built name)
-    or performed by code outside the hook library is not seen."""
+    through a module-level, never rebound import of importlib, and __import__ only when the name
+    __import__ has no binding occurrence anywhere in the module and the module never references
+    __builtins__. The caller refuses every pin and hand-off in a module with any hit; constant-key
+    reads and allowlisted uses stay accepted. The residual: a rebinding reached through getattr or
+    __getattribute__ bound to another name, through an accessor this scan does not model (such as
+    operator.attrgetter) or performed by code outside the hook library is not seen."""
     excepted = _void_exception_ids(tree)
     hits = set()
     imported_roots = set()
@@ -677,6 +738,21 @@ def _voiding_constructs(tree):
             continue
         if isinstance(node, ast.Name) and node.id in _VOID_NAMES:
             hits.add((node.lineno, "a reference to the name {!r}".format(node.id)))
+        elif isinstance(node, ast.Call) and (
+                (isinstance(node.func, ast.Name) and node.func.id in _ATTR_ACCESSORS)
+                or (isinstance(node.func, ast.Attribute) and node.func.attr in _ATTR_ACCESSORS)):
+            # Safe only when the attribute-name argument is certain: the second positional argument,
+            # reached through no starred argument, a string literal outside the voiding names. Every
+            # other call of getattr or __getattribute__ voids, fail closed (a missing or non-literal
+            # name can be built at run time to reach a voiding callable or namespace).
+            if not (len(node.args) >= 2
+                    and not any(isinstance(a, ast.Starred) for a in node.args[:2])
+                    and isinstance(node.args[1], ast.Constant)
+                    and isinstance(node.args[1].value, str)
+                    and node.args[1].value not in _VOID_NAMES):
+                what = node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+                hits.add((node.lineno, "a call of {!r} whose attribute name is not a string "
+                          "literal outside the voiding names".format(what)))
         elif isinstance(node, ast.Attribute):
             if node.attr in _VOID_NAMES:
                 hits.add((node.lineno, "a reference to the attribute {!r}".format(node.attr)))
@@ -816,14 +892,18 @@ def hook_registry_keys(root, registry_use=()):
     module holds any certainty-voiding construct (_voiding_constructs): any reference at all,
     read-only included, to exec, eval, compile, setattr, delattr, __import__ or import_module as a
     bare name or an attribute of any object, any reference at all to globals, locals, vars, modules,
-    _getframe, f_locals, f_globals or __dict__, a star import anywhere, or a store or delete to an
-    attribute rooted in an import-bound name, excepting exactly two forms that can neither rebind a
-    name nor run code in the module: (a) an attribute named compile whose object is a name bound, at
-    module level and only there, by `import re` (or `import re as <alias>`) and never rebound
+    _getframe, f_locals, f_globals, __dict__, __globals__ or __builtins__, a call of getattr or
+    __getattribute__ whose attribute-name argument is a string literal naming one of those callables
+    or namespaces or is not a string literal at all, a star import anywhere, or a store or delete to
+    an attribute rooted in an import-bound name, excepting exactly two forms that can neither rebind
+    a name nor run code in the module: (a) an attribute named compile whose object is a name bound,
+    at module level and only there, by `import re` (or `import re as <alias>`) and never rebound
     anywhere in the module, and (b) a call __import__(<one string literal>) or
     importlib.import_module(<one string literal>) whose literal names a module in
     sys.stdlib_module_names, with no other arguments, import_module reached through a module-level,
-    never rebound import of importlib; and a pin or hand-off in the body of a class with any
+    never rebound import of importlib, __import__ only when the name __import__ has no binding
+    occurrence anywhere in the module and the module never references __builtins__; and a pin or
+    hand-off in the body of a class with any
     base, keyword or decorator is refused (its metaclass's __prepare__ mapping can resolve any name
     there), while constant-key reads stay accepted in both cases.
     The result is the union of those keys and the keys-read asserted by registry_use, the validated
@@ -837,9 +917,10 @@ def hook_registry_keys(root, registry_use=()):
     matches; a hook library that cannot be read or parsed; and one that yields no key at all (a
     derivation that finds nothing would pass every list vacuously). The residual: a registry object
     reached under a name not in HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library
-    is not seen, a rebinding reached only through a computed string (such as getattr with a built
-    name) or performed by code outside the hook library is not seen, and an allowlisted use is
-    covered only by its asserted keys-read."""
+    is not seen, a rebinding reached through getattr or __getattribute__ bound to another name,
+    through an accessor the scan does not model (such as operator.attrgetter) or performed by code
+    outside the hook library is not seen, and an allowlisted use is covered only by its asserted
+    keys-read."""
     tree, text = _parse_python_text(os.path.join(root, HOOK_LIBRARY), HOOK_LIBRARY)
     keys = set()
     refused = {}
@@ -1115,9 +1196,10 @@ def run_gate(root):
         return 1
     print("PASS: {} record reader(s) under {} are each on {} with a disposition (the residual: a "
           "registry object reached under a name not in HOOK_REGISTRY_NAMES is not seen, a key used "
-          "outside the hook library is not seen, a rebinding reached only through a computed string "
-          "or performed by code outside the hook library is not seen, and an allowlisted use is "
-          "covered only by its asserted keys-read)".format(
+          "outside the hook library is not seen, a rebinding reached through getattr or "
+          "__getattribute__ bound to another name, through an accessor the scan does not model "
+          "(such as operator.attrgetter) or performed by code outside the hook library is not "
+          "seen, and an allowlisted use is covered only by its asserted keys-read)".format(
               len(detected), " and ".join(SCAN_ROOTS), SWITCH_LIST))
     return 0
 
@@ -1866,7 +1948,11 @@ def _self_test():
 
     # The near neighbours of the two exceptions stay voided: compile through an alias of re that the
     # module later rebinds, a bare compile brought in by `from re import compile`, __import__ of a
-    # literal that names no sys.stdlib_module_names module, and __import__ of a variable. The flip
+    # literal that names no sys.stdlib_module_names module, __import__ of a variable, __import__
+    # with a keyword argument, compile through a function-level import of re, __import__ bound by a
+    # def, a class, an import alias, a from-import or a parameter, a module that assigns or reads
+    # __builtins__, a write through an attribute __globals__, and a call of getattr or
+    # __getattribute__ whose attribute name is a voiding literal or no string literal. The flip
     # that removes voiding entirely accepts each, so each row depends on the voiding rule.
     for void_id, flip_id, hook, line in (
             ("void/re-compile-rebound-alias", "flip/re-compile-rebound-alias",
@@ -1880,6 +1966,43 @@ def _self_test():
              '    reg.get(k)\n', 3),
             ("void/dunder-import-variable-argument", "flip/dunder-import-variable-argument",
              'def f(name):\n    return __import__(name)\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4),
+            ("void/dunder-import-keyword-argument", "flip/dunder-import-keyword-argument",
+             'M = __import__("hashlib", level=0)\nfor k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("void/function-level-import-re-compile", "flip/function-level-import-re-compile",
+             'def f():\n    import re\n    return re.compile("x")\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 5),
+            ("void/dunder-import-def-bound", "flip/dunder-import-def-bound",
+             'def __import__(name):\n    return None\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("void/dunder-import-class-bound", "flip/dunder-import-class-bound",
+             'class __import__:\n    pass\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("void/dunder-import-import-alias-bound", "flip/dunder-import-import-alias-bound",
+             'import os as __import__\nM = __import__("hashlib")\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4),
+            ("void/dunder-import-from-import-bound", "flip/dunder-import-from-import-bound",
+             'from importlib import __import__\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 4),
+            ("void/dunder-import-parameter-bound", "flip/dunder-import-parameter-bound",
+             'def f(__import__):\n    return __import__("hashlib")\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4),
+            ("void/dunder-import-builtins-assignment", "flip/dunder-import-builtins-assignment",
+             '__builtins__ = {}\nM = __import__("hashlib")\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4),
+            ("void/builtins-name-reference", "flip/builtins-name-reference",
+             'B = __builtins__\nfor k in ("ledger_path",):\n    reg.get(k)\n', 3),
+            ("void/dunder-globals-attribute-write", "flip/dunder-globals-attribute-write",
+             'def f(g):\n    g.__globals__["k"] = "x"\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4),
+            ("void/getattr-voiding-literal", "flip/getattr-voiding-literal",
+             'import builtins\nE = getattr(builtins, "exec")\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4),
+            ("void/getattr-non-literal-name", "flip/getattr-non-literal-name",
+             'def f(o, n):\n    return getattr(o, n)\nfor k in ("ledger_path",):\n'
+             '    reg.get(k)\n', 4),
+            ("void/dunder-getattribute-call", "flip/dunder-getattribute-call",
+             'def f(o):\n    return o.__getattribute__("exec")\nfor k in ("ledger_path",):\n'
              '    reg.get(k)\n', 4)):
         files = dict(_FIXTURE_FILES, **{HOOK_LIBRARY: hook})
         rc, out = _gate(files)
@@ -1887,6 +2010,14 @@ def _self_test():
               and "at line {} column".format(line) in out, (rc, out))
         rc, out = _gate_without_voiding(files)
         check(flip_id, rc == 0, (rc, out))
+
+    # A getattr call whose attribute name is a string literal outside the voiding names cannot reach
+    # a voiding callable or namespace, so it does not void (the real hook library holds many such
+    # calls).
+    rc, out = _gate(dict(_FIXTURE_FILES, **{
+        HOOK_LIBRARY: 'import os\nF = getattr(os, "O_PATH", 0)\nfor k in ("ledger_path",):\n'
+                      '    reg.get(k)\n'}))
+    check("quiet/getattr-plain-literal", rc == 0, (rc, out))
 
     # A class with any base, keyword or decorator: its metaclass's __prepare__ mapping can resolve
     # any name in the body, so a pin or a hand-off there is refused while a constant-key read in the
@@ -2153,17 +2284,22 @@ def _self_test():
           "def's type parameter shadows a module-level hand-off callee, every pin and hand-off is voided, "
           "fail closed, in a module holding any reference (read-only included) to exec, eval, compile, "
           "setattr, delattr, __import__ or import_module as a bare name or an attribute, any reference to "
-          "globals, locals, vars, modules, _getframe, f_locals, f_globals or __dict__, a star import, or "
+          "globals, locals, vars, modules, _getframe, f_locals, f_globals, __dict__, __globals__ or "
+          "__builtins__, a call of getattr or __getattribute__ whose attribute name is a string literal "
+          "naming a voiding callable or namespace or is not a string literal at all, a star import, or "
           "a store or delete to an attribute rooted in an import-bound name (each voided shape has a "
           "quiet twin that passes and a flip that accepts it with the voiding removed), excepting "
           "exactly two forms that can neither rebind a name nor run code in the module: an attribute "
           "named compile whose object is a name bound, at module level and only there, by import re "
           "(or import re as <alias>) and never rebound anywhere in the module, and a call "
           "__import__(<one string literal>) or importlib.import_module(<one string literal>) whose "
-          "literal names a module in sys.stdlib_module_names, with no other arguments (each excepted "
+          "literal names a module in sys.stdlib_module_names, with no other arguments, __import__ only "
+          "when the name __import__ has no binding occurrence in the module and nothing references "
+          "__builtins__ (each excepted "
           "shape passes and is refused by the flip that removes the exceptions, and its near "
-          "neighbours, a rebound alias of re, a bare compile from re, a non-stdlib literal and a "
-          "variable argument, stay voided), and a pin or "
+          "neighbours, a rebound alias of re, a bare compile from re, a non-stdlib literal, a "
+          "variable argument, a keyword argument, a function-level import of re, each binding of the "
+          "name __import__ and a __builtins__ reference or assignment, stay voided), and a pin or "
           "hand-off in the body of a class with any base, keyword or decorator is refused while "
           "constant-key reads stay accepted; every registry use outside those forms (a non-constant key, "
           "another method or attribute, a call argument through any other callee or parameter, a match, "
@@ -2175,8 +2311,10 @@ def _self_test():
           "excludes derived keys that name no record path (a key in both lists or an exclusion nothing "
           "derives exits 2); the residual: a registry object reached under a name not in "
           "HOOK_REGISTRY_NAMES is not seen, a key used outside the hook library is not seen, a rebinding "
-          "reached only through a computed string or performed by code outside the hook library is not "
-          "seen, and an allowlisted use is covered only by its asserted keys-read; the parse site handles "
+          "reached through getattr or __getattribute__ bound to another name, through an accessor the "
+          "scan does not model (such as operator.attrgetter) or performed by code outside the hook "
+          "library is not seen, and an allowlisted use is covered only by its asserted keys-read; the "
+          "parse site handles "
           "RecursionError, MemoryError and ValueError; the live tree passes)".format(len(EXECUTED)))
     return 0
 
