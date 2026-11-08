@@ -130,8 +130,9 @@ inferred over a workflow default), also not observed; defaults.run.working-direc
 (Step shell, above); and the
 runner image, runs-on labels, services and environment values (a job or step env:
 can set a variable such as BASH_ENV that changes what an accepted gate command
-does). Inside a run: block the exact line exit 1 is accepted, because it can only
-end a step red; every other exit spelling stays unclassified.
+does, including the step's exit status). Inside a run: block the exact line exit 1
+is accepted, because it can only end a step red; every other exit spelling stays
+unclassified.
 GITLEAKS DOWNLOAD. A run: | block holding a line that names curl, wget, sha256sum or
 gitleaks.tar.gz, or one of the retry loop's lines, must equal GITLEAKS_STEP_RUN line
 for line (indentation removed, blank lines and shell comments skipped): the bounded
@@ -143,10 +144,12 @@ exit removed, another attempt count, a curl time bound removed) is cannot-evalua
 (gitleaks-download-pin), and curl, tar and a checksum pipeline are no longer accepted
 by the generic run-line grammar anywhere else. The pin covers edits to the run: text
 only. Not checked: the pinned version and checksum values; bash's own behaviour on
-the pinned body; and which curl, sha256sum or tar the pinned lines run, which a step
-or job env: (for example PATH or BASH_ENV, which can name a repository directory or
-file supplying a sha256sum that always passes) or an earlier step (for example one
-that writes GITHUB_PATH) can change; the gate does not check that.
+the pinned body; and what any line of the pinned body does, including the step's
+exit status (for example through a BASH_ENV EXIT trap) and which curl, sha256sum,
+tar or gitleaks runs, which a step or job env: (for example PATH or BASH_ENV, which
+can name a repository directory or file supplying a sha256sum that always passes)
+or an earlier step (for example one that writes GITHUB_PATH) can change; the gate
+does not check that.
 TWO WORKFLOWS. The CI side is the union of the named workflows in CI_WORKFLOWS:
 quality.yml and msg-leaks.yml, which holds the message/metadata leak scan alone
 so that only its one job re-runs on a PR title/body edit. A gate may run in
@@ -875,12 +878,14 @@ SCOPE_DECIDE_RUN_LINES = frozenset({
 # cannot-evaluate), so an edit to the run: text that drops, reorders, bypasses or makes
 # optional the checksum check is refused. The pin covers the run: text only: a step or
 # job env: (for example PATH or BASH_ENV) or an earlier step (for example one that
-# writes GITHUB_PATH) can change which curl, sha256sum or tar these lines run, and the
-# gate does not check that. This gate does not model bash and does not run this body:
-# an exact pin was chosen so that any edit to the step's script is a finding until the
-# pin and the workflow change together under review. This pin is a consistency check
-# within the reviewed repository, not an authorization, and it does not check the
-# pinned version or checksum values (tools/check_gitleaks_pin.py reads the version pin).
+# writes GITHUB_PATH) can change what any line of this body does, including the step's
+# exit status (for example through a BASH_ENV EXIT trap) and which curl, sha256sum, tar
+# or gitleaks runs, and the gate does not check that. This gate does not model bash and
+# does not run this body: an exact pin was chosen so that any edit to the step's script
+# is a finding until the pin and the workflow change together under review. This pin is
+# a consistency check within the reviewed repository, not an authorization, and it does
+# not check the pinned version or checksum values (tools/check_gitleaks_pin.py reads the
+# version pin).
 GITLEAKS_SCAN_LINE = "./gitleaks dir . --no-banner --redact --exit-code 1"
 GITLEAKS_CURL_LINE = (
     'if curl -fsSL --connect-timeout 30 --max-time 300 '
