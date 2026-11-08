@@ -38,6 +38,7 @@ import _journal          # noqa: E402
 import _opf_absorb       # noqa: E402
 import _opf_changelog    # noqa: E402
 import _opf_check        # noqa: E402
+import _opf_premise_gate  # noqa: E402
 import _opf_store        # noqa: E402
 import _opf_views        # noqa: E402
 import _opf_worklog as wl  # noqa: E402
@@ -580,11 +581,25 @@ def _entry_point_census(check):
     # caller passes the manifest-derived inputs, so its entry case below is its
     # own first intake, the archive worklog, judged against the doctor's walk.
     # The archive reader (archive_read) runs that same walk and is judged the same way.
+    # The premise-review evaluator (_opf_premise_gate.evaluate) reaches the active
+    # loader and the archive loader through its private readers: its entry cases
+    # below judge each first-intake failure as the evaluator's own fail-closed
+    # cannot-evaluate cause, carrying the shared contained reader's exact text.
     check("F2f-public-entry-census", boundaries == {
         "_opf_absorb.evaluate", "_opf_changelog.evaluate", "_opf_check.validate_store",
         "_opf_check.archived_records", "_opf_check.archive_read",
+        "_opf_premise_gate.evaluate",
         "_opf_views.plan_views", "_opf_worklog.load_worklog", "_opf_worklog.load_worklog_at",
         "_opf_worklog.load_archive_worklog_at"})
+
+
+def _premise_gate_readers(fx):
+    """The premise-review evaluator's public entry; the GateResult is kept on the
+    fixture so its fail-closed cause and exit are judged next to the shared text."""
+    def run():
+        fx.premise_result = _opf_premise_gate.evaluate(fx.root, "BI-1")
+        return fx.premise_result.detail
+    return {"premise_gate": run}
 
 
 def _entry_point_regressions(check):
@@ -608,6 +623,7 @@ def _entry_point_regressions(check):
             readers.update(
                 loader_at=lambda: _error(lambda: wl.load_worklog_at(fx.fd, M)),
                 doctor_public=lambda: _doctor_public(fx, control))
+            readers.update(_premise_gate_readers(fx))
             if control is not None:
                 readers = {key: readers[key] for key in ("doctor", "doctor_public")}
             original_parse = _opf_store.tomllib.loads
@@ -651,12 +667,18 @@ def _entry_point_regressions(check):
                         sorted(declared - set(validation.unevaluated_profiles)),
                         list(validation.unevaluated_profiles))
                     check(label + "-profile-scope", fx.profile_scope == scope)
+                if caller == "premise_gate":
+                    check(label + "-fail-closed",
+                          fx.premise_result.exit_code == _opf_premise_gate.EXIT_CANNOT
+                          and fx.premise_result.cause == "manifest-invalid")
 
     # Positive reachability witnesses: a healthy manifest must reach the active
     # source through each matrix entry; doctor's walk must reach the archive too.
     # Failing the active read prevents the staging entry from publishing a run.
     with _Fixture() as fx:
-        for caller, run in _manifest_readers(fx).items():
+        witnesses = dict(_manifest_readers(fx))
+        witnesses.update(_premise_gate_readers(fx))
+        for caller, run in witnesses.items():
             reads = []
 
             def read(fd, rel, **kwargs):
@@ -671,6 +693,11 @@ def _entry_point_regressions(check):
             check("F2f-reachable-active-" + caller, LEGACY in reads)
             if caller == "doctor":
                 check("F2f-reachable-archive-doctor", ARCHIVE in reads)
+            if caller == "premise_gate":
+                check("F2f-reachable-active-premise_gate-fail-closed",
+                      fx.premise_result.exit_code == _opf_premise_gate.EXIT_CANNOT
+                      and fx.premise_result.cause == "worklog-unreadable"
+                      and "fixture active-read witness" in fx.premise_result.detail)
 
     # The archive walk's public entry (opf record's pre-publication chain rule):
     # the bucket's archive.toml enumerates the archived worklog (a worklog_moved
@@ -740,6 +767,69 @@ def _entry_point_regressions(check):
                 check(label + "-archive-read", (ARCHIVE in reads) == (raw != "absent"))
                 check(label + "-no-active-read", not any(
                     path == LEGACY or path.startswith(M + "/worklog/") for path in reads))
+
+    # The premise-review evaluator's public entry (evaluate) reaches the active
+    # loader through its private worklog reader and the archive loader through
+    # its private archive walk. Each first-intake failure is the evaluator's own
+    # fail-closed cannot-evaluate cause, never an empty history, and where the
+    # evaluator shares the siblings' contained reader its detail carries that
+    # reader's exact text (the same texts the F1 loader cases pin above).
+    gate_manifest_parse = ("cannot parse m/manifest.toml "
+                           "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
+    gate_worklog_parse = ("cannot parse m/worklog.toml "
+                          "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
+    gate_archive_parse = ("cannot parse m/archive/2026/worklog.toml "
+                          "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
+    gate_faults = (
+        ("manifest-missing", p, None,
+         "manifest-invalid", p + " is absent"),
+        ("manifest-unreadable", p, PermissionError("fixture unreadable"),
+         "manifest-invalid", "cannot read m/manifest.toml (fixture unreadable)"),
+        ("manifest-malformed", p, b"not TOML [",
+         "manifest-invalid", gate_manifest_parse),
+        ("worklog-missing", LEGACY, None,
+         "worklog-unreadable", "m/worklog.toml is absent (the active worklog ledger is required)"),
+        ("worklog-unreadable", LEGACY, PermissionError("fixture unreadable"),
+         "worklog-unreadable", "cannot read m/worklog.toml (fixture unreadable)"),
+        ("worklog-malformed", LEGACY, b"not TOML [",
+         "worklog-unreadable", gate_worklog_parse),
+        ("archive-worklog-missing", ARCHIVE, None,
+         "archive-unreadable", "m/archive/2026 declares rotated spans but carries no worklog.toml"),
+        ("archive-worklog-unreadable", ARCHIVE, PermissionError("fixture unreadable"),
+         "archive-unreadable", "cannot read m/archive/2026/worklog.toml (fixture unreadable)"),
+        ("archive-worklog-malformed", ARCHIVE, b"not TOML [",
+         "archive-unreadable", gate_archive_parse),
+    )
+    for name, target, raw, cause, detail in gate_faults:
+        with _Fixture() as fx:
+            _manifest_readers(fx)  # Seat the indexes, counters, and archive bucket.
+            if target == ARCHIVE:
+                fx.files[M + "/archive/2026/archive.toml"] = moved
+            if raw is None:
+                del fx.files[target]
+            else:
+                fx.files[target] = raw
+            reads = []
+
+            def read(fd, rel, **kwargs):
+                reads.append(fx.path(fd, rel))
+                return fx.read(fd, rel, **kwargs)
+
+            with patch.object(_journal, "_read_contained", side_effect=read):
+                result = _opf_premise_gate.evaluate(fx.root, "BI-1")
+            label = "F2f-entry-premise-gate-" + name
+            check(label + "-fail-closed",
+                  result.exit_code == _opf_premise_gate.EXIT_CANNOT
+                  and (result.cause, result.detail) == (cause, detail)
+                  and result.head is None and result.snapshot is None
+                  and result.lines == ["cause: {}: {}".format(cause, detail)])
+            check(label + "-manifest-read", (p in reads) == (name != "manifest-missing"))
+            check(label + "-active-read", (LEGACY in reads) == (
+                name in ("worklog-unreadable", "worklog-malformed") or target == ARCHIVE))
+            check(label + "-no-directory-read",
+                  not any(q.startswith(M + "/worklog/") for q in reads))
+            check(label + "-archive-worklog-read", (ARCHIVE in reads) == (
+                name in ("archive-worklog-unreadable", "archive-worklog-malformed")))
 
 
 def _doctor_snapshot_regressions(check):
