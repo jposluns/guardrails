@@ -326,7 +326,7 @@ _CONTRACT = {
         _D('Base discovery token: opf.'),
         _D('Status: this specification is a draft.'),
         _D("The reference tooling's status in this build is the generated status note that follows, also published in opf/README.md, on opfiles.ai, and in opf/site/llms.txt (generated from VERB_STATUS in opf/tools/opf.py):"),
-        _D('Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.'),
+        _D('Reference CLI status. Available: init, render, doctor, absorb, record. Partial: adopt (plan, approve, and status; apply, complete, and reconcile exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.'),
         _D('Date: 2026-10-24 (UTC).'),
         _D('OPFiles is a neutral, self-contained operational-files standard published under the Apache License 2.0 (except vendored third-party material, which remains under its own terms).'),
         _D('AIQT and AIQT Guardrails are trademarks (registration pending); AIQT is a brand, not a legal entity, and the standard is authored and maintained by its lead maintainer.'),

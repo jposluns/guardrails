@@ -9,7 +9,7 @@ disagree.
 The website is [opfiles.ai](https://opfiles.ai). The standard is open source under the Apache
 License 2.0, except vendored third-party material, which remains under its own terms.
 
-Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
+Reference CLI status. Available: init, render, doctor, absorb, record. Partial: adopt (plan, approve, and status; apply, complete, and reconcile exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
 
 ## Why it exists
 
@@ -103,7 +103,7 @@ The specification defines 12 baseline record types (11 typed indexes plus the wo
 | `doctor` | verifies the store | implemented |
 | `absorb` | drafts changelog entries for human curation | implemented |
 | `record` | authors 1 record change at a time | implemented |
-| `adopt` | plan, approve, reconcile and status run; apply and complete refuse | partly implemented |
+| `adopt` | plan, approve and status run; apply, complete and reconcile refuse | partly implemented |
 | `upgrade` | refuses with exit 2; no store upgrade is defined | refuses |
 | `import` | ordinary modes retired; refuse with exit 2 | retired |
 | `migrate` | specified; exits 2 in this build | in progress |

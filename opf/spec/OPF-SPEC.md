@@ -5,7 +5,7 @@ Formal name: AIQT Development Operational Standard. Public brand: OPFiles
 reference tooling's status in this build is the generated status note that follows, also published
 in opf/README.md, on opfiles.ai, and in opf/site/llms.txt (generated from VERB_STATUS in
 opf/tools/opf.py):
-Reference CLI status. Available: init, render, doctor, absorb. Partial: record (create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2), adopt (plan, approve, reconcile, and status; apply and complete exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
+Reference CLI status. Available: init, render, doctor, absorb, record. Partial: adopt (plan, approve, and status; apply, complete, and reconcile exit 2). In progress: upgrade, import, migrate, sync; each exits 2 in this build.
 Date: 2026-10-24 (UTC).
 
 OPFiles is a neutral, self-contained operational-files standard published under the Apache

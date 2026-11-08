@@ -24105,8 +24105,8 @@ VERB_STATUS = (
     ("render", "available", ""),
     ("doctor", "available", ""),
     ("absorb", "available", ""),
-    ("record", "partial", "create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2"),
-    ("adopt", "partial", "plan, approve, reconcile, and status; apply and complete exit 2"),
+    ("record", "available", ""),
+    ("adopt", "partial", "plan, approve, and status; apply, complete, and reconcile exit 2"),
     ("upgrade", "in progress", ""),
     ("import", "in progress", ""),
     ("migrate", "in progress", ""),
@@ -24160,16 +24160,14 @@ def _verb_subcommands(verb):
 
 def _verb_refusal_holds(verb, sub):
     """Whether the code that makes subcommand `sub` of `verb` refuse every argument list (exit 2) is in
-    place: adopt complete is refused before any parse; adopt apply refuses every plan while the mandatory
-    receipt stage is the refusing composer; record receipt-repair needs a homes 2 store, which this build
-    refuses while SUPPORTED_HOMES is 1. None for a subcommand with no such refusal."""
+    place: adopt complete is refused before any parse; adopt apply and adopt reconcile are refused once
+    their arguments parse, before the root is resolved or any gate or engine entry runs, while the base
+    2.0.0 adoption fence (_opf_adopt_apply.adoption_journal_fenced, always True on the only base this
+    build implements) is up. None for a subcommand with no such refusal."""
     if (verb, sub) == ("adopt", "complete"):
         return sub in ADOPT_DEFERRED
-    if (verb, sub) == ("adopt", "apply"):
-        stage = _opf_adopt_apply.DRIVER_STAGES.get(_opf_adopt_apply.RECEIPT_STAGE)
-        return stage is _opf_adopt_apply._receipt_not_yet_composable
-    if (verb, sub) == ("record", "receipt-repair"):
-        return _opf_store.SUPPORTED_HOMES == 1
+    if (verb, sub) in (("adopt", "apply"), ("adopt", "reconcile")):
+        return _opf_adopt_apply.adoption_journal_fenced()
     return None
 
 
@@ -24195,20 +24193,23 @@ _VERB_RECORD_ARGS = {
 # engine entry itself: (helper module name, attribute). The reconcile-first gate opens the product root
 # through the entry status uses. While any running subcommand of the verb is probed each is a stand-in that
 # passes, as the real gate does over the empty scratch root, so every entry call the probe sees comes from
-# the handler: for adopt that is every running subcommand (plan, approve, reconcile and status), of which
-# plan and approve call the gate. A subcommand named as exiting 2 runs the real gate: adopt apply does, and
-# reaches the product root entry through it (_VERB_REFUSAL_ENTRIES).
+# the handler: for adopt that is every running subcommand (plan, approve and status), of which
+# plan and approve call the gate. A subcommand named as exiting 2 runs the real dispatch with the real
+# gates; on base 2.0.0 none of adopt's refused subcommands reaches a gate: complete is refused before any
+# parse, and the adoption fence refuses apply and reconcile once their arguments parse, before the root is
+# resolved (_VERB_REFUSAL_ENTRIES lists no entry for any of them).
 _VERB_SUB_GATES = {
     "adopt": (("_opf_adopt_apply", "require_clean_journal"),),
 }
 # The engine entries ("module.attribute") the real dispatch of each subcommand named as exiting 2 may call
 # while its refusal is in place, keyed by (verb, subcommand): its own entry, and any entry the real gate
 # before it reaches. A guarded entry called during the refusal run of a subcommand it is not listed for is
-# refused and is a fault (_verb_engine_guard); a subcommand with no row may call none.
+# refused and is a fault (_verb_engine_guard); a subcommand with no row may call none. On base 2.0.0 every
+# refused adopt subcommand is refused before any engine entry, so each row is empty.
 _VERB_REFUSAL_ENTRIES = {
-    ("adopt", "apply"): ("_opf_adopt_apply._open_product_root", "_opf_adopt_apply.run_apply"),
+    ("adopt", "apply"): (),
     ("adopt", "complete"): (),
-    ("record", "receipt-repair"): ("_opf_record._run_operation",),
+    ("adopt", "reconcile"): (),
 }
 
 
@@ -24595,8 +24596,9 @@ def _verb_status_self_test():
     progress stub marked available, an available verb marked in progress, a verb dropped or doubled, a
     handler renamed (main() routing init to another name), a refusal listed for an available verb (alone and
     with that verb marked in progress), an in progress verb that runs a handler only with arguments, a scope
-    that does not read as a list, a refused subcommand named as running, a running subcommand named as
-    exiting 2, record marked available, main() dispatching an in progress verb straight to a helper module's
+    that does not read as a list, a refused subcommand named as running, the pre-fence table that named
+    adopt reconcile as running, a running subcommand named as
+    exiting 2, adopt marked available, main() dispatching an in progress verb straight to a helper module's
     entry, an in progress verb whose dispatch raises, an engine entry reached through a lambda, a helper
     module imported in the intercepted dispatch (held by the import gate), a same-size rewrite of a scratch
     file (held by content hashing), an engine entry called outside any refusal run (held by the engine
@@ -24627,10 +24629,10 @@ def _verb_status_self_test():
             return here._opf_record.cli(list(argv[1:]))
         return real_main(argv)
 
-    def reconcile_through_lambda(argv):
-        # main() reaching adopt reconcile's engine entry through a lambda, not straight from _cmd_adopt
-        if list(argv[:2]) == ["adopt", "reconcile"]:
-            call = lambda: here._opf_adopt_apply.reconcile_report(os.getcwd(), [])  # noqa: E731
+    def status_through_lambda(argv):
+        # main() reaching adopt status's engine entry through a lambda, not straight from _cmd_adopt
+        if list(argv[:2]) == ["adopt", "status"]:
+            call = lambda: here._opf_adopt_apply._open_product_root(os.getcwd())  # noqa: E731
             return call()
         return real_main(argv)
 
@@ -24669,17 +24671,17 @@ def _verb_status_self_test():
         return real_main(argv)
 
     def engine_outside_refusal(argv):
-        # main() calling adopt plan's engine entry while it dispatches record create, outside any refusal
+        # main() calling record's engine entry while it dispatches adopt plan, outside any refusal
         # run; no arguments, so a guard that let it through raises TypeError before the engine runs
-        if list(argv[:2]) == ["record", "create"]:
-            here._opf_adopt_plan.plan()
+        if list(argv[:2]) == ["adopt", "plan"]:
+            here._opf_record._run_operation()
         return real_main(argv)
 
     def engine_in_other_refusal(argv):
-        # main() calling adopt reconcile's engine entry during the refusal run of record receipt-repair,
-        # which that entry is not listed for; no arguments, as above
-        if list(argv[:2]) == ["record", "receipt-repair"]:
-            here._opf_adopt_apply.reconcile_report()
+        # main() calling record's engine entry during the refusal run of adopt reconcile, which that
+        # entry is not listed for; no arguments, as above
+        if list(argv[:2]) == ["adopt", "reconcile"]:
+            here._opf_record._run_operation()
         return real_main(argv)
 
     def marked(verb, status, scope=""):
@@ -24700,34 +24702,37 @@ def _verb_status_self_test():
          "main() routes ['migrate', '--help'] to ['_cmd_init']"),
         ("scope-not-a-list", dict(table=marked("adopt", "partial", "every subcommand")), "adopt's scope"),
         ("refused-named-running", dict(table=marked("adopt", "partial",
-                                                    "plan, approve, complete, reconcile, and status; apply exits 2")),
+                                                    "plan, approve, complete, and status; reconcile and apply exit 2")),
          "adopt complete is named as running"),
-        ("running-named-refused", dict(table=marked("record", "partial", "transition, done-with-receipt, and "
-                                                    "worklog-append; create and receipt-repair exit 2")),
+        ("reconcile-named-running", dict(table=marked("adopt", "partial",
+                                                      "plan, approve, reconcile, and status; apply and complete exit 2")),
+         "adopt reconcile is named as running but does not reach its engine entry"),
+        ("running-named-refused", dict(table=marked("record", "partial", "transition, done-with-receipt, "
+                                                    "receipt-repair, and worklog-append; create exits 2")),
          "record create is named as exiting 2"),
-        ("record-marked-available", dict(table=marked("record", "available")),
-         "record is marked available but record receipt-repair exits 2"),
+        ("adopt-marked-available", dict(table=marked("adopt", "available")),
+         "adopt is marked available but adopt reconcile exits 2"),
         ("dispatch-to-helper", dict(dispatch=to_helper), "main() routes ['upgrade'] to ['_opf_record.cli']"),
         ("intercepted-dispatch-raises", dict(dispatch=raises_when_routed),
          "the intercepted dispatch of ['sync'] raised"),
-        ("engine-through-lambda", dict(dispatch=reconcile_through_lambda),
-         "adopt reconcile reaches its engine entry from <lambda>, not straight from _cmd_adopt"),
+        ("engine-through-lambda", dict(dispatch=status_through_lambda),
+         "adopt status reaches its engine entry from <lambda>, not straight from _cmd_adopt"),
         ("helper-import-refused", dict(dispatch=imports_helper),
          "the intercepted dispatch of ['migrate'] raised _VerbHelperImportBlocked('_opf_verb_status_absent')"),
         ("same-size-rewrite-seen", dict(dispatch=rewrites_same_size),
          "the intercepted dispatch of ['migrate'] changed the scratch directory: [('in/plan.toml', "),
         ("engine-outside-refusal-refused", dict(dispatch=engine_outside_refusal),
-         "record create is named as running but does not reach its engine entry (reached [], exit "
-         "_VerbEngineBlocked('_opf_adopt_plan.plan')"),
+         "adopt plan is named as running but does not reach its engine entry (reached [], exit "
+         "_VerbEngineBlocked('_opf_record._run_operation')"),
         ("engine-in-other-refusal-refused", dict(dispatch=engine_in_other_refusal),
-         "the real engine entry _opf_adopt_apply.reconcile_report was called during the real dispatch of "
-         "record receipt-repair, which it is not listed for"),
+         "the real engine entry _opf_record._run_operation was called during the real dispatch of "
+         "adopt reconcile, which it is not listed for"),
     )
     # The engine calls a flip makes on purpose where no entry is permitted, each refused by the guard (every
     # other flip must make none), and the one scratch change a flip makes on purpose (no other flip may
     # change the scratch directory): the fault that change raises must start with that flip's needle.
-    refused_on_purpose = {"engine-outside-refusal-refused": ["_opf_adopt_plan.plan"],
-                          "engine-in-other-refusal-refused": ["_opf_adopt_apply.reconcile_report"]}
+    refused_on_purpose = {"engine-outside-refusal-refused": ["_opf_record._run_operation"],
+                          "engine-in-other-refusal-refused": ["_opf_record._run_operation"]}
     writes_on_purpose = ("same-size-rewrite-seen",)
     target = getattr(here, "_cmd_init", None)
     if target is None:
