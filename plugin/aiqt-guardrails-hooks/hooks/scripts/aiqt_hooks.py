@@ -25636,6 +25636,18 @@ def orch_truncation_guard(data):
                 "substitution, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
                 "read to the end (rule trkasy, fail-closed).")
+        if detach_kind == "detach" and _orch_detach_poll_loop(command):
+            # A backgrounded polling loop is the event orch_untracked_wait_loop denies with its specific
+            # advice (never resubmit the loop). The generic advice below (use the tracked background
+            # dispatch, or keep the command in the foreground) would resubmit that loop, so on this event
+            # the deny gives the same exits as that hook (_ORCH_POLL_LOOP_EXITS). The verdict is unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command backgrounds a polling loop "
+                "with a bare '&' (a for/while/until loop carrying sleep plus a status probe), launching "
+                "asynchronous work this tool call does not track, so its result and failure would be lost; "
+                "it is denied. " + _ORCH_POLL_LOOP_EXITS,
+                "AIQT guardrail: denied a foreground bare-& polling loop (untracked asynchronous work, rule "
+                "trkasy). " + _ORCH_POLL_LOOP_BANNER_EXITS)
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
@@ -25970,6 +25982,32 @@ def _orch_poll_reading(segments):
     return _orch_poll_loop_at(segments, amp_idx)
 
 
+# The exits both denials of a backgrounded polling loop give: orch_untracked_wait_loop's, and
+# orch_truncation_guard's bare-'&' detach deny on the same command (_orch_detach_poll_loop). One text, so the
+# two never advise differently on that event. The loop is never resubmitted: a tracked or foreground copy
+# still waits by polling a status probe. Exit (1) needs a CI status reader with a wait mode, which an adopter
+# repository may not have, and many waits are not CI at all, so exit (2), the tracked wake, covers the rest.
+_ORCH_POLL_LOOP_EXITS = (
+    "Remove the trailing '&', do not resubmit the loop in any form (neither as a tracked background dispatch "
+    "nor in the foreground), and take ONE of these exits: (1) only for a CI wait in a repository that has a "
+    "CI status reader with a mode that waits until the run ends: start ONE tracked task as a background "
+    "dispatch (run_in_background: true) that runs that reader in its wait mode (such as tools/ci-status.sh "
+    "<sha> --wait in the AIQT Guardrails repository), collect its completion, and read the outcome from that "
+    "task's exit status as the reader documents its codes, never by matching success or failure words in its "
+    "output; (2) otherwise (a wait that is not CI, such as a health-check poll or waiting on a merge, or a "
+    "repository with no such reader), schedule a tracked wake that re-invokes this session to re-check.")
+_ORCH_POLL_LOOP_BANNER_EXITS = (
+    "Do not resubmit the loop: for a CI wait where the repository has a CI status reader with a wait mode, "
+    "run one tracked task with it and read its exit status; otherwise schedule a tracked wake.")
+
+
+def _orch_detach_poll_loop(command):
+    """True where command is the backgrounded polling loop orch_untracked_wait_loop denies (_orch_bg_poll_loop
+    reads 'match'), so orch_truncation_guard's detach deny gives that hook's exits instead of its generic
+    advice. Only the reason chooses by this; the truncation guard's verdict does not."""
+    return _orch_bg_poll_loop(command) == "match"
+
+
 def orch_untracked_wait_loop(data):
     """trkasy, PreToolUse Bash: DENY a command that backgrounds a status-polling loop with a bare `&`. A
     detached child is not a harness-tracked task, so its completion cannot notify this session and the result
@@ -26027,16 +26065,9 @@ def orch_untracked_wait_loop(data):
             "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "
             "'&' (a for/while/until loop carrying sleep plus a status probe). A detached child is not a "
             "harness-tracked task: its completion cannot notify this session, so the result is stranded and "
-            "the session goes dark waiting on it. Remove the trailing '&', do not resubmit the loop in any "
-            "form, and take ONE of these exits: (1) to wait for CI, start ONE tracked task as a background "
-            "dispatch (run_in_background: true) that runs this repository's own CI status reader in a mode "
-            "that waits until the run ends (such as tools/ci-status.sh <sha> --wait in the AIQT Guardrails "
-            "repository), collect its completion, and read the outcome from that task's exit status as the "
-            "reader documents its codes, never by matching success or failure words in its output; (2) "
-            "schedule a tracked wake that re-invokes this session to re-check.",
+            "the session goes dark waiting on it. " + _ORCH_POLL_LOOP_EXITS,
             "AIQT guardrail: denied an untracked background wait loop; a bare-'&' poll cannot notify this "
-            "session. Run one tracked task with the repository's own CI status reader in its wait mode and "
-            "read its exit status, or schedule a tracked wake.")
+            "session. " + _ORCH_POLL_LOOP_BANNER_EXITS)
     return _allow()                         # 'none' or 'indeterminate': emit nothing; truncation guard backstops
 
 

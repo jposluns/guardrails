@@ -3165,33 +3165,88 @@ def _test_trkasy_no_amp(failures, tmp):
 _WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
 
 
+_WAIT_LOOP_CHECKS_API_COMMANDS = ("gh pr checks", "gh pr status", "gh run watch")
+
+
 def _wait_loop_deny_text_faults(reason, banner):
-    """The faults of the orch_untracked_wait_loop deny text: it must not name gh pr checks (a fine-grained
-    token cannot read the Checks API it uses) or suggest resubmitting the same loop, and its remedy must be
-    one tracked task read by its exit status, never by output words. The hook ships to adopter
-    repositories that may have no tools/ci-status.sh, so that path is not required; where the text names
-    it, it must be only an example ("such as tools/ci-status.sh")."""
+    """The faults of a deny text for a backgrounded polling loop (orch_untracked_wait_loop's, and
+    orch_truncation_guard's bare-'&' detach deny on the same loop). Neither the reason nor the banner may name
+    gh pr checks, gh pr status or gh run watch (each reads the Checks API, which a fine-grained token cannot
+    read, as tools/ci-status.sh's header says). Each must forbid resubmitting the loop: it carries "do not
+    resubmit the loop", every "resubmit" in it is inside that phrase, and it never says "same loop" or gives
+    the generic detach advice that would resubmit it (use the tracked background dispatch, or keep the
+    command in the foreground). The remedy is one tracked task read by its exit status, never by output
+    words; the reason confines that exit to a CI wait in a repository that has such a reader and sends every
+    other wait to the tracked wake. The hook ships to adopter repositories that may have no
+    tools/ci-status.sh, so that path is not required; where the text names it, it must be only an example
+    ("such as tools/ci-status.sh")."""
     faults = []
     for where, text in (("reason", reason), ("banner", banner)):
         flat = " ".join(text.split()).lower()
-        if "gh pr checks" in flat:
-            faults.append("the {} names gh pr checks".format(where))
+        for name in _WAIT_LOOP_CHECKS_API_COMMANDS:
+            if name in flat:
+                faults.append("the {} names {}".format(where, name))
         if flat.count("tools/ci-status.sh") != flat.count("such as tools/ci-status.sh"):
             faults.append("the {} names tools/ci-status.sh other than as an example".format(where))
         if "exit status" not in flat:
             faults.append("the {} does not say to read the exit status".format(where))
+        if "do not resubmit the loop" not in flat:
+            faults.append("the {} does not say do not resubmit the loop".format(where))
+        if flat.count("resubmit") != flat.count("do not resubmit the loop"):
+            faults.append("the {} says resubmit other than in do not resubmit the loop".format(where))
+        if "same loop" in flat:
+            faults.append("the {} suggests resubmitting the same loop".format(where))
+        for advice in ("use the platform's tracked background dispatch", "keep the command in the foreground",
+                       "run it foreground", "use the tracked background dispatch or run it in the foreground"):
+            if advice in flat:
+                faults.append("the {} gives the generic detach advice {!r}, which resubmits the loop"
+                              .format(where, advice))
     flat = " ".join(reason.split()).lower()
-    if "same loop" in flat:
-        faults.append("the reason suggests resubmitting the same loop")
     if "never by matching success or failure words" not in flat:
         faults.append("the reason does not forbid matching success or failure words in the output")
+    if "(1) only for a ci wait in a repository that has a ci status reader" not in flat:
+        faults.append("the reason does not confine exit (1) to a CI wait in a repository with a CI status reader")
+    if "(2) otherwise" not in flat:
+        faults.append("the reason does not send every other wait to exit (2), the tracked wake")
     return faults
+
+
+def _wait_loop_deny_faults(handler, root):
+    """handler's deny on _WAIT_LOOP_DENY_COMMAND (a foreground call in registry scope at root), judged by
+    _wait_loop_deny_text_faults; a call that does not deny is itself the fault."""
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "cwd": str(root), "tool_input": {"command": _WAIT_LOOP_DENY_COMMAND}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        return ["the poll loop did not deny ({})".format(_reduce_result(code, stdout_obj))]
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    banner = (stdout_obj or {}).get("systemMessage", "")
+    if not isinstance(reason, str) or not isinstance(banner, str):
+        return ["the reason or banner is not a string"]
+    return _wait_loop_deny_text_faults(reason, banner)
+
+
+# Each mutant appends text to the orch_untracked_wait_loop deny reason that the row must catch: the label,
+# the appended text, and a word every fault it must raise holds.
+_WAIT_LOOP_DENY_MUTANTS = (
+    ("gh-pr-checks", " (for example: timeout <seconds> gh pr checks <ref> --watch)", "names gh pr checks"),
+    ("resubmit-tracked", " (3) resubmit this loop with run_in_background: true.", "resubmit other than"),
+    ("gh-run-watch", " (3) run gh run watch <id>.", "names gh run watch"),
+    ("gh-pr-status", " (3) run gh pr status.", "names gh pr status"))
 
 
 def _test_wait_loop_deny_text(failures, tmp):
     """orch_untracked_wait_loop deny text, in registry scope (a git toplevel holding the registry): the
-    matching poll loop denies, and the reason and banner pass _wait_loop_deny_text_faults. The flip wraps
-    _deny so the reason names the old gh pr checks watch, and the row must then go red."""
+    matching poll loop denies, and the reason and banner pass _wait_loop_deny_text_faults. Each mutant in
+    _WAIT_LOOP_DENY_MUTANTS wraps _deny so the reason carries its text, and the row must then go red with
+    the fault it names.
+
+    The same loop also meets orch_truncation_guard's bare-'&' detach deny, so the row runs that handler on
+    it as well and requires its reason and banner to pass the same check. That is the property that the two
+    reasons do not contradict: both deny, both say "do not resubmit the loop" and resubmit nothing else, and
+    neither gives the generic detach advice (use the tracked background dispatch, or keep the command in the
+    foreground) that would resubmit the loop the other forbids. Its flip patches _orch_detach_poll_loop to
+    find no poll loop, which restores the generic detach text for this command, and the row must then go
+    red."""
     try:
         root = _init_repo(tmp / "wait-loop-deny-text")
     except (OSError, subprocess.SubprocessError) as exc:
@@ -3201,34 +3256,36 @@ def _test_wait_loop_deny_text(failures, tmp):
     (root / ".aiqt").mkdir(parents=True, exist_ok=True)
     (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
     handler = aiqt_hooks.orch_untracked_wait_loop
-
-    def faults_now():
-        code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
-                                             "cwd": str(root),
-                                             "tool_input": {"command": _WAIT_LOOP_DENY_COMMAND}})
-        if _reduce_result(code, stdout_obj) != "deny":
-            return ["the poll loop did not deny ({})".format(_reduce_result(code, stdout_obj))]
-        reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
-        banner = (stdout_obj or {}).get("systemMessage", "")
-        if not isinstance(reason, str) or not isinstance(banner, str):
-            return ["the reason or banner is not a string"]
-        return _wait_loop_deny_text_faults(reason, banner)
-    faults = faults_now()
+    faults = _wait_loop_deny_faults(handler, root)
     if faults:
         failures.append("(wl-deny-text) the untracked wait-loop deny text is wrong: {}"
                         .format("; ".join(faults)))
     saved = aiqt_hooks._deny
-
-    def old_watch_deny(reason, banner):
-        return saved(reason + " (for example: timeout <seconds> gh pr checks <ref> --watch)", banner)
-    aiqt_hooks._deny = old_watch_deny
+    for label, extra, expected in _WAIT_LOOP_DENY_MUTANTS:
+        def mutant_deny(reason, banner, extra=extra):
+            return saved(reason + extra, banner)
+        aiqt_hooks._deny = mutant_deny
+        try:
+            flipped = _wait_loop_deny_faults(handler, root)
+        finally:
+            aiqt_hooks._deny = saved
+        if not any(expected in fault for fault in flipped):
+            failures.append("(wl-deny-text-flip-{}) with the reason carrying {!r} the row must go red with a "
+                            "fault naming {!r}, got {!r}".format(label, extra, expected, flipped))
+    guard = aiqt_hooks.orch_truncation_guard
+    faults = _wait_loop_deny_faults(guard, root)
+    if faults:
+        failures.append("(wl-deny-text-truncation-guard) the truncation guard's deny of the same poll loop "
+                        "contradicts the wait-loop deny: {}".format("; ".join(faults)))
+    saved_poll = aiqt_hooks._orch_detach_poll_loop
+    aiqt_hooks._orch_detach_poll_loop = lambda command: False
     try:
-        flipped = faults_now()
+        flipped = _wait_loop_deny_faults(guard, root)
     finally:
-        aiqt_hooks._deny = saved
-    if not any("names gh pr checks" in fault for fault in flipped):
-        failures.append("(wl-deny-text-flip) with the reason naming gh pr checks the row must go red, got {!r}"
-                        .format(flipped))
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+    if not any("generic detach advice" in fault for fault in flipped):
+        failures.append("(wl-deny-text-truncation-guard-flip) with the truncation guard's generic detach text "
+                        "restored for the poll loop the row must go red, got {!r}".format(flipped))
 
 
 def _test_pgrep_self_match(failures):
