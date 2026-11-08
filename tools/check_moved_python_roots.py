@@ -6,15 +6,23 @@ directory from __file__ by a fixed number of parent hops that the move silently 
                                       exit 0 no finding within scope, 1 findings, 2 cannot evaluate
   check_moved_python_roots.py --self-test
                                       assert the fixture matrix over synthetic git repositories in a
-                                      tempdir (never the live repository), each quiet row paired with
-                                      its flag-everything flip
+                                      tempdir (never the live repository), each comparison-quiet row
+                                      paired with its flag-everything flip (the scope-only quiet
+                                      rows, which no comparison earns, have none and are named in
+                                      the self-test preamble)
   check_moved_python_roots.py [--self-test] --execution-report ABS_PATH
                                       the self-test, also writing its execution report, finalized at
                                       interpreter exit (tools/_selftest_exit_report.py), as the
                                       execution gate runs it
 
---head defaults to HEAD; --base defaults to the merge base of HEAD and origin/HEAD, and an
-origin/HEAD that does not resolve is exit 2. Each revision is resolved with
+--head defaults to HEAD; --base defaults to the merge base of --head and origin/HEAD, and an
+origin/HEAD that does not resolve is exit 2. A --base that is an all-zero object id of the head
+object id's length (a push event's before value for a newly created ref) is accepted only when the
+head commit has no parent: nothing precedes a root commit, so the change moves no file and the run
+prints that and exits 0; a zero base over pre-existing history is exit 2, the rule
+tools/check_release_cut.py applies to a zero before. A shallow repository is exit 2 before any
+judgment, as the branch-root sibling's probe refuses one, because a truncated history can hide the
+true merge base and make the gate judge unrelated history. Each revision is resolved with
 `git rev-parse --verify --end-of-options REV^{commit}`. Every git call runs with the ambient GIT_*
 variables scrubbed and GIT_NO_REPLACE_OBJECTS=1, as the branch-root gate's calls do. The change is
 read per merge base of base and head (`git merge-base --all`; none is exit 2, several are each
@@ -22,35 +30,52 @@ judged and the findings combined) with
 `git diff-tree -r -z --name-status --find-renames=50% -l0 <merge-base> <head> --` (-l0 turns the
 rename limit off), parsed strictly: R<nn> takes an old and a new path, A/D/M/T one path, and any
 other status letter or malformed record is exit 2. Judged movers: each rename whose both sides end
-in .py, and each added .py file whose file name matches at least one deleted .py file (compared
-with every such deletion and reported only when none of them derived the head directory); an added
-file matching no deletion is new and not judged. Each side read of a judged pairing must be a
-regular blob (100644/100755); a symlink or submodule there is exit 2. Blobs are parsed without
-being executed (tokenize.detect_encoding honouring PEP 263 cookies, then ast.parse); SyntaxError,
-ValueError (null bytes), RecursionError, MemoryError, UnicodeDecodeError or an unreadable blob is
-exit 2, for the base version as well as the head version.
+in .py, and each added .py file whose file name matches at least one .py file the change deletes or
+renames away (judged against every such base path); an added file matching no deleted or renamed
+name is new and not judged. Each side read of a judged pairing must be a regular blob
+(100644/100755); a symlink or submodule there is exit 2. Blobs are parsed without being executed
+(tokenize.detect_encoding honouring PEP 263 cookies, then ast.parse); SyntaxError, ValueError (null
+bytes), RecursionError, MemoryError, UnicodeDecodeError or an unreadable blob is exit 2, for the
+base version as well as the head version, and a derivation analysis that exhausts the recursion
+limit or memory (an expression nested past what the recognizer can walk) is exit 2, never a crash.
 
 Recognized derivations are expressions anchored on __file__ under the accepted wrappers (Path,
 pathlib.Path, PurePath, os.path.abspath/realpath/normpath, .resolve(), .absolute(), import aliases
-and `from os import path`), hopping with .parent (1), .parents[k] for a literal int k >= 0 (k+1),
-os.path.dirname or an imported dirname (1), and literal ".." segments under os.path.join or the /
-operator (1 each; path parts after the last hop are ignored); a name bound once by a simple
-assignment in the same scope can be extended by later hops. Not recognized: a Path, dirname or
-__file__ redefined locally, and text inside comments or strings. In scope only at 2 hops or more
-(one hop is the file's own directory, which moves with the file). Anything else anchored on
-__file__ (a non-literal index, a helper function, a name bound more than once) is not judged; the
-tool prints how many such expressions it skipped. A head derivation is a finding when the base
-version at the old path derived no such repository-relative directory (hops above the root are a
-distinct outside-the-repository value) or when the directory is absent from the head tree; an
-inline `# fixed-hop-target: <dir>` comment naming exactly the head-computed directory clears it,
-and lapses by itself when the file moves again.
+and `from os import path`), hopping with .parent (1), .parents[k] for a literal int k >= 0 (k+1)
+and os.path.dirname or an imported dirname (1). A literal ".." segment under os.path.join or the /
+operator is kept as a textual path component: a later .parent, .parents or dirname hop removes that
+component (those operations are lexical), while os.path.abspath/realpath/normpath, .resolve() and
+the end of the expression collapse each pending ".." one level upward (.absolute() does not
+collapse); path parts after the last hop are ignored. A name bound once by a simple assignment in
+the same scope can be extended by later hops; a name bound in one scope to a __file__-anchored
+value and used in another scope is counted as skipped, never silently dropped. Not recognized: a
+Path, dirname or __file__ redefined locally, and text inside comments or strings. In scope only at
+2 hops or more (one hop is the file's own directory, which moves with the file). Anything else
+anchored on __file__ (a non-literal index, a helper function, a name bound more than once) is not
+judged; the tool prints how many such expressions it skipped. Each in-scope head derivation is
+judged against its own base counterpart: the base derivation assigned to the same single-assignment
+name, or failing that one with the same normalized expression text, in any matched base path (base
+derivations of every hop count take part, so a one-hop base .parent corrected to .parents[1] during
+a one-level-deeper move is the same directory and passes). It passes only when a counterpart names
+the same repository-relative directory (hops above the root are a distinct outside-the-repository
+value per level, compared by value and never probed as a tree path) and, for an in-repository
+directory, that directory is present in the head tree. A counterpart naming only other directories
+is a finding. A head derivation with no counterpart is never a pass: in a rename it is a finding
+when no base derivation named its directory and exit 2 (cannot evaluate) when some base derivation
+named it under another name or expression, and in a name-matched addition it is exit 2, because a
+new file cannot be told from a moved one there. An inline `# fixed-hop-target: <dir>` comment
+naming exactly the head-computed directory clears that line's finding or unmatched derivation, and
+lapses by itself when the file moves again.
 
 Exit 0 prints both revisions and the judged and compared counts, or an empty-scope line when the
 change moves no Python file, never a claim that anything works. A pass establishes neither that the
 moved code runs nor that its paths are correct.
 
 DISCLOSED RESIDUALS of this implementation: the marker is read textually from the finding's source
-line, so a string literal on that same line spelling the marker can clear that line's finding;
+line, so a comment-shaped marker inside a trailing string literal is read too; a closed string keeps
+its quote, so the captured directory then carries that quote character and clears a finding only for
+a directory name that itself ends in it (an unquoted trailing spelling inside an unterminated or
+raw-text line does not arise in code that parses);
 import aliases are collected from every import statement in the module, whatever scope it is in, so
 a function-local import is honoured module-wide; a function's decorators and default expressions
 are judged in the function's own scope rather than the enclosing one; and the absent-directory leg
@@ -139,6 +164,42 @@ def _resolve_commit(root, rev):
         raise CannotEvaluate("revision {!r} does not resolve to a commit: {}".format(
             rev, _stderr_text(proc) or "git rev-parse failed"))
     return proc.stdout.decode("ascii", "replace").strip()
+
+
+def _refuse_shallow(root):
+    """CannotEvaluate for a shallow repository, whose truncated history can hide the true merge
+    base, as the branch-root sibling's probe refuses one; a failed or unrecognized probe is itself
+    cannot-evaluate, never a silent 'not shallow'."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--is-shallow-repository"],
+            capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        _proc_failure(exc)
+    value = proc.stdout.decode("ascii", "replace").strip()
+    if proc.returncode != 0 or value not in ("true", "false"):
+        raise CannotEvaluate(
+            "cannot determine whether the repository is shallow ({})".format(
+                _stderr_text(proc) or "git rev-parse --is-shallow-repository failed"))
+    if value == "true":
+        raise CannotEvaluate(
+            "shallow repository: a truncated history can hide the true merge base and make the "
+            "judged range unrelated to the change; fetch the full history")
+
+
+def _commit_parents(root, sha):
+    """The parent object ids of sha, read from git rev-list (a root commit has none)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "rev-list", "--parents", "-n", "1", sha, "--"],
+            capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        _proc_failure(exc)
+    fields = proc.stdout.decode("ascii", "replace").split()
+    if proc.returncode != 0 or not fields or fields[0] != sha:
+        raise CannotEvaluate("cannot read the parents of {}: {}".format(
+            sha, _stderr_text(proc) or "git rev-list failed"))
+    return fields[1:]
 
 
 def _default_base(root, head_sha):
@@ -336,7 +397,8 @@ def _collect_aliases(tree):
 
 
 class _Scope:
-    def __init__(self):
+    def __init__(self, parent=None):
+        self.parent = parent
         self.bind_counts = {}
         self.simple = {}
         self.owned = []
@@ -357,8 +419,8 @@ def _build_scopes(tree):
     assignments kept for the bound-once indirection rule."""
     scopes = []
 
-    def collect(scope_node):
-        scope = _Scope()
+    def collect(scope_node, parent=None):
+        scope = _Scope(parent)
         scopes.append(scope)
         if isinstance(scope_node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             arguments = scope_node.args
@@ -374,7 +436,7 @@ def _build_scopes(tree):
             if isinstance(node, _SCOPE_TYPES):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     scope.poison(node.name)
-                collect(node)
+                collect(node, scope)
                 continue
             scope.owned.append(node)
             if isinstance(node, ast.Assign):
@@ -418,14 +480,32 @@ def _hop(state, count):
 
 
 def _segments(state, literal):
+    """Joined path parts kept textually: a literal '..' stays a component, so a later lexical hop
+    (.parent, .parents, dirname) removes it instead of climbing, and _collapse resolves the rest."""
     for segment in literal.split("/"):
         if segment in ("", "."):
             continue
-        if segment == "..":
-            state = _hop(state, 1)
-        else:
-            state = (state[0], state[1] + (segment,))
+        state = (state[0], state[1] + (segment,))
     return state
+
+
+def _collapse(state):
+    """The state with every pending literal '..' component resolved one level upward, the way
+    os.path.normpath, abspath, realpath or Path.resolve() collapse it, and the way the final value
+    of the expression denotes a directory."""
+    if state is None or state == _SKIP:
+        return state
+    up, tail = state
+    downs = []
+    for part in tail:
+        if part == "..":
+            if downs:
+                downs.pop()
+            else:
+                up += 1
+        else:
+            downs.append(part)
+    return up, tuple(downs)
 
 
 def _module_ref(node, scope, modules):
@@ -470,6 +550,23 @@ def _eval(node, scope, aliases, visiting):
             return None if scope.bind_counts.get("__file__") else (0, ())
         binds = scope.bind_counts.get(node.id, 0)
         if binds == 0:
+            # Not bound here: a name bound in an enclosing scope to a __file__-anchored value
+            # (a module-level HERE extended inside a function) is anchored but crosses a scope
+            # the bound-once rule does not model, so it is skipped and counted, never dropped.
+            if node.id in visiting:
+                return None
+            outer = scope.parent
+            while outer is not None:
+                if outer.bind_counts.get(node.id, 0):
+                    visiting.add(node.id)
+                    try:
+                        anchored = any(
+                            _eval(value, outer, aliases, visiting) is not None
+                            for value in outer.simple.get(node.id, []))
+                    finally:
+                        visiting.discard(node.id)
+                    return _SKIP if anchored else None
+                outer = outer.parent
             return None
         if node.id in visiting:
             return _SKIP
@@ -508,7 +605,9 @@ def _eval(node, scope, aliases, visiting):
         func = node.func
         if (isinstance(func, ast.Attribute) and func.attr in ("resolve", "absolute")
                 and not node.args and not node.keywords):
-            return _eval(func.value, scope, aliases, visiting)
+            inner = _eval(func.value, scope, aliases, visiting)
+            # resolve() collapses pending '..' components; absolute() only prefixes and keeps them.
+            return _collapse(inner) if func.attr == "resolve" else inner
         kind = _callable_kind(func, scope, aliases)
         if kind is None:
             return None
@@ -525,7 +624,7 @@ def _eval(node, scope, aliases, visiting):
         if first is None or first == _SKIP:
             return first
         if kind == "pure":
-            return first if len(plain) == 1 else _SKIP
+            return _collapse(first) if len(plain) == 1 else _SKIP
         if kind == "dirname":
             return _hop(first, 1) if len(plain) == 1 else _SKIP
         state = first
@@ -547,10 +646,13 @@ def _eval(node, scope, aliases, visiting):
 
 
 def _derivations(tree, text):
-    """([(line, column, expression text, up hops)] for every maximal recognized derivation with at
-    least one hop, the count of anchored-but-not-judged expressions): each expression is judged once
-    at its outermost recognized node (an anchored node under a recognized or skipped ancestor is
-    that ancestor's)."""
+    """([(line, column, expression text, up hops, counterpart keys)] for every maximal recognized
+    derivation with at least one hop, the count of anchored-but-not-judged expressions): each
+    expression is judged once at its outermost recognized node (an anchored node under a recognized
+    or skipped ancestor is that ancestor's). The counterpart keys, most specific first, are the
+    single-assignment target name where the node is that assignment's value, then the normalized
+    expression text; the verdict matches a head derivation to a base one through the first shared
+    key."""
     aliases = _collect_aliases(tree)
     parents = {}
     for parent in ast.walk(tree):
@@ -558,6 +660,10 @@ def _derivations(tree, text):
             parents[child] = parent
     derivs, skipped = [], 0
     for scope in _build_scopes(tree):
+        assigned = {}
+        for name, values in scope.simple.items():
+            for value in values:
+                assigned[id(value)] = name
         for node in scope.owned:
             if not isinstance(node, ast.expr):
                 continue
@@ -573,6 +679,7 @@ def _derivations(tree, text):
                 ancestor = parents.get(ancestor)
             if suppressed:
                 continue
+            result = _collapse(result)
             if result == _SKIP or result[0] == 0:
                 skipped += 1
                 continue
@@ -580,7 +687,10 @@ def _derivations(tree, text):
                 expr = ast.get_source_segment(text, node) or ast.unparse(node)
             except (ValueError, RecursionError, MemoryError):
                 expr = "<expression at line {}>".format(node.lineno)
-            derivs.append((node.lineno, node.col_offset, " ".join(expr.split()), result[0]))
+            expr = " ".join(expr.split())
+            name = assigned.get(id(node))
+            keys = (("name", name), ("expr", expr)) if name else (("expr", expr),)
+            derivs.append((node.lineno, node.col_offset, expr, result[0], keys))
     derivs.sort()
     return derivs, skipped
 
@@ -603,7 +713,12 @@ def _blob_analysis(root, rev, path, cache):
         _require_blob(mode, otype, rev, path)
         blob = _blob_bytes(root, oid, rev, path)
         text, tree = _parse_python(blob, "{!r} in {}".format(path, rev))
-        derivs, skipped = _derivations(tree, text)
+        try:
+            derivs, skipped = _derivations(tree, text)
+        except (RecursionError, MemoryError) as exc:
+            raise CannotEvaluate(
+                "cannot analyse {!r} in {}: {}: expression nesting exceeds what the recognizer "
+                "can walk".format(path, rev, type(exc).__name__))
         cache[key] = (derivs, skipped, text.splitlines())
     return cache[key]
 
@@ -620,45 +735,76 @@ def scan(root, base, head, min_hops=MIN_HOPS, compare=True):
     cache, tree_cache = {}, {}
     for merge_base in bases:
         renames, added, deleted = _changes(root, merge_base, head)
-        deleted_by_name = {}
+        old_by_name = {}
         for path in deleted:
             if path.endswith(".py"):
-                deleted_by_name.setdefault(path.rsplit("/", 1)[-1], []).append(path)
-        pairs = [([old], new) for old, new in renames
+                old_by_name.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+        for old, _new in renames:
+            if old.endswith(".py"):
+                old_by_name.setdefault(old.rsplit("/", 1)[-1], []).append(old)
+        pairs = [([old], new, "rename") for old, new in renames
                  if old.endswith(".py") and new.endswith(".py")]
         for path in added:
             if path.endswith(".py"):
-                candidates = deleted_by_name.get(path.rsplit("/", 1)[-1])
+                candidates = old_by_name.get(path.rsplit("/", 1)[-1])
                 if candidates:
-                    pairs.append((list(candidates), path))
-        for olds, new in pairs:
+                    pairs.append((list(candidates), path, "name-match"))
+        for olds, new, pairing in pairs:
             judged.add(new)
             head_derivs, head_skipped, head_lines = _blob_analysis(root, head, new, cache)
             skipped_by_file[new] = head_skipped
-            base_dirs = set()
+            base_by_key, base_all = {}, set()
             if compare:
-                # In-scope derivations only (min_hops and up): a one-hop base derivation names
-                # the file's own directory, which after a move one level deeper is exactly the
-                # stale two-hop head directory, so counting it would mask the seed shape in any
-                # mover that also derives its own directory (a sys.path insert line).
+                # Base derivations of every hop count take part, each under its counterpart keys:
+                # judging a head derivation against its own counterpart (the same assignment name,
+                # else the same expression text) keeps one stale derivation from hiding behind
+                # another's directory, and lets a one-hop .parent corrected to .parents[1] during a
+                # one-level-deeper move pass as the same directory.
                 for old in olds:
                     old_derivs, _old_skipped, _old_lines = _blob_analysis(
                         root, merge_base, old, cache)
-                    for _line, _col, _expr, up in old_derivs:
-                        if up >= min_hops:
-                            base_dirs.add(_derived_dir(old, up))
-            for line, col, expr, up in head_derivs:
+                    for _line, _col, _expr, up, keys in old_derivs:
+                        directory = _derived_dir(old, up)
+                        base_all.add(directory)
+                        for one_key in keys:
+                            base_by_key.setdefault(one_key, set()).add(directory)
+            for line, col, expr, up, keys in head_derivs:
                 if up < min_hops:
                     continue
                 compared.add((new, line, col))
                 head_dir = _derived_dir(new, up)
+                counterpart = None
                 if compare:
-                    bad = (head_dir not in base_dirs
-                           or not _dir_in_head_tree(root, head, head_dir, tree_cache))
+                    counterpart = next(
+                        (base_by_key[one_key] for one_key in keys if one_key in base_by_key),
+                        None)
+                    if counterpart is not None:
+                        bad = (head_dir not in counterpart
+                               or (not head_dir.startswith("..")
+                                   and not _dir_in_head_tree(root, head, head_dir, tree_cache)))
+                    else:
+                        bad = True
                     if bad and 0 < line <= len(head_lines):
                         marker = _MARKER_RE.search(head_lines[line - 1])
                         if marker is not None and marker.group(1) == head_dir:
                             bad = False
+                    if bad and counterpart is None:
+                        # No counterpart is never a pass: a name-matched addition cannot be told
+                        # from a new file, and a renamed file whose base derived this directory
+                        # under another name or expression cannot be matched soundly either way.
+                        if pairing == "name-match":
+                            raise CannotEvaluate(
+                                "cannot judge added {!r}: line {} derives {!r} ({}) but no "
+                                "deleted or renamed .py file named {!r} has a base derivation "
+                                "with the same name or expression; a new file cannot be told "
+                                "from a moved one".format(
+                                    new, line, head_dir, expr, new.rsplit("/", 1)[-1]))
+                        if head_dir in base_all:
+                            raise CannotEvaluate(
+                                "cannot judge {} -> {}: line {} derives {!r} ({}) with no base "
+                                "counterpart of the same name or expression, while the base "
+                                "derived that directory another way".format(
+                                    ", ".join(olds), new, line, head_dir, expr))
                 else:
                     bad = True
                 if bad:
@@ -668,7 +814,7 @@ def scan(root, base, head, min_hops=MIN_HOPS, compare=True):
                         findings.append({
                             "old": ", ".join(olds), "new": new, "line": line, "expr": expr,
                             "hops": up, "head_dir": head_dir,
-                            "base_dirs": sorted(base_dirs)})
+                            "base_dirs": sorted(counterpart or ())})
     findings.sort(key=lambda item: (item["new"], item["line"], item["old"]))
     return findings, len(judged), len(compared), sum(skipped_by_file.values()), bases
 
@@ -706,9 +852,23 @@ def main(argv=None):
     else:
         root = repo_root_default()
     try:
+        _refuse_shallow(root)
         head_sha = _resolve_commit(root, options.get("--head", "HEAD"))
-        if "--base" in options:
-            base_sha = _resolve_commit(root, options["--base"])
+        base_arg = options.get("--base")
+        if (base_arg is not None and set(base_arg) == {"0"}
+                and len(base_arg) == len(head_sha)):
+            # A push event's before value for a newly created ref: accepted only for a proven
+            # root head, the rule tools/check_release_cut.py applies to a zero before.
+            if _commit_parents(root, head_sha):
+                raise CannotEvaluate(
+                    "zero --base requires a root head with no parent; a new branch over "
+                    "pre-existing history has no judged range here, pass the real base")
+            print("head {}".format(head_sha))
+            print("zero base with a root head: nothing precedes this history; this change "
+                  "moves no Python file")
+            return 0
+        if base_arg is not None:
+            base_sha = _resolve_commit(root, base_arg)
         else:
             base_sha = _default_base(root, head_sha)
         findings, moved, compared, skipped, _bases = scan(root, base_sha, head_sha)
@@ -738,12 +898,17 @@ def main(argv=None):
 
 # --- self-test --------------------------------------------------------------------------------------
 # The fixture matrix over synthetic git repositories in a tempdir only (never the live repository).
-# Every quiet row is paired with its flag-everything flip (scan(compare=False), the plain matcher
-# with no before-and-after comparison; for the one-hop row the flip also lowers the hop minimum to
-# 1, and for the not-recognized rows the flip removes exactly the property that earned the quiet, a
-# local redefinition or a comment/string placement, since the plain matcher does not recognize
-# those either). Fixture git commands run under tools/_git_fixture_env.git_fixture_env, and the
-# whole run scrubs the ambient git environment in place first.
+# Every comparison-quiet row is paired with its flag-everything flip (scan(compare=False), the plain
+# matcher with no before-and-after comparison; for the one-hop and lexical-dirname rows the flip
+# also lowers the hop minimum to 1, and for the not-recognized rows the flip removes exactly the
+# property that earned the quiet, a local redefinition or a comment/string placement, since the
+# plain matcher does not recognize those either). The scope-only quiet rows have no flip, because no
+# comparison earns their quiet: scope/unmoved-file-out-of-scope (an M record is never paired),
+# scope/env-only-residue-passes and derive/cross-scope-extension-skipped (nothing in scope to flag;
+# the latter asserts the skip count instead), scope/new-file-not-judged (no same-named base file),
+# hist/zero-base-root-head-passes (nothing precedes a root) and launch/empty-scope-line. Fixture git
+# commands run under tools/_git_fixture_env.git_fixture_env, and the whole run scrubs the ambient
+# git environment in place first.
 
 FAILURES = []
 EXECUTED = []
@@ -1009,9 +1174,15 @@ def self_test(report_path=None):
         check("derive/comment-string-not-recognized",
               _counts(_outcome(text10, text10_b, text10_h, compare=False)) == ("ok", 0, 1, 0, 0),
               _outcome(text10, text10_b, text10_h, compare=False))
+        # the companion adds the same expression as live code NEXT TO the comment and string
+        # copies: the flip flags exactly the one live derivation, so the quiet above is earned by
+        # placement, and this row is not a rerun of the redefined-name companion.
+        body10cc = (body10t + "ROOT = Path(__file__).parents[1]\n")
+        textc, textc_b, textc_h = _repo_with(
+            base, "comment-string-companion", {"c/t.py": body10cc}, {"c/d/t.py": body10cc})
         check("derive/comment-string-companion-flags",
-              _counts(_outcome(redefc, redefc_b, redefc_h, compare=False, min_hops=2))[:2]
-              == ("ok", 1), "same code outside comment/string flags")
+              _counts(_outcome(textc, textc_b, textc_h, compare=False)) == ("ok", 1, 1, 1, 0),
+              _outcome(textc, textc_b, textc_h, compare=False))
 
         # fixture 11: one-hop Path(__file__).parent in a moved file, flip at a 1-hop minimum
         body11 = "from pathlib import Path\nHERE = Path(__file__).parent\n"
@@ -1074,6 +1245,9 @@ def self_test(report_path=None):
         check("match/two-deletions-one-derives-passes",
               _counts(_outcome(two_a, two_a_b, two_a_h))[:2] == ("ok", 0),
               _outcome(two_a, two_a_b, two_a_h))
+        check("match/two-deletions-companion-flags",
+              _counts(_outcome(two_a, two_a_b, two_a_h, compare=False))[:2] == ("ok", 1),
+              _outcome(two_a, two_a_b, two_a_h, compare=False))
         two_b, two_b_b, two_b_h = _repo_with(
             base, "two-dels-flag",
             {"m/a/t.py": P1 + filler, "n/b/t.py": P1 + "L = 9\n" + filler.replace("BASE", "LIB")},
@@ -1164,6 +1338,115 @@ def self_test(report_path=None):
         check("verdict/above-root-distinct-flagged",
               _counts(got) == ("ok", 1, 1, 1, 0)
               and got[1][0]["head_dir"].startswith(".."), got)
+        # the same above-root value after a same-depth move is the same directory; it cannot be
+        # probed as a head-tree path, so it is compared by value and passes
+        above_same, asame_b, asame_h = _repo_with(
+            base, "above-same", {"a/t.py": body23}, {"b/t.py": body23})
+        check("verdict/above-root-same-depth-passes",
+              _counts(_outcome(above_same, asame_b, asame_h)) == ("ok", 0, 1, 1, 0),
+              _outcome(above_same, asame_b, asame_h))
+        check("verdict/above-root-same-depth-companion-flags",
+              _counts(_outcome(above_same, asame_b, asame_h, compare=False))[:2] == ("ok", 1),
+              _outcome(above_same, asame_b, asame_h, compare=False))
+
+        # fixture 23b: counterpart judgment: one stale derivation must not hide behind another
+        # name's directory: ROOT keeps its hops over a one-deeper move while PKG corrects its own,
+        # so a set-membership comparison would pass both and the per-name comparison flags ROOT
+        body23b_base = ("import pathlib\nROOT = pathlib.Path(__file__).parents[2]\n"
+                        "PKG = pathlib.Path(__file__).parents[1]\n")
+        body23b_head = ("import pathlib\nROOT = pathlib.Path(__file__).parents[2]\n"
+                        "PKG = pathlib.Path(__file__).parents[2]\n")
+        cpart, cpart_b, cpart_h = _repo_with(
+            base, "counterpart", {"a/b/t.py": body23b_base}, {"a/b/c/t.py": body23b_head})
+        got = _outcome(cpart, cpart_b, cpart_h)
+        check("verdict/counterpart-stale-root-flagged",
+              _counts(got) == ("ok", 1, 1, 2, 0) and got[1][0]["line"] == 2
+              and got[1][0]["head_dir"] == "a" and got[1][0]["base_dirs"] == ["."], got)
+
+        # fixture 23c: a name bound to a __file__-anchored value at module level and extended in
+        # a function crosses a scope the bound-once rule does not model: counted as skipped
+        body23c = ("from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
+                   "def locate():\n    return HERE.parents[0]\n")
+        xscope, xscope_b, xscope_h = _repo_with(
+            base, "cross-scope", {"x/t.py": body23c}, {"x/d/t.py": body23c})
+        check("derive/cross-scope-extension-skipped",
+              _counts(_outcome(xscope, xscope_b, xscope_h)) == ("ok", 0, 1, 0, 1),
+              _outcome(xscope, xscope_b, xscope_h))
+
+        # fixture 23d: a rename to a corrected file plus a stale copy added elsewhere: the added
+        # copy name-matches the rename source and is judged against it, not left unjudged
+        stale, stale_b, stale_h = _repo_with(
+            base, "stale-copy", {"a/t.py": P1 + filler},
+            {"b/c/t.py": "import pathlib\nROOT = pathlib.Path(__file__).parents[2]\n" + filler,
+             "d/e/t.py": P1 + "# stale copy\n"})
+        got = _outcome(stale, stale_b, stale_h)
+        check("match/rename-plus-stale-copy-flagged",
+              _counts(got) == ("ok", 1, 2, 2, 0) and got[1][0]["new"] == "d/e/t.py"
+              and got[1][0]["head_dir"] == "d", got)
+
+        # fixture 23e: an added file whose only same-named base file derived nothing cannot be
+        # told from a new file: cannot-evaluate, never a finding over no base signal
+        nobase, nobase_b, nobase_h = _repo_with(
+            base, "no-base-derivation", {"u/t.py": "VALUE = 1\n"}, {"v/w/t.py": P1})
+        got = _outcome(nobase, nobase_b, nobase_h)
+        check("match/add-name-no-base-derivation-cannot-evaluate",
+              got[0] == "cannot" and "cannot judge added" in got[1], got)
+
+        # fixture 23f: .parent corrected to .parents[1] over a one-level-deeper move names the
+        # same directory under the same name: a pass, and the flip still flags it
+        conv, conv_b, conv_h = _repo_with(
+            base, "converted",
+            {"k/t.py": "from pathlib import Path\nROOT = Path(__file__).parent\n" + filler},
+            {"k/d/t.py": "from pathlib import Path\nROOT = Path(__file__).parents[1]\n" + filler})
+        check("derive/parent-to-parents1-same-dir-passes",
+              _counts(_outcome(conv, conv_b, conv_h)) == ("ok", 0, 1, 1, 0),
+              _outcome(conv, conv_b, conv_h))
+        check("derive/parent-to-parents1-companion-flags",
+              _counts(_outcome(conv, conv_b, conv_h, compare=False))[:2] == ("ok", 1),
+              _outcome(conv, conv_b, conv_h, compare=False))
+
+        # fixture 23g: dirname is lexical, so dirname(join(dirname(__file__), '..')) is the
+        # file's own directory (the hop removes the literal '..'), out of scope either way
+        lex_body = ("import os\nHERE = os.path.dirname(os.path.join("
+                    "os.path.dirname(__file__), '..'))\n")
+        lex, lex_b, lex_h = _repo_with(
+            base, "lexical", {"a/b/t.py": lex_body + filler}, {"a/b/c/t.py": lex_body + filler})
+        check("derive/dirname-after-dotdot-own-directory-passes",
+              _counts(_outcome(lex, lex_b, lex_h)) == ("ok", 0, 1, 0, 0),
+              _outcome(lex, lex_b, lex_h))
+        check("derive/dirname-after-dotdot-companion-min1-flags",
+              _counts(_outcome(lex, lex_b, lex_h, compare=False, min_hops=1))[:2] == ("ok", 1),
+              _outcome(lex, lex_b, lex_h, compare=False, min_hops=1))
+
+        # fixture 23h: a parseable deep attribute chain exhausts the recognizer's recursion, a
+        # disclosed cannot-evaluate, never an uncaught crash
+        chain = "from pathlib import Path\nROOT = Path(__file__)" + ".parent" * 5000 + "\n"
+        deepc, deepc_b, deepc_h = _repo_with(
+            base, "deep-chain", {"a/t.py": P1 + filler}, {"b/t.py": chain})
+        got = _outcome(deepc, deepc_b, deepc_h)
+        check("parse/deep-attribute-chain-cannot-evaluate",
+              got[0] == "cannot" and "RecursionError" in got[1], got)
+
+        # fixture 23i: a shallow repository is refused before judgment (a truncated history can
+        # hide the true merge base); the shallow marker file is what git's own probe reads
+        shallow_dir = base / "shallow"
+        _fx(Path(base), "clone", "-q", str(fixed), str(shallow_dir))
+        with open(Path(shallow_dir) / ".git" / "shallow", "w", encoding="ascii") as handle:
+            handle.write(fixed_b + "\n")
+        got = _launch("--root", str(shallow_dir))
+        check("hist/shallow-repository-cannot-evaluate",
+              got[0] == 2 and "shallow" in got[2], got)
+
+        # fixture 23j: a zero --base (a push event's before value for a new ref) is accepted only
+        # for a proven root head, the release-cut rule
+        zeror = _init_repo(base, "zero-root")
+        zr1 = _commit_state(zeror, {}, {"a/t.py": P1}, "only")
+        got = _launch("--root", str(zeror), "--base", "0" * len(zr1), "--head", zr1)
+        check("hist/zero-base-root-head-passes",
+              got[0] == 0 and "moves no Python file" in got[1], got)
+        got = _launch("--root", str(fixed), "--base", "0" * len(fixed_h), "--head", fixed_h)
+        check("hist/zero-base-with-history-cannot-evaluate",
+              got[0] == 2 and "zero --base" in got[2], got)
 
         # fixture 24: a base syntax error, a head null byte and deep nesting are cannot-evaluate
         bad_base, bb_b, bb_h = _repo_with(
@@ -1174,11 +1457,15 @@ def self_test(report_path=None):
             base, "null-byte", {"a/t.py": P1 + filler}, {"b/t.py": b"x = 1\n\x00\n"})
         check("parse/head-null-byte-cannot-evaluate",
               _outcome(nul, nul_b, nul_h)[0] == "cannot", _outcome(nul, nul_b, nul_h))
-        deep_body = "x = " + "(" * 100000 + "0" + ")" * 100000 + "\n"
+        # A deep attribute chain makes ast.parse itself raise RecursionError on this interpreter
+        # (deep parentheses raise SyntaxError instead and would not reach that handler), so the
+        # row asserts the exception name and fails if the handler stops catching it.
+        deep_body = "x" + ".a" * 200000 + "\n"
         deep, deep_b, deep_h = _repo_with(
             base, "deep-nesting", {"a/t.py": P1 + filler}, {"b/t.py": deep_body})
+        got = _outcome(deep, deep_b, deep_h)
         check("parse/deep-nesting-cannot-evaluate",
-              _outcome(deep, deep_b, deep_h)[0] == "cannot", _outcome(deep, deep_b, deep_h)[0])
+              got[0] == "cannot" and "RecursionError" in got[1], got)
 
         # fixture 25: a latin-1 coding cookie parses; undecodable bytes are cannot-evaluate
         latin = (b"# -*- coding: latin-1 -*-\n# caf\xe9\nimport os.path\n"
@@ -1214,24 +1501,29 @@ def self_test(report_path=None):
               _outcome(lost, lost_b, lost_h)[0] == "cannot", _outcome(lost, lost_b, lost_h)[0])
 
         # fixture 27: a symlink or a submodule on one side of a pairing
+        # The symlink's target text is chosen to parse as Python and derive nothing, so only the
+        # regular-blob mode guard can refuse it; the asserted message pins that guard, not a
+        # downstream parse failure.
         sym = _init_repo(base, "symlink")
         s1 = _commit_state(sym, {}, {"a/t.py": P1}, "base")
         (Path(sym) / "a" / "t.py").unlink()
         os.makedirs(Path(sym) / "b", exist_ok=True)
-        os.symlink("../a", Path(sym) / "b" / "t.py")
+        os.symlink("tgt", Path(sym) / "b" / "t.py")
         _fx(sym, "add", "-A")
         _fx(sym, "commit", "-q", "-m", "head")
         s2 = _fx(sym, "rev-parse", "HEAD")
+        got = _outcome(sym, s1, s2)
         check("mode/symlink-side-cannot-evaluate",
-              _outcome(sym, s1, s2)[0] == "cannot", _outcome(sym, s1, s2))
+              got[0] == "cannot" and "not a regular file" in got[1], got)
         sub = _init_repo(base, "gitlink")
         g1 = _commit_state(sub, {}, {"a/t.py": P1}, "base")
         _fx(sub, "rm", "-q", "a/t.py")
         _fx(sub, "update-index", "--add", "--cacheinfo", "160000,{},b/t.py".format(g1))
         _fx(sub, "commit", "-q", "-m", "head")
         g2 = _fx(sub, "rev-parse", "HEAD")
+        got = _outcome(sub, g1, g2)
         check("mode/submodule-side-cannot-evaluate",
-              _outcome(sub, g1, g2)[0] == "cannot", _outcome(sub, g1, g2))
+              got[0] == "cannot" and "not a regular file" in got[1], got)
 
         # fixture 28: a malformed record and an unrecognized status letter, via a patched runner
         with _patched(this, "_diff_tree_bytes", lambda _r, _m, _h: b"R90\0only-old.py\0"):
@@ -1283,15 +1575,19 @@ def self_test(report_path=None):
             print("  - " + failure)
         return 1
     print("SELF-TEST PASS: check_moved_python_roots {} checks over synthetic git fixtures (the "
-          "seed shape, R100, wrapper, dot-dot, alias and bound-name derivations flagged; corrected "
-          "hops, same-depth moves, one-hop derivations, redefined or quoted names, unmoved and new "
-          "files and non-__file__ roots quiet, each quiet row with its flag-everything flip; "
-          "unpaired adds matched by name against every same-named deletion; the marker clearing "
-          "exactly its directory and lapsing on the next move; odd path bytes enumerated; -l0 "
-          "pairing under diff.renameLimit=1; criss-cross merge bases combined; above-root hops "
-          "distinct; parse, mode, blob, revision, merge-base and record failures each "
-          "cannot-evaluate; and the launch contract); execution set reconciled against "
-          "tools/selftest_checks.toml".format(len(EXECUTED)))
+          "seed shape, R100, wrapper, dot-dot, alias and bound-name derivations flagged, each "
+          "head derivation judged against its own base counterpart; corrected hops, same-depth "
+          "moves, one-hop and lexical-dirname derivations, redefined or quoted names, unmoved and "
+          "new files and non-__file__ roots quiet, each comparison-quiet row with its "
+          "flag-everything flip and the scope-only quiet rows disclosed without one; unpaired "
+          "adds matched by name against every same-named deletion or rename source, an unmatched "
+          "in-scope derivation never a pass; the marker clearing exactly its directory and "
+          "lapsing on the next move; odd path bytes enumerated; -l0 pairing under "
+          "diff.renameLimit=1; criss-cross merge bases combined; above-root hops distinct by "
+          "value; shallow histories and zero bases over history refused; parse, recursion, mode, "
+          "blob, revision, merge-base and record failures each cannot-evaluate; and the launch "
+          "contract); execution set reconciled against tools/selftest_checks.toml".format(
+              len(EXECUTED)))
     return 0
 
 

@@ -987,7 +987,7 @@ ALLOWLIST = (
             "The pull_request CI job judges the moved Python files of the PR "
             "head against its target branch, both runtime-derived from the "
             "event; a local run has no PR-head or target-ref context, so the "
-            "bare default-base leg runs locally and in the CI else-branch."
+            "bare default-base leg runs locally only."
         ),
         "backlog": "GD-123",
     },
@@ -997,7 +997,30 @@ ALLOWLIST = (
         "reason": (
             "The push CI job supplies the event's before OID as the base so "
             "the judged range is exactly what the push changed; the bare "
-            "default-base leg runs locally and in the CI else-branch."
+            "default-base leg runs locally only."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": "tools/check_moved_python_roots.py --base HEAD^",
+        "reason": (
+            "The CI else-branch for a workflow_dispatch or schedule run uses "
+            "the history-relative literal base HEAD^, because origin/HEAD "
+            "need not exist in CI; a root HEAD takes a stated not-judged "
+            "line instead. There is no local --base leg, so this literal "
+            "form is CI-only by design."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "local-only",
+        "identity": "tools/check_moved_python_roots.py",
+        "reason": (
+            "The bare leg derives its default base from the merge base of "
+            "HEAD and origin/HEAD, which a local clone configures; CI "
+            "supplies an event-derived base on every leg because origin/HEAD "
+            "need not exist there."
         ),
         "backlog": "GD-123",
     },
