@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ab5289178114c349f698d246f017dc9dcad0a98d20fd33d4ca9944a1cededddb"
+tree-sha256 = "19bc1f9c3b803efc9ccd075d62bc6e7114db9bf74d157234e248be7e3ce8ac5f"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -147,7 +147,7 @@ sha256 = "7396859c9a2b6d18ecec0982f02f9b72a64a5a79ef6d4270df82eab956af0ec7"
 [[sources]]
 path = ".aiqt/core/renderers.toml"
 bytes = 3103
-sha256 = "50730401f3a9c0e24cc61000629c7a3b1d9bcd6165e3b3931d52c83fa7171ca2"
+sha256 = "b010e238f375f66bfbbf7319d36f13bfd0667700d51a30ba004c07f2858f2587"
 
 [[sources]]
 path = ".aiqt/core/rules/00-project-integrity.md"
@@ -3271,8 +3271,8 @@ sha256 = "eeaf84ff6f52265afaada78685614553c864d42cfb1ec5331fa0a89fbe159a8c"
 
 [[sources]]
 path = "opf/tools/_skill_frontmatter.py"
-bytes = 15730
-sha256 = "d18f1cd654109034e9c3806356ae2e33e0cdb7b723fc9cc2a0aaf3610b4631fc"
+bytes = 16197
+sha256 = "93cc59eed1ed61c1cd6db7426215e4750cbfe244553020f000af0ff9ea146392"
 
 [[sources]]
 path = "opf/tools/_vendor/commonmark-spec-0.31.2/spec-0.31.2-examples.json"
@@ -4396,8 +4396,8 @@ sha256 = "deac085d23bfdcd68eda1f88b5cf41da9683f9d79307d2c803107b69817dd9a3"
 
 [[sources]]
 path = "tools/check_skill_frontmatter.py"
-bytes = 29422
-sha256 = "7d070a0bb8b91cc9728ca0d7a0b8f7100636be748548b1ba524d27449d47a70d"
+bytes = 33204
+sha256 = "3767f18add005830642e2ef273b930f211f465327e147479f420282f0bc2e8f4"
 
 [[sources]]
 path = "tools/check_standards_currency.py"
@@ -4656,8 +4656,8 @@ sha256 = "cc0464c20f62e7c83131c52c90ff9eafa40bcdd2f425fa158496c83e326a9b7c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 223766
-sha256 = "e269fd8b8b48c7c9980267dccdb4d1c14a70acb15305327e352649e631f28810"
+bytes = 224740
+sha256 = "4f057e9f29d7f31a5dd82ca61b2dccb7eb485a7cb7438a08dd2ce1a78f7ccaf8"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

@@ -280,12 +280,55 @@ def _run_vectors():
     # (PyYAML refuses to construct it) and a signed base-16 integer.
     ("vector/cannot/equals-name", _doc("name: =", GOOD_DESC), fm.CANNOT_EVALUATE),
     ("vector/cannot/signed-hex-name", _doc("name: +0x1F", GOOD_DESC), fm.CANNOT_EVALUATE),
-    # Each of these reaches its named guard directly: the all-CRLF and leading-BOM vectors above would
-    # be caught by the fence test even without the CR and BOM guards, so they do not pin those guards.
+    # A CR, a NUL or a BOM inside the frontmatter is refused, but more than one guard catches each of
+    # these three (the whole-text guard and the per-line scan for CR and NUL, the key-line pattern for a
+    # BOM that starts a key line), so none of them shows that one particular guard is needed.
     ("vector/cannot/cr-in-value", _doc(GOOD_NAME, "description: a\rb"), fm.CANNOT_EVALUATE),
     ("vector/cannot/bom-after-fence", "---\n" + chr(0xFEFF) + GOOD_NAME + "\n" + GOOD_DESC + "\n---\n",
      fm.CANNOT_EVALUATE),
     ("vector/cannot/nul-in-value", _doc(GOOD_NAME, "description: a\x00b"), fm.CANNOT_EVALUATE),
+    # Only the whole-text guard sees the body after the closing fence (the per-line scan reads the
+    # frontmatter alone), so these two read VALID without it.
+    ("vector/cannot/cr-after-fence", _doc(GOOD_NAME, GOOD_DESC) + "a\rb\n", fm.CANNOT_EVALUATE),
+    ("vector/cannot/nul-after-fence", _doc(GOOD_NAME, GOOD_DESC) + "a\x00b\n", fm.CANNOT_EVALUATE),
+    # A BOM inside a value passes the key-line pattern, so only the refused set catches it.
+    ("vector/cannot/bom-in-value", _doc(GOOD_NAME, "description: a" + chr(0xFEFF) + "b"), fm.CANNOT_EVALUATE),
+    # Each end of the readable ranges: a C1 control other than NEL (the first, U+0080, and the last,
+    # U+009F) in a value and in name is refused and U+00A0 just past them reads; U+D7FF and U+E000,
+    # either side of the surrogates, read; U+FFFD reads while U+FFFE and U+FFFF are refused; U+10000
+    # reads. U+FDD0 is a non-character inside YAML's printable set, and reads.
+    ("vector/cannot/control-c1-first-value", _doc(GOOD_NAME, "description: a\x80b"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/control-c1-last-value", _doc(GOOD_NAME, "description: a\x9fb"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/control-c1-first-name", _doc("name: de\x80mo", GOOD_DESC), fm.CANNOT_EVALUATE),
+    ("vector/cannot/control-c1-last-name", _doc("name: de\x9fmo", GOOD_DESC), fm.CANNOT_EVALUATE),
+    ("vector/boundary/no-break-space-reads", _doc(GOOD_NAME, "description: a\xa0b"), fm.VALID),
+    ("vector/boundary/below-surrogates-reads", _doc(GOOD_NAME, "description: a" + chr(0xD7FF) + "b"),
+     fm.VALID),
+    ("vector/boundary/above-surrogates-reads", _doc(GOOD_NAME, "description: a" + chr(0xE000) + "b"),
+     fm.VALID),
+    ("vector/boundary/replacement-char-reads", _doc(GOOD_NAME, "description: a" + chr(0xFFFD) + "b"),
+     fm.VALID),
+    ("vector/cannot/noncharacter-fffe", _doc(GOOD_NAME, "description: a" + chr(0xFFFE) + "b"),
+     fm.CANNOT_EVALUATE),
+    ("vector/cannot/noncharacter-ffff", _doc(GOOD_NAME, "description: a" + chr(0xFFFF) + "b"),
+     fm.CANNOT_EVALUATE),
+    ("vector/boundary/supplementary-reads", _doc(GOOD_NAME, "description: a" + chr(0x10000) + "b"),
+     fm.VALID),
+    ("vector/boundary/noncharacter-fdd0-reads", _doc(GOOD_NAME, "description: a" + chr(0xFDD0) + "b"),
+     fm.VALID),
+    # "<<" is YAML 1.1's merge key, which PyYAML's safe loader refuses as a plain value, for any key;
+    # quoted, or inside a longer plain value, it is a string and reads.
+    ("vector/cannot/merge-key-name", _doc("name: <<", GOOD_DESC), fm.CANNOT_EVALUATE),
+    ("vector/cannot/merge-key-description", _doc(GOOD_NAME, "description: <<"), fm.CANNOT_EVALUATE),
+    ("vector/cannot/merge-key-other-key", _doc(GOOD_NAME, GOOD_DESC, "license: <<"), fm.CANNOT_EVALUATE),
+    ("vector/boundary/merge-key-quoted-reads", _doc("name: '<<'", GOOD_DESC), fm.VALID),
+    ("vector/boundary/merge-key-in-text-reads", _doc(GOOD_NAME, "description: a << b"), fm.VALID),
+    # A float that starts with "." may hold "_" after its first digit (".5_0" reads as 0.5); with "_"
+    # before any digit it is a string.
+    ("vector/cannot/dot-float-underscore-name", _doc("name: .5_0", GOOD_DESC), fm.CANNOT_EVALUATE),
+    ("vector/cannot/dot-float-underscore-description", _doc(GOOD_NAME, "description: .5_"),
+     fm.CANNOT_EVALUATE),
+    ("vector/boundary/dot-underscore-first-reads", _doc("name: ._5", GOOD_DESC), fm.VALID),
     ("vector/cannot/tab-in-plain", _doc(GOOD_NAME, "description: a\tb"), fm.CANNOT_EVALUATE),
     ("vector/cannot/blank-line-indented-past-block", _doc(GOOD_NAME, "description: >-", "   ", "  text"),
      fm.CANNOT_EVALUATE),
@@ -362,6 +405,9 @@ def _self_test():
     got = fm.evaluate_bytes(b"\xff" + _doc(GOOD_NAME, GOOD_DESC).encode("utf-8"))
     check("cannot/not-utf8", got.status == fm.CANNOT_EVALUATE, got.describe())
     check("cannot/not-bytes", fm.evaluate_bytes("text").status == fm.CANNOT_EVALUATE)
+    # A surrogate never survives strict UTF-8 decoding, so it can reach the reader only as text.
+    got = fm.evaluate_text(_doc(GOOD_NAME, "description: a\ud800b"))
+    check("cannot/surrogate-text", got.status == fm.CANNOT_EVALUATE, got.describe())
     # The size bound at its end: one byte under and exactly at MAX_BYTES are read, one over is refused.
     base = _doc(GOOD_NAME, GOOD_DESC).encode("utf-8")
     for name, size, want in (("bound/size-under", fm.MAX_BYTES - 1, fm.VALID),
@@ -453,7 +499,7 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_skill_frontmatter {} checks (VALID, INVALID and CANNOT_EVALUATE vectors, "
           "a flip for each INVALID vector, the ': ' boundaries, leading-space values, unprintable and "
-          "non-LF-break characters, the size bound, the two shipped files INVALID before the content fix "
+          "non-LF-break characters at each end of the readable ranges, the merge key, the size bound, the two shipped files INVALID before the content fix "
           "and VALID after, the reader's command-line refusal, and the gate over tempdir trees and "
           "zips)".format(len(EXECUTED)))
     return 0

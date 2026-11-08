@@ -14,8 +14,10 @@ one of three statuses; anything it does not read is CANNOT_EVALUATE, never a pas
 The subset:
   - the file starts with a line that is exactly "---" and the frontmatter ends at the next line that is
     exactly "---"; the text is UTF-8 with LF line ends (a BOM, a CR or a NUL is CANNOT_EVALUATE);
-  - every frontmatter character is inside YAML's printable set; a character outside it (a C0 or C1
-    control, DEL, a surrogate or a non-character), a byte order mark after the opening fence, and the
+  - every frontmatter character is inside YAML's printable set; a character outside it (a C0 control
+    other than TAB, LF and CR, a C1 control other than NEL, DEL, a surrogate, U+FFFE or U+FFFF; the
+    other non-characters, such as U+FDD0, are YAML-printable and read), a byte order mark after the
+    opening fence, and the
     NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR characters (line breaks to a YAML 1.1 parser, plain
     content to this reader's LF-only line split) are each CANNOT_EVALUATE;
   - each key line starts in column 0 with a plain key ([A-Za-z0-9_][A-Za-z0-9_-]*), a colon and one
@@ -26,7 +28,7 @@ The subset:
       a block scalar header (|, |-, |+, >, >-, >+) followed by lines indented by at least one space;
       a safe plain value: it does not start with a YAML indicator character, it holds no " #" and no
         tab, it does not read as a YAML null, boolean, number (signed base-2, -8 and -16 forms
-        included) or the "=" value key, and it may continue on following lines
+        included), the "=" value key or the "<<" merge key, and it may continue on following lines
         indented by at least one space (each continuation line held to the same rules);
   - a key line with nothing after the colon is an empty value: INVALID for name and description,
     CANNOT_EVALUATE for any other key;
@@ -75,11 +77,14 @@ DOUBLE_ESCAPES = {"\\": "\\", '"': '"', "/": "/", "n": "\n", "t": "\t"}
 # A plain value starting with one of these is a YAML indicator (or reserved) and is outside the subset.
 INDICATORS = frozenset("-?:,[]{}#&*!|>'\"%@`")
 # Plain values YAML resolves to something other than a string (YAML 1.1 and 1.2 core forms), plus
-# "=", which YAML 1.1 resolves to the value key type (PyYAML refuses to construct it). The base-2,
-# -8 and -16 integer forms admit a sign (YAML 1.1 reads "+0x1F" as the integer 31).
+# "=" and "<<", which YAML 1.1 resolves to the value key and merge key types (PyYAML's safe loader
+# refuses to construct either as a plain value). The other bare type indicators YAML 1.1 resolves
+# ("!", "&" and "*") start with an indicator character and are refused before this pattern is tried.
+# The base-2, -8 and -16 integer forms admit a sign (YAML 1.1 reads "+0x1F" as the integer 31), and a
+# float that starts with "." admits "_" after its first digit (YAML 1.1 reads ".5_0" as 0.5).
 NON_STRING_RE = re.compile(
-    r"(=|~|null|Null|NULL|true|True|TRUE|false|False|FALSE|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF"
-    r"|y|Y|n|N|[-+]?(?:\.[0-9]+|[0-9][0-9_]*(?:[.:][0-9_]*)*)(?:[eE][-+]?[0-9]+)?"
+    r"(=|<<|~|null|Null|NULL|true|True|TRUE|false|False|FALSE|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF"
+    r"|y|Y|n|N|[-+]?(?:\.[0-9][0-9_]*|[0-9][0-9_]*(?:[.:][0-9_]*)*)(?:[eE][-+]?[0-9]+)?"
     r"|[-+]?0[xob][0-9a-fA-F_]+|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
     r"|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}.*)\Z")
 
