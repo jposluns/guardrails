@@ -17051,17 +17051,24 @@ def _main_isolated(monitor):
                 ("(H33o) worktree add --detach under a git alias denies",
                  "git -c alias.wa=worktree wa add --detach /tmp/wt-h33o {}".format(br_tip))):
             brexpect(label, command, "deny")
-        # A --git-dir or GIT_DIR redirect names a repository this guard does not pin, so a detach under one
-        # allows with a note whatever its start, as the -b form does; the CI branch-root gate stays the backstop.
-        brexpect("(H33p) worktree add --detach on an orphaned start under --git-dir allows with a note",
-                 "git --git-dir={}/.git worktree add --detach /tmp/wt-h33p {}".format(brr, br_orphan),
-                 "allow-note")
-        brexpect("(H33q) worktree add --detach on an orphaned start under a GIT_DIR prefix allows with a note",
-                 "GIT_DIR={}/.git git worktree add --detach /tmp/wt-h33q {}".format(brr, br_orphan),
-                 "allow-note")
+        # A --git-dir or GIT_DIR redirect, a -c option with no -C, or an empty -C names a repository this guard
+        # does not pin, so a detach under one allows with a note whatever its start, with no ancestry probe, as
+        # the -b form does; the CI branch-root gate stays the backstop.
+        h33_note = (
+            ("(H33p) worktree add --detach on an orphaned start under --git-dir allows with a note",
+             "git --git-dir={}/.git worktree add --detach /tmp/wt-h33p {}".format(brr, br_orphan)),
+            ("(H33q) worktree add --detach on an orphaned start under a GIT_DIR prefix allows with a note",
+             "GIT_DIR={}/.git git worktree add --detach /tmp/wt-h33q {}".format(brr, br_orphan)),
+            ("(H33r) worktree add --detach on an orphaned start under a -c option allows with a note",
+             "git -c core.x=1 worktree add --detach /tmp/wt-h33r {}".format(br_orphan)),
+            ("(H33s) worktree add -d on an orphaned start under an empty -C allows with a note",
+             "git -C '' worktree add -d /tmp/wt-h33s {}".format(br_orphan)),
+        )
+        for label, command in h33_note:
+            brexpect(label, command, "allow-note")
         # Flip: the old classifier, which returned _ASK_START at the first detach token its walk met (so
-        # every detach form denied), must turn each H33 allow vector red, so they test the detach branch and
-        # not some other allow. It walks the arguments as the classifier does, so a d that is the value of
+        # every detach form denied), must turn each H33 allow and allow-note vector red, so they test the
+        # detach branch and not some other allow. It walks the arguments as the classifier does, so a d that is the value of
         # -b (-bd, -b -d) stays a branch name; with no detach token met the classifier's own answer stands.
         _h33_saved = aiqt_hooks._worktree_creation_start
 
@@ -17097,6 +17104,10 @@ def _main_isolated(monitor):
         try:
             for label, command, cwd in h33_allow:
                 got = _decision(brg, command, cwd=cwd)
+                if got != "deny":
+                    failures.append("{} flip: the old detach deny must turn it red, got {}".format(label, got))
+            for label, command in h33_note:
+                got = _decision(brg, command, cwd=brr)
                 if got != "deny":
                     failures.append("{} flip: the old detach deny must turn it red, got {}".format(label, got))
         finally:
