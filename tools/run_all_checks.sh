@@ -164,6 +164,8 @@ run_gate "opf-prompt-pack-selftest" python3 -I -B opf/tools/check_opf_prompt_pac
 run_gate "opf-prompt-pack" python3 -I -B opf/tools/check_opf_prompt_pack.py
 run_gate "opf-enforce-platforms-selftest" python3 -I -B tools/check_opf_enforce_platforms.py --self-test
 run_gate "opf-enforce-platforms" python3 -I -B tools/check_opf_enforce_platforms.py
+run_gate "opf-enforce-residuals-selftest" python3 -I -B tools/check_opf_enforce_residuals.py --self-test
+run_gate "opf-enforce-residuals" python3 -I -B tools/check_opf_enforce_residuals.py
 run_gate "opf-oplock-selftest" python3 -I -B opf/tools/_opf_oplock.py --self-test
 run_gate "opf-init-substrate-selftest" python3 -I -B opf/tools/_opf_init_substrate.py --self-test
 run_gate "opf-init-builders-selftest" python3 -I -B opf/tools/_opf_init.py --self-test
@@ -311,6 +313,7 @@ run_gate "placement-selftest" python3 -I -B tools/check_selftest_execution.py --
 run_gate "placement"      python3 -I -B tools/check_rule_placement.py
 run_gate "applies-selftest" python3 -I -B tools/check_applies.py --self-test
 run_gate "applies"         python3 -I -B tools/check_applies.py
+run_gate "mappings-selftest" python3 -I -B tools/check_selftest_execution.py --suite mappings-selftest
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 # Repository-only assertion lives outside the shipped tooling: it pins the corpus below and the whole permitted
 # gate invocation in both runners (--config .aiqt/cited-standards.toml and nothing else, so an appended --root

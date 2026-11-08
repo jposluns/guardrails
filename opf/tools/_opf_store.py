@@ -333,11 +333,12 @@ def homes_generation(manifest_data):
     return 2 if (type(declared) is int and declared == HOMES and version == SPEC_VERSION) else 1
 
 
-# The imported-series machine-store leaves (spec 8.2/4.2): a store that declares spec_version
-# IMPORTED_SPEC_VERSION or later keeps imported history beside the clean-series files, one leaf per
-# enabled type except legacy_fragment; worklog, a ledger, uses worklog.imported.toml instead of an
-# imported index. The gate below also requires this tooling's OWN support (SPEC_VERSION at or above
-# IMPORTED_SPEC_VERSION), never the declared version alone.
+# The imported-series machine-store leaves (spec 4.2): imported history sits beside the clean-series
+# files, one leaf per enabled type; worklog, a ledger, uses worklog.imported.toml instead of an imported
+# index. This tooling registers them on a store that declares spec_version IMPORTED_SPEC_VERSION or
+# later, and grants no leaf to its importer-only legacy_fragment type, whose LF namespace is outside
+# _IMPORTED_SERIES_NAMESPACES below. The gate below also requires this tooling's OWN support
+# (SPEC_VERSION at or above IMPORTED_SPEC_VERSION), never the declared version alone.
 IMPORTED_SPEC_VERSION = "1.3.0"        # the first base spec_version whose stores carry the imported series
 IMPORTED_INDEX_SUFFIX = ".imported.index.toml"
 IMPORTED_WORKLOG_NAME = "worklog.imported.toml"

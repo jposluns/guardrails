@@ -14,7 +14,7 @@ lbl = "Entry 1"
 id = "d-1"
 heading = "Draft status"
 rail = "Draft status"
-claim = '''The specification is a working draft and the reference tooling lands verb by verb. A conformance claim names its scope and which profiles were evaluated.'''
+claim = '''The reference tooling lands verb by verb. A conformance claim names its scope and which profiles were evaluated.'''
 limitation = '''Until the validation tooling covers a given claim, conformance to that claim is self-asserted, and any report says so. An unqualified "conformant" claim is never emitted, by tooling or by prose.'''
 evidence = '''<a href="https://github.com/jposluns/guardrails/blob/main/opf/spec/OPF-SPEC.md" target="_blank" rel="noopener noreferrer">The specification<span class="vh"> (opens in a new tab)</span></a> <a href="$BASE/standard/">The standard</a>'''
 
@@ -55,7 +55,7 @@ id = "d-5"
 heading = "The single-writer lease"
 rail = "The single-writer lease"
 claim = '''The standard's cross-system contract requires a divergence check to detect a collision between 2 systems afterward.'''
-limitation = '''The lease has a propagation window: a second system may begin before observing the held lease. The divergence check and the lease are specified controls, not complete CLI coverage, and opf sync is planned. The operation lock that opf init takes excludes other OPF runs on the same store only. It does not exclude runs on another store in the same repository or writers on another system.'''
+limitation = '''The lease has a propagation window: a second system may begin before observing the held lease. The divergence check and the lease are specified controls, not complete CLI coverage, and opf sync exits 2 in this build. The operation lock that opf init takes excludes other OPF runs on the same store only. It does not exclude runs on another store in the same repository or writers on another system.'''
 evidence = '''<a href="$BASE/core-files/#lease">The single-writer lease</a>'''
 
 [[body]]

@@ -9,8 +9,9 @@ the registry, and the two exports can never disagree. No second frontmatter or m
 and load_manifests are reused verbatim.
 
 Byte-reproducible: no wall-clock timestamp is embedded (each manifest's own `retrieved` date carries the
-true freshness), so --check is a stable drift gate. A defensive `cid in manifest.id_set` recheck means a
-fabricated id can never be rendered even if this runs before check_mappings; an emitted title carrying an
+true freshness), so --check is a stable drift gate. A defensive `cid in manifest.id_set` recheck, and the
+shared _standards.withdrawn_finding test, mean a fabricated or withdrawn id can never be rendered even if
+this runs before check_mappings; an emitted title carrying an
 en/em dash fails closed here rather than as a red site-integrity gate later.
 
   gen_mappings.py           regenerate the two exports under site/downloads/
@@ -44,7 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _gen_common import linked_dir_failures, repo_root, reconcile, target_dir_present  # noqa: E402
-from _standards import load_manifests, ManifestError, natkey  # noqa: E402
+from _standards import load_manifests, ManifestError, natkey, withdrawn_finding  # noqa: E402
 import gen_rules  # noqa: E402  (reuse the one frontmatter parser + full corpus validation)
 from gen_agents import sort_key  # noqa: E402  (canonical AIQT priority order for the rules)
 
@@ -168,6 +169,10 @@ def build_rows(corpus, manifests):
                     # fabricated id even if this runs out of order.
                     raise ValueError("{}: {}: id '{}' is not in {} {}".format(
                         src.name, key, cid, manifest.name, manifest.edition))
+                # Nor an id its manifest marks withdrawn: the same test check_mappings reports.
+                withdrawn = withdrawn_finding(src.name, key, cid, manifest)
+                if withdrawn is not None:
+                    raise ValueError(withdrawn)
                 rows.append({
                     "rule_id": str(fm["corpus-id"]),
                     "rule_title": title,
@@ -208,7 +213,7 @@ def registry_rows(manifests, rows):
             "retrieved": manifest.retrieved,
             "catalogue": manifest.catalogue,
             "ids_cited": len(cited.get(stem, ())),
-            "ids_total": len(manifest.ids),
+            "ids_total": len(manifest.active_ids()),   # a withdrawn id is not part of the total
         })
     return sorted(out, key=_framework_sort_key)
 

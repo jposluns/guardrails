@@ -28,9 +28,12 @@ This reusable pack author tool is opt-in for adopters of this changelog schema.
 For pull_request events or when GITHUB_BASE_REF is set, require a merge HEAD
 whose raw first parent equals the resolved origin/GITHUB_BASE_REF tip, and use
 that parent as the comparison base. Missing or mismatched bindings fail closed.
-In GitHub Actions, only pull_request and push are supported. Push requires
---protected equal to refs/remotes/origin/GITHUB_REF_NAME (origin/BRANCH is
-normalized), and --base equal to the workflow's PUSH_BEFORE event value.
+In GitHub Actions, only pull_request, push, workflow_dispatch and schedule are
+supported. Push requires --protected equal to refs/remotes/origin/GITHUB_REF_NAME
+(origin/BRANCH is normalized), and --base equal to the workflow's PUSH_BEFORE
+event value. A workflow_dispatch or schedule run has no pushed range: it requires
+the same --protected and refuses --base, and compares HEAD with its raw first
+parent (a root HEAD with no parent compares against no snapshot).
 The event must name a branch, with HEAD equal to its protected tracking tip.
 Every raw first-parent transition in base..HEAD is checked separately, including
 its declaration. A zero before is accepted only
@@ -94,6 +97,8 @@ DECLARATION = ".aiqt/release-cut.toml"
 PENDING = ".aiqt/pending-fixes.toml"
 PATHS = (CHANGELOG, DECLARATION, PENDING)
 TIMEOUT = 30
+# GitHub Actions events with no pushed range: the run checks the tip transition alone.
+TIP_EVENTS = ("workflow_dispatch", "schedule")
 OID = re.compile(rb"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 DECL_KEYS = {
     "schema", "operation", "previous-version", "next-version",
@@ -502,10 +507,16 @@ def context(root, protected=None, before=None):
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     actions = os.environ.get("GITHUB_ACTIONS") == "true"
     if actions:
-        require(event in ("pull_request", "push"), "unsupported GitHub Actions event: " + event)
+        require(event in ("pull_request", "push") + TIP_EVENTS,
+                "unsupported GitHub Actions event: " + event)
         if event == "push":
             require(protected is not None and before is not None,
                     "push requires explicit --protected and --base")
+        elif event in TIP_EVENTS:
+            # No pushed range exists (the event carries no before), so the run compares the
+            # checked-out tip with its raw first parent, never a caller-chosen base.
+            require(protected is not None and before is None,
+                    event + " requires explicit --protected and refuses --base")
     ci_context = event == "pull_request" or bool(base_ref)
     require(not ci_context or before is None, "PR comparison rejects --base")
     require(not ci_context or bool(base_ref), "PR comparison requires GITHUB_BASE_REF")
@@ -527,16 +538,17 @@ def context(root, protected=None, before=None):
         protected = default_protected_ref(root)
     target, head = resolve(root, protected), resolve(root, "HEAD")
     if not ci_context:
-        if actions and event == "push":
+        if actions and event in ("push",) + TIP_EVENTS:
             branch = os.environ.get("GITHUB_REF_NAME", "")
             require(os.environ.get("GITHUB_REF_TYPE") == "branch" and bool(branch),
-                    "push requires a branch GITHUB_REF_NAME and GITHUB_REF_TYPE=branch")
+                    event + " requires a branch GITHUB_REF_NAME and GITHUB_REF_TYPE=branch")
             expected = "refs/remotes/origin/" + branch
             git(root, "check-ref-format", expected)
             require(protected == expected,
-                    "push --protected must equal " + expected)
-            event_before = oid(os.environ.get("PUSH_BEFORE", "").encode(), "PUSH_BEFORE")
-            require(before == event_before, "push --base must equal workflow PUSH_BEFORE")
+                    event + " --protected must equal " + expected)
+            if event == "push":
+                event_before = oid(os.environ.get("PUSH_BEFORE", "").encode(), "PUSH_BEFORE")
+                require(before == event_before, "push --base must equal workflow PUSH_BEFORE")
         else:
             default = default_protected_ref(root)
             require(target == resolve(root, default),
@@ -561,8 +573,8 @@ def context(root, protected=None, before=None):
         base = oid(bases[0], "merge base")
         require(base != head or head == target,
                 "HEAD is behind the target; no honest comparison base")
-        if actions and event == "push":
-            require(head == target, "push HEAD does not match --protected target")
+        if actions and event in ("push",) + TIP_EVENTS:
+            require(head == target, event + " HEAD does not match --protected target")
         if before is not None:
             if not actions:
                 require(before == base, "local --base must equal the protected merge base: " + base)
@@ -828,8 +840,15 @@ def test_cases():
                  "push-before-narrowed", "push-before-missing", "push-before-invalid",
                  "push-ref-name-missing", "push-ref-type-tag"):
         add(name, 2, after=cut, tweak=name)
-    for name in ("event-dispatch", "event-merge-group", "event-missing"):
+    for name in ("event-merge-group", "event-missing"):
         add(name, 2, tweak=name)
+    for event in ("dispatch", "schedule"):
+        add("tip-" + event, 0, tweak="tip-" + event)
+        add("tip-" + event + "-declared", 0, after=cut, new=declaration, tweak="tip-" + event)
+        add("tip-" + event + "-undeclared", 1, after=cut, tweak="tip-" + event)
+        for name in ("base", "bare", "identity", "ref-tag"):
+            add("tip-" + event + "-" + name, 2, after=cut, tweak="tip-" + event + "-" + name)
+        add("tip-" + event + "-target-mismatch", 2, tweak="tip-" + event + "-target-mismatch")
     add("push-noop-undeclared", 1, after=cut, tweak="push-noop")
     add("push-noop-declared", 0, after=cut, new=declaration, tweak="push-noop")
     add("push-two-cuts", 0, after=cut, new=declaration, tweak="push-two-cuts")
@@ -965,9 +984,9 @@ def fixture_repo(parent, name, case, env):
             command("update-ref", ref, future)
             if tweak == "behind-default":
                 command("update-ref", "refs/remotes/origin/main", future)
-    elif tweak == "protected" or (tweak and tweak.startswith("push-")):
+    elif tweak == "protected" or (tweak and tweak.startswith(("push-", "tip-"))):
         if tweak in ("push-identity-branch", "push-identity-origin", "push-identity-tag",
-                     "push-before-narrowed"):
+                     "push-before-narrowed", "tip-dispatch-identity", "tip-schedule-identity"):
             command("update-ref", "refs/heads/before", head)
             head = commit("no-op after undeclared append")
             for ref in ("refs/heads/attacker", "refs/remotes/origin/attacker", "refs/tags/attacker"):
@@ -992,7 +1011,8 @@ def fixture_repo(parent, name, case, env):
             command("tag", "-a", "before", base, "-m", "annotated before")
         elif tweak == "push-base-broken-history":
             (root / ".git" / "objects" / base[:2] / base[2:]).unlink()
-        if tweak != "push-target-mismatch":
+        if tweak not in ("push-target-mismatch", "tip-dispatch-target-mismatch",
+                         "tip-schedule-target-mismatch"):
             command("update-ref", "refs/remotes/origin/main", head)
         if tweak != "protected" and tweak not in ("push-origin-head", "push-origin-head-full"):
             command("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
@@ -1140,6 +1160,18 @@ def observe(script, root, tweak, env):
             if tweak.startswith("push-base-"):
                 env["PUSH_BEFORE"] = before
             args += ["--base", before]
+    if tweak and tweak.startswith("tip-"):
+        env.update({"CI": "true", "GITHUB_ACTIONS": "true", "GITHUB_BASE_REF": "",
+                    "GITHUB_EVENT_NAME": ("schedule" if tweak.startswith("tip-schedule")
+                                          else "workflow_dispatch"),
+                    "GITHUB_REF_NAME": "main", "GITHUB_REF_TYPE": "branch"})
+        env.pop("PUSH_BEFORE", None)
+        if tweak.endswith("-ref-tag"):
+            env["GITHUB_REF_TYPE"] = "tag"
+        if not tweak.endswith("-bare"):
+            args += ["--protected", "origin/attacker" if tweak.endswith("-identity") else "origin/main"]
+        if tweak.endswith("-base"):
+            args += ["--base", resolve(root, "refs/heads/main")]
     if tweak == "ci-explicit-protected":
         args += ["--protected", "origin/main"]
     if tweak == "ci-explicit-base":
@@ -1167,8 +1199,7 @@ def observe(script, root, tweak, env):
         args += ["--base", resolve(root, "refs/heads/main")]
     if tweak and tweak.startswith("event-"):
         env.update({"GITHUB_ACTIONS": "true", "GITHUB_BASE_REF": "", "GITHUB_EVENT_NAME": {
-            "event-dispatch": "workflow_dispatch", "event-merge-group": "merge_group",
-            "event-missing": "",
+            "event-merge-group": "merge_group", "event-missing": "",
         }[tweak]})
     result = subprocess.run(args, capture_output=True, env=env, timeout=TIMEOUT)
     require(result.returncode in (0, 1, 2) and not result.stderr,
@@ -2642,6 +2673,24 @@ def _self_test_isolated(red_on_revert):
                 _, parents = commit_header(root, binding["head"])
                 check(case_id + "-first-parent",
                       binding["head"] == binding["target"] and binding["base"] == parents[0])
+            if case_id in ("tip-dispatch", "tip-dispatch-declared", "tip-dispatch-undeclared",
+                           "tip-schedule", "tip-schedule-declared", "tip-schedule-undeclared"):
+                binding = report["context"]
+                _, parents = commit_header(root, binding["head"])
+                check(case_id + "-first-parent",
+                      binding["head"] == binding["target"] and binding["base"] == parents[0]
+                      and binding["transitions"] == [])
+            if case_id in ("tip-dispatch-base", "tip-schedule-base", "tip-dispatch-bare",
+                           "tip-schedule-bare"):
+                check(case_id + "-refusal", "requires explicit --protected and refuses --base"
+                      in report["detail"])
+            if case_id in ("event-merge-group", "event-missing"):
+                check(case_id + "-refusal", "unsupported GitHub Actions event" in report["detail"])
+            if case_id in ("tip-dispatch-identity", "tip-schedule-identity"):
+                check(case_id + "-identity", "--protected must equal" in report["detail"])
+            if case_id in ("tip-dispatch-target-mismatch", "tip-schedule-target-mismatch"):
+                check(case_id + "-binding",
+                      "HEAD does not match --protected target" in report["detail"])
             if case_id in ("push-noop-undeclared", "push-noop-declared", "push-two-cuts",
                            "push-repaired", "push-root"):
                 transitions = report["context"]["transitions"]
@@ -2759,8 +2808,18 @@ def _self_test_isolated(red_on_revert):
                  "require(True,", "push-before-narrowed", 0),
                 ("push-range", 'for parent, revision in binding["transitions"]:',
                  'for parent, revision in binding["transitions"][-1:]:', "push-noop-undeclared", 0),
-                ("ci-event", 'require(event in ("pull_request", "push"),',
-                 "require(True,", "event-dispatch", 0),
+                ("ci-event", 'require(event in ("pull_request", "push") + TIP_EVENTS,',
+                 "require(True,", "event-merge-group", 0),
+                ("tip-event-base", "require(protected is not None and before is None,",
+                 "require(True,", "tip-dispatch-base", 1),
+                ("tip-dispatch-target",
+                 'if actions and event in ("push",) + TIP_EVENTS:\n            require(head == target,',
+                 'if actions and event == "push":\n            require(head == target,',
+                 "tip-dispatch-target-mismatch", 0),
+                ("tip-schedule-target",
+                 'if actions and event in ("push",) + TIP_EVENTS:\n            require(head == target,',
+                 'if actions and event == "push":\n            require(head == target,',
+                 "tip-schedule-target-mismatch", 0),
                 ("pending-open-items", "if open_items:", "if False:", "pending-open", 0),
                 ("pending-binding", 'if head_pending["release"] != after[-1]:', "if False:",
                  "pending-bound-elsewhere", 0),

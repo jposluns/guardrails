@@ -4527,7 +4527,7 @@ def _b6_tests(base, env, ok, refuses):
        and seed.counters.get(IMPORTED_PREFIX + "BI") == 4
        and {ns: counters["counters"].get(ns) for ns in imported}
        == dict(imported, **{IMPORTED_PREFIX + "BI": 4}))
-    # B3: LF is accepted-if-present, never required (spec 8.1), so a snapshot WITHOUT LF is a
+    # B3: LF is accepted-if-present, never required, so a snapshot WITHOUT LF is a
     # complete seed whose counters carry no LF; a snapshot missing a BASELINE namespace (HO) is still
     # UNKNOWN (never zero) and the plan refuses it.
     nolf = dict.fromkeys(_opf_store.BASELINE_TYPES.values(), 1)

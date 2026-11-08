@@ -991,6 +991,7 @@ _ENTRY_FLOOR_EXEMPT = {
                                   "_close_exc_safe_vectors_self_test)",
     "opf-cli": "the dispatcher's command-line suite (_cli_self_test)",
     "opf-declaration-cli": "the dispatcher's spec 16.1 declaration suite (_declaration_cli_self_test)",
+    "opf-verb-status": "the dispatcher's verb status table suite (_verb_status_self_test)",
 }
 
 
@@ -17019,7 +17020,7 @@ def _cmd_doctor(rest):
     integrity engine (_opf_check.validate_store) over them, returning that engine's own 0/1/2 contract via
     _opf_check.exit_code (0 VALID, 1 INVALID, 2 CANNOT-EVALUATE). A NOT-ADOPTED root reports NOT APPLICABLE
     and exits 0 (the pack's own `--root .` case, mirroring render); any other non-RESOLVED status is a located
-    cannot-evaluate (exit 2). `--require-store` is the enforcement-pack CI floor (spec 1.3.0 14.1: the pack
+    cannot-evaluate (exit 2). `--require-store` is the enforcement-pack CI floor (spec 2.0.0 14.1: the pack
     MUST provide CI checks): with it, a NOT-ADOPTED root is a located cannot-evaluate (exit 2) instead of NOT
     APPLICABLE, so a repository whose store was removed cannot pass CI vacuously; every other status keeps
     its unflagged outcome. Doctor is READ-ONLY: it makes no store change (SECI-preview-has-no-side-effects);
@@ -19530,6 +19531,12 @@ def _adopt_read_inputs(path):
     return doc
 
 
+# The `opf adopt` subcommand vocabulary, and the subcommands refused before any parse or read in this build.
+# Module level, so the status self-test binds adopt's partial scope to the same tuples.
+ADOPT_SUBCOMMANDS = ("plan", "approve", "apply", "complete", "reconcile", "status")
+ADOPT_DEFERRED = ("complete",)
+
+
 def _cmd_adopt(rest):
     """`opf adopt <subcommand> ...` (spec 1, 14; OPF-ADOPT K9a): the adoption verb. The subcommand
     vocabulary is `plan`, `approve`, `apply`, `complete`, `reconcile` and `status`; K9a shipped the two
@@ -19653,8 +19660,8 @@ def _cmd_adopt(rest):
     The parser is the house fail-closed idiom: an unknown subcommand or token, an empty or
     option-looking or duplicate value -> exit 2. Every residual escape fails closed to exit 2 (never a
     false 0 or an uncaught exit-1), the same class-width backstop render and doctor carry."""
-    subcommands = ("plan", "approve", "apply", "complete", "reconcile", "status")
-    deferred = ("complete",)
+    subcommands = ADOPT_SUBCOMMANDS
+    deferred = ADOPT_DEFERRED
     if not rest:
         print("opf adopt: give a subcommand ({})".format(" / ".join(subcommands)), file=sys.stderr)
         return EXIT_MALFORMED
@@ -24018,6 +24025,7 @@ def _self_tests():
     ("opf-cli", _cli_self_test),
     ("opf-declaration", _opf_declaration.self_test),
     ("opf-declaration-cli", _declaration_cli_self_test),
+    ("opf-verb-status", _verb_status_self_test),
 )
 
 
@@ -24032,7 +24040,7 @@ SELF_TEST_GROUPS = (
     ("core", ("opf-store", "opf-schema", "opf-release", "opf-worklog", "opf-changelog", "opf-emit", "opf-views",
               "opf-observe", "opf-absorb", "opf-record", "opf-write-guard", "opf-fuzz", "opf-check", "opf-journal",
               "opf-aggregator", "opf-retained-close-offpath", "opf-close-exc-safe-vectors", "opf-cli",
-              "opf-declaration", "opf-declaration-cli")),
+              "opf-declaration", "opf-declaration-cli", "opf-verb-status")),
     ("adopt", ("opf-adopt-apply", "opf-adopt-state")),
     ("watchdog", ("opf-watchdog-isolation", "opf-watchdog-regressions")),
 )
@@ -24083,6 +24091,676 @@ def run_self_test_group(name, groups=None, tests=None):
 # The spec's command vocabulary (spec 1). Each lands in its own unit; until then a verb fails closed.
 KNOWN_VERBS = ("init", "adopt", "import", "doctor", "render", "migrate", "sync", "upgrade", "absorb",
                "record")
+
+# The status of each KNOWN_VERBS verb in this build, the one source of the published status note
+# (tools/gen_draft_site.py renders it on opfiles.ai, in opf/README.md and in opf/site/llms.txt). Each row is
+# (verb, status, scope): "available" runs through its own handler; "partial" runs through its own handler for
+# the subcommands its scope names as running, and each subcommand it names as exiting 2 refuses every argument
+# list in this build; "in progress" exits 2 in this build, through the fail-closed stub or through a handler
+# that refuses every argument list. A scope reads "A, B, and C", then optionally "; D exits 2" or "; D and E
+# exit 2" (_verb_scope_parts), and names every subcommand of the verb exactly once. A literal, so the
+# generator reads it without importing this module. _verb_status_self_test holds it to main()'s dispatch.
+VERB_STATUS = (
+    ("init", "available", ""),
+    ("render", "available", ""),
+    ("doctor", "available", ""),
+    ("absorb", "available", ""),
+    ("record", "partial", "create, transition, done-with-receipt, and worklog-append; receipt-repair exits 2"),
+    ("adopt", "partial", "plan, approve, reconcile, and status; apply and complete exit 2"),
+    ("upgrade", "in progress", ""),
+    ("import", "in progress", ""),
+    ("migrate", "in progress", ""),
+    ("sync", "in progress", ""),
+)
+VERB_STATUSES = ("available", "partial", "in progress")
+# The line main() prints for a KNOWN_VERBS verb with no handler, as the status self-test expects it.
+_VERB_STUB_LINE = "opf {}: not yet implemented in this build (fail-closed)\n"
+
+
+def _verb_scope_list(text):
+    """The names of one scope list, "a", "a and b" or "a, b, and c" (the Oxford comma), each a lowercase
+    word with hyphens; None when the text does not read so."""
+    if ", " in text:
+        head, sep, last = text.rpartition(", and ")
+        names = head.split(", ") + [last] if sep else []
+        if len(names) < 3:
+            return None
+    else:
+        names = text.split(" and ")
+        if len(names) > 2:
+            return None
+    if not all(name and name[0].isalpha() and all(c.islower() or c == "-" for c in name) for name in names):
+        return None
+    return names
+
+
+def _verb_scope_parts(scope):
+    """(running, refused): the subcommands a partial scope names as running and as exiting 2. The scope
+    reads "A, B, and C", then optionally "; D exits 2" or "; D and E exit 2"; None when it does not read
+    so, names nothing as running, or names a subcommand twice."""
+    running_text, sep, refused_text = scope.partition("; ")
+    running = _verb_scope_list(running_text)
+    refused = []
+    if sep:
+        refused = None
+        for ending, single in ((" exits 2", True), (" exit 2", False)):
+            if refused_text.endswith(ending):
+                names = _verb_scope_list(refused_text[:-len(ending)])
+                if names is not None and (len(names) == 1) == single:
+                    refused = names
+    if running is None or refused is None or len(set(running + refused)) != len(running + refused):
+        return None
+    return running, refused
+
+
+def _verb_subcommands(verb):
+    """The subcommand vocabulary of `verb`, read from the code that parses it; None for a verb with none."""
+    return {"adopt": ADOPT_SUBCOMMANDS, "record": tuple(_opf_record.SUBCOMMANDS)}.get(verb)
+
+
+def _verb_refusal_holds(verb, sub):
+    """Whether the code that makes subcommand `sub` of `verb` refuse every argument list (exit 2) is in
+    place: adopt complete is refused before any parse; adopt apply refuses every plan while the mandatory
+    receipt stage is the refusing composer; record receipt-repair needs a homes 2 store, which this build
+    refuses while SUPPORTED_HOMES is 1. None for a subcommand with no such refusal."""
+    if (verb, sub) == ("adopt", "complete"):
+        return sub in ADOPT_DEFERRED
+    if (verb, sub) == ("adopt", "apply"):
+        stage = _opf_adopt_apply.DRIVER_STAGES.get(_opf_adopt_apply.RECEIPT_STAGE)
+        return stage is _opf_adopt_apply._receipt_not_yet_composable
+    if (verb, sub) == ("record", "receipt-repair"):
+        return _opf_store.SUPPORTED_HOMES == 1
+    return None
+
+
+# The engine entry each running subcommand reaches once its own handler has parsed it: (helper module
+# name, attribute, subcommand), the subcommand None where the entry takes the parsed request.
+_VERB_SUB_ENTRIES = {
+    "adopt": (("_opf_adopt_plan", "plan", "plan"), ("_opf_adopt_apply", "capture_approval", "approve"),
+              ("_opf_adopt_apply", "run_apply", "apply"), ("_opf_adopt_apply", "reconcile_report", "reconcile"),
+              ("_opf_adopt_apply", "_open_product_root", "status")),
+    "record": (("_opf_record", "_run_operation", None),),
+}
+# An ordinary argument list for each record subcommand, its options after the subcommand.
+_VERB_RECORD_ARGS = {
+    "create": ["--type", "backlog_item", "--title", "probe", "--actor", "maintainer"],
+    "transition": ["BI-1", "active", "--actor", "maintainer"],
+    "done-with-receipt": ["BI-1", "--actor", "maintainer"],
+    "receipt-repair": ["BI-1", "--actor", "maintainer", "--reason", "probe"],
+    "worklog-append": ["--kind", "note", "--summary", "probe", "--actor", "maintainer"],
+}
+
+
+# The read-only gates a running subcommand's handler calls before its engine entry, each of which reaches an
+# engine entry itself: (helper module name, attribute). The reconcile-first gate opens the product root
+# through the entry status uses. While any running subcommand of the verb is probed each is a stand-in that
+# passes, as the real gate does over the empty scratch root, so every entry call the probe sees comes from
+# the handler: for adopt that is every running subcommand (plan, approve, reconcile and status), of which
+# plan and approve call the gate. A subcommand named as exiting 2 runs the real gate: adopt apply does, and
+# reaches the product root entry through it (_VERB_REFUSAL_ENTRIES).
+_VERB_SUB_GATES = {
+    "adopt": (("_opf_adopt_apply", "require_clean_journal"),),
+}
+# The engine entries ("module.attribute") the real dispatch of each subcommand named as exiting 2 may call
+# while its refusal is in place, keyed by (verb, subcommand): its own entry, and any entry the real gate
+# before it reaches. A guarded entry called during the refusal run of a subcommand it is not listed for is
+# refused and is a fault (_verb_engine_guard); a subcommand with no row may call none.
+_VERB_REFUSAL_ENTRIES = {
+    ("adopt", "apply"): ("_opf_adopt_apply._open_product_root", "_opf_adopt_apply.run_apply"),
+    ("adopt", "complete"): (),
+    ("record", "receipt-repair"): ("_opf_record._run_operation",),
+}
+
+
+class _VerbProbeReached(Exception):
+    """Raised by the stand-in for a subcommand's engine entry once it has recorded the call."""
+
+
+class _VerbEngineBlocked(Exception):
+    """Raised in place of a real engine entry the status self-test does not mean to run."""
+
+
+def _verb_entry_standin(sub, reached):
+    """A stand-in for an engine entry that never calls the engine, from any caller: it records the
+    subcommand (`sub`, or the parsed request's when `sub` is None) and the code object of its immediate
+    caller in `reached`, then raises _VerbProbeReached. The caller judges whether that code is the verb's
+    own handler; a call through a lambda or any other wrapper is recorded with the wrapper's code."""
+    def standin(*args, **kwargs):
+        reached.append((sub if sub is not None else getattr(args[0] if args else None, "subcommand", None),
+                        sys._getframe(1).f_code))
+        raise _VerbProbeReached()
+    return standin
+
+
+def _verb_engine_guard(original, name, phase, calls):
+    """A guard over the real engine entry `original` (named `name`) for a whole status run. phase[0] is None,
+    or (the subcommand the run executes for real on purpose because its refusal is in place, the entries
+    that run may call). The guard records (name, that subcommand or None, whether the call is permitted) in
+    `calls`, and calls `original` only while phase[0] names a subcommand whose own entries include `name`;
+    at any other time, during another subcommand's refusal run included, it raises _VerbEngineBlocked, so
+    the engine never runs there."""
+    def guard(*args, **kwargs):
+        during, permitted = phase[0] if phase[0] is not None else (None, ())
+        allowed = name in permitted
+        calls.append((name, during, allowed))
+        if not allowed:
+            raise _VerbEngineBlocked(name)
+        return original(*args, **kwargs)
+    return guard
+
+
+def _verb_tree(base):
+    """Every path under `base`, relative, with its file type, size, and, for a regular file, the SHA-256 of
+    its content, in a fixed order, so a path that appeared, changed (a same-size rewrite included) or
+    vanished changes the result."""
+    import hashlib
+    seen = []
+    for top, dirs, files in os.walk(base):
+        dirs.sort()
+        for name in sorted(dirs + files):
+            path = os.path.join(top, name)
+            st = os.lstat(path)
+            digest = None
+            if stat.S_ISREG(st.st_mode):
+                with open(path, "rb") as handle:
+                    digest = hashlib.sha256(handle.read()).hexdigest()
+            elif stat.S_ISLNK(st.st_mode):
+                digest = os.readlink(path)
+            seen.append((os.path.relpath(path, base), stat.S_IFMT(st.st_mode), st.st_size, digest))
+    return seen
+
+
+class _VerbHelperImportBlocked(ImportError):
+    """Raised for an import of a helper module that is not loaded yet while the dispatch is intercepted."""
+
+
+class _VerbHelperImportGate:
+    """A sys.meta_path finder that records, then refuses, the import of any _opf_ helper module not loaded
+    yet, so the intercepted dispatch cannot load and run a helper that was not intercepted."""
+
+    def __init__(self, called):
+        self.called = called
+
+    def find_spec(self, name, path=None, target=None):
+        if name.startswith("_opf_"):
+            self.called.append("import " + name)
+            raise _VerbHelperImportBlocked(name)
+        return None
+
+
+def _verb_intercepted(here, dispatch, argv):
+    """Run dispatch(argv) with EVERY function this module defines, other than `dispatch` itself, and every
+    callable attribute of every loaded _opf_ helper module replaced by a recorder that returns 0, the import
+    of any _opf_ helper not loaded yet refused, and the declaration gate emptied, so no handler or helper
+    under any name runs and no store or declaration is read. Returns (the names called, in order, a helper's
+    as "module.attribute" and a refused import as "import module", the leading _bootstrap dropped; the exit,
+    or the exception the dispatch raised; stderr). Between the replacement and the restore, nothing defined
+    in this module or a helper is called other than the import gate (_VerbHelperImportGate). A function this
+    module defines is one inspect.isfunction admits (a def or a lambda, not a class, a builtin or a bound
+    method) whose __module__ is this module's name, so a function imported from another module is kept."""
+    import contextlib
+    import inspect
+    import io
+    import types
+    called = []
+    saved = [(here, name, value) for name, value in vars(here).items()
+             if inspect.isfunction(value) and value.__module__ == here.__name__
+             and value is not dispatch]
+    for module_name, module in sorted(sys.modules.items()):
+        if module_name.startswith("_opf_") and isinstance(module, types.ModuleType) and module is not here:
+            saved.extend((module, name, value) for name, value in vars(module).items()
+                         if callable(value) and value is not dispatch)
+    replaced = len(saved)
+    saved.append((here, "_DECLARATION_GATED", here._DECLARATION_GATED))
+    gate = _VerbHelperImportGate(called)
+    err = io.StringIO()
+    try:
+        for owner, name, _value in saved[:replaced]:
+            label = name if owner is here else owner.__name__ + "." + name
+            setattr(owner, name, lambda *args, _n=label, **kwargs: called.append(_n) or EXIT_OK)
+        here._DECLARATION_GATED = ()
+        sys.meta_path.insert(0, gate)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            routed = dispatch(list(argv))
+    except Exception as exc:  # noqa: BLE001  reported as a fault by the caller, never a pass
+        routed = exc
+    finally:
+        while gate in sys.meta_path:
+            sys.meta_path.remove(gate)
+        for owner, name, value in saved:
+            setattr(owner, name, value)
+    return called[1:] if called[:1] == ["_bootstrap"] else called, routed, err.getvalue()
+
+
+def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, engine_calls=None):
+    """Return the faults of `table` (default VERB_STATUS) against `dispatch` (default main()) over `verbs`
+    (default KNOWN_VERBS), with `refusals` (default _VERB_REFUSALS). Every verb appears exactly once and no
+    other name does; each status is one of VERB_STATUSES, with a scope exactly when it is partial; a
+    refusals entry is a fault unless its verb is in progress here and in VERB_STATUS.
+
+    Every probe runs with its working directory and --root in a scratch directory this function creates
+    and removes, and a probe after which a path under that directory appeared, changed or vanished is a
+    fault. Routing is judged with every function of this module and of every loaded helper intercepted
+    (_verb_intercepted), so no handler or helper under any name runs: an available or partial verb must
+    reach exactly its own `_cmd_<verb>`. An in progress verb is probed with no arguments, with --help and
+    with --root: each must reach no handler or exactly its own refusing handler, and must not raise, and
+    only then does the real dispatch run it, which must exit 2 with exactly the stub line or its refusal. A
+    partial scope must read as _verb_scope_parts reads it and name the verb's subcommands
+    (_verb_subcommands) exactly once: each named as running must reach its engine entry (_VERB_SUB_ENTRIES,
+    a stand-in that never calls the engine) straight from the real handler, with the handler's gates
+    (_VERB_SUB_GATES, a stand-in for every running subcommand of the verb) passing; each named as exiting 2
+    must have its refusal in place (_verb_refusal_holds) and exit 2 from the real dispatch, which runs the
+    real gates. An available verb with a subcommand whose refusal is in place is a fault: it is partial.
+    Each engine entry is guarded for the whole run (_verb_engine_guard): it runs only in the real dispatch of
+    a subcommand named as exiting 2 that _VERB_REFUSAL_ENTRIES lists it for, and a call anywhere else,
+    during another subcommand's refusal run included, is refused and is a fault. Every guarded call,
+    (entry, the subcommand run for real or None, whether it was permitted), is appended to `engine_calls`
+    when it is a list."""
+    import contextlib
+    import io
+    import shutil
+    import tempfile
+    from unittest.mock import patch
+    table = VERB_STATUS if table is None else table
+    verbs = KNOWN_VERBS if verbs is None else verbs
+    refusals = _VERB_REFUSALS if refusals is None else refusals
+    dispatch = main if dispatch is None else dispatch
+    here = sys.modules[__name__]
+    faults = []
+    names = [row[0] for row in table]
+    for verb in verbs:
+        if names.count(verb) != 1:
+            faults.append("{} appears {} times in the status table".format(verb, names.count(verb)))
+    for name in sorted(set(names) - set(verbs)):
+        faults.append("{} is in the status table but not a known verb".format(name))
+    marked = dict((row[0], row[1]) for row in table)
+    live = dict((row[0], row[1]) for row in VERB_STATUS)
+    for verb in sorted(refusals):
+        if marked.get(verb) != "in progress":
+            faults.append("{} is in the refusal list but marked {}".format(verb, marked.get(verb)))
+    base = os.path.realpath(tempfile.mkdtemp(prefix="opf-verb-status-"))
+    root = os.path.join(base, "root")
+    inputs = os.path.join(base, "in")
+    cwd = os.getcwd()
+    # Every engine entry is guarded for the whole run: it runs only during the real dispatch of a
+    # subcommand whose refusal is in place (phase[0] names it and the entries listed for it), and only when
+    # it is one of those entries; any other call is recorded and refused.
+    phase = [None]
+    calls = [] if engine_calls is None else engine_calls
+    guards = contextlib.ExitStack()
+    try:
+        for module, attr in sorted(set((module, attr) for entries in _VERB_SUB_ENTRIES.values()
+                                       for module, attr, _sub in entries)):
+            owner = getattr(here, module)
+            guards.enter_context(patch.object(owner, attr, _verb_engine_guard(
+                getattr(owner, attr), module + "." + attr, phase, calls)))
+        os.mkdir(root)
+        os.mkdir(inputs)
+        files = dict((name, os.path.join(inputs, name + ".toml")) for name in ("inputs", "plan", "approval"))
+        for name, path in files.items():
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write('schema = 1\nproduct = "probe"\nexpected_observation_digest = "probe"\n'
+                             '[bindings]\n' if name == "inputs" else "probe = 1\n")
+        before = _verb_tree(base)
+        os.chdir(root)
+
+        def unchanged(what):
+            after = _verb_tree(base)
+            if after == before:
+                return True
+            faults.append("{} changed the scratch directory: {}".format(
+                what, sorted(set(after) ^ set(before))))
+            shutil.rmtree(root)
+            os.mkdir(root)
+            # the probes run inside root, so step into the new one rather than stay in the removed one
+            os.chdir(root)
+            return False
+
+        def real(argv):
+            err = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                    code = dispatch(list(argv))
+            except Exception as exc:  # noqa: BLE001  a fault, never a pass
+                code = exc
+            return code, err.getvalue()
+
+        def sub_argv(verb, sub):
+            if verb == "record":
+                return [verb, sub] + _VERB_RECORD_ARGS.get(sub, []) + ["--root", root]
+            flags = dict(plan=["--inputs", files["inputs"]],
+                         approve=["--inputs", files["inputs"], "--plan", files["plan"], "--actor", "maintainer"],
+                         apply=["--inputs", files["inputs"], "--plan", files["plan"],
+                                "--approval", files["approval"]]).get(sub, [])
+            return [verb, sub] + flags + ["--root", root]
+
+        for verb, status, scope in table:
+            if status not in VERB_STATUSES:
+                faults.append("{} has unknown status {!r}".format(verb, status))
+                continue
+            if (status == "partial") != bool(scope):
+                faults.append("{} is {} with scope {!r}; a scope goes with partial and only partial".format(
+                    verb, status, scope))
+            probes = [[verb]] if status != "in progress" else [[verb], [verb, "--help"], [verb, "--root", root]]
+            routes = []
+            for argv in probes:
+                called, routed, err = _verb_intercepted(here, dispatch, argv)
+                routes.append((argv, called, routed, err))
+                unchanged("the intercepted dispatch of {}".format(argv))
+            if status in ("available", "partial"):
+                argv, called, routed, err = routes[0]
+                if called != ["_cmd_" + verb] or routed != EXIT_OK:
+                    faults.append("{} is marked {} but main() does not route it to _cmd_{} (handlers reached {}, "
+                                  "exit {!r}, stderr {!r})".format(verb, status, verb, called, routed, err))
+                    continue
+                vocabulary = _verb_subcommands(verb)
+                if status == "available":
+                    for sub in vocabulary or ():
+                        if _verb_refusal_holds(verb, sub):
+                            faults.append("{} is marked available but {} {} exits 2 in this build; it is "
+                                          "partial".format(verb, verb, sub))
+                    continue
+                parts = _verb_scope_parts(scope)
+                if parts is None or vocabulary is None or sorted(parts[0] + parts[1]) != sorted(vocabulary):
+                    faults.append("{}'s scope {!r} does not name each of its subcommands {} exactly once as "
+                                  "running or exiting 2".format(verb, scope, vocabulary))
+                    continue
+                caller = (here._opf_record.cli if verb == "record" else getattr(here, "_cmd_" + verb)).__code__
+                for sub in parts[0]:
+                    reached = []
+                    with contextlib.ExitStack() as stack:
+                        for module, attr, entry_sub in _VERB_SUB_ENTRIES.get(verb, ()):
+                            stack.enter_context(patch.object(getattr(here, module), attr,
+                                                             _verb_entry_standin(entry_sub, reached)))
+                        for module, attr in _VERB_SUB_GATES.get(verb, ()):
+                            stack.enter_context(patch.object(getattr(here, module), attr,
+                                                             lambda *args, **kwargs: None))
+                        code, err = real(sub_argv(verb, sub))
+                    if [name for name, _code in reached] != [sub]:
+                        faults.append("{} {} is named as running but does not reach its engine entry (reached "
+                                      "{}, exit {!r}, stderr {!r})".format(
+                                          verb, sub, [name for name, _code in reached], code, err))
+                    elif reached[0][1] is not caller:
+                        faults.append("{} {} reaches its engine entry from {}, not straight from {}; the "
+                                      "entry did not run".format(verb, sub, reached[0][1].co_name, caller.co_name))
+                    unchanged("{} {} (running)".format(verb, sub))
+                for sub in parts[1]:
+                    if not _verb_refusal_holds(verb, sub):
+                        faults.append("{} {} is named as exiting 2 but no refusal of every argument list is in "
+                                      "place for it".format(verb, sub))
+                        continue
+                    phase[0] = ("{} {}".format(verb, sub), _VERB_REFUSAL_ENTRIES.get((verb, sub), ()))
+                    try:
+                        code, err = real(sub_argv(verb, sub))
+                    finally:
+                        phase[0] = None
+                    if code != EXIT_MALFORMED:
+                        faults.append("{} {} is named as exiting 2 but exits {!r} (stderr {!r})".format(
+                            verb, sub, code, err))
+                    unchanged("{} {} (exiting 2)".format(verb, sub))
+                continue
+            for argv, called, routed, err in routes:
+                if isinstance(routed, Exception):
+                    # An intercepted dispatch that raised is a fault, and the real dispatch is not run.
+                    faults.append("{} is marked in progress, but the intercepted dispatch of {} raised {!r} "
+                                  "(handlers reached {}); it is not run".format(verb, argv, routed, called))
+                    continue
+                if called and (called != ["_cmd_" + verb] or verb not in refusals):
+                    faults.append("{} is marked in progress, but main() routes {} to {} and it is not a handler "
+                                  "that refuses every argument list".format(verb, argv, called))
+                    continue
+                if called and live.get(verb) != "in progress":
+                    # Never run the handler of a verb VERB_STATUS marks available or partial.
+                    faults.append("{} is in the refusal list, but VERB_STATUS marks it {}; its handler is not "
+                                  "run".format(verb, live.get(verb)))
+                    continue
+                code, got = real(argv)
+                want = (_VERB_STUB_LINE.format(verb) if not called
+                        else "opf {}: {}\n".format(verb, getattr(here, refusals[verb])))
+                if code != EXIT_MALFORMED or got != want:
+                    faults.append("{} is marked in progress but {} exits {!r} with stderr {!r}, not 2 with "
+                                  "{!r}".format(verb, argv, code, got, want))
+                unchanged("{} (in progress)".format(argv))
+    finally:
+        os.chdir(cwd)
+        shutil.rmtree(base, ignore_errors=True)
+        guards.close()
+    if os.path.lexists(base):
+        faults.append("the scratch directory {} could not be removed".format(base))
+    for name, during, allowed in calls:
+        if allowed:
+            continue
+        if during is None:
+            faults.append("the real engine entry {} was called outside the real dispatch of a subcommand "
+                          "whose refusal is in place; it was refused and did not run".format(name))
+        else:
+            faults.append("the real engine entry {} was called during the real dispatch of {}, which it is "
+                          "not listed for; it was refused and did not run".format(name, during))
+    return faults
+
+
+# The in progress verbs whose handler refuses every argument list with exit 2 and reads and writes nothing,
+# each with the name of the refusal it prints. Only these handlers, of in progress verbs, does the status
+# self-test run for real, and only once the intercepted dispatch reaches exactly that handler.
+_VERB_REFUSALS = {"upgrade": "UPGRADE_NONE", "import": "IMPORT_RETIRED"}
+
+
+def _verb_intercepted_faults():
+    """Hold what _verb_intercepted replaces, and return the faults, empty when it holds. A function this
+    module defines (a def, and a lambda bound here) must be replaced by a recorder during the dispatch, so
+    calling it records its name and returns 0; the dispatch itself, a class this module defines, a bound
+    method of an instance of that class, a function bound here but defined in another module, and a builtin
+    bound here must each be kept as it is. After the dispatch, every one of them must be the original again."""
+    here = sys.modules[__name__]
+    probes = dict(_verb_status_probe_lambda=lambda: None,
+                  _verb_status_probe_method=_VerbHelperImportGate([]).find_spec,
+                  _verb_status_probe_foreign=os.path.join, _verb_status_probe_builtin=len)
+    seen = {}
+
+    def dispatch(argv):
+        # reads each attribute and calls the two that must be recorders; nothing this module defines runs
+        for attr, value in originals.items():
+            seen[attr] = getattr(here, attr) is value
+        here._verb_tree(argv)
+        here._verb_status_probe_lambda()
+        return EXIT_OK
+
+    probes["_verb_status_probe_dispatch"] = dispatch
+    originals = dict(probes, _verb_tree=here._verb_tree, _VerbHelperImportGate=here._VerbHelperImportGate)
+    replaced = ("_verb_tree", "_verb_status_probe_lambda")
+    faults = []
+    for attr in probes:
+        setattr(here, attr, probes[attr])
+    try:
+        called, routed, err = _verb_intercepted(here, dispatch, ["probe"])
+    finally:
+        for attr in probes:
+            delattr(here, attr)
+    want = dict((attr, attr not in replaced) for attr in originals)
+    if seen != want:
+        faults.append("_verb_intercepted kept {} and replaced {}, not kept {} and replaced {}".format(
+            sorted(attr for attr in seen if seen[attr]), sorted(attr for attr in seen if not seen[attr]),
+            sorted(attr for attr in want if want[attr]), sorted(replaced)))
+    if called != list(replaced) or routed != EXIT_OK or err:
+        faults.append("_verb_intercepted recorded {}, exit {!r}, stderr {!r}, not {}, exit 0 and no stderr".format(
+            called, routed, err, list(replaced)))
+    if here._verb_tree is not originals["_verb_tree"] or (
+            here._VerbHelperImportGate is not originals["_VerbHelperImportGate"]):
+        faults.append("_verb_intercepted did not restore _verb_tree and _VerbHelperImportGate")
+    return faults
+
+
+def _verb_status_self_test():
+    """Hold VERB_STATUS to the dispatch (_verb_status_faults), then show that each flip fails, named: an in
+    progress stub marked available, an available verb marked in progress, a verb dropped or doubled, a
+    handler renamed (main() routing init to another name), a refusal listed for an available verb (alone and
+    with that verb marked in progress), an in progress verb that runs a handler only with arguments, a scope
+    that does not read as a list, a refused subcommand named as running, a running subcommand named as
+    exiting 2, record marked available, main() dispatching an in progress verb straight to a helper module's
+    entry, an in progress verb whose dispatch raises, an engine entry reached through a lambda, a helper
+    module imported in the intercepted dispatch (held by the import gate), a same-size rewrite of a scratch
+    file (held by content hashing), an engine entry called outside any refusal run (held by the engine
+    guard), and an engine entry called during the refusal run of a subcommand it is not listed for. No flip
+    runs a handler other than a refusing one, and no flip makes a real engine call outside the refusal run
+    of a subcommand the entry is listed for; the two flips that call an entry where it is not permitted call
+    it with no arguments, so a guard that let it through raises TypeError before the engine runs. What the
+    intercepted dispatch replaces and keeps is held first (_verb_intercepted_faults)."""
+    here = sys.modules[__name__]
+    faults = _verb_intercepted_faults() + _verb_status_faults()
+    real_main = main
+
+    def renamed(argv):
+        # main() with init's handler bound under another name
+        if list(argv[:1]) == ["init"]:
+            return getattr(here, "_verb_status_renamed_init")(list(argv[1:]))
+        return real_main(argv)
+
+    def routes_with_arguments(argv):
+        # main() routing migrate to a real handler once it has any argument
+        if list(argv[:1]) == ["migrate"] and len(argv) > 1:
+            return getattr(here, "_cmd_init")(list(argv[1:]))
+        return real_main(argv)
+
+    def to_helper(argv):
+        # main() dispatching upgrade straight to a helper module's entry, not to its own handler
+        if list(argv[:1]) == ["upgrade"]:
+            return here._opf_record.cli(list(argv[1:]))
+        return real_main(argv)
+
+    def reconcile_through_lambda(argv):
+        # main() reaching adopt reconcile's engine entry through a lambda, not straight from _cmd_adopt
+        if list(argv[:2]) == ["adopt", "reconcile"]:
+            call = lambda: here._opf_adopt_apply.reconcile_report(os.getcwd(), [])  # noqa: E731
+            return call()
+        return real_main(argv)
+
+    def raises_when_routed(argv):
+        # main() routing sync to a handler name this module does not define, so the dispatch raises
+        if list(argv[:1]) == ["sync"]:
+            return getattr(here, "_cmd_sync")(list(argv[1:]))
+        return real_main(argv)
+
+    def imports_helper(argv):
+        # main() importing a helper module that is not loaded while it dispatches migrate; the name exists
+        # nowhere, so with the import gate gone the import fails with ModuleNotFoundError and nothing runs
+        if list(argv[:1]) == ["migrate"]:
+            import importlib
+            importlib.import_module("_opf_verb_status_absent")
+        return real_main(argv)
+
+    rewritten = []
+
+    def rewrites_same_size(argv):
+        # main() rewriting a scratch input file with content of the same size and type the first time it
+        # dispatches migrate, then restoring it the first time it dispatches migrate --help, so only the
+        # content hash sees the change; the path is taken from the probe's working directory (the scratch
+        # root) on the first call
+        content = {("migrate",): "probe = 2\n", ("migrate", "--help"): "probe = 1\n"}.get(tuple(argv))
+        if content is None or tuple(argv) in rewritten[1:]:
+            return real_main(argv)
+        if not rewritten:
+            parent = os.path.dirname(os.getcwd())
+            if not os.path.basename(parent).startswith("opf-verb-status-"):
+                return real_main(argv)
+            rewritten.append(os.path.join(parent, "in", "plan.toml"))
+        rewritten.append(tuple(argv))
+        with open(rewritten[0], "w", encoding="utf-8") as handle:
+            handle.write(content)
+        return real_main(argv)
+
+    def engine_outside_refusal(argv):
+        # main() calling adopt plan's engine entry while it dispatches record create, outside any refusal
+        # run; no arguments, so a guard that let it through raises TypeError before the engine runs
+        if list(argv[:2]) == ["record", "create"]:
+            here._opf_adopt_plan.plan()
+        return real_main(argv)
+
+    def engine_in_other_refusal(argv):
+        # main() calling adopt reconcile's engine entry during the refusal run of record receipt-repair,
+        # which that entry is not listed for; no arguments, as above
+        if list(argv[:2]) == ["record", "receipt-repair"]:
+            here._opf_adopt_apply.reconcile_report()
+        return real_main(argv)
+
+    def marked(verb, status, scope=""):
+        return tuple((v, status, scope) if v == verb else (v, s, c) for v, s, c in VERB_STATUS)
+
+    with_init = dict(_VERB_REFUSALS, init="UPGRADE_NONE")
+    flips = (
+        ("stub-marked-available", dict(table=marked("migrate", "available")), "migrate is marked available"),
+        ("available-marked-in-progress", dict(table=marked("init", "in progress")), "init is marked in progress"),
+        ("verb-dropped", dict(table=tuple(row for row in VERB_STATUS if row[0] != "sync")),
+         "sync appears 0 times"),
+        ("verb-doubled", dict(table=VERB_STATUS + (("render", "available", ""),)), "render appears 2 times"),
+        ("handler-renamed", dict(dispatch=renamed), "init is marked available but main() does not route it"),
+        ("refusal-for-available-verb", dict(refusals=with_init), "init is in the refusal list but marked available"),
+        ("refusal-for-available-verb-marked-in-progress",
+         dict(table=marked("init", "in progress"), refusals=with_init), "its handler is not run"),
+        ("in-progress-runs-with-arguments", dict(dispatch=routes_with_arguments),
+         "main() routes ['migrate', '--help'] to ['_cmd_init']"),
+        ("scope-not-a-list", dict(table=marked("adopt", "partial", "every subcommand")), "adopt's scope"),
+        ("refused-named-running", dict(table=marked("adopt", "partial",
+                                                    "plan, approve, complete, reconcile, and status; apply exits 2")),
+         "adopt complete is named as running"),
+        ("running-named-refused", dict(table=marked("record", "partial", "transition, done-with-receipt, and "
+                                                    "worklog-append; create and receipt-repair exit 2")),
+         "record create is named as exiting 2"),
+        ("record-marked-available", dict(table=marked("record", "available")),
+         "record is marked available but record receipt-repair exits 2"),
+        ("dispatch-to-helper", dict(dispatch=to_helper), "main() routes ['upgrade'] to ['_opf_record.cli']"),
+        ("intercepted-dispatch-raises", dict(dispatch=raises_when_routed),
+         "the intercepted dispatch of ['sync'] raised"),
+        ("engine-through-lambda", dict(dispatch=reconcile_through_lambda),
+         "adopt reconcile reaches its engine entry from <lambda>, not straight from _cmd_adopt"),
+        ("helper-import-refused", dict(dispatch=imports_helper),
+         "the intercepted dispatch of ['migrate'] raised _VerbHelperImportBlocked('_opf_verb_status_absent')"),
+        ("same-size-rewrite-seen", dict(dispatch=rewrites_same_size),
+         "the intercepted dispatch of ['migrate'] changed the scratch directory: [('in/plan.toml', "),
+        ("engine-outside-refusal-refused", dict(dispatch=engine_outside_refusal),
+         "record create is named as running but does not reach its engine entry (reached [], exit "
+         "_VerbEngineBlocked('_opf_adopt_plan.plan')"),
+        ("engine-in-other-refusal-refused", dict(dispatch=engine_in_other_refusal),
+         "the real engine entry _opf_adopt_apply.reconcile_report was called during the real dispatch of "
+         "record receipt-repair, which it is not listed for"),
+    )
+    # The engine calls a flip makes on purpose where no entry is permitted, each refused by the guard (every
+    # other flip must make none), and the one scratch change a flip makes on purpose (no other flip may
+    # change the scratch directory): the fault that change raises must start with that flip's needle.
+    refused_on_purpose = {"engine-outside-refusal-refused": ["_opf_adopt_plan.plan"],
+                          "engine-in-other-refusal-refused": ["_opf_adopt_apply.reconcile_report"]}
+    writes_on_purpose = ("same-size-rewrite-seen",)
+    target = getattr(here, "_cmd_init", None)
+    if target is None:
+        faults.append("_cmd_init is not defined, so main() cannot route init to it")
+        target = lambda rest: EXIT_MALFORMED  # noqa: E731  a stand-in, so the flips still run
+    here._verb_status_renamed_init = target
+    try:
+        for label, kwargs, needle in flips:
+            calls = []
+            got = _verb_status_faults(engine_calls=calls, **kwargs)
+            if not any(needle in fault for fault in got):
+                faults.append("flip {} was not caught: {!r}".format(label, got))
+            leaked = [fault for fault in got if "changed the scratch directory" in fault
+                      and not (label in writes_on_purpose and fault.startswith(needle))]
+            if leaked:
+                faults.append("flip {} ran a handler that wrote: {!r}".format(label, leaked))
+            # The only real engine calls a flip may make are in the real dispatch of a subcommand whose
+            # refusal is in place, to an entry listed for it; every other call, refused by the guard, counts
+            # here and must be exactly the calls the flip makes on purpose.
+            stray = [name for name, _during, allowed in calls if not allowed]
+            if stray != refused_on_purpose.get(label, []):
+                faults.append("flip {} made {} real engine call(s) outside a refusal run the entry is listed "
+                              "for: {!r}, not {!r}".format(label, len(stray), stray,
+                                                           refused_on_purpose.get(label, [])))
+    finally:
+        del here._verb_status_renamed_init
+    if faults:
+        print("opf verb status self-test: FAIL", file=sys.stderr)
+        for fault in faults:
+            print("  " + fault, file=sys.stderr)
+        return EXIT_FINDING
+    print("opf verb status self-test: PASS ({} verbs, {} flips)".format(len(VERB_STATUS), len(flips)))
+    return EXIT_OK
 
 
 # Helper self-tests that pin sys.set_int_max_str_digits(4300) inside a fixture and MUST restore the ambient
