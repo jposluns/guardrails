@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "c053e8a92e3b9ca90380baa884537c51a2e259b575de2be19cd0fe7279cef5ef"
+tree-sha256 = "07083c85d6a22d1e9eea777f0fff98cd9db12fc5ad7ef6f3c0638a3936d8b2d9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -56,8 +56,8 @@ sha256 = "566cdd353538798199eff9aef9aadb403e31ba9dda366b41d8abcc1ee560761c"
 
 [[sources]]
 path = ".aiqt/core/enforcement-roadmap.toml"
-bytes = 12603
-sha256 = "6dad058b0c711f005e2ed978d1854bc2f796072016e6044ff65c75a45b48002e"
+bytes = 12628
+sha256 = "5d0b09e5d57985ba44a062b6b2fd5a124c2e5ec044008a817ef22043f46508ac"
 
 [[sources]]
 path = ".aiqt/core/gates/byte-canon.toml"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 584824
-sha256 = "4035e0f915b34d490ccfb08bc5c72fa988e581a14984233e96b7d1e9ea163df9"
+bytes = 585229
+sha256 = "6022b1c40eb9dbe738df485d25e747dfd5ad605e7b9e888b20015f307cd1d9a4"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -826,8 +826,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1103398
-sha256 = "312e5f1b275137eac1d6b678b900dc0507693bf54f62c705761bd7a3e97ae1d1"
+bytes = 1106484
+sha256 = "8b33346b287ef2708122ad5c84e10d51d2c56576c6af4a9c1c9a2f38c52c5c93"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2391,8 +2391,8 @@ sha256 = "854403d7fd810507f024d0ff23a6db4c8bcf8978ea92210d7536a247d5c0fd28"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 641748
-sha256 = "ddc37fb1d8af727087d52108c50733b8f11ece02af69932fd4ddd4dca5995250"
+bytes = 642197
+sha256 = "7146f8681d0b24a29c554cb218896c20dc305a260ece1a76f301b45ac81db36d"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3951,8 +3951,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 701298
-sha256 = "817243b44c2724e1ff3e7c937af87e690279098e2dd22ec6b97d8f0ef91195d3"
+bytes = 701806
+sha256 = "1f5a2360ab4d29e3d877b9021dec3936f3a387073e00a019ed90b18cebf29342"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4256,8 +4256,8 @@ sha256 = "63902bb6d3098492781660326c60848ae8d9b83cf54b10f63d29ffafcd3201d3"
 
 [[sources]]
 path = "tools/check_mistakes_register.py"
-bytes = 147493
-sha256 = "3994b3446d75345ebc28ba3d5f6d7bed114fb3f8a4899f5cebad030b81d290d3"
+bytes = 154967
+sha256 = "a2b6c1989c57820e5a1d9756bb502a40effbebd549c241c18ab523d30fd3c460"
 
 [[sources]]
 path = "tools/check_msg_leaks.py"
@@ -4626,8 +4626,8 @@ sha256 = "115085f6d441f82bded7bb867df053e05ac3499ff184bc8e37ecadc3d7dec4c3"
 
 [[sources]]
 path = "tools/orch_register.py"
-bytes = 316154
-sha256 = "638d00c75327faadbffdc5ac9d902ca0e22adb76f91b612260dc66766f24062d"
+bytes = 316256
+sha256 = "43a90d014deff0088cbfa7268ec9d423e9ced25017fec7fec3567f59e5be2f05"
 
 [[sources]]
 path = "tools/pin.py"

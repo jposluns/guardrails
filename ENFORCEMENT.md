@@ -9,10 +9,10 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Status | Rules |
 |---|---:|
 | Gate-linked (class a) | 8 |
-| Gate-linked (class a), partial | 0 |
+| Gate-linked (class a), partial | 1 |
 | Gate-linked (class c only) | 1 |
 | Gate-linked (class c only), partial | 8 |
-| Hook-linked | 19 |
+| Hook-linked | 18 |
 | Hook-linked, partial | 4 |
 | Preview only | 2 |
 | Preview only, partial | 0 |
@@ -39,7 +39,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Read before characterizing | `rdbchr` | No control | No shipped control cites this rule. |
 | Capture the reference when the claim is made | `refcap` | No control | No shipped control cites this rule. |
 | Reproduce a defect before fixing it | `reprod` | No control | No shipped control cites this rule. |
-| A current timestamp is read from the clock | `tstamp` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
+| A current timestamp is read from the clock | `tstamp` | Gate-linked (class a), partial | `gate:mistakes-register`, class a; `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | Validate an inferred premise before acting | `valinf` | No control | No shipped control cites this rule. |
 | Verify a fix is in its commit | `vfxcmt` | Hook-linked, partial | `hook:review-dispatch-pin`, class c |
 | Anything wrong is fixed first | `actbef` | Gate-linked (class c only), partial | `gate:release-cut`, class c |
@@ -498,7 +498,7 @@ A byte-identity drift gate over the artefact tools/gen_mappings.py generates fro
 Technical limits (from the enforcement ledger):
 
 ```
-Total over the declared register: a broken digest chain or sequence, a reused id, an illegal status transition, a rewrite of anchored or merge-base rows, and an unverifiable landed row always fail; a declared-but-unreadable register, a malformed or unreadable anchor, an anchor entry that exists but is not a usable regular file (a dangling symlink or a directory; presence is an explicit lstat whose only absence answer is ENOENT, so such an entry, or an anchor lstat failure such as EIO, never takes the missing-anchor allowance), a present registry that is not a JSON object, a git failure, launch error or timeout deciding whether the register is tracked or reading its merge-base authority, and a launch error or timeout reading whether a landed row's commit exists, are exit 2. The anchor write (--update-anchor, tracked and untracked registers alike) never opens an existing entry: a non-regular anchor entry (a symlink, dangling or live, included) is refused with its target neither created nor rewritten, and a green advance lands by atomic replace of an exclusively created temporary. A same-authority local file offers no protection against an actor who rewrites the WHOLE chain and the anchor together, which defeats the untracked mode (the tracked mode is bounded by merge-base history instead), so rewrites are DETECTABLE within those bounds, never prevented; adopters needing real separation bind the same interface to a server-side append store. The landed-row check proves the cited commit and check path exist, not that the check semantically guards the mistake. In a checkout with no registry the live leg is NOT APPLICABLE with the self-test as assurance.
+Total over the declared register: a broken digest chain or sequence, a reused id, an illegal status transition, a rewrite of anchored or merge-base rows, and an unverifiable landed row always fail; a declared-but-unreadable register, a malformed or unreadable anchor, an anchor entry that exists but is not a usable regular file (a dangling symlink or a directory; presence is an explicit lstat whose only absence answer is ENOENT, so such an entry, or an anchor lstat failure such as EIO, never takes the missing-anchor allowance), a present registry that is not a JSON object, a git failure, launch error or timeout deciding whether the register is tracked or reading its merge-base authority, and a launch error or timeout reading whether a landed row's commit exists, are exit 2. The anchor write (--update-anchor, tracked and untracked registers alike) never opens an existing entry: a non-regular anchor entry (a symlink, dangling or live, included) is refused with its target neither created nor rewritten, and a green advance lands by atomic replace of an exclusively created temporary. A same-authority local file offers no protection against an actor who rewrites the WHOLE chain and the anchor together, which defeats the untracked mode (the tracked mode is bounded by merge-base history instead), so rewrites are DETECTABLE within those bounds, never prevented; adopters needing real separation bind the same interface to a server-side append store. The landed-row check proves the cited commit and check path exist, not that the check semantically guards the mistake. For tstamp, a row whose ts is not an RFC 3339 UTC instant (a typed placeholder such as XX:XX or TBD, a bare date, a value with no zone, a non-zero offset, or a date absent from the calendar such as February 30) is a violation; a well-formed ts is not proven to have been read from the clock, so a typed but valid instant still passes, and records outside the declared registers are not checked. In a checkout with no registry the live leg is NOT APPLICABLE with the self-test as assurance.
 ```
 
 ### `gate:mistakes-register-append-selftest`

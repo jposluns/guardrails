@@ -2371,7 +2371,8 @@ def self_test():
         declare(mistakes_register="unshow-append.jsonl")
         unshow_append_reg = repo / "unshow-append.jsonl"
         real_pairs_hook = gate_module._pairs_without_duplicates
-        unshow_row = {"seq": _UnshowableValue(), "id": "MR-1", "ts": "t", "mistake": "m",
+        unshow_row = {"seq": _UnshowableValue(), "id": "MR-1",
+                      "ts": "2026-08-29T00:00:00+00:00", "mistake": "m",
                       "evidence": "e", "rule": "r", "guardrail": "g", "status": "proposed",
                       "prev": ZERO}
 
@@ -2454,7 +2455,8 @@ def self_test():
             declare(mistakes_register="deepseq.jsonl")
             deep_seq_reg = repo / "deepseq.jsonl"
             deep_seq_line = ('{"seq": ' + "[" * decode_max + "]" * decode_max
-                             + ', "id": "MR-1", "ts": "t", "mistake": "m", "evidence": "e",'
+                             + ', "id": "MR-1", "ts": "2026-08-29T00:00:00+00:00",'
+                             ' "mistake": "m", "evidence": "e",'
                              ' "rule": "r", "guardrail": "g", "status": "proposed",'
                              ' "prev": "' + ZERO + '"}')
             deep_seq_reg.write_text(deep_seq_line + "\n", encoding="utf-8")

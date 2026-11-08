@@ -644,8 +644,8 @@ mechanisms = []
 
 [[rule]]
 corpus-id = "tstamp"
-status = "enforced"
-mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
+status = "partial"
+mechanisms = ["gate:mistakes-register", "hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 
 [[rule]]
 corpus-id = "tsthrm"

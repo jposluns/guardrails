@@ -3,7 +3,7 @@
 permanent ids and a digest chain, and a landed row's claims are verified against the repository.
 
 Row schema (one JSON object per line):
-  {"seq": N, "id": "MR-N", "ts": "<iso-utc>", "mistake": "...", "evidence": "...", "rule": "...",
+  {"seq": N, "id": "MR-N", "ts": "<RFC 3339 UTC instant>", "mistake": "...", "evidence": "...", "rule": "...",
    "guardrail": "...", "status": "proposed|accepted|landed|declined|superseded",
    "prev": "<sha256 of the previous raw line, 64*'0' for the first>",
    ...landed rows also: "commit": "<sha>", "check_ref": "<repo-relative path>",
@@ -99,10 +99,12 @@ if tuple(sys.version_info[:2]) < (3, 14):
         pass
     os._exit(2)
 
+import datetime
 import errno
 import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 from pathlib import Path
@@ -119,6 +121,32 @@ ZERO = "0" * 64
 TRANSITIONS = {"proposed": {"accepted", "declined", "superseded"},
                "accepted": {"landed", "declined", "superseded"},
                "landed": {"superseded"}, "declined": set(), "superseded": set()}
+# A row's ts is an RFC 3339 UTC instant: a Z or +00:00 zero offset, optional fractional seconds,
+# and a real calendar date and time. This restates opf/tools/_opf_schema.py _valid_timestamp
+# rather than importing it, because this gate installs standalone beside the appender and so
+# carries no dependency on opf/tools; the self-test asserts that the two predicates agree on a
+# shared vector set. The appender's own value, datetime.now(timezone.utc).isoformat(), carries
+# +00:00 and (except on an exact second) microseconds, and is accepted.
+_TS_RE = re.compile(r"^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})"
+                    r"(\.[0-9]+)?(?:Z|\+00:00)\Z")
+
+
+def _valid_timestamp(value):
+    """True only when VALUE is an RFC 3339 UTC instant string (the _TS_RE shape) that names a
+    real calendar date and time: month 13, day 32, February 30, hour 24 and second 60 are all
+    refused. A typed placeholder (23:3xZ, XX:XX, TBD), a bare date, a value with no zone and a
+    non-zero offset do not match the shape and are refused too."""
+    if not isinstance(value, str):
+        return False
+    m = _TS_RE.match(value)
+    if not m:
+        return False
+    try:
+        datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                          int(m.group(4)), int(m.group(5)), int(m.group(6)))
+    except ValueError:
+        return False
+    return True
 
 
 class CannotEvaluate(RuntimeError):
@@ -516,6 +544,11 @@ def verify_lines(lines, root=None, prefix="MR-"):
         for key in ("ts", "mistake", "evidence", "rule", "guardrail"):
             if not isinstance(row.get(key), str) or not row.get(key):
                 problems.append("line {}: missing field {}".format(n, key))
+        ts = row.get("ts")
+        if isinstance(ts, str) and ts and not _valid_timestamp(ts):
+            problems.append("line {}: ts {} is not an RFC 3339 UTC instant (a real calendar date "
+                            "and time with a Z or +00:00 zone, optional fractional "
+                            "seconds)".format(n, _shown(ts)))
         if status == "landed" and root is not None:
             commit, check_ref, check_ok = row.get("commit"), row.get("check_ref"), False
             commit_ok = False
@@ -853,6 +886,119 @@ def run(root, update=False):
     return 0
 
 
+# The ts vectors, (value, accepted): the typed placeholders and invalid instants a row must not
+# carry, the shapes an RFC 3339 UTC writer (the appender included) produces, and each calendar
+# and clock bound at its edge and just past it.
+_TS_VECTORS = (
+    ("23:3xZ", False),
+    ("XX:XX", False),
+    ("TBD", False),
+    ("2026-11-07T23:3x:00Z", False),
+    ("2026-11-07", False),
+    ("2026-11-07T23:30:00", False),
+    ("2026-02-30T00:00:00Z", False),
+    ("2026-11-07T23:30:00+01:00", False),
+    ("2026-11-07T23:30:00-00:00", False),
+    ("2026-11-07t23:30:00z", False),
+    ("2026-11-07 23:30:00Z", False),
+    ("2026-11-07T23:30:00Z\n", False),
+    ("2026-11-07T23:30Z", False),
+    ("2026-11-07T23:30:00.Z", False),
+    ("٢026-11-07T23:30:00Z", False),
+    ("2026-11-07T23:30:00Z", True),
+    ("2026-11-07T23:30:00+00:00", True),
+    ("2026-11-07T23:30:00.123456+00:00", True),
+    ("2026-11-07T23:30:00.5Z", True),
+    ("2026-01-01T00:00:00Z", True),
+    ("2026-00-01T00:00:00Z", False),
+    ("2026-01-00T00:00:00Z", False),
+    ("2026-12-31T23:59:59Z", True),
+    ("2026-13-01T00:00:00Z", False),
+    ("2026-01-30T00:00:00Z", True),
+    ("2026-01-31T00:00:00Z", True),
+    ("2026-01-32T00:00:00Z", False),
+    ("2026-02-28T00:00:00Z", True),
+    ("2026-02-29T00:00:00Z", False),
+    ("2028-02-29T00:00:00Z", True),
+    ("2026-11-07T22:00:00Z", True),
+    ("2026-11-07T23:00:00Z", True),
+    ("2026-11-07T24:00:00Z", False),
+    ("2026-11-07T23:58:00Z", True),
+    ("2026-11-07T23:59:00Z", True),
+    ("2026-11-07T23:60:00Z", False),
+    ("2026-11-07T23:59:58Z", True),
+    ("2026-11-07T23:59:59Z", True),
+    ("2026-11-07T23:59:60Z", False),
+)
+
+
+def _ts_vectors(failures, row):
+    """Drive every ts vector through verify_lines on a one-row register whose other fields are
+    clean: a refuse case must draw a finding naming line 1 and the value, a pass case must read
+    clean, and the appender's own value (datetime.now(timezone.utc).isoformat(), with and
+    without microseconds) must pass. Two flips prove the vectors bite: with the predicate
+    reverted to the old non-empty check every refuse case must read clean (the vectors turn
+    red), and with a too-strict Z-only predicate every +00:00 pass case must draw a finding.
+    The restated predicate must also agree with opf/tools/_opf_schema.py _valid_timestamp on
+    every vector, loaded here by a plain import with sys.path restored afterwards."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    vectors = _TS_VECTORS + ((now.isoformat(), True),
+                             (now.replace(microsecond=0).isoformat(), True),
+                             (now.replace(microsecond=1).isoformat(), True))
+
+    def judged(value):
+        return verify_lines([row(1, "MR-1", "proposed", ZERO, {"ts": value})], prefix="MR-")
+
+    for value, accepted in vectors:
+        found = judged(value)
+        if accepted and found:
+            failures.append("ts-pass {!r}: want a clean row, got {!r}".format(value, found))
+        if not accepted and not any(p.startswith("line 1: ts ") and repr(value) in p
+                                    for p in found):
+            failures.append("ts-refuse {!r}: want a finding naming line 1 and the value, got "
+                            "{!r}".format(value, found))
+    real_predicate = _valid_timestamp
+
+    def nonempty(value):
+        return isinstance(value, str) and bool(value)
+
+    def z_only(value):
+        return isinstance(value, str) and re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", value) is not None
+
+    try:
+        globals()["_valid_timestamp"] = nonempty
+        for value, accepted in vectors:
+            if not accepted and judged(value):
+                failures.append("ts-flip-nonempty {!r}: with the non-empty check restored the "
+                                "refuse vector still drew a finding, so it cannot detect the "
+                                "revert".format(value))
+        globals()["_valid_timestamp"] = z_only
+        for value, accepted in vectors:
+            if accepted and value.endswith("+00:00") and not judged(value):
+                failures.append("ts-flip-z-only {!r}: with a Z-only predicate the +00:00 pass "
+                                "vector still read clean, so it cannot detect an over-strict "
+                                "predicate".format(value))
+    finally:
+        globals()["_valid_timestamp"] = real_predicate
+    saved_path = list(sys.path)
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "opf" / "tools"))
+    try:
+        import _opf_schema
+    except ImportError as exc:
+        failures.append("ts-agrees-with-opf-schema: the reference predicate in "
+                        "opf/tools/_opf_schema.py cannot be imported ({})".format(exc))
+    else:
+        for value in [v for v, _ in vectors] + [None, 20261107, b"2026-11-07T23:30:00Z"]:
+            if bool(_opf_schema._valid_timestamp(value)) != _valid_timestamp(value):
+                failures.append("ts-agrees-with-opf-schema {!r}: the restated predicate says "
+                                "{}, the reference says {}".format(
+                                    value, _valid_timestamp(value),
+                                    bool(_opf_schema._valid_timestamp(value))))
+    finally:
+        sys.path[:] = saved_path
+
+
 def self_test():
     import contextlib
     import io
@@ -957,12 +1103,14 @@ def self_test():
         _case("non-object-line-fails", ["17"], False)
         _case("bool-seq-fails", chain(lambda p: row(True, "MR-1", "proposed", p)), False)
         _case("float-seq-fails", chain(lambda p: row(1.0, "MR-1", "proposed", p)), False)
-        dup_fields = (("seq", 1), ("id", "MR-1"), ("ts", "t"), ("mistake", "m"),
+        dup_fields = (("seq", 1), ("id", "MR-1"), ("ts", "2026-08-29T00:00:00+00:00"),
+                      ("mistake", "m"),
                       ("evidence", "e"), ("rule", "r"), ("guardrail", "g"),
                       ("status", "landed"), ("status", "proposed"), ("prev", ZERO))
         dup_row = "{" + ", ".join(
             json.dumps(k) + ": " + json.dumps(v) for k, v in dup_fields) + "}"
         _case("duplicate-key-fails", [dup_row], False)
+        _ts_vectors(failures, row)
         # a row nested too deeply for the JSON decoder (balanced or not) is a NAMED
         # violation, never an escaped RecursionError that would crash the gate with a
         # traceback instead of failing the register; the depth is far beyond what any
@@ -1010,7 +1158,8 @@ def self_test():
         # in that site's own violation message, never as an escaped RecursionError
 
         def _site_fields(**overrides):
-            fields = {"seq": 1, "id": "MR-1", "ts": "t", "mistake": "m", "evidence": "e",
+            fields = {"seq": 1, "id": "MR-1", "ts": "2026-08-29T00:00:00+00:00",
+                      "mistake": "m", "evidence": "e",
                       "rule": "r", "guardrail": "g", "status": "proposed", "prev": ZERO}
             fields.update(overrides)
             return fields
@@ -2378,7 +2527,9 @@ def self_test():
     print("SELF-TEST PASS: pure appends pass; a broken chain or sequence, a reused id, an illegal "
           "transition, a non-object line, a line nested too deeply for the JSON decoder "
           "(balanced and unbalanced, a named violation, never an escaped RecursionError), "
-          "a bool or float seq, a duplicated key, an anchored "
+          "a bool or float seq, a duplicated key, a ts that is not an RFC 3339 UTC instant "
+          "(a typed placeholder, a bare date, no zone, an impossible date; the predicate "
+          "agrees with the opf schema's and two flips turn its vectors red), an anchored "
           "rewrite or reorder, an unverifiable or absolute-path landed check_ref, a tracked "
           "rewrite with no computable merge-base, and a declared untracked register with no "
           "anchor all fail; a malformed, non-object or wrongly shaped anchor (a zero, negative, "
