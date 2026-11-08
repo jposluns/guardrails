@@ -45,11 +45,9 @@ source that defines its input forms. The cases cover the outcomes the fix change
 the boundaries it affects. The tests of changed outcomes are observed to fail with the fix reverted; tests of
 preserved outcomes need not, since they exist to catch a fix that wrongly moves a sibling's verdict.
 
-A change that moves executable code, or rewrites paths that code depends on, is verified by exercising the
-result rather than by a check that fails without it, since a correct move preserves behaviour and passes
-the same checks before and after. Such a change carries checks that run the affected code, its tests, and
-each build or generator that reads an affected directory from the resulting layout, and that would fail if
-a dependency on the old layout were left behind, for example a root derived by fixed parent hops from a
-file's own location. A replayed edit record, a byte-for-byte comparison of rewritten lines, a
-stale-reference search, or a passing textual gate is evidence about the edits, not the result. Where the
-result cannot be exercised, the change is reported unverified.
+A move of executable code, or a rewrite of paths code depends on, is verified by exercising the result, not
+by a check that fails without it. The change carries checks that run the affected code, its tests, and each
+build or generator that reads an affected directory from the resulting layout, failing if a dependency on the
+old layout remains. Replayed edits, byte comparisons of rewritten lines, stale-reference searches, and
+passing textual gates are evidence about the edits, not the result. A result that cannot be exercised is
+reported unverified.
