@@ -3189,21 +3189,28 @@ def _bounded_setup_error(exc):
     return "SETUP-ERROR:" + type(exc).__name__ + ":" + str(exc)[:8192]
 
 
-def bounded_probe_unestablished(result, elapsed, timeout_s):
+def bounded_probe_unestablished(result, elapsed, timeout_s, started):
     """True when a run_bounded PROBE established nothing on this host: the
-    TIMEOUT sentinel once the caller's measured monotonic `elapsed` reached
-    `timeout_s`. run_bounded computes its deadline AFTER that measurement
-    begins (and arms the child timer later still), so on a correct probe only
-    a bound that genuinely elapsed here can be host starvation of the probe
-    child (guardian startup shares the requested deadline): no verdict, never
-    a pass and never a definite failure. A TIMEOUT measured BEFORE the bound
-    could have elapsed is an early trip of the bound (a run_bounded
-    regression), and every other result is the probe's own outcome; both stay
-    with the caller's check, which judges them as before. The ends of the
-    window: at exactly `timeout_s` the bound has elapsed (unestablished, the
-    same inclusive end _watchdog_window_verdict uses); one tick under it has
-    not (the caller's check keeps the definite failure)."""
-    return result == "TIMEOUT" and elapsed >= timeout_s
+    TIMEOUT sentinel, once the caller's measured monotonic `elapsed` reached
+    `timeout_s`, WITHOUT the probe's start receipt (`started`: whether the
+    one byte the probe writes on a caller-declared keep_fds pipe as its
+    first statement was observed). Starvation is told from a real hang by
+    OBSERVATION, never by the clock alone. With no receipt the guardian
+    never started the probe inside the bound, which only host starvation
+    produces on a correct caller (guardian startup shares the requested
+    deadline; run_bounded computes that deadline AFTER the caller's
+    measurement begins): nothing was established -- no verdict, never a pass
+    and never a definite failure. With the receipt present the probe ran and
+    then BLOCKED, the definite regression a bounded probe exists to catch,
+    so that TIMEOUT stays with the caller's check (a definite failure there,
+    never no verdict). A TIMEOUT measured BEFORE the bound could have
+    elapsed is an early trip of the bound (a run_bounded regression), and
+    every other result is the probe's own outcome; both stay with the
+    caller's check, which judges them as before. The ends of the elapsed
+    window: at exactly `timeout_s` the bound has elapsed (unestablished when
+    unstarted, the same inclusive end _watchdog_window_verdict uses); one
+    tick under it has not (the caller's check keeps the definite failure)."""
+    return result == "TIMEOUT" and elapsed >= timeout_s and not started
 
 
 def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):

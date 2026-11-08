@@ -1120,7 +1120,15 @@ def self_test():
                 _rc_calls.append(relpath)                 # (version/worklog/manifest also route through _read_contained)
             return _orig_rc(root_fd, relpath, **_kw)
         _journal._read_contained = _recording_rc
+        # The probe writes one byte on this declared pipe as its FIRST
+        # statement, so a TIMEOUT is separated into its two causes by
+        # OBSERVATION, never by the clock alone: byte present, the probe ran
+        # and then blocked (the definite hang this check exists to catch);
+        # no byte, the guardian never started the probe inside the bound
+        # (host starvation: the no-verdict path below).
+        _started_r, _started_w = os.pipe()
         def _fifo_probe():
+            os.write(_started_w, b"R")
             r_fifo = evaluate(fifo_root)
             return str(r_fifo.status == CANNOT_EVALUATE
                        and any("not a regular file" in f for f in r_fifo.findings)
@@ -1129,32 +1137,49 @@ def self_test():
         import time as _probe_time
         _probe_begin = _probe_time.monotonic()
         try:
-            fifo_result = run_bounded(_fifo_probe, timeout_s=5)
+            try:
+                fifo_result = run_bounded(_fifo_probe, timeout_s=5, keep_fds=(_started_w,))
+            finally:
+                _journal._read_contained = _orig_rc
+                os.close(_started_w)
+            _probe_elapsed = _probe_time.monotonic() - _probe_begin
+            os.set_blocking(_started_r, False)
+            try:
+                _probe_started = os.read(_started_r, 1) == b"R"
+            except BlockingIOError:
+                _probe_started = False
         finally:
-            _journal._read_contained = _orig_rc
-        # A TIMEOUT whose measured time reached the 5 s bound establishes
-        # nothing: a starved host can reach the bound on a correct probe
-        # (guardian startup shares it), so that run is recorded apart as this
-        # suite's distinct no-verdict exit 2 below, never a pass and never a
-        # definite failure. An early TIMEOUT and every other result stay with
-        # the check: the guard-deletion regression is judged by the recorded
-        # downstream-reader call (_rc_calls), which no host speed can move.
+            os.close(_started_r)
+        # A TIMEOUT that reached the 5 s bound WITHOUT the probe's start
+        # receipt establishes nothing: a starved host can fail to start a
+        # correct probe inside the bound (guardian startup shares it), so
+        # that run is recorded apart as this suite's distinct no-verdict
+        # exit 2 below, never a pass and never a definite failure. A TIMEOUT
+        # WITH the receipt means the probe ran and then BLOCKED, the
+        # definite regression itself, and stays with the check, as do an
+        # early TIMEOUT and every other result: the guard-deletion
+        # regression is judged by the recorded downstream-reader call
+        # (_rc_calls), which no host speed can move.
         from _opf_emit import bounded_probe_unestablished
-        if bounded_probe_unestablished(fifo_result, _probe_time.monotonic() - _probe_begin, 5):
+        if bounded_probe_unestablished(fifo_result, _probe_elapsed, 5, _probe_started):
             unestablished.append("f1-fifo-changelog-not-regular-fail-closed: the bounded FIFO "
-                                 "probe's own 5 s bound, not the probe's return, ended the run")
+                                 "probe was never observed to start inside its 5 s bound")
         else:
             check("f1-fifo-changelog-not-regular-fail-closed", fifo_result == "True")
-        # The classifier's window ends, pinned: at the bound and above it the
-        # probe is unestablished; one tick under it, and a returned value at
-        # any measured time, keep the check's own judgement.
+        # The classifier's window ends, pinned: at the bound and above it an
+        # UNSTARTED probe is unestablished; one tick under the bound, a
+        # STARTED probe at any measured time, and a returned value at any
+        # measured time, keep the check's own judgement.
         check("f1-fifo-probe-timeout-at-bound-unestablished",
-              bounded_probe_unestablished("TIMEOUT", 5.0, 5)
-              and bounded_probe_unestablished("TIMEOUT", 5.01, 5))
+              bounded_probe_unestablished("TIMEOUT", 5.0, 5, False)
+              and bounded_probe_unestablished("TIMEOUT", 5.01, 5, False))
         check("f1-fifo-probe-early-timeout-stays-judged",
-              not bounded_probe_unestablished("TIMEOUT", 4.99, 5))
+              not bounded_probe_unestablished("TIMEOUT", 4.99, 5, False))
+        check("f1-fifo-probe-started-timeout-stays-judged",
+              not bounded_probe_unestablished("TIMEOUT", 5.0, 5, True)
+              and not bounded_probe_unestablished("TIMEOUT", 6.0, 5, True))
         check("f1-fifo-probe-returned-value-stays-judged",
-              not bounded_probe_unestablished("True", 6.0, 5))
+              not bounded_probe_unestablished("True", 6.0, 5, False))
 
         # F-A (RANGE-BOUNDS, hostile store-file on disk): an OVERSIZE CHANGELOG.md is refused by
         # _load_inputs on the pre-open st.st_size ceiling BEFORE the whole file is read into memory,
