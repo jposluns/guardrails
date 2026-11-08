@@ -1562,7 +1562,16 @@ source-path = ".aiqt/core/rules/integ-validation-gates-apply.md"
 start-line = 17
 end-line = 18
 canonical-text = "There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its\nsource. Trust is never a substitute for the gate."
-source-digest = "6e5b8be0330b60fbccc002bf93f87d03716b51a2849b3949e66c8ebd72396400"
+source-digest = "268e17cfc01533b4027a15b40a8890339a9f2d823d5622f5b107bb531307b035"
+
+[[clause]]
+clause-id = "valgat.2"
+corpus-id = "valgat"
+source-path = ".aiqt/core/rules/integ-validation-gates-apply.md"
+start-line = 18
+end-line = 20
+canonical-text = "A caller that can tell, from what it already holds,\nthat a callee will refuse an input withholds the dispatch and reports the refusal; a check ahead of an\nexpensive apply meets guard-input-soundness (grdinp)."
+source-digest = "268e17cfc01533b4027a15b40a8890339a9f2d823d5622f5b107bb531307b035"
 
 [[clause]]
 clause-id = "wowo01.1"

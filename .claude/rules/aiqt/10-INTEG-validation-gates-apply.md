@@ -15,4 +15,6 @@ map-iso-42001-broad: [A.6.2.4]
 # Validation is a gate on apply
 
 There is no trusted-worker fast path: every candidate change is validated before it lands, no matter its
-source. Trust is never a substitute for the gate.
+source. Trust is never a substitute for the gate. A caller that can tell, from what it already holds,
+that a callee will refuse an input withholds the dispatch and reports the refusal; a check ahead of an
+expensive apply meets guard-input-soundness (grdinp).
