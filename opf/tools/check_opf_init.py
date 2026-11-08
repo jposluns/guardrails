@@ -391,13 +391,69 @@ def _selftest_dispatch_guard(test):
     return False
 
 
+def _definition_time_exprs(node):
+    """The child expressions of a def that the interpreter evaluates AT DEFINITION TIME, in
+    the scope that holds the def statement: the decorator expressions and the argument
+    defaults (positional and keyword-only)."""
+    spec = node.args
+    return (list(node.decorator_list) + list(spec.defaults)
+            + [default for default in spec.kw_defaults if default is not None])
+
+
+def _run_time_children(node):
+    """The child nodes of a def charged to the function itself: its body, plus the parameter
+    and return annotations (charged to the function, never as a dispatch position)."""
+    spec = node.args
+    out = []
+    for arg in (spec.posonlyargs + spec.args + spec.kwonlyargs
+                + ([spec.vararg] if spec.vararg else [])
+                + ([spec.kwarg] if spec.kwarg else [])):
+        if arg.annotation is not None:
+            out.append(arg.annotation)
+    if node.returns is not None:
+        out.append(node.returns)
+    out.extend(node.body)
+    return out
+
+
 def _module_function_references(tree):
     """Every reference to a module-level function of `tree`, as (referrer, target, dispatch)
-    rows: referrer is the enclosing module-level function's name (None for module-level code) and
-    dispatch is True when the reference sits inside an `if` branch whose test
-    _selftest_dispatch_guard recognizes. A direct self-reference is discounted."""
+    rows: referrer is the enclosing module-level function's name (None for module-level code),
+    a method body's referrer is its qualified "Class.method" name, and dispatch is True when
+    the reference sits inside an `if` branch whose test _selftest_dispatch_guard recognizes.
+    A decorator expression or an argument default of a module-level def or of a method is
+    recorded under a "<definition time>" referrer: the interpreter evaluates it at import,
+    outside the function, and it never counts as a dispatch. A module-level binding whose
+    targets are all plain names (`probe = _fn`, `TABLE = {"k": _fn}`, plain or annotated) is
+    an alias: the binding itself makes no row for the functions its value holds (other than
+    as a call's callee), and each later read of the alias name makes a row for every such
+    function under the reader's own referrer; an alias never read in its module makes an
+    "<alias binding>" row. Any other reference from module-level code or a class body that
+    is not the callee of a call (a tuple-unpacking alias, a class attribute, an alias of an
+    alias) is recorded under an "<alias binding>" referrer. That referrer never counts as a
+    dispatch, so an alias cannot launder its target into the self-test split. A direct
+    self-reference is discounted."""
     names = {node.name for node in tree.body
              if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    callee_ids = {id(sub.func) for sub in ast.walk(tree) if isinstance(sub, ast.Call)}
+    alias_targets = {}
+    alias_value_ids = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if not all(isinstance(target, ast.Name) and target.id not in names
+                   for target in targets):
+            continue
+        held = [sub for sub in ast.walk(value) if isinstance(sub, ast.Name)
+                and sub.id in names and id(sub) not in callee_ids]
+        for target in targets:
+            alias_targets.setdefault(target.id, set()).update(sub.id for sub in held)
+        alias_value_ids.update(id(sub) for sub in held)
+    alias_read = set()
     rows = []
 
     def scan(node, referrer, dispatch):
@@ -406,8 +462,29 @@ def _module_function_references(tree):
             scan_each(node.body, referrer, dispatch or _selftest_dispatch_guard(node.test))
             scan_each(node.orelse, referrer, dispatch)
             return
-        if isinstance(node, ast.Name) and node.id in names and node.id != referrer:
-            rows.append((referrer, node.id, dispatch))
+        if isinstance(node, ast.ClassDef):
+            scan_each(node.decorator_list, referrer, dispatch)
+            scan_each(node.bases, referrer, dispatch)
+            scan_each([kw.value for kw in node.keywords], referrer, dispatch)
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    scan_each(_definition_time_exprs(item), "<definition time>", dispatch)
+                    scan_each(_run_time_children(item),
+                              "{}.{}".format(node.name, item.name), dispatch)
+                else:
+                    scan(item, referrer, dispatch)
+            return
+        row_referrer = ("<alias binding>" if referrer is None
+                        and id(node) not in callee_ids else referrer)
+        if (isinstance(node, ast.Name) and node.id in names and node.id != referrer
+                and id(node) not in alias_value_ids):
+            rows.append((row_referrer, node.id, dispatch))
+        elif (isinstance(node, ast.Name) and node.id in alias_targets
+              and isinstance(node.ctx, ast.Load)):
+            alias_read.add(node.id)
+            for target in sorted(alias_targets[node.id]):
+                if target != referrer:
+                    rows.append((row_referrer, target, dispatch))
         scan_each(list(ast.iter_child_nodes(node)), referrer, dispatch)
 
     def scan_each(children, referrer, dispatch):
@@ -416,9 +493,13 @@ def _module_function_references(tree):
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            scan_each(list(ast.iter_child_nodes(node)), node.name, False)
+            scan_each(_definition_time_exprs(node), "<definition time>", False)
+            scan_each(_run_time_children(node), node.name, False)
         else:
             scan(node, None, False)
+    for alias in sorted(set(alias_targets) - alias_read):
+        rows.extend(("<alias binding>", target, False)
+                    for target in sorted(alias_targets[alias]))
     return names, rows
 
 
@@ -490,15 +571,22 @@ def _selftest_production_split(tree, cross_refs=frozenset(), forced=frozenset())
       `--selftest-*-child` children).
     - A reference is test-side when it is dispatch-guarded, made from a function ALREADY in the
       set, or is the dispatch of a candidate from `main` or from module-level code (how every
-      suite starts). Functions coupled by UNGUARDED references into a cycle (a mutual pair, a
-      longer cycle) form one strongly connected group that joins only as a whole, judged on the
-      references arriving from OUTSIDE the group alone, so the members can never vouch for each
-      other. The set grows one proven function or group at a time until nothing more qualifies.
-    - Everything the growth never reaches is production: a function reached from production
-      through any other reference (so a helper with "self_test" in its name that production
-      calls is held to the rules), and equally a pair, a longer cycle or a self-recursive
-      function with no test-side reference from outside itself, which under a
-      greatest-fixed-point reading could hold itself test-side and hide a call.
+      suite starts); a module-level or class-body reference that is not a call's callee (an
+      alias, which could be called from anywhere) is never such a dispatch, and a method body
+      is judged as a production function under its own "Class.method" referrer, never as
+      module-level code. Decorator expressions and argument defaults of a module-level def or
+      a method run at import, outside the function, so they are never such a dispatch and
+      never count as the function's own references. Functions coupled by UNGUARDED
+      references into a cycle (a mutual pair, a longer cycle) form one strongly connected group that joins only as a
+      whole, judged on the references arriving from OUTSIDE the group alone, so the members
+      can never vouch for each other. The set grows one proven function or group at a time
+      until nothing more qualifies.
+    - Everything the growth never reaches is production. A helper with "self_test" in its
+      name is held to the rules whenever production reaches it through any reference that is
+      not proven test-side: from a function body, a method body, a decorator expression, an
+      argument default, or a module-level alias binding. A pair, a longer cycle or a
+      self-recursive function with no test-side reference from outside itself stays
+      production.
     - A function referenced from nowhere in its own module is production (an exported seam), a
       candidate included, unless another scanned module names it (`cross_refs`), as the
       cross-module self-test seams are; a mutant therefore cannot mint an unreferenced
@@ -795,7 +883,14 @@ def _homes_module_summary(text):
         elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
               and len(node.value) < 200):
             mentions.add(node.value)
-    names, rows = _module_function_references(tree)
+    try:
+        names, rows = _module_function_references(tree)
+    except RecursionError:
+        # A source can parse and still nest an expression deeper than the reference walk's
+        # recursion allows; that source is a cannot-evaluate outcome, never a traceback.
+        summary["error"] = "RecursionError in the reference walk"
+        _HOMES_SCAN_CACHE[key] = summary
+        return summary
     defcounts = {}
     callcounts = {}
     for node in tree.body:
@@ -818,7 +913,8 @@ def _homes_rule_violations(sources):
     opf/tools modules; an empty list means every production run_init_operation call reads the one
     homes rule and nothing in production writes the rule out from under it (see the roster
     comment: fail-closed discovery over every production unit, the self-test split excluded by
-    reachability, plus the minimum presence roster). A missing or unparsable source, or a roster
+    reachability, plus the minimum presence roster). A missing or unparsable source, a source
+    whose reference walk overflows the recursion limit (a cannot-evaluate finding), or a roster
     function absent or defined more than once at module level or not calling run_init_operation
     exactly once, is itself a finding.
 
@@ -849,7 +945,7 @@ def _homes_rule_violations(sources):
             continue
         summary = _homes_module_summary(text)
         if summary["error"] is not None:
-            found.append("{}: cannot parse ({})".format(fname, summary["error"]))
+            found.append("{}: cannot evaluate ({})".format(fname, summary["error"]))
             continue
         summaries[fname] = summary
     for fname, func in _HOMES_RULE_SITES:
@@ -888,14 +984,22 @@ def _homes_rule_violations(sources):
             try:
                 tree = ast.parse(summary["text"])
             except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
-                found.append("{}: cannot parse ({})".format(fname, type(exc).__name__))
+                found.append("{}: cannot evaluate ({})".format(fname, type(exc).__name__))
                 continue
             selftest = _split_from_references(summary["names"], summary["rows"],
                                               cross_key, forced)
             store_aliases = set(_store_import_aliases(tree))
             direct_names, init_aliases = _init_callee_spellings(tree)
-            units = [(None, [node for node in tree.body
-                             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))])]
+            # Decorator expressions and argument defaults run at import, so a self-test
+            # function's definition-time expressions are production and scan with the
+            # module-level unit; a production function's own unit already walks its whole def.
+            module_nodes = [node for node in tree.body
+                            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            module_nodes += [expr for node in tree.body
+                             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                             and node.name in selftest
+                             for expr in _definition_time_exprs(node)]
+            units = [(None, module_nodes)]
             units += [(node.name, [node]) for node in tree.body
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                       and node.name not in selftest]
@@ -4795,6 +4899,87 @@ def _suite_isolated(invoke):
                      "            init_op.run_init_operation = None\n"
                      "            result = init_op.run_init_operation(",
                      "references run_init_operation"),
+                    ("a decorator calling the seam, applied to a self_test-named function",
+                     "_zz_homes_mutant.py", None,
+                     "import sys\n\nfrom _opf_init_operation import run_init_operation\n\n\n"
+                     "def _arm(fn):\n    return run_init_operation(fn)\n\n\n"
+                     "@_arm\ndef _homes_wrap_self_test(root):\n    return None\n\n\n"
+                     "if __name__ == \"__main__\":\n"
+                     "    if \"--self-test\" in sys.argv:\n"
+                     "        _homes_wrap_self_test(None)\n",
+                     "_arm does not pass homes2"),
+                    ("an argument default on a self_test-named function calling the seam",
+                     "_zz_homes_mutant.py", None,
+                     "import sys\n\nfrom _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_seed_self_test(root, seed=run_init_operation(None)):\n"
+                     "    return seed\n\n\n"
+                     "if __name__ == \"__main__\":\n"
+                     "    if \"--self-test\" in sys.argv:\n"
+                     "        _homes_seed_self_test(None)\n",
+                     "module-level code does not pass homes2"),
+                    ("a method dispatching to a self_test-named helper that calls the seam",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_probe_self_test(root):\n    return run_init_operation(root)"
+                     "\n\n\nclass _InitDriver:\n"
+                     "    def prepare(self, root):\n"
+                     "        return _homes_probe_self_test(root)\n",
+                     "_homes_probe_self_test does not pass homes2"),
+                    ("a module-level alias of a self_test-named helper that production calls",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_probe_self_test(root):\n    return run_init_operation(root)"
+                     "\n\n\nprobe = _homes_probe_self_test\n\n\n"
+                     "def _init_probe(root):\n    return probe(root)\n",
+                     "_homes_probe_self_test does not pass homes2"),
+                    ("a deeply nested expression that overflows the reference walk",
+                     "_zz_homes_mutant.py", None,
+                     "probe = 0" + " + 0" * 4000 + "\n",
+                     "cannot evaluate (RecursionError in the reference walk)"),
+                    ("a self_test-named decorator, calling the seam, on a production def",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_deco_self_test(fn):\n    run_init_operation(None)\n"
+                     "    return fn\n\n\n"
+                     "@_homes_deco_self_test\ndef _init_prod(root):\n    return root\n",
+                     "_homes_deco_self_test does not pass homes2"),
+                    ("a production def whose default calls a self_test-named helper",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_probe_self_test(root):\n    return run_init_operation(root)"
+                     "\n\n\ndef _init_prod(root, seed=_homes_probe_self_test(None)):\n"
+                     "    return seed\n",
+                     "_homes_probe_self_test does not pass homes2"),
+                    ("a self_test-named decorator, calling the seam, on a method",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_deco_self_test(fn):\n    run_init_operation(None)\n"
+                     "    return fn\n\n\nclass _InitDriver:\n"
+                     "    @_homes_deco_self_test\n    def prepare(self, root):\n"
+                     "        return root\n",
+                     "_homes_deco_self_test does not pass homes2"),
+                    ("a tuple alias of a self_test-named helper that production calls",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_probe_self_test(root):\n    return run_init_operation(root)"
+                     "\n\n\nprobe, _unused = _homes_probe_self_test, None\n\n\n"
+                     "def _init_probe(root):\n    return probe(root)\n",
+                     "_homes_probe_self_test does not pass homes2"),
+                    ("a dict entry aliasing a self_test-named helper that production calls",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_probe_self_test(root):\n    return run_init_operation(root)"
+                     "\n\n\n_TABLE = {\"probe\": _homes_probe_self_test}\n\n\n"
+                     "def _init_probe(root):\n    return _TABLE[\"probe\"](root)\n",
+                     "_homes_probe_self_test does not pass homes2"),
+                    ("a class attribute aliasing a self_test-named helper",
+                     "_zz_homes_mutant.py", None,
+                     "from _opf_init_operation import run_init_operation\n\n\n"
+                     "def _homes_probe_self_test(root):\n    return run_init_operation(root)"
+                     "\n\n\nclass _InitDriver:\n"
+                     "    probe = staticmethod(_homes_probe_self_test)\n\n\n"
+                     "def _init_probe(root):\n    return _InitDriver.probe(root)\n",
+                     "_homes_probe_self_test does not pass homes2"),
                 ]
                 for mutant_label, fname, old, new, expect in rule_mutants:
                     mutated_sources = dict(rule_sources)
