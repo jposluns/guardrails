@@ -3336,14 +3336,14 @@ _SPG_FIX_ROWS = (
      None, True),
     ("(spg-x34) an & inside a { } group after a hit", "python3 - || { true & }", True, None, False),
     ("(spg-x35) an & inside a substitution after a hit", "python3 - && x=$(true &)", True, None, False),
-    ("(spg-x36) an & inside a second group after a group hit", "(python3 -) && (true &)", True, None, False),
+    ("(spg-x36) an & inside a second group after a group hit", "(python3 -) && (true &)", True, None, True),
     ("(spg-x37) an & inside backquotes after a hit", "python3 - && echo `true &`", True, None, False),
     ("(spg-x38) a substitution expanded before the background redirect", "x=$(python3 -) &", True, "bgdrop",
      True),
     ("(spg-x39) a fed substitution in a background command", "x=$(echo \"print('fed')\" | python3 -) &", False,
      None, True),
     ("(spg-x40) an echoed substitution in a background command", "echo $(python3 -) &", True, None, False),
-    ("(spg-x41) a process substitution in a background command", "cat <(python3 -) &", True, None, False),
+    ("(spg-x41) a process substitution in a background command", "cat <(python3 -) &", True, None, True),
     ("(spg-x42) a subshell in a $(( whose closers stand apart", "x=$((python3 -) )", True, "arithclose", True),
     ("(spg-x43) a fed subshell in a $(( whose closers stand apart", "x=$((echo \"print('fed')\" | python3 -) )",
      False, None, True),
@@ -3356,7 +3356,37 @@ _SPG_FIX_ROWS = (
     ("(spg-x48) a # right after a closing substitution", "echo $(echo a)#; python3 -", True, "glue", True),
     ("(spg-x49) a # standing apart after a substitution", "echo $(echo a) #; python3 -", False, None, True),
     ("(spg-x50) a # right after a closing backquote", "echo `echo a`#; python3 -", True, None, False),
-    ("(spg-x51) a # right after an arithmetic $(( ))", "echo $((1))#; python3 -", True, None, False))
+    ("(spg-x51) a # right after an arithmetic $(( ))", "echo $((1))#; python3 -", True, None, False),
+    ("(spg-x52) a substitution inside ${ }", "echo ${v:-$(python3 -)}", True, "bracesubst", True),
+    ("(spg-x53) a fed substitution inside ${ }", "echo ${v:-$(echo \"print('fed')\" | python3 -)}", False,
+     None, True),
+    ("(spg-x54) a substitution inside ${ } in an assignment", "x=${v:-$(python3 -)}", True, None, True),
+    ("(spg-x55) a fed substitution inside ${ } in an assignment",
+     "x=${v:-$(echo \"print('fed')\" | python3 -)}", False, None, True),
+    ("(spg-x56) a process substitution inside ${ }", "echo ${v:-<(python3 -)}", True, "bracesubst", True),
+    ("(spg-x57) a fed process substitution inside ${ }",
+     "echo ${v:-<(echo \"print('fed')\" | python3 -)}", False, None, True),
+    ("(spg-x58) a backquote substitution inside ${ }", "echo ${v:-`python3 -`}", True, "bracesubst", True),
+    ("(spg-x59) a $$ before a literal { then a substitution", "echo $${ $(python3 -)", True, None, True),
+    ("(spg-x60) a $$ before a literal { then a separator", "echo $${ ; python3 -", True, "bracepid", True),
+    ("(spg-x61) a fed group reading a $$ and its closing )",
+     "echo \"print('fed')\" | (echo $(echo $${); python3 -)", False, None, True),
+    ("(spg-x62) an & inside a pattern substitution", "python3 - ${q//&/+}", True, "braceword", True),
+    ("(spg-x63) a fed hit with an & inside a pattern substitution",
+     "echo \"print('fed')\" | python3 - ${q//&/+}", False, None, True),
+    ("(spg-x64) an & inside ${ } after a hit", "python3 - && echo ${v:-&}", True, "braceword", True),
+    ("(spg-x65) a fed hit before an & inside ${ }", "echo \"print('fed')\" | python3 - && echo ${v:-&}",
+     False, None, True),
+    ("(spg-x66) a < inside ${ }", "python3 - ${v:-<x}", True, "braceword", True),
+    ("(spg-x67) a fed hit with a < inside ${ }", "echo \"print('fed')\" | python3 - ${v:-<x}", False, None,
+     True),
+    ("(spg-x68) job control on before a background hit", "set -m; python3 - & wait", True, "monitor", True),
+    ("(spg-x69) job control on by option name", "set -o monitor; python3 - & wait", True, None, True),
+    ("(spg-x70) job control turned back off", "set -m; set +m; python3 - & wait", False, None, True),
+    ("(spg-x71) a fed background hit under job control",
+     "set -m; echo \"print('fed')\" | python3 - & wait", False, None, True),
+    ("(spg-x72) job control off again by option name",
+     "set -o monitor; set +o monitor; python3 - & wait", False, None, True))
 _SPG_ORACLE_WAIT = 4
 
 
@@ -3381,13 +3411,19 @@ def _spg_flips():
         "bgdrop": {"_stdin_py_bg_drops": lambda stack, scopes, clean: True},
         "arithclose": {"_STDIN_PY_ARITH_STRICT": False},
         "brace": {"_stdin_py_brace": lambda raw, depth: 0},
-        "glue": {"_STDIN_PY_COMMENT_GLUE": False}}
+        "glue": {"_STDIN_PY_COMMENT_GLUE": False},
+        "bracesubst": {"_STDIN_PY_BRACE_SUBST": False},
+        "braceword": {"_STDIN_PY_BRACE_WORD": False},
+        "bracepid": {"_STDIN_PY_BRACE_PID": False},
+        "monitor": {"_STDIN_PY_MONITOR": False}}
 
 
 def _spg_oracle(failures, handler):
     """Run each _SPG_ORACLE_ROWS command under real bash, standard input an open pipe that is never written,
     in its own session under _SPG_ORACLE_WAIT seconds; a run still waiting then is killed by its process group
-    and counts as blocked. The hook must deny exactly the rows that block, and each must block as stated."""
+    and counts as blocked. The pipe's write end is closed right after the kill, so a set -m job that survives
+    in its own process group reads end of file, runs its empty program and exits instead of holding the output
+    pipes open. The hook must deny exactly the rows that block, and each must block as stated."""
     if shutil.which("bash") is None or shutil.which("python3") is None:
         failures.append("(spg-oracle) the real-bash oracle needs bash and python3 on PATH")
         return
@@ -3407,10 +3443,13 @@ def _spg_oracle(failures, handler):
                 blocked = False
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
+                fd, write_end = write_end, -1
+                os.close(fd)
                 proc.communicate()
                 blocked = True
         finally:
-            os.close(write_end)
+            if write_end != -1:
+                os.close(write_end)
         if denied != blocked or blocked != expected:
             failures.append("{}: hook deny {} but real bash blocked {} (expected {}), exit {}".format(
                 label, denied, blocked, expected, proc.returncode))

@@ -2011,6 +2011,10 @@ _CLOSE_SWEEP_DISPOSITIONS = (
     ("tools/pin.py", "do_recover", "AFTER", "fd", "root_fd", 4,
      _CS_P1.format("each fd, root_fd = root_fd, None; os.close(fd) is followed by a return in its block, so the "
                    "close of root_fd after the try never runs after it")),
+    ("tools/selftest_aiqt_hooks.py", "_spg_oracle", "TRY", "fd", "write_end", 1,
+     _CS_P1.format("fd, write_end = write_end, -1 runs before os.close(fd), so the finally's write_end != -1 "
+                   "guard never reaches the closed number; the early close lets a kill survivor in another "
+                   "process group read end of file and exit")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "AFTER", "jr_fd", "jr_fd", 3,
      _CS_FRESH.format("self-test legs", "leg's journal-root open, or its jr_fd = None ahead of one")),
     ("opf/tools/_opf_adopt_apply.py", "_self_test_checks", "AFTER", "root_fd", "root_fd", 10,
