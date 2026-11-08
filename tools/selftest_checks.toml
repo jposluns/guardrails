@@ -3307,6 +3307,54 @@ expected-check-ids = [
 ]
 
 [[suite]]
+# The premise-review evaluator's read-side vectors (opf/tools/_opf_premise_gate.py), replayed over
+# synthetic stores by its tools/ runner: each input/* and history/* row asserts one evaluation
+# outcome, and its flip/* companion asserts the same fixture turns red with that row's one guard
+# removed in process.
+id = "premise-gate-selftest"
+runner = "tools/check_premise_gate.py"
+args = ["--self-test"]
+expected-check-ids = [
+  "input/no-store",
+  "flip/input/no-store",
+  "input/no-store-first-line",
+  "input/worklog-unreadable",
+  "flip/input/worklog-unreadable",
+  "input/archive-bucket-unreadable",
+  "flip/input/archive-bucket-unreadable",
+  "input/invalid-finding-record",
+  "flip/input/invalid-finding-record",
+  "input/duplicate-wl",
+  "flip/input/duplicate-wl",
+  "input/unknown-flow-event",
+  "flip/input/unknown-flow-event",
+  "input/malformed-scope",
+  "flip/input/malformed-scope",
+  "input/verdict-missing-rev",
+  "flip/input/verdict-missing-rev",
+  "input/no-start-entry",
+  "flip/input/no-start-entry",
+  "input/item-missing",
+  "flip/input/item-missing",
+  "input/finding-without-create-entry",
+  "flip/input/finding-without-create-entry",
+  "input/head-moved",
+  "flip/input/head-moved",
+  "history/start-only",
+  "flip/history/start-only",
+  "history/start-only-first-line",
+  "history/baseline-only",
+  "flip/history/baseline-only",
+  "history/failed-rounds-only",
+  "flip/history/failed-rounds-only",
+  "history/importer-flow-lines-ignored",
+  "flip/history/importer-flow-lines-ignored",
+  "history/finding-present-not-evaluated",
+  "flip/history/finding-present-not-evaluated",
+  "history/finding-present-first-line",
+]
+
+[[suite]]
 id = "entry-guard-selftest"
 runner = "tools/check_entry_guard.py"
 expected-check-ids = [

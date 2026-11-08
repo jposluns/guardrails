@@ -1243,6 +1243,9 @@ jobs:
       - name: Entry-guard gate
         shell: bash
         run: python3 -I -B tools/check_entry_guard.py
+      - name: Premise-gate evaluator self-test (execution-reconciled)
+        shell: bash
+        run: python3 -I -B tools/check_selftest_execution.py --suite premise-gate-selftest
       - name: Verifier delivery self-test (execution-reconciled)
         shell: bash
         run: python3 -I -B tools/check_selftest_execution.py --suite verifier-delivery-selftest

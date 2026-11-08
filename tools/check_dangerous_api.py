@@ -494,6 +494,10 @@ ALLOWLIST = (
      "self-test probe: exec_module of the repository's own NEWTAB contract script (a fixture"
      " copy of .github/check_newtab_contract.py), opf/enforcement/claude/pretooluse_deny.py or"
      " tools/_gen_common.py, the equivalent of an import; no external input"),
+    ("tools/check_premise_gate.py", "_load_gate", "code", 1,
+     "self-test loader: exec_module of the repository's own opf/tools/_opf_premise_gate.py (the"
+     " evaluator under test, loaded from its fixed repository path), the equivalent of an"
+     " import; no external input"),
     ("opf/tools/_opf_adopt_discover.py",
      "self_test.DiscoveryTests.test_change_during_discovery_is_cannot_evaluate.os_hook", "shell", 1,
      "self-test fault injector: mock.patch.object(os, attribute) where every caller passes the"

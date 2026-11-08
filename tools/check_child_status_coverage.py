@@ -535,6 +535,13 @@ DYNAMIC_LOADS_REVIEWED = (
     ("tools/_selftest_exit_report.py", ("loader.exec_module(main)",), (),
      "the registered self-test runner, loaded as __main__ by _bootstrap_main only in the child the execution "
      "gate launches, never in a process that imports this module to arm its report"),
+    ("tools/check_premise_gate.py",
+     ("importlib.util.spec_from_file_location('_opf_premise_gate', str(ROOT / GATE_REL))",
+      "spec.loader.exec_module(module)"),
+     (), "the premise-review evaluator library (opf/tools/_opf_premise_gate.py, no entry point), loaded for "
+     "in-process vectors over tempdir fixture stores; the evaluator spawns nothing, and the store readers it "
+     "imports reach subprocess only inside their own self-tests, which neither it nor this runner calls, so "
+     "the row follows nothing"),
     ("tools/gen_crosswalk.py",
      ("importlib.util.spec_from_file_location('_crosswalk_fdopen_flip_' + flip_path.stem, flip_path)",
       "spec.loader.exec_module(reverted)"),
