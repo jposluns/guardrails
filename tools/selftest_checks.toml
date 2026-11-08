@@ -4485,6 +4485,8 @@ expected-check-ids = [
   "round/repository-control-cannot-evaluate",
   "round/repository-at-length-validates",
   "round/repository-over-length-cannot-evaluate",
+  "round/repository-owner-leading-dot-cannot-evaluate",
+  "round/repository-owner-leading-dash-cannot-evaluate",
   "round/repository-trailing-newline-cannot-evaluate",
   "round/repository-name-at-length-validates",
   "round/repository-name-over-length-cannot-evaluate",
@@ -4527,11 +4529,13 @@ expected-check-ids = [
   # ---------- the registry reader and the reconciliation legs ----------
   "harness/registry-unreadable-harness-error",
   "harness/registry-not-toml-harness-error",
+  "harness/registry-not-utf8-harness-error",
   "harness/registry-nested-too-deep-harness-error",
   "harness/registry-out-of-memory-harness-error",
   "harness/execution-set-missing-id-fails",
   "harness/execution-set-extra-id-fails",
   "harness/execution-set-reconciled-clean",
+  "harness/execution-set-reaches-verdict",
 ]
 
 [[suite]]

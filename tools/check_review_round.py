@@ -407,6 +407,34 @@ def _execution_set_failures(expected, executed):
     return failures
 
 
+def _reconciliation_reaches_verdict():
+    """(exit status, the missing id's failure line printed) of self_test when the executed set omits
+    one registered id, with the case rows stubbed and the harness state isolated: this holds the
+    call site in self_test that folds the reconciliation failures into the verdict, which the rows
+    that call _execution_set_failures directly cannot."""
+    expected = _expected_check_ids()
+    if expected is None:
+        return ("no registry", False)
+    missing = sorted(expected)[-1]
+
+    def stub_cases(base):
+        # recorded directly: these are the simulated harness state, not check rows of this suite
+        for name in sorted(expected):
+            if name != missing:
+                _EXECUTED_SET.add(name)
+                EXECUTED.append(name)
+
+    printed = io.StringIO()
+
+    def run():
+        with contextlib.redirect_stdout(printed):
+            return self_test()
+
+    code = _patched("FAILURES", [], lambda: _patched("EXECUTED", [], lambda: _patched(
+        "_EXECUTED_SET", set(), lambda: _patched("_self_test_cases", stub_cases, run))))
+    return (code, "execution-set/missing: {}".format(missing) in printed.getvalue())
+
+
 def check(name, got, want):
     if name in _EXECUTED_SET:
         print("SELF-TEST HARNESS ERROR: duplicate check id {!r}".format(name), file=sys.stderr)
@@ -462,8 +490,9 @@ def _manifest_text(brief, brief_sha, families=("alpha", "beta"), critical=False,
 
 
 def _outcome(base, text, head=REV, table_text=None, skip_table=False):
-    """("ok", "") or ("cannot-evaluate", reason) of validate_round on a written fixture; text None
-    leaves the manifest file absent."""
+    """("ok", ""), ("cannot-evaluate", reason) or ("escaped-<class>", reason) of validate_round on a
+    written fixture; text None leaves the manifest file absent. The escaped outcomes cover every
+    class the manifest parse path can raise, so a row whose refusal is removed fails by name."""
     tmp = Path(tempfile.mkdtemp(dir=base))
     manifest = tmp / "manifest.toml"
     if text is not None:
@@ -476,7 +505,7 @@ def _outcome(base, text, head=REV, table_text=None, skip_table=False):
         validate_round(str(manifest), head, str(table))
     except CannotEvaluate as exc:
         return ("cannot-evaluate", str(exc))
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, RecursionError, MemoryError) as exc:
         # a fault that escaped the refusals and reached a raw open: the row fails by this named
         # outcome, never by a traceback
         return ("escaped-" + type(exc).__name__, str(exc))
@@ -484,13 +513,13 @@ def _outcome(base, text, head=REV, table_text=None, skip_table=False):
 
 
 def _direct(manifest_path, head, table_path):
-    """("ok", "") or ("cannot-evaluate", reason) of validate_round on caller-supplied paths, for the
-    rows whose refusal must come before any file is opened."""
+    """("ok", ""), ("cannot-evaluate", reason) or ("escaped-<class>", reason) of validate_round on
+    caller-supplied paths, for the rows whose refusal must come before any file is opened."""
     try:
         validate_round(manifest_path, head, table_path)
     except CannotEvaluate as exc:
         return ("cannot-evaluate", str(exc))
-    except (ValueError, OSError) as exc:
+    except (ValueError, OSError, RecursionError, MemoryError) as exc:
         # a fault that escaped the refusals and reached a raw open: the row fails by this named
         # outcome, never by a traceback
         return ("escaped-" + type(exc).__name__, str(exc))
@@ -584,6 +613,15 @@ def _self_test_cases(base):
     check("round/repository-over-length-cannot-evaluate",
           _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
                                                     'repository = "{}/{}"'.format("a" * 101, "b" * 100))),
+                   "owner/name"), True)
+    # the owner side's first character: '.' and '-' are refused there exactly as on the name side
+    check("round/repository-owner-leading-dot-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = ".fixture/round"')),
+                   "owner/name"), True)
+    check("round/repository-owner-leading-dash-cannot-evaluate",
+          _refused(_outcome(base, valid_two.replace('repository = "fixture/round"',
+                                                    'repository = "-fixture/round"')),
                    "owner/name"), True)
     # the name side's own edges: its length bound, its first character, and the end anchor (a $
     # would admit a trailing newline that \Z refuses)
@@ -696,9 +734,22 @@ def _self_test_cases(base):
     check("round/attempts-not-implemented-cannot-evaluate", (code, "attempts ledger" in out), (2, True))
     code, out = _main_quiet(argv + ["--decisions", str(manifest)])
     check("round/decisions-not-implemented-cannot-evaluate", (code, "decision records" in out), (2, True))
-    # --execution-report takes only an absolute report path (the execution-set gate's launch form)
+    # --execution-report takes only an absolute report path (the execution-set gate's launch form).
+    # self_test is stubbed for this one call so the row asserts the usage refusal and that the suite
+    # was never re-entered: a refusal that let a relative path through would otherwise re-enter the
+    # running suite in-process and surface as a duplicate-id harness exit, never as this row's name.
+    entered = []
+
+    def _entered_self_test(report_path=None):
+        entered.append(report_path)
+        return 0
+
+    usage_err = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(usage_err):
+        code = _patched("self_test", _entered_self_test,
+                        lambda: main(["--execution-report", "relative-report.json"]))
     check("round/execution-report-relative-cannot-evaluate",
-          _main_quiet(["--execution-report", "relative-report.json"])[0], 2)
+          (code, "usage:" in usage_err.getvalue(), entered), (2, True, []))
     # the named group this gate reads from the checker's harness first-line grammar
     check("group/harness-family-named-group",
           (_harness_family("WORKER_STATUS: PASS (account=a, rc=0, family=b, model=c, effort=d)"),
@@ -713,6 +764,11 @@ def _self_test_cases(base):
     not_toml = harness_tmp / "registry-not-toml.toml"
     not_toml.write_text("suite = \n", encoding="utf-8")
     check("harness/registry-not-toml-harness-error", _registry_refusal(not_toml), (None, True))
+    # not valid UTF-8: tomllib.load raises UnicodeDecodeError here, a ValueError that is not a
+    # TOMLDecodeError, so this row is the one that holds the handler's ValueError arm
+    not_utf8 = harness_tmp / "registry-not-utf8.toml"
+    not_utf8.write_bytes(b'suite = "\xff"\n')
+    check("harness/registry-not-utf8-harness-error", _registry_refusal(not_utf8), (None, True))
     nested = harness_tmp / "registry-nested.toml"
     nested.write_text("suite = " + "[" * 10000 + "]" * 10000 + "\n", encoding="utf-8")
     check("harness/registry-nested-too-deep-harness-error", _registry_refusal(nested), (None, True))
@@ -724,6 +780,8 @@ def _self_test_cases(base):
           _execution_set_failures({"x"}, {"x", "y"}), ["execution-set/extra: y"])
     check("harness/execution-set-reconciled-clean",
           _execution_set_failures({"x", "y"}, {"y", "x"}), [])
+    # the call site: a missing id must reach self_test's verdict, not only the function's return
+    check("harness/execution-set-reaches-verdict", _reconciliation_reaches_verdict(), (1, True))
 
 
 def self_test(report_path=None):
