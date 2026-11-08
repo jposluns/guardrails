@@ -3678,8 +3678,9 @@ _PSM_IDIOM_ROWS = (
     ("(psm-i8) pidwait -f with the bracket idiom", "pidwait -f '[j]ob7'"))
 # Long bracket idioms, each one scan of the command: (label, command, decision). A test that searched the
 # whole command once per class letter used about 104 s of CPU on the first at 400 KB; each row must stay
-# under _PSM_TIMED_BOUND CPU seconds (about 0.01 to 0.06 s in-process on an 80-core host with Python 3.14.4,
-# 2026-10-29). The last is a literal whose period letter is the class letter, which is not judged and denies.
+# under _PSM_TIMED_BOUND CPU seconds of the calling thread's own work (_hook_cpu_timed; about 0.01 to
+# 0.06 s in-process on an 80-core host with Python 3.14.4, 2026-10-29). The last is a literal whose
+# period letter is the class letter, which is not judged and denies.
 _PSM_TIMED_ROWS = (
     ("(psm-t1) a 200,000-letter class", "pgrep -f '[" + "a" * 200000 + "]x' " + "b" * 200000, "allow"),
     ("(psm-t2) a 200,000-letter literal", "pgrep -f '[b]" + "a" * 199999 + "c' " + "a" * 200000, "allow"),
@@ -3949,15 +3950,318 @@ def _test_trkasy_no_amp(failures, tmp):
         aiqt_hooks._orch_foreground_detach_lexed = fixed
 
 
+_WAIT_LOOP_DENY_COMMAND = "while true; do gh run view 1; sleep 30; done &"
+
+
+_WAIT_LOOP_CHECKS_API_COMMANDS = ("gh pr checks", "gh pr status", "gh run watch")
+
+
+# The only spans of a poll-loop deny text (flattened and lower-cased) that may name the foreground, the
+# background dispatch flag, or the loop itself ("a foreground command" only describes the denied call): the
+# clause that forbids resubmitting the loop, and exit (1)'s
+# dispatch of the CI status reader (a different command, not the loop). Outside them, any word of
+# _WAIT_LOOP_RERUN_WORDS offers the loop again in some form (in the foreground, as a tracked dispatch, or by a
+# rerun), which contradicts the denial even where it never says "resubmit".
+_WAIT_LOOP_SANCTIONED_SPANS = (
+    "do not resubmit the loop in any form (neither as a tracked background dispatch nor in the foreground)",
+    "a background dispatch (run_in_background: true) that runs that reader",
+    "do not resubmit the loop")
+_WAIT_LOOP_RERUN_WORDS = ("in the foreground", "foreground wait", "run it foreground", "run_in_background",
+                          "the loop", "this loop", "rerun", "re-run", "keep it foreground",
+                          "retry it as a tracked background dispatch", "start the poll again",
+                          "the same polling command again")
+
+
+def _wait_loop_deny_text_faults(reason, banner):
+    """The faults of a deny text for a backgrounded polling loop (orch_untracked_wait_loop's, and
+    orch_truncation_guard's bare-'&' detach deny on the same loop). Neither the reason nor the banner may name
+    gh pr checks, gh pr status or gh run watch (each reads the Checks API, which a fine-grained token cannot
+    read, as tools/ci-status.sh's header says). Each must forbid resubmitting the loop: it carries "do not
+    resubmit the loop", every "resubmit" in it is inside that phrase, and it never says "same loop" or gives
+    the generic detach advice that would resubmit it (use the tracked background dispatch, or keep the
+    command in the foreground). Outside the do-not-resubmit clause and exit (1)'s dispatch of the reader
+    (_WAIT_LOOP_SANCTIONED_SPANS) it offers neither a foreground run or wait, run_in_background, the loop,
+    nor a rerun (_WAIT_LOOP_RERUN_WORDS), so a reworded offer to run the loop again ("run the loop in the foreground",
+    "rerun the loop with run_in_background", "keep it foreground", "retry it as a tracked background
+    dispatch", "start the poll again", "the same polling command again") is a fault. The remedy is one tracked task read by its exit
+    status, never by output words; the reason confines that exit to a CI wait in a repository that has such a reader and sends every
+    other wait to the tracked wake. The hook ships to adopter repositories that may have no
+    tools/ci-status.sh, so that path is not required; where the text names it, it must be only an example
+    ("such as tools/ci-status.sh")."""
+    faults = []
+    for where, text in (("reason", reason), ("banner", banner)):
+        flat = " ".join(text.split()).lower()
+        for name in _WAIT_LOOP_CHECKS_API_COMMANDS:
+            if name in flat:
+                faults.append("the {} names {}".format(where, name))
+        if flat.count("tools/ci-status.sh") != flat.count("such as tools/ci-status.sh"):
+            faults.append("the {} names tools/ci-status.sh other than as an example".format(where))
+        if "exit status" not in flat:
+            faults.append("the {} does not say to read the exit status".format(where))
+        if "do not resubmit the loop" not in flat:
+            faults.append("the {} does not say do not resubmit the loop".format(where))
+        if flat.count("resubmit") != flat.count("do not resubmit the loop"):
+            faults.append("the {} says resubmit other than in do not resubmit the loop".format(where))
+        if "same loop" in flat:
+            faults.append("the {} suggests resubmitting the same loop".format(where))
+        for advice in ("use the platform's tracked background dispatch", "keep the command in the foreground",
+                       "run it foreground", "use the tracked background dispatch or run it in the foreground"):
+            if advice in flat:
+                faults.append("the {} gives the generic detach advice {!r}, which resubmits the loop"
+                              .format(where, advice))
+        rest = flat
+        for span in _WAIT_LOOP_SANCTIONED_SPANS:
+            rest = rest.replace(span, " ")
+        for word in _WAIT_LOOP_RERUN_WORDS:
+            if word in rest:
+                faults.append("the {} offers to run the loop again ({!r} outside the do-not-resubmit clause and "
+                              "exit (1))".format(where, word))
+    flat = " ".join(reason.split()).lower()
+    if "never by matching success or failure words" not in flat:
+        faults.append("the reason does not forbid matching success or failure words in the output")
+    if "(1) only for a ci wait in a repository that has a ci status reader" not in flat:
+        faults.append("the reason does not confine exit (1) to a CI wait in a repository with a CI status reader")
+    if "(2) otherwise" not in flat:
+        faults.append("the reason does not send every other wait to exit (2), the tracked wake")
+    return faults
+
+
+def _wait_loop_deny_faults(handler, root, command=_WAIT_LOOP_DENY_COMMAND):
+    """handler's deny on command, _WAIT_LOOP_DENY_COMMAND unless given (a foreground call in registry scope
+    at root), judged by _wait_loop_deny_text_faults; a call that does not deny is itself the fault."""
+    code, stdout_obj, _stderr = handler({"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash",
+                                         "cwd": str(root), "tool_input": {"command": command}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        return ["the poll loop did not deny ({})".format(_reduce_result(code, stdout_obj))]
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    banner = (stdout_obj or {}).get("systemMessage", "")
+    if not isinstance(reason, str) or not isinstance(banner, str):
+        return ["the reason or banner is not a string"]
+    return _wait_loop_deny_text_faults(reason, banner)
+
+
+# Each mutant appends text to the orch_untracked_wait_loop deny reason that the row must catch: the label,
+# the appended text, and a word every fault it must raise holds.
+_WAIT_LOOP_DENY_MUTANTS = (
+    ("gh-pr-checks", " (for example: timeout <seconds> gh pr checks <ref> --watch)", "names gh pr checks"),
+    ("resubmit-tracked", " (3) resubmit this loop with run_in_background: true.", "resubmit other than"),
+    ("gh-run-watch", " (3) run gh run watch <id>.", "names gh run watch"),
+    ("gh-pr-status", " (3) run gh pr status.", "names gh pr status"),
+    ("foreground-wait", " Or run the loop in the foreground and wait.", "run the loop again"),
+    ("rerun-tracked", " (3) rerun the loop with run_in_background: true.", "run the loop again"),
+    ("keep-it-foreground", " Or keep it foreground.", "run the loop again"),
+    ("retry-tracked-dispatch", " (3) retry it as a tracked background dispatch.", "run the loop again"),
+    ("start-poll-again", " Then start the poll again.", "run the loop again"),
+    ("same-polling-command", " Then run the same polling command again.", "run the loop again"))
+
+
+def _test_wait_loop_deny_text(failures, tmp):
+    """orch_untracked_wait_loop deny text, in registry scope (a git toplevel holding the registry): the
+    matching poll loop denies, and the reason and banner pass _wait_loop_deny_text_faults. Each mutant in
+    _WAIT_LOOP_DENY_MUTANTS wraps _deny so the reason carries its text, and the row must then go red with
+    the fault it names.
+
+    The same loop also meets orch_truncation_guard's bare-'&' detach deny, so the row runs that handler on
+    it as well and requires its reason and banner to pass the same check. That is the property that the two
+    reasons do not contradict: both deny, both say "do not resubmit the loop" and resubmit nothing else, and
+    neither gives the generic detach advice (use the tracked background dispatch, or keep the command in the
+    foreground) that would resubmit the loop the other forbids. Its flip patches _orch_detach_poll_loop to
+    find no poll loop and _orch_bg_poll_loop to read 'none' (with only the first patch the guard's hedged
+    fallback text, which also passes this check, would take over), which restores the generic detach text
+    for this command, and the row must then go red."""
+    try:
+        root = _init_repo(tmp / "wait-loop-deny-text")
+    except (OSError, subprocess.SubprocessError) as exc:
+        failures.append("(wl-deny-text-cannot-evaluate) the registry-scope repository could not be built: {}"
+                        .format(exc))
+        return
+    (root / ".aiqt").mkdir(parents=True, exist_ok=True)
+    (root / ".aiqt" / "orchestration.local.json").write_text(json.dumps({"version": 1}), encoding="utf-8")
+    handler = aiqt_hooks.orch_untracked_wait_loop
+    faults = _wait_loop_deny_faults(handler, root)
+    if faults:
+        failures.append("(wl-deny-text) the untracked wait-loop deny text is wrong: {}"
+                        .format("; ".join(faults)))
+    saved = aiqt_hooks._deny
+    for label, extra, expected in _WAIT_LOOP_DENY_MUTANTS:
+        def mutant_deny(reason, banner, extra=extra):
+            return saved(reason + extra, banner)
+        aiqt_hooks._deny = mutant_deny
+        try:
+            flipped = _wait_loop_deny_faults(handler, root)
+        finally:
+            aiqt_hooks._deny = saved
+        if not any(expected in fault for fault in flipped):
+            failures.append("(wl-deny-text-flip-{}) with the reason carrying {!r} the row must go red with a "
+                            "fault naming {!r}, got {!r}".format(label, extra, expected, flipped))
+    guard = aiqt_hooks.orch_truncation_guard
+    faults = _wait_loop_deny_faults(guard, root)
+    if faults:
+        failures.append("(wl-deny-text-truncation-guard) the truncation guard's deny of the same poll loop "
+                        "contradicts the wait-loop deny: {}".format("; ".join(faults)))
+    saved_poll = aiqt_hooks._orch_detach_poll_loop
+    saved_bg = aiqt_hooks._orch_bg_poll_loop
+    aiqt_hooks._orch_detach_poll_loop = lambda command: False
+    aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
+    try:
+        flipped = _wait_loop_deny_faults(guard, root)
+    finally:
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+        aiqt_hooks._orch_bg_poll_loop = saved_bg
+    if not any("generic detach advice" in fault for fault in flipped):
+        failures.append("(wl-deny-text-truncation-guard-flip) with the truncation guard's generic detach text "
+                        "restored for the poll loop the row must go red, got {!r}".format(flipped))
+    _wait_loop_overmatch_rows(failures, root)
+    _wait_loop_fallback_rows(failures, root)
+
+
+# A detach whose '#' the shared lexer cannot judge under both readings, with the poll shape's words only in
+# quoted text: _orch_bg_poll_loop's text-scan fallback reads it as 'match' (the wait-loop hook's disclosed
+# over-match), but it is not a polling loop. The wait-loop hook still denies it with the wait-loop exits,
+# so the truncation guard's deny gives the hedged fallback text (the detach stated, the poll loop stated
+# only conditionally, and the same exits), never the generic detach advice that would offer the loop the
+# other deny forbids, and never the lexed poll text, which would state outright a loop that is not there.
+_WAIT_LOOP_OVERMATCH_COMMAND = "npm run serve & x=\"$(echo # (\n)\"; echo \"for gh sleep done\""
+
+
+# The hedge the truncation guard's fallback poll text carries (the poll loop stated conditionally), and the
+# opening the lexed poll text states outright; _wait_loop_overmatch_faults tells the two texts apart by them.
+_WAIT_LOOP_HEDGE_PHRASE = "if this command backgrounds a polling loop"
+_WAIT_LOOP_OUTRIGHT_PHRASE = "this foreground command backgrounds a polling loop"
+
+
+def _wait_loop_overmatch_faults(root, command=_WAIT_LOOP_OVERMATCH_COMMAND):
+    """The faults of orch_truncation_guard's deny on command (a foreground call in registry scope at root),
+    _WAIT_LOOP_OVERMATCH_COMMAND unless given: it must deny with the hedged fallback text, judged by
+    _wait_loop_deny_text_faults (so it carries the wait-loop exits and offers neither a foreground run nor
+    run_in_background) plus the hedge itself (_WAIT_LOOP_HEDGE_PHRASE), and it must not state the loop
+    outright as the lexed poll text does (_WAIT_LOOP_OUTRIGHT_PHRASE), since the fallback 'match' may be an
+    over-match on words in quoted or comment text."""
+    code, stdout_obj, _stderr = aiqt_hooks.orch_truncation_guard(
+        {"hook_event_name": aiqt_hooks.PRETOOL, "tool_name": "Bash", "cwd": str(root),
+         "tool_input": {"command": command}})
+    if _reduce_result(code, stdout_obj) != "deny":
+        return ["the over-matched detach did not deny ({})".format(_reduce_result(code, stdout_obj))]
+    reason = (stdout_obj or {}).get("hookSpecificOutput", {}).get("permissionDecisionReason", "")
+    banner = (stdout_obj or {}).get("systemMessage", "")
+    if not isinstance(reason, str) or not isinstance(banner, str):
+        return ["the reason or banner is not a string"]
+    faults = _wait_loop_deny_text_faults(reason, banner)
+    flat = " ".join(reason.split()).lower()
+    if _WAIT_LOOP_HEDGE_PHRASE not in flat:
+        faults.append("the reason lacks the hedge ({!r})".format(_WAIT_LOOP_HEDGE_PHRASE))
+    if _WAIT_LOOP_OUTRIGHT_PHRASE in flat:
+        faults.append("the reason states the poll loop outright on a command the lexer did not read as one")
+    if "keep the command in the foreground" in flat:
+        faults.append("the reason gives the generic detach advice")
+    return faults
+
+
+def _wait_loop_overmatch_rows(failures, root):
+    """orch_truncation_guard on _WAIT_LOOP_OVERMATCH_COMMAND: the precondition (the shared lexer refuses it
+    with _UncertainHashError, and the wait-loop classifier's text-scan fallback then reads it as 'match'),
+    the row (_wait_loop_overmatch_faults), a flip that gates the lexed poll text on the classifier's answer,
+    fallback included, under which the row must go red (the loop stated outright), and a flip that reads the
+    fallback as 'none', which restores the generic detach text and must also turn the row red."""
+    try:
+        aiqt_hooks._lex_readings(_WAIT_LOOP_OVERMATCH_COMMAND)
+        lexed = True
+    except aiqt_hooks._UncertainHashError:
+        lexed = False
+    except ValueError:
+        lexed = True
+    if lexed or aiqt_hooks._orch_bg_poll_loop(_WAIT_LOOP_OVERMATCH_COMMAND) != "match":
+        failures.append("(wl-deny-text-overmatch-cannot-evaluate) the over-match fixture no longer reads 'match' "
+                        "only through the text-scan fallback, so the row below tests nothing")
+        return
+    faults = _wait_loop_overmatch_faults(root)
+    if faults:
+        failures.append("(wl-deny-text-overmatch) the truncation guard's deny of an over-matched detach is "
+                        "wrong: {}".format("; ".join(faults)))
+    saved_poll = aiqt_hooks._orch_detach_poll_loop
+    aiqt_hooks._orch_detach_poll_loop = lambda command: aiqt_hooks._orch_bg_poll_loop(command) == "match"
+    try:
+        flipped = _wait_loop_overmatch_faults(root)
+    finally:
+        aiqt_hooks._orch_detach_poll_loop = saved_poll
+    if not any("states the poll loop outright" in fault for fault in flipped):
+        failures.append("(wl-deny-text-overmatch-flip) with the lexed poll text gated on the fallback's 'match' "
+                        "the row must go red, got {!r}".format(flipped))
+    saved_bg = aiqt_hooks._orch_bg_poll_loop
+    aiqt_hooks._orch_bg_poll_loop = lambda command: "none"
+    try:
+        flipped = _wait_loop_overmatch_faults(root)
+    finally:
+        aiqt_hooks._orch_bg_poll_loop = saved_bg
+    if not any("generic detach advice" in fault for fault in flipped):
+        failures.append("(wl-deny-text-overmatch-generic-flip) with the generic detach text restored for the "
+                        "over-matched detach the row must go red, got {!r}".format(flipped))
+
+
+# Commands where a bare '&' really backgrounds work in a polling loop but the shared lexer refuses the
+# command (a '#' it cannot judge under both readings, here inside a backquote substitution or a quoted
+# "$( ... )"), with the '&' before the first such '#' so the detach scan reads it: _orch_bg_poll_loop reads
+# 'match' only through its text-scan fallback while _orch_detach_poll_loop is False. The truncation guard's
+# deny must give the hedged fallback text (the wait-loop exits, offering neither a foreground run nor
+# run_in_background), and orch_untracked_wait_loop denies the same command with those exits, so the two
+# denials must not contradict on any of them.
+_WAIT_LOOP_FALLBACK_LOOP_ROWS = (
+    ("backquote-hash", "while true; do gh run view 1; sleep 30; done & x=`echo #`"),
+    ("backquote-hash-second-line", "while true; do gh run view 1; sleep 30; done &\nx=`echo #`"),
+    ("quoted-subst-hash", "while true; do gh run view 1; sleep 30; done & x=\"$(echo # (\n)\""),
+    ("amp-in-body", "while true; do gh run view 1 & sleep 30; done; x=`echo #`"),
+    ("for-curl", "for i in 1 2 3; do curl -fsS https://example.invalid/status; sleep 5; done & x=`echo #`"),
+)
+
+
+def _wait_loop_fallback_rows(failures, root):
+    """orch_truncation_guard and orch_untracked_wait_loop on each _WAIT_LOOP_FALLBACK_LOOP_ROWS command: the
+    precondition (the shared lexer refuses it with _UncertainHashError, _orch_bg_poll_loop reads 'match'
+    only through its text-scan fallback, and _orch_detach_poll_loop finds no lexed loop), the guard's deny
+    judged by _wait_loop_overmatch_faults (the hedged fallback text with the wait-loop exits), the wait-loop
+    hook's deny on the same command judged by _wait_loop_deny_text_faults (the property that the two denials
+    do not contradict), and a flip that reads the fallback as 'none', which restores the guard's generic
+    detach text and must turn each row red with the generic-advice fault."""
+    for label, command in _WAIT_LOOP_FALLBACK_LOOP_ROWS:
+        try:
+            aiqt_hooks._lex_readings(command)
+            uncertain = False
+        except aiqt_hooks._UncertainHashError:
+            uncertain = True
+        except ValueError:
+            uncertain = False
+        if (not uncertain or aiqt_hooks._orch_bg_poll_loop(command) != "match"
+                or aiqt_hooks._orch_detach_poll_loop(command)):
+            failures.append("(wl-deny-text-fallback-{}-cannot-evaluate) the fixture no longer reads 'match' "
+                            "only through the text-scan fallback, so the row tests nothing".format(label))
+            continue
+        faults = _wait_loop_overmatch_faults(root, command)
+        if faults:
+            failures.append("(wl-deny-text-fallback-{}) the truncation guard's deny of a fallback-matched "
+                            "poll loop is wrong: {}".format(label, "; ".join(faults)))
+        faults = _wait_loop_deny_faults(aiqt_hooks.orch_untracked_wait_loop, root, command)
+        if faults:
+            failures.append("(wl-deny-text-fallback-{}-wait-loop) the wait-loop deny of a fallback-matched "
+                            "poll loop is wrong: {}".format(label, "; ".join(faults)))
+        saved_bg = aiqt_hooks._orch_bg_poll_loop
+        aiqt_hooks._orch_bg_poll_loop = lambda cmd: "none"
+        try:
+            flipped = _wait_loop_overmatch_faults(root, command)
+        finally:
+            aiqt_hooks._orch_bg_poll_loop = saved_bg
+        if not any("generic detach advice" in fault for fault in flipped):
+            failures.append("(wl-deny-text-fallback-{}-flip) with the generic detach text restored for the "
+                            "fallback-matched loop the row must go red, got {!r}".format(label, flipped))
+
+
 def _test_pgrep_self_match(failures):
     """pgrep_self_match rows; only the real-bash oracle rows (_psm_oracle) execute a command. Each deny row
     must also be red with the hook disabled (its detector _psm_hit patched to find nothing), so the row pins
     this hook's decision, and each bracket idiom row must be red with the idiom exception removed."""
     handler = aiqt_hooks.pgrep_self_match
     for label, command, want in _PSM_TIMED_ROWS:
-        start = time.process_time()
-        got = _decision(handler, command)
-        spent = time.process_time() - start
+        got, spent = _hook_cpu_timed(lambda command=command: _decision(handler, command),
+                                     bound=_PSM_TIMED_BOUND)
         if got != want or spent > _PSM_TIMED_BOUND:
             failures.append("{}: expected {} within {} s of CPU, got {} in {:.3f} s".format(
                 label, want, _PSM_TIMED_BOUND, got, spent))
@@ -6282,6 +6586,55 @@ def _cpu_seconds():
     """CPU seconds this process has used (every thread), plus those of the child processes it reaped."""
     children = os.times()
     return time.process_time() + children.children_user + children.children_system
+
+
+def _hook_cpu_timed(call, bound=None, runs=3):
+    """(the last call()'s result, the least CPU seconds the calling thread spent in one call()): the
+    clock of every row that holds one in-process handler call to a fixed absolute CPU bound. It charges
+    the call only for its own work, which a fixed bound can judge, where one process-CPU reading also
+    charges it for work it did not do (a commit-identity row so charged measured 2.43 s inside the full
+    suite on a host at a load near half its CPUs, against at most 0.03 s for the same call alone, about
+    80 times; at these rows the suite runs one thread, arms no interval timer and triggers no cyclic
+    collection, so that charge came from outside the call). Three guards, each against a charge a fixed
+    absolute bound cannot absorb: time.thread_time charges only the calling thread, so work another
+    thread does while the call runs is never billed to it; the cyclic collector is held off across the
+    call, the prior state restored after the second clock reading, so a collection that the call's own
+    allocations tip over a generation threshold cannot bill a pass over the whole suite heap, which a
+    hook process at its production size never carries, to the one call that tipped it (the deferred
+    collection runs outside every timed region, charged to no row); and with a bound the call is
+    re-timed, up to runs times in all, only while the least reading so far is at or over it, and that
+    least reading is judged, since stray charges the clock cannot see apart (kernel reclaim billed to
+    an allocating thread as system time, a co-scheduled sibling's cache pressure) only ever add time,
+    so the least of up to three is the fairest reading of the call's own cost. The call's own work, its
+    reference counting included, is always charged. The re-timed call must be deterministic: same
+    input, same decision, no state carried across runs (a counting shim is reset inside the call).
+    Disclosed limit: a real super-linear regression of the measured path is over the bound on every
+    run, and so still fails, only in a call that meets that precondition, and then only after up to
+    runs timed calls of the regressed path, so in about runs times its own cost: the psm-t rows, which
+    time one call at about 400 KB with no smaller probe first, are the worst recorded case (about 104 s
+    of CPU per call at 400 KB, so about five minutes), while the rows that time a small probe first
+    fail on that probe; a call that keeps state between runs (a memoised quadratic helper, for example)
+    can read low on its second and third runs, and its least reading then passes the bound. The
+    median-judged rows (_timed_runs over the
+    lex-cost and deadline-shape cases) keep their existing clocks, time.process_time in the lex-cost
+    rows and _cpu_seconds in the deadline-shape cases, and judge the median of three runs, which
+    already tolerates one slowed run."""
+    import gc
+    spent = None
+    for _ in range(max(1, runs)):
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            started = time.thread_time()
+            result = call()
+            once = time.thread_time() - started
+        finally:
+            if enabled:
+                gc.enable()
+        spent = once if spent is None else min(spent, once)
+        if bound is None or spent < bound:
+            break
+    return result, spent
 
 
 def _judged(times):
@@ -25678,7 +26031,8 @@ def _main_isolated(monitor):
         # Each rebase reads its options only up to the next rebase subcommand that the segment's git commands read,
         # so a segment of many wrapped rebase commands costs time linear in its length, where reading the rest of
         # the segment for each of them cost time quadratic in it (about 1.5 s to 4 s of CPU time at 65,536
-        # characters for the two forms below). The bound is the handler's CPU time in this process over 'sudo -E git
+        # characters for the two forms below). The bound is the CPU time the calling thread spends in the
+        # handler (_hook_cpu_timed: the thread clock, the cyclic collector held off) over 'sudo -E git
         # rebase x ...' and over 'sudo -E git rebase -x x ...', each padded to 65,536 characters and to
         # _CMTIDN_READ_LIMIT, the longest command the reader reads (131,072 characters): 0.5 s at 65,536 and 1 s at
         # 131,072, the same bound per character, against at most about 0.035 s and 0.07 s measured, a margin of
@@ -25704,10 +26058,10 @@ def _main_isolated(monitor):
                     _ci_cmd = "sudo" + _ci_unit * _ci_reps
                     _ci_cmd += " " * (_ci_size - len(_ci_cmd))
                     _ci_want = [_ci_reps, _ci_reps if " -x " in _ci_unit else 0]
-                    _ci_counts[:] = [0, 0]
-                    _ci_start = time.process_time()
-                    _ci_got = _decision(cig, _ci_cmd)
-                    _ci_spent = time.process_time() - _ci_start
+                    def _ci_reset_and_decide(_cmd=_ci_cmd):
+                        _ci_counts[:] = [0, 0]
+                        return _decision(cig, _cmd)
+                    _ci_got, _ci_spent = _hook_cpu_timed(_ci_reset_and_decide, bound=_ci_cap)
                     if _ci_got != "allow" or _ci_spent > _ci_cap or _ci_counts != _ci_want:
                         failures.append("(ci-wr-rebase-cpu) {} characters of 'sudo{} ...' gave {} after {:.2f} s of "
                                         "CPU time, {} rebase reads and {} run lines built (want allow within {} s, "
@@ -25722,7 +26076,8 @@ def _main_isolated(monitor):
         # raw-string scan that judges a command the tokenizer cannot parse (_RAW_IDENTITY_CONTEXTS) take each
         # whitespace run whole, so a long run costs time linear in its length, where giving it back one character at
         # a time cost time quadratic in it (about 53 s and 130 s of CPU time at _CMTIDN_READ_LIMIT characters for
-        # the two forms below). The bound is the handler's CPU time in this process over a commit message of a
+        # the two forms below). The bound is the CPU time the calling thread spends in the handler
+        # (_hook_cpu_timed: the thread clock, the cyclic collector held off) over a commit message of a
         # co-author name and a run of newlines, before a second message with an AI co-author trailer, which the
         # reader denies (ci-wr172), and over user.name, a run of spaces and a quote that does not close, before an
         # AI user.name value, which the raw-string scan denies (ci-wr173), each padded to 16,384 characters and to
@@ -25740,10 +26095,10 @@ def _main_isolated(monitor):
                  "' user.name Claude", ("could not be read in full", "(user.name/user.email value 'Claude')"))):
             for _ci_size, _ci_cap in ((16 << 10, 0.125), (aiqt_hooks._CMTIDN_READ_LIMIT, 1.0)):
                 _ci_cmd = _ci_head + _ci_run * (_ci_size - len(_ci_head) - len(_ci_tail)) + _ci_tail
-                _ci_start = time.process_time()
-                _ci_code, _ci_out = cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
-                                         "tool_input": {"command": _ci_cmd}})[:2]
-                _ci_spent = time.process_time() - _ci_start
+                _ci_result, _ci_spent = _hook_cpu_timed(
+                    lambda _cmd=_ci_cmd: cig({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                              "tool_input": {"command": _cmd}}), bound=_ci_cap)
+                _ci_code, _ci_out = _ci_result[:2]
                 _ci_got = _reduce_result(_ci_code, _ci_out)
                 _ci_reason = ((_ci_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
                 if _ci_got != "deny" or _ci_spent > _ci_cap or not all(_ci_w in _ci_reason for _ci_w in _ci_wants):
@@ -26165,9 +26520,8 @@ def _main_isolated(monitor):
                  "denies (the disclosed over-deny)", '; git commit -m "thanks Claudette"', "deny"),
                 ("(ci-wr-c47) a command past the read limit that names no AI identity allows",
                  "; git commit -m x", "allow")):
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_wide + _ci_tail)
-            _ci_spent = time.process_time() - _ci_start
+            _ci_got, _ci_spent = _hook_cpu_timed(
+                lambda _cmd=_ci_wide + _ci_tail: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
                 failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
                                 .format(_ci_label, len(_ci_wide + _ci_tail), _ci_want, _ci_got, _ci_spent))
@@ -26207,9 +26561,7 @@ def _main_isolated(monitor):
                  _ci_body + "\nsetconf user.name Claude", "deny"),
                 ("(ci-wr165) an AI identity variable spelled in lower case, which the reader also judges, with no git "
                  "word, past the read limit, denies", _ci_body + "\ngit_committer_email=claude@x make", "deny")):
-            _ci_start = time.process_time()
-            _ci_got = _decision(cig, _ci_long)
-            _ci_spent = time.process_time() - _ci_start
+            _ci_got, _ci_spent = _hook_cpu_timed(lambda _cmd=_ci_long: _decision(cig, _cmd), bound=1.0)
             if _ci_got != _ci_want or _ci_spent > 1.0:
                 failures.append("{}: over {} characters expected {} within 1 s of CPU time, got {} after {:.2f} s"
                                 .format(_ci_label, len(_ci_long), _ci_want, _ci_got, _ci_spent))
@@ -28987,18 +29339,16 @@ def _main_isolated(monitor):
         # COST: an escaped '>' run inside one absolute target word is passed over, so the scan makes one word
         # read for that run, not one per '>' (a read per '>' grows with the square of the run's length).
         _ut_cost_cmd = "cat <<<y > /" + "\\>/" * 8000
-        _ut_t0 = time.process_time()
-        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
-        _ut_cpu = time.process_time() - _ut_t0
+        _ut_cost_got, _ut_cpu = _hook_cpu_timed(
+            lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
             failures.append("(ap-c95e) the escaped-'>' run must allow in under 1 s of CPU; got {} in {:.2f} s"
                             .format(_ut_cost_got, _ut_cpu))
         # the second reading a backquote starts cuts each run to two, so each '>' it reads ends the word before
         # it and the reads stay linear in the command's length.
         _ut_cost_cmd = "echo `true`; cat <<<y > /" + "\\\\\\>/" * 8000
-        _ut_t0 = time.process_time()
-        _ut_cost_got = _decision(aiqt_hooks.bash_absolute_paths, _ut_cost_cmd)
-        _ut_cpu = time.process_time() - _ut_t0
+        _ut_cost_got, _ut_cpu = _hook_cpu_timed(
+            lambda _cmd=_ut_cost_cmd: _decision(aiqt_hooks.bash_absolute_paths, _cmd), bound=1.0)
         if _ut_cpu >= 1.0 or _ut_cost_got != "allow":
             failures.append("(ap-c95f) the odd backslash runs after a backquote must allow in under 1 s of CPU; "
                             "got {} in {:.2f} s".format(_ut_cost_got, _ut_cpu))
@@ -29564,6 +29914,7 @@ def _main_isolated(monitor):
         _test_inline_errexit(failures, tmp)
         _test_pgrep_self_match(failures)
         _test_trkasy_no_amp(failures, tmp)
+        _test_wait_loop_deny_text(failures, tmp)
         _test_note_literal_sites(failures, tmp)
         _test_stop_dispatch_note_sites(failures, tmp)
         _test_note_shape_pins(failures, tmp)

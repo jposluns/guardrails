@@ -25860,8 +25860,16 @@ def orch_truncation_guard(data):
     that DETACHES a child with a bare `&` launches asynchronous work the foreground tool call does not track,
     and a bare-& detach is never the right way to launch tracked work, so a readable foreground command
     carrying such an operator DENIES-and-educates (use the tracked background dispatch, or keep it foreground
-    and wait). The detach is read by _orch_foreground_detach_lexed: the shared lexer's bare `&` separator
-    denies, the raw quote-tracking scan decides where the lexer refuses the command, and the scan's detach
+    and wait), except a backgrounded polling loop that the shared lexer itself reads as one
+    (_orch_detach_poll_loop): that deny gives orch_untracked_wait_loop's exits (_ORCH_POLL_LOOP_EXITS),
+    which forbid resubmitting the loop in either form, since a tracked or foreground copy still polls; and
+    except a command the lexer refuses whose text holds the poll shape's words (_orch_bg_poll_loop reads
+    'match' only through its text-scan fallback there, a real loop or an over-match on words in quoted or
+    comment text): orch_untracked_wait_loop denies that command with those same exits, so this deny gives a
+    hedged text that states the detach, says that if the command backgrounds a polling loop it must not be
+    resubmitted, and carries those exits, never the generic advice, which would offer the loop again in
+    both forms. The verdict is the same deny in every case. The detach is read by _orch_foreground_detach_lexed: the shared
+    lexer's bare `&` separator denies, the raw quote-tracking scan decides where the lexer refuses the command, and the scan's detach
     is lifted ONLY where every `&` it reads lies, as the lexer places it, in a quoted here-document body, a
     single- or double-quoted string, or a comment. Every other foreground call in registry scope remains
     out of scope (the harness returns its
@@ -26165,8 +26173,14 @@ def orch_truncation_guard(data):
         # scope, but a bare `&` detaches a child into untracked asynchronous work whose result and failure
         # are then lost. A bare-& detach is never the right way to launch tracked work (the tracked
         # background dispatch is), so it DENIES-and-educates: the caller self-corrects to run_in_background
-        # (or waits in the foreground), which is what lets the dispatch ledger record it. An unreadable
-        # (non-string) command fails closed; a non-detaching foreground command is out of scope (ALLOW).
+        # (or waits in the foreground), which is what lets the dispatch ledger record it. Two exceptions to
+        # that advice: a backgrounded polling loop the shared lexer reads as one (_orch_detach_poll_loop)
+        # takes the wait-loop exits instead, and a command the lexer refuses whose text holds the poll
+        # shape's words (_orch_bg_poll_loop's fallback 'match') takes a hedged text carrying those exits,
+        # since orch_untracked_wait_loop denies both and its exits forbid resubmitting the loop in either
+        # form. An
+        # unreadable (non-string) command fails closed; a non-detaching foreground command is out of scope
+        # (ALLOW).
         if not isinstance(command, str):
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground Bash call's command is {}, not a "
@@ -26193,6 +26207,43 @@ def orch_truncation_guard(data):
                 "substitution, or write the text to a file and pass the file.",
                 "AIQT guardrail: denied a foreground command whose quoting or comments this guard could not "
                 "read to the end (rule trkasy, fail-closed).")
+        # COST: the classifier below lexes the command again, so it runs ONCE per detach deny, and
+        # _orch_detach_poll_loop (a further lex) only on its 'match', never on the plain detach path: the
+        # 1 MB deadline shapes whose readings the lexer can judge stay at one classifier lex, within the
+        # timed bounds the hooks self-test pins.
+        detach_poll_kind = _orch_bg_poll_loop(command) if detach_kind == "detach" else "none"
+        if detach_kind == "detach" and detach_poll_kind == "match" and _orch_detach_poll_loop(command):
+            # A backgrounded polling loop is the event orch_untracked_wait_loop denies with its specific
+            # advice (never resubmit the loop). The generic advice below (use the tracked background
+            # dispatch, or keep the command in the foreground) would resubmit that loop, so on this event
+            # the deny gives the same exits as that hook (_ORCH_POLL_LOOP_EXITS). The verdict is unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command backgrounds a polling loop "
+                "with a bare '&' (a for/while/until loop carrying sleep plus a status probe), launching "
+                "asynchronous work this tool call does not track, so its result and failure would be lost; "
+                "it is denied. " + _ORCH_POLL_LOOP_EXITS,
+                "AIQT guardrail: denied a foreground bare-& polling loop (untracked asynchronous work, rule "
+                "trkasy). " + _ORCH_POLL_LOOP_BANNER_EXITS)
+        if detach_kind == "detach" and detach_poll_kind == "match":
+            # The shared lexer refused the command (so _orch_detach_poll_loop found no lexed loop), but its
+            # text holds the poll shape's words (_orch_bg_poll_loop's text-scan fallback, which can
+            # over-match words in quoted or comment text), so orch_untracked_wait_loop denies the same
+            # command with the wait-loop exits. The generic advice below would offer the loop again in both
+            # forms, against those exits, so this deny states the bare-'&' detach, hedges on whether the
+            # detached work is a polling loop, and gives the same exits. The verdict is unchanged.
+            return _deny(
+                "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
+                "bare '&', launching asynchronous work this tool call does not track, so its result and "
+                "failure would be lost, and it carries a '#' whose comment reading this guard cannot judge "
+                "under both readings, so whether that work is a polling loop is read from the command's "
+                "text alone, which holds the words of one (a for/while/until loop carrying sleep plus a "
+                "status probe), written as code or in quoted or comment text; it is denied. If this "
+                "command backgrounds a polling loop, do not resubmit the loop. If it does not, put a blank "
+                "before such a '#' outside any grouping or substitution, or drop it, so this guard can "
+                "read where those words sit, and re-issue the call. " + _ORCH_POLL_LOOP_EXITS,
+                "AIQT guardrail: denied a foreground bare-'&' detach whose text holds a polling loop's "
+                "words (rule trkasy); if it backgrounds a polling loop, do not resubmit the loop. "
+                + _ORCH_POLL_LOOP_BANNER_EXITS)
         if detach_kind == "detach":
             return _deny(
                 "AIQT rule trkasy (track-launched-work): this foreground command detaches a child with a "
@@ -26483,8 +26534,10 @@ def _orch_bg_poll_loop(command):
     to another's can turn a 'match' into 'indeterminate', and the strictest answer is kept ('match', then
     'indeterminate', then 'none'). Where the lexer cannot judge it that way, the command's text
     (_hash_doubt_scan) is read for the canonical shape's words: a loop header, 'done', an '&', 'sleep' and
-    a probe all present give 'match' (an over-match on such a command, which the truncation guard denies
-    anyway), else 'indeterminate'. The classifier reads the loop words, the '&' and the sleep only where they
+    a probe all present give 'match' (an over-match on such a command is possible; the truncation guard
+    denies it anyway, with a hedged text carrying the wait-loop exits: _orch_detach_poll_loop does not take
+    this text scan, so that guard tests this classifier's 'match' for that text), else
+    'indeterminate'. The classifier reads the loop words, the '&' and the sleep only where they
     are written bare, so no quoting hides them from the text; the --watch and actions/runs probes it reads
     from decoded tokens, so text holding quoting that scan does not decode (_hash_doubt_opaque) counts as
     carrying a probe."""
@@ -26525,6 +26578,50 @@ def _orch_poll_reading(segments):
     if any(segments[k].argv for k in range(amp_idx + 1, len(segments))):
         return "indeterminate"              # a command trails the bare-`&` `done`: not the canonical shape
     return _orch_poll_loop_at(segments, amp_idx)
+
+
+# The exits every denial of a backgrounded polling loop gives. orch_untracked_wait_loop's deny carries them
+# on every 'match', the lexed reading and the text-scan fallback alike. orch_truncation_guard's bare-'&'
+# detach deny carries them too, in one of two texts: where the shared lexer itself reads the poll loop
+# (_orch_detach_poll_loop) its deny states the loop outright and gives these exits, and where the lexer
+# refuses the command but its text holds the poll shape's words (_orch_bg_poll_loop's fallback 'match', a
+# real loop or an over-match) its deny states the bare-'&' detach, hedges on whether the detached work is a
+# polling loop, and gives these exits; only a detach the classifier does not read as 'match' keeps the
+# generic detach advice, and there orch_untracked_wait_loop emits nothing. So no input draws one denial
+# that gives these exits and another that offers the loop again (a command whose detach scan cannot read
+# the command to its end takes the unreadable-quoting deny, which offers no resubmission either).
+# The loop is never resubmitted: a tracked or foreground copy
+# still waits by polling a status probe. Exit (1) needs a CI status reader with a wait mode, which an adopter
+# repository may not have, and many waits are not CI at all, so exit (2), the tracked wake, covers the rest.
+_ORCH_POLL_LOOP_EXITS = (
+    "Remove the trailing '&', do not resubmit the loop in any form (neither as a tracked background dispatch "
+    "nor in the foreground), and take ONE of these exits: (1) only for a CI wait in a repository that has a "
+    "CI status reader with a mode that waits until the run ends: start ONE tracked task as a background "
+    "dispatch (run_in_background: true) that runs that reader in its wait mode (such as tools/ci-status.sh "
+    "<sha> --wait in the AIQT Guardrails repository), collect its completion, and read the outcome from that "
+    "task's exit status as the reader documents its codes, never by matching success or failure words in its "
+    "output; (2) otherwise (a wait that is not CI, such as a health-check poll or waiting on a merge, or a "
+    "repository with no such reader), schedule a tracked wake that re-invokes this session to re-check.")
+_ORCH_POLL_LOOP_BANNER_EXITS = (
+    "Do not resubmit the loop: for a CI wait where the repository has a CI status reader with a wait mode, "
+    "run one tracked task with it and read its exit status; otherwise schedule a tracked wake.")
+
+
+def _orch_detach_poll_loop(command):
+    """True where the shared lexer itself reads command as the backgrounded polling loop
+    orch_untracked_wait_loop denies (a reading _orch_poll_reading classifies 'match', the answer
+    _orch_bg_poll_loop gives on a lexed command), so orch_truncation_guard's detach deny gives that hook's
+    exits instead of its generic advice. A command the lexer refuses is False here, including one whose '#'
+    it cannot judge under both readings: there _orch_bg_poll_loop falls back to a text scan that can read
+    'match' from words in quoted text or a comment, and on such a 'match' the truncation guard gives a
+    hedged text that carries the wait-loop exits and offers neither dispatch form, never the generic detach
+    advice (orch_untracked_wait_loop denies that command too, and the generic advice would offer the loop
+    its deny forbids). Only the reason chooses by this; the truncation guard's verdict does not."""
+    try:
+        readings = _lex_readings(command)
+    except ValueError:                      # _UncertainHashError included: no text-scan fallback here
+        return False
+    return any(_orch_poll_reading(segments) == "match" for segments in readings)
 
 
 def orch_untracked_wait_loop(data):
@@ -26584,13 +26681,9 @@ def orch_untracked_wait_loop(data):
             "AIQT rule trkasy (untracked wait loop): this command backgrounds a polling loop with a bare "
             "'&' (a for/while/until loop carrying sleep plus a status probe). A detached child is not a "
             "harness-tracked task: its completion cannot notify this session, so the result is stranded and "
-            "the session goes dark waiting on it. Remove the trailing '&' and take ONE of these exits: (1) "
-            "submit the same loop as a tracked background dispatch (run_in_background: true) and collect its "
-            "completion; (2) run a bounded foreground watch and act on the observed result (for example: "
-            "timeout <seconds> gh pr checks <ref> --watch); (3) schedule a tracked wake that re-invokes this "
-            "session to re-check.",
+            "the session goes dark waiting on it. " + _ORCH_POLL_LOOP_EXITS,
             "AIQT guardrail: denied an untracked background wait loop; a bare-'&' poll cannot notify this "
-            "session. Use run_in_background, a bounded foreground watch, or a tracked wake.")
+            "session. " + _ORCH_POLL_LOOP_BANNER_EXITS)
     return _allow()                         # 'none' or 'indeterminate': emit nothing; truncation guard backstops
 
 
