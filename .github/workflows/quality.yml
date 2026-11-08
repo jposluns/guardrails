@@ -983,12 +983,18 @@ jobs:
               # all-zero before only for a root HEAD, the release-cut rule).
               python3 -I -B tools/check_moved_python_roots.py --base "$PUSH_BEFORE"
             elif git rev-parse --verify --quiet "HEAD^" >/dev/null; then
-              # A workflow_dispatch or schedule run has no event range, and origin/HEAD need
-              # not exist in CI: compare the checked-out tip with its raw first parent, as
-              # the release-cut and version gates do for these events.
+              # A workflow_dispatch run has no event range, and origin/HEAD need not
+              # exist in CI: compare the checked-out tip with its raw first parent, as
+              # the release-cut and version gates do for that event.
               python3 -I -B tools/check_moved_python_roots.py --base "HEAD^"
             else
-              echo "moved-python-roots: NOT JUDGED for $EVENT_NAME: HEAD is a root commit with no first parent to serve as a base; nothing precedes it, so no file was moved"
+              # The probe failing does not prove a root commit (a shallow or otherwise
+              # truncated history fails it too): pass the all-zero base, which the gate
+              # accepts only for a verified parentless root HEAD and refuses over
+              # pre-existing or shallow history, so the gate's own root and shallow
+              # checks decide, as the version-monotonicity step's bare invocation lets
+              # its gate's own root detection decide.
+              python3 -I -B tools/check_moved_python_roots.py --base "0000000000000000000000000000000000000000"
             fi
           fi
 

@@ -1005,11 +1005,23 @@ ALLOWLIST = (
         "side": "ci-only",
         "identity": "tools/check_moved_python_roots.py --base HEAD^",
         "reason": (
-            "The CI else-branch for a workflow_dispatch or schedule run uses "
-            "the history-relative literal base HEAD^, because origin/HEAD "
-            "need not exist in CI; a root HEAD takes a stated not-judged "
-            "line instead. There is no local --base leg, so this literal "
-            "form is CI-only by design."
+            "The CI else-branch for a workflow_dispatch run uses the "
+            "history-relative literal base HEAD^, because origin/HEAD "
+            "need not exist in CI. There is no local --base leg, so this "
+            "literal form is CI-only by design."
+        ),
+        "backlog": "GD-123",
+    },
+    {
+        "side": "ci-only",
+        "identity": ("tools/check_moved_python_roots.py --base "
+                     "0000000000000000000000000000000000000000"),
+        "reason": (
+            "When HEAD^ does not resolve on a workflow_dispatch run, CI "
+            "passes the all-zero base, which the gate accepts only for a "
+            "verified parentless root HEAD and refuses over pre-existing or "
+            "shallow history, so the gate's own root and shallow checks "
+            "decide; a local run derives its base from origin/HEAD instead."
         ),
         "backlog": "GD-123",
     },

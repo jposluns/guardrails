@@ -35,8 +35,9 @@ renames away (judged against every such base path); an added file matching no de
 name is new and not judged. Each side read of a judged pairing must be a regular blob
 (100644/100755); a symlink or submodule there is exit 2. Blobs are parsed without being executed
 (tokenize.detect_encoding honouring PEP 263 cookies, then ast.parse); SyntaxError, ValueError (null
-bytes), RecursionError, MemoryError, UnicodeDecodeError or an unreadable blob is exit 2, for the
-base version as well as the head version, and a derivation analysis that exhausts the recursion
+bytes), LookupError (a coding cookie naming a registered codec that is not a text encoding, such as
+rot13 or hex), RecursionError, MemoryError, UnicodeDecodeError or an unreadable blob is exit 2, for
+the base version as well as the head version, and a derivation analysis that exhausts the recursion
 limit or memory (an expression nested past what the recognizer can walk) is exit 2, never a crash.
 
 Recognized derivations are expressions anchored on __file__ under the accepted wrappers (Path,
@@ -53,10 +54,15 @@ Path, dirname or __file__ redefined locally, and text inside comments or strings
 2 hops or more (one hop is the file's own directory, which moves with the file). Anything else
 anchored on __file__ (a non-literal index, a helper function, a name bound more than once) is not
 judged; the tool prints how many such expressions it skipped. Each in-scope head derivation is
-judged against its own base counterpart: the base derivation assigned to the same single-assignment
-name, or failing that one with the same normalized expression text, in any matched base path (base
-derivations of every hop count take part, so a one-hop base .parent corrected to .parents[1] during
-a one-level-deeper move is the same directory and passes). It passes only when a counterpart names
+judged against its own base counterpart in the same enclosing scope (the qualified function or
+class path, the module itself for module-level code): the base derivation assigned to the same name
+in that scope, or failing that one with the same normalized expression text in that scope, in any
+matched base path (base derivations of every hop count take part, so a one-hop base .parent
+corrected to .parents[1] during a one-level-deeper move is the same directory and passes). Where
+one scope assigns a name more than once on either side, each head assignment of that name is judged
+against the base assignment of that name in the same source position, and the comparison is exit 2
+(cannot evaluate, with a reason) when the recognized assignments cannot be paired one to one that
+way. It passes only when a counterpart names
 the same repository-relative directory (hops above the root are a distinct outside-the-repository
 value per level, compared by value and never probed as a tree path) and, for an in-repository
 directory, that directory is present in the head tree. A counterpart naming only other directories
@@ -347,12 +353,15 @@ def _dir_in_head_tree(root, head, directory, cache):
 
 def _parse_python(blob, label):
     """The decoded source text and its AST, read without being executed; every parse failure the
-    plan names is cannot-evaluate, for a base version as for a head version."""
+    plan names is cannot-evaluate, for a base version as for a head version. LookupError covers a
+    coding cookie naming a registered codec that is not a text encoding (rot13, hex), which
+    tokenize.detect_encoding or the decode raises where an unknown cookie raises SyntaxError."""
     try:
         encoding, _first_lines = tokenize.detect_encoding(io.BytesIO(blob).readline)
         text = blob.decode(encoding)
         return text, ast.parse(text)
-    except (SyntaxError, ValueError, RecursionError, MemoryError, UnicodeDecodeError) as exc:
+    except (SyntaxError, ValueError, LookupError, RecursionError, MemoryError,
+            UnicodeDecodeError) as exc:
         raise CannotEvaluate("cannot parse {}: {}: {}".format(label, type(exc).__name__, exc))
 
 
@@ -397,8 +406,9 @@ def _collect_aliases(tree):
 
 
 class _Scope:
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, qual=""):
         self.parent = parent
+        self.qual = qual  # qualified function or class path; "" is the module scope
         self.bind_counts = {}
         self.simple = {}
         self.owned = []
@@ -415,12 +425,13 @@ def _poison_target(scope, target):
 
 def _build_scopes(tree):
     """One _Scope per module, function, lambda and class body, each owning the nodes within it
-    (stopping at nested scopes), with its non-import bindings counted and its simple single-name
-    assignments kept for the bound-once indirection rule."""
+    (stopping at nested scopes), with its non-import bindings counted, its simple single-name
+    assignments kept for the bound-once indirection rule, and its qualified path kept for the
+    counterpart keys (every lambda shares the path segment "<lambda>" under its enclosing scope)."""
     scopes = []
 
-    def collect(scope_node, parent=None):
-        scope = _Scope(parent)
+    def collect(scope_node, parent=None, qual=""):
+        scope = _Scope(parent, qual)
         scopes.append(scope)
         if isinstance(scope_node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             arguments = scope_node.args
@@ -436,7 +447,10 @@ def _build_scopes(tree):
             if isinstance(node, _SCOPE_TYPES):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     scope.poison(node.name)
-                collect(node, scope)
+                    part = node.name
+                else:
+                    part = "<lambda>"
+                collect(node, scope, qual + "." + part if qual else part)
                 continue
             scope.owned.append(node)
             if isinstance(node, ast.Assign):
@@ -645,14 +659,52 @@ def _eval(node, scope, aliases, visiting):
     return None
 
 
+def _counterpart_keys(scope_qual, name, expr):
+    """The counterpart keys of one derivation, most specific first: the assigned target name under
+    its enclosing scope's qualified path ("" is the module scope), else the normalized expression
+    text under that path. Scope-qualified so one scope's derivation is never judged against another
+    scope's; a module-level function named so the self-test can flip the qualifier off and show the
+    scope rows discriminate."""
+    if name:
+        return (("name", scope_qual, name), ("expr", scope_qual, expr))
+    return (("expr", scope_qual, expr),)
+
+
+def _match_counterpart(keys, head_ordinal, head_count, base_by_key, base_name_seq, context):
+    """The base directories the head derivation carrying these keys is judged against (None when
+    no key matches). Where the same scope assigns the name more than once on either side, each head
+    assignment is paired with the base assignment of that name in the same source position, and a
+    set that cannot be paired one to one is cannot-evaluate, never a merged-set pass. A module-level
+    function so the self-test can flip it back to the merged-set lookup and show the rows
+    discriminate."""
+    name_key = keys[0] if keys[0][0] == "name" else None
+    if name_key is not None and name_key in base_name_seq:
+        per_old = base_name_seq[name_key]
+        if head_count > 1 or any(len(dirs) > 1 for dirs in per_old.values()):
+            scope_label = name_key[1] or "<module>"
+            if len(per_old) > 1:
+                raise CannotEvaluate(
+                    "cannot judge {}: name {!r} in scope {} is recognized in more than one "
+                    "matched base file while a side assigns it more than once; the assignments "
+                    "cannot be paired one to one".format(context, name_key[2], scope_label))
+            dirs = next(iter(per_old.values()))
+            if len(dirs) != head_count:
+                raise CannotEvaluate(
+                    "cannot judge {}: name {!r} in scope {} carries {} recognized assignment(s) "
+                    "in the head file but {} in the base; the assignments cannot be paired one "
+                    "to one".format(context, name_key[2], scope_label, head_count, len(dirs)))
+            return {dirs[head_ordinal]}
+    return next((base_by_key[one_key] for one_key in keys if one_key in base_by_key), None)
+
+
 def _derivations(tree, text):
     """([(line, column, expression text, up hops, counterpart keys)] for every maximal recognized
     derivation with at least one hop, the count of anchored-but-not-judged expressions): each
     expression is judged once at its outermost recognized node (an anchored node under a recognized
-    or skipped ancestor is that ancestor's). The counterpart keys, most specific first, are the
-    single-assignment target name where the node is that assignment's value, then the normalized
-    expression text; the verdict matches a head derivation to a base one through the first shared
-    key."""
+    or skipped ancestor is that ancestor's). The counterpart keys come from _counterpart_keys: the
+    assigned target name where the node is a simple assignment's value, else the normalized
+    expression text, each under the enclosing scope's qualified path; the verdict matches a head
+    derivation to a base one through the first shared key."""
     aliases = _collect_aliases(tree)
     parents = {}
     for parent in ast.walk(tree):
@@ -688,8 +740,7 @@ def _derivations(tree, text):
             except (ValueError, RecursionError, MemoryError):
                 expr = "<expression at line {}>".format(node.lineno)
             expr = " ".join(expr.split())
-            name = assigned.get(id(node))
-            keys = (("name", name), ("expr", expr)) if name else (("expr", expr),)
+            keys = _counterpart_keys(scope.qual, assigned.get(id(node)), expr)
             derivs.append((node.lineno, node.col_offset, expr, result[0], keys))
     derivs.sort()
     return derivs, skipped
@@ -753,13 +804,15 @@ def scan(root, base, head, min_hops=MIN_HOPS, compare=True):
             judged.add(new)
             head_derivs, head_skipped, head_lines = _blob_analysis(root, head, new, cache)
             skipped_by_file[new] = head_skipped
-            base_by_key, base_all = {}, set()
+            base_by_key, base_all, base_name_seq = {}, set(), {}
             if compare:
                 # Base derivations of every hop count take part, each under its counterpart keys:
-                # judging a head derivation against its own counterpart (the same assignment name,
-                # else the same expression text) keeps one stale derivation from hiding behind
-                # another's directory, and lets a one-hop .parent corrected to .parents[1] during a
-                # one-level-deeper move pass as the same directory.
+                # judging a head derivation against its own counterpart (the same assignment name
+                # in the same scope, else the same expression text in that scope) keeps one stale
+                # derivation from hiding behind another's directory, and lets a one-hop .parent
+                # corrected to .parents[1] during a one-level-deeper move pass as the same
+                # directory. base_name_seq keeps each name key's directories in source order per
+                # base file, so same-scope reassignments pair position by position.
                 for old in olds:
                     old_derivs, _old_skipped, _old_lines = _blob_analysis(
                         root, merge_base, old, cache)
@@ -768,6 +821,13 @@ def scan(root, base, head, min_hops=MIN_HOPS, compare=True):
                         base_all.add(directory)
                         for one_key in keys:
                             base_by_key.setdefault(one_key, set()).add(directory)
+                        if keys[0][0] == "name":
+                            base_name_seq.setdefault(keys[0], {}).setdefault(
+                                old, []).append(directory)
+            head_name_order = {}
+            for line, col, _expr, _up, keys in head_derivs:
+                if keys[0][0] == "name":
+                    head_name_order.setdefault(keys[0], []).append((line, col))
             for line, col, expr, up, keys in head_derivs:
                 if up < min_hops:
                     continue
@@ -775,9 +835,14 @@ def scan(root, base, head, min_hops=MIN_HOPS, compare=True):
                 head_dir = _derived_dir(new, up)
                 counterpart = None
                 if compare:
-                    counterpart = next(
-                        (base_by_key[one_key] for one_key in keys if one_key in base_by_key),
-                        None)
+                    positions = (head_name_order.get(keys[0])
+                                 if keys[0][0] == "name" else None)
+                    counterpart = _match_counterpart(
+                        keys,
+                        positions.index((line, col)) if positions else 0,
+                        len(positions) if positions else 1,
+                        base_by_key, base_name_seq,
+                        "{} -> {}: line {} ({})".format(", ".join(olds), new, line, expr))
                     if counterpart is not None:
                         bad = (head_dir not in counterpart
                                or (not head_dir.startswith("..")
@@ -898,6 +963,9 @@ def main(argv=None):
 
 # --- self-test --------------------------------------------------------------------------------------
 # The fixture matrix over synthetic git repositories in a tempdir only (never the live repository).
+# The scoped-counterpart rows are paired the other way around: each flags, and its flip (the scope
+# qualifier dropped from the counterpart keys and the merged-set lookup restored) hides the finding,
+# so those rows fail if the scope-qualified pairing regresses.
 # Every comparison-quiet row is paired with its flag-everything flip (scan(compare=False), the plain
 # matcher with no before-and-after comparison; for the one-hop and lexical-dirname rows the flip
 # also lowers the hop minimum to 1, and for the not-recognized rows the flip removes exactly the
@@ -1363,6 +1431,84 @@ def self_test(report_path=None):
               _counts(got) == ("ok", 1, 1, 2, 0) and got[1][0]["line"] == 2
               and got[1][0]["head_dir"] == "a" and got[1][0]["base_dirs"] == ["."], got)
 
+        # fixture 23b2: the counterpart key carries the enclosing scope. In each repository two
+        # functions assign the same name; the move corrects f's hops and leaves g's stale, and g's
+        # stale head directory equals f's base directory, so only the per-scope judgment reports g.
+        # Each row is paired with the scope-free flip (the qualifier dropped from the keys AND the
+        # counterpart restored to the merged-set lookup), under which the finding hides, so every
+        # row here fails if the scope-qualified pairing regresses.
+        def _scope_free_keys(_qual, name, expr):
+            return (("name", "", name), ("expr", "", expr)) if name else (("expr", "", expr),)
+
+        def _scope_free_match(keys, _ordinal, _count, base_by_key, _base_name_seq, _context):
+            return next((base_by_key[k] for k in keys if k in base_by_key), None)
+
+        scope_a_base = ("from pathlib import Path\n"
+                        "def f():\n    ROOT = Path(__file__).parents[2]\n"
+                        "def g():\n    ROOT = Path(__file__).parents[1]\n")
+        scope_a_head = ("from pathlib import Path\n"
+                        "def f():\n    ROOT = Path(__file__).parents[1]\n"
+                        "def g():\n    ROOT = Path(__file__).parents[1]\n")
+        scope_a, scope_a_b, scope_a_h = _repo_with(
+            base, "scope-shallower", {"tools/a/b/x.py": scope_a_base},
+            {"tools/a/x.py": scope_a_head})
+        got = _outcome(scope_a, scope_a_b, scope_a_h)
+        check("verdict/scoped-shallower-move-stale-flagged",
+              _counts(got) == ("ok", 1, 1, 2, 0) and got[1][0]["line"] == 5
+              and got[1][0]["head_dir"] == "tools"
+              and got[1][0]["base_dirs"] == ["tools/a"], got)
+        with (_patched(this, "_counterpart_keys", _scope_free_keys),
+              _patched(this, "_match_counterpart", _scope_free_match)):
+            got = _outcome(scope_a, scope_a_b, scope_a_h)
+        check("verdict/scoped-shallower-move-scope-free-flip-hides",
+              _counts(got) == ("ok", 0, 1, 2, 0), got)
+        scope_b_base = ("from pathlib import Path\n"
+                        "def f():\n    ROOT = Path(__file__).parents[1]\n"
+                        "def g():\n    ROOT = Path(__file__).parents[2]\n")
+        scope_b_head = ("from pathlib import Path\n"
+                        "def f():\n    ROOT = Path(__file__).parents[2]\n"
+                        "def g():\n    ROOT = Path(__file__).parents[2]\n")
+        scope_b, scope_b_b, scope_b_h = _repo_with(
+            base, "scope-deeper", {"tools/a/x.py": scope_b_base},
+            {"tools/a/b/x.py": scope_b_head})
+        got = _outcome(scope_b, scope_b_b, scope_b_h)
+        check("verdict/scoped-deeper-move-stale-flagged",
+              _counts(got) == ("ok", 1, 1, 2, 0) and got[1][0]["line"] == 5
+              and got[1][0]["head_dir"] == "tools" and got[1][0]["base_dirs"] == ["."], got)
+        with (_patched(this, "_counterpart_keys", _scope_free_keys),
+              _patched(this, "_match_counterpart", _scope_free_match)):
+            got = _outcome(scope_b, scope_b_b, scope_b_h)
+        check("verdict/scoped-deeper-move-scope-free-flip-hides",
+              _counts(got) == ("ok", 0, 1, 2, 0), got)
+
+        # fixture 23b3: one scope assigning the same name twice is judged assignment by
+        # assignment in source order (the second stays stale here, hidden under the merged-set
+        # flip), and a set that cannot be paired one to one is cannot-evaluate
+        multi_base = ("from pathlib import Path\n"
+                      "ROOT = Path(__file__).parents[1]\n"
+                      "ROOT = Path(__file__).parents[2]\n")
+        multi_head = ("from pathlib import Path\n"
+                      "ROOT = Path(__file__).parents[2]\n"
+                      "ROOT = Path(__file__).parents[2]\n")
+        multi, multi_b, multi_h = _repo_with(
+            base, "multi-assign", {"a/b/t.py": multi_base}, {"a/b/c/t.py": multi_head})
+        got = _outcome(multi, multi_b, multi_h)
+        check("verdict/same-scope-multi-assign-stale-flagged",
+              _counts(got) == ("ok", 1, 1, 2, 0) and got[1][0]["line"] == 3
+              and got[1][0]["head_dir"] == "a" and got[1][0]["base_dirs"] == ["."], got)
+        with (_patched(this, "_counterpart_keys", _scope_free_keys),
+              _patched(this, "_match_counterpart", _scope_free_match)):
+            got = _outcome(multi, multi_b, multi_h)
+        check("verdict/same-scope-multi-assign-scope-free-flip-hides",
+              _counts(got) == ("ok", 0, 1, 2, 0), got)
+        unpair, unpair_b, unpair_h = _repo_with(
+            base, "multi-assign-unpaired",
+            {"a/b/t.py": "from pathlib import Path\nROOT = Path(__file__).parents[1]\n"},
+            {"a/b/c/t.py": multi_head})
+        got = _outcome(unpair, unpair_b, unpair_h)
+        check("verdict/same-scope-multi-assign-unpairable-cannot-evaluate",
+              got[0] == "cannot" and "paired one to one" in got[1], got)
+
         # fixture 23c: a name bound to a __file__-anchored value at module level and extended in
         # a function crosses a scope the bound-once rule does not model: counted as skipped
         body23c = ("from pathlib import Path\nHERE = Path(__file__).resolve().parent\n"
@@ -1478,6 +1624,21 @@ def self_test(report_path=None):
             base, "undecodable", {"a/t.py": P1 + filler}, {"b/t.py": b"# x\n\xff\xfe = 1\n"})
         check("parse/undecodable-cannot-evaluate",
               _outcome(undec, undec_b, undec_h)[0] == "cannot", _outcome(undec, undec_b, undec_h))
+        # fixture 25b: a coding cookie naming a registered codec that is not a text encoding
+        # raises LookupError out of the encoding probe (an unknown cookie raises SyntaxError
+        # instead): a disclosed cannot-evaluate on the head side as on the base side, never a crash
+        rot_head, rot_head_b, rot_head_h = _repo_with(
+            base, "nontext-codec-head", {"a/t.py": P1 + filler},
+            {"b/t.py": b"# -*- coding: rot13 -*-\nROOT = 1\n"})
+        got = _outcome(rot_head, rot_head_b, rot_head_h)
+        check("parse/head-nontext-codec-cookie-cannot-evaluate",
+              got[0] == "cannot" and "LookupError" in got[1], got)
+        hex_base, hex_base_b, hex_base_h = _repo_with(
+            base, "nontext-codec-base", {"a/t.py": b"# -*- coding: hex -*-\nROOT = 1\n"},
+            {"b/t.py": P1})
+        got = _outcome(hex_base, hex_base_b, hex_base_h)
+        check("parse/base-nontext-codec-cookie-cannot-evaluate",
+              got[0] == "cannot" and "LookupError" in got[1], got)
 
         # fixture 26: an unresolvable revision, no merge base, and a missing blob
         try:
@@ -1576,7 +1737,8 @@ def self_test(report_path=None):
         return 1
     print("SELF-TEST PASS: check_moved_python_roots {} checks over synthetic git fixtures (the "
           "seed shape, R100, wrapper, dot-dot, alias and bound-name derivations flagged, each "
-          "head derivation judged against its own base counterpart; corrected hops, same-depth "
+          "head derivation judged against its own base counterpart in its own scope, same-scope "
+          "reassignments paired one to one or refused; corrected hops, same-depth "
           "moves, one-hop and lexical-dirname derivations, redefined or quoted names, unmoved and "
           "new files and non-__file__ roots quiet, each comparison-quiet row with its "
           "flag-everything flip and the scope-only quiet rows disclosed without one; unpaired "
