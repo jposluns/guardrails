@@ -446,11 +446,12 @@ def _any_link(site, href, text, where):
 def _inline(site, value):
     """An inline HTML value with the $BASE/ token rendered as the site's base path, the $OPF_STATUS
     token rendered as the reference CLI status note (status_note) and the $HOOK_COUNT token rendered as
-    the Claude Code hook count (hook_count)."""
+    the Claude Code hook count (hook_count) of the site's "tree" (the tree build() is given; ROOT when the site
+    names none)."""
     if "$OPF_STATUS" in value:
         value = value.replace("$OPF_STATUS", status_note())
     if "$HOOK_COUNT" in value:
-        value = value.replace("$HOOK_COUNT", str(hook_count()))
+        value = value.replace("$HOOK_COUNT", str(hook_count(site.get("tree", ROOT))))
     return value.replace("$BASE/", site["base"])
 
 
@@ -463,11 +464,22 @@ HOOKS_SOURCE = ".aiqt/core/hooks/manifest.toml"
 def hook_count(root=ROOT):
     """The number of [[hook]] entries in the hooks manifest under root whose platform is "claude-code".
     RefusedPage when the manifest cannot be read or parsed, when its hook key is not an array of tables
-    each with a string platform, or when it holds no Claude Code hook."""
+    each with a string platform, or when it holds no Claude Code hook. Like _existing and _load_pages, it
+    refuses a manifest path that is a symbolic link or any entry other than a regular file."""
     path = Path(root) / HOOKS_SOURCE
     try:
-        with open(path, "rb") as handle:
-            data = handle.read(MAX_PAGE_BYTES + 1)
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise RefusedPage("{}: not a regular file (a symbolic link or other entry)".format(HOOKS_SOURCE))
+        # O_NOFOLLOW and O_NONBLOCK keep an entry swapped in after the lstat from being followed or from
+        # blocking the open (a FIFO); the opened descriptor is checked again before anything is read.
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RefusedPage("{}: not a regular file (a symbolic link or other entry)".format(HOOKS_SOURCE))
+            with os.fdopen(fd, "rb", closefd=False) as handle:
+                data = handle.read(MAX_PAGE_BYTES + 1)
+        finally:
+            os.close(fd)
     except OSError as exc:
         raise RefusedPage("{}: unreadable ({})".format(HOOKS_SOURCE, exc)) from exc
     if len(data) > MAX_PAGE_BYTES:
@@ -1611,14 +1623,15 @@ def staged_sites(sites=SITES):
     return tuple(dict(site, base=DRAFT_BASE, root=site["live"] + "/draft") for site in sites)
 
 
-def build(pages=None, sites=SITES, registered=True):
+def build(pages=None, sites=SITES, registered=True, tree=ROOT):
     """{target path: text} for every registered output. Each site is loaded from its own data directory
     and rendered with its own context; with the default page sets, the built set must match the
     GENSRC_OUTPUTS declaration, so a page cannot land or vanish without its registry entry. A given
     `pages` list (a fixture) is rendered for every site in `sites`. Every kept live path of a site must
     exist under its live root before anything renders, and no 2 sites may build the same output path.
     `registered` false skips the declaration match, for a fixture build of the declared pages at another
-    base (promoted_sites)."""
+    base (promoted_sites). `tree` is the repository tree whose hooks manifest gives the $HOOK_COUNT value
+    (run() passes the root it is given)."""
     declared = pages is None
     outputs = {}
     for site in sites:
@@ -1631,7 +1644,7 @@ def build(pages=None, sites=SITES, registered=True):
             target = "{}/{}".format(site["root"], page["rel"])
             if target in outputs:
                 raise RefusedPage("{}: built by more than 1 site".format(target))
-            outputs[target] = render_page(site, site_pages, page)
+            outputs[target] = render_page(dict(site, tree=tree), site_pages, page)
     if declared and registered:
         targets = {entry["target"] for entry in GENSRC_OUTPUTS}
         if set(outputs) != targets:
@@ -1762,7 +1775,7 @@ def run(root, check, outputs=None):
     defaults to build()."""
     try:
         if outputs is None:
-            outputs = build()
+            outputs = build(tree=root)
     except RefusedPage as exc:
         print("error: refused: {}".format(exc), file=sys.stderr)
         return 2
@@ -2841,6 +2854,9 @@ def _self_test():
     expect("stray/tree-clean", stray_outputs(ROOT) == [], stray_outputs(ROOT))
 
     with tempfile.TemporaryDirectory(prefix="gen-draft-site-selftest-") as tmp:
+        # run() counts the hooks of the tree it is given, so the tree carries the live hooks manifest.
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        shutil.copyfile(ROOT / HOOKS_SOURCE, Path(tmp) / HOOKS_SOURCE)
         first = run(tmp, check=True)
         second = run(tmp, check=False)
         third = run(tmp, check=True)
@@ -2934,11 +2950,51 @@ def _self_test():
                          ("site/install/details/index.html", "The {} Claude Code hooks")):
         expect("hooks/live-count-on-pages", wording.format(live_hooks) in live_outputs[rel], (rel, wording))
     expect("hooks/no-unrendered-token", not any("$HOOK_COUNT" in text for text in live_outputs.values()))
-    for rel in ("site/draft-src/home.toml", "site/draft-src/install-details.toml"):
+    # A typed count: a number (digits or a number word) followed by "hooks" with at most 4 words between,
+    # in any case, matched after TOML \u and \U escapes and HTML character references (&nbsp; among them)
+    # are decoded, so neither a number word, a no-break space nor words in between hide a typed count.
+    number_words = ("zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|"
+                    "fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+                    "eighty|ninety|hundred|dozen")
+    typed_count = re.compile(r"\b(?:\d+|" + number_words + r")\b(?:\W+\w+){0,4}?\W+hooks\b", re.IGNORECASE)
+
+    def typed_counts(text):
+        def code_point(match):
+            value = int(match.group(1) or match.group(2), 16)
+            return chr(value) if value <= 0x10FFFF else " "
+        text = re.sub(r"\\u([0-9A-Fa-f]{4})|\\U([0-9A-Fa-f]{8})", code_point, text)
+        return [found.group(0) for found in typed_count.finditer(_html.unescape(text))]
+
+    for name, text, want in (
+            ("hooks/typed-count-digits", "of 12 hooks", True),
+            ("hooks/typed-count-number-word", "of twelve hooks", True),
+            ("hooks/typed-count-number-word-capitalised", "Twelve Hooks ship", True),
+            ("hooks/typed-count-nbsp", "of 12&nbsp;hooks", True),
+            ("hooks/typed-count-nbsp-words-between", "The 12&nbsp;Claude&nbsp;Code hooks", True),
+            ("hooks/typed-count-toml-escape", "of 12\\u00a0hooks", True),
+            ("hooks/typed-count-char-reference-digits", "of &#49;&#50; hooks", True),
+            ("hooks/typed-count-hex-char-reference-digits", "of &#x31;&#x32; hooks", True),
+            ("hooks/typed-count-nbsp-not-a-word", "of 12&nbsp;Claude&nbsp;Code&nbsp;opt&nbsp;in hooks", True),
+            ("hooks/typed-count-four-words-between", "the 12 opt in Claude Code hooks", True),
+            ("hooks/typed-count-five-words-between-not-matched", "the 12 a b c d e hooks", False),
+            ("hooks/typed-count-token-not-matched", "The $HOOK_COUNT Claude Code hooks", False),
+            ("hooks/typed-count-no-number-not-matched", "the pack's tools and hooks", False)):
+        found = typed_counts(text)
+        expect(name, bool(found) == want, (text, found))
+    hook_data_files = []
+    for data_site in SITES:
+        with os.scandir(ROOT / data_site["src"]) as entries:
+            hook_data_files.extend("{}/{}".format(data_site["src"], entry.name) for entry in entries
+                                   if entry.name.endswith(".toml"))
+    expect("hooks/data-files-every-site", any(rel.startswith("opf/site/draft-src/") for rel in hook_data_files)
+           and "site/draft-src/home.toml" in hook_data_files, hook_data_files)
+    for rel in sorted(hook_data_files):
         with open(ROOT / rel, encoding="utf-8") as handle:
             data_text = handle.read()
-        typed = re.findall(r"\b\d+ (?:Claude Code )?hooks\b", data_text)
-        expect("hooks/data-files-carry-the-token", "$HOOK_COUNT" in data_text and not typed, (rel, typed))
+        typed = typed_counts(data_text)
+        carries = "$HOOK_COUNT" in data_text or rel not in ("site/draft-src/home.toml",
+                                                            "site/draft-src/install-details.toml")
+        expect("hooks/data-files-carry-the-token", carries and not typed, (rel, typed))
     expect("hooks/token-rendered", _inline({"base": "/"}, "a $HOOK_COUNT b") == "a {} b".format(live_hooks))
     for name, text, want in (
             ("hooks/count-claude-code-only", '[[hook]]\nplatform = "claude-code"\n[[hook]]\nplatform = "claude-code"\n'
@@ -2962,6 +3018,60 @@ def _self_test():
                 with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
                     handle.write(text)
             refused(name, hook_count, tmp)
+    # A symbolic link at the manifest path is refused, never followed, even to a valid manifest.
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / "real.toml", "w", encoding="utf-8") as handle:
+            handle.write('[[hook]]\nplatform = "claude-code"\n')
+        os.symlink(Path(tmp) / "real.toml", Path(tmp) / HOOKS_SOURCE)
+        refused("hooks/symlink-manifest-refused", hook_count, tmp)
+    # A FIFO at the manifest path is refused without a blocking open. A reader that did open it would wait
+    # for a writer; the writer below feeds such a reader a valid manifest (and gives up once the call returns
+    # or after about 10 seconds), so a reader that opens the FIFO counts a hook and the row fails, not hangs.
+    import threading
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
+        fifo = Path(tmp) / HOOKS_SOURCE
+        os.makedirs(fifo.parent)
+        os.mkfifo(fifo)
+        done = threading.Event()
+
+        def feed():
+            for _attempt in range(1000):
+                if done.wait(0.01):
+                    return
+                try:
+                    fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+                except OSError:
+                    continue
+                try:
+                    os.write(fd, b'[[hook]]\nplatform = "claude-code"\n')
+                finally:
+                    os.close(fd)
+                return
+
+        feeder = threading.Thread(target=feed, daemon=True)
+        feeder.start()
+        try:
+            refused("hooks/fifo-manifest-refused", hook_count, tmp)
+        finally:
+            done.set()
+            feeder.join(15)
+    # run() counts the hooks manifest of the root it is given, not ROOT's: a tree whose manifest holds 1 more
+    # Claude Code hook than the live one gets pages stating that count.
+    import contextlib
+    import io
+    with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-run-") as tmp:
+        os.makedirs((Path(tmp) / HOOKS_SOURCE).parent)
+        with open(Path(tmp) / HOOKS_SOURCE, "w", encoding="utf-8") as handle:
+            handle.write('[[hook]]\nplatform = "claude-code"\n' * (live_hooks + 1))
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = run(tmp, check=False)
+        written = ""
+        if os.path.isfile(Path(tmp) / "site/index.html"):
+            with open(Path(tmp) / "site/index.html", encoding="utf-8") as handle:
+                written = handle.read()
+    expect("hooks/run-counts-its-root",
+           code == 0 and "an opt-in plugin of {} hooks".format(live_hooks + 1) in written, code)
 
     if failures:
         print("SELF-TEST FAIL: gen_draft_site {} failure(s)".format(len(failures)))
@@ -2974,7 +3084,10 @@ def _self_test():
           "component's reference markup, the data-file refusals, derived scripts with rail.js only where "
           "the rail lists sections, the link rules, kept live paths, the mappings bodies, promotion "
           "switch, text-field escaping, the structural link guard, the checked title and meta keys, the "
-          "hook count read from the hooks manifest and --check exit codes)")
+          "hook count read from the hooks manifest of the root run() is given (a symbolic link or FIFO "
+          "there refused), no draft-src data file of either site typing a number (digits or a number word) "
+          "with at most 4 words before \"hooks\" once TOML escapes and HTML character references are "
+          "decoded, and --check exit codes)")
     return 0
 
 
