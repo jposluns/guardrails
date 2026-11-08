@@ -24291,14 +24291,20 @@ class _VerbHelperImportGate:
 
 def _verb_intercepted(here, dispatch, argv):
     """Run dispatch(argv) with EVERY function this module defines, other than `dispatch` itself, and every
-    callable attribute of every loaded _opf_ helper module replaced by a recorder that returns 0, the import
-    of any _opf_ helper not loaded yet refused, and the declaration gate emptied, so no handler or helper
-    under any name runs and no store or declaration is read. Returns (the names called, in order, a helper's
-    as "module.attribute" and a refused import as "import module", the leading _bootstrap dropped; the exit,
-    or the exception the dispatch raised; stderr). Between the replacement and the restore, nothing defined
-    in this module or a helper is called other than the import gate (_VerbHelperImportGate). A function this
-    module defines is one inspect.isfunction admits (a def or a lambda, not a class, a builtin or a bound
-    method) whose __module__ is this module's name, so a function imported from another module is kept."""
+    callable attribute of every loaded _opf_ helper module other than _opf_store replaced by a recorder that
+    returns 0, the import of any _opf_ helper not loaded yet refused, and the declaration gate emptied, so
+    no handler and no helper the probes may reach runs and no declaration is read. The store module is left
+    exactly as it is: no attribute of it is ever written, not even to restore one, so the interception
+    cannot write to the store module under any name. A dispatch that reached a store callable would still
+    fail its probe, because every probe requires the recorded names to be exactly its own handler and a
+    store callable records nothing; any filesystem effect of such a call is caught by the caller's
+    scratch-tree hash walk. Returns (the names called, in order, a helper's as "module.attribute" and a
+    refused import as "import module", the leading _bootstrap dropped; the exit, or the exception the
+    dispatch raised; stderr). Between the replacement and the restore, nothing defined in this module or a
+    helper other than the store module is callable for real, other than the import gate
+    (_VerbHelperImportGate). A function this module defines is one inspect.isfunction admits (a def or a
+    lambda, not a class, a builtin or a bound method) whose __module__ is this module's name, so a function
+    imported from another module is kept."""
     import contextlib
     import inspect
     import io
@@ -24308,7 +24314,10 @@ def _verb_intercepted(here, dispatch, argv):
              if inspect.isfunction(value) and value.__module__ == here.__name__
              and value is not dispatch]
     for module_name, module in sorted(sys.modules.items()):
-        if module_name.startswith("_opf_") and isinstance(module, types.ModuleType) and module is not here:
+        # The store module is skipped by name: the interception must never write to _opf_store, so none of
+        # its callables is replaced or restored.
+        if (module_name.startswith("_opf_") and module_name != "_opf_store"
+                and isinstance(module, types.ModuleType) and module is not here):
             saved.extend((module, name, value) for name, value in vars(module).items()
                          if callable(value) and value is not dispatch)
     replaced = len(saved)
@@ -24341,8 +24350,9 @@ def _verb_status_faults(table=None, verbs=None, refusals=None, dispatch=None, en
 
     Every probe runs with its working directory and --root in a scratch directory this function creates
     and removes, and a probe after which a path under that directory appeared, changed or vanished is a
-    fault. Routing is judged with every function of this module and of every loaded helper intercepted
-    (_verb_intercepted), so no handler or helper under any name runs: an available or partial verb must
+    fault. Routing is judged with every function of this module and of every loaded helper other than the
+    store module intercepted (_verb_intercepted, which never writes to _opf_store), so no handler runs and
+    each probe is held to the recorders it reached: an available or partial verb must
     reach exactly its own `_cmd_<verb>`. An in progress verb is probed with no arguments, with --help and
     with --root: each must reach no handler or exactly its own refusing handler, and must not raise, and
     only then does the real dispatch run it, which must exit 2 with exactly the stub line or its refusal. A
@@ -24551,8 +24561,13 @@ def _verb_intercepted_faults():
     module defines (a def, and a lambda bound here) must be replaced by a recorder during the dispatch, so
     calling it records its name and returns 0; the dispatch itself, a class this module defines, a bound
     method of an instance of that class, a function bound here but defined in another module, and a builtin
-    bound here must each be kept as it is. After the dispatch, every one of them must be the original again."""
+    bound here must each be kept as it is, and every callable of the store module must be kept as it is
+    during the dispatch (the interception never writes to _opf_store). After the dispatch, every one of
+    them must be the original again."""
     here = sys.modules[__name__]
+    store = sys.modules["_opf_store"]
+    store_originals = sorted((name, value) for name, value in vars(store).items() if callable(value))
+    store_kept = []
     probes = dict(_verb_status_probe_lambda=lambda: None,
                   _verb_status_probe_method=_VerbHelperImportGate([]).find_spec,
                   _verb_status_probe_foreign=os.path.join, _verb_status_probe_builtin=len)
@@ -24562,6 +24577,7 @@ def _verb_intercepted_faults():
         # reads each attribute and calls the two that must be recorders; nothing this module defines runs
         for attr, value in originals.items():
             seen[attr] = getattr(here, attr) is value
+        store_kept.append(all(getattr(store, name) is value for name, value in store_originals))
         here._verb_tree(argv)
         here._verb_status_probe_lambda()
         return EXIT_OK
@@ -24588,6 +24604,9 @@ def _verb_intercepted_faults():
     if here._verb_tree is not originals["_verb_tree"] or (
             here._VerbHelperImportGate is not originals["_VerbHelperImportGate"]):
         faults.append("_verb_intercepted did not restore _verb_tree and _VerbHelperImportGate")
+    if store_kept != [True] or not all(getattr(store, name) is value for name, value in store_originals):
+        faults.append("_verb_intercepted wrote to the store module: every callable of _opf_store must be "
+                      "kept as it is during the dispatch and after it")
     return faults
 
 

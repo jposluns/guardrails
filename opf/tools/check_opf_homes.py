@@ -1994,7 +1994,9 @@ _ATTRIBUTE_WRITER_EXCLUSIONS = {
      "setattr(owner, name, lambda *args, _n=label, **kwargs: called.append(_n) or EXIT_OK)"):
         "the intercepted dispatch's recorders: the pairs are saved[:replaced], filled from vars of this module "
         "with the functions it defines (inspect.isfunction, matching __module__) and from each loaded _opf_ "
-        "helper module's callables; the store's HOMES is an integer, never a callable, so no pair names it",
+        "helper module's callables with _opf_store skipped by name, so no owner is ever the store module and "
+        "the use writes nothing to it; HOMES is bound only as the store module's integer constant, an integer "
+        "too wherever it is imported, never a callable, so no pair names it",
     ("opf.py", "_verb_intercepted", "setattr(owner, name, value)"):
         "the same pairs restored from saved, plus this module's _DECLARATION_GATED by its literal name; the "
         "reason above",
@@ -2747,7 +2749,11 @@ def _homes1_scan(tools=None):
     self_tests, _helpers = _self_test_functions(trees)
     if not self_tests:
         # The classifier leaving no self-test body unread while the tree defines self-test functions is a
-        # finding, never a silent widening of the scan to every self-test body.
+        # finding, never a silent widening of the scan to every self-test body. Disclosed limit: this fires
+        # only when NO self-test body is left unread, so a partial misclassification (some bodies unread,
+        # others read as production) is not reported here; and the count it names is of the module-level
+        # undecorated defs matched below, while the classifier's own set of self-test defs also holds
+        # decorated ones, so the two counts can differ.
         matched = [(rel, stmt) for rel, tree in trees for stmt in tree.body
                    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
                    and not stmt.decorator_list and _SELF_TEST_NAME.search(stmt.name)]
@@ -7283,6 +7289,18 @@ def _self_test_vectors():
          "    setattr(_opf_store, 'HOMES', 1)\n    return _fixture\n\n\nFIXTURE = _fixture\n",
          importing + "def _fixture():\n    return helper_self_test\n\n\ndef helper_self_test():\n"
          "    setattr(_opf_store, 'HOMES', 1)\n    return _fixture\n", (8, rebound_in.format("helper_self_test"))),
+        # Taint crosses a def chain: production spells only _taint_entry, whose body spells _taint_bridge,
+        # whose body spells the self-test function, so the self-test body is read like production code and
+        # its HOMES write is red (red only while taint propagates def to def: taint that stopped at
+        # _taint_entry would leave _taint_bridge a helper, the body unread and the write unseen). The clean
+        # flip spells the chain only from the self-test body, so it stays a helper chain and the body unread.
+        ("self-test-taint-chain", "planted.py",
+         importing + "def helper_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n    return _taint_bridge()\n\n\n"
+         "def _taint_bridge():\n    helper_self_test\n    return 0\n\n\ndef _taint_entry():\n"
+         "    return _taint_bridge()\n\n\nRUN = _taint_entry\n",
+         importing + "def helper_self_test():\n    setattr(_opf_store, 'HOMES', 1)\n    _taint_entry\n"
+         "    return _taint_bridge()\n\n\ndef _taint_bridge():\n    helper_self_test\n    return 0\n\n\n"
+         "def _taint_entry():\n    return _taint_bridge()\n", (4, rebound_in.format("helper_self_test"))),
         # Only the body of the `__main__` block is an entry: its else and elif arms run on import. A decorated main
         # is production code, and so is a main production code spells (called at import, or from a self-test
         # function production reaches). Each clean flip moves the call into the block's body, or drops the
