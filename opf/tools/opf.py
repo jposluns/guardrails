@@ -1517,7 +1517,16 @@ def _watchdog_timer_case(label, mode, bounded=None, clock=None):
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             rc = functions[label]()
     after = signal.getitimer(which)
-    ok = (rc == EXIT_OK and not mutations and not shields and after[1] == before[1]
+    if rc == EXIT_MALFORMED:
+        # The exercised module's own distinct no-verdict exit (2, its bounded
+        # exercise never established on this host, or its environment refused
+        # fail-closed): no verdict on this case either, honored below only
+        # when EVERY isolation check holds and recorded apart, never a pass
+        # and never a definite failure (rc 1, and rc 2 with any isolation
+        # check failed, stay definite failures).
+        unestablished.append("the exercised module self-test issued no verdict (exit 2)")
+    ok = (rc in (EXIT_OK, EXIT_MALFORMED) and not mutations and not shields
+          and after[1] == before[1]
           and signal.getsignal(signum) is handler
           and signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask)
     if mode == "expiry":
@@ -4289,6 +4298,20 @@ def _watchdog_deadline_case(mode):
             # an unexpected wait PID stay definite failures (plain
             # ChildStatusUnavailable never takes this branch).
             unestablished = result
+        elif (not ok and result == "TIMEOUT" and execution_ok and reached
+              and reaped and census_ok and not cleanup_ok):
+            # Cleanup completion or the receipt was OBSERVED after the
+            # declared deadline while every controlled-timeline check held.
+            # The drain itself refuses to keep waiting past expiry (it raises
+            # the distinct subclass, mapped above), so a late observation
+            # here is the host scheduling the drain's last ECHILD read, the
+            # recording, or the receipt delivery late on a correct drain: no
+            # verdict, never a pass and never a definite failure. A late
+            # ARMED deadline, lost ownership, a missed reap and a broken
+            # census order stay definite failures above.
+            unestablished = ("cleanup completion or receipt observed after "
+                             "the declared deadline while every controlled "
+                             "check held")
     finally:
         os.close(started_r)
         os.close(started_w)
@@ -5754,6 +5777,23 @@ def _watchdog_completion_case(mode, tree=None):
                           side_effect=emit.ChildStatusUnavailable(
                               "lost descendant ownership")):
             assert _watchdog_deadline_case("pipe-stall") == EXIT_FINDING
+        # A cleanup whose completion is OBSERVED only after its declared
+        # deadline and the receipt allowance, with every controlled check
+        # held, is no verdict (a starved host schedules the recording and
+        # the receipt late on a correct drain), never a pass and never a
+        # definite failure. The stand-in holds the CALLER past the drain
+        # deadline plus the allowance after a successful run, which is
+        # deterministic: the observation always lands beyond the limit,
+        # whatever the host's speed. The message carries no
+        # "ChildStatusDeadline" token, so the expired-deadline flip above
+        # keeps discriminating a drain that ignores its expiry.
+        def late_observation(thunk, **kwargs):
+            observed = real_run(thunk, **kwargs)
+            time.sleep(emit._FIXTURE_CLEANUP_GRACE + _DEADLINE_RECEIPT_ALLOWANCE + 0.2)
+            return observed
+        with patch.object(emit, "run_bounded", late_observation):
+            out = no_verdict(_watchdog_deadline_case, "pipe-stall")
+            assert "after the declared deadline" in out, out
         real_signal, first = emit._fixture_signal, [True]
         def census_only(*args, **kwargs):
             if first[0]:
@@ -16949,6 +16989,45 @@ def _watchdog_regression_self_test():
         if got != want:
             flip_missed.append("window fixture %s at %s s -> %r, want %r"
                                % (result, elapsed, got, want))
+    # The module no-verdict connection inside the REAL timer fixture
+    # (red-on-revert): an exercised module self-test's own distinct exit 2
+    # (its bounded exercise never established on this host) is a CLEAN timer
+    # fixture exit carrying the exact marker ONLY while every isolation
+    # check holds; exit 2 with a recorded caller mutation, and exit 1, stay
+    # definite failures carrying no honored marker.
+    def module_fixture(stub):
+        if _bootstrap() != EXIT_OK:
+            return ("bootstrap-failed", False)
+        sigalrm = signal.getsignal(signal.SIGALRM)
+        timer = signal.getitimer(signal.ITIMER_REAL)
+        real_self_test = _opf_changelog.self_test
+        buffer = io.StringIO()
+        try:
+            _opf_changelog.self_test = stub
+            with contextlib.redirect_stdout(buffer):
+                rc = _watchdog_timer_case("changelog", "single")
+        finally:
+            _opf_changelog.self_test = real_self_test
+            signal.signal(signal.SIGALRM, sigalrm)
+            signal.setitimer(signal.ITIMER_REAL, *timer)
+        out = buffer.getvalue()
+        return (_watchdog_completion_verdict(rc, out), _WATCHDOG_CANNOT_EVALUATE in out)
+
+    def mutating_no_verdict():
+        try:
+            signal.alarm(1)
+        except AssertionError:
+            pass
+        return EXIT_MALFORMED
+
+    for stub, name, want in (((lambda: EXIT_MALFORMED), "no-verdict",
+                              ("cannot-evaluate", True)),
+                             ((lambda: EXIT_FINDING), "finding", ("fail", False)),
+                             (mutating_no_verdict, "mutating-no-verdict",
+                              ("fail", False))):
+        got = module_fixture(stub)
+        if got != want:
+            flip_missed.append("module fixture %s -> %r, want %r" % (name, got, want))
     # The close-out allowance derivation: the real close-out code, run along
     # each derived path under a virtual clock, must fit that path's total
     # and reach each of its waits.

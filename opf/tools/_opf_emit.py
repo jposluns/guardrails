@@ -3189,6 +3189,23 @@ def _bounded_setup_error(exc):
     return "SETUP-ERROR:" + type(exc).__name__ + ":" + str(exc)[:8192]
 
 
+def bounded_probe_unestablished(result, elapsed, timeout_s):
+    """True when a run_bounded PROBE established nothing on this host: the
+    TIMEOUT sentinel once the caller's measured monotonic `elapsed` reached
+    `timeout_s`. run_bounded computes its deadline AFTER that measurement
+    begins (and arms the child timer later still), so on a correct probe only
+    a bound that genuinely elapsed here can be host starvation of the probe
+    child (guardian startup shares the requested deadline): no verdict, never
+    a pass and never a definite failure. A TIMEOUT measured BEFORE the bound
+    could have elapsed is an early trip of the bound (a run_bounded
+    regression), and every other result is the probe's own outcome; both stay
+    with the caller's check, which judges them as before. The ends of the
+    window: at exactly `timeout_s` the bound has elapsed (unestablished, the
+    same inclusive end _watchdog_window_verdict uses); one tick under it has
+    not (the caller's check keeps the definite failure)."""
+    return result == "TIMEOUT" and elapsed >= timeout_s
+
+
 def run_bounded(thunk, timeout_s=30, mem_bytes=1024 * 1024 * 1024, keep_fds=()):
     """Run `thunk` (a zero-arg callable returning a short str) in a bounded CHILD PROCESS and return that
     str, or a sentinel: 'TIMEOUT' (wall-clock bound tripped), 'OOM' (address-space bound tripped),

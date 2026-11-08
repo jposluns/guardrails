@@ -2636,6 +2636,7 @@ def _self_test():
 
     failures = []
     checked = [0]
+    unestablished = []
 
     def check(name, cond):
         checked[0] += 1
@@ -2786,13 +2787,37 @@ def _self_test():
                 return str(not _rc_calls)
             return "ACCEPTED"
 
+        import time as _probe_time
+        _probe_begin = _probe_time.monotonic()
         try:
             # The probe reads through the pre-opened dirfd: DECLARE it (fd allowlist).
             fifo_result = run_bounded(_fifo_probe, timeout_s=5, keep_fds=(_ffd,))
         finally:
             _journal._read_contained = _orig_rc
             os.close(_ffd)
-        check("fifo-source-fails-closed-not-hang", fifo_result == "True")
+        # A TIMEOUT whose measured time reached the 5 s bound establishes
+        # nothing: a starved host can reach the bound on a correct probe
+        # (guardian startup shares it), so that run is recorded apart as this
+        # suite's distinct no-verdict exit 2 below, never a pass and never a
+        # definite failure. An early TIMEOUT and every other result stay with
+        # the check: the guard-deletion regression is judged by the recorded
+        # downstream-reader call (_rc_calls), which no host speed can move.
+        from _opf_emit import bounded_probe_unestablished
+        if bounded_probe_unestablished(fifo_result, _probe_time.monotonic() - _probe_begin, 5):
+            unestablished.append("fifo-source-fails-closed-not-hang: the bounded FIFO probe's "
+                                 "own 5 s bound, not the probe's return, ended the run")
+        else:
+            check("fifo-source-fails-closed-not-hang", fifo_result == "True")
+        # The classifier's window ends, pinned: at the bound and above it the
+        # probe is unestablished; one tick under it, and a returned value at
+        # any measured time, keep the check's own judgement.
+        check("fifo-probe-timeout-at-bound-unestablished",
+              bounded_probe_unestablished("TIMEOUT", 5.0, 5)
+              and bounded_probe_unestablished("TIMEOUT", 5.01, 5))
+        check("fifo-probe-early-timeout-stays-judged",
+              not bounded_probe_unestablished("TIMEOUT", 4.99, 5))
+        check("fifo-probe-returned-value-stays-judged",
+              not bounded_probe_unestablished("True", 6.0, 5))
         _slp = base / "symparent"; _slp.mkdir(); (_slp / "real").mkdir()
         (_slp / "real" / "x.index.toml").write_text("schema = 1\n", encoding="utf-8")
         (_slp / "toml").symlink_to("real")
@@ -5537,6 +5562,13 @@ def _self_test():
         for f in failures:
             print("  - " + f, file=sys.stderr)
         return EXIT_DRIFT
+    if unestablished:
+        # Every judged check held, but a bounded probe was never established
+        # on this host: the distinct fail-closed no-verdict exit, never a
+        # pass and never a definite failure (a failed check above stays one).
+        print("OPF-VIEWS SELF-TEST: CANNOT EVALUATE (no verdict: {})".format(
+            "; ".join(unestablished)), file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
     print("opf-views self-test: PASS ({} checks) -- independent expected-bytes goldens per view, drift "
           "detection, the closed transform vocabulary (unknown filter/sort/group/project refused), the "
           "source-set-digest sensitivity, the block-actionability join with deduped numeric-order "

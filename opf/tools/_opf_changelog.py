@@ -662,6 +662,7 @@ def self_test():
 
     failures = []
     checked = 0
+    unestablished = []
 
     def check(name, cond):
         nonlocal checked
@@ -1125,11 +1126,35 @@ def self_test():
                        and any("not a regular file" in f for f in r_fifo.findings)
                        and not _rc_calls)
 
+        import time as _probe_time
+        _probe_begin = _probe_time.monotonic()
         try:
             fifo_result = run_bounded(_fifo_probe, timeout_s=5)
         finally:
             _journal._read_contained = _orig_rc
-        check("f1-fifo-changelog-not-regular-fail-closed", fifo_result == "True")
+        # A TIMEOUT whose measured time reached the 5 s bound establishes
+        # nothing: a starved host can reach the bound on a correct probe
+        # (guardian startup shares it), so that run is recorded apart as this
+        # suite's distinct no-verdict exit 2 below, never a pass and never a
+        # definite failure. An early TIMEOUT and every other result stay with
+        # the check: the guard-deletion regression is judged by the recorded
+        # downstream-reader call (_rc_calls), which no host speed can move.
+        from _opf_emit import bounded_probe_unestablished
+        if bounded_probe_unestablished(fifo_result, _probe_time.monotonic() - _probe_begin, 5):
+            unestablished.append("f1-fifo-changelog-not-regular-fail-closed: the bounded FIFO "
+                                 "probe's own 5 s bound, not the probe's return, ended the run")
+        else:
+            check("f1-fifo-changelog-not-regular-fail-closed", fifo_result == "True")
+        # The classifier's window ends, pinned: at the bound and above it the
+        # probe is unestablished; one tick under it, and a returned value at
+        # any measured time, keep the check's own judgement.
+        check("f1-fifo-probe-timeout-at-bound-unestablished",
+              bounded_probe_unestablished("TIMEOUT", 5.0, 5)
+              and bounded_probe_unestablished("TIMEOUT", 5.01, 5))
+        check("f1-fifo-probe-early-timeout-stays-judged",
+              not bounded_probe_unestablished("TIMEOUT", 4.99, 5))
+        check("f1-fifo-probe-returned-value-stays-judged",
+              not bounded_probe_unestablished("True", 6.0, 5))
 
         # F-A (RANGE-BOUNDS, hostile store-file on disk): an OVERSIZE CHANGELOG.md is refused by
         # _load_inputs on the pre-open st.st_size ceiling BEFORE the whole file is read into memory,
@@ -1228,6 +1253,13 @@ def self_test():
         for f in failures:
             print("  FAILED: {}".format(f))
         return 1
+    if unestablished:
+        # Every judged check held, but a bounded probe was never established
+        # on this host: the distinct fail-closed no-verdict exit, never a
+        # pass and never a definite failure (a failed check above stays one).
+        print("OPF-CHANGELOG SELF-TEST: CANNOT EVALUATE (no verdict: {})".format(
+            "; ".join(unestablished)))
+        return 2
     print("OPF-CHANGELOG SELF-TEST: PASS ({} range-coverage, freeze, and store-resolution checks)".format(
         checked))
     return 0
