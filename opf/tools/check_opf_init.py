@@ -337,16 +337,27 @@ _ROUTE_EXTERNAL_IMPORTS = dict(
 
 # The fresh-init entries outside opf.py that choose a store's homes generation. opf.py's _init_main
 # is held to the one rule by its roster above (it admits _opf_store.init_writes_homes2, never
-# SUPPORTED_HOMES); each site here is held the same way by _homes_rule_violations: the named
-# module-level function calls run_init_operation exactly once, with no * or ** splat, passes homes2
-# as exactly <module alias>.init_writes_homes2() with no arguments, and names SUPPORTED_HOMES
-# nowhere, so a site that re-derives the generation itself, passes a constant or omits the argument
-# is a finding. Rows are (file in this directory, function, the alias that file imports
-# _opf_store as).
+# SUPPORTED_HOMES). _homes_rule_violations never reads a closed call-site list for coverage: it
+# DISCOVERS every call to run_init_operation in the production code of the sources it is given
+# (every module-level statement and every module-level function outside the self-test split of
+# _selftest_production_split, nested functions and lambdas included) and requires each call to pass
+# homes2 as exactly <alias>.init_writes_homes2() with no arguments and no * or ** splat, where
+# <alias> is the name that module binds with a module-level `import _opf_store [as alias]`. The
+# production unit holding such a call must name SUPPORTED_HOMES nowhere -- not as a name, not as an
+# attribute, and not as the string "SUPPORTED_HOMES" (which a getattr read would carry). No
+# production code in any scanned module may bind the name init_writes_homes2 anywhere (assignment
+# to a name or an attribute, an import alias, a nested def, a class, a loop or with or except
+# target), so a rebinding of the rule before a call is a finding; the one allowed binding is the
+# rule's own module-level `def init_writes_homes2`. A module whose production code calls
+# run_init_operation may not carry the exact string "init_writes_homes2" anywhere in production
+# code either (a setattr rebinding would carry it). The rows below are the minimum PRESENCE roster:
+# each named function must still exist exactly once at module level and call run_init_operation
+# exactly once, so a required entry renamed or dropped stays a finding even though discovery holds
+# whatever replaced it. Rows are (file in this directory, function).
 _HOMES_RULE_SITES = (
-    ("_opf_adopt_apply.py", "_init_store_run", "store"),
-    ("_opf_init_operation.py", "init_operation", "_opf_store"),
-    ("_opf_init_operation.py", "_child_main", "_opf_store"),
+    ("_opf_adopt_apply.py", "_init_store_run"),
+    ("_opf_init_operation.py", "init_operation"),
+    ("_opf_init_operation.py", "_child_main"),
 )
 
 
@@ -357,50 +368,178 @@ def _homes_rule_call(node, alias):
             and isinstance(node.func.value, ast.Name) and node.func.value.id == alias)
 
 
-def _homes_rule_violations(sources):
-    """Findings for _HOMES_RULE_SITES over `sources`, a dict of file name to source text; an empty
-    list means every site reads the one homes rule. A missing or unparsable source, or a site
-    function that is absent or defined more than once at module level, is itself a finding."""
+def _is_run_init_call(node):
+    """True for any call whose callee is named run_init_operation, plain or as an attribute."""
+    return (isinstance(node, ast.Call)
+            and ((isinstance(node.func, ast.Name) and node.func.id == "run_init_operation")
+                 or (isinstance(node.func, ast.Attribute)
+                     and node.func.attr == "run_init_operation")))
+
+
+def _selftest_production_split(tree):
+    """The names of `tree`'s module-level functions that are SELF-TEST functions, by RULE, never a
+    hand list: seed with every module-level function whose name contains "self_test" (the
+    convention the close sweep already keys on), then absorb, to a fixpoint, every module-level
+    function whose name is referenced ONLY from functions already in the set (a self-reference is
+    discounted). Module-level code outside any function is a production referrer, and a function
+    referenced from nowhere in its own module is production (an exported seam), so a new entry
+    cannot hide by being uncalled."""
+    names = {node.name for node in tree.body
+             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    referrers = {name: set() for name in names}
+    for node in tree.body:
+        src = node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and sub.id in referrers and sub.id != src:
+                referrers[sub.id].add(src)
+    selftest = {name for name in names if "self_test" in name}
+    changed = True
+    while changed:
+        changed = False
+        for name in sorted(names - selftest):
+            refs = referrers[name]
+            if refs and refs <= selftest:
+                selftest.add(name)
+                changed = True
+    return selftest
+
+
+def _store_import_aliases(tree):
+    """The names a module's module-level `import _opf_store [as name]` statements bind."""
+    aliases = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            for name in node.names:
+                if name.name == "_opf_store":
+                    aliases.append(name.asname or "_opf_store")
+    return aliases
+
+
+def _binds_init_rule(node):
+    """True when `node` BINDS the name init_writes_homes2: an assignment (plain, augmented,
+    annotated or walrus) whose target is that Name or that Attribute of anything, an import alias,
+    a def or class of that name, a loop, with or except target, or a global/nonlocal declaration.
+    Reading or calling it is not a binding."""
+    targets = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr, ast.For, ast.AsyncFor)):
+        targets = [node.target]
+    elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+        targets = [node.optional_vars]
+    for target in targets:
+        for sub in ast.walk(target):
+            if ((isinstance(sub, ast.Name) and sub.id == "init_writes_homes2")
+                    or (isinstance(sub, ast.Attribute) and sub.attr == "init_writes_homes2")):
+                return True
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name == "init_writes_homes2"
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return any((name.asname or name.name).split(".")[0] == "init_writes_homes2"
+                   for name in node.names)
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return "init_writes_homes2" in node.names
+    if isinstance(node, ast.ExceptHandler):
+        return node.name == "init_writes_homes2"
+    return False
+
+
+def _homes_rule_unit_findings(fname, unit_name, nodes, aliases, calls_here):
+    """Findings for one production unit (a module-level function's body, or the module-level code):
+    every run_init_operation call in it passes the one rule, and a unit holding such a call names
+    SUPPORTED_HOMES nowhere, the exact string included (the getattr read)."""
     found = []
-    for fname, func, alias in _HOMES_RULE_SITES:
-        text = sources.get(fname)
+    walked = [sub for node in nodes for sub in ast.walk(node)]
+    for node in walked:
+        if _binds_init_rule(node) and not (
+                unit_name == "init_writes_homes2" and node in nodes
+                and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
+            found.append("{}: {} binds init_writes_homes2 (line {}); only the rule's own "
+                         "module-level definition binds that name".format(
+                             fname, unit_name or "module-level code", node.lineno))
+    if calls_here:
+        for node in walked:
+            if ((isinstance(node, ast.Name) and node.id == "SUPPORTED_HOMES")
+                    or (isinstance(node, ast.Attribute) and node.attr == "SUPPORTED_HOMES")
+                    or (isinstance(node, ast.Constant) and node.value == "SUPPORTED_HOMES")):
+                found.append("{}: {} names SUPPORTED_HOMES (line {})".format(
+                    fname, unit_name or "module-level code", node.lineno))
+    for call in calls_here:
+        rule = [kw for kw in call.keywords if kw.arg == "homes2"]
+        if (any(isinstance(arg, ast.Starred) for arg in call.args)
+                or any(kw.arg is None for kw in call.keywords)):
+            found.append("{}: {} splats its run_init_operation arguments (line {})".format(
+                fname, unit_name or "module-level code", call.lineno))
+        elif len(rule) != 1 or not aliases or not any(
+                _homes_rule_call(rule[0].value, alias) for alias in aliases):
+            found.append("{}: {} does not pass homes2=<_opf_store alias>.init_writes_homes2() "
+                         "to run_init_operation (line {})".format(
+                             fname, unit_name or "module-level code", call.lineno))
+    return found
+
+
+def _homes_rule_violations(sources):
+    """Findings over `sources`, a dict of file name to source text covering the production
+    opf/tools modules; an empty list means every production run_init_operation call reads the one
+    homes rule (see the roster comment: discovery over every production unit, the self-test split
+    excluded by rule, plus the minimum presence roster). A missing or unparsable source, or a
+    roster function absent or defined more than once at module level or not calling
+    run_init_operation exactly once, is itself a finding."""
+    found = []
+    trees = {}
+    for fname in sorted(sources):
+        text = sources[fname]
         if type(text) is not str:
             found.append("{}: source not supplied".format(fname))
             continue
         try:
-            tree = ast.parse(text)
+            trees[fname] = ast.parse(text)
         except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
             found.append("{}: cannot parse ({})".format(fname, type(exc).__name__))
+    for fname, func in _HOMES_RULE_SITES:
+        if fname not in sources:
+            found.append("{}: source not supplied".format(fname))
+            continue
+        tree = trees.get(fname)
+        if tree is None:
             continue
         defs = [node for node in tree.body
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == func]
         if len(defs) != 1:
             found.append("{}: {} is defined {} times at module level".format(fname, func, len(defs)))
             continue
-        calls = []
-        for node in ast.walk(defs[0]):
-            if ((isinstance(node, ast.Name) and node.id == "SUPPORTED_HOMES")
-                    or (isinstance(node, ast.Attribute) and node.attr == "SUPPORTED_HOMES")):
-                found.append("{}: {} names SUPPORTED_HOMES (line {})".format(
-                    fname, func, node.lineno))
-            if isinstance(node, ast.Call):
-                callee = node.func
-                name = (callee.id if isinstance(callee, ast.Name)
-                        else callee.attr if isinstance(callee, ast.Attribute) else None)
-                if name == "run_init_operation":
-                    calls.append(node)
+        calls = [node for node in ast.walk(defs[0]) if _is_run_init_call(node)]
         if len(calls) != 1:
             found.append("{}: {} calls run_init_operation {} times, not once".format(
                 fname, func, len(calls)))
-            continue
-        call = calls[0]
-        rule = [kw for kw in call.keywords if kw.arg == "homes2"]
-        if (any(isinstance(arg, ast.Starred) for arg in call.args)
-                or any(kw.arg is None for kw in call.keywords)):
-            found.append("{}: {} splats its run_init_operation arguments".format(fname, func))
-        elif len(rule) != 1 or not _homes_rule_call(rule[0].value, alias):
-            found.append("{}: {} does not pass homes2={}.init_writes_homes2()".format(
-                fname, func, alias))
+    for fname in sorted(trees):
+        tree = trees[fname]
+        selftest = _selftest_production_split(tree)
+        # A roster entry is production BY CONTRACT, whatever its in-module referrers: a public seam
+        # called only from other modules (and exercised by this module's own self-test) must never
+        # be absorbed into the self-test split.
+        selftest -= set(func for site_fname, func in _HOMES_RULE_SITES if site_fname == fname)
+        aliases = _store_import_aliases(tree)
+        units = [(None, [node for node in tree.body
+                         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))])]
+        units += [(node.name, [node]) for node in tree.body
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and node.name not in selftest]
+        module_calls = False
+        for unit_name, nodes in units:
+            calls_here = [sub for node in nodes for sub in ast.walk(node)
+                          if _is_run_init_call(sub)]
+            module_calls = module_calls or bool(calls_here)
+            found.extend(_homes_rule_unit_findings(fname, unit_name, nodes, aliases, calls_here))
+        if module_calls:
+            for unit_name, nodes in units:
+                for node in nodes:
+                    for sub in ast.walk(node):
+                        if isinstance(sub, ast.Constant) and sub.value == "init_writes_homes2":
+                            found.append(
+                                "{}: {} carries the string \"init_writes_homes2\" (line {}); a "
+                                "production rebinding could ride it".format(
+                                    fname, unit_name or "module-level code", sub.lineno))
     return found
 
 
@@ -4126,22 +4265,29 @@ def _suite_isolated(invoke):
                     encoding="utf-8")
                 check("route gate: the real source is clean",
                       _init_route_violations(gate_source) == [])
-                # The homes rule outside opf.py: the real adoption-coupled init, the substrate's
-                # public seam and its kill-point child each pass homes2 from the one rule, and a
-                # mutant that re-derives the generation, passes a constant, omits the argument,
-                # splats it or drops the site is a finding.
+                # The homes rule outside opf.py, held by DISCOVERY over every production module in
+                # this directory (never a closed site list): the real adoption-coupled init, the
+                # substrate's public seam and its kill-point child each pass homes2 from the one
+                # rule, and a mutant that re-derives the generation, passes a constant, omits the
+                # argument, splats it, drops a required site, adds a NEW production caller without
+                # the rule or with a constant, rebinds init_writes_homes2 before the call, or reads
+                # SUPPORTED_HOMES through getattr is a finding.
                 rule_dir = Path(__file__).resolve().parent
                 rule_sources = dict(
-                    (fname, (rule_dir / fname).read_text(encoding="utf-8"))
-                    for fname in sorted(set(site[0] for site in _HOMES_RULE_SITES)))
+                    (path.name, path.read_text(encoding="utf-8"))
+                    for path in sorted(rule_dir.glob("*.py")))
+                check("homes rule sites: every roster file is in the directory scan",
+                      set(site[0] for site in _HOMES_RULE_SITES) <= set(rule_sources))
                 check("homes rule sites: the real sources are clean",
                       _homes_rule_violations(rule_sources) == [])
                 rule_adopt = "homes2=store.init_writes_homes2())"
                 rule_seam = ("                              admitted_dirs=admitted_dirs,\n"
                              "                              homes2=_opf_store.init_writes_homes2())")
                 rule_child = "operation_id=opid, homes2=_opf_store.init_writes_homes2())"
+                rule_coupled = "            result = init_op.run_init_operation("
                 check("homes rule sites: the mutation anchors are present once",
                       rule_sources["_opf_adopt_apply.py"].count(rule_adopt) == 1
+                      and rule_sources["_opf_adopt_apply.py"].count(rule_coupled) == 1
                       and rule_sources["_opf_init_operation.py"].count(rule_seam) == 1
                       and rule_sources["_opf_init_operation.py"].count(rule_child) == 1
                       and rule_sources["_opf_init_operation.py"].count(
@@ -4164,6 +4310,22 @@ def _suite_isolated(invoke):
                     ("the public seam renamed away",
                      "_opf_init_operation.py", "\ndef init_operation(",
                      "\ndef init_operation_v1("),
+                    ("a new production function calling run_init_operation without the rule",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _init_rehearse(root):\n    return run_init_operation(root)\n\n\n"
+                     "def init_operation("),
+                    ("a new seam passing homes2=False",
+                     "_opf_init_operation.py", "\ndef init_operation(",
+                     "\ndef _init_quick(root):\n    return run_init_operation(root, homes2=False)"
+                     "\n\n\ndef init_operation("),
+                    ("a rebinding of init_writes_homes2 before the call",
+                     "_opf_adopt_apply.py", rule_coupled,
+                     "            store.init_writes_homes2 = lambda: False\n"
+                     "            result = init_op.run_init_operation("),
+                    ("a getattr read of SUPPORTED_HOMES at the call site",
+                     "_opf_adopt_apply.py", rule_coupled,
+                     "            homes_now = getattr(store, \"SUPPORTED_HOMES\")\n"
+                     "            result = init_op.run_init_operation("),
                 ]
                 for mutant_label, fname, old, new in rule_mutants:
                     mutated_sources = dict(rule_sources)

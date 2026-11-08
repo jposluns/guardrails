@@ -4528,24 +4528,27 @@ def _init_store_scaffold(first_adoption, changelog_created):
     derives them from the pinned sources and snapshot), carried in the row and verified after
     publication. The view destinations come from the default manifest's own declared views, and the
     machine manifest digest pins the default manifest (baseline record types only, every module
-    tier off)."""
-    import _opf_check
+    tier off). The homes generation is never chosen here: the scaffold builds from the ONE rule
+    every fresh-init entry reads (_opf_store.init_writes_homes2) through the SAME builders the
+    substrate's plan uses (_opf_init._manifest_model and bootstrap_documents, plus the
+    .working/.gitignore member exactly where the substrate creates it), so the scaffold, the plan
+    and the published files agree at either generation."""
     import _opf_init
-    manifest = _opf_init.build_manifest()
-    documents = {
-        store.MANIFEST_NAME: manifest,
-        "version.toml": _opf_init.build_version(),
-        "worklog.toml": _opf_init.build_worklog(),
-    }
-    if first_adoption:
-        documents["counters.toml"] = _opf_init.build_counters()
-    for tname in _opf_init.INDEX_TYPES:
-        documents[tname + _opf_check.INDEX_SUFFIX] = _opf_init.build_index(tname)
+    homes2 = store.init_writes_homes2()
+    try:
+        model = _opf_init._manifest_model(homes2=homes2)
+        documents = _opf_init.bootstrap_documents(model)
+    except _opf_init.InitError as exc:
+        raise AdoptApplyError("a bootstrap builder refused: {} (fail-closed)".format(exc))
+    manifest = documents[store.MANIFEST_NAME]
     machine = "{}/{}".format(store.WORKING_DIRNAME, store.DEFAULT_MACHINE_SUBDIR)
     scaffold = {"{}/{}".format(machine, n): "sha256:" + _sha256(t.encode("utf-8"))
                 for n, t in documents.items()}
     if not first_adoption:
         scaffold[init_op.COUNTERS_RELPATH] = None
+    if store.homes_generation(model) == 2:
+        scaffold[init_op.GITIGNORE_RELPATH] = "sha256:" + _sha256(
+            store.render_homes_gitignore().encode("utf-8"))
     scaffold[store.POINTER_REL] = "sha256:" + _sha256(
         emit_checked({"store": {"target": "dir:."}}).encode("utf-8"))
     if changelog_created:
@@ -17645,9 +17648,14 @@ def _self_test_checks():
         check("toml-floor-store-model-{}-refused".format(probe_label),
               "does not parse as TOML" in (refusal(_store_model, probe_ctx, man) or ""))
     for probe_label, probe_payload in (("deep-nesting", deep_toml), ("long-integer", long_int_toml)):
-        with mock.patch.object(_opf_init, "build_manifest", lambda: probe_payload.decode("utf-8")):
+        # The scaffold reads its manifest text through the bootstrap builders, so the hostile
+        # payload is planted there; the destinations preflight still reads build_manifest.
+        with mock.patch.object(_opf_init, "bootstrap_documents",
+                               lambda model, *, seed=None: {
+                                   store.MANIFEST_NAME: probe_payload.decode("utf-8")}):
             check("toml-floor-init-scaffold-{}-refused".format(probe_label),
                   "does not parse as TOML" in (refusal(_init_store_scaffold, True, True) or ""))
+        with mock.patch.object(_opf_init, "build_manifest", lambda: probe_payload.decode("utf-8")):
             check("toml-floor-init-destinations-{}-refused".format(probe_label),
                   "does not parse as TOML" in (refusal(_init_store_external_destinations) or ""))
     with tempfile.TemporaryDirectory(prefix="opf-adopt-apply-") as temp:
@@ -21069,6 +21077,53 @@ def _init_store_git_checks(check, ctx, refused):
               refused(dispatch(dict(row, members=wrongf), ctx(root, run_id=rid())), "builders fix")
               and init_op._tree_snapshot(root) == before)
 
+        # GENERATION 2 END TO END (spec 4.2): with homes 2 activated (SUPPORTED_HOMES patched to 2,
+        # restored by the context manager), the scaffold, the plan and the published files agree:
+        # the coupled init completes and publishes a generation-2 store -- the homes-2 manifest
+        # (whose digest differs from the generation-1 build's) and the .working/.gitignore member --
+        # with every plan-bound member's live bytes matching the row's digest.
+        with mock.patch.object(store, "SUPPORTED_HOMES", 2):
+            manifest2_rel, scaffold2 = _init_store_scaffold(True, True)
+            probe2 = init_op._plain_repo(os.path.join(base, "probe-gen2"), env)
+            pres2 = init_op.run_init_operation(probe2, homes2=True)
+            check("init-store-gen2-probe-views-ready", pres2.status == init_op.VIEWS_READY)
+            members2 = []
+            for path in sorted(scaffold2):
+                digest = scaffold2[path]
+                if path == init_op.PROVENANCE_RELPATH:
+                    digest = UNBOUND_DIGEST
+                elif digest is None:
+                    digest = live_digest(probe2, path)
+                members2.append(dict(path=path, digest=digest))
+            row2 = dict(op="init-store", store_root=".", members=members2)
+            check("init-store-gen2-row-validates", schema.validate_op(row2).status == valid
+                  and init_op.GITIGNORE_RELPATH in scaffold2
+                  and scaffold2[manifest2_rel] != scaffold[manifest_rel])
+            root = init_op._plain_repo(os.path.join(base, "fresh-gen2"), env)
+            run = rid()
+            res = dispatch(row2, ctx(root, run_id=run))
+            check("init-store-gen2-first-adoption-views-ready", res.status == valid
+                  and store.resolve_store(root).status == store.RESOLVED
+                  and txn_state(root, run) == "complete"
+                  and live_digest(root, manifest2_rel) == scaffold2[manifest2_rel]
+                  and live_digest(root, init_op.GITIGNORE_RELPATH)
+                  == scaffold2[init_op.GITIGNORE_RELPATH]
+                  and all(live_digest(root, m["path"]) == m["digest"] for m in members2
+                          if m["digest"] != UNBOUND_DIGEST))
+            # Red with the scaffold reverted to the generation-1 build (the pre-fix coupler): its
+            # row and scaffold still agree with EACH OTHER, but not with the generation the
+            # substrate writes under the one rule, so the published store's created set and
+            # manifest digest no longer match the row and the postcondition reverses the run.
+            root = init_op._plain_repo(os.path.join(base, "reverse-gen2"), env)
+            run = rid()
+            with mock.patch.dict(globals(), _init_store_scaffold=lambda first, created: (
+                    manifest_rel, dict(scaffold))):
+                res = dispatch(row, ctx(root, run_id=run))
+            check("init-store-gen2-scaffold-reverted-to-gen1-reversed",
+                  refused(res, "restoring NOT-ADOPTED")
+                  and store.resolve_store(root).status != store.RESOLVED
+                  and txn_state(root, run) == "rolled-back")
+
         # Spec 5.1 through the ONE shared ignore preflight the substrate runs under its mutex before its
         # first write (_opf_write_guard.init_ignore_refusal, which plain `opf init` calls too): a store git
         # would ignore refuses with no store entry written and no init operation recorded (the run's
@@ -22158,9 +22213,16 @@ def _init_store_git_checks(check, ctx, refused):
                 return stopped
 
             root_ = init_op._plain_repo(os.path.join(base, fixture), env)
-            with mock.patch.object(store, "SUPPORTED_HOMES", homes), \
-                    mock.patch.object(init_op, "run_init_operation", record):
-                res_ = dispatch(row, ctx(root_, run_id=rid()))
+            with mock.patch.object(store, "SUPPORTED_HOMES", homes):
+                # The row carries the ACTIVE generation's scaffold members (the engine refuses a
+                # mismatched row before the substrate runs), each deferred digest bound to a
+                # placeholder: the probe stops the run before any byte is written or verified.
+                _g_rel, g_scaffold = _init_store_scaffold(True, True)
+                g_members = [dict(path=p, digest=UNBOUND_DIGEST if p == init_op.PROVENANCE_RELPATH
+                                  else g_scaffold[p] or "sha256:" + "a" * 64)
+                             for p in sorted(g_scaffold)]
+                with mock.patch.object(init_op, "run_init_operation", record):
+                    res_ = dispatch(dict(row, members=g_members), ctx(root_, run_id=rid()))
             return homes_spec(homes, seen), res_.status == cannot_ and op_ids(root_) == []
 
         def plain_spec(homes, fixture):
