@@ -8118,9 +8118,11 @@ def _deadline_restore_fault_failures():
     caller's periodic 30-second timer (unnested) and for a 600-second outer window (nested), raising on its
     first call ("once") and on its first two calls ("twice"). Each operation runs in the scenario
     _RESTORE_OPERATIONS gives it: "plain", a 5-second window whose body sleeps 0.05 s, so that a restore
-    that counts the window's time twice, or not at all, is off by at least that much, while a host stall
-    inside the restore's gap widens the bounds by only the stall (_restored_countdown_bounds) and passes
-    such a restore only when it lasts about as long as the body; "expired", a 0.2-second
+    that counts the window's time twice, or not at all, is off by at least that much. A host stall widens
+    the bounds by only the stall (_restored_countdown_bounds), and on one side only, so it passes such a
+    restore only when it lasts about as long as the body and falls on that restore's side: a stall in the
+    restore's gap can pass the one that counts twice, and a stall in the arm or read bracket the one that
+    counts not at all; "expired", a 0.2-second
     window whose body ends while the first instruction of _give_back waits (up to 1 s, from an opcode trace
     stage) until the window's own expiry is pending, so the restore discards it; "due", the window's own
     expiry at a caller timer due 0.05 s in. Each case is checked at return from the with statement, before
