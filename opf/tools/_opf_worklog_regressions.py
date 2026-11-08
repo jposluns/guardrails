@@ -774,6 +774,12 @@ def _entry_point_regressions(check):
     # fail-closed cannot-evaluate cause, never an empty history, and where the
     # evaluator shares the siblings' contained reader its detail carries that
     # reader's exact text (the same texts the F1 loader cases pin above).
+    # This fixture patches resolve_store (the _Fixture context), so resolution
+    # never reads the manifest: the manifest-missing, manifest-unreadable and
+    # manifest-malformed rows below reach the evaluator's own contained manifest
+    # read and are its manifest-invalid cause. On an unpatched on-disk store the
+    # resolver reads the manifest first, so those same faults fail resolution
+    # and surface as store-unresolved instead.
     gate_manifest_parse = ("cannot parse m/manifest.toml "
                            "(Expected '=' after a key in a key/value pair (at line 1, column 5))")
     gate_worklog_parse = ("cannot parse m/worklog.toml "

@@ -21,12 +21,19 @@ This draft carries the read side only. Its outcomes:
                             store this draft has not fully evaluated is never allowed
 
 Cannot-evaluate causes, fail-closed and never read as an empty history:
-  store-unresolved       the store cannot be resolved, or its root cannot be opened
-  manifest-invalid       the manifest is missing, unreadable, or fails validation
+  store-unresolved       the store cannot be resolved, or its root cannot be opened; resolution
+                         reads the manifest first, so on disk a missing or unreadable manifest
+                         fails here, not as manifest-invalid
+  manifest-invalid       the manifest fails validation, or this evaluator's own contained re-read
+                         of the resolved store's manifest finds it absent or unreadable
   worklog-unreadable     the active worklog is missing, unreadable, not the declared shape,
-                         malformed TOML, or fails id/filename agreement
+                         malformed TOML, fails id/filename agreement, or holds no WL-series entry
   archive-unreadable     a rotation-archive bucket, its archive.toml, a declared rotated worklog
-                         span, or a moved record's destination cannot be read as declared
+                         span, or a moved record's destination cannot be read as declared: a
+                         worklog_moved row missing a required key or carrying an invalid value, a
+                         bucket worklog file the bucket does not declare, declared spans without
+                         that file, spans that do not cover exactly the WL numbers read from it,
+                         or a moved record not seated exactly once at its destination
   index-unreadable       a <type>.index.toml this evaluator reads is absent, unreadable, or not a
                          schema-1 {schema, record} index
   record-invalid         a worklog entry or record fails its _opf_schema validation, carries a
@@ -51,7 +58,9 @@ Cannot-evaluate causes, fail-closed and never read as an empty history:
 Boundary notes. The head WL is the highest number over every WL-series entry read, active and
 archived, importer-authored entries included (an importer append still moves the store), while the
 `imported:` series is separate and never counted. Zero rounds is a positive reading (a `flow
-start` with no later non-failed DISCOVERY `verdict`), never a stand-in for an unreadable store. A
+start` and no non-failed DISCOVERY `verdict` in the unit's clean history; the window count takes
+every such verdict wherever it sits relative to the start entry), never a stand-in for an
+unreadable store. A
 lifecycle line that does not match the writer's fixed grammar is not an error here: it records no
 creation, so a finding relying on it still fails closed as finding-create-missing. The snapshot
 digest covers the bytes of every store file this evaluator read, in read order; the manifest is
@@ -192,6 +201,21 @@ def _require_fresh_wl(seen, number, ident):
         raise PremiseGateCannot("duplicate-wl", "two worklog entries carry {}".format(ident))
 
 
+def _require_wl_head(seen):
+    """At least one WL-series entry must have been read; the head is the highest number read."""
+    if not seen:
+        raise PremiseGateCannot("worklog-unreadable", "no WL-series entry was read")
+    return max(seen)
+
+
+def _require_flow_relates(entry, item, number):
+    """A flow entry must link relates to the item its line names."""
+    if not _links_relate(entry, item):
+        raise PremiseGateCannot("flow-line-malformed",
+                                "WL-{} flow line names {} but the entry does not link "
+                                "relates to it".format(number, item))
+
+
 def _ignored_by_firewall(ident, actor_kind):
     """The section 8.6 firewall: imported-series ids and importer-authored writes are history."""
     return ident.startswith(_opf_schema.IMPORTED_PREFIX) or actor_kind == "importer"
@@ -249,6 +273,14 @@ def _require_verdict_fields(fields, where):
                                     "{}: verdict entry is missing {}=".format(where, key))
 
 
+def _require_start_fields(fields, where):
+    """Every start entry carries lane=, scope=, branch= and tier= (section 5)."""
+    for key in ("lane", "scope", "branch", "tier"):
+        if key not in fields:
+            raise PremiseGateCannot("flow-line-malformed",
+                                    "{}: start entry is missing {}=".format(where, key))
+
+
 def _parse_flow_line(first, wl):
     """One section 5 first line -> FlowLine, or None for the run entry; malformed fails closed."""
     where = "WL-{} flow line".format(wl)
@@ -284,10 +316,7 @@ def _parse_flow_line(first, wl):
     if "scope" in fields:
         _check_scope(fields["scope"], where)
     if event == "start":
-        for key in ("lane", "scope", "branch", "tier"):
-            if key not in fields:
-                raise PremiseGateCannot("flow-line-malformed",
-                                        "{}: start entry is missing {}=".format(where, key))
+        _require_start_fields(fields, where)
     if event == "verdict":
         _require_verdict_fields(fields, where)
     if event == "converge":
@@ -346,6 +375,79 @@ def _require_predicate_ready(findings_for_item, item):
                                 "predicate; allowance refused".format(item, len(findings_for_item)))
 
 
+def _worklog_read_failed(exc):
+    """A failed active-ledger read is a refusal, never an empty or assumed ledger."""
+    raise PremiseGateCannot("worklog-unreadable", str(exc))
+
+
+def _archive_stat_failed(exc):
+    """A failed stat of the archive directory is a refusal, never an absent archive."""
+    raise PremiseGateCannot("archive-unreadable", str(exc))
+
+
+def _require_span_row(row, bucket, destination):
+    """One worklog_moved row carries every required key with a valid value: span, a two-element
+    [low, high] of canonical WL-n references whose low end does not exceed its high end, and
+    destination, the bucket's own worklog file. Returns the WL numbers the span covers, both
+    ends inclusive."""
+    if not (isinstance(row, dict) and set(row) == ARCHIVE_WLMOVED_KEYS):
+        raise PremiseGateCannot("archive-unreadable", bucket + ": malformed worklog_moved row")
+    bounds = row["span"]
+    refs = ([_opf_worklog._valid_wl_ref(bound) for bound in bounds]
+            if isinstance(bounds, list) and len(bounds) == 2 else [None])
+    if any(ref is None or ref[1] is not None for ref in refs):
+        raise PremiseGateCannot("archive-unreadable",
+                                bucket + ": worklog_moved span is not [low, high] canonical "
+                                "WL-n references")
+    if refs[0][0] > refs[1][0]:
+        raise PremiseGateCannot("archive-unreadable",
+                                bucket + ": worklog_moved span low end is above its high end")
+    if row["destination"] != destination:
+        raise PremiseGateCannot("archive-unreadable",
+                                "{}: worklog_moved destination must be the bucket's own "
+                                "worklog file {}".format(bucket, destination))
+    return range(refs[0][0], refs[1][0] + 1)
+
+
+def _require_declared_worklog(declared, document, bucket):
+    """A bucket's worklog file and its declared spans must agree in both directions."""
+    if document is None and declared:
+        raise PremiseGateCannot("archive-unreadable",
+                                bucket + " declares rotated spans but carries no worklog.toml")
+    if document is not None and not declared:
+        raise PremiseGateCannot("archive-unreadable",
+                                bucket + " carries a worklog.toml it does not declare")
+
+
+def _require_span_match(declared, entries, bucket):
+    """The declared spans and the bucket's worklog entries must cover the same WL numbers."""
+    read = set()
+    for entry in entries:
+        ref = _opf_worklog._valid_wl_ref(entry.get("id")) if isinstance(entry, dict) else None
+        if ref is not None:
+            read.add(ref[0])
+    if read != declared:
+        raise PremiseGateCannot("archive-unreadable",
+                                bucket + ": the declared rotated spans do not match the WL "
+                                "numbers read from its worklog.toml")
+
+
+def _require_seated_once(seated, ident, dest):
+    """A moved record must be seated exactly once at its declared destination."""
+    if len(seated) != 1:
+        raise PremiseGateCannot("archive-unreadable",
+                                "moved id {} is not seated once in {}".format(ident, dest))
+    return seated[0]
+
+
+def _require_index_shape(data, rel, cause):
+    """Each record index this evaluator reads must be a schema-1 {schema, record} index."""
+    if not (isinstance(data, dict) and set(data) <= INDEX_TOP_KEYS
+            and type(data.get("schema")) is int and data.get("schema") == 1
+            and isinstance(data.get("record", []), list)):
+        raise PremiseGateCannot(cause, rel + " is not a schema-1 record index")
+
+
 # --- reads -------------------------------------------------------------------------------------
 
 def _open_root(res):
@@ -380,7 +482,7 @@ def _load_worklog_history(root_fd, machine_rel, model, snapshot):
     except (_opf_store.StoreError, _journal.JournalError) as exc:
         # WorklogError subclasses StoreError; the generation-1 ledger read can also surface the
         # contained reader's own StoreError untranslated, and both fail closed here.
-        raise PremiseGateCannot("worklog-unreadable", str(exc))
+        document = _worklog_read_failed(exc)
     _require_worklog_shape(document, machine_rel, "worklog-unreadable")
     return document
 
@@ -394,12 +496,16 @@ def _require_worklog_shape(document, where, cause):
 
 def _read_archive(root_fd, machine_rel, snapshot):
     """Every rotation-archive bucket read with the active store (flow skill section 5): the
-    rotated worklog spans' entries, and the moved records of the types this evaluator reads."""
+    rotated worklog spans' entries, each span compared with what the bucket's worklog file
+    actually holds, and the moved records of the types this evaluator reads."""
     arel = machine_rel + "/" + ARCHIVE_DIRNAME
     try:
         st = _journal._lstat_contained(root_fd, arel)
-    except _journal.JournalError as exc:
-        raise PremiseGateCannot("archive-unreadable", str(exc))
+    except (_journal.JournalError, OSError) as exc:
+        # _lstat_contained walks the contained parents no-follow and can raise JournalError or,
+        # from its own descriptor duplication, a bare OSError; evaluate catches neither, so both
+        # are mapped to the archive cause here, never an escaping crash.
+        st = _archive_stat_failed(exc)
     if st is None:
         return [], {}
     if not stat.S_ISDIR(st.st_mode):
@@ -428,20 +534,19 @@ def _read_archive(root_fd, machine_rel, snapshot):
         if not isinstance(spans, list) or not isinstance(rows, list):
             raise PremiseGateCannot("archive-unreadable",
                                     bucket + "/archive.toml moved/worklog_moved must be arrays")
-        if spans:
-            for span in spans:
-                if not (isinstance(span, dict) and set(span) <= ARCHIVE_WLMOVED_KEYS):
-                    raise PremiseGateCannot("archive-unreadable",
-                                            bucket + ": malformed worklog_moved row")
-            try:
-                document = _opf_worklog.load_archive_worklog_at(
-                    root_fd, bucket + "/" + _opf_worklog.LEGACY_NAME, on_read=snapshot.feed)
-            except (_opf_store.StoreError, _journal.JournalError) as exc:
-                raise PremiseGateCannot("archive-unreadable", str(exc))
-            if document is None:
-                raise PremiseGateCannot("archive-unreadable",
-                                        bucket + " declares rotated spans but carries no worklog.toml")
+        wl_rel = ARCHIVE_DIRNAME + "/" + name + "/" + _opf_worklog.LEGACY_NAME
+        declared = set()
+        for span in spans:
+            declared.update(_require_span_row(span, bucket, wl_rel))
+        try:
+            document = _opf_worklog.load_archive_worklog_at(
+                root_fd, bucket + "/" + _opf_worklog.LEGACY_NAME, on_read=snapshot.feed)
+        except (_opf_store.StoreError, _journal.JournalError) as exc:
+            raise PremiseGateCannot("archive-unreadable", str(exc))
+        _require_declared_worklog(declared, document, bucket)
+        if document is not None:
             _require_worklog_shape(document, bucket, "archive-unreadable")
+            _require_span_match(declared, document.get("entry", []), bucket)
             entries.extend(document.get("entry", []))
         for row in rows:
             if not (isinstance(row, dict) and set(row) <= ARCHIVE_MOVED_KEYS
@@ -454,18 +559,11 @@ def _read_archive(root_fd, machine_rel, snapshot):
             dest = machine_rel + "/" + row["destination"]
             if dest not in dest_cache:
                 data2 = _read_archive_toml(root_fd, dest, snapshot, required=True)
-                if not (isinstance(data2, dict) and set(data2) <= INDEX_TOP_KEYS
-                        and type(data2.get("schema")) is int and data2.get("schema") == 1
-                        and isinstance(data2.get("record", []), list)):
-                    raise PremiseGateCannot("archive-unreadable",
-                                            dest + " is not a schema-1 record index")
+                _require_index_shape(data2, dest, "archive-unreadable")
                 dest_cache[dest] = data2.get("record", [])
             seated = [r for r in dest_cache[dest]
                       if isinstance(r, dict) and r.get("id") == row["id"]]
-            if len(seated) != 1:
-                raise PremiseGateCannot("archive-unreadable",
-                                        "moved id {} is not seated once in {}".format(row["id"], dest))
-            moved.setdefault(rtype, []).append(seated[0])
+            moved.setdefault(rtype, []).append(_require_seated_once(seated, row["id"], dest))
     return entries, moved
 
 
@@ -502,14 +600,13 @@ def _collect_worklog(entries):
         number = ref[0]
         _require_fresh_wl(seen, number, ident)
         seen.add(number)
+        _validate_clean_record(entry, "worklog", ident)
         actor = entry.get("actor")
         kind = actor.get("kind") if isinstance(actor, dict) else None
         if _ignored_by_firewall(ident, kind):
-            continue                    # importer-authored: occupies its WL, never live history
-        _validate_clean_record(entry, "worklog", ident)
+            continue                    # importer-authored: validated, then kept out of live history
         clean.append((number, entry))
-    if not seen:
-        raise PremiseGateCannot("worklog-unreadable", "no WL-series entry was read")
+    head = _require_wl_head(seen)
     clean.sort(key=lambda pair: pair[0])
     flows, create_wl, transitions = [], {}, {}
     for number, entry in clean:
@@ -521,10 +618,7 @@ def _collect_worklog(entries):
             parsed = _parse_flow_line(first, number)
             if parsed is None:
                 continue
-            if not _links_relate(entry, parsed.item):
-                raise PremiseGateCannot("flow-line-malformed",
-                                        "WL-{} flow line names {} but the entry does not link "
-                                        "relates to it".format(number, parsed.item))
+            _require_flow_relates(entry, parsed.item, number)
             flows.append(parsed)
             continue
         match = _LIFECYCLE_RE.fullmatch(first)
@@ -534,7 +628,7 @@ def _collect_worklog(entries):
                 create_wl.setdefault(rid, number)
             else:
                 transitions.setdefault(rid, []).append((number, match.group(3), match.group(4)))
-    return History(flows, create_wl, transitions, max(seen))
+    return History(flows, create_wl, transitions, head)
 
 
 def _links_relate(record, target):
@@ -558,10 +652,7 @@ def _collect_records(root_fd, machine_rel, snapshot, archived):
             raise PremiseGateCannot("index-unreadable", rel + " is absent")
         snapshot.feed(rel, got[0])
         data = got[1]
-        if not (isinstance(data, dict) and set(data) <= INDEX_TOP_KEYS
-                and type(data.get("schema")) is int and data.get("schema") == 1
-                and isinstance(data.get("record", []), list)):
-            raise PremiseGateCannot("index-unreadable", rel + " is not a schema-1 record index")
+        _require_index_shape(data, rel, "index-unreadable")
         byid = {}
         for row in list(data.get("record", [])) + list(archived.get(rtype, [])):
             if not isinstance(row, dict):
@@ -571,11 +662,11 @@ def _collect_records(root_fd, machine_rel, snapshot, archived):
                 raise PremiseGateCannot("record-invalid", rel + " carries a record with no string id")
             if ident.startswith(_opf_schema.IMPORTED_PREFIX):
                 continue
+            _validate_clean_record(row, rtype, ident)
             actor = row.get("actor")
             kind = actor.get("kind") if isinstance(actor, dict) else None
             if _ignored_by_firewall(ident, kind):
                 continue
-            _validate_clean_record(row, rtype, ident)
             if ident in byid:
                 raise PremiseGateCannot("record-invalid", ident + " is seated twice")
             byid[ident] = row

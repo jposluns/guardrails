@@ -3308,9 +3308,9 @@ expected-check-ids = [
 
 [[suite]]
 # The premise-review evaluator's read-side vectors (opf/tools/_opf_premise_gate.py), replayed over
-# synthetic stores by its tools/ runner: each input/* and history/* row asserts one evaluation
-# outcome, and its flip/* companion asserts the same fixture turns red with that row's one guard
-# removed in process.
+# synthetic stores by its tools/ runner: each input/* and history/* outcome row asserts one
+# evaluation outcome, and its flip/* companion asserts the same fixture turns red with that row's
+# one guard removed in process; the *-first-line rows pin rendering and carry no flip.
 id = "premise-gate-selftest"
 runner = "tools/check_premise_gate.py"
 args = ["--self-test"]
@@ -3322,6 +3322,34 @@ expected-check-ids = [
   "flip/input/worklog-unreadable",
   "input/archive-bucket-unreadable",
   "flip/input/archive-bucket-unreadable",
+  "input/archive-undeclared-worklog",
+  "flip/input/archive-undeclared-worklog",
+  "input/archive-span-row-empty",
+  "flip/input/archive-span-row-empty",
+  "input/archive-span-inverted",
+  "flip/input/archive-span-inverted",
+  "input/archive-span-mismatch",
+  "flip/input/archive-span-mismatch",
+  "input/archive-stat-oserror",
+  "flip/input/archive-stat-oserror",
+  "input/moved-record-seated-twice",
+  "flip/input/moved-record-seated-twice",
+  "input/importer-entry-invalid",
+  "flip/input/importer-entry-invalid",
+  "input/importer-record-invalid",
+  "flip/input/importer-record-invalid",
+  "input/worklog-not-schema-1",
+  "flip/input/worklog-not-schema-1",
+  "input/empty-worklog",
+  "flip/input/empty-worklog",
+  "input/flow-entry-unrelated",
+  "flip/input/flow-entry-unrelated",
+  "input/start-missing-fields",
+  "flip/input/start-missing-fields",
+  "input/index-not-schema-1",
+  "flip/input/index-not-schema-1",
+  "input/head-not-canonical",
+  "flip/input/head-not-canonical",
   "input/invalid-finding-record",
   "flip/input/invalid-finding-record",
   "input/duplicate-wl",

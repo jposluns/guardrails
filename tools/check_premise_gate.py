@@ -6,12 +6,13 @@
   any other argument list is refused with exit 2 (this draft registers only the self-test; no
   gate or live mode is wired yet, and the evaluator never allows a store it has not fully read)
 
-Each input/* and history/* row asserts one evaluation outcome (the exit and, for a refusal, its
-cause token), and its flip/* companion repeats the same fixture with that row's one guard removed
-(a module attribute replaced in process through unittest.mock; nothing is executed from text) and
-asserts the outcome CHANGES, so a build that loses the guard turns the row red. The evaluator is
-loaded from its repository path with importlib; the fixtures are synthetic stores under a
-tempdir, and no live store is read or written.
+Each input/* and history/* outcome row asserts one evaluation outcome (the exit and, for a
+refusal, its cause token), and its flip/* companion repeats the same fixture with that row's one
+guard removed (a module attribute replaced in process through unittest.mock; nothing is executed
+from text) and asserts the outcome CHANGES, so a build that loses the guard turns the row red.
+The *-first-line rows pin the rendered first line of a result another row already asserts and
+carry no flip. The evaluator is loaded from its repository path with importlib; the fixtures are
+synthetic stores under a tempdir, and no live store is read or written.
 """
 import sys
 
@@ -286,6 +287,19 @@ class Fixture:
             parts.append("links = {}\n".format(_links_toml(row["links"])))
         return "".join(parts)
 
+    def bucket(self, name, archive_text, entries=None):
+        """One rotation-archive bucket: its archive.toml, and (when `entries` is given, an empty
+        list included) a worklog.toml holding those rows."""
+        bucket = self.machine / "archive" / name
+        os.makedirs(bucket, exist_ok=True)
+        with open(bucket / "archive.toml", "w", encoding="utf-8") as handle:
+            handle.write(archive_text)
+        if entries is not None:
+            side = Fixture(self.root)
+            side.entries = list(entries)
+            with open(bucket / "worklog.toml", "w", encoding="utf-8") as handle:
+                handle.write(side._worklog_toml())
+
     def write(self):
         os.makedirs(self.machine, exist_ok=True)
         with open(self.machine / "manifest.toml", "w", encoding="utf-8") as handle:
@@ -365,38 +379,241 @@ def _self_test():
               gate.render(got, ITEM).startswith("premise-gate: cannot-evaluate BI-1\n"),
               gate.render(got, ITEM))
 
-        # input/worklog-unreadable: a directory sits where the active ledger should be. The flip
-        # substitutes the good unit's parsed entries for the failed read (a loader that treats an
-        # unreadable source as available history).
+        # input/worklog-unreadable: a directory sits where the active ledger should be, while the
+        # whole unit history sits rotated in a declared archive span. The flip removes the one
+        # guard that keeps a failed active read from becoming an empty ledger, so the archived
+        # history alone would grade the unit.
         os.makedirs(base / "wl")
         broken = Fixture(base / "wl").unit()
+        rotated = list(broken.entries)
+        broken.entries = []
         broken_path = broken.write()
+        broken.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-1", "WL-2"]\n'
+                      'destination = "archive/2026/worklog.toml"\n', rotated)
         os.mkdir(Path(broken_path) / ".working" / "toml" / "worklog.toml.d")
         os.rename(Path(broken_path) / ".working" / "toml" / "worklog.toml",
                   Path(broken_path) / ".working" / "toml" / "worklog.gone")
         os.rename(Path(broken_path) / ".working" / "toml" / "worklog.toml.d",
                   Path(broken_path) / ".working" / "toml" / "worklog.toml")
-
-        def fabricate(*_args, entries=good.entries, **_kwargs):
-            return {"schema": 1, "entry": [dict(entry) for entry in entries]}
-
         plain, red, _got = _vector(gate, broken_path, 2, "worklog-unreadable",
-                                   ("_load_worklog_history", fabricate),
+                                   ("_worklog_read_failed",
+                                    lambda _exc: {"schema": 1, "entry": []}),
                                    lambda res: res.exit_code == 0)
         check("input/worklog-unreadable", plain[0], plain[1])
         check("flip/input/worklog-unreadable", red[0], red[1])
 
         # input/archive-bucket-unreadable: a bucket whose archive.toml is a directory. The flip
-        # skips the archive read wholesale.
+        # swallows the refused archive.toml read into a default empty archive manifest.
         os.makedirs(base / "arch")
         arch = Fixture(base / "arch").unit()
         arch_path = arch.write()
         os.makedirs(Path(arch_path) / ".working" / "toml" / "archive" / "2026" / "archive.toml")
+        real_archive_toml = gate._read_archive_toml
+
+        def swallow_archive_toml(root_fd, rel, snapshot, required=True, real=real_archive_toml):
+            try:
+                return real(root_fd, rel, snapshot, required)
+            except gate.PremiseGateCannot:
+                return {"schema": 1}
+
         plain, red, _got = _vector(gate, arch_path, 2, "archive-unreadable",
-                                   ("_read_archive", lambda *_a, **_k: ([], {})),
+                                   ("_read_archive_toml", swallow_archive_toml),
                                    lambda res: res.exit_code == 0)
         check("input/archive-bucket-unreadable", plain[0], plain[1])
         check("flip/input/archive-bucket-unreadable", red[0], red[1])
+
+        # input/archive-undeclared-worklog: a bucket carries a worklog.toml (here an empty one)
+        # that its archive.toml does not declare; it must never be silently unread.
+        os.makedirs(base / "undecl")
+        undecl = Fixture(base / "undecl").unit()
+        undecl_path = undecl.write()
+        undecl.bucket("2026", "schema = 1\n", entries=[])
+        plain, red, _got = _vector(gate, undecl_path, 2, "archive-unreadable",
+                                   ("_require_declared_worklog", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-undeclared-worklog", plain[0], plain[1])
+        check("flip/input/archive-undeclared-worklog", red[0], red[1])
+
+        # input/archive-span-row-empty: a worklog_moved row must carry every required key with a
+        # valid value; an empty row is never a subset-pass.
+        os.makedirs(base / "spanrow")
+        spanrow = Fixture(base / "spanrow").unit()
+        spanrow_path = spanrow.write()
+        spanrow.bucket("2026", "schema = 1\nworklog_moved = [{}]\n")
+        plain, red, _got = _vector(gate, spanrow_path, 2, "archive-unreadable",
+                                   ("_require_span_row", lambda _row, _bucket, _dest: ()),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-span-row-empty", plain[0], plain[1])
+        check("flip/input/archive-span-row-empty", red[0], red[1])
+
+        # input/archive-span-inverted: a span whose low end is above its high end (the boundary
+        # is lo <= hi, both ends inclusive; ["WL-1", "WL-1"] is the smallest valid span).
+        os.makedirs(base / "spaninv")
+        spaninv = Fixture(base / "spaninv").unit()
+        spaninv_path = spaninv.write()
+        spaninv.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-2", "WL-1"]\n'
+                       'destination = "archive/2026/worklog.toml"\n')
+        plain, red, _got = _vector(gate, spaninv_path, 2, "archive-unreadable",
+                                   ("_require_span_row", lambda _row, _bucket, _dest: ()),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-span-inverted", plain[0], plain[1])
+        check("flip/input/archive-span-inverted", red[0], red[1])
+
+        # input/archive-span-mismatch: the bucket declares WL-5..WL-6 but its worklog.toml holds
+        # WL-5 only; the declared span must match what is read.
+        os.makedirs(base / "spanmis")
+        spanmis = Fixture(base / "spanmis").unit()
+        spanmis_path = spanmis.write()
+        rotated_side = Fixture(base / "spanmis")
+        rotated_side.entry("WL-5", summary="rotated bookkeeping")
+        spanmis.bucket("2026", 'schema = 1\n[[worklog_moved]]\nspan = ["WL-5", "WL-6"]\n'
+                       'destination = "archive/2026/worklog.toml"\n', rotated_side.entries)
+        plain, red, _got = _vector(gate, spanmis_path, 2, "archive-unreadable",
+                                   ("_require_span_match", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/archive-span-mismatch", plain[0], plain[1])
+        check("flip/input/archive-span-mismatch", red[0], red[1])
+
+        # input/archive-stat-oserror: the archive-directory stat raises a bare OSError (the
+        # contained walker's own descriptor duplication can); the evaluator maps it to the
+        # archive cause instead of crashing. The flip treats the failed stat as an absent archive.
+        from unittest import mock
+        real_lstat = gate._journal._lstat_contained
+
+        def lstat_oserror(fd, rel, _real=real_lstat):
+            if rel.endswith("/archive"):
+                raise OSError(9, "fixture dup failure")
+            return _real(fd, rel)
+
+        with mock.patch.object(gate._journal, "_lstat_contained", lstat_oserror):
+            plain, red, got = _vector(gate, good_path, 2, "archive-unreadable",
+                                      ("_archive_stat_failed", lambda _exc: None),
+                                      lambda res: res.exit_code == 0)
+        check("input/archive-stat-oserror",
+              plain[0] and "fixture dup failure" in got.detail, (plain[1], got.detail))
+        check("flip/input/archive-stat-oserror", red[0], red[1])
+
+        # input/moved-record-seated-twice: a moved id seated twice at its declared destination.
+        # The flip weakens the exactly-once seat to first-match.
+        os.makedirs(base / "seat")
+        seat = Fixture(base / "seat").unit()
+        seat_path = seat.write()
+        mover = Fixture(base / "seat")
+        moved_row = mover.record("backlog_item", "BI-9", "active", actor="maintainer")
+        seat.bucket("2026", 'schema = 1\n[[moved]]\nid = "BI-9"\ntype = "backlog_item"\n'
+                    'destination = "archive/2026/backlog_item.toml"\n')
+        with open(seat.machine / "archive" / "2026" / "backlog_item.toml", "w",
+                  encoding="utf-8") as handle:
+            handle.write(mover._record_toml([moved_row, moved_row]))
+        plain, red, _got = _vector(gate, seat_path, 2, "archive-unreadable",
+                                   ("_require_seated_once",
+                                    lambda seated, _ident, _dest: seated[0]),
+                                   lambda res: res.exit_code == 0)
+        check("input/moved-record-seated-twice", plain[0], plain[1])
+        check("flip/input/moved-record-seated-twice", red[0], red[1])
+
+        # input/importer-entry-invalid: an importer-authored worklog entry must validate before
+        # the firewall may hold it out of live history; a bad row is record-invalid, never a skip.
+        os.makedirs(base / "impent")
+        impent = Fixture(base / "impent").unit()
+        impent.entry("WL-9", actor="importer", kind="no-such-kind", summary="imported history")
+        plain, red, _got = _vector(gate, impent.write(), 2, "record-invalid",
+                                   ("_validate_clean_record", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/importer-entry-invalid", plain[0], plain[1])
+        check("flip/input/importer-entry-invalid", red[0], red[1])
+
+        # input/importer-record-invalid: the same rule for an importer-authored index record.
+        os.makedirs(base / "imprec")
+        imprec = Fixture(base / "imprec").unit()
+        imprec.record("finding", "FN-1", "open", actor="importer", links=[relates(ITEM)],
+                      omit=("title",))
+        plain, red, _got = _vector(gate, imprec.write(), 2, "record-invalid",
+                                   ("_validate_clean_record", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/importer-record-invalid", plain[0], plain[1])
+        check("flip/input/importer-record-invalid", red[0], red[1])
+
+        # input/worklog-not-schema-1: the active ledger parses as TOML but is not the declared
+        # schema-1 {schema, entry} shape.
+        os.makedirs(base / "shape")
+        shape = Fixture(base / "shape").unit()
+        shape_path = shape.write()
+        shape_ledger = Path(shape_path) / ".working" / "toml" / "worklog.toml"
+        with open(shape_ledger, "r", encoding="utf-8") as handle:
+            shape_text = handle.read()
+        with open(shape_ledger, "w", encoding="utf-8") as handle:
+            handle.write(shape_text.replace("schema = 1\n", "schema = 2\n", 1))
+        plain, red, _got = _vector(gate, shape_path, 2, "worklog-unreadable",
+                                   ("_require_worklog_shape", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/worklog-not-schema-1", plain[0], plain[1])
+        check("flip/input/worklog-not-schema-1", red[0], red[1])
+
+        # input/empty-worklog: a ledger with no WL-series entry at all is unread history, never a
+        # zero head. The flip grades the empty read as evaluable history.
+        os.makedirs(base / "emptywl")
+        emptywl = Fixture(base / "emptywl")
+        emptywl.record("backlog_item", ITEM, "active", actor="maintainer")
+        plain, red, _got = _vector(gate, emptywl.write(), 2, "worklog-unreadable",
+                                   ("_require_wl_head", lambda seen: max(seen, default=0)),
+                                   lambda res: res.cause == "no-start-entry")
+        check("input/empty-worklog", plain[0], plain[1])
+        check("flip/input/empty-worklog", red[0], red[1])
+
+        # input/flow-entry-unrelated: a flow line names the item but its entry does not link
+        # relates to it.
+        os.makedirs(base / "unrel")
+        unrel = Fixture(base / "unrel")
+        unrel.record("backlog_item", ITEM, "active", actor="maintainer")
+        unrel.entry("WL-1", detail="opf-record create {} open".format(ITEM), kind="added",
+                    summary="created " + ITEM, links=[relates(ITEM)])
+        unrel.entry("WL-2", detail=START_DETAIL)
+        plain, red, _got = _vector(gate, unrel.write(), 2, "flow-line-malformed",
+                                   ("_require_flow_relates", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/flow-entry-unrelated", plain[0], plain[1])
+        check("flip/input/flow-entry-unrelated", red[0], red[1])
+
+        # input/start-missing-fields: a start entry without its required tier= field.
+        os.makedirs(base / "startf")
+        startf = Fixture(base / "startf")
+        startf.record("backlog_item", ITEM, "active", actor="maintainer")
+        startf.entry("WL-1", detail="opf-record create {} open".format(ITEM), kind="added",
+                     summary="created " + ITEM, links=[relates(ITEM)])
+        startf.entry("WL-2", detail=START_DETAIL.replace(" tier=light", ""),
+                     links=[relates(ITEM)])
+        plain, red, _got = _vector(gate, startf.write(), 2, "flow-line-malformed",
+                                   ("_require_start_fields", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/start-missing-fields", plain[0], plain[1])
+        check("flip/input/start-missing-fields", red[0], red[1])
+
+        # input/index-not-schema-1: a record index that is not the schema-1 {schema, record} shape.
+        os.makedirs(base / "idx")
+        idx = Fixture(base / "idx").unit()
+        idx_path = idx.write()
+        idx_index = Path(idx_path) / ".working" / "toml" / "backlog_item.index.toml"
+        with open(idx_index, "r", encoding="utf-8") as handle:
+            idx_text = handle.read()
+        with open(idx_index, "w", encoding="utf-8") as handle:
+            handle.write(idx_text.replace("schema = 1\n", "schema = 2\n", 1))
+        plain, red, _got = _vector(gate, idx_path, 2, "index-unreadable",
+                                   ("_require_index_shape", _noop),
+                                   lambda res: res.exit_code == 0)
+        check("input/index-not-schema-1", plain[0], plain[1])
+        check("flip/input/index-not-schema-1", red[0], red[1])
+
+        # input/head-not-canonical: a suffixed expected head is a usage refusal, never parsed
+        # leniently down to its number.
+        def lax_head(value):
+            return None if value is None else int(value.split("-", 1)[1].split(".", 1)[0])
+
+        plain, red, _got = _vector(gate, good_path, 2, "usage",
+                                   ("_parse_expected_head", lax_head),
+                                   lambda res: res.exit_code == 0, expect_head_wl="WL-2.abcd")
+        check("input/head-not-canonical", plain[0], plain[1])
+        check("flip/input/head-not-canonical", red[0], red[1])
 
         # input/invalid-finding-record: a finding row with no title fails schema validation. With
         # validation removed the read completes and the draft's no-predicate refusal shows instead.
@@ -579,13 +796,17 @@ def _self_test():
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: check_premise_gate {} checks (an unresolved store, an unreadable "
-          "worklog, an unreadable archive bucket, an invalid record, a duplicate WL, an unknown "
-          "flow event, a malformed scope=, a verdict without rev=, a missing start entry, a "
-          "missing item, a finding without its create entry, a moved head and a unit with any "
-          "finding each refuse with their cause; a started unit, a baseline round, failed rounds "
-          "and ignored importer flow lines each allow; every row turns red under the flip that "
-          "removes its guard)".format(len(EXECUTED)))
+    print("SELF-TEST PASS: check_premise_gate {} checks (an unresolved store, an unreadable, "
+          "empty or mis-shaped worklog, an unreadable archive bucket or failed archive stat, an "
+          "undeclared bucket worklog, a malformed, inverted or mismatched rotated span, a "
+          "twice-seated moved record, an invalid record (importer-authored rows included), a "
+          "mis-shaped index, a duplicate WL, an unknown flow event, a malformed scope=, a "
+          "verdict without rev=, an unrelated flow entry, a start entry missing its fields, a "
+          "missing start entry, a missing item, a finding without its create entry, a moved or "
+          "non-canonical expected head and a unit with any finding each refuse with their cause; "
+          "a started unit, a baseline round, failed rounds and ignored importer flow lines each "
+          "allow; every outcome row turns red under the flip that removes its one guard, and the "
+          "*-first-line rows pin rendering without a flip)".format(len(EXECUTED)))
     return 0
 
 

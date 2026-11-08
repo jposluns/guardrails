@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "70a585914eb1f433b86d6caa7ccbb26d6e0b75f433c2238ebd548b3a91cf560a"
+tree-sha256 = "2d05ddc3d7dcdce00f341155cdf5ebe59ac2dbed5e2437ba722584bb9cc47324"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3221,8 +3221,8 @@ sha256 = "0d9e538618029fbc77e6e92abcf327013eb4f4245cbd4ddf6767ccaabda67af2"
 
 [[sources]]
 path = "opf/tools/_opf_premise_gate.py"
-bytes = 32489
-sha256 = "3ed74c13386289ef0f5f83bfef0342f4191ef9fe8e3f69bdaf2a3993c051a1b4"
+bytes = 36843
+sha256 = "afd2266d8bfb521bc7180d1a88c276c454c7928701fcccd1e406f1f2808517f6"
 
 [[sources]]
 path = "opf/tools/_opf_record.py"
@@ -3261,8 +3261,8 @@ sha256 = "f2bf9443251836d9e4341461fa8b829d6b7bc5f56caf7f53509eec4d694ce27b"
 
 [[sources]]
 path = "opf/tools/_opf_worklog_regressions.py"
-bytes = 64789
-sha256 = "417b46070432ba13b9080a6b667c58c7c1273d03382fc977b8b22d5c98545da8"
+bytes = 65233
+sha256 = "41d4b3512e30f786168c1763e544582e4d32ce7d5a4e735e4d3c05956ed7936e"
 
 [[sources]]
 path = "opf/tools/_opf_write_guard.py"
@@ -4316,8 +4316,8 @@ sha256 = "ec1cf77885f467ad74e94587104a53d2460b907802225a47ba5e6991f9701a79"
 
 [[sources]]
 path = "tools/check_premise_gate.py"
-bytes = 26709
-sha256 = "eec6d0ccfb45d70cfd545aed55d7fbc286de457f9e5b9abf415e10b044f81e8d"
+bytes = 40163
+sha256 = "5c7d26360c9f85ecf61774601e2913093eb7c47a7018aa56eb2621f83c83da93"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -4666,8 +4666,8 @@ sha256 = "cc0464c20f62e7c83131c52c90ff9eafa40bcdd2f425fa158496c83e326a9b7c"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 221958
-sha256 = "55b7deec4c1be3afc0e9fa8034624b70b1b7a692e4e01c77de8761d0b80be1e7"
+bytes = 223005
+sha256 = "22773af5b08a66690caf2d5a6c49ae5c5ce7346a01d9ac284961239fe324895f"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
