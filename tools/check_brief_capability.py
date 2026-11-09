@@ -599,27 +599,32 @@ A cost that is a fixed launch cost plus a linear term meets both bounds with the
 to spare, whatever its slope, while a pass whose time grows with the square of the input quadruples over the top
 span and so fails it once its 64 KiB squared-growth cost exceeds twice the sum of the fixed cost and LINEAR_SLACK.
 The 1 KiB median is measured and reported for diagnosis only and never judged: its value enters neither bound, so,
-high or low, it cannot loosen the verdict. The 1 KiB runs can still fail the shape in two ways: a 1 KiB run that
-reaches the parse deadline fails it, as any run that reaches it does, and the wall clock of the 1 KiB runs counts,
-with that of every other run, toward the whole child's LINEAR_TIMEOUT, so 1 KiB runs slow enough to carry the child
-past that timeout fail it too. A run whose parse child is killed at the reading's parse deadline fails the shape
-whatever CPU time it was charged (a killed child is charged only its share of the deadline), as does a child stopped
-at the timeout. Every shape carries a lead that holds "nput", so each runs through the shared parsed-document
-reading, never the ASCII fast path. The largest size, 64 KiB, is a former text ceiling of the reading and sits below
-its current one (MAX_TEXT_BYTES, 102,400 bytes, 1.5625 times 64 KiB): the rule judges the shape of the growth, which
-the two spans read at any size, and a squared-growth cost at or under the top span's threshold at 64 KiB is at most
-about 2.44 times (1.5625 squared) that threshold at the ceiling. The parse deadline does not bound that cost: it
-bounds only the shared reading's parse child, which preflight starts to read the INPUT declarations, while the rest
-of evaluate() (the preflight rules, the block split and every lint pass) runs in the calling process with no
-deadline, so a slow lint pass on a brief at the ceiling is neither cut off nor refused. A shape the reading's own
-bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the nesting prescan)
-is timed through its refusal, which is the bounded behaviour an oversized or pathological brief gets. A shape is
-evidence only for the text it repeats. On the previous revision, with a 1 MiB size, a 60-second timeout and the
-parse-free fast path (measured to 60 s, not to completion), the three argument-tail shapes with a failing suffix
-(" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not finish within 60 s;
-the whitespace-run shapes (whitespace-run-linear and item-list-whitespace-linear) were added when an earlier
-revision did not finish 128 KiB within 60 s, and some others when an earlier revision exceeded the bound, each
-measured only to a 60-second timeout.
+high or low, it cannot loosen the verdict. The 1 KiB runs can still fail the shape, as any run can: a 1 KiB run that
+reaches the parse deadline fails it, as does one that ends the child with an uncaught error (the child must exit 0),
+and the wall clock of the 1 KiB runs counts, with that of every other run, toward the whole child's LINEAR_TIMEOUT,
+so 1 KiB runs slow enough to carry the child past that timeout fail it too. A run in which a parse child is killed
+at the reading's parse deadline fails the shape whatever CPU time it was charged (a killed child is charged only the
+CPU time it used before the kill), as does a child stopped at the timeout. Every shape carries a lead that holds
+"nput", so each runs through the shared parsed-document reading, never the ASCII fast path. The largest size,
+64 KiB, is a former text ceiling of the reading and sits below its current one (MAX_TEXT_BYTES, 102,400 bytes,
+1.5625 times 64 KiB): the rule judges the shape of the growth, which the two spans read at any size, and a
+squared-growth cost at or under the top span's threshold at 64 KiB is at most about 2.44 times (1.5625 squared) that
+threshold at the ceiling. The parse deadline does not bound that cost: it bounds only the shared reading's parse
+children, each started by _child_parse (tools/_input_declarations.py) through _parse, which an evaluate() run
+reaches in two places: decode_brief, whose forbidden_text parses a non-ASCII brief that holds a format character and
+passes its earlier checks, to place that character against the parsed document's code, and preflight, whose
+PreflightText reads the INPUT declarations with read_inputs from a brief the reading's ASCII fast path does not
+answer. The rest of evaluate() (the preflight rules, the block split and every lint pass) runs in the calling
+process with no deadline, apart from the git reads rules P3 and P5 start when given a repository, each bounded by
+GIT_READ_TIMEOUT, so a slow lint pass on a brief at the ceiling is neither cut off nor refused. A shape the
+reading's own bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the
+nesting prescan) is timed through its refusal, which is the bounded behaviour an oversized or pathological brief
+gets. A shape is evidence only for the text it repeats. On the previous revision, with a 1 MiB size, a 60-second
+timeout and the parse-free fast path (measured to 60 s, not to completion), the three argument-tail shapes with a
+failing suffix (" -x.y" repeated then "!", " -x/y" repeated with no stop, " --a=b" repeated then " x") did not
+finish within 60 s; the whitespace-run shapes (whitespace-run-linear and item-list-whitespace-linear) were added
+when an earlier revision did not finish 128 KiB within 60 s, and some others when an earlier revision exceeded the
+bound, each measured only to a 60-second timeout.
 
 Usage:
   check_brief_capability.py                (no brief: validate the shipped capability table, exit 0 or 2)
@@ -4166,14 +4171,15 @@ def _child_commit(repo, commit):
 # LINEAR_RUNS times each, every brief built afresh: a lead that forces the parsed-document path (it holds
 # "nput", so the ASCII fast path never answers it), a prefix, one unit repeated, and a suffix. The
 # verdict reads only the 8, 32 and 64 KiB medians; the 1 KiB time is reported for diagnosis (it shows the
-# fixed cost, mostly the parse child's launch) and never judged, though the 1 KiB runs, like every run,
-# count toward LINEAR_TIMEOUT over the whole child. A prescan refusal (a cannot-evaluate) is still a
-# bounded evaluation and is timed as one; a run whose parse child was killed at the parse deadline is
-# not, since the killed child is charged only its share of the deadline, so the child stops there and
-# exits non-zero naming the size (the row is red whatever CPU time the run took). Each run is timed by
-# _run_cpu(), CPU seconds of this process and of the children it reaped during the run (the parse child
-# among them), so time the measured work spends waiting for a busy host's CPUs is not counted. One line
-# per run: the 1 KiB, the 8 KiB, the 32 KiB, then the 64 KiB CPU time.
+# fixed cost, for a shape whose 1 KiB brief is parsed mostly the parse child's launch) and never judged,
+# though the 1 KiB runs, like every run, count toward LINEAR_TIMEOUT over the whole child. A prescan
+# refusal (a cannot-evaluate) is still a bounded evaluation and is timed as one; a run in which a parse
+# child was killed at the parse deadline is not, since the killed child is charged only the CPU time it
+# used before the kill, so the child stops there and exits non-zero naming the size (the row is red
+# whatever CPU time the run took). Each run is timed by _run_cpu(), CPU seconds of this process and of the
+# children it reaped during the run (every parse child the run started among them), so time the measured
+# work spends waiting for a busy host's CPUs is not counted. One line per run: the 1 KiB, the 8 KiB, the
+# 32 KiB, then the 64 KiB CPU time.
 LINEAR_CHILD = (
     "import resource, sys\n"
     "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
@@ -4201,12 +4207,14 @@ LINEAR_CHILD = (
 
 def _run_cpu():
     """CPU seconds, user plus system, of this process and of every child process it has reaped: the clock
-    LINEAR_CHILD reads around each evaluate() run, so the parse child a run starts and reaps is charged to
-    that run. Counting this process alone would miss whatever work the parse child does. A process the
-    measuring child never reaps is not counted at all: a grandchild the parse child started, or a process
-    still running in the parse child's group when _kill_group kills it, burns CPU this clock never sees,
-    bounded only by the parse deadline (the reading kills the child's whole group at that deadline and
-    again after the child exits) and by LINEAR_TIMEOUT over the whole measuring child."""
+    LINEAR_CHILD reads around each evaluate() run, so every parse child a run starts and reaps (one from
+    decode_brief, one from preflight, or both) is charged to that run. Counting this process alone would
+    miss whatever work the parse children do. A process the measuring child never reaps is not counted at
+    all: a grandchild a parse child started, or a process still running in a parse child's group when
+    _kill_group kills it, burns CPU this clock never sees. The reading kills that whole group right after
+    the child exits or at the parse deadline, whichever comes first, so a process still in the group burns
+    it for no longer than the parse deadline from the child's start; the measuring child's own
+    LINEAR_TIMEOUT stops only the measuring child, not a parse child's group."""
     own = resource.getrusage(resource.RUSAGE_SELF)
     reaped = resource.getrusage(resource.RUSAGE_CHILDREN)
     return own.ru_utime + own.ru_stime + reaped.ru_utime + reaped.ru_stime
@@ -4214,10 +4222,10 @@ def _run_cpu():
 
 def _parse_deadline_hit(exc):
     """True when `exc` (the CannotEvaluate an evaluate() run raised) was raised from or while handling a
-    subprocess.TimeoutExpired, which is how the shared reading's parse child is killed at its parse
-    deadline; every exception on the chain is visited once. The walk follows __cause__ whenever it is set
-    and reads __context__ only when it is not, so a TimeoutExpired reachable only through the __context__
-    of an exception raised with an explicit cause is not seen."""
+    subprocess.TimeoutExpired, which is how a parse child of the shared reading (decode_brief's or
+    preflight's) is killed at the parse deadline; every exception on the chain is visited once. The walk
+    follows __cause__ whenever it is set and reads __context__ only when it is not, so a TimeoutExpired
+    reachable only through the __context__ of an exception raised with an explicit cause is not seen."""
     seen = set()
     while exc is not None and id(exc) not in seen:
         if isinstance(exc, subprocess.TimeoutExpired):
