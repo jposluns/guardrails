@@ -4420,12 +4420,24 @@ _HDT_ROWS = (
      "cat <<A; x=$(case a in a) echo;; esac\nA\n)", "deny", "case-unsure"),
     ("(hdt-d22) case inside a quoted $(...) leaving the scan inside a quote",
      "x=\"$(case a in a) echo \";; esac)\"\ncat <<E\nx", "deny", "case-open"),
+    ("(hdt-d23) case inside a quoted $(...) leaving a single quote open over a later opener",
+     "echo \"$(case a in a) echo '\"';; esac)\"\ncat <<E\nhi\nX\necho after", "deny", "open-run"),
+    ("(hdt-d24) ANSI-C string with an escaped quote inside a ${...}, a later opener unterminated",
+     "echo ${x:-$'\\''}; cat <<E\nhi\nX\necho after", "deny", "group-ansi-c"),
+    ("(hdt-a40) ANSI-C string with an escaped quote inside a ${...}, a later opener closed",
+     "echo ${x:-$'\\''}; cat <<E\nhi\nE\necho after", "allow", None),
+    ("(hdt-d25) single quote left open with a << after it, denied fail-closed", "echo 'a\ncat <<E\nhi",
+     "deny", "open-run"),
+    ("(hdt-d26) ANSI-C string left open with a << after it, denied fail-closed", "echo $'a\\'\ncat <<E\nhi",
+     "deny", "open-run"),
+    ("(hdt-d27) backquote left open with a << after it, denied fail-closed", "echo `echo a\ncat <<E\nhi\nE",
+     "deny", "open-run"),
 )
 # An allow row that pins no single rule of the scan (its mutant is None) names the one line, its delimiter
 # line, that closes it: with only that line mistyped the same command must deny, so its allow comes from that
 # delimiter line and not from an opener the scan missed.
 _HDT_CLOSING_LINE = {"(hdt-a1)": 2, "(hdt-a5)": 4, "(hdt-a12)": 2, "(hdt-a13)": 2, "(hdt-a14)": 2,
-                     "(hdt-a15)": 2, "(hdt-a32)": 6}
+                     "(hdt-a15)": 2, "(hdt-a32)": 6, "(hdt-a40)": 2}
 # Each mutant reverts one rule of the scan in a copy of the hook source: (anchor, replacement) edits, each
 # anchor occurring exactly once.
 _HDT_MUTANTS = {
@@ -4444,7 +4456,11 @@ _HDT_MUTANTS = {
                            "command.count(\"\\n\", 0, pending[0][3]) + 1\n                pending = stack.pop()[1]\n",
                            "                pending = stack.pop()[1]\n"),),
     "case-unsure": (("                if case_at >= 0 and waiting:\n", "                if False:\n"),),
-    "case-open": (("    if case_at >= 0 and stack:\n", "    if False:\n"),),
+    "case-open": (("    if case_at >= 0 and (stack or open_at >= 0):\n", "    if False:\n"),),
+    "open-run": (("    if case_at >= 0 and (stack or open_at >= 0):\n", "    if case_at >= 0 and stack:\n"),
+                 ("    if open_at >= 0 and _HDT_OPENER_RE.search(command, open_at):\n", "    if False:\n")),
+    "group-ansi-c": (("        if command.startswith(\"$'\", i):\n            i = _hdt_skip_quote(",
+                      "        if False:\n            i = _hdt_skip_quote("),),
     "glued-arith": (("    for word in _HDT_ARITH_KEYWORDS:\n", "    for word in ():\n"),),
     "delim-tab-strip": (("                pending.append((command[start:i].strip(), token, strip, start, quoted))\n",
                          "                token = token.lstrip(\"\\t\") if strip else token\n"

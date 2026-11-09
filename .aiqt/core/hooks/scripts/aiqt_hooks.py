@@ -19411,15 +19411,31 @@ def _hdt_skip_quote(command, i, n, ansi_c=False):
     return n
 
 
+def _hdt_closed(command, i, end, closer, escapes):
+    """True when the quoted string or backquote opening at command[i], skipped to end (_hdt_skip_quote,
+    _hdt_skip_backquote), closes before the command ends: end lies short of the end of the text, or its last
+    character is the closer, past the opening one and, where a backslash escapes (escapes), after an even
+    run of backslashes."""
+    if end < len(command):
+        return True
+    if end - i < 2 or command[end - 1] != closer:
+        return False
+    inner = command[i + 1:end - 1]
+    return not escapes or (len(inner) - len(inner.rstrip("\\"))) % 2 == 0
+
+
 def _hdt_skip_group(command, i, n, opener, closer):
     """The index just past the group whose first opener is at command[i] (an arithmetic $(( or ((, a $[ or a
-    ${ expansion), counting nested openers and closers and skipping quoted strings and escaped characters; n
-    when it never closes."""
+    ${ expansion), counting nested openers and closers and skipping quoted strings (an ANSI-C $'...' one
+    with its backslash escapes) and escaped characters; n when it never closes."""
     depth = 0
     while i < n:
         c = command[i]
         if c == "\\":
             i += 2
+            continue
+        if command.startswith("$'", i):
+            i = _hdt_skip_quote(command, i + 1, n, ansi_c=True)
             continue
         if c in "'\"":
             i = _hdt_skip_quote(command, i, n)
@@ -19483,6 +19499,8 @@ def _hdt_delimiter(command, i, n):
 _HDT_ARITH_KEYWORDS = ("for", "while", "until", "if", "elif", "then", "else", "do", "!")
 # A command or process substitution, the only place a here-document can open inside a ${...} expansion.
 _HDT_SUBST_RE = re.compile(r"\$\((?!\()|`|[<>]\(")
+# A << that is not part of a <<< here-string: a here-document opener as written, wherever it stands.
+_HDT_OPENER_RE = re.compile(r"(?<!<)<<(?!<)")
 
 
 def _hdt_arith_start(command, i):
@@ -19525,9 +19543,12 @@ def _hdt_unterminated(command):
     the line's leading tabs are removed; for a delimiter with no quoted or escaped part a body line ending
     in an odd number of backslashes joins the next line first, as bash joins it. Where the scan cannot be
     sure it fails closed, returning a token of None: a ${...} holding both a '<<' and a substitution
-    (_hdt_skip_param), and, once a case word stands inside a substitution (its pattern's ')' read as the
-    closing parenthesis), a substitution closing while any opener is pending or the scan ending inside an
-    open quote or substitution. Linear in the command length apart from the backquote rescan (a
+    (_hdt_skip_param); a single quote, $'...' string or backquote that runs to the end of the command
+    unclosed (_hdt_closed) with a '<<' after its start, which a quote the scan misreads can swallow while
+    bash reads it as an opener; and, once a case word stands inside a substitution (its pattern's ')' read
+    as the closing parenthesis), a substitution closing while an opener read before that parenthesis is
+    pending or the scan ending inside an open quote, an unclosed quoted string or backquote, or a
+    substitution. Linear in the command length apart from the backquote rescan (a
     backquote k levels deep needs 2^(k-1)-1 backslashes before it, so the depth is at most logarithmic):
     every character is read once by the scan or once by a body search, and an opener keeps its offset, its
     line number counted only for the one opener returned (a count at every opener rereads the prefix each
@@ -19539,6 +19560,7 @@ def _hdt_unterminated(command):
     #                     or >( a list [parenthesis depth, the pending list of the context around it]
     waiting = 0         # the openers pending in every context, the current one included
     case_at = -1        # the offset of the first case word inside a substitution, -1 while none
+    open_at = -1        # the offset of a ', $'...' or backquote running to the end unclosed, -1 while none
     while i < n:
         c = command[i]
         if c == "\\":
@@ -19552,6 +19574,8 @@ def _hdt_unterminated(command):
             hit = _hdt_unterminated(escapes.sub(r"\1", inner))
             if hit is not None:
                 return hit[0], hit[1], command.count("\n", 0, i) + hit[2]
+            if not _hdt_closed(command, i, end, "`", True):
+                open_at = i
             i = end
             continue
         if top == '"':
@@ -19571,13 +19595,19 @@ def _hdt_unterminated(command):
                 continue
         if c in "'\"":
             if c == "'":
-                i = _hdt_skip_quote(command, i, n)
+                end = _hdt_skip_quote(command, i, n)
+                if not _hdt_closed(command, i, end, "'", False):
+                    open_at = i
+                i = end
             else:
                 stack.append('"')
                 i += 1
             continue
         if c == "$" and command.startswith("$'", i):
-            i = _hdt_skip_quote(command, i + 1, n, ansi_c=True)
+            end = _hdt_skip_quote(command, i + 1, n, ansi_c=True)
+            if not _hdt_closed(command, i + 1, end, "'", True):
+                open_at = i
+            i = end
             continue
         if c == "#" and (i == 0 or command[i - 1] in _HDT_COMMENT_AFTER):
             nl = command.find("\n", i)
@@ -19653,13 +19683,16 @@ def _hdt_unterminated(command):
             pending.clear()
             continue
         i += 1
-    if case_at >= 0 and stack:
+    if case_at >= 0 and (stack or open_at >= 0):
         return "case", None, command.count("\n", 0, case_at) + 1
     if waiting:
         lists = [pending] + [entry[1] for entry in stack if entry != '"']
         first = min((found[0] for found in lists if found), key=lambda opener: opener[3], default=None)
         if first is not None:
             return first[0], first[1], command.count("\n", 0, first[3]) + 1
+    if open_at >= 0 and _HDT_OPENER_RE.search(command, open_at):
+        opener = "$'" if command.startswith("$'", open_at) else command[open_at]
+        return opener, None, command.count("\n", 0, open_at) + 1
     return None
 
 
@@ -19700,12 +19733,13 @@ def heredoc_terminator(data):
         return _deny(
             "AIQT rule sectvl (tool-argument-validation): this command holds {!r} on line {}, a shape whose "
             "here-document bodies this check cannot place reliably (a ${{...}} expansion holding both a << and "
-            "a command or process substitution, or a case statement inside a substitution while a "
-            "here-document is pending or a quote or substitution is left open), so it is denied fail-closed. "
-            "Move the here-document out of that construct, for example into a variable assigned on an "
-            "earlier line.".format(opener, line),
+            "a command or process substitution, a quote or backquote left open with a << after it, or a case "
+            "statement inside a substitution while a here-document is pending or a quote or substitution is "
+            "left open), so it is denied fail-closed. Close every quote, or move the here-document out of "
+            "that construct, for example into a variable assigned on an earlier line.".format(opener, line),
             "AIQT guardrail: denied a here-document shape this check cannot read reliably (rule sectvl, "
-            "fail-closed); move the here-document out of the ${...} expansion or case statement.")
+            "fail-closed); close every quote, or move the here-document out of the ${...} expansion or case "
+            "statement.")
     return _deny(
         "AIQT rule sectvl (tool-argument-validation): the here-document opened by {!r} on line {} of this "
         "command has no line equal to its delimiter {!r} before the command ends, so the shell would read "
