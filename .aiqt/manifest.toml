@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "80427e56ffd205f259e59486d91ccf071294380f1748b8c5f907cc3d9eed2945"
+tree-sha256 = "f0cafb6d600671e913f4b410300971250bc0a0092f323554046f9ab94ce4546c"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -3056,8 +3056,8 @@ sha256 = "3323a9af51993fdf7080091dad5510bd6df26acb82c109c0624b05714a680dcd"
 
 [[sources]]
 path = "opf/spec/OPF-SPEC.md"
-bytes = 192059
-sha256 = "851d408780dc0aea9871095522a1039c811f933a34a55dffc87290594db70bdb"
+bytes = 192440
+sha256 = "f5a30fff509e42823e7dac61d13fa47a3b2f8f05f0df12f9e67e82eaac2888f6"
 
 [[sources]]
 path = "opf/tools/_byte_canon.py"
@@ -4301,8 +4301,8 @@ sha256 = "5a84d0e6518d11c47300eac4236476ea7f76101f918f9a33367a9038233e4eee"
 
 [[sources]]
 path = "tools/check_overclaim.py"
-bytes = 277939
-sha256 = "77c4aa1f8e5805b4d32efb20aec678bec479cdce624d12b277303570426ac10d"
+bytes = 279229
+sha256 = "5dd17a57a585944d1d6f642eb61103e56198b5e655f9b7efe01f4eea0652ce9a"
 
 [[sources]]
 path = "tools/check_portability.py"

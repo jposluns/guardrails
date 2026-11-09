@@ -1810,10 +1810,14 @@ retention policy MUST apply it as a recorded maintainer decision governing archi
 
 ## 13. Change evidence
 
-Change evidence is layered. The layers below make an edit that bypasses the recorded flows visible
-to review and to the integrity layer; they do not detect a deliberate edit by someone who can also
-rewrite the history and the recorded digests, which remains the same-user tampering residual
-disclosed in section 14.1:
+Change evidence is layered. History makes every record change, including an edit that bypasses the
+recorded flows, visible to review. The integrity layer (section 11) sees such an edit only in what
+the other layers cover: a released worklog span or published changelog entry whose frozen digest it
+breaks, a per-record index row whose digest no longer matches its record file, and a rotation that
+`archive.toml` does not enumerate. An edit to a record that none of them covers is visible to
+review only. No layer detects a deliberate edit by someone who can also rewrite the history and the
+recorded digests, which remains the same-user tampering residual disclosed in section 14.1. The
+layers are:
 
 - **History.** The tracked store (section 5) puts every record change in version-control history
   under the project's review gate, and store relocation preserves that history (section 5.4); the
