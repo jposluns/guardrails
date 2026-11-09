@@ -24333,50 +24333,55 @@ def _verb_intercepted(here, dispatch, argv):
     returns 0, the import of any _opf_ helper not loaded yet refused, and the declaration gate emptied, so
     no handler and no helper the probes may reach runs and no declaration is read. The store module is left
     exactly as it is: no attribute of it is ever written, not even to restore one, so the interception
-    cannot write to the store module under any name. Store calls are observed instead of replaced: a
-    profile hook (sys.setprofile, installed for the dispatch and taken down in the finally, the hook that
-    was set before put back on every exit, an exception and KeyboardInterrupt included) records, by name,
-    each of these that runs in this thread while the dispatch runs, and each recorded name is one no probe
-    accepts, so the probe fails:
+    cannot write to the store module under any name. Store calls are observed instead of replaced: a profile
+    hook (sys.setprofile, installed for the dispatch and taken down in the finally, the hook that was set
+    before put back on every exit, an exception and KeyboardInterrupt included) records, by name, the calls of
+    exactly the kinds below that run in this thread while the dispatch runs, and each recorded name is one no
+    probe accepts, so the probe fails:
       - a call of code whose globals are the store module's namespace, as "_opf_store.<name>" (a store
         function, a method of a class the store defines, a store function reached through another);
-      - a call of the code of any Python function bound in the store's namespace when the dispatch starts,
-        or of code nested in one, compared by code object identity, as "_opf_store.<name>", so a function
-        the store imports (_parse, from _semver) and store code run with other globals (a function
-        rebuilt from its code object, or one given it as __code__) are recorded too;
+      - a call of the code object of a Python function bound in the store's namespace when the dispatch
+        starts, or of a code object nested in one, compared by identity, as "_opf_store.<name>", so a function
+        the store imports (_parse, from _semver) is recorded, and so is that identical code object run with
+        other globals (a function given it as __code__); a copy of it (code.replace()) is another object and
+        is not recorded;
       - a call made from Python code to a builtin bound in the store's namespace when the dispatch starts,
-        compared by identity, as "_opf_store.<name>";
-      - a call of code whose globals are the namespace of a module the store binds that sits in the
-        store's own directory (_journal, _containment), as "_opf_store.<module>.<name>"; these modules are
-        not replaced either, since their names do not start with _opf_;
+        compared by identity, as "_opf_store.<name>" (the store binds no builtin at present, so this kind
+        records nothing now);
+      - a call of code whose globals are the namespace of a module the store binds that sits in the store's
+        own directory (_journal, _containment), as "_opf_store.<module>.<name>"; these modules are not
+        replaced either, since their names do not start with _opf_;
       - a call made from Python code to sys.setprofile or sys._setprofileallthreads (which
         threading.setprofile_all_threads calls), to a thread start (_thread.start_new_thread,
-        _thread.start_joinable_thread, which threading.Thread.start calls) or to os.fork or os.forkpty,
-        as "<module>.<name>", recorded before it runs, since each can take store code out of the hook's
-        sight; and a profile hook that is no longer this one when the dispatch ends, as
-        "sys.setprofile (changed during the dispatch)".
-    A store callable, here and in _verb_intercepted_faults, is any callable bound in the store's namespace:
-    none of them is written (every one is held kept), and a call of one is recorded as above unless it is
-    one of the residual routes below. The store call itself runs for real;
-    a filesystem effect it has inside the caller's scratch base is caught by the caller's scratch-tree hash
-    walk, and an effect outside that base is not seen by this harness at all. Residual routes, which stay
-    open and are NOT recorded: a class bound in the store's namespace whose construction runs no code of
-    the kinds above (Path, from pathlib; StoreError, whose construction runs no Python code), since calling
-    a class is no event the hook can tie to the store; an attribute of any other module the store binds
-    (store.re.compile, store.os.getcwd); store code run in a thread already running when the dispatch
-    starts, in a thread or a forked child started without a Python-level call to one of the starts above
-    (from C code, such as map(_thread.start_new_thread, ...)), or in a child process the dispatch starts
-    (subprocess, os.posix_spawn); a generator or coroutine of store code created during the dispatch and
-    resumed after the hook is removed (creating one runs none of its code); a hook turned off and back on
-    from C code (map(sys.setprofile, ...)) around a store call, which no event names; any call made from
-    C code to a builtin bound in the store's namespace; and code of _journal or _containment rebuilt with
-    other globals. Returns (the names called, in order, a helper's as "module.attribute" and a
-    refused import as "import module", the leading _bootstrap dropped; the exit, or the exception the
-    dispatch raised; stderr). Between the replacement and the restore, nothing defined in this module or a
-    helper other than the store module is callable for real, other than the import gate
-    (_VerbHelperImportGate). A function this module defines is one inspect.isfunction admits (a def or a
-    lambda, not a class, a builtin or a bound method) whose __module__ is this module's name, so a function
-    imported from another module is kept."""
+        _thread.start_new, _thread.start_joinable_thread, which threading.Thread.start calls) or to os.fork or
+        os.forkpty, each where defined, as "<module>.<name>", recorded before it runs, since each can take
+        store code out of the hook's sight; and a profile hook that is no longer this one when the dispatch
+        ends, as "sys.setprofile (changed during the dispatch)".
+    Any other route by which store code runs is NOT recorded, so this hook does not fail a probe whose
+    dispatch takes one. A profile hook cannot see every such route; the routes named here are known examples,
+    not a complete list: a copy of a store code object (code.replace()) run with other globals; a second load
+    of the store's file as another module object; a subinterpreter that imports the store; a method of an
+    object the store binds (store._DISPLAY_ATOM.match, the methods of a store.Path instance) and a callable
+    the store holds inside another object (operator.ge in _COMPARATORS); a class bound in the store's
+    namespace whose construction runs no code of the kinds above (Path, from pathlib; StoreError, whose
+    construction runs no Python code), since calling a class is no event the hook can tie to the store; an
+    attribute of any other module the store binds (store.re.compile, store.os.getcwd); store code run in a
+    thread already running when the dispatch starts, in a thread or a forked child started without a
+    Python-level call to one of the starts above (from C code, such as map(_thread.start_new_thread, ...)), or
+    in a child process the dispatch starts (subprocess, os.posix_spawn); a generator or coroutine of store
+    code created during the dispatch and resumed after the hook is removed (creating one runs none of its
+    code); a hook turned off and back on from C code (map(sys.setprofile, ...)) around a store call, which no
+    event names; any call made from C code to a builtin bound in the store's namespace; and code of _journal
+    or _containment rebuilt with other globals. A store callable, here and in _verb_intercepted_faults, is any
+    callable bound in the store's namespace: none of them is written (every one is held kept). The store call
+    itself runs for real; a filesystem effect it has inside the caller's scratch base is caught by the
+    caller's scratch-tree hash walk, and an effect outside that base is not seen by this harness at all.
+    Returns (the names called, in order, a helper's as "module.attribute" and a refused import as "import
+    module", the leading _bootstrap dropped; the exit, or the exception the dispatch raised; stderr). Between
+    the replacement and the restore, nothing defined in this module or a helper other than the store module is
+    callable for real, other than the import gate (_VerbHelperImportGate). A function this module defines is
+    one inspect.isfunction admits (a def or a lambda, not a class, a builtin or a bound method) whose
+    __module__ is this module's name, so a function imported from another module is kept."""
     import contextlib
     import inspect
     import io
@@ -24669,8 +24674,8 @@ def _verb_intercepted_faults():
     dispatch must run for real (it returns its real value, so nothing replaced it) and still be recorded
     as "_opf_store.<name>" by the profile hook. After the dispatch, every one of them must be the original
     again. A store callable is any callable bound in the store's namespace, as _verb_intercepted defines
-    it; the other routes the hook closes, a second store function among them, and the prior hook put back
-    on every exit are held by _verb_intercepted_route_faults."""
+    it; the further routes the hook records that have a row (listed there, a second store function among
+    them) and the prior hook put back on every exit are held by _verb_intercepted_route_faults."""
     here = sys.modules[__name__]
     store = sys.modules["_opf_store"]
     store_originals = sorted((name, value) for name, value in vars(store).items() if callable(value))
@@ -24725,15 +24730,22 @@ def _verb_intercepted_faults():
 
 
 def _verb_intercepted_route_faults(here, store):
-    """Hold the routes _verb_intercepted's profile hook closes, each by a dispatch that takes it and the
-    exact names it must record, and hold the prior profile hook put back on every exit. The routes: a second
-    store function (_is_absolute_path), a function the store imports (_parse, from _semver), store code
-    rebuilt with other globals, a function of a module in the store's directory (_containment.mode_for),
-    the hook turned off and back on around a store call, threading.setprofile_all_threads, the hook turned
-    off from C code and left off, and a thread started with threading.Thread. Then, with a sentinel hook
-    set before, a dispatch that returns, one that raises ValueError and one that raises KeyboardInterrupt
-    must each leave the sentinel set again (and KeyboardInterrupt must reach the caller). The hook set
-    before this function runs is put back in its finally whatever happens."""
+    """Hold routes _verb_intercepted's profile hook records, each by a dispatch that takes it and the exact
+    names it must record, and hold the prior profile hook put back on every exit. The rows: a second store
+    function (_is_absolute_path), a function the store imports (_parse, from _semver), store code run with
+    other globals (a function given _home_kind's own code object), code nested in a store function (a
+    generator function given the code object of the generator expression in _is_str_token_control), a function
+    of each module in the store's directory (_containment.mode_for, _journal._is_canonical_pid_start), the
+    hook turned off and back on around a store call, threading.setprofile_all_threads, the hook turned off
+    from C code and left off, a thread started with threading.Thread, and a call of each of os.fork,
+    os.forkpty, _thread.start_new_thread and _thread.start_new (each where defined) with arguments it refuses,
+    so the call is recorded and raises TypeError before anything forks or a thread starts. No row holds a
+    builtin bound in the store's namespace, since the store binds none at present. Then, with a sentinel hook
+    set before, a dispatch that returns, one that raises ValueError and one that raises KeyboardInterrupt must
+    each leave the sentinel set again (and KeyboardInterrupt must reach the caller). The hook set before this
+    function runs is put back in its finally whatever happens."""
+    import _thread
+    import inspect
     import threading
 
     def off_on():
@@ -24767,18 +24779,46 @@ def _verb_intercepted_route_faults(here, store):
         worker.start()
         worker.join()
 
+    def nested():
+        # code nested in a store function, run with this module's globals: a local generator function
+        # given the code object of _is_str_token_control's generator expression, over an empty iterator
+        # so that code starts once
+        def stand_in(items):
+            yield items
+        stand_in.__code__ = [const for const in store._is_str_token_control.__code__.co_consts
+                             if inspect.iscode(const)][0]
+        list(stand_in(iter(())))
+
+    def refused(call, args):
+        # a recorded builtin called with arguments it refuses: the call is recorded before it runs, then it
+        # raises TypeError, so nothing forks and no thread starts
+        try:
+            call(*args)
+        except TypeError:
+            return
+        raise AssertionError("{!r} accepted {!r}".format(call, args))
+
+    starts = tuple((owner.__name__ + "." + name, getattr(owner, name), args)
+                   for owner, name, args in ((os, "fork", (1,)), (os, "forkpty", (1,)),
+                                             (_thread, "start_new_thread", (None, ())),
+                                             (_thread, "start_new", (None, ())))
+                   if hasattr(owner, name))
     routes = (
         ("a second store function", lambda: store._is_absolute_path("/x"), ["_opf_store._is_absolute_path"]),
         ("a function the store imports", lambda: store._parse("1.2.3"), ["_opf_store._parse"]),
         ("store code run with other globals", rebound, ["_opf_store._home_kind"]),
+        ("code nested in a store function", nested, ["_opf_store.<genexpr>"]),
         ("a module in the store's directory", lambda: store._containment.mode_for("probe", True),
          ["_opf_store._containment.mode_for"]),
+        ("a second module in the store's directory", lambda: store._journal._is_canonical_pid_start("12"),
+         ["_opf_store._journal._is_canonical_pid_start"]),
         ("the hook turned off and back on", off_on, ["sys.setprofile"]),
         ("threading.setprofile_all_threads", all_threads_off_on, ["sys._setprofileallthreads"]),
         ("the hook turned off from C code and left off", off_through_c,
          ["sys.setprofile (changed during the dispatch)"]),
         ("a thread started", thread, ["_thread.start_joinable_thread"]),
-    )
+    ) + tuple(("a call of {} it refuses".format(label), lambda call=call, args=args: refused(call, args),
+               [label]) for label, call, args in starts)
     faults = []
     outer = sys.getprofile()
 
