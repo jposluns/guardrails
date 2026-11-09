@@ -16930,21 +16930,76 @@ _GATE_TAG_READS = frozenset(("-l", "--list", "-n", "-v", "--verify", "--contains
                              "--points-at", "--merged", "--no-merged"))
 _GATE_GIT_RECOVERY = {"merge": frozenset(("--abort", "--quit")),
                       "am": frozenset(("--abort", "--quit", "--show-current-patch"))}
+# The value-taking options of each gated action, so that an option's value is never read as one of the
+# forms above: 'git commit -m --dry-run' commits with the message --dry-run, and 'git tag -m -l v1' creates
+# the tag. Each entry is (short letters whose value is mandatory, attached or the next word; short letters
+# whose value is optional and only ever attached; long options whose value may be the next word). A long
+# word that is a prefix of a listed one is read as it, as git resolves an abbreviation. Over-reading a word
+# as a value only denies more; a value-taking option missing here can still let its value read as one of
+# those forms, a disclosed residual.
+_GATE_GATED_VALUE_OPTS = {
+    "commit": ("mFCct", "Su", _GATE_LONG_ARG_OPTS["commit"]),
+    "push": ("o", "", frozenset(("--push-option", "--repo", "--receive-pack", "--exec",
+                                 "--recurse-submodules"))),
+    "merge": ("mFsX", "S", frozenset(("--message", "--file", "--strategy", "--strategy-option",
+                                      "--into-name", "--cleanup"))),
+    "tag": ("mFu", "n", frozenset(("--message", "--file", "--local-user", "--sort", "--format",
+                                   "--cleanup", "--trailer"))),
+    "am": ("Cp", "S", _GATE_LONG_ARG_OPTS["am"] | frozenset(("--patch-format", "--empty"))),
+}
+
+
+def _gate_git_opts(sub, words):
+    """The option words of a gated action's own arguments (the words after its subcommand), read as git reads
+    them: up to the first '--' or '--end-of-options' that is not an option's value, each long option cut to
+    its name before any '=', and the value of a value-taking option (_GATE_GATED_VALUE_OPTS: the next word
+    after a long option or after a short cluster that ends in a mandatory letter) left out."""
+    shorts, stuck, longs = _GATE_GATED_VALUE_OPTS.get(sub, ("", "", frozenset()))
+    opts, i, n = [], 0, len(words)
+    while i < n:
+        tok = words[i]
+        i += 1
+        if tok in ("--", "--end-of-options"):
+            break
+        if not tok.startswith("-") or tok == "-":
+            continue
+        if tok.startswith("--"):
+            name = tok.split("=", 1)[0]
+            opts.append(name)
+            if "=" not in tok and any(opt.startswith(name) for opt in longs):
+                i += 1
+            continue
+        opts.append(tok)
+        for k, ch in enumerate(tok[1:], 1):
+            if ch in stuck:
+                break
+            if ch in shorts:
+                if k == len(tok) - 1:
+                    i += 1
+                break
+    return opts
 
 
 def _gate_gated_git(seg):
     """The gated git action (_GATE_GATED_GIT) a segment runs, read after its leading assignments and the env,
     nice, timeout and time wrappers (_gate_peel), or None; a form that records, marks or sends nothing (a tag
-    listing or verify, a recovery option, --dry-run, --help) is None. Options are read up to a '--'."""
+    listing or verify, a recovery option, --dry-run, --help) is None. Those forms are read only from real
+    option words: a -h or --help among git's global options (each value of _GIT_ARG_OPTS skipped), and the
+    subcommand's own option words read by _gate_git_opts, which skips every listed option's value and stops
+    at a '--', so an option's value is never taken for one of those forms."""
     argv = _gate_peel(seg.argv) if seg.argv else None
     if not argv or _gate_word(argv[0]) != "git":
         return None
     sub, rest = _git_subcommand_rest(argv)
     if sub not in _GATE_GATED_GIT:
         return None
-    words = argv[1:]
-    opts = [tok.split("=", 1)[0] for tok in (words[:words.index("--")] if "--" in words else words)]
-    if any(tok in ("--help", "-h", "--dry-run") for tok in opts) or (sub == "push" and "-n" in opts):
+    head, k, end = [], _command_word_index(argv) + 1, len(argv) - len(rest) - 1
+    while k < end:
+        head.append(argv[k])
+        k += 2 if "=" not in argv[k] and argv[k] in _GIT_ARG_OPTS else 1
+    opts = _gate_git_opts(sub, rest)
+    if (any(tok in ("--help", "-h") for tok in head) or any(tok in ("--help", "-h", "--dry-run") for tok in opts)
+            or (sub == "push" and "-n" in opts)):
         return None
     if sub == "tag" and (not rest or any(tok in _GATE_TAG_READS or tok.startswith("-n") for tok in opts)):
         return None
@@ -16956,9 +17011,10 @@ def _gate_gated_git(seg):
 def _gate_status_passthrough(seg):
     """True when a command '&&'-joined between a masked pipeline and a gated git action cannot gate that action
     on the check's outcome: a known-benign command (_gate_benign_prefix: cd DIR, plain echo, true, ':' or pwd)
-    or a plain 'git add' or 'git status' with no redirection. Any other command may gate it on its own status
-    (test, '[', a verification run, a read of PIPESTATUS, git diff --quiet, a grep of the log), so the walk
-    ends there."""
+    or a plain 'git add' or 'git status' with no redirection. Any other command ends the walk unread: one may
+    gate the action (a test of PIPESTATUS, a second verification run), and one that does not read the check's
+    status (git diff --quiet, [ -s LOG ] or grep -q PATTERN LOG, which a failing check's log can pass, or
+    make clean) leaves the action unjudged, residual R5."""
     if _gate_benign_prefix(seg):
         return True
     argv = seg.argv
@@ -18557,11 +18613,13 @@ def gate_weakening(data):
     (git commit, push, merge, tag or am in a form that records, marks or sends, directly or through further
     '&&'-joined commands that cannot gate it, _gate_status_passthrough) DENIES, because by default the
     pipeline's status is its last stage's, so a failing check does not stop the action; on a parse error
-    the recovered complete segments, those of the uncertain-'#' path included, are judged the same way. A
-    ';' or newline join is not judged here (the action runs after it whatever the status, piped or not). The
-    same shape after a command that is not known-benign (a set -o pipefail included, which the note names)
-    or joined by '||' to the command before it ALLOWS-WITH-NOTE after the flow note, ahead of the
-    failed-main-reading floor's fallback decision. NOTE tier: every
+    the recovered complete segments, those of the uncertain-'#' path included, deny the same way when the
+    shape is proven, and an unproven one there keeps the fallback's decision, which can be a silent allow.
+    A ';' or newline join is not judged here (the action runs after it whatever the status, piped or not).
+    The same shape after a command that is not known-benign (a set -o pipefail included, which the note
+    names) or joined by '||' to the command before it ALLOWS-WITH-NOTE on a parsed command after the flow
+    note, ahead of the failed-main-reading floor's fallback decision. An option's value is never read as a
+    form that records nothing (git commit -m --dry-run is gated, _gate_git_opts). NOTE tier: every
     other checker-shaped segment (the broad heuristic) whose failure signal is swallowed by a following
     '|| true'/'|| :', or piped into an adjacent head/tail, ALLOWS-WITH-NOTE, and so does a shape outside the
     canonical deny that _gate_flow_note sees (an unlisted tool, mode or option, a compound or grouped stage,
@@ -18625,14 +18683,21 @@ def gate_weakening(data):
     options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks; R5 for the status tier, a gated git action reached through a '&' join,
-    another pipeline, a compound command, a command off _gate_status_passthrough that cannot gate it
-    (make clean) or a wrapper other than env, nice, timeout and time (sudo git push, command git commit), a
-    producer off the verification list or set up by an assignment or env prefix, a here-string or process
-    substitution the lexer stops at before the action, the pipeline inside a '( )' or '{ }' group, a
-    '|| true' after the pipeline (as after ';', the action then runs whatever the check's status, piped
-    or not), pipefail set by an earlier call (invisible here), and on the failed-main-reading floor the
-    segments main's partial lex recovers, which the status tier does not read (it reads this guard's own
-    readings there)."""
+    another pipeline, a compound command, a command off _gate_status_passthrough, whether it cannot gate
+    the action (make clean) or ends the walk without reading the check's status (git diff --quiet, or
+    [ -s LOG ] or grep -q PATTERN LOG, which a failing check's log can pass), or a wrapper other than env,
+    nice, timeout and time (sudo git push, command git commit), a producer off the verification list, set
+    up by an assignment or env prefix or with its stdout redirected while its pipe still carries the
+    status (pytest > LOG 2>&1 | cat, pytest 2>&1 > LOG | tee ERR), a last stage that is a compound
+    command (pytest | (cat), pytest | { cat; }), a here-string or process substitution the lexer stops at
+    before the action, the pipeline inside a '( )' or '{ }' group or inside the condition or body of an
+    if, while, until, for or case compound (if pytest | tee LOG; then git commit; fi), a '|| true' after
+    the pipeline (as after ';', the action then runs whatever the check's status, piped or not), pipefail
+    set by an earlier call (invisible here), an unproven shape on the parse-error path (after a non-benign
+    command, a set -o pipefail or a '||' join, as before a here-string), which keeps the fallback's decision
+    and can allow silently instead of noting, a value-taking option missing from _GATE_GATED_VALUE_OPTS
+    whose value spells a form that records nothing, and on the failed-main-reading floor the segments main's
+    partial lex recovers, which the status tier does not read (it reads this guard's own readings there)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
