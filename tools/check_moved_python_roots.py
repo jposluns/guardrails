@@ -26,8 +26,8 @@ the way a shallow repository is refused: a grafts entry rewrites the parent list
 walk sees (git merge-base, rev-parse parent operators such as HEAD^, rev-list), so any judged
 range computed over one is untrustworthy. The head's parents are additionally read from the raw
 commit object (git cat-file commit with object replacement disabled), never through a history
-walk, as a second guard on the zero-base path; a parent id there must be a full 40- or
-64-character lowercase hex id, and a malformed parent line or a named parent
+walk, as a second guard on the zero-base path; a parent id there must be lowercase hex of the
+head id's own length (the repository's hash length), and a malformed parent line or a named parent
 whose object is missing is exit 2. A shallow repository is exit 2 before any
 judgment, as the branch-root sibling's probe refuses one, because a truncated history can hide the
 true merge base and make the gate judge unrelated history. Each revision is resolved with
@@ -35,7 +35,10 @@ true merge base and make the gate judge unrelated history. Each revision is reso
 variables scrubbed and GIT_NO_REPLACE_OBJECTS=1, as the branch-root gate's calls do, and every
 call that parses a commit (rev-parse on a revision, merge-base, diff-tree, ls-tree) passes
 `-c core.commitGraph=false`, so parents and root trees come from the objects themselves, never
-from a stale or crafted commit-graph cache. The change is
+from a stale or crafted commit-graph cache. The self-test forges a commit-graph parent edge that
+git 2.53 honours in merge-base and in a parent operator (HEAD~2) and shows the setting keeps the
+verdict; no row covers the setting on diff-tree and ls-tree, kept there as defence in depth. The
+change is
 read per merge base of base and head (`git merge-base --all`; none is exit 2, several are each
 judged and the findings combined) with
 `git diff-tree -r -z --name-status --find-renames=50% -l0 <merge-base> <head> --` (-l0 turns the
@@ -120,9 +123,11 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import ast
 import contextlib
+import hashlib
 import io
 import os
 import re
+import struct
 import subprocess
 import tempfile
 import tokenize
@@ -144,6 +149,14 @@ USAGE = ("usage: check_moved_python_roots.py [--root DIR] [--base REV] [--head R
 _REGULAR_BLOB_MODES = ("100644", "100755")
 _MARKER_RE = re.compile(r"#\s*fixed-hop-target:[ \t]*(.+?)\s*$")
 _SCOPE_TYPES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+# Passed to every git call that parses a commit: parents and root trees then come from the commit
+# objects, never from a commit-graph cache. On git 2.53 a commit-graph file with a crafted parent
+# edge steers merge-base and parent operators such as HEAD~2 (the commits named on the command
+# line are read from their objects, but the ancestors reached from them come from the cache); the
+# self-test forges such an edge and shows the verdict unchanged, and its flip empties this tuple.
+# No row covers diff-tree or ls-tree, which name only command-line commits: the setting stays on
+# them as defence in depth.
+_NO_COMMIT_GRAPH = ("-c", "core.commitGraph=false")
 
 
 class CannotEvaluate(RuntimeError):
@@ -174,11 +187,11 @@ def _stderr_text(proc):
 
 def _resolve_commit(root, rev):
     """The full commit id REV resolves to, or CannotEvaluate naming the revision. Parent
-    operators in REV (HEAD^, REV~2) parse commits, so the commit-graph cache is disabled:
-    the parents must come from the commit objects themselves."""
+    operators in REV (HEAD^, REV~2) parse commits, so the commit-graph cache is disabled
+    (_NO_COMMIT_GRAPH): the parents must come from the commit objects themselves."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "-c", "core.commitGraph=false", "rev-parse", "--verify",
+            ["git", "-C", str(root), *_NO_COMMIT_GRAPH, "rev-parse", "--verify",
              "--end-of-options", rev + "^{commit}"],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
@@ -214,9 +227,11 @@ def _refuse_grafts(root):
     """CannotEvaluate when the repository has an info/grafts file, refused before any history
     read the way a shallow repository is: a grafts entry rewrites the parent list every history
     walk sees (git merge-base, rev-parse parent operators such as HEAD^, rev-list), so a merge
-    base or a resolved parent computed over one is untrustworthy, and no supported git option
-    turns grafts off per invocation. A failed probe is itself cannot-evaluate, never a silent
-    'no grafts'."""
+    base or a resolved parent computed over one is untrustworthy. git has no command-line option
+    that turns grafts off; the GIT_GRAFT_FILE environment variable redirects the grafts file per
+    invocation, and _git_env clears every ambient GIT_* variable, so each call reads the
+    repository's own grafts path, which this probe names and refuses when it exists. A failed
+    probe is itself cannot-evaluate, never a silent 'no grafts'."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--git-path", "info/grafts"],
@@ -236,15 +251,25 @@ def _refuse_grafts(root):
             "file".format(grafts_path))
 
 
+def _parent_id_length_ok(value, sha):
+    """Whether a parent id has the length of the commit id being read, the repository's own hash
+    length. A module-level function so the self-test can flip only this length test."""
+    return len(value) == len(sha)
+
+
 def _commit_parents(root, sha):
     """The parent object ids of sha (a root commit has none), read from the raw commit object
     (git cat-file commit with object replacement disabled), never through a history walk: git
     rev-list honours an info/grafts file and replace refs, either of which could make a head over
     real history look parentless. cat-file prints the stored object bytes, which no graft rewrites;
     this is the second guard behind _refuse_grafts, which refuses a grafts file outright. A parent
-    id must be a full 40- or 64-character lowercase hex id (an abbreviation would resolve through
-    the object store's disambiguation, not the stored id); a malformed parent header line or a
-    named parent whose object is missing is cannot-evaluate."""
+    id must be lowercase hex of exactly sha's length, the repository's own hash length (an
+    abbreviation would resolve through the object store's disambiguation, not the stored id, and
+    in a SHA-256 repository a 40-character prefix is such an abbreviation); a malformed parent
+    header line or a named parent whose object is missing is cannot-evaluate. The length test is a
+    backstop: through main on git 2.53 it is not reached, because rev-parse --verify refuses a
+    commit whose parent line is malformed before this read; the self-test calls this function
+    directly to exercise it."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "--no-replace-objects", "cat-file", "commit", sha],
@@ -258,11 +283,12 @@ def _commit_parents(root, sha):
     for raw_line in proc.stdout.split(b"\n\n", 1)[0].split(b"\n"):
         if raw_line.startswith(b"parent "):
             value = raw_line[len(b"parent "):].decode("ascii", "replace")
-            if len(value) not in (40, 64) or set(value) - set("0123456789abcdef"):
+            if (not _parent_id_length_ok(value, sha)
+                    or set(value) - set("0123456789abcdef")):
                 raise CannotEvaluate(
                     "cannot read the parents of {}: malformed parent line in the commit "
-                    "object (a parent id must be a full 40- or 64-character lowercase hex "
-                    "id)".format(sha))
+                    "object (a parent id must be a full {}-character lowercase hex id, the "
+                    "repository's own hash length)".format(sha, len(sha)))
             parents.append(value)
     for parent in parents:
         try:
@@ -281,11 +307,11 @@ def _commit_parents(root, sha):
 def _default_base(root, head_sha):
     """The default --base: the merge base of head and origin/HEAD, each failure a cannot-evaluate.
     merge-base walks history, so it runs behind _refuse_grafts, with replace refs disabled by
-    _git_env and the commit-graph cache disabled here."""
+    _git_env and the commit-graph cache disabled here (_NO_COMMIT_GRAPH)."""
     origin_sha = _resolve_commit(root, "origin/HEAD")
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "-c", "core.commitGraph=false", "merge-base",
+            ["git", "-C", str(root), *_NO_COMMIT_GRAPH, "merge-base",
              head_sha, origin_sha],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
@@ -300,10 +326,10 @@ def _default_base(root, head_sha):
 def _merge_bases(root, base, head):
     """Every merge base of base and head; none (a shallow or unrelated history) is cannot-evaluate.
     merge-base walks history, so it runs behind _refuse_grafts, with replace refs disabled by
-    _git_env and the commit-graph cache disabled here."""
+    _git_env and the commit-graph cache disabled here (_NO_COMMIT_GRAPH)."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "-c", "core.commitGraph=false", "merge-base", "--all",
+            ["git", "-C", str(root), *_NO_COMMIT_GRAPH, "merge-base", "--all",
              base, head],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
@@ -321,10 +347,11 @@ def _diff_tree_bytes(root, merge_base, head):
     """The raw NUL-delimited --name-status records of the change, rename detection on with no
     rename limit (-l0: a 91-file move must not lose pairings to diff.renameLimit, and plumbing
     ignores diff.renames). diff-tree parses both commits for their root trees, so the
-    commit-graph cache is disabled. Named so the self-test can patch in a malformed record."""
+    commit-graph cache is disabled (_NO_COMMIT_GRAPH, defence in depth: no self-test row
+    covers this call). Named so the self-test can patch in a malformed record."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "-c", "core.commitGraph=false", "diff-tree", "-r", "-z",
+            ["git", "-C", str(root), *_NO_COMMIT_GRAPH, "diff-tree", "-r", "-z",
              "--name-status", "--find-renames=50%", "-l0", merge_base, head, "--"],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
@@ -373,10 +400,11 @@ def _changes(root, merge_base, head):
 
 def _tree_entry(root, rev, path):
     """(mode, type, object id) of path in rev's tree, or CannotEvaluate (absent included).
-    ls-tree parses the commit for its root tree, so the commit-graph cache is disabled."""
+    ls-tree parses the commit for its root tree, so the commit-graph cache is disabled
+    (_NO_COMMIT_GRAPH, defence in depth: no self-test row covers this call)."""
     try:
         proc = subprocess.run(
-            ["git", "-C", str(root), "-c", "core.commitGraph=false", "ls-tree", "-z",
+            ["git", "-C", str(root), *_NO_COMMIT_GRAPH, "ls-tree", "-z",
              "--full-tree", rev, "--", ":(literal)" + path],
             capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
     except (OSError, subprocess.SubprocessError) as exc:
@@ -1183,6 +1211,43 @@ def _counts(outcome):
     return ("ok", len(outcome[1]), outcome[2], outcome[3], outcome[4])
 
 
+def _parents_outcome(repo, sha):
+    """("ok", parents) or ("cannot", message) from _commit_parents."""
+    try:
+        return ("ok", _commit_parents(Path(repo), sha))
+    except CannotEvaluate as exc:
+        return ("cannot", str(exc))
+
+
+def _forge_commit_graph_parent(repo, child, new_parent):
+    """Rewrite the first-parent edge of child in repo's commit-graph file (written beforehand by
+    git commit-graph write) to point at new_parent, and recompute the file's trailing checksum,
+    so the cache is self-consistent and only disagrees with the commit objects."""
+    path = Path(repo) / ".git" / "objects" / "info" / "commit-graph"
+    with open(path, "rb") as handle:
+        data = bytearray(handle.read())
+    if data[:4] != b"CGPH" or data[5] not in (1, 2):
+        raise RuntimeError("fixture commit-graph has an unexpected header")
+    hash_len = 20 if data[5] == 1 else 32
+    offsets = {}
+    for index in range(data[6] + 1):
+        start = 8 + 12 * index
+        offsets[bytes(data[start:start + 4])] = struct.unpack(
+            ">Q", bytes(data[start + 4:start + 12]))[0]
+    fanout = offsets[b"OIDF"]
+    count = struct.unpack(">I", bytes(data[fanout + 255 * 4:fanout + 256 * 4]))[0]
+    table = offsets[b"OIDL"]
+    oids = [bytes(data[table + i * hash_len:table + (i + 1) * hash_len]).hex()
+            for i in range(count)]
+    entry = offsets[b"CDAT"] + oids.index(child) * (hash_len + 16) + hash_len
+    data[entry:entry + 4] = struct.pack(">I", oids.index(new_parent))
+    digest = hashlib.sha1 if hash_len == 20 else hashlib.sha256
+    data[-hash_len:] = digest(bytes(data[:-hash_len])).digest()
+    os.chmod(path, 0o644)
+    with open(path, "wb") as handle:
+        handle.write(bytes(data))
+
+
 def _launch(*args, cwd=None):
     result = subprocess.run(
         [sys.executable, "-I", "-B", str(Path(__file__).resolve())] + list(args),
@@ -1870,11 +1935,63 @@ def self_test(report_path=None):
               flip_rc == 0 and "empty scope" in flip_out.getvalue(),
               (flip_rc, flip_out.getvalue()))
 
+        # fixture 23j2g: a commit-graph file whose parent edge for an intermediate head commit
+        # is forged to name the base (checksum recomputed) makes plain git merge-base answer the
+        # base and HEAD~2 resolve to it, where the objects say the merge base is the fork point
+        # and HEAD~2 is the head branch's first commit. Base and head both move x.py, so judged
+        # from the forged answers the change moves no Python file. With core.commitGraph=false
+        # the verdict is the true stale-move finding both ways; each flip empties
+        # _NO_COMMIT_GRAPH and the forged edge then hides the move (empty scope). The first
+        # condition of each finding row asserts the forgery is live, so the row cannot pass
+        # vacuously on a git that ignores the cache.
+        cgr = _init_repo(base, "forged-commit-graph")
+        ca = _commit_state(cgr, {}, {"tools/a/b/x.py": stale23}, "a")
+        cb = _commit_state(cgr, {"tools/a/b/x.py": stale23},
+                           {"tools/a/x.py": stale23, "other.txt": "o\n"}, "b")
+        _fx(cgr, "checkout", "-q", "-b", "h", ca)
+        ch0 = _commit_state(cgr, {"tools/a/b/x.py": stale23},
+                            {"tools/a/b/x.py": stale23, "h0.txt": "0\n"}, "h0")
+        ch1 = _commit_state(cgr, {"tools/a/b/x.py": stale23, "h0.txt": "0\n"},
+                            {"tools/a/b/x.py": stale23, "h0.txt": "0\n", "h1.txt": "1\n"}, "h1")
+        ch = _commit_state(cgr, {"tools/a/b/x.py": stale23, "h0.txt": "0\n", "h1.txt": "1\n"},
+                           {"tools/a/x.py": stale23, "h0.txt": "0\n", "h1.txt": "1\n"}, "h")
+        _fx(cgr, "commit-graph", "write", "--reachable")
+        _forge_commit_graph_parent(cgr, ch1, cb)
+        cached_base = _fx(cgr, "merge-base", cb, ch)
+        cached_up2 = _fx(cgr, "rev-parse", "HEAD~2")
+        got = _launch("--root", str(cgr), "--base", cb, "--head", ch)
+        check("hist/forged-commit-graph-merge-base-ignored",
+              cached_base == cb and got[0] == 1
+              and "FINDING: tools/a/b/x.py -> tools/a/x.py" in got[1],
+              (cached_base, ca, got))
+        flip_out = io.StringIO()
+        with (_patched(this, "_NO_COMMIT_GRAPH", ()),
+              contextlib.redirect_stdout(flip_out)):
+            flip_rc = main(["--root", str(cgr), "--base", cb, "--head", ch])
+        check("hist/forged-commit-graph-merge-base-flip-hides",
+              flip_rc == 0 and "empty scope" in flip_out.getvalue(),
+              (flip_rc, flip_out.getvalue()))
+        got = _launch("--root", str(cgr), "--base", "HEAD~2", "--head", "HEAD")
+        check("hist/forged-commit-graph-parent-operator-ignored",
+              cached_up2 == cb and got[0] == 1
+              and "base {}\n".format(ch0) in got[1]
+              and "FINDING: tools/a/b/x.py -> tools/a/x.py" in got[1],
+              (cached_up2, ch0, got))
+        flip_out = io.StringIO()
+        with (_patched(this, "_NO_COMMIT_GRAPH", ()),
+              contextlib.redirect_stdout(flip_out)):
+            flip_rc = main(["--root", str(cgr), "--base", "HEAD~2", "--head", "HEAD"])
+        check("hist/forged-commit-graph-parent-operator-flip-hides",
+              flip_rc == 0 and "empty scope" in flip_out.getvalue()
+              and "base {}\n".format(cb) in flip_out.getvalue(),
+              (flip_rc, flip_out.getvalue()))
+
         # fixture 23j2e: a parent header carrying an abbreviated id is refused: an abbreviation
         # resolves through the object store's disambiguation, not the stored full id, so it is no
         # trustworthy parent. The commit is written with hash-object --literally so the malformed
-        # header is really stored. The flip drops only the full-length requirement, under which
-        # the abbreviation resolves and is returned as a parent.
+        # header is really stored. The flip patches only the real length test
+        # (_parent_id_length_ok) to accept any length, keeping the hex check and the object probe,
+        # under which the abbreviation resolves and is returned as a parent.
         shortp = _init_repo(base, "short-parent")
         sp1 = _commit_state(shortp, {}, {"a.txt": "1\n"}, "one")
         sp2 = _commit_state(shortp, {"a.txt": "1\n"}, {"a.txt": "2\n"}, "two")
@@ -1895,28 +2012,41 @@ def self_test(report_path=None):
         check("hist/short-parent-id-cannot-evaluate",
               got.startswith("cannot") and "malformed parent" in got, got)
 
-        def _lenient_parents(walk_root, walk_sha):
-            proc = subprocess.run(
-                ["git", "-C", str(walk_root), "--no-replace-objects", "cat-file", "commit",
-                 walk_sha],
-                capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
-            if proc.returncode != 0:
-                raise CannotEvaluate("cannot read the commit object {}".format(walk_sha))
-            values = [line[len(b"parent "):].decode("ascii", "replace")
-                      for line in proc.stdout.split(b"\n\n", 1)[0].split(b"\n")
-                      if line.startswith(b"parent ")]
-            for parent in values:
-                probe = subprocess.run(
-                    ["git", "-C", str(walk_root), "--no-replace-objects", "cat-file", "-e",
-                     parent],
-                    capture_output=True, timeout=GIT_TIMEOUT, env=_git_env())
-                if probe.returncode != 0:
-                    raise CannotEvaluate("missing parent {}".format(parent))
-            return values
+        with _patched(this, "_parent_id_length_ok", lambda _value, _sha: True):
+            got = _parents_outcome(Path(shortp), bad_sha)
+        check("hist/short-parent-id-flip-accepts", got == ("ok", [sp1[:7]]), got)
 
-        check("hist/short-parent-id-flip-accepts",
-              _lenient_parents(Path(shortp), bad_sha) == [sp1[:7]],
-              _lenient_parents(Path(shortp), bad_sha))
+        # fixture 23j2f: in a SHA-256 repository a parent line holding the first 40 characters of
+        # a 64-character id is an abbreviation, refused because a parent id must have the
+        # repository's own hash length; the full 64-character parent of a normal commit there
+        # is accepted. The flip restores only the old length test (any 40- or 64-character id),
+        # under which the 40-character prefix resolves and is returned as a parent.
+        sha256p = Path(base) / "sha256-parent"
+        sha256p.mkdir()
+        _fx(sha256p, "init", "-q", "-b", "m", "--object-format=sha256")
+        _fx(sha256p, "config", "user.name", "Self Test")
+        _fx(sha256p, "config", "user.email", "selftest@example.invalid")
+        wp1 = _commit_state(sha256p, {}, {"a.txt": "1\n"}, "one")
+        wp2 = _commit_state(sha256p, {"a.txt": "1\n"}, {"a.txt": "2\n"}, "two")
+        raw_commit = subprocess.run(
+            ["git", "-C", str(sha256p), "cat-file", "commit", wp2], capture_output=True,
+            timeout=GIT_TIMEOUT, env=_git_fixture_env.git_fixture_env()).stdout
+        mangled_path = Path(base) / "sha256-parent-commit"
+        with open(mangled_path, "wb") as handle:
+            handle.write(raw_commit.replace(
+                b"parent " + wp1.encode("ascii"), b"parent " + wp1[:40].encode("ascii"), 1))
+        wide_sha = _fx(sha256p, "hash-object", "-t", "commit", "-w", "--literally",
+                       str(mangled_path))
+        normal = _parents_outcome(sha256p, wp2)
+        got = _parents_outcome(sha256p, wide_sha)
+        check("hist/sha256-forty-char-parent-cannot-evaluate",
+              len(wp1) == 64 and len(wide_sha) == 64 and normal == ("ok", [wp1])
+              and got[0] == "cannot" and "malformed parent" in got[1],
+              (normal, got))
+        with _patched(this, "_parent_id_length_ok",
+                      lambda value, _sha: len(value) in (40, 64)):
+            got = _parents_outcome(sha256p, wide_sha)
+        check("hist/sha256-forty-char-parent-flip-accepts", got == ("ok", [wp1[:40]]), got)
 
         # fixture 23j3: a commit naming a parent whose object is missing cannot be evaluated
         lostp = _init_repo(base, "lost-parent")
@@ -2085,8 +2215,10 @@ def self_test(report_path=None):
           "lapsing on the next move; odd path bytes enumerated; -l0 pairing under "
           "diff.renameLimit=1; criss-cross merge bases combined; above-root hops distinct by "
           "value; shallow histories, grafts files and zero bases over history refused, replace "
-          "refs ignored and the commit-graph cache disabled on commit-parsing reads, head "
-          "parents read from the raw commit object and accepted only as full-length ids; "
+          "refs ignored, a forged commit-graph parent edge ignored by merge-base and a parent "
+          "operator (no row for the setting on diff-tree and ls-tree), head parents read from "
+          "the raw commit object and accepted only as ids of the repository's own hash length, "
+          "SHA-256 included; "
           "parse, recursion, mode, "
           "blob, revision, merge-base and record failures each cannot-evaluate; and the launch "
           "contract); execution set reconciled against tools/selftest_checks.toml".format(
