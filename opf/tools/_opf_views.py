@@ -4693,11 +4693,15 @@ def _self_test():
         check("linesep-collapse-off-reaches-views",
               ls_pre and _ls_off_rc == EXIT_OK and all(ch in _ls_off_refs for ch in ls_seps))
 
-        # --- A store holding U+0085 but neither U+2028 nor U+2029 drifts in its Markdown view (spec 5.7).
-        # The U+0085 collapse kept GENERATOR_VERSION, so REFERENCES.md as a tool without that collapse
-        # rendered it (the reference locator holding a literal U+0085, the U+2028/U+2029 collapse left on)
-        # differs from the current render, and render --check reports it as drift until one re-render.
-        # With U+0085 left out of _MD_LINESEP_RE both renders are the same bytes and these checks fail.
+        # --- A store holding U+0085 inside a rendered line, but neither U+2028 nor U+2029, drifts in its
+        # Markdown view (spec 5.7). The U+0085 collapse kept GENERATOR_VERSION, so REFERENCES.md as a tool
+        # without that collapse rendered it (the reference locator holding a literal U+0085 inside the
+        # line, the U+2028/U+2029 collapse left on) differs from the current render, and render --check
+        # reports it as drift until one re-render. With U+0085 left out of _MD_LINESEP_RE both renders are
+        # the same bytes and these checks fail. A U+0085 only at the end of a rendered line is the
+        # exception: the per-line rstrip() removes it either way, so both renders are the same bytes
+        # (checked below). The modelled earlier tool differs from the current one only in that collapse; a
+        # real earlier tool without it also writes an older generator version, so its views differ anyway.
         nelroot = new_root()
         write_toml(nelroot, "manifest.toml", manifest)
         empty_indexes(nelroot)
@@ -4733,6 +4737,39 @@ def _self_test():
               _nel_pre and _nel_prior != _nel_now
               and render_write(nelroot) == EXIT_OK and _nel_refs.read_bytes() == _nel_now
               and render(["--root", str(nelroot), "--check"]) == EXIT_OK)
+        # A U+0085 only at the end of a rendered line, alone and in a run with a space: the render without
+        # the U+0085 collapse and the current render are the same bytes, and render --check finds no drift.
+        # If the line-end strip stopped removing U+0085, the render without the collapse would keep it at
+        # the line end, and this check fails.
+        nelendroot = new_root()
+        write_toml(nelendroot, "manifest.toml", manifest)
+        empty_indexes(nelendroot)
+        write_toml(nelendroot, "reference.index.toml", "\n".join([
+            "schema = 1", "", "[[record]]",
+            'id = "RF-1"', 'type = "reference"', 'status = "recorded"', 'title = "a source"',
+            'created_at = "2026-01-01T00:00:00Z"', 'updated_at = "2026-01-02T00:00:00Z"',
+            'actor = { kind = "maintainer" }',
+            'refs = [{ kind = "doc", locator = "loc\\u0085", note = "a note" },'
+            ' { kind = "doc", locator = "end\\u0085 \\u0085", note = "a note" }]',
+        ]) + "\n")
+        _nelend_refs = nelendroot / WORKING_DIRNAME / "REFERENCES.md"
+        _nelend_store = (nelendroot / WORKING_DIRNAME / "toml" / "reference.index.toml").read_text(
+            encoding="utf-8")
+        _nelend_saved = globals()["_MD_LINESEP_RE"]
+        try:
+            globals()["_MD_LINESEP_RE"] = re.compile("[\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+            _nelend_prior_rc = render_write(nelendroot)
+        finally:
+            globals()["_MD_LINESEP_RE"] = _nelend_saved
+        _nelend_prior = _nelend_refs.read_bytes() if _nelend_refs.is_file() else b""
+        _nelend_now_rc = render_write(nelendroot)
+        _nelend_now = _nelend_refs.read_bytes() if _nelend_refs.is_file() else b""
+        check("nel-line-end-renders-byte-identical",
+              _nelend_store.count("\\u0085") == 3 and "\x85" not in _nelend_store
+              and _nelend_prior_rc == EXIT_OK and _nelend_now_rc == EXIT_OK and _nelend_prior == _nelend_now
+              and body_of(_nelend_now.decode("utf-8"))
+              == "\n# REFERENCES\n\n- RF-1 a source\n  - doc: loc\n  - doc: end\n"
+              and render(["--root", str(nelendroot), "--check"]) == EXIT_OK)
 
         # --- a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --------
         prroot = new_root()
@@ -5348,7 +5385,7 @@ def _self_test():
         # from a record holding either character differs from the current render in exactly that spelling.
         # The byte-level drift gate is NOT loosened: the old-spelled view reads as C-VIEW-DRIFT until one
         # re-render re-spells it, and a projection over records holding neither character is byte-identical
-        # across a re-render, so a store without these characters sees no drift.
+        # across a re-render, so this re-spelling brings no drift to a store without these characters.
         import _opf_check as _sep_check
         _sep_decision = {"id": "MD-1", "type": "maintainer_decision", "status": "recorded",
                          "title": "a ruling",
