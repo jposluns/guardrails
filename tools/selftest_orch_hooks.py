@@ -16315,6 +16315,51 @@ def _main_isolated(report_path=None):
         # directory outside every declared directory, still denies
         check("nrd/over-deny-unread-unrelated",
               nrd_got("cat <<EOF\nhi\nEOF\n", cwd=outd, project=str(nd.root)), DENY_INERT)
+        # --- once the working directory is unknown (cd -, a bare cd, an unreadable cd operand) or a
+        # directory-stack builtin appears, a later relative operand is in scope. Each row moves into the
+        # declared directory's parent, loses the tracked directory, and runs the declared file through a
+        # relative operand; real bash runs it in every one, and each allows when the walk keeps judging
+        # the operand against the last directory it knew.
+        _nrd_cwd_rows = (
+            "cd {}; cd {}; cd -; bash nrd-stage/x.sh".format(tmp, outd),
+            "cd {}; pushd {}; popd; bash nrd-stage/x.sh".format(tmp, outd),
+            "HOME={}; cd; bash nrd-stage/x.sh".format(tmp),
+            'D={}; cd "$D"; bash nrd-stage/x.sh'.format(tmp))
+        for cid, cmd in (("nrd/cwd-lost-cd-minus-denies", _nrd_cwd_rows[0]),
+                         ("nrd/cwd-lost-popd-denies", _nrd_cwd_rows[1]),
+                         ("nrd/cwd-lost-bare-cd-denies", _nrd_cwd_rows[2]),
+                         ("nrd/cwd-lost-unread-cd-denies", _nrd_cwd_rows[3])):
+            check(cid, nrd_got(cmd), DENY_RAN)
+        # --- a shell or python-family word reading its program from stdin is in scope whenever a
+        # directory is declared: the program is not among the lexed words, so a quote splice inside it
+        # hides the declared directory from the raw text. Real bash runs the declared file in every row.
+        _nrd_sp = "{}/nrd-sta\"\"ge".format(tmp)
+        _nrd_stdin_rows = (
+            "echo 'bash {}/x.sh' | bash".format(_nrd_sp),
+            "echo 'exec(open(\"{}/x.py\").read())' | python3".format(_nrd_sp),
+            "bash <<'EOF'\nbash {}/x.sh\nEOF\n".format(_nrd_sp),
+            "bash -s <<'EOF'\nbash {}/x.sh\nEOF\n".format(_nrd_sp),
+            "python3 - <<'EOF'\nexec(open('{}/' 'nrd-sta' 'ge/x.py').read())\nEOF\n".format(tmp))
+        for cid, cmd in (("nrd/stdin-pipe-bash-denies", _nrd_stdin_rows[0]),
+                         ("nrd/stdin-pipe-python-denies", _nrd_stdin_rows[1]),
+                         ("nrd/stdin-qheredoc-bash-denies", _nrd_stdin_rows[2]),
+                         ("nrd/stdin-bash-s-denies", _nrd_stdin_rows[3]),
+                         ("nrd/stdin-python-dash-denies", _nrd_stdin_rows[4])):
+            check(cid, nrd_got(cmd), DENY_RAN)
+        # the accepted over-denies of those two rules: an unrelated command after a lost working
+        # directory, and an unrelated program fed to a shell or python on stdin, deny and run nothing
+        check("nrd/over-deny-cwd-lost-unrelated", nrd_got("cd -; make -s nrd-none"), DENY_INERT)
+        check("nrd/over-deny-stdin-unrelated", nrd_got("echo 'echo hi' | bash"), DENY_INERT)
+        # with a directory declared, commands that read no program from stdin and keep a known working
+        # directory stay allowed and run nothing
+        for cid, cmd in (("nrd/no-stdin-echo-allows", "echo hi"),
+                         ("nrd/no-stdin-python-c-allows", "python3 -c 'print(1)'"),
+                         ("nrd/no-stdin-python-version-allows", "python3 --version"),
+                         ("nrd/no-stdin-cat-qheredoc-allows", "cat <<'EOF'\nhi\nEOF\n"),
+                         ("nrd/no-stdin-bash-n-allows", "bash -n {}/copy.sh".format(outd)),
+                         ("nrd/no-stdin-cd-abs-allows", "cd {}; echo hi".format(outd)),
+                         ("nrd/no-stdin-cd-minus-absolute-allows", "cd -; ls {}".format(outd))):
+            check(cid, nrd_got(cmd), ALLOW_INERT)
         # setsid, stdbuf and exec -a, where present on the host (verdict always asserted; the real-bash
         # run only where the tool exists, so the suite is portable)
         for cid, tool, cmd in (
@@ -16708,6 +16753,15 @@ def _main_isolated(report_path=None):
               [_flip_verdict("_nrd_unread_in_scope", lambda d: False, c, cwd=str(tmp),
                              project=str(nd.root)) for c in _nrd_unread + (_nrd_rel,)],
               ["allow"] * 7 + ["deny"])
+        # keeping the last known working directory after cd -, a bare cd, an unreadable cd operand or a
+        # directory-stack builtin lets every lost-directory row above through again
+        check("nrd/flip-cwd-lost-allows",
+              [_flip_verdict("_nrd_cwd_lost", lambda seg, cwd: False, c) for c in _nrd_cwd_rows],
+              ["allow"] * 4)
+        # leaving a program a shell or python reads from stdin out of scope lets every stdin row through
+        check("nrd/flip-stdin-program-allows",
+              [_flip_verdict("_nrd_stdin_program", lambda seg: False, c) for c in _nrd_stdin_rows],
+              ["allow"] * 5)
 
         # the pre-fix helper bodies the new flips restore (each shows its fix is load-bearing)
         def _nrd_old_cp_targets(operands, eff_cwd):
@@ -17148,6 +17202,11 @@ def _main_isolated(report_path=None):
                     os.environ["CLAUDE_PROJECT_DIR"] = prev
 
         check("nrd/inert-no-key-allows", _verdict(ni_guard(ni_cmd)), "allow")
+        # with no directory declared, a stdin program and a lost working directory stay allowed
+        check("nrd/inert-no-key-stdin-allows",
+              [_verdict(ni_guard(c)) for c in ("echo 'echo hi' | bash", "python3 - <<'EOF'\nprint(1)\nEOF\n",
+                                               "bash -s", "cd -; make test", "pushd /tmp; popd; ls x")],
+              ["allow"] * 5)
         ni_reg_path = ni.root / ".aiqt" / "orchestration.local.json"
         ni_reg = json.loads(ni_reg_path.read_text(encoding="utf-8"))
         ni_reg["deliverable_dirs"] = [str(ni_staging)]
