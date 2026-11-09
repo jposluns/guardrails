@@ -27751,6 +27751,64 @@ def _main_isolated(monitor):
              "python3 -c \"open(p,'w').write(str('GEN.md'))\"", gr),
             ("(gb-p18) a second uncleared write beside the program keeps the data a mention", "deny",
              "python3 -c \"open(p,'w').write('GEN.md')\" > \"$X\"", gr),
+            # the data is blanked only for one straight-line program that writes once, last, as the whole
+            # command's one step: a loop or comprehension that runs the write again, a read of the written file
+            # used as a path, a call the guard does not count as a write (replace, truncate, unlink, system), a
+            # rebound name, a wrapper, and any later step (a list, xargs, bash on the written file, a heredoc, a
+            # shell loop) keep the data a mention, so naming GEN.md denies
+            ("(gb-p19) a loop that runs the one write again on the path it wrote denies", "deny",
+             "python3 -c \"for p in ('n.txt',0): open(p or open('n.txt').read(),'w').write('GEN.md')\"", gr),
+            ("(gb-p19b) data read back as the os.replace destination denies", "deny",
+             "python3 -c \"import os,sys; p=sys.argv[1]; open(p,'w').write('GEN.md'); q=open(p).read(); "
+             "os.replace('src.toml', q)\" n.txt", gr),
+            ("(gb-p19c) data read back as the os.truncate path denies", "deny",
+             "python3 -c \"import os,sys; p=sys.argv[1]; open(p,'w').write('GEN.md'); "
+             "os.truncate(open(p).read(), 0)\" n.txt", gr),
+            ("(gb-p19d) a later xargs step that reads the written file denies", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('GEN.md')\" n.txt; xargs -a n.txt truncate -s 0",
+             gr),
+            ("(gb-p19e) a later bash step that runs the written script denies", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('echo PWNED > GEN.md')\" n.sh; bash n.sh", gr),
+            ("(gb-p19f) data passed through the environment to os.system denies", "deny",
+             "python3 -c 'import os,sys; p=sys.argv[1]; open(p,\"w\").write(\"GEN.md\"); "
+             "os.environ[\"Q\"]=open(p).read(); os.system(\"echo PWNED > $Q\")' n.txt", gr),
+            ("(gb-p19g) a later heredoc-fed bash that reads the written file denies", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('GEN.md')\" n.txt\n"
+             "bash <<EOF\necho PWNED > \\$(cat n.txt)\nEOF", gr),
+            ("(gb-p19h) a loop with formatted data and a formatted read-back path denies", "deny",
+             "python3 -c \"for p in ('n.txt',0): open(p or '{}'.format(open('n.txt').read()),'w')"
+             ".write('%s' % 'GEN.md')\"", gr),
+            ("(gb-p19i) a list comprehension that runs the write again with f-string data denies", "deny",
+             "python3 -c \"x='n'; [open(p or open('n.txt').read(),'w').write(f'GEN.md') for p in ('n.txt','')]\"",
+             gr),
+            ("(gb-p19j) data read back as a Path that is unlinked denies", "deny",
+             "python3 -c \"import pathlib,sys; p=sys.argv[1]; open(p,'w').write('GEN.md'); "
+             "pathlib.Path(open(p).read()).unlink()\" n.txt", gr),
+            ("(gb-p19k) data read back through a subscript as the os.truncate path denies", "deny",
+             "python3 -c \"import os,sys; p=sys.argv[1]; open(p,'w').write('GEN.md'); q=[open(p).read()][0]; "
+             "os.truncate(q,0)\" n.txt", gr),
+            ("(gb-p19l) a shell loop that runs the program again on the path it wrote denies", "deny",
+             "for i in 1 2; do python3 -c \"import os; p=open('n.txt').read() if os.path.exists('n.txt') "
+             "else 'n.txt'; open(p,'w').write('GEN.md')\"; done", gr),
+            ("(gb-p19m) a path name rebound to the read-back data denies", "deny",
+             "python3 -c \"p='n.txt'; p=open(p).read(); open(p,'w').write('GEN.md')\"", gr),
+            ("(gb-p19n) the program under an env wrapper keeps the data a mention", "deny",
+             "env python3 -c \"import sys; open(sys.argv[1],'w').write('GEN.md')\" n.txt", gr),
+            ("(gb-p19o) a later step joined by && keeps the data a mention", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('see GEN.md')\" n.txt && cat n.txt", gr),
+            ("(gb-p19p) a path concatenated from constants that spell GEN.md keeps the data a mention", "deny",
+             "python3 -c \"open('GE' + 'N.md','w').write('GEN.md')\"", gr),
+            # the plain shape: the program is the whole command, writes once, last, to a path from an argument or
+            # a name bound to a constant, so data alone naming GEN.md notes; a constant path is a judged sink
+            ("(gb-p20) one write to an argument path whose data alone names GEN.md notes", "allow-note",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('see GEN.md')\" n.txt", gr),
+            ("(gb-p20b) a single-quoted program appending to a constant-bound path notes", "allow-note",
+             "python3 -I -c 'p=\"/tmp/x/n.md\"; open(p,\"a\").write(\"see \" + \"GEN.md\")'", gr),
+            ("(gb-p20c) a write_text under Path whose data alone names GEN.md notes", "allow-note",
+             "/usr/bin/python3 -B -c \"import sys,pathlib; pathlib.Path(sys.argv[1]).write_text('GEN.md')\" n.txt",
+             gr),
+            ("(gb-p20d) a one-statement write to a constant path is a judged sink and allows", "allow",
+             "python3 -c \"open('n.txt','w').write('see GEN.md')\"", gr),
             # tree containment and the boundary
             ("(gb-e1) a redirect into a tree denies", "deny", "echo x > gen/new.md", gr),
             ("(gb-e2) a redirect under gen-extra allows", "allow", "echo x > gen-extra/x.md", gr),

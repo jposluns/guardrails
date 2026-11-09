@@ -20710,16 +20710,28 @@ def _gensrc_python_sinks(code):
 # their concatenation or formatting, so nothing in it can bind a name, call a function or reach a path.
 _GENSRC_DATA_NODES = (ast.Constant, ast.Name, ast.Load, ast.BinOp, ast.Add, ast.Mod, ast.JoinedStr,
                       ast.FormattedValue)
+# The constant open modes the one write of _gensrc_python_data_spans may carry.
+_GENSRC_DATA_MODES = frozenset(("w", "a", "x", "wt", "at", "xt"))
+# The interpreter options _gensrc_unmention accepts between python and the -c of a lone program.
+_GENSRC_DATA_OPTIONS = frozenset(("-I", "-B", "-E", "-s", "-S", "-u", "-q"))
+# The characters a word around a lone python -c program may hold for _gensrc_unmention: none of them can end
+# the command, start another step, redirect, expand, quote or begin a comment.
+_GENSRC_DATA_WORD = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./=:,+@%-")
 
 
 def _gensrc_python_data_spans(code):
-    """The character spans (start, end) of code that hold only the DATA a python -c program writes, or []:
-    the argument of a .write() chained straight onto the program's one write-shaped call (open(P, 'w').write(D),
-    io.open or Path(P).open alike) and the data argument of Path(P).write_text(D) or .write_bytes(D). Spans are
-    found only where the program parses, holds exactly one write-shaped call (an open with a write or computed
-    mode, a write_text or write_bytes, a shutil copy or move), so the data cannot be read back from another file
-    as a path, and D holds nothing but constants, names, + and % and f-strings, so it binds no name and calls
-    nothing. A program holding a carriage return, or text that does not encode, yields no span."""
+    """The character span (start, end) of code that holds only the DATA a python -c program writes, in a
+    one-element list, or []. A span is found only for one straight-line shape, in which the data is written
+    once, by the last statement, and nothing in the program can read it back, run it or use it as a path: the
+    last statement is open(P, M).write(D) with M a constant text write mode, or Path(P).write_text(D)
+    (pathlib.Path alike), every call taking only positional arguments; P is a string constant, a name bound
+    to one, or sys.argv[N] with N a constant integer; every earlier statement is import sys, import pathlib,
+    a name bound to a string constant, or a name bound to open(X).read() with X a string constant or a name
+    bound to one, each name bound once and none of open, sys, pathlib or Path rebound; and D holds nothing but
+    string constants, those bound names, + and % and f-strings. Any loop, comprehension, function, lambda,
+    other import, other call (a replace, truncate, unlink, system or environment write among them) or other
+    statement yields no span, as does a program that does not parse, holds a carriage return, or holds text
+    that does not encode."""
     if "\r" in code or len(code) > _GENSRC_MAX_PY:
         return []
     try:
@@ -20730,62 +20742,74 @@ def _gensrc_python_data_spans(code):
     starts = [0]
     for line in lines:
         starts.append(starts[-1] + len(line.decode("utf-8")) + 1)
-
-    def write_mode(call, index):
-        mode = None
-        for keyword in call.keywords:
-            if keyword.arg == "mode":
-                mode = keyword.value
-        if mode is None and len(call.args) > index:
-            mode = call.args[index]
-        if mode is None:
-            return False
-        value = mode.value if isinstance(mode, ast.Constant) and isinstance(mode.value, str) else None
-        return value is None or any(ch in value for ch in "wax+")
-
-    def is_open(call):
-        func = call.func
-        if isinstance(func, ast.Name) and func.id == "open":
-            return write_mode(call, 1)
-        if not isinstance(func, ast.Attribute) or func.attr != "open":
-            return False
-        if isinstance(func.value, ast.Name) and func.value.id == "io":
-            return write_mode(call, 1)
-        return write_mode(call, 0)
-
-    writes, data = 0, []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if is_open(node):
-            writes += 1
-        elif isinstance(func, ast.Attribute) and func.attr in ("write_text", "write_bytes"):
-            writes += 1
-            given = [kw.value for kw in node.keywords if kw.arg == "data"] + node.args[:1]
-            if len(given) == 1:
-                data.append(given[0])
-        elif (isinstance(func, ast.Attribute) and func.attr in ("copy", "copy2", "copyfile", "move")
-              and isinstance(func.value, ast.Name) and func.value.id == "shutil"):
-            writes += 1
-        if (isinstance(func, ast.Attribute) and func.attr == "write" and isinstance(func.value, ast.Call)
-                and is_open(func.value) and len(node.args) == 1 and not node.keywords):
-            data.append(node.args[0])
-    if writes != 1:
+    if not tree.body:
         return []
-    spans = []
+    modules, constants, bound = set(), set(), set()
+
+    def text(node):
+        return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+    def literal(node):
+        return text(node) or (isinstance(node, ast.Name) and node.id in constants)
+
+    def plain(node, count):
+        return isinstance(node, ast.Call) and len(node.args) == count and not node.keywords
+
+    def named(node, name):
+        return isinstance(node, ast.Name) and node.id == name
+
+    def path_word(node):
+        return literal(node) or (
+            isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "argv" and named(node.value.value, "sys") and "sys" in modules
+            and isinstance(node.slice, ast.Constant) and type(node.slice.value) is int)
+
+    for stmt in tree.body[:-1]:
+        if isinstance(stmt, ast.Import):
+            if any(alias.asname is not None or alias.name not in ("sys", "pathlib") for alias in stmt.names):
+                return []
+            modules.update(alias.name for alias in stmt.names)
+            continue
+        if not (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name)):
+            return []
+        name, value = stmt.targets[0].id, stmt.value
+        if name in ("open", "sys", "pathlib", "Path") or name in bound:
+            return []
+        if text(value):
+            constants.add(name)
+        elif not (plain(value, 0) and isinstance(value.func, ast.Attribute) and value.func.attr == "read"
+                  and plain(value.func.value, 1) and named(value.func.value.func, "open")
+                  and literal(value.func.value.args[0])):
+            return []
+        bound.add(name)
+    last = tree.body[-1]
+    if not (isinstance(last, ast.Expr) and plain(last.value, 1) and isinstance(last.value.func, ast.Attribute)):
+        return []
+    call = last.value
+    owner = call.func.value
+    if call.func.attr == "write":
+        if not (plain(owner, 2) and named(owner.func, "open") and text(owner.args[1])
+                and owner.args[1].value in _GENSRC_DATA_MODES):
+            return []
+    elif call.func.attr == "write_text":
+        if not (plain(owner, 1) and (named(owner.func, "Path") or (
+                isinstance(owner.func, ast.Attribute) and owner.func.attr == "Path"
+                and named(owner.func.value, "pathlib") and "pathlib" in modules))):
+            return []
+    else:
+        return []
+    node = call.args[0]
+    parts = list(ast.walk(node))
+    if (not path_word(owner.args[0]) or not all(isinstance(part, _GENSRC_DATA_NODES) for part in parts)
+            or any(isinstance(part, ast.Name) and part.id not in bound for part in parts)
+            or any(isinstance(part, ast.Constant) and not isinstance(part.value, str) for part in parts)):
+        return []
     try:
-        for node in data:
-            if not all(isinstance(part, _GENSRC_DATA_NODES) for part in ast.walk(node)):
-                continue
-            if isinstance(node, ast.Constant) and not isinstance(node.value, (str, bytes)):
-                continue
-            start = starts[node.lineno - 1] + len(lines[node.lineno - 1][:node.col_offset].decode("utf-8"))
-            end = starts[node.end_lineno - 1] + len(lines[node.end_lineno - 1][:node.end_col_offset].decode("utf-8"))
-            spans.append((start, end))
+        start = starts[node.lineno - 1] + len(lines[node.lineno - 1][:node.col_offset].decode("utf-8"))
+        end = starts[node.end_lineno - 1] + len(lines[node.end_lineno - 1][:node.end_col_offset].decode("utf-8"))
     except (AttributeError, IndexError, TypeError, ValueError):
         return []
-    return spans
+    return [(start, end)]
 
 
 def _gensrc_unmention(command, code):
@@ -20793,10 +20817,15 @@ def _gensrc_unmention(command, code):
     for the mention filter alone (_gensrc_mentions), or command unchanged. A span is blanked only where the
     program is spelled in command exactly once as one plain quoted word: in single quotes when it holds no
     single quote, or in double quotes when it holds no double quote, $, backquote or backslash, so each
-    character of the program sits at a known place in the raw text. A name the program spells anywhere else
-    (a path built from it, an argument, another command) stays in the text and still counts."""
+    character of the program sits at a known place in the raw text, and only where that word is the whole
+    command's one step with no later one: the text before it is python, python3 or python3.N (bare or under
+    /usr/bin or /usr/local/bin), then only the options -I, -B, -E, -s, -S, -u or -q, then -c, and the text
+    after it is plain words, all separated by spaces, with no newline anywhere, so no later step (a pipe, a
+    list, a loop, a heredoc, xargs, a second program) can read the written file back. A name the program
+    spells anywhere else (a path built from it, an argument, another command) stays in the text and still
+    counts."""
     spans = _gensrc_python_data_spans(code)
-    if not spans:
+    if not spans or "\n" in command or "\r" in command:
         return command
     hits = []
     for quote, banned in (("'", "'"), ('"', '"$`\\')):
@@ -20808,6 +20837,19 @@ def _gensrc_unmention(command, code):
             hits.append(at + 1)
             at = command.find(needle, at + 1)
     if len(hits) != 1:
+        return command
+    words = [word for word in command[:hits[0] - 1].split(" ") if word]
+    after = command[hits[0] + len(code) + 1:]
+    python = words[0] if words else ""
+    for root in ("/usr/bin/", "/usr/local/bin/"):
+        if python.startswith(root):
+            python = python[len(root):]
+    if (len(words) < 2 or words[-1] != "-c" or not command[:hits[0] - 1].endswith(" ")
+            or (after and not after.startswith(" "))
+            or any(ch not in _GENSRC_DATA_WORD for ch in "".join(words) + after.replace(" ", ""))
+            or any(word not in _GENSRC_DATA_OPTIONS for word in words[1:-1])
+            or not (python in ("python", "python3") or (
+                python.startswith("python3.") and python[8:] and all(ch in "0123456789" for ch in python[8:])))):
         return command
     text = list(command)
     for start, end in spans:
