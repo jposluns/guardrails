@@ -31,8 +31,10 @@ whatever the tree currently holds can sweep in unrelated work, and where committ
 for a fixture or test, an isolated checkout provides it rather than reshaping the shared working
 tree in place. A check whose subject is another checkout's committed state records that commit's
 object id at start and reads that commit, not the working tree, which can change mid-run; a step
-needing files uses an isolated checkout made fresh from the object store, not a copy of the tree; a
-check whose subject is a working tree is governed by review-in-flight-pins-its-artefact.
+needing files uses an isolated checkout of that object id, made fresh from an object store, not a
+copy of the tree; a check whose subject is a working tree snapshots it to an object id and binds to
+that snapshot, as the first paragraph requires, unless the tree is pinned as
+review-in-flight-pins-its-artefact describes.
 
 The preference is to remove the ambient dependency, not merely to check it: a confirmed ambient
 binding is correct only until the surrounding state next shifts. This applies prefer-removing-a-path
