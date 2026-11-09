@@ -12118,6 +12118,7 @@ def _named_text_cases(hooks):
 
 
 _CS_STAMP = "[2026-11-09 14:05:00 UTC] Checking the queue."
+_CS_STAMP_BARE = "2026-11-09 14:05:00 UTC Checking the queue."
 
 
 def _cs_text(text, side=False):
@@ -12234,10 +12235,23 @@ def _console_stamp_cases(tmp):
         "R6": run([_cs_prompt(), _cs_text(_CS_STAMP), _cs_tool("t1"), _cs_text("Now the second."),
                    _cs_tool("t2")], tid="t2"),
         "R7": run([_cs_prompt(), _cs_text("```\n" + _CS_STAMP + "\n```"), _cs_tool("t1")]),
+        # The stamp must sit right after a `[`: the same stamp unbracketed at the line's start, after a
+        # bullet, or after emphasis is noted; bracketed after leading whitespace or a number bullet it is not.
+        "R8": run([_cs_prompt(), _cs_text(_CS_STAMP_BARE), _cs_tool("t1")]),
+        "R9": run([_cs_prompt(), _cs_text("- " + _CS_STAMP_BARE), _cs_tool("t1")]),
+        "R10": run([_cs_prompt(), _cs_text("**" + _CS_STAMP_BARE), _cs_tool("t1")]),
+        "C10": run([_cs_prompt(), _cs_text("  1. " + _CS_STAMP), _cs_tool("t1")]),
+        # A heading is not a permitted prefix, so a bracketed stamp after `# ` is noted.
+        "R11": run([_cs_prompt(), _cs_text("# " + _CS_STAMP), _cs_tool("t1")]),
+        # Presence only: a bracketed, zoned stamp far behind or ahead of the clock is not noted here (the
+        # Stop hook judges its time).
+        "C11": run([_cs_prompt(), _cs_text("[2020-01-01 00:00:00 UTC] Checking the queue."), _cs_tool("t1")]),
+        "C12": run([_cs_prompt(), _cs_text("[2099-01-01 00:00:00 UTC] Checking the queue."), _cs_tool("t1")]),
     }
     want = {"C1": "allow", "C2": "allow", "C3": "allow", "C4": "allow", "C5": "allow", "C6": "allow",
-            "C9a": "allow", "C9b": "allow", "R1": "warn", "R2": "warn", "R3": "warn", "R4": "warn",
-            "R6": "warn", "R7": "warn"}
+            "C9a": "allow", "C9b": "allow", "C10": "allow", "C11": "allow", "C12": "allow", "R1": "warn",
+            "R2": "warn", "R3": "warn", "R4": "warn", "R6": "warn", "R7": "warn", "R8": "warn", "R9": "warn",
+            "R10": "warn", "R11": "warn"}
     # Each vector's check id is spelled out as a literal row, so the selftest-execution gate resolves it;
     # the coverage check after the loop keeps the rows and the vectors from drifting apart.
     seen = []
@@ -12245,9 +12259,13 @@ def _console_stamp_cases(tmp):
                        ("console-stamp/vector-C3", "C3"), ("console-stamp/vector-C4", "C4"),
                        ("console-stamp/vector-C5", "C5"), ("console-stamp/vector-C6", "C6"),
                        ("console-stamp/vector-C9a", "C9a"), ("console-stamp/vector-C9b", "C9b"),
+                       ("console-stamp/vector-C10", "C10"), ("console-stamp/vector-C11", "C11"),
+                       ("console-stamp/vector-C12", "C12"),
                        ("console-stamp/vector-R1", "R1"), ("console-stamp/vector-R2", "R2"),
                        ("console-stamp/vector-R3", "R3"), ("console-stamp/vector-R4", "R4"),
-                       ("console-stamp/vector-R6", "R6"), ("console-stamp/vector-R7", "R7")):
+                       ("console-stamp/vector-R6", "R6"), ("console-stamp/vector-R7", "R7"),
+                       ("console-stamp/vector-R8", "R8"), ("console-stamp/vector-R9", "R9"),
+                       ("console-stamp/vector-R10", "R10"), ("console-stamp/vector-R11", "R11")):
         seen.append(key)
         check(label, verdict(vectors[key]), want[key])
     check("console-stamp/vector-table-covers-every-vector", (sorted(seen), sorted(want)),
@@ -12391,6 +12409,22 @@ def _console_stamp_cases(tmp):
     # Arabic-Indic or fullwidth digit bullet is not a bullet, so no permitted prefix is found.
     check("console-stamp/lead-end-bullet-digits-ascii",
           [aiqt_hooks._console_lead_end(s) for s in ("1. [x", "١. [x", "１. [x")], [4, 0, 0])
+    # The two hooks catch different messages, pinned side by side as (this check notes, the Stop hook's
+    # check_message blocks) for a message written at 14:05:00 UTC under the Stop hook's 10-minute BEHIND
+    # tolerance. This check notes a message with no bracketed, zoned stamp at its first line's lead and never
+    # judges a stamp's time. The Stop hook never blocks a missing stamp; it blocks a claim more than a minute
+    # ahead wherever it leads, but a stale stamp only as the bracketed header.
+    grammar = aiqt_hooks._CONSOLE_GRAMMARS["bracketed-zoned"]
+    ref = stop_hook._naive_us(2026, 11, 9, 14, 5, 0, 0)
+    split = (_CS_STAMP, "Let me check the queue.", "[2026-11-09 13:50:00 UTC] Checking the queue.",
+             "[2026-11-09 14:10:00 UTC] Checking the queue.", _CS_STAMP_BARE,
+             "2026-11-09 13:50:00 UTC Checking the queue.", "2026-11-09 14:10:00 UTC Checking the queue.",
+             "# [2026-11-09 13:50:00 UTC] Checking the queue.", "[2026-11-09 13:50:00] Checking the queue.")
+    check("console-stamp/stop-hook-split-table",
+          [(not aiqt_hooks._console_run_stamped(s, grammar),
+            bool(stop_hook.check_message(s, ref, None, "message", stop_hook.BEHIND_US))) for s in split],
+          [(False, False), (True, False), (False, True), (False, True), (True, False), (True, False),
+           (True, True), (True, False), (True, False)])
     # Registration: note-only, PreToolUse, and the Python-floor copy names it.
     name = "orch_console_stamp_pretool"
     check("console-stamp/registered-note-only",
@@ -12459,6 +12493,21 @@ def _console_stamp_cases(tmp):
     check("console-stamp/mutant-search-not-match-R2",
           mutant("_console_run_stamped", first_line_search, "R2"), True)
     check("console-stamp/mutant-lead-check-dropped-R3", mutant("_console_run_stamped", any_lead, "R3"), True)
+
+    # The bracket rule reverted two ways: dropped whole (an unbracketed stamp at the line's start passes),
+    # or only the `[` test dropped (a stamp after a bullet or emphasis passes).
+    def unbracketed(text, pattern):
+        line = next((ln for ln in text.splitlines() if ln.strip()), None)
+        return line is None or pattern.match(line, aiqt_hooks._console_lead_end(line)) is not None
+
+    def any_prefix(text, pattern):
+        line = next((ln for ln in text.splitlines() if ln.strip()), None)
+        i = aiqt_hooks._console_lead_end(line) if line is not None else 0
+        return line is None or (i > 0 and pattern.match(line, i) is not None)
+    check("console-stamp/mutant-bracket-rule-dropped-R8", mutant("_console_run_stamped", unbracketed, "R8"), True)
+    check("console-stamp/mutant-bracket-test-dropped-R9-R10",
+          (mutant("_console_run_stamped", any_prefix, "R9"), mutant("_console_run_stamped", any_prefix, "R10")),
+          (True, True))
     check("console-stamp/mutant-zone-optional-R4", mutant("_CONSOLE_GRAMMARS", loose, "R4"), True)
     check("console-stamp/mutant-whole-turn-scope-C5", mutant("_console_records", whole_turn, "C5"), True)
     check("console-stamp/mutant-sidechain-skip-removed-C6",

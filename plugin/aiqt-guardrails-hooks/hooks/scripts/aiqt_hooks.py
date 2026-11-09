@@ -32484,9 +32484,15 @@ def _console_stamp_decide(data):
 def orch_console_stamp_pretool(data):
     """tstamp (adopter-armed, NOTE-ONLY), PreToolUse on every tool: where the registry opts in with a
     console_stamp object and the session is in lease scope, note a tool call whose preceding console
-    messages in the current segment do not open with a bracketed, zoned stamp. Never blocks: the
-    dispatcher lists it in NOTE_ONLY_PRETOOL_MODES, and a cannot-evaluate allows with a guard-events row
-    or a note, never as clean."""
+    messages in the current segment do not open with a bracketed, zoned stamp. It checks presence only and
+    is not the Stop clock-truth hook's equivalent. It notes a message whose first non-blank line has no
+    stamp right after a `[` at the permitted lead (no stamp, an unbracketed or unzoned one, one after a
+    heading or on a later line) and passes any bracketed, zoned stamp whatever its time. The Stop hook
+    never blocks a missing stamp: it blocks a claim more than a minute ahead of when the message was
+    written (outside code, a quote or a scheduling phrase), a bracketed header stamp more than its
+    tolerance behind, and a wrong elapsed footer. Never blocks: the dispatcher lists it in
+    NOTE_ONLY_PRETOOL_MODES, and a cannot-evaluate allows with a guard-events row or a note, never as
+    clean."""
     kind, root, detail = _console_stamp_decide(data)
     if kind == "row":
         if _orch_guard_event(root, "console-stamp", "fail-open", detail):
