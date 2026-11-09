@@ -484,7 +484,24 @@ def _nested_rebinders(node, at_module):
     return names
 
 
-_TYPE_PARAM_NODES = (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)
+# The AST node types each binding branch tests, declared as data: every isinstance test in
+# _BINDING_BRANCHES and _type_param_binds takes its classes from this table, so a branch can
+# never test a node type the table does not list, and the self-test's meta row compares the
+# table, read as data, with the per-type void rows plus the closed no-row table. Order carries
+# meaning where one branch reads different fields per type: store-or-delete is the Name test
+# followed by its Store and Del context markers, and match-capture is the two name captures
+# (MatchAs, MatchStar) followed by the mapping rest (MatchMapping).
+_BRANCH_NODE_TYPES = {
+    "store-or-delete": (ast.Name, ast.Store, ast.Del),
+    "parameter": (ast.arg,),
+    "def-or-class": (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+    "import-alias": (ast.Import, ast.ImportFrom),
+    "except": (ast.ExceptHandler,),
+    "global-nonlocal": (ast.Global, ast.Nonlocal),
+    "match-capture": (ast.MatchAs, ast.MatchStar, ast.MatchMapping),
+    "type-parameter": (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple),
+}
+_TYPE_PARAM_NODES = _BRANCH_NODE_TYPES["type-parameter"]
 
 
 def _type_param_binds(node):
@@ -618,39 +635,41 @@ def _from_import_void_names(alias):
     return tuple(dict.fromkeys(n for n in names if n in _VOID_NAMES))
 
 
-# Each binding construct _bound_anywhere counts, one branch per construct. Every branch except
-# store-or-delete is guarded by a self-test row that fails with that branch removed; no row can
-# guard store-or-delete, because a stored or deleted bare-name __import__ or __builtins__ is
-# itself a voiding occurrence, so removing that branch never changes the exit (the branch is kept
-# for completeness of _bound_anywhere and is covered by the occurrence check). Beyond the
-# whole-branch flips (which remove the except, global-nonlocal, match-capture and type-parameter
-# branches, or drop __builtins__ from the exception condition), every single AST node type a
-# branch tests has its own void row and a flip that narrows the branch to drop only that type, so
-# a branch that keeps one of its node types and drops another fails too; the only tested node
-# types with no such row are those in the self-test's closed table _NO_ROW_BINDING_NODE_TYPES
-# (the store-or-delete Name test with its Store and Del context markers, a from-import binding of
-# either name, and a nonlocal declaration), each with the reason dropping it alone can never
-# change the exit, and a self-test meta row reads these branches and _type_param_binds by AST and
-# fails when a tested node type has neither a per-type row nor a no-row entry. A MatchAs or
-# MatchStar name and a MatchMapping rest are one branch: each is a match capture.
+# Each binding construct _bound_anywhere counts, one branch per construct, each branch's
+# isinstance tests built from its _BRANCH_NODE_TYPES entry, so no branch can test a node type the
+# table does not list. Every branch except store-or-delete is guarded by a self-test row that
+# fails with that branch removed; no row can guard store-or-delete, because a stored or deleted
+# bare-name __import__ or __builtins__ is itself a voiding occurrence, so removing that branch
+# never changes the exit (the branch is kept for completeness of _bound_anywhere and is covered
+# by the occurrence check). Beyond the whole-branch flips (which remove the except,
+# global-nonlocal, match-capture and type-parameter branches, or drop __builtins__ from the
+# exception condition), every single AST node type a branch tests has its own void row and a flip
+# that narrows the branch to drop only that type, so a branch that keeps one of its node types
+# and drops another fails too; the only tested node types with no such row are those in the
+# self-test's closed table _NO_ROW_BINDING_NODE_TYPES (the store-or-delete Name test with its
+# Store and Del context markers, and a from-import binding of either name), each with the reason
+# dropping it alone can never change the exit, and a self-test meta row compares
+# _BRANCH_NODE_TYPES, read as data, with the per-type rows plus that closed table and fails when
+# a listed node type has neither a per-type row nor a no-row entry, when one has both, or when
+# either names a type the table does not list. A MatchAs or MatchStar name and a MatchMapping
+# rest are one branch: each is a match capture.
 _BINDING_BRANCHES = {
-    "store-or-delete": lambda node: (
-        (node.id,) if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
-        else ()),
-    "parameter": lambda node: (node.arg,) if isinstance(node, ast.arg) else (),
-    "def-or-class": lambda node: (
-        (node.name,)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else ()),
-    "import-alias": lambda node: (
+    "store-or-delete": lambda node, types=_BRANCH_NODE_TYPES["store-or-delete"]: (
+        (node.id,) if isinstance(node, types[0]) and isinstance(node.ctx, types[1:]) else ()),
+    "parameter": lambda node, types=_BRANCH_NODE_TYPES["parameter"]: (
+        (node.arg,) if isinstance(node, types) else ()),
+    "def-or-class": lambda node, types=_BRANCH_NODE_TYPES["def-or-class"]: (
+        (node.name,) if isinstance(node, types) else ()),
+    "import-alias": lambda node, types=_BRANCH_NODE_TYPES["import-alias"]: (
         tuple(a.asname or a.name.split(".")[0] for a in node.names)
-        if isinstance(node, (ast.Import, ast.ImportFrom)) else ()),
-    "except": lambda node: (
-        (node.name,) if isinstance(node, ast.ExceptHandler) and node.name else ()),
-    "global-nonlocal": lambda node: (
-        tuple(node.names) if isinstance(node, (ast.Global, ast.Nonlocal)) else ()),
-    "match-capture": lambda node: (
-        (node.name,) if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name
-        else (node.rest,) if isinstance(node, ast.MatchMapping) and node.rest else ()),
+        if isinstance(node, types) else ()),
+    "except": lambda node, types=_BRANCH_NODE_TYPES["except"]: (
+        (node.name,) if isinstance(node, types) and node.name else ()),
+    "global-nonlocal": lambda node, types=_BRANCH_NODE_TYPES["global-nonlocal"]: (
+        tuple(node.names) if isinstance(node, types) else ()),
+    "match-capture": lambda node, types=_BRANCH_NODE_TYPES["match-capture"]: (
+        (node.name,) if isinstance(node, types[:2]) and node.name
+        else (node.rest,) if isinstance(node, types[2]) and node.rest else ()),
     "type-parameter": lambda node: _type_param_binds(node),
 }
 
@@ -1502,8 +1521,12 @@ def _branch_without(branch, node_type):
 # The closed table of AST node types the binding branches test that have no per-node-type void
 # row, each with the reason dropping that type alone can never change the gate's exit. Every
 # other tested node type has a void row and a narrowing flip in the per-node-type block of the
-# self-test, and the meta row there compares this table and that block against the branches read
-# by AST, so neither this table nor the branches can grow silently.
+# self-test, and the meta row there compares this table and that block against the declared
+# node-type table _BRANCH_NODE_TYPES, read as data, so neither this table nor the set of tested
+# types can grow silently. Nonlocal has a row, not an entry here: ast.parse accepts a nonlocal
+# declaration with no enclosing binding of the name (only compile() rejects it), so a module can
+# bind __import__ or __builtins__ by a Nonlocal node and nothing else, and dropping Nonlocal
+# alone does change the exit.
 _NO_ROW_BINDING_NODE_TYPES = {
     "Name": "a stored or deleted bare-name __import__ or __builtins__ is itself a voiding "
             "occurrence, so a store-or-delete binding never changes the exit on its own; the "
@@ -1516,44 +1539,22 @@ _NO_ROW_BINDING_NODE_TYPES = {
                   "itself (_from_import_void_names), so dropping ImportFrom from the "
                   "import-alias branch never changes the exit; the from-import rows guard that "
                   "check",
-    "Nonlocal": "a nonlocal declaration of __import__ or __builtins__ parses only under an "
-                "enclosing function-scope binding of the same name, and that binding is counted "
-                "by another branch, so dropping Nonlocal alone never changes the exit",
 }
 
 
-def _binding_branch_node_types():
-    """Every ast node-type name _BINDING_BRANCHES and _type_param_binds test, read from this
-    file's own source: each ast.<Type> attribute referenced by the branch lambdas or by
-    _type_param_binds, with every module-level name they reference (such as _TYPE_PARAM_NODES)
-    resolved and walked too, so a node type added to any branch later appears here and must gain
-    a per-node-type row or a _NO_ROW_BINDING_NODE_TYPES entry; CannotEvaluate when either
-    definition is missing."""
-    tree, _ = _parse_python_text(os.path.abspath(__file__), "check_record_readers.py")
-    definitions = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            definitions[node.name] = node
-        elif (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)):
-            definitions[node.targets[0].id] = node.value
-    roots = ("_BINDING_BRANCHES", "_type_param_binds")
-    missing = [name for name in roots if name not in definitions]
-    if missing:
-        raise CannotEvaluate("module-level definition(s) {} not found".format(", ".join(missing)))
-    pending = [definitions[name] for name in roots]
-    expanded = set(roots)
-    types = set()
-    while pending:
-        for inner in ast.walk(pending.pop()):
-            if (isinstance(inner, ast.Attribute) and isinstance(inner.value, ast.Name)
-                    and inner.value.id == "ast"):
-                types.add(inner.attr)
-            elif (isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load)
-                    and inner.id in definitions and inner.id not in expanded):
-                expanded.add(inner.id)
-                pending.append(definitions[inner.id])
-    return frozenset(types)
+def _branch_node_type_names(table):
+    """The name of every ast node class one branch table lists: the full set of node types
+    branches built from that table can test."""
+    return frozenset(cls.__name__ for types in table.values() for cls in types)
+
+
+def _binding_node_types_closed(table, covered, no_row):
+    """True when one branch table's listed node types are exactly accounted for: every listed
+    type has a per-node-type void row or a no-row entry but never both, and neither set names a
+    type the table does not list. The table is compared as data; nothing parses this file's
+    source, so a node type a branch gains in any way appears here through the table the branch
+    is built from."""
+    return _branch_node_type_names(table) == (covered | no_row) and not (covered & no_row)
 
 
 def _gate_without_builtins_blocker(files):
@@ -2266,7 +2267,9 @@ def _self_test():
     # covered by the occurrence check. The branch flips the self-test runs are exactly the four
     # removals below, the two match-capture narrowings after them, the per-node-type narrowings
     # (one per AST node type the branches test, _NO_ROW_BINDING_NODE_TYPES excepted) in the block
-    # after those, and the __builtins__ exception-condition drop.
+    # after those, the __builtins__ exception-condition drop, and the type-parameter-binding drop
+    # of the shadowed hand-off row (_gate_without_type_param_binds nulls _type_param_binds, and
+    # with it what the type-parameter branch counts).
     for void_id, flip_id, branch, hook, line in (
             ("void/dunder-import-except-bound", "flip/dunder-import-except-bound", "except",
              'try:\n    pass\nexcept ValueError as __import__:\n    pass\n'
@@ -2323,13 +2326,16 @@ def _self_test():
 
     # Every AST node type the binding branches test, one row per type: the module binds
     # __import__ by exactly that node type beside an otherwise excepted __import__("hashlib")
-    # call, so the call is not excepted and voids; the flip narrows only that type's branch to
-    # drop that type, which a whole-branch removal cannot show, so a branch that keeps its other
-    # types and drops this one fails this row. The types in _NO_ROW_BINDING_NODE_TYPES have no
-    # row because dropping any of them alone can never change the exit; the meta row after the
-    # loop reads _BINDING_BRANCHES and _type_param_binds by AST and fails when a tested node type
-    # has neither a row here nor an entry there, so a node type added later without a row fails
-    # the suite.
+    # call, so the call is not excepted and the module is voided; each row's asserted line is
+    # the refused registry-use line (the reg.get(k) the voiding leaves unaccepted), not the
+    # __import__ call's line. The flip narrows only that type's branch to drop that type, which
+    # a whole-branch removal cannot show, so a branch that keeps its other types and drops this
+    # one fails this row. The types in _NO_ROW_BINDING_NODE_TYPES have no row because dropping
+    # any of them alone can never change the exit; the meta row after the loop compares the
+    # declared node-type table _BRANCH_NODE_TYPES, read as data, with the rows here plus that
+    # closed table and fails when a listed node type has neither, so a node type added to the
+    # table later without a row fails the suite. The Nonlocal row parses only under ast.parse
+    # (compile() rejects an unbound nonlocal), which is exactly what the gate runs.
     covered_node_types = set()
     for node_type, branch, void_id, flip_id, hook, line in (
             ("arg", "parameter", "void/binding-node-arg", "flip/binding-node-arg",
@@ -2356,6 +2362,10 @@ def _self_test():
              'M = __import__("hashlib")\nfor k in ("ledger_path",):\n    reg.get(k)\n', 7),
             ("Global", "global-nonlocal", "void/binding-node-global", "flip/binding-node-global",
              'def f():\n    global __import__\nM = __import__("hashlib")\n'
+             'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
+            ("Nonlocal", "global-nonlocal", "void/binding-node-nonlocal",
+             "flip/binding-node-nonlocal",
+             'def f():\n    nonlocal __import__\nM = __import__("hashlib")\n'
              'for k in ("ledger_path",):\n    reg.get(k)\n', 5),
             ("MatchAs", "match-capture", "void/binding-node-matchas",
              "flip/binding-node-matchas",
@@ -2389,16 +2399,24 @@ def _self_test():
         rc, out = _gate_with_binding_branch(files, branch, _branch_without(branch, node_type))
         check(flip_id, rc == 0, (rc, out))
 
-    # The coverage closure over the binding branches: every node type they test, read from the
-    # source by AST, has either a per-node-type void row and narrowing flip above or an entry in
-    # the closed no-row table, the two sets are disjoint, and neither lists a type the branches
-    # no longer test.
-    tested, crash = _guarded(_binding_branch_node_types)
+    # The coverage closure over the binding branches: every node type the declared table
+    # _BRANCH_NODE_TYPES lists (the only types the branches and _type_param_binds can test,
+    # since their isinstance classes are taken from the table) has either a per-node-type void
+    # row and narrowing flip above or an entry in the closed no-row table, the two sets are
+    # disjoint, and neither names a type the table does not list. The table is compared as data;
+    # nothing parses this file's source.
     no_row = frozenset(_NO_ROW_BINDING_NODE_TYPES)
     check("meta/binding-node-types-closed",
-          crash is None and tested == covered_node_types | no_row
-          and not (covered_node_types & no_row),
-          (crash, sorted(tested or ()), sorted(covered_node_types), sorted(no_row)))
+          _binding_node_types_closed(_BRANCH_NODE_TYPES, covered_node_types, no_row),
+          (sorted(_branch_node_type_names(_BRANCH_NODE_TYPES)), sorted(covered_node_types),
+           sorted(no_row)))
+    # The meta row's own flip: a mutant table that lists one more node type, with no row and no
+    # no-row entry for it, must fail the same comparison.
+    mutant_table = dict(_BRANCH_NODE_TYPES)
+    mutant_table["type-alias"] = (ast.TypeAlias,)
+    check("flip/binding-node-types-mutant-table-fails",
+          not _binding_node_types_closed(mutant_table, covered_node_types, no_row),
+          sorted(_branch_node_type_names(mutant_table)))
 
     # A binding of __builtins__ with no bare-name or attribute occurrence the scan reads: the
     # bound object is the mapping a bare-name __import__ resolves through, so the __import__
@@ -2748,9 +2766,11 @@ def _self_test():
           "is covered by the occurrence check), the flips the self-test runs removing the except, "
           "global-nonlocal, match-capture and type-parameter branches, narrowing the match-capture "
           "branch to drop its star and its mapping-rest form, narrowing each branch to drop each "
-          "single AST node type it tests (one void row and one narrowing flip per type, the no-row "
-          "types listed in a closed table with reasons, and a meta row that reads the branches and "
-          "_type_param_binds by AST and fails when a tested type has neither), and dropping "
+          "single AST node type it tests (one void row and one narrowing flip per type, the "
+          "branches built from a declared node-type table, the no-row types listed in a closed "
+          "table with reasons, and a meta row that compares the declared table, read as data, "
+          "with the per-type rows plus the no-row table and whose flip fails a mutant table that "
+          "lists one more type), and dropping "
           "__builtins__ from the "
           "exception condition (each excepted "
           "shape passes and is refused by the flip that removes the exceptions, and its near "
