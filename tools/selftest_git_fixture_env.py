@@ -1434,6 +1434,17 @@ CONFIG_MEMBER_BOUNDS = {
     # wall.
     # ESTIMATED: 796 * 20 / 3 = 5306.7, so 5400 s.
     ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): 5400,
+    # Sized outside SIZING (the account reports this member only among the nine of 142.55 s or
+    # less, measured before the member's census rows and revert flips existed; no config-lane
+    # time of it since is known).
+    # READ FROM SOURCE (tools/check_release_cut.py, its census budget comment): with every census
+    # entry, census row and revert flip spending its bounds in full, a --red-on-revert run ends by
+    # about 2046 s, above the 1200 s default, so the default would cut the member's own worst case
+    # short; 2700 s sits above that worst case with about a third of it as margin.
+    # MEASURED (2026-11-09, 80-CPU host, load5 about 26 to 29, standalone, plain): one --self-test
+    # run took 283.4 s wall and one --self-test --red-on-revert run took 309.4 s wall, both passed;
+    # the worst case above, not these runs, sizes this entry.
+    ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): 2700,
 }
 # The sizing account's frozen facts (see SIZING above); _roster_figures derives the live figures
 # from them and config/member-roster-figures pins them against _registered_selftests().
@@ -1596,6 +1607,9 @@ SIZING_LATER_MEASURED = {
     ("tools/check_selftest_execution.py", "--suite", "child-status-coverage-selftest"): (
         "Standalone runs only (2026-10-29, CI 796 s, local 604.9 s), no config-lane time known:"
         " see this member's CONFIG_MEMBER_BOUNDS comment."),
+    ("tools/check_release_cut.py", "--self-test", "--red-on-revert"): (
+        "Standalone runs only (2026-11-09), no config-lane time of the member with its census"
+        " rows known: see this member's CONFIG_MEMBER_BOUNDS comment."),
 }
 # After the process-group kill: the bounded drain of output still held by a descendant that left
 # the group (setsid or setpgid), the bounded reap of the leader, and the bounded wait for the group

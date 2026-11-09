@@ -2514,19 +2514,29 @@ runpy.run_path(path, run_name="__main__")
 # up to 430 s, and every other entry gets the 30 s floor (4 * 4.02 = 16.08 s at most). The factor allows a run
 # four times slower than its slower measured run, about a host four times as loaded.
 # The bounds must also fit inside the whole run: tools/selftest_git_fixture_env.py kills
-# `check_release_cut.py --self-test --red-on-revert` at 1200 s (CONFIG_MEMBER_BOUND_DEFAULT), and a run killed
-# there never reaches the named failure below. A killed entry spends its bound, then at most _CENSUS_KILL_WAIT s
-# draining its pipes and at most _CENSUS_KILL_WAIT s polling its group empty, so an entry costs at worst its
-# bound plus 2 * _CENSUS_KILL_WAIT s. _census_table_failures refuses, before anything runs, an empty table, a
-# row bound above _CENSUS_BOUND_CAP, and a table whose bounds plus 2 * _CENSUS_KILL_WAIT s per entry sum above
-# _CENSUS_TOTAL_CAP, so a table edit cannot silently break this arithmetic: any table that runs spends at most
-# _CENSUS_TOTAL_CAP = 720 s on its entries, post-kill waits included. This table's bounds sum to
-# 430 + 6 * 30 = 610 s, 610 + 7 * 2 * 5 = 680 s with the post-kill waits. A plain --self-test run took 283.5 s
-# on the same day at a 1-minute load of 25 to 33, the seven entries about 113 s of it (their second measured
-# runs above), so the rest about 171 s; with every entry killed at its bound and both post-kill waits spent,
-# that run ends by about 680 + 171 = 851 s, 349 s under 1200 s, and a table spending the full 720 s cap by
-# about 891 s, 309 s under. The --red-on-revert run adds its revert replays to that rest; the replays' time was
-# not measured.
+# `check_release_cut.py --self-test --red-on-revert` at 2700 s (its CONFIG_MEMBER_BOUNDS entry), and a run
+# killed there never reaches the named failure below. A killed entry spends its bound, then at most
+# _CENSUS_KILL_WAIT s draining its pipes and at most _CENSUS_KILL_WAIT s polling its group empty, so an entry
+# costs at worst its bound plus 2 * _CENSUS_KILL_WAIT s. _census_table_failures refuses, before anything runs,
+# an empty table, a row bound above _CENSUS_BOUND_CAP, and a table whose bounds plus 2 * _CENSUS_KILL_WAIT s
+# per entry sum above _CENSUS_TOTAL_CAP, so a table edit cannot silently break this arithmetic: any table that
+# runs spends at most _CENSUS_TOTAL_CAP = 720 s on its entries, post-kill waits included. This table's bounds
+# sum to 430 + 6 * 30 = 610 s, 610 + 7 * 2 * 5 = 680 s with the post-kill waits.
+# The census rows spend their own drains and waits on top of the table, each _census_run they make bounded at
+# 2 * TIMEOUT = 60 s plus the two post-kill waits (70 s at worst): with every one of those bounds spent in
+# full, the bound rows cost at worst 70 + 20 + 5 = 95 s (their 60 s and 10 s entries plus the grandchild
+# check), the interrupt and unreaped rows 75 s each, the exit-code row 70 s, the reaped-exit row 75 s, the
+# drain-reaped row 130 s (its wrapper waits up to 60 s for the leader's exit before the drain runs), the
+# construction row 135 s (drain, exit-or-record wait, grandchild check) and the sigchld row about 0 s
+# (nothing is launched): about 655 s together. The revert flips, run only under --red-on-revert, cost at
+# worst 60 s (interrupt), 70 s (exit code), 75 s (reaped exit), 130 s (drain reaped), 135 s (construction)
+# and 70 s (sigchld): about 540 s together. A plain --self-test run took 283.5 s on 2026-11-08 at a 1-minute
+# load of 25 to 33, the seven entries about 113 s of it (their second measured runs above), so the rest (the
+# fixture cases, close checks, entry-restore and, under --red-on-revert, the source mutations) about 171 s;
+# with every census bound above spent in full, a --self-test run ends by about 680 + 655 + 171 = 1506 s and
+# a --red-on-revert run by about 1506 + 540 = 2046 s. Both exceed the 1200 s default member bound, so the
+# member carries its own 2700 s entry in tools/selftest_git_fixture_env.py, above that worst case with about
+# a third of it as margin; measured runs stay far under it (the entry's own comment records them).
 _CENSUS_BOUND_CAP = 600
 _CENSUS_TOTAL_CAP = 720
 # The most a killed entry waits after its group kill, once for its pipes and once more for its group to empty.
@@ -2582,15 +2592,22 @@ def _census_run(args, bound):
     """Run CENSUS_DRIVER in this interpreter on args (the callee path, the census caller and the self-test
     arguments) as the leader of a new session, and so of its own process group, with stdin from /dev/null and
     stdout and stderr captured. Before anything is launched, the SIGCHLD disposition of this process is
-    read: when signal.getsignal reports SIG_IGN, the run fails closed as (None, b"", note) with no leader
-    constructed at all, because whenever SIGCHLD is ignored the kernel can reap an exited leader at any
-    point (between the drain's waitid and a kill included), unpinning a group id that a kill could then
-    reach once reused; refusing before the launch means no group kill here can ever follow a kernel reap
-    from that cause. That read cannot detect SA_NOCLDWAIT set without SIG_IGN (signal.getsignal does not
-    report that flag), nor another reaper in this same process (a thread or a signal handler calling
-    os.wait*); either can still unpin the group id. The drain's ChildProcessError return below is the
-    second guard, for a reap it observes; a reap it does not observe (one landing after the drain's last
-    waitid, before the finally's kill) stays open under those two undetected reapers. Barring them, the
+    read twice: signal.getsignal (Python's handler table) and the kernel's own process-wide SigIgn mask in
+    /proc/self/status, which also sees a SIG_IGN installed outside the signal module (through libc, or
+    inherited across exec). When either read reports SIG_IGN, the run fails closed as (None, b"", note)
+    with no leader constructed at all, because whenever SIGCHLD is ignored the kernel can reap an exited
+    leader at any point (between the drain's waitid and a kill included), unpinning a group id that a kill
+    could then reach once reused; when the kernel mask cannot be read (no /proc, or no readable SigIgn
+    line), the run also fails closed with no launch, since the disposition is then unknown. Refusing before
+    the launch means no group kill here can follow a kernel reap from a disposition already set when the
+    leader is constructed; it does not rule one out for the reapers the reads cannot see. Those are:
+    SA_NOCLDWAIT set without SIG_IGN (neither read reports that flag), a SIG_IGN set after the reads, and
+    another reaper in this same process (a thread or a signal handler calling os.wait*); any of them can
+    still unpin the group id. Against an unpinned id the drain fails closed twice below, each time it would
+    otherwise trust the leader's identity: its os.waitid's ChildProcessError return, for a reap it observes,
+    and the final reap's, for a reap landing between the last waitid and that reap; a reap it never observes
+    (one landing after the drain's last waitid, before the finally's kill, on a path that kills) stays open
+    under those undetected reapers. Barring them, the
     leader stays this process's unreaped child until the kill decision is
     made: the drain below reads both pipes itself (a selector over the two of them) and watches for the
     leader's exit with os.waitid and WNOWAIT, which detects the exit without reaping, so until this function
@@ -2598,16 +2615,19 @@ def _census_run(args, bound):
     for reuse. When the leader has exited and both pipes have hit end of file, a state the drain reads at
     the top of each pass, before that pass reads the deadline (set to bound seconds after the leader's
     construction and the mask restore below, so the bound covers only the drain; the fork and exec before it
-    lie outside it), the leader is reaped and (exit code, stderr bytes, "") returned, even when that state
+    lie outside it), the leader is reaped with os.waitpid, and (exit code, stderr bytes, "") returned with
+    the code taken from that reap itself, even when that state
     is first seen on the pass where the deadline has already run out; nothing is killed on that path (a
     descendant that had released the output pipes can outlive the run, and one that left the group is never
-    reached). Whenever something other than this function has reaped the leader (the kernel, with SIGCHLD
-    ignored at that point despite the check above, so SA_NOCLDWAIT or a SIG_IGN set after it, or another
-    reaper in this same process), the drain's
-    os.waitid raises ChildProcessError: that run fails closed as (None, b"", note) with no kill, because a
-    group id no longer pinned by an unreaped leader can be freed and reused, so signalling it could reach
-    someone else's processes. On every other path out of the drain (the bound spent, or an exception such as
-    an interrupt raised inside it) the leader is, barring the two undetected reapers above, an unreaped
+    reached). Whenever something other than this function reaps the leader first (the kernel, with SIGCHLD
+    ignored at that point despite the checks above, so SA_NOCLDWAIT or a SIG_IGN set after them, or another
+    reaper in this same process), whichever of the drain's
+    os.waitid or that final os.waitpid runs next raises ChildProcessError: that run fails closed as
+    (None, b"", note) with no kill, because a group id no longer pinned by an unreaped leader can be freed
+    and reused, so signalling it could reach someone else's processes, and because the reaped leader's exit
+    status is gone, so no exit code is returned in its place (a missing status is never reported as 0).
+    On every other path out of the drain (the bound spent, or an exception such as
+    an interrupt raised inside it) the leader is, barring the undetected reapers above, an unreaped
     child, so the group id still names this group:
     the cleanup sends the whole group SIGKILL and the leader is reaped only after that (on an exception, by
     the Popen exit as the exception propagates; on a KeyboardInterrupt that exit waits for it only up to
@@ -2628,7 +2648,24 @@ def _census_run(args, bound):
     consequence is stated here rather than undone in the
     child, since the census children run in their own session, never as a terminal's foreground group, and
     are ended by SIGKILL, which no mask blocks."""
-    if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+    ignored = signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN
+    if not ignored:
+        # signal.getsignal reads Python's handler table, not the kernel disposition, so a SIG_IGN
+        # installed outside the signal module is invisible to it: read the kernel's process-wide
+        # SigIgn mask too, and fail closed where it cannot be read.
+        try:
+            with open("/proc/self/status", "r", encoding="ascii") as status:
+                for line in status:
+                    if line.startswith("SigIgn:"):
+                        ignored = bool(int(line.split(":", 1)[1], 16) >> (signal.SIGCHLD - 1) & 1)
+                        break
+                else:
+                    raise ValueError("no SigIgn line")
+        except (OSError, ValueError) as exc:
+            return None, b"", ("cannot evaluate: the kernel SIGCHLD disposition could not be read from "
+                               "/proc/self/status (%r), so a kernel reap of an exited leader cannot be "
+                               "ruled out; no leader was launched" % (exc,))
+    if ignored:
         return None, b"", ("cannot evaluate: SIGCHLD is set to be ignored in this process, so the kernel "
                            "could reap an exited leader at any point and a group kill could reach a reused "
                            "group id; no leader was launched")
@@ -2669,7 +2706,17 @@ def _census_run(args, bound):
                                                "was sent")
                     if exited and not pipes.get_map():
                         ended = True              # from here the kill stays off: never a kill after the reap
-                        code = proc.wait()        # the exit was seen with WNOWAIT, so a zombie until this reap
+                        try:
+                            status = os.waitpid(proc.pid, 0)[1]   # seen with WNOWAIT, a zombie until here
+                        except ChildProcessError:
+                            # the leader was reaped between the WNOWAIT observation and this reap,
+                            # so the observed status is gone: fail closed, never a made-up code
+                            return None, b"", ("cannot evaluate: the leader was reaped out from under "
+                                               "the drain between the exit observation and the reap, "
+                                               "so its exit could not be read and no group kill was "
+                                               "sent")
+                        code = os.waitstatus_to_exitcode(status)
+                        proc.returncode = code    # the Popen exit must not wait again for a reaped child
                         return code, bytes(err), ""
                     left = deadline - time.monotonic()
                     if left <= 0:
@@ -2747,7 +2794,8 @@ def _census_mapping_check(root, mappings=_CENSUS_MAPPINGS):
 # A stand-in callee for the census-mapping bound rows: it sleeps argv[1] seconds, then makes its census read and
 # reports the injected error the way a real self-test does. Given argv[2], it first writes there its own pid and
 # process group, or, given argv[3] as well, those of a grandchild it starts that inherits (and so holds) the
-# output pipes and sleeps 120 s (bounded, so a failed group kill leaves nothing running for long; a row that
+# output pipes and sleeps argv[4] seconds, 120 when absent (bounded either way, so a failed group kill leaves
+# nothing running for long; a row that
 # finds the recorded pid still in the recorded group kills it itself, and never signals a pid that left it).
 _CENSUS_STANDIN = """import os, subprocess, sys, time
 def _st_fd_table():
@@ -2761,7 +2809,9 @@ def _st_fd_table():
 if len(sys.argv) > 2:
     pid = os.getpid()
     if len(sys.argv) > 3:
-        pid = subprocess.Popen([sys.executable, "-I", "-c", "import time; time.sleep(120)"]).pid
+        pid = subprocess.Popen([sys.executable, "-I", "-c",
+                                "import time; time.sleep(" + (sys.argv[4] if len(sys.argv) > 4 else "120")
+                                + ")"]).pid
     with open(sys.argv[2], "w", encoding="ascii") as record:
         record.write("%d %d" % (pid, os.getpgid(0)))
 time.sleep(float(sys.argv[1]))
@@ -2924,7 +2974,9 @@ def _census_interrupt_row(parent):
             signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})   # an already pending handler runs here
         finally:
             try:
-                signal.signal(signal.SIGCHLD, previous)         # nothing delivered after the block runs here
+                # nothing delivered after the block runs here; a None previous handler was installed
+                # from C and cannot be reinstalled from Python, so the default disposition stands in
+                signal.signal(signal.SIGCHLD, signal.SIG_DFL if previous is None else previous)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, unblock)
     if not interrupted:
@@ -2978,7 +3030,9 @@ def _census_interrupt_unreaped_row(parent):
             signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGCHLD})   # an already pending handler runs here
         finally:
             try:
-                signal.signal(signal.SIGCHLD, previous)         # nothing delivered after the block runs here
+                # nothing delivered after the block runs here; a None previous handler was installed
+                # from C and cannot be reinstalled from Python, so the default disposition stands in
+                signal.signal(signal.SIGCHLD, signal.SIG_DFL if previous is None else previous)
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, unblock)
     if not interrupted:
@@ -2993,20 +3047,125 @@ def _census_interrupt_unreaped_row(parent):
 def _census_exit_code_row(parent):
     """An ordinary census run's exit code, read through the unreaped leader: the stand-in ends exit 2 with
     its cannot-evaluate report, and _census_run must return exactly that code with no note. The drain watches
-    the exit with WNOWAIT, so the leader is still this process's unreaped zombie when proc.wait() reads the
-    code; a drain that reaps the leader first (a waitid without WNOWAIT) loses the status, proc.wait() falls
-    back to 0, and this row reports that 0. Returns the failures."""
+    the exit with WNOWAIT, so the leader is still this process's unreaped zombie when the final os.waitpid
+    reads the code; a drain that reaps the leader first (a waitid without WNOWAIT) leaves that reap nothing,
+    so the run comes back as the fail-closed reaped-leader note, which this row reports. Returns the
+    failures."""
     parent.mkdir()
     (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
     code, err, note = _census_run([str(parent / "standin.py"), "*", "0"], 2 * TIMEOUT)
     err = err.decode("utf-8", "replace")
     if code != 2 or note:
-        return ["census exit code row: expected exit 2 with no note from the stand-in, got %r with note %r; "
-                "a 0 means the leader was reaped before proc.wait() could read its exit" % (code, note)]
+        return ["census exit code row: expected exit 2 with no note from the stand-in, got %r with note %r"
+                % (code, note)]
     if "SELF-TEST ERROR: descriptor census cannot evaluate descriptor" not in err:
         return ["census exit code row: the stand-in run carried no cannot-evaluate report: %r"
                 % err.strip()[-200:]]
     return []
+
+
+def _census_reaped_exit_row(parent):
+    """An exit status lost to an outside reap between the drain's WNOWAIT observation and its own reap: the
+    stand-in exits 2 while a grandchild it started holds the output pipes open, so the drain observes the
+    exit while the pipes are still held, and a thread then reaps the leader inside that window (released by
+    the wrapped os.waitid as soon as it first observes the exit, and joined before the observation is handed
+    back to the drain, so the reap always lands between the observation and the drain's reap). _census_run
+    must fail closed with the reaped-leader cannot-evaluate note, never return a made-up exit 0 in place of
+    the stand-in's 2, and the thread must have read that 2 itself (the status went somewhere, just not
+    here). Returns the failures."""
+    import threading
+    parent.mkdir()
+    (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
+    record = parent / "grandchild"
+    real_popen = subprocess.Popen
+    real_waitid = os.waitid
+    leader = []
+    reaped = []
+    observed = threading.Event()
+
+    def capturing(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        leader.append(proc.pid)
+        return proc
+
+    def reap():
+        if observed.wait(2 * TIMEOUT) and leader:
+            try:
+                reaped.append(os.waitpid(leader[0], 0))
+            except ChildProcessError as exc:
+                reaped.append(exc)
+
+    def observing(idtype, pid, flags):
+        result = real_waitid(idtype, pid, flags)
+        if result is not None and leader and pid == leader[0] and not observed.is_set():
+            observed.set()
+            thread.join(2 * TIMEOUT)
+        return result
+
+    thread = threading.Thread(target=reap)
+    thread.start()
+    failures = []
+    subprocess.Popen, os.waitid = capturing, observing
+    try:
+        code, err, note = _census_run([str(parent / "standin.py"), "*", "0.5", str(record), "spawn", "3"],
+                                      2 * TIMEOUT)
+    finally:
+        subprocess.Popen, os.waitid = real_popen, real_waitid
+        observed.set()
+        thread.join(2 * TIMEOUT)
+    if (code, err) != (None, b"") or "reaped out from under the drain between the exit observation" not in note:
+        failures.append("census reaped exit row: expected the fail-closed reaped-leader note, got %r with "
+                        "note %r" % (code, note))
+    if len(reaped) != 1 or not isinstance(reaped[0], tuple):
+        failures.append("census reaped exit row: the racing reaper did not reap the leader: %r" % (reaped,))
+    elif os.waitstatus_to_exitcode(reaped[0][1]) != 2:
+        failures.append("census reaped exit row: the racing reaper read exit %r, not the stand-in's 2"
+                        % (os.waitstatus_to_exitcode(reaped[0][1]),))
+    return failures + _census_grandchild_gone(record, "census reaped exit row")
+
+
+def _census_drain_reaped_row(parent):
+    """The drain entered with the leader already reaped: subprocess.Popen is wrapped (and restored in a
+    finally) so the wrapper reaps the leader itself as soon as it has exited, before the constructor
+    returns. The drain's first os.waitid then raises ChildProcessError, and _census_run must fail closed
+    with the reaped-leader cannot-evaluate note and send no kill at all (os.killpg is wrapped too, counting;
+    a kill against the unpinned group id would be the failure this guard exists to prevent). Returns the
+    failures."""
+    parent.mkdir()
+    (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
+    real_popen = subprocess.Popen
+    real_killpg = os.killpg
+    kills = []
+
+    def reaping(*args, **kwargs):
+        proc = real_popen(*args, **kwargs)
+        deadline = time.monotonic() + 2 * TIMEOUT
+        while True:
+            try:
+                pid = os.waitpid(proc.pid, os.WNOHANG)[0]
+            except ChildProcessError:
+                return proc                       # already reaped elsewhere; the drain still sees ECHILD
+            if pid == proc.pid or time.monotonic() >= deadline:
+                return proc    # reaped, or not exited in time (the row then reports the missing refusal)
+            time.sleep(0.05)
+
+    def counting(pgid, sig):
+        kills.append((pgid, sig))
+        return real_killpg(pgid, sig)
+
+    failures = []
+    subprocess.Popen, os.killpg = reaping, counting
+    try:
+        code, err, note = _census_run([str(parent / "standin.py"), "*", "0"], 2 * TIMEOUT)
+    finally:
+        subprocess.Popen, os.killpg = real_popen, real_killpg
+    if (code, err) != (None, b"") or "reaped out from under the drain (by the kernel" not in note:
+        failures.append("census drain reaped row: expected the in-drain fail-closed refusal, got %r with "
+                        "note %r" % (code, note))
+    if kills:
+        failures.append("census drain reaped row: a kill was sent although the leader was already reaped: "
+                        "%r" % (kills,))
+    return failures
 
 
 def _census_construction_interrupt_row(parent):
@@ -3053,7 +3212,7 @@ def _census_construction_interrupt_row(parent):
         interrupted = True
     finally:
         subprocess.Popen = real_popen
-        signal.signal(signal.SIGINT, previous)
+        signal.signal(signal.SIGINT, signal.SIG_DFL if previous is None else previous)
     if not interrupted:
         failures.append("census construction interrupt row: the construction-time SIGINT raised no "
                         "interrupt; nothing was reproduced")
@@ -3104,7 +3263,9 @@ def _census_sigchld_ignored_row(parent):
         code, err, note = _census_run([str(parent / "standin.py"), "*", "0"], 2 * TIMEOUT)
     finally:
         subprocess.Popen = real_popen
-        signal.signal(signal.SIGCHLD, previous)
+        # a None previous handler was installed from C and cannot be reinstalled from Python:
+        # restore the default disposition rather than raise and leave SIG_IGN installed
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL if previous is None else previous)
     if launched:
         failures.append("census sigchld ignored row: a leader was launched although SIGCHLD was set to be "
                         "ignored (%d constructions)" % len(launched))
@@ -3168,11 +3329,15 @@ def _census_interrupt_flip_red(parent, script):
     recorded group). Returns the failures: [] when the flipped copy let the grandchild survive, a named
     failure when it did not reproduce the skipped kill."""
     source = script.read_text(encoding="utf-8")
-    require(source.count("\ndef _census_run(") == 1, "census interrupt flip: its function anchor is not unique")
+    count = source.count("\ndef _census_run(")
+    require(count != 0, "census interrupt flip: its function anchor is absent")
+    require(count == 1, "census interrupt flip: its function anchor is repeated")
     begin = source.index("\ndef _census_run(")
     body = source[begin:source.index("\ndef ", begin + 1)]
     anchor = "if not ended:"
-    require(body.count(anchor) == 1, "census interrupt flip: its kill-condition anchor is not unique")
+    count = body.count(anchor)
+    require(count != 0, "census interrupt flip: its kill-condition anchor is absent")
+    require(count == 1, "census interrupt flip: its kill-condition anchor is repeated")
     parent.mkdir()
     (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
     (parent / "flip.py").write_text(
@@ -3200,10 +3365,14 @@ def _census_run_flipped(parent, script, name, old, new):
     runs the real drain's text with exactly one revert. Returns that copy's _census_run."""
     import importlib.util
     source = script.read_text(encoding="utf-8")
-    require(source.count("\ndef _census_run(") == 1, name + ": its function anchor is not unique")
+    count = source.count("\ndef _census_run(")
+    require(count != 0, name + ": its function anchor is absent")
+    require(count == 1, name + ": its function anchor is repeated")
     begin = source.index("\ndef _census_run(")
     body = source[begin:source.index("\ndef ", begin + 1)]
-    require(body.count(old) == 1, name + ": its revert anchor is not unique")
+    count = body.count(old)
+    require(count != 0, name + ": its revert anchor is absent")
+    require(count == 1, name + ": its revert anchor is repeated")
     parent.mkdir()
     location = parent / "flipped.py"
     location.write_text(
@@ -3220,10 +3389,10 @@ def _census_run_flipped(parent, script, name, old, new):
 def _census_exit_code_flip_red(parent, script):
     """The exit-code row against a copy of _census_run whose drain reaps on sight: WNOWAIT dropped from the
     drain's os.waitid, this file's own text with only that flag removed. The waitid then reaps the exited
-    leader, proc.wait() can no longer read its status and falls back to 0, and the real
+    leader, the final os.waitpid can no longer read its status and fails closed, and the real
     _census_exit_code_row, run with this module's _census_run swapped for the copy (restored in a finally),
-    must report that 0 in place of the stand-in's exit 2. Returns the failures: [] when the row turned red,
-    a named failure when it did not."""
+    must report that fail-closed note in place of the stand-in's exit 2. Returns the failures: [] when the
+    row turned red, a named failure when it did not."""
     this = sys.modules[__name__]
     flipped = _census_run_flipped(parent, script, "census exit code flip",
                                   "os.WEXITED | os.WNOHANG | os.WNOWAIT", "os.WEXITED | os.WNOHANG")
@@ -3233,9 +3402,9 @@ def _census_exit_code_flip_red(parent, script):
         got = _census_exit_code_row(parent / "row")
     finally:
         this._census_run = real
-    if len(got) != 1 or "got 0 with note ''" not in got[0]:
-        return ["census exit code flip: expected the row to report the reaped leader's exit read as 0, "
-                "got %r" % (got,)]
+    if len(got) != 1 or "reaped out from under the drain between the exit observation" not in got[0]:
+        return ["census exit code flip: expected the row to report the reaped leader as the fail-closed "
+                "note, got %r" % (got,)]
     return []
 
 
@@ -3273,7 +3442,7 @@ def _census_sigchld_flip_red(parent, script):
     failures: [] when the row turned red, a named failure when it did not."""
     this = sys.modules[__name__]
     flipped = _census_run_flipped(parent, script, "census sigchld flip",
-                                  "if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:", "if False:")
+                                  "if ignored:", "if False:")
     real = this._census_run
     this._census_run = flipped
     try:
@@ -3283,6 +3452,52 @@ def _census_sigchld_flip_red(parent, script):
     if not any("a leader was launched although SIGCHLD was set to be ignored" in failure for failure in got):
         return ["census sigchld flip: expected the row to report a launched leader, got %r" % (got,)]
     return []
+
+
+def _census_reaped_exit_flip_red(parent, script):
+    """The reaped-exit row against a copy of _census_run whose final reap is put back to the Popen wait: the
+    drain's own os.waitpid replaced by proc.wait(), whose missing-child fallback reports 0 for a child
+    someone else reaped. Under the row's racing reaper the copy then returns exit 0 with no note for a
+    stand-in that exited 2, and the real _census_reaped_exit_row, run with this module's _census_run swapped
+    for the copy (restored in a finally), must report that 0. Returns the failures: [] when the row turned
+    red, a named failure when it did not."""
+    this = sys.modules[__name__]
+    flipped = _census_run_flipped(parent, script, "census reaped exit flip",
+                                  "status = os.waitpid(proc.pid, 0)[1]",
+                                  "status = proc.wait() << 8")
+    real = this._census_run
+    this._census_run = flipped
+    try:
+        got = _census_reaped_exit_row(parent / "row")
+    finally:
+        this._census_run = real
+    if not any("got 0 with note ''" in failure for failure in got):
+        return ["census reaped exit flip: expected the row to report the swallowed reap read as 0, got %r"
+                % (got,)]
+    return []
+
+
+def _census_drain_reaped_flip_red(parent, script):
+    """The drain-reaped row against a copy of _census_run whose in-drain ChildProcessError guard is
+    disarmed: its except clause narrowed to an exception os.waitid never raises there, this file's own text
+    otherwise untouched. The already-reaped leader's ChildProcessError then escapes the drain instead of
+    failing closed, and the real row, run with this module's _census_run swapped for the copy (restored in
+    a finally), must see that escape in place of the refusal. Returns the failures: [] when the escape
+    confirmed the disarmed guard, a named failure when the row still got the refusal."""
+    this = sys.modules[__name__]
+    flipped = _census_run_flipped(
+        parent, script, "census drain reaped flip",
+        "except ChildProcessError:\n                            # something other",
+        "except FileNotFoundError:\n                            # something other")
+    real = this._census_run
+    this._census_run = flipped
+    try:
+        got = _census_drain_reaped_row(parent / "row")
+    except ChildProcessError:
+        return []
+    finally:
+        this._census_run = real
+    return ["census drain reaped flip: expected the reap to escape the disarmed guard, got %r" % (got,)]
 
 
 def _close_harness_checks(parent, script):
@@ -3405,6 +3620,7 @@ def _self_test_isolated(red_on_revert):
     script = Path(__file__).resolve()
     with tempfile.TemporaryDirectory(prefix="aiqt-release-cut-") as temporary:
         parent = Path(temporary)
+        skips = []
         home = parent / "home"
         home.mkdir()
         (parent / "no-hooks").mkdir()
@@ -3520,13 +3736,27 @@ def _self_test_isolated(red_on_revert):
             print("FAIL " + failure, file=sys.stderr)
         check("census-exit-code-unreaped", not exit_code_failures)
         print("PASS census-exit-code-unreaped")
+        reaped_exit_failures = _census_reaped_exit_row(parent / "census-exit-reaped")
+        for failure in reaped_exit_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("census-exit-reaped-under-drain", not reaped_exit_failures)
+        print("PASS census-exit-reaped-under-drain")
+        drain_reaped_failures = _census_drain_reaped_row(parent / "census-drain-reaped")
+        for failure in drain_reaped_failures:
+            print("FAIL " + failure, file=sys.stderr)
+        check("census-drain-reaped", not drain_reaped_failures)
+        print("PASS census-drain-reaped")
         construction_failures, construction_outcome = _census_construction_interrupt_row(
             parent / "census-interrupt-construction")
         for failure in construction_failures:
             print("FAIL " + failure, file=sys.stderr)
-        check("census-interrupt-kill-construction", not construction_failures)
-        print("PASS census-interrupt-kill-construction" if construction_outcome == "ran"
-              else "SKIP census-interrupt-kill-construction (" + construction_outcome + ")")
+        # a skipped row is reported as a skip, never recorded as a passed check id
+        if construction_outcome == "ran":
+            check("census-interrupt-kill-construction", not construction_failures)
+            print("PASS census-interrupt-kill-construction")
+        else:
+            skips.append("census-interrupt-kill-construction")
+            print("SKIP census-interrupt-kill-construction (" + construction_outcome + ")")
         sigchld_failures = _census_sigchld_ignored_row(parent / "census-sigchld-ignored")
         for failure in sigchld_failures:
             print("FAIL " + failure, file=sys.stderr)
@@ -3543,14 +3773,27 @@ def _self_test_isolated(red_on_revert):
                 print("FAIL " + failure, file=sys.stderr)
             check("census-exit-code-unreaped-red", not flip_failures)
             print("RED census-exit-code-unreaped at the drain's WNOWAIT reap order")
+            flip_failures = _census_reaped_exit_flip_red(parent / "census-exit-reaped-flip", script)
+            for failure in flip_failures:
+                print("FAIL " + failure, file=sys.stderr)
+            check("census-exit-reaped-under-drain-red", not flip_failures)
+            print("RED census-exit-reaped-under-drain at the final reap's missing-status guard")
+            flip_failures = _census_drain_reaped_flip_red(parent / "census-drain-reaped-flip", script)
+            for failure in flip_failures:
+                print("FAIL " + failure, file=sys.stderr)
+            check("census-drain-reaped-red", not flip_failures)
+            print("RED census-drain-reaped at the drain's reaped-leader guard")
             flip_failures, flip_outcome = _census_construction_flip_red(
                 parent / "census-construction-flip", script)
             for failure in flip_failures:
                 print("FAIL " + failure, file=sys.stderr)
-            check("census-interrupt-kill-construction-red", not flip_failures)
-            print("RED census-interrupt-kill-construction at the construction-time SIGINT block"
-                  if flip_outcome == "ran"
-                  else "SKIP census-interrupt-kill-construction-red (" + flip_outcome + ")")
+            # a skipped flip is reported as a skip, never recorded as a passed check id
+            if flip_outcome == "ran":
+                check("census-interrupt-kill-construction-red", not flip_failures)
+                print("RED census-interrupt-kill-construction at the construction-time SIGINT block")
+            else:
+                skips.append("census-interrupt-kill-construction-red")
+                print("SKIP census-interrupt-kill-construction-red (" + flip_outcome + ")")
             flip_failures = _census_sigchld_flip_red(parent / "census-sigchld-flip", script)
             for failure in flip_failures:
                 print("FAIL " + failure, file=sys.stderr)
@@ -3676,7 +3919,8 @@ def _self_test_isolated(red_on_revert):
                     raise CannotEvaluate(name + ": mutation survived its own oracle")
                 print("RED " + name + " at " + case_id)
         print("PASS release-cut-selftest cases=" + ",".join(cases)
-              + " red-on-revert=" + str(red_on_revert).lower())
+              + " red-on-revert=" + str(red_on_revert).lower()
+              + (" skipped=" + ",".join(skips) if skips else ""))
     return 0
 
 
