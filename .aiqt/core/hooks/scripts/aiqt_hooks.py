@@ -19449,7 +19449,9 @@ def _hdt_unterminated(command):
     expansion opens a here-document, its delimiter word taken after quote removal; '<<<' is a here-string.
     The bodies of the openers on a line begin after that line's unquoted newline, in order, and each ends at
     the first line equal to its delimiter, read after removing the line's leading tabs for '<<-'. Linear in
-    the command length: every character is read once by the scan or once by a body search."""
+    the command length: every character is read once by the scan or once by a body search, and an opener
+    keeps its offset, its line number counted only for the one opener returned (a count at every opener
+    rereads the prefix each time, quadratic in the number of openers)."""
     n = len(command)
     i = 0
     pending = []
@@ -19488,15 +19490,14 @@ def _hdt_unterminated(command):
             start = i
             token, i = _hdt_delimiter(command, i + (3 if strip else 2), n)
             if token is not None:
-                pending.append((command[start:i].strip(), token, strip,
-                                command.count("\n", 0, start) + 1))
+                pending.append((command[start:i].strip(), token, strip, start))
             continue
         if c == "\n" and pending:
             i += 1
-            for opener, token, strip, line in pending:
+            for opener, token, strip, start in pending:
                 while True:
                     if i >= n:
-                        return opener, token, line
+                        return opener, token, command.count("\n", 0, start) + 1
                     nl = command.find("\n", i)
                     end = n if nl < 0 else nl
                     body_line = command[i:end]
@@ -19507,7 +19508,7 @@ def _hdt_unterminated(command):
             continue
         i += 1
     if pending:
-        return pending[0][0], pending[0][1], pending[0][3]
+        return pending[0][0], pending[0][1], command.count("\n", 0, pending[0][3]) + 1
     return None
 
 

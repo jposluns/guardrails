@@ -4386,8 +4386,8 @@ _HDT_MUTANTS = {
                     '                    if body_line == token:\n'),),
     "dash-always": (('                    if (body_line.lstrip("\\t") if strip else body_line) == token:\n',
                      '                    if body_line.lstrip("\\t") == token:\n'),),
-    "first-only": (("            for opener, token, strip, line in pending:\n",
-                    "            for opener, token, strip, line in pending[:1]:\n"),),
+    "first-only": (("            for opener, token, strip, start in pending:\n",
+                    "            for opener, token, strip, start in pending[:1]:\n"),),
 }
 
 
