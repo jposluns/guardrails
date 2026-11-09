@@ -1161,9 +1161,10 @@ def _page_bound_sources(root):
     automatically. This closes the round-8/round-10 class where the former hand-maintained list here
     (residue/id/description) drifted from the generator (the rule TITLE and the hook MATCHER shipped
     unscanned). Covers the rule title, corpus id, mechanism reference id, the metadata fields the page
-    emits verbatim (platform, default, entry point incl. the hook matcher, class), the ledger residue, and
-    each pending rule's roadmap description. gen_enforcement_register raises ValueError/OSError on a
-    malformed or unreadable input, which the caller maps to a fail-closed exit 2."""
+    emits verbatim (platform, default, entry point incl. the hook matcher, class), the ledger residue,
+    each pending rule's roadmap description, and each partial rule's roadmap coverage note.
+    gen_enforcement_register raises ValueError/OSError on a malformed or unreadable input, which the
+    caller maps to a fail-closed exit 2."""
     return gen_enforcement_register.page_content_strings(root)
 
 
@@ -1517,7 +1518,7 @@ def _md_rule_row(md_text, cid):
 def _md_field_rendered(md_text, channel, key, raw):
     """(rendered, location_label) for one page-bound (channel, key, raw): whether the field renders at ITS OWN
     expected Markdown location by EXACT value equality, not by mere substring presence somewhere in scope. Row
-    channels (title, corpus-id, description) bind to the EXACT Rules-table row keyed by the corpus id and
+    channels (title, corpus-id, description, coverage) bind to the EXACT Rules-table row keyed by the corpus id and
     compare the specific CELL for equality; mechanism channels (mech-id, the metadata fields, residue) bind to
     the mechanism block keyed by the reference, the metadata fields comparing the EXACT `- Label:` LINE in the
     region BEFORE the residual heading, and the residue comparing the fence content. Escaping mirrors the
@@ -1527,7 +1528,7 @@ def _md_field_rendered(md_text, channel, key, raw):
     outside its own row all satisfied the old `in scope` / `in md_text` test while the real field was wrong or
     absent."""
     cell = gen_enforcement_register._md_cell
-    if channel in ("corpus-id", "title", "description"):
+    if channel in ("corpus-id", "title", "description", "coverage"):
         cells = _md_rule_row(md_text, key)
         if channel == "corpus-id":
             return (cells is not None, "the Corpus ID cell of row {}".format(key))
@@ -1535,6 +1536,13 @@ def _md_field_rendered(md_text, channel, key, raw):
             return (False, "the Rules row for {}".format(key))
         if channel == "title":
             return (cells[0] == cell(raw), "the Rule cell of row {}".format(key))
+        if channel == "coverage":
+            # The generator appends the coverage note to the partial row's linked-controls cell after
+            # a fixed ". Coverage: " marker, so the exact escaped note must END that row's own cell and
+            # the Status cell must carry the partial suffix; a note elsewhere on the page cannot satisfy it.
+            return (cells[2].endswith(gen_enforcement_register.PARTIAL_SUFFIX)
+                    and cells[3].endswith(cell(". Coverage: " + raw)),
+                    "the coverage tail of partial row {}".format(key))
         return (cells[2] == "Pending" and cells[3] == cell(raw),
                 "the How cell of pending row {}".format(key))
     scope = _md_mech_scope(md_text, key)
@@ -1583,13 +1591,13 @@ def _scan_page_bound_sources(sources):
     """Source-side cleanliness leg (GER-1). Every page-bound verbatim source string page_content_strings
     reports must (a) carry NO character outside the printable-plus-ASCII-whitespace allowlist and (b) pass
     the PLAIN marketing patterns. ONE shared reject runs over EVERY channel (title, corpus-id, mech-id, the
-    metadata fields, residue, description), so no page-bound channel can be missed or diverge: each is held
-    to the identical bar, and the id/class/metadata channels that stay ASCII-constrained upstream are still
-    run through the reject here (removing the 'constrained upstream' assumption). The invisible/allowlist
-    reject runs on the RAW string, BEFORE any whitespace collapse, so the exact bytes the page ships are
-    judged; the marketing scan runs on a whitespace-collapsed copy for phrase robustness (guards honoured,
-    NO bound-allowance heuristic, so an 'honestly bounded' categorical or guarantee shape flags at source).
-    For the mech-id channel a claim-bearing kebab id renders on the page with hyphens
+    metadata fields, residue, description, coverage), so no page-bound channel can be missed or diverge:
+    each is held to the identical bar, and the id/class/metadata channels that stay ASCII-constrained
+    upstream are still run through the reject here (removing the 'constrained upstream' assumption). The
+    invisible/allowlist reject runs on the RAW string, BEFORE any whitespace collapse, so the exact bytes
+    the page ships are judged; the marketing scan runs on a whitespace-collapsed copy for phrase robustness
+    (guards honoured, NO bound-allowance heuristic, so an 'honestly bounded' categorical or guarantee shape
+    flags at source). For the mech-id channel a claim-bearing kebab id renders on the page with hyphens
     (gate:catch-all-secrets), which a space-requiring marketing pattern would not match, so that channel is
     ALSO scanned hyphens-as-spaces so a marketing id fails at source even though the page render carries the
     literal hyphens."""
@@ -3174,7 +3182,7 @@ def _page_bound_source_self_test():
         # (n2) the full channel set is present (structural, against drift).
         channels = {c for c, _k, _r in _page_bound_sources(tree)}
         for needed in ("title", "corpus-id", "mech-id", "platform", "default", "entry", "class",
-                       "residue", "description"):
+                       "residue", "description", "coverage"):
             if needed not in channels:
                 failures.append("COMPLETENESS: page_content_strings must emit the {!r} channel (FIX 1)"
                                 .format(needed))
@@ -3409,6 +3417,23 @@ def _page_bound_source_self_test():
         ]
         for label, rel_path, needle, tmpl, expect in cases:
             for tag, ch in (("homoglyph", HOMO), ("zerowidth", ZW)):
+                if (label, tag) == ("description", "zerowidth"):
+                    # The register generator's own load refuses a Cf format character (U+200B) in a
+                    # roadmap description before any page-bound string is enumerated, a ValueError the
+                    # caller maps to a fail-closed exit 2, so this source must be refused, not scanned.
+                    sub = gen_enforcement_register._build(tmp / "description-zerowidth")
+                    p = sub / rel_path
+                    p.write_text(p.read_text(encoding="utf-8").replace(needle, tmpl.format(ch), 1),
+                                 encoding="utf-8")
+                    try:
+                        _page_bound_sources(sub)
+                        failures.append("INJECT description-zerowidth: the register generator accepted a "
+                                        "zero-width space in a roadmap description")
+                    except ValueError as exc:
+                        if "Cf format character" not in str(exc):
+                            failures.append("INJECT description-zerowidth: refused for another reason "
+                                            "({})".format(exc))
+                    continue
                 fs = inject_and_scan("{}-{}".format(label, tag), rel_path, needle, tmpl.format(ch))
                 if not has(fs, expect):
                     failures.append("COMPLETENESS: a {} in the {} channel source must be flagged (FIX 1)"

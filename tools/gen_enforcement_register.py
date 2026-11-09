@@ -81,6 +81,7 @@ if tuple(sys.version_info[:2]) < (3, 14):
 
 import html
 import re
+import unicodedata
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -157,8 +158,11 @@ EXPLAINER = (
     "standalone file under .preview/ that an adopter installs by hand, not part of the plugin, so nothing "
     "runs for it unless it is installed. A status ending in partial records the same linkage and states "
     "that the "
-    "linked mechanisms are known to cover only part of the rule; their residuals name what they do not "
-    "cover. No control means no shipped control cites the rule yet; pending means the "
+    "linked mechanisms are known to cover only part of the rule. Where the roadmap records a coverage "
+    "note for such a rule, the note is shown in that rule's row and names what the linked mechanisms "
+    "cover and what they do not; each mechanism's residual names what that mechanism itself "
+    "does not catch, not every uncovered clause of every rule it is linked "
+    "to. No control means no shipped control cites the rule yet; pending means the "
     "same, and its description states the intended build. Each mechanism's class and residual describe the "
     "boundary of what it checks, and a linked mechanism may cover only part of a rule's violation surface. "
     "The technical limits shown for each mechanism are the enforcement ledger's own text, quoted verbatim "
@@ -194,18 +198,46 @@ GENSRC_OUTPUTS = (
 
 # --- input loading and validation ---------------------------------------------------------------------
 
+def _splits_line(ch):
+    """True when str.splitlines() splits a line at the character ch (LF, CR, VT, FF, the file, group and
+    record separators U+001C to U+001E, NEL U+0085, and the line and paragraph separators U+2028 and
+    U+2029). Asked of splitlines itself, so the set is exactly the one the interpreter uses."""
+    return len(("a" + ch + "a").splitlines()) != 1
+
+
+def _is_cc(ch):
+    """True when ch is in Unicode general category Cc (U+0000 to U+001F and U+007F to U+009F, NEL
+    U+0085 included)."""
+    return unicodedata.category(ch) == "Cc"
+
+
+def _is_cf(ch):
+    """True when ch is in Unicode general category Cf, the invisible format characters (a zero-width space
+    U+200B, a byte order mark U+FEFF, a soft hyphen U+00AD, a direction mark, and the like)."""
+    return unicodedata.category(ch) == "Cf"
+
+
+# The three character classes _no_ctrl refuses, each tested on its own. The self-test's flips replace one
+# entry at a time with a test that answers False, and restore it.
+_NO_CTRL_CLASSES = {"line break": _splits_line, "Cc control": _is_cc, "Cf format": _is_cf}
+
+
 def _no_ctrl(value, where):
-    """Reject an en dash, em dash, control character, or an embedded newline in a SINGLE-LINE display string
-    that renders into a Markdown TABLE CELL (a rule title, a status word, a corpus id, a pending row's
-    description). Fail-closed (ValueError -> exit 2), so a bad source surfaces here rather than as a red site
-    or dash gate on the generated output. A tab or newline in a Markdown table cell would break the row, so
-    this guard is deliberately strict; a mechanism RESIDUE renders into a multi-line sink instead and uses
+    """Reject an en dash, an em dash, or any character of three classes in a SINGLE-LINE display string that
+    renders into a Markdown TABLE CELL (a rule title, a pending row's description, a partial row's coverage
+    note): a character str.splitlines() splits on (_splits_line), a Unicode Cc control character (_is_cc), or
+    a Unicode Cf format character (_is_cf). Each class is tested on its own, so U+2028 and U+2029 (category
+    Zl and Zp, not Cc) are refused as line breaks and a zero-width space or a byte order mark as format
+    characters. Fail-closed (ValueError -> exit 2), so a bad source surfaces here rather than as a red site
+    or dash gate on the generated output. A tab or line break in a Markdown table cell would break the row,
+    so this guard is deliberately strict; a mechanism RESIDUE renders into a multi-line sink instead and uses
     _residue_display, which permits newlines."""
     if EN in value or EM in value:
         raise ValueError("{}: contains an en/em dash: {!r}".format(where, value))
     for ch in value:
-        if ch != " " and (ord(ch) < 0x20 or ord(ch) == 0x7f):
-            raise ValueError("{}: contains a control character or newline: {!r}".format(where, value))
+        for name, test in _NO_CTRL_CLASSES.items():
+            if test(ch):
+                raise ValueError("{}: contains a {} character {!r}: {!r}".format(where, name, ch, value))
     return value
 
 
@@ -213,11 +245,14 @@ def _residue_display(value, where):
     """Validate a mechanism RESIDUE for its actual sinks, which are NOT a table cell: it renders into a
     fenced Markdown code block (render_md) and an HTML blockquote (render_html), both of which carry
     multi-line, multi-paragraph text safely. So a residue MAY contain newlines (the two enforced hook
-    residues git-stash-ref and protected-line-guard are legitimately multi-paragraph). What is still
-    rejected: an en/em dash (the house no-dash convention, also caught by the whole-corpus dash gate) and
-    any control character OTHER than newline (a raw NUL, backspace, tab, or carriage return has no faithful
-    rendering in either sink). Newline is the only control character permitted; each view renders it safely,
-    the fenced block by lengthening its fence past any backtick run (_fence_for) and the blockquote by
+    residues git-stash-ref and protected-line-guard are legitimately multi-paragraph). What is rejected is
+    exactly: an en/em dash (the house no-dash convention, also caught by the whole-corpus dash gate), a C0
+    control character U+0000 to U+001F other than newline (a raw NUL, backspace, tab, or carriage return has
+    no faithful rendering in either sink), and DEL U+007F. Apart from the two dashes, no character above
+    U+007F is tested, so a C1 control character (U+0080 to U+009F, NEL U+0085 included), the line and
+    paragraph separators U+2028 and U+2029, and a Cf format character such as a zero-width space U+200B all
+    pass this guard. Newline is the only C0 control character permitted; each view renders it safely, the
+    fenced block by lengthening its fence past any backtick run (_fence_for) and the blockquote by
     HTML-escaping the text under a white-space:pre-wrap style so the line breaks show. Fail-closed
     (ValueError -> exit 2) so a bad residue surfaces here, exactly as _no_ctrl does for a table cell."""
     if EN in value or EM in value:
@@ -331,7 +366,7 @@ def load_roadmap(path, ledger_cids, linkage):
         if prev is not None and cid < prev:
             raise ValueError("{}: rows must be in ascending corpus-id order (after {})".format(where, prev))
         prev = cid
-        allowed = {"corpus-id", "status", "mechanisms", "description"}
+        allowed = {"corpus-id", "status", "mechanisms", "description", "coverage"}
         unknown = set(row) - allowed
         if unknown:
             raise ValueError("{}: unknown key(s): {}".format(where, ", ".join(sorted(unknown))))
@@ -352,6 +387,16 @@ def load_roadmap(path, ledger_cids, linkage):
         if has_desc:
             desc = _req_str(row, "description", where)
             _no_ctrl(desc, "{}: description".format(where))
+        # A coverage note is accepted ONLY on a partial row: it states what the linked mechanisms cover
+        # and what they do not, and both views render it in that rule's row (the Markdown cell escapes
+        # each backslash and pipe, _md_cell), so it is validated as a single-line table-cell display
+        # string (_no_ctrl), fail-closed like every other field.
+        has_cov = "coverage" in row
+        if has_cov:
+            if status != "partial":
+                raise ValueError("{}: only a partial row may carry a coverage note".format(where))
+            cov = _req_str(row, "coverage", where)
+            _no_ctrl(cov, "{}: coverage".format(where))
         if cid not in ledger_cids:
             raise ValueError("{}: corpus-id is not in the ledger (an orphan roadmap row)".format(where))
         ledger_refs = linkage[cid]
@@ -377,7 +422,7 @@ def load_roadmap(path, ledger_cids, linkage):
             if status == "none" and has_desc:
                 raise ValueError("{}: a none row must not carry a description".format(where))
         out[cid] = {"status": status, "mechanisms": mechanisms,
-                    "description": row.get("description")}
+                    "description": row.get("description"), "coverage": row.get("coverage")}
     roadmap_cids = set(out)
     missing = ledger_cids - roadmap_cids
     if missing:
@@ -531,6 +576,8 @@ def render_md(rows, roadmap, controls, enforced_union):
         status = row["status"]
         if status in LINKED:
             how = _enforced_cell_md(row["mechanisms"], controls)
+            if row.get("coverage"):
+                how += ". Coverage: " + row["coverage"]
         elif status == "pending":
             how = row["description"]
         else:
@@ -587,6 +634,8 @@ def render_html(rows, roadmap, controls, enforced_union):
                              .format(anchor=_a("{}-{}".format(ctrl["kind"], ctrl["id"])),
                                      ref=_t(ref), sfx=_t(_how_suffix(ctrl)), cls=_t(ctrl["class"])))
             how = "; ".join(cells)
+            if row.get("coverage"):
+                how += ". Coverage: " + _t(row["coverage"])
         elif status == "pending":
             how = _t(row["description"])
         else:
@@ -824,6 +873,8 @@ def page_content_strings(root):
         ("<event> on <matcher>") and the gate script path.
       - "residue"     each enforced mechanism's ledger residue (rendered verbatim in both views)
       - "description" each pending rule's roadmap description (the How cell for a pending row)
+      - "coverage"    each partial rule's roadmap coverage note (rendered in that rule's row; the Markdown
+                      cell escapes each backslash and pipe)
     Every value is the RAW string (NOT whitespace-collapsed) so a downstream invisible/non-ASCII reject
     judges the exact bytes the page ships. Scoped to what the page RENDERS: only mechanisms that appear in
     an enforced row (enforced_union) contribute mechanism channels, exactly as render_md / render_html
@@ -846,6 +897,8 @@ def page_content_strings(root):
         row = roadmap[cid]
         if row["status"] == "pending" and row["description"]:
             out.append(("description", cid, row["description"]))
+        if row["status"] == "partial" and row.get("coverage"):
+            out.append(("coverage", cid, row["coverage"]))
     for ref in sorted(enforced_union):
         ctrl = controls[ref]
         out.append(("mech-id", ref, ref))
@@ -1027,6 +1080,7 @@ mechanisms = ["gate:gate-alpha"]
 corpus-id = "rulebb"
 status = "partial"
 mechanisms = ["gate:gate-alpha"]
+coverage = "Covers one synthetic case of rulebb; the rest of rulebb is uncovered by a linked mechanism."
 
 [[rule]]
 corpus-id = "rulecc"
@@ -1150,7 +1204,12 @@ def self_test_main():
                           "| No control | 1 |", "`gate:gate-alpha`",
                           "`hook:hook-one`", NO_CONTROL_TEXT,
                           "### `gate:gate-alpha`", RESIDUAL_HEADING,
-                          "Class letters:", _ALPHA_RESIDUE, _HOOK_RESIDUE):
+                          "Class letters:", _ALPHA_RESIDUE, _HOOK_RESIDUE,
+                          # The partial row's coverage note renders verbatim in ITS OWN row's cell
+                          # (FLIP: removing the render_md coverage branch makes this token vanish).
+                          "| Title of rulebb | `rulebb` | Gate-linked (class a), partial | "
+                          "`gate:gate-alpha`, class a. Coverage: Covers one synthetic case of rulebb; "
+                          "the rest of rulebb is uncovered by a linked mechanism. |"):
                 if token not in body:
                     failures.append("conformant tree: {!r} missing from ENFORCEMENT.md".format(token))
             # The three-backtick hook residue must be wrapped in a FOUR-backtick fence (lengthened past
@@ -1188,6 +1247,12 @@ def self_test_main():
                             "HTML page")
         if "id=\"rule-apex01\"" not in html_page or "id=\"mechanism-gate-gate-alpha\"" not in html_page:
             failures.append("conformant tree: expected stable rule/mechanism anchors in the HTML page")
+        # The coverage note also renders on the HTML view (FLIP: removing the render_html coverage
+        # branch makes this token vanish from the page).
+        if (". Coverage: Covers one synthetic case of rulebb; the rest of rulebb is uncovered by a "
+                "linked mechanism.</td>") not in html_page:
+            failures.append("conformant tree: the partial row's coverage note is not rendered verbatim "
+                            "in the HTML row")
         # The verbatim residual disclosure is present on the page: the labelled blockquote carries the
         # data-mech for each mechanism, and the tag-shaped residue token survives as visible text (escaped),
         # not as markup, so the display-fidelity assertion passed on a conformant generation.
@@ -1206,7 +1271,10 @@ def self_test_main():
         md_body = (good / MD_REL).read_text(encoding="utf-8") if (good / MD_REL).is_file() else ""
         for view_name, view in (("ENFORCEMENT.md", md_body), ("the generated page", html_page)):
             for banned in ("How enforced", "Enforcement has not been built", "no status here means",
-                           "deterministic check over what it examines"):
+                           "deterministic check over what it examines",
+                           # The residuals do NOT name what a partial rule's mechanisms fail to cover;
+                           # the coverage note does. The old sentence claiming otherwise must stay gone.
+                           "their residuals name what they do not cover"):
                 if banned in view:
                     failures.append("conformant tree: {} still carries {!r}".format(view_name, banned))
             for wanted in (COLUMN_HEADING, NO_CONTROL_TEXT, "none of the statuses means a rule is enforced",
@@ -1432,6 +1500,81 @@ def self_test_main():
         expect2("roadmap-lint-ref",
                 lambda t: replace_in(t / ROADMAP, 'mechanisms = ["hook:hook-one"]',
                                      'mechanisms = ["lint:hook-one"]'))
+        # (m2) A coverage note on an enforced row fails closed: the note is a partial-row field only.
+        expect2("roadmap-coverage-on-enforced",
+                lambda t: replace_in(t / ROADMAP,
+                                     'corpus-id = "ruleaa"\nstatus = "enforced"\n'
+                                     'mechanisms = ["gate:gate-alpha"]',
+                                     'corpus-id = "ruleaa"\nstatus = "enforced"\n'
+                                     'mechanisms = ["gate:gate-alpha"]\n'
+                                     'coverage = "should not be here"'))
+        # (m3) A coverage note on a none row fails closed the same way.
+        expect2("roadmap-coverage-on-none",
+                lambda t: replace_in(t / ROADMAP,
+                                     'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []',
+                                     'corpus-id = "ruledd"\nstatus = "none"\nmechanisms = []\n'
+                                     'coverage = "should not be here"'))
+        # (m4) A MALFORMED coverage note (an embedded newline would break the table row) fails closed
+        # via _no_ctrl (FLIP: dropping the coverage _no_ctrl validation lets this generate, so this
+        # vector's expected exit 2 fails).
+        expect2("roadmap-coverage-newline",
+                lambda t: replace_in(t / ROADMAP,
+                                     'coverage = "Covers one synthetic case of rulebb; the rest of '
+                                     'rulebb is uncovered by a linked mechanism."',
+                                     'coverage = "First line.\\nSecond line."'))
+        # (m5) A whitespace-only coverage note is not a coverage note.
+        expect2("roadmap-coverage-ws",
+                lambda t: replace_in(t / ROADMAP,
+                                     'coverage = "Covers one synthetic case of rulebb; the rest of '
+                                     'rulebb is uncovered by a linked mechanism."',
+                                     'coverage = "   "'))
+        # (m6) Each character class _no_ctrl refuses, in a coverage note written as a TOML escape (so this
+        # source stays ASCII): a character str.splitlines() splits on, a Unicode Cc control character, and
+        # a Unicode Cf format character. Every row fails closed (exit 2).
+        cov_note = ('coverage = "Covers one synthetic case of rulebb; the rest of '
+                    'rulebb is uncovered by a linked mechanism."')
+        ctrl_rows = (("splits", ("\\r", "\\u000B", "\\u000C", "\\u001C", "\\u001D", "\\u001E", "\\u0085",
+                                 "\\u2028", "\\u2029")),
+                     ("cc", ("\\u0001", "\\t", "\\u007F", "\\u0085", "\\u009F")),
+                     ("cf", ("\\u200B", "\\uFEFF", "\\u00AD", "\\u200E")))
+
+        def put_note(escape):
+            return lambda t: replace_in(t / ROADMAP, cov_note,
+                                        'coverage = "Checks: one case.' + escape + ' Not checked: the rest."')
+
+        for cls, escapes in ctrl_rows:
+            for escape in escapes:
+                expect2("roadmap-coverage-{}-{}".format(cls, escape.strip("\\")), put_note(escape))
+
+        # (m7) FLIPS for (m6): with one class's _NO_CTRL_CLASSES test replaced by one that answers False, a
+        # note holding a character only that class catches is accepted (not exit 2), so each class's row
+        # fails without its own leg. CR, VT, FF, U+001C to U+001E and NEL (U+0085) are each both a line break
+        # and Cc: refused while either leg stands, accepted only with both disabled. LF is both as well; it
+        # has no flip here, and roadmap-coverage-newline (m4) checks only that it is refused.
+        def accepted_with(disabled, escape):
+            saved = dict(_NO_CTRL_CLASSES)
+            try:
+                for leg in disabled:
+                    _NO_CTRL_CLASSES[leg] = lambda ch: False
+                tree = _build(tmp / "flip-{}-{}".format("-".join(disabled).replace(" ", "-"),
+                                                       escape.strip("\\")))
+                put_note(escape)(tree)
+                return run_quiet(tree, check=True) != 2
+            finally:
+                _NO_CTRL_CLASSES.update(saved)
+
+        both_legs = ("\\r", "\\u000B", "\\u000C", "\\u001C", "\\u001D", "\\u001E", "\\u0085")
+        flips = ((("line break",), ("\\u2028", "\\u2029"), True),
+                 (("Cc control",), ("\\u0001", "\\t", "\\u007F", "\\u009F"), True),
+                 (("Cf format",), ("\\u200B", "\\uFEFF", "\\u00AD", "\\u200E"), True),
+                 (("line break",), both_legs, False),
+                 (("Cc control",), both_legs, False),
+                 (("line break", "Cc control"), both_legs, True))
+        for disabled, escapes, want in flips:
+            for escape in escapes:
+                if accepted_with(disabled, escape) != want:
+                    failures.append("flip: with {} disabled, a coverage note holding {} expected {}".format(
+                        " and ".join(disabled), escape, "accepted" if want else "still refused (exit 2)"))
         # (q) A stale committed ledger (mutate it so it no longer matches a fresh build).
         expect2("stale-ledger",
                 lambda t: (t / ".aiqt" / "enforceability.json").write_text(
@@ -1598,7 +1741,11 @@ def self_test_main():
           "Markdown target AND a hand edit to the generated page chrome each fail --check (exit 1); and an "
           "unknown roadmap top-level or row key, a missing or extra roadmap row, an enforced/partial/none/"
           "mechanism mismatch against the ledger linkage, a none row with a description, a pending row missing its "
-          "description or carrying a mechanism or carrying only whitespace, a NEWLINE in a table-cell "
+          "description or carrying a mechanism or carrying only whitespace, a partial row's coverage note "
+          "rendered in its own row in both views while a coverage note on an enforced or none row, "
+          "a newline inside one, any other character str.splitlines() splits on, a Cc control character, a Cf "
+          "format character (each class also flipped: accepted once its own test is disabled), or a "
+          "whitespace-only one fails closed (exit 2), a NEWLINE in a table-cell "
           "description, an unsupported lint: reference, a stale committed ledger, an en dash or a raw tab "
           "in a residue, a boolean roadmap version, a site shell missing its content token, and an "
           "invalid-UTF-8 generated Markdown or HTML target, and a published preview hook that does not "

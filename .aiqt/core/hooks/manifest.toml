@@ -340,7 +340,7 @@ residue = "The scheduled-yield binding of the decision core: a call that parks t
 
 [[hook]]
 id = "orch-ask-unattended"
-rules = ["cntdef", "recfst", "humovs"]
+rules = ["cntdef", "recfst"]
 platform = "claude-code"
 event = "PreToolUse"
 matcher = "AskUserQuestion"
@@ -416,7 +416,7 @@ residue = "A RECORDING substrate: stamps the clock-read UTC time of each GENUINE
 
 [[hook]]
 id = "orch-resume-audit"
-rules = ["sesres", "recncl", "cnclse"]
+rules = ["recncl", "cnclse"]
 platform = "claude-code"
 event = "SessionStart"
 handler = "orch_resume_audit"
@@ -426,7 +426,7 @@ residue = "SessionStart cannot block at the platform (exit 2 shows stderr only, 
 
 [[hook]]
 id = "orch-resume-barrier"
-rules = ["sesres", "recncl"]
+rules = ["recncl"]
 platform = "claude-code"
 event = "PreToolUse"
 matcher = "Write|Edit|MultiEdit|NotebookEdit|Bash"
