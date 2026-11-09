@@ -6551,7 +6551,10 @@ def verify_pack_member(plan, pack, source_member):
     pack carries another; and the member's bytes must match the size and sha256 its one source row records
     in that frozen inventory. Returns (bytes, bare-hex sha256); any failure raises AdoptApplyError. Passing
     proves the bytes are the ones the agreed release lists, never that its publisher is authentic beyond
-    the anchor (the self-asserted-identity residual, spec 14.1)."""
+    the anchor (the self-asserted-identity residual, spec 14.1). The version this gate binds is still the
+    pack release version: the manifest's release-version, taken from the root VERSION of the reference
+    repository, not OPF's own version in opf/VERSION; moving adoption to OPF's own version is a later step
+    of the version split."""
     import _opf_pack_manifest as pack_manifest
     release = plan.get("release")
     agreed = release.get("manifest_sha256") if isinstance(release, dict) else None
