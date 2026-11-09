@@ -154,6 +154,7 @@ guarded-surfaces = [
     "tools/check_secrets.py",
     "tools/check_security_txt.py",
     "tools/check_selftest_execution.py",
+    "tools/check_shell_function_standins.py",
     "tools/check_site.py",
     "tools/check_site_versions.py",
     "tools/check_sitemap.py",
