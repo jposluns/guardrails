@@ -16287,6 +16287,34 @@ def _main_isolated(report_path=None):
         check("nrd/symlink-into-denies",
               nrd_got("python3 -I {}".format(nd.root / "link-in.py"), run_cwd=str(nd.root)), DENY_RAN)
         check("nrd/relative-after-cd-denies", nrd_got("cd {}; python3 x.py".format(st)), DENY_RAN)
+        # --- a command the lexer cannot read is in scope whenever a directory is declared: nothing short
+        # of lexing shows that it names none. Each row runs the declared file through a RELATIVE operand
+        # from the declared directory's parent (an undeclared working directory), after a here-document
+        # the lexer refuses: six quoted ones in positions the lexer cannot place, and an unquoted one.
+        # Each allows if an unreadable command is judged from its raw text and working directory alone,
+        # and real bash runs the file in every one. The control lexes and denies either way.
+        _nrd_rel = "bash nrd-stage/x.sh"
+        _nrd_unread = (
+            "echo ${x:-$(cat <<'EOF'\nhi\nEOF\n)}\n" + _nrd_rel,
+            "(( a <<'EOF' ))\nhi\nEOF\n" + _nrd_rel,
+            "a=( <<'EOF' )\nhi\nEOF\n" + _nrd_rel,
+            "echo $[ 1 <<'EOF' ]\nhi\nEOF\n" + _nrd_rel,
+            "cat <<'EOF' $(echo\nhi)\nEOF\n" + _nrd_rel,
+            "echo ${x:-<<'EOF'\nhi\nEOF\n}\n" + _nrd_rel,
+            "cat <<EOF\nhi\nEOF\n" + _nrd_rel)
+        for cid, cmd in (("nrd/unread-param-subst-qheredoc-denies", _nrd_unread[0]),
+                         ("nrd/unread-arith-qheredoc-denies", _nrd_unread[1]),
+                         ("nrd/unread-array-qheredoc-denies", _nrd_unread[2]),
+                         ("nrd/unread-old-arith-qheredoc-denies", _nrd_unread[3]),
+                         ("nrd/unread-subst-after-qheredoc-denies", _nrd_unread[4]),
+                         ("nrd/unread-param-qheredoc-denies", _nrd_unread[5]),
+                         ("nrd/unread-unquoted-heredoc-denies", _nrd_unread[6]),
+                         ("nrd/unread-control-lexed-denies", _nrd_rel)):
+            check(cid, nrd_got(cmd, run_cwd=str(tmp), cwd=str(tmp), project=str(nd.root)), DENY_RAN)
+        # the accepted over-deny of that rule: an unreadable command that runs nothing, from a working
+        # directory outside every declared directory, still denies
+        check("nrd/over-deny-unread-unrelated",
+              nrd_got("cat <<EOF\nhi\nEOF\n", cwd=outd, project=str(nd.root)), DENY_INERT)
         # setsid, stdbuf and exec -a, where present on the host (verdict always asserted; the real-bash
         # run only where the tool exists, so the suite is portable)
         for cid, tool, cmd in (
@@ -16674,6 +16702,12 @@ def _main_isolated(report_path=None):
                 os.environ.pop("CDPATH", None)
             else:
                 os.environ["CDPATH"] = _nrd_prev_cdpath2
+        # judging an unreadable command's scope from its raw text and working directory alone lets every
+        # unread row above through again, while the lexed control still denies
+        check("nrd/flip-unread-scope-allows",
+              [_flip_verdict("_nrd_unread_in_scope", lambda d: False, c, cwd=str(tmp),
+                             project=str(nd.root)) for c in _nrd_unread + (_nrd_rel,)],
+              ["allow"] * 7 + ["deny"])
 
         # the pre-fix helper bodies the new flips restore (each shows its fix is load-bearing)
         def _nrd_old_cp_targets(operands, eff_cwd):

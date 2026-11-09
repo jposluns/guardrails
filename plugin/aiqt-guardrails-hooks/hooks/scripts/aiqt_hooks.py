@@ -26700,14 +26700,14 @@ def orch_untracked_wait_loop(data):
 # is DENIED unless EVERY lexed segment matches a closed allowlist of read-only forms with registered
 # options (_NRD_READ_FORMS and the shaped forms in _nrd_segment_allowed); a compound command, backtick,
 # substitution, wrapper, builtin, assignment prefix, xargs, find or any other unlisted word in scope
-# denies, and a command the lexer cannot read denies whole while in scope. The registry is found
-# independently of the payload working directory (_nrd_roots: the project directory the hook's own
-# environment names, unioned with the session cwd's git toplevel), so sitting inside a declared
-# directory cannot disarm the guard. The matching is path-textual (the manifest residue discloses the
-# copy, alias and runtime-built-path residuals); each judged operand and each declared directory is
-# compared both as written (lexically normalized against the effective working directory) and through
-# os.path.realpath, and the union deny-biases the result, so a symlink into or out of a directory is
-# caught either way.
+# denies, and a command the lexer cannot read is always in scope and denies whole (nothing short of
+# lexing shows it names no declared directory: _nrd_unread_in_scope). The registry is found independently
+# of the payload working directory (_nrd_roots: the project directory the hook's own environment names,
+# unioned with the session cwd's git toplevel), so sitting inside a declared directory cannot disarm the
+# guard. The matching is path-textual (the manifest residue discloses the copy, alias and
+# runtime-built-path residuals); each judged operand and each declared directory is compared both as
+# written (lexically normalized against the effective working directory) and through os.path.realpath,
+# and the union deny-biases the result, so a symlink into or out of a directory is caught either way.
 _NRD_RULE = "wowo01"
 _NRD_KEY = "deliverable_dirs"
 # The hook environment's project-directory anchor: the installed hook commands are themselves launched
@@ -27907,6 +27907,18 @@ def _nrd_next_cwd(seg, eff_cwd):
     return os.path.normpath(os.path.join(eff_cwd, dest)) if eff_cwd is not None else None
 
 
+def _nrd_unread_in_scope(dirs):
+    """Whether a command the lexer cannot read is in scope: True whenever any directory is declared.
+    Scope is never judged from such a command's raw text or its working directory alone, because with
+    no lexed tokens nothing shows that it does not name a declared directory: a relative operand
+    resolves against a working directory that a cd, a bare cd to HOME, a CDPATH entry or a `..` can
+    move anywhere, and a quote splice, an expansion or a decoded string can spell an absolute path the
+    raw text never holds. No test short of lexing separates a plainly unrelated unreadable command
+    from one of those, so every one is in scope (check-fails-closed-on-unreadable); the over-deny is
+    accepted and its deny reason names the cause and the exit."""
+    return bool(dirs)
+
+
 def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     """The allowlist-by-construction judgement of one Bash command against the declared directories:
     (subject, why) to refuse, None to pass. SCOPE first: the command is in scope when its raw text (or
@@ -27917,14 +27929,15 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     itself resolves into one, or when a relative cd/pushd stands while CDPATH is set (its destination
     could be a declared directory through a CDPATH entry, so it is treated as in scope). A nested shell
     -c body is classified recursively in the parent's effective working directory, so a declared
-    directory a quote splice hides from the raw text is still reached. Out of scope the command passes
-    untouched. IN SCOPE the command passes only when EVERY lexed segment matches the closed read-only
-    allowlist (_nrd_segment_allowed); a command the lexer cannot read (an unquoted heredoc, a
-    here-string, a process substitution, an unbalanced quote) has no segments to match and refuses
-    whole. The residual is a command that reaches a declared file WITHOUT naming it or its directory
-    and from an undeclared working directory (a variable assigned in an earlier call, an alias file
-    made elsewhere): nothing in such a call's text or payload distinguishes it (disclosed in the
-    manifest residue and ORCHESTRATION.md)."""
+    directory a quote splice hides from the raw text is still reached. A command the lexer cannot read
+    (an unquoted heredoc, a here-string, a process substitution, an unbalanced quote, a quoted heredoc
+    the lexer cannot place) is IN SCOPE whenever any directory is declared (_nrd_unread_in_scope), and
+    it has no segments to match, so it refuses whole. Out of scope the command passes untouched. IN
+    SCOPE the command passes only when EVERY lexed segment matches the closed read-only allowlist
+    (_nrd_segment_allowed). The residual is a command that reaches a declared file WITHOUT naming it or
+    its directory and from an undeclared working directory (a variable assigned in an earlier call, an
+    alias file made elsewhere): nothing in such a call's text or payload distinguishes it (disclosed in
+    the manifest residue and ORCHESTRATION.md)."""
     eff_cwd = cwd if isinstance(cwd, str) and os.path.isabs(cwd) and "\x00" not in cwd else None
     scope = (eff_cwd is not None and _nrd_match(eff_cwd, None, dirs) is True) \
         or _nrd_raw_names(command, dirs) \
@@ -27933,6 +27946,8 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
         segments = _lex_command(command)
     except ValueError:
         segments = None
+        if _nrd_unread_in_scope(dirs):
+            scope = True
     if segments is not None:
         cdpath = _nrd_cdpath_active(segments)
         walk_cwd = eff_cwd
@@ -27969,8 +27984,13 @@ def _nrd_scope_scan(command, cwd, dirs, _depth=0):
     if not scope:
         return None
     if segments is None:
-        return ("this command", "cannot be read by this guard's lexer, so no segment of it can be "
-                                "matched against the closed read-only allowlist")
+        return ("this command", "cannot be read by this guard's lexer (an unquoted here-document, a "
+                                "here-string, a process substitution, an open quote, or a quoted "
+                                "here-document in a position the lexer cannot place), so whether it "
+                                "reaches a declared directory through a relative operand, a cd, an "
+                                "expansion or a quote splice cannot be ruled out, and no segment of it "
+                                "can be matched against the closed read-only allowlist; restate it in "
+                                "a form the lexer reads, or write file content with the Write tool")
     written = set()
     for seg in segments:
         if not seg.argv and not seg.redirects:
@@ -28030,8 +28050,8 @@ def _nrd_deny_text(subject, why):
     reason = (
         "AIQT rule wowo01 (workers produce inert data): {} {}. This command is in scope of a declared "
         "deliverable directory (the registry's deliverable_dirs: the draft staging and hand-back "
-        "directories): its text names one, an operand resolves into one, or its working directory is "
-        "inside one. A worker-delivered file there is data until it is applied, so in that scope ONLY "
+        "directories): its text names one, an operand resolves into one, its working directory is "
+        "inside one, or this guard's lexer cannot read it. A worker-delivered file there is data until it is applied, so in that scope ONLY "
         "a closed allowlist of read-only forms runs, each with its registered options: cat, wc, head, "
         "tail, ls, file, grep, diff, the coreutils hash tools, cp with the declared file only as a "
         "source and only where cp actually writes outside the declared directories, not under a "
