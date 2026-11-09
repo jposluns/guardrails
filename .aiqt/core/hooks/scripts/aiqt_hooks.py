@@ -5184,7 +5184,13 @@ def _identity_assignment_ai(tokens):
     - a user.name=VALUE or user.email=VALUE word (any case) anywhere, and an exact-case user.name or user.email
       word followed by a value, on any segment, as before author and committer were read;
     - an author.name=VALUE, author.email=VALUE, committer.name=VALUE or committer.email=VALUE word (any case)
-      right after a -c word, the git -c inline form (a git alias or function standing for git included);
+      right after a -c word, the git -c inline form (a git alias or function standing for git included), or
+      after a git clone --config word, and any of the six in a git clone --config=NAME=VALUE word;
+    - a ${EMAIL:=VALUE} or ${EMAIL=VALUE} default-value expansion, or one of a git identity variable, in any
+      word (_identity_default_assignment_ai);
+    - a git alias definition whose value holds an identity config assignment (-c author.name=VALUE), given
+      by -c alias.NAME=VALUE, git clone --config, or a git config command that sets a value
+      (_alias_identity_ai);
     - one of the six config names (any case) followed by a value, on a git config command that sets a value
       (_cmtidn_config_setting), so a read-only command that merely names one (grep, rg, git config
       --get-regexp, git log) is not one."""
@@ -5197,12 +5203,20 @@ def _identity_assignment_ai(tokens):
         m = EMAIL_ENV_RE.match(tok)
         if m and i in assigned and AI_IDENTITY_RE.search(m.group(1)):
             return "EMAIL variable {!r}".format(tok.strip()[:80])
+        hit = _identity_default_assignment_ai(tok)
+        if hit is not None:
+            return hit
         m = USER_CONF_EQ_RE.match(tok)
         if m and AI_IDENTITY_RE.search(m.group(1)):
             return "user.name/user.email value {!r}".format(tok.strip()[:80])
-        m = ROLE_CONF_EQ_RE.match(tok)
-        if m and i > 0 and tokens[i - 1] == "-c" and AI_IDENTITY_RE.search(m.group(1)):
-            return "author/committer config value {!r}".format(tok.strip()[:80])
+        inline = tok if i > 0 and tokens[i - 1] in _CMTIDN_CONFIG_OPTS else None
+        m = CONFIG_OPT_EQ_RE.match(tok)
+        if m:
+            inline = m.group(1)  # git clone --config=NAME=VALUE, the -c form in one word
+        if inline is not None:
+            hit = _identity_inline_config_ai(inline)
+            if hit is not None:
+                return hit
         if tok in ("user.name", "user.email") and i + 1 < n and AI_IDENTITY_RE.search(tokens[i + 1]):
             return "user.name/user.email value {!r}".format(tokens[i + 1].strip()[:80])
     start = _cmtidn_config_setting(tokens)
@@ -5211,6 +5225,71 @@ def _identity_assignment_ai(tokens):
         if IDENTITY_CONF_NAME_RE.fullmatch(tok) and AI_IDENTITY_RE.search(tokens[i + 1]):
             label = "user.name/user.email" if tok[:1] in "uU" else "author/committer config"
             return "{} value {!r}".format(label, tokens[i + 1].strip()[:80])
+        if ALIAS_CONF_NAME_RE.fullmatch(tok):
+            hit = _alias_identity_ai(tokens[i + 1])
+            if hit is not None:
+                return hit
+    return None
+
+
+# The words that give git a NAME=VALUE config pair in the next word: the git -c global option (and the -c
+# option of git clone), and git clone --config with the prefixes git reads as it (git clone has no other long
+# option starting with 'co'). A prefix shared with another option is refused by git, so reading it here is a
+# safe-direction over-deny.
+_CMTIDN_CONFIG_OPTS = frozenset(("-c", "--co", "--con", "--conf", "--confi", "--config"))
+CONFIG_OPT_EQ_RE = re.compile(r"(?s)^--co(?:n(?:f(?:i(?:g)?)?)?)?=(.*)$")
+# A git alias definition: its key (any case) and, in the NAME=VALUE form, its value. git runs an alias value
+# that does not start with '!' as git options and a subcommand, so a '-c author.name=X' inside it sets the
+# identity of the command the alias runs (git config alias.ci '-c author.name=X commit'; git ci).
+ALIAS_CONF_NAME_RE = re.compile(r"(?is)alias\..+")
+ALIAS_CONF_EQ_RE = re.compile(r"(?is)^alias\.[^=]*=(.*)$")
+# An identity config assignment inside an alias value, read as raw text: a user, author or committer name or
+# email (any case), '=' and a value (a quoted string or a word).
+_ALIAS_IDENTITY_RE = re.compile(r"(?i)(?:user|author|committer)\.(?:name|email)\s*+=\s*+" + _VALUE)
+# A shell default-value expansion that assigns an identity variable when it is unset or empty
+# (${EMAIL:=VALUE} or ${EMAIL=VALUE}, and the same for the git identity variables): bash assigns the
+# variable wherever the expansion stands, an operand of ':' or echo included, and an assignment to a
+# variable already exported, or under set -a, reaches git. The value runs to the first '}'.
+DEFAULT_ASSIGN_RE = re.compile(
+    r"\$\{(?:EMAIL|(?i:GIT_(?:AUTHOR|COMMITTER)_(?:NAME|EMAIL))):?=([^}]*)")
+
+
+def _identity_default_assignment_ai(tok):
+    """A hit label when the word tok holds a default-value expansion that assigns an AI identity to EMAIL or a
+    git identity variable (DEFAULT_ASSIGN_RE), else None. Read in any word of any segment, a single-quoted one
+    included, where bash does not expand it: the cost is a safe-direction over-deny of such text (a commit
+    message quoting ${EMAIL:=claude@x})."""
+    if "${" not in tok:
+        return None
+    for m in DEFAULT_ASSIGN_RE.finditer(tok):
+        if AI_IDENTITY_RE.search(m.group(1)):
+            return "identity variable default {!r}".format(m.group(0).strip()[:80])
+    return None
+
+
+def _alias_identity_ai(value):
+    """A hit label when the git alias value names an AI identity in an identity config assignment it holds
+    (_ALIAS_IDENTITY_RE: -c author.name=X, a quoted value included), else None."""
+    for m in _ALIAS_IDENTITY_RE.finditer(value):
+        if AI_IDENTITY_RE.search(m.group(1)):
+            return "git alias identity config {!r}".format(m.group(0).strip()[:80])
+    return None
+
+
+def _identity_inline_config_ai(pair):
+    """A hit label when the NAME=VALUE config pair that a -c or git clone --config word gives sets an AI
+    identity: an author.* or committer.* name (any case) with an AI value, a user.* one the same way (any
+    case, so the --config=user.name=X word is read too), or an alias whose value holds such an assignment
+    (_alias_identity_ai); else None."""
+    m = ROLE_CONF_EQ_RE.match(pair)
+    if m and AI_IDENTITY_RE.search(m.group(1)):
+        return "author/committer config value {!r}".format(pair.strip()[:80])
+    m = USER_CONF_EQ_RE.match(pair)
+    if m and AI_IDENTITY_RE.search(m.group(1)):
+        return "user.name/user.email value {!r}".format(pair.strip()[:80])
+    m = ALIAS_CONF_EQ_RE.match(pair)
+    if m:
+        return _alias_identity_ai(m.group(1))
     return None
 
 
@@ -5260,20 +5339,45 @@ _GIT_CONFIG_READ_LONG = ("--get", "--get-all", "--get-regexp", "--get-urlmatch",
                          "--remove-section", "--edit")
 _GIT_CONFIG_READ_SHORT = frozenset("le")  # -l (--list) and -e (--edit), alone or in a short option cluster
 _GIT_CONFIG_READ_SUBS = frozenset(("get", "list", "unset", "rename-section", "remove-section", "edit"))
-# git config options that take the next word as their value, so that word is not read as a subcommand.
-_GIT_CONFIG_VALUE_OPTS = frozenset(("-f", "--file", "--blob", "--type", "--default", "--comment", "--value"))
+# git config options that take a value (git 2.53.0 git config set -h and git config get -h): the long names,
+# also read by any prefix, and the short letters -f (--file) and -t (--type), which take the rest of their word
+# or else the next word. A value given in the next word is that option's value, never a mode or a subcommand,
+# so 'git config --comment -l author.name X' sets author.name with the comment '-l'.
+_GIT_CONFIG_VALUE_LONG = ("file", "blob", "type", "default", "comment", "value", "url")
+_GIT_CONFIG_VALUE_SHORT = frozenset("ft")
 
 
 def _cmtidn_config_read_option(tok):
-    """True when one word after git config selects a mode that reads or edits rather than sets a value."""
+    """True when one word after git config, read as an option, selects a mode that reads or edits rather than
+    sets a value."""
     if tok.startswith("--"):
         return len(tok) >= 3 and "=" not in tok and any(name.startswith(tok) for name in _GIT_CONFIG_READ_LONG)
     if tok.startswith("-") and len(tok) > 1:
         for letter in tok[1:]:
             if letter in _GIT_CONFIG_READ_SHORT:
                 return True
-            if letter == "f":
-                return False  # -f takes the rest of its word or the next word as a file name
+            if letter in _GIT_CONFIG_VALUE_SHORT:
+                return False  # -f and -t take the rest of their word or the next word as their value
+    return False
+
+
+def _cmtidn_config_value_option(tok):
+    """True when one word after git config, read as an option, takes the next word as its value: a long
+    value option, or a prefix of one, with no '=' and no 'no-' (--comment, --comm, --file), or a short option
+    cluster whose first value letter is its last letter (-f, -zf, -t). A word that git takes for another
+    option is so read only where it is a prefix of a value option too, and skipping its next word can only
+    pass over a read or edit option or a subcommand, so the command is then judged as one that sets a
+    value, a safe-direction over-deny."""
+    if tok.startswith("--"):
+        name = tok[2:]
+        return (bool(name) and "=" not in name and not name.startswith("no-")
+                and any(full.startswith(name) for full in _GIT_CONFIG_VALUE_LONG))
+    if tok.startswith("-") and len(tok) > 1:
+        for k in range(1, len(tok)):
+            if tok[k] in _GIT_CONFIG_READ_SHORT:
+                return False
+            if tok[k] in _GIT_CONFIG_VALUE_SHORT:
+                return k == len(tok) - 1
     return False
 
 
@@ -5282,13 +5386,18 @@ def _cmtidn_config_setting(tokens):
     reads as its arguments when that command sets a value, or None when there is none. A config word counts
     when it is the subcommand of a git command the finder reads (_cmtidn_git_commands: git config, sudo git
     config, git -C dir config) or stands right after a command word that is not git (a git alias or function
-    standing for git, g config author.name ...). The command sets a value unless one of its words selects a
+    standing for git, g config author.name ...). The command sets a value unless one of its options selects a
     read or edit mode (_cmtidn_config_read_option: --get, --get-regexp, --list, --unset and the rest) or its
     first word that is not an option is a read or edit subcommand (git config get, list, unset,
     rename-section, remove-section, edit); git config set and the NAME VALUE form, with any scope, file,
-    type, --add or --replace-all option, set one. One backward pass marks where a read or edit option
-    follows, and each config word's subcommand search stops at its first word that is not an option, so a
-    segment of many config words costs time linear in its length."""
+    type, comment, value pattern, --add or --replace-all option, set one. Its options are read as git 2.53.0
+    reads them: from the word after config up to its first word that is neither an option nor the value of
+    the option before it (_cmtidn_config_value_option), or up to a '--' word. So an option value spelled as a
+    read option (--comment -l, --value -e, -f -l) selects no mode, and neither does a word after the NAME
+    (git config author.name X -l and git config author.name X --get set author.name). One backward pass
+    marks, for each word read as an option and for each word read as an option value, whether the options
+    from there select a read or edit mode, so a segment of many config words costs time linear in its
+    length."""
     n = len(tokens)
     starts = [k for k in _cmtidn_git_commands(tokens) if tokens[k] == "config"]
     k = 0
@@ -5300,24 +5409,25 @@ def _cmtidn_config_setting(tokens):
         starts.append(k + 1)
     if not starts:
         return None
-    read_after = [False] * (n + 1)  # read_after[i]: a word at index i or later selects a read or edit mode
+    # read_opt[i]: a git config command whose options start at word i reads or edits; read_val[i]: the same when
+    # word i is the value of the option before it, never a mode or a subcommand.
+    read_opt = [False] * (n + 1)
+    read_val = [False] * (n + 1)
     for i in range(n - 1, -1, -1):
-        read_after[i] = read_after[i + 1] or _cmtidn_config_read_option(tokens[i])
+        tok = tokens[i]
+        read_val[i] = read_opt[i + 1]
+        if tok == "--":
+            read_opt[i] = False
+        elif _cmtidn_config_read_option(tok):
+            read_opt[i] = True
+        elif _cmtidn_config_value_option(tok):
+            read_opt[i] = read_val[i + 1]
+        elif not tok.startswith("-"):
+            read_opt[i] = tok in _GIT_CONFIG_READ_SUBS  # the first word that is not an option ends the options
+        else:
+            read_opt[i] = read_opt[i + 1]
     for k in sorted(starts):
-        if read_after[k + 1]:
-            continue
-        first = None
-        skip = False
-        for j in range(k + 1, n):
-            tok = tokens[j]
-            if skip:
-                skip = False
-            elif tok in _GIT_CONFIG_VALUE_OPTS:
-                skip = True
-            elif not tok.startswith("-"):
-                first = tok
-                break
-        if first not in _GIT_CONFIG_READ_SUBS:
+        if not read_opt[k + 1]:
             return k + 1
     return None
 

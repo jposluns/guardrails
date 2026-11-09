@@ -25279,6 +25279,71 @@ def _main_isolated(monitor):
                  "python3 -c 'print(1)' EMAIL=noreply@anthropic.com"),
                 ("(ci-idc-c22) an AI EMAIL that echo only prints allows", "echo EMAIL=noreply@anthropic.com")):
             ciexpect(_ci_label, _ci_cmd, "allow")
+        # git config reads its options only up to its first word that is neither an option nor an option's
+        # value, so a read option spelled as an option value or after the NAME selects no mode and the command
+        # still sets the value; each deny vector below set the identity on git 2.53.0 (with a stand-in name).
+        # A git alias whose value holds '-c author.name=X', a git clone --config pair and a default-value
+        # expansion of EMAIL or a git identity variable set an identity git records too.
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc28) a --comment value spelled -l does not make git config a read, denies",
+                 "git config --comment -l author.name Claude"),
+                ("(ci-idc29) a set --value pattern spelled -l does not make git config set a read, denies",
+                 "git config set --value -l author.name Claude"),
+                ("(ci-idc30) a --comment value spelled -e given by a prefix, before a User.Name pair, denies",
+                 "git config --comm -e User.Name Claude"),
+                ("(ci-idc31) a -f value spelled -l in a short option cluster denies",
+                 "git config -zf -l author.name Claude"),
+                ("(ci-idc32) a --list word after the NAME VALUE pair does not make git config a read, denies",
+                 "git config author.name Claude -l"),
+                ("(ci-idc33) a --get word after the NAME VALUE pair does not make git config a read, denies",
+                 "git config committer.email noreply@anthropic.com --get"),
+                ("(ci-idc34) a --comment value spelled --get-regexp at --global scope denies",
+                 "git config --global --comment --get-regexp committer.name Claude"),
+                ("(ci-idc35) a --replace-all Author.Name pair denies", "git config --replace-all Author.Name Claude"),
+                ("(ci-idc36) a --system author.name pair denies", "git config --system author.name Claude"),
+                ("(ci-idc37) a --worktree committer.email pair denies",
+                 "git config --worktree committer.email noreply@anthropic.com"),
+                ("(ci-idc38) a config pair through an alias standing for git denies",
+                 "alias g=git; g config author.name Claude"),
+                ("(ci-idc39) a git alias whose value sets an AI author.name denies",
+                 "git config alias.ci '-c author.name=Claude commit'; git ci -m x"),
+                ("(ci-idc40) a git alias whose value sets an AI user.name denies",
+                 "git config alias.ci '-c user.name=Claude commit'"),
+                ("(ci-idc41) a git alias set by config set whose value sets an AI committer.email denies",
+                 "git config set alias.ci '-c committer.email=noreply@anthropic.com commit'"),
+                ("(ci-idc42) a git -c alias whose value sets an AI author.name denies",
+                 "git -c alias.ci='-c author.name=Claude commit' ci -m x"),
+                ("(ci-idc43) a git clone --config author.name pair naming an AI denies",
+                 "git clone --config author.name=Claude . c2"),
+                ("(ci-idc44) a git clone --config=author.name word naming an AI denies",
+                 "git clone --config=author.name=Claude . c2"),
+                ("(ci-idc45) a git clone --conf committer.name pair naming an AI denies",
+                 "git clone --conf committer.name=Claude . c2"),
+                ("(ci-idc46) a default-value expansion that assigns an AI EMAIL denies",
+                 ": \"${EMAIL:=noreply@anthropic.com}\"; export EMAIL; git commit -m x"),
+                ("(ci-idc47) a default-value expansion that assigns an AI GIT_AUTHOR_NAME denies",
+                 ": ${GIT_AUTHOR_NAME=Claude}; export GIT_AUTHOR_NAME; git commit -m x")):
+            ciexpect(_ci_label, _ci_cmd, "deny")
+        for _ci_label, _ci_cmd in (
+                ("(ci-idc-c23) git config -l before the NAME allows", "git config -l author.name claude"),
+                ("(ci-idc-c24) git config -f FILE -l of author.name allows",
+                 "git config -f .git/config -l author.name claude"),
+                ("(ci-idc-c25) git config --comment=VALUE then --get allows",
+                 "git config --comment=x --get author.name claude"),
+                ("(ci-idc-c26) git config get --value PATTERN of author.name allows",
+                 "git config get --value claude author.name"),
+                ("(ci-idc-c27) git config get --all of author.name allows", "git config get --all author.name claude"),
+                ("(ci-idc-c28) git config list --show-origin allows",
+                 "git config list --show-origin author.name claude"),
+                ("(ci-idc-c29) a git alias whose value names an AI only in a message allows",
+                 "git config alias.ci 'commit -m claude'"),
+                ("(ci-idc-c30) a git clone --config author.name pair with no AI value allows",
+                 "git clone --config author.name=Me . c2"),
+                ("(ci-idc-c31) a use-default expansion of an AI EMAIL, which assigns nothing, allows",
+                 ": \"${EMAIL:-noreply@anthropic.com}\""),
+                ("(ci-idc-c32) a commit message that quotes -c author.name with an AI name allows",
+                 "git commit -m 'use -c author.name=Claude in an alias'")):
+            ciexpect(_ci_label, _ci_cmd, "allow")
         # A git commit behind leading reserved words, a function or coprocess name, VAR=value words or a wrapper
         # word (env, timeout, command, exec, nohup, xargs, sudo, nice, setsid, stdbuf, time) is judged like the
         # bare form: behind a wrapper a git word starts a candidate git command, whatever the wrapper's own
