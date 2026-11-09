@@ -1684,6 +1684,14 @@ jobs:
         shell: bash
         run: python3 -I -B tools/check_dangerous_api.py
 
+      - name: Residue count wording self-test
+        shell: bash
+        run: python3 -I -B tools/check_residue_counts.py --self-test
+
+      - name: Residue count wording
+        shell: bash
+        run: python3 -I -B tools/check_residue_counts.py
+
       # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit
       # that proves the harness end to end, and the internal-name leak gate. Mirrors the same legs in
       # tools/run_all_checks.sh (roster symmetry). The advisory digest runs last: audit_reference.py

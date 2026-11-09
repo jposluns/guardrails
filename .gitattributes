@@ -874,6 +874,7 @@ tools/check_release_build.py text eol=lf
 tools/check_release_cut.py text eol=lf
 tools/check_release_delta.py text eol=lf
 tools/check_relied_exit_pipes.py text eol=lf
+tools/check_residue_counts.py text eol=lf
 tools/check_rule_placement.py text eol=lf
 tools/check_secrets.py text eol=lf
 tools/check_security_txt.py text eol=lf

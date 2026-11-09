@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "b78a57bf3363a5f782044b48049555562024902bbdf72a9daca2ac4e0e8a0971"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 584824
-sha256 = "4035e0f915b34d490ccfb08bc5c72fa988e581a14984233e96b7d1e9ea163df9"
+bytes = 587733
+sha256 = "b162677370763b1eed49fbbc0951e69946cf090651647d8ada0e1e4e8b9d442b"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -131,8 +131,8 @@ sha256 = "7665572c121fb72a7493bbcff903b66e61dcd6255baf0b82c23dd3c47f2d0897"
 
 [[sources]]
 path = ".aiqt/core/python-floor.toml"
-bytes = 9434
-sha256 = "16b2fe0e805746c7a11f8bf83f45662eb46b464f9268ef44e277882847fc4147"
+bytes = 9471
+sha256 = "cd36cc547084303359700315ff19f2b2602ba5753702b3a39cd076128e933c3c"
 
 [[sources]]
 path = ".aiqt/core/references.toml"
@@ -2306,8 +2306,8 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 
 [[sources]]
 path = ".gitattributes"
-bytes = 53714
-sha256 = "21fde9319bf20547792d6aa11a8d14c6cd93eb26b686ec0ea03035802ec0278a"
+bytes = 53756
+sha256 = "42230a567ad2acaa17b9bdd1f5bfddfd2c84e2a5cc79d484059d4bbb9394e7a7"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
@@ -2417,7 +2417,7 @@ sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 [[sources]]
 path = "README.md"
 bytes = 5215
-sha256 = "907cc75bbe117406819f7024efae0018dce57d8184d4125ee1ee1301ca0b1935"
+sha256 = "bf8a698dabac67c8ac2be0e96086811877a8dc0b8070d1b37a8ef6f7b846435b"
 
 [[sources]]
 path = "RELEASING.md"
@@ -4360,6 +4360,11 @@ bytes = 269049
 sha256 = "62cba7c3a3a459fbd31a27c52bc7ab11a792bd52189db8ba826e27c0327fd55b"
 
 [[sources]]
+path = "tools/check_residue_counts.py"
+bytes = 24658
+sha256 = "8a90ce05a7c58ac0b5fd223ffd67b4145a8746118310f23990befc4772605086"
+
+[[sources]]
 path = "tools/check_rule_placement.py"
 bytes = 101181
 sha256 = "7ad36408b0746a340bf2d2ea6ec56ac6553598c9e257982fcc2f95327e3c80ac"
@@ -4641,8 +4646,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 29542
-sha256 = "9f3beed56449e18e981340c045b03c72f9436abf5ef526ba9aca94a8a58aa29e"
+bytes = 30008
+sha256 = "7a3dbb5e2537fe6cd310dc7a5852b7dd2462b9f5319cefffae7672ef7a861a1a"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"
