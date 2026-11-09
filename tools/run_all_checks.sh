@@ -248,6 +248,8 @@ run_gate "worker-pack-drift" python3 -I -B tools/gen_worker_pack.py --check
 run_gate "hooks-selftest" python3 -I -B tools/gen_hooks.py --self-test
 run_gate "secret-patterns-selftest" python3 -I -B tools/gen_secret_patterns.py --self-test
 run_gate "secret-patterns-drift" python3 -I -B tools/gen_secret_patterns.py --check
+run_gate "ci-floor-digests-selftest" python3 -I -B opf/tools/gen_ci_floor_digests.py --self-test
+run_gate "ci-floor-digests-drift" python3 -I -B opf/tools/gen_ci_floor_digests.py --check
 run_gate "hooks-drift"    python3 -I -B tools/gen_hooks.py --check
 run_gate "hooks-behaviour-selftest" python3 -I -B tools/selftest_aiqt_hooks.py
 run_gate "char-policy-selftest" python3 -I -B tools/gen_char_policy.py --self-test

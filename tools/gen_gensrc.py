@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Generate the .aiqt/gensrc.json registry of generated outputs from each generator's own declaration.
 
-Every tools/gen_*.py declares a module-level GENSRC_OUTPUTS constant naming what it generates (its
-targets, their kind, the sources it derives them from, and how to regenerate them). This tool discovers
-those generators by STATICALLY PARSING each tools/gen_*.py and evaluating only its GENSRC_OUTPUTS
+Every tools/gen_*.py, and every OPF tooling generator opf/tools/gen_*.py, declares a module-level
+GENSRC_OUTPUTS constant naming what it generates (its targets, their kind, the sources it derives them
+from, and how to regenerate them). This tool discovers those generators by STATICALLY PARSING each
+tools/gen_*.py and each opf/tools/gen_*.py and evaluating only its GENSRC_OUTPUTS
 literal (ast.parse + ast.literal_eval), never importing or executing a generator, so no import-time
 side effect (a SystemExit, a dynamic __getattr__, a broken import) can influence discovery. It requires
 the declaration, validates and unions the entries, and renders the single registry .aiqt/gensrc.json so
@@ -214,13 +215,15 @@ def _read_declaration(path, where):
 
 def discover_declarations(tools_dir):
     """Statically read every tools/gen_*.py in tools_dir except this tool, in sorted stem order, and
-    return a list of (stem, GENSRC_OUTPUTS-value). Each declaration is recovered by parsing, never by
-    importing (see _read_declaration), so the import-execution surface is removed entirely. Fail-closed:
-    a bad or missing declaration raises ValueError naming the file (the structural staleness guard),
-    discovering NO generator at all raises ValueError (a registry-only repo is malformed, never a
-    silent self-only registry), and os.scandir RAISES on an unreadable tools_dir instead of silently
-    yielding nothing as a glob would; the caller maps all of these, and any OSError reading a file, to
-    exit 2."""
+    return a list of (stem, GENSRC_OUTPUTS-value). This reads the tools/ generators only; the OPF
+    tooling's generators (opf/tools/gen_*.py) are read the same static way by
+    discover_opf_declarations, and build_registry unions both. Each declaration is recovered by
+    parsing, never by importing (see _read_declaration), so the import-execution surface is removed
+    entirely. Fail-closed: a bad or missing declaration raises ValueError naming the file (the
+    structural staleness guard), discovering NO generator at all raises ValueError (a registry-only
+    repo is malformed, never a silent self-only registry), and os.scandir RAISES on an unreadable
+    tools_dir instead of silently yielding nothing as a glob would; the caller maps all of these, and
+    any OSError reading a file, to exit 2."""
     tools_dir = Path(tools_dir)
     stems = []
     with os.scandir(tools_dir) as it:  # OSError on an unreadable/absent dir -> caller's fail-closed try
@@ -236,6 +239,24 @@ def discover_declarations(tools_dir):
     for stem in stems:
         decl = _read_declaration(tools_dir / (stem + ".py"), "{}.py".format(stem))
         declarations.append((stem, decl))
+    return declarations
+
+
+def discover_opf_declarations(root):
+    """Statically read every OPF tooling generator opf/tools/gen_*.py under root, in sorted name order,
+    and return a list of ("opf/tools/<stem>", GENSRC_OUTPUTS-value): the opf/tools counterpart of
+    discover_declarations, with the same static parse and never an import. A tree with no opf/tools
+    entry has no OPF generators and returns an empty list; one that is there but cannot be listed
+    raises OSError, and a bad or missing declaration raises ValueError; the caller maps both to exit 2
+    (fail-closed)."""
+    opf_tools = Path(root) / "opf" / "tools"
+    declarations = []
+    if os.path.lexists(opf_tools):
+        with os.scandir(opf_tools) as it:
+            names = sorted(e.name for e in it if e.name.startswith("gen_") and e.name.endswith(".py"))
+        for name in names:
+            declarations.append(("opf/tools/" + name[:-3],
+                                 _read_declaration(opf_tools / name, "opf/tools/" + name)))
     return declarations
 
 
@@ -458,6 +479,9 @@ def build_registry(root):
     with sort_keys for determinism, plus a trailing newline. Raises ValueError/OSError on a bad
     declaration or an unreadable input; the caller maps those to exit 2."""
     declarations = discover_declarations(root / "tools")
+    # The OPF tooling's own generators (opf/tools/gen_*.py) declare their outputs the same way. A tree with
+    # no opf/tools has none; one that is there but cannot be listed raises OSError (exit 2).
+    declarations.extend(discover_opf_declarations(root))
     entries = collect_entries(declarations, root)
     obj = {"version": 1, "generated": entries}
     return json.dumps(obj, indent=2, sort_keys=True) + "\n"
@@ -810,6 +834,14 @@ GENSRC_OUTPUTS = (
 )
 '''
 
+# The OPF tooling discovery (case u): an opf/tools/gen_*.py declaration is unioned into the registry.
+_FAKE_OPF_GEN = '''# self-test OPF tooling generator that declares its output
+GENSRC_OUTPUTS = (
+    {"target": "OPF-OUT.md", "kind": "file",
+     "sources": ("src.txt",), "regenerate": "python3 opf/tools/gen_selftestopfout.py"},
+)
+'''
+
 def _build_from(base, filename, text):
     """A synthetic repo whose only generator is `filename` carrying `text`, with the source it names and
     an empty .aiqt/ so reconcile can write the registry."""
@@ -1084,6 +1116,33 @@ def self_test_main():
         if rc != 2 or ".working component" not in err or "x/.working/TODO.md" not in err:
             failures.append("a .working target (x/.working/TODO.md) expected exit 2 naming the .working "
                             "component (OPF boundary), got {} ({!r})".format(rc, err.strip()))
+
+        # (u) The OPF tooling discovery: an opf/tools/gen_*.py declaration is unioned into the registry,
+        #     and the registry reads as DRIFT (exit 1) under the flip that disables that discovery, so
+        #     this case depends on exactly that branch, not on the tools/ discovery.
+        opftree = tmp / "opftools"
+        _build_from(opftree, "gen_selftestgood.py", _FAKE_GOOD)
+        (opftree / "opf" / "tools").mkdir(parents=True)
+        (opftree / "opf" / "tools" / "gen_selftestopfout.py").write_text(_FAKE_OPF_GEN, encoding="utf-8")
+        if run_quiet(opftree, check=False) != 0 or run_quiet(opftree, check=True) != 0:
+            failures.append("opf tooling discovery: expected a clean generate and a drift-clean check")
+        try:
+            targets = {e["target"] for e in
+                       json.loads((opftree / REGISTRY_REL).read_text(encoding="utf-8"))["generated"]}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            targets = "unreadable ({})".format(exc)
+        if not (isinstance(targets, set) and "OPF-OUT.md" in targets):
+            failures.append("opf tooling discovery: expected the opf/tools declaration's target "
+                            "'OPF-OUT.md' in the registry, got {!r}".format(targets))
+        real_opf_discovery = discover_opf_declarations
+        try:
+            globals()["discover_opf_declarations"] = lambda _root: []
+            if run_quiet(opftree, check=True) != 1:
+                failures.append("opf tooling discovery: with the opf/tools discovery disabled, the "
+                                "registry holding the opf entry was expected to read as drift (exit 1), "
+                                "so the case does not depend on that branch")
+        finally:
+            globals()["discover_opf_declarations"] = real_opf_discovery
         # .aiqt/ above the registry symlinked outside the root fails closed (exit 2) in --check and write mode
         # with the registry there untouched; symlinked inside the root, it is read and the registry rewritten.
         failures.extend(linked_dir_failures(tmp, "aiqt", lambda base: _build_from(
@@ -1118,8 +1177,10 @@ def self_test_main():
           "roster, or a dunder, a utf-7 cookie hiding a rebinding, a leading BOM and non-UTF-8 bytes fail closed "
           "(exit 2), while a utf-8 cookie generates; a parser stack overflow (a chain of 200,000 unary minus "
           "signs as tools/gen_hooks.py or another generator, a RecursionError injected into every parse and a "
-          "MemoryError into the byte parse alone) fails closed (exit 2) naming its cause; and a target with a "
-          ".working component (an OPF store path) fails closed (exit 2)"
+          "MemoryError into the byte parse alone) fails closed (exit 2) naming its cause; a target with a "
+          ".working component (an OPF store path) fails closed (exit 2); and an opf/tools/gen_*.py "
+          "declaration is unioned into the registry, which reads as drift (exit 1) when that discovery is "
+          "disabled"
           + note)
     return 0
 
