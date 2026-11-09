@@ -23778,7 +23778,7 @@ def orch_yield_tool(data):
 
 
 def orch_ask_guard(data):
-    """cntdef/recfst bounded by humovs, PreToolUse AskUserQuestion: deny a blocking question in
+    """cntdef/recfst, PreToolUse AskUserQuestion (the orch-ask-unattended hook): deny a blocking question in
     unattended mode with the record-and-continue instruction. The operating mode is read by _orch_mode, one
     sound parser over the shared mode file: a leading byte-order mark is tolerated; the `Operating-mode:`
     declaration is parsed on its own PHYSICAL line (its value must begin with attended or unattended, compound
@@ -32928,7 +32928,7 @@ def _orch_unlink_quiet(path):
 
 
 def orch_resume_audit(data):
-    """sesres/recncl/cnclse, SessionStart (warn: the platform cannot block this event): reconcile the
+    """recncl/cnclse, SessionStart (warn: the platform cannot block this event): reconcile the
     durable record against observed reality and ARM the resume barrier on divergence; a clean audit
     clears it. Arming and clearing are best-effort and atomic (_orch_barrier_write: a temporary file
     beside the barrier, flushed and fsynced, then os.replace): where the barrier cannot be written (its
@@ -33185,7 +33185,7 @@ def _orch_barrier_read(path):
 
 
 def orch_resume_barrier(data):
-    """sesres/recncl, PreToolUse (stage BAKE: warn-first, blocks nothing yet): while the barrier is
+    """recncl, PreToolUse (stage BAKE: warn-first, its handler blocks nothing yet): while the barrier is
     armed, surface the first mutation outside the allowlist. The record surfaces, the registry files,
     and the suite's own state directory stay writable, so the only exit, correcting the record, is
     never obstructed. The barrier is read by _orch_barrier_read: a non-blocking open (a FIFO with no

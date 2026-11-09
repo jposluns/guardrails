@@ -1204,7 +1204,7 @@ residue = "A crash-injection self-test of the 9.3 journal-first cutover engine: 
 [[gate]]
 id = "record-drift"
 script = "tools/check_record_drift.py"
-rules = ["recncl", "chtrk1"]
+rules = ["recncl"]
 platform = "ci"
 default = "block"
 class = "a"
