@@ -20270,6 +20270,29 @@ def _main_isolated(monitor):
         dexpect("(qa-b4e) --output=realfile.txt allows with a note (diverted to a file, not a proof-C shell redirect)",
                 "git diff --output=realfile.txt", "allow-note")
         dexpect("(qa-b4f) separated --output realfile.txt allows with a note", "git diff --output realfile.txt", "allow-note")
+        # A --output-shaped word BEFORE the subcommand is a git global option's value, not a diversion: git
+        # 2.53.0 printed the patch on stdout and wrote no real.txt for each of qa-b4g to qa-b4k, so each
+        # is a console dump. Only the subcommand's own arguments divert.
+        dexpect("(qa-b4g) a --namespace value shaped like --output= is no diversion -> denies (console dump)",
+                "git --namespace --output=real.txt diff", "deny")
+        dexpect("(qa-b4h) a --namespace value shaped like -oFILE is no diversion -> denies",
+                "git --namespace -oreal.txt diff", "deny")
+        dexpect("(qa-b4i) a -c value shaped like -oFILE is no diversion -> denies",
+                "git -c -oreal.txt diff", "deny")
+        dexpect("(qa-b4j) a --namespace value shaped like --output= before log -p -> denies",
+                "git --namespace --output=real.txt log -p", "deny")
+        dexpect("(qa-b4k) a --namespace value shaped like --output= before stash show -p -> denies",
+                "git --namespace --output=real.txt stash show -p", "deny")
+        dexpect("(qa-b4l) a separated --output after a --namespace value still diverts to a file -> allows with a note",
+                "git --namespace ns diff --output=real.txt", "allow-note")
+        dexpect("(qa-b4m) a global value shaped like --output= with a real-file redirect earns no plain allow",
+                "git --namespace --output=x diff > out.txt", "allow-note")
+        dexpect("(qa-b4n) a global value shaped like --output= piped to less earns no plain allow",
+                "git --namespace --output=x diff | less", "allow-note")
+        dexpect("(qa-b4o) --namespace taking a bare --output leaves real.txt as the subcommand -> allows with a note",
+                "git --namespace --output real.txt diff", "allow-note")
+        dexpect("(qa-b4p) a subcommand --output to the console after a global look-alike still denies",
+                "git --namespace --output=x diff --output=/dev/stdout", "deny")
         # BLOCKER 5: a redirect target that resolves to a device via '..' or a relative path must NOT earn
         # proof C; a genuine plain-file redirect still ALLOWs.
         dexpect("(qa-b5a) '> /tmp/../dev/stdout' normalizes to a device -> denies",

@@ -4393,8 +4393,11 @@ def _is_possible_producer(seg):
 # DECOY when --output is present (proofs C and D must not apply). --output/-o takes a file value, inline
 # (--output=X / -oX) or separated (--output X / -o X).
 def _diff_output_diversion(argv):
-    """Return (present, target) for a git --output/-o diff-output diversion before any '--' boundary, or
-    (False, None). The target decides console vs file: the diff lands there, not on stdout."""
+    """Return (present, target) for a --output/-o-shaped word anywhere in argv before any '--' boundary, or
+    (False, None). It reads every word, the git word and the git global options and their values included,
+    so proofs C and D, which pass a whole segment, never grant a plain allow while any word could divert the
+    diff. Whether the diff really leaves stdout is judged on the subcommand's own arguments
+    (_subcommand_output_diversion)."""
     end = len(argv)
     for j, word in enumerate(argv):
         if word in _DIFF_END_OF_OPTIONS:
@@ -4411,6 +4414,15 @@ def _diff_output_diversion(argv):
             return True, word[2:]
         i += 1
     return False, None
+
+
+def _subcommand_output_diversion(argv):
+    """(present, target) for a --output/-o diversion among the arguments after a git segment's subcommand
+    (_git_subcommand_rest), the only place git reads one as the diff's destination. A --output-shaped word
+    before the subcommand is no diversion: it is the value of a git global option (git --namespace
+    --output=x diff, where --namespace takes it, and git -c and -C alike), which git runs with the patch on
+    stdout, or a word git refuses as an unknown global option (git --output=x diff) and runs nothing for."""
+    return _diff_output_diversion(_git_subcommand_rest(argv)[1])
 
 
 def _final_stdout_dest(redirects):
@@ -4529,16 +4541,18 @@ def _is_console_dump(seg, segments, index):
     (a literal 'git' or a path to it, so an opaque/expansion command word this guard cannot resolve is never
     a confirmed dump - it routes to ASK instead), it is a git diff producer, it does not emit only a summary
     listing, and its output is proven to reach a console. When the producer diverts its output with
-    --output/-o, THAT target decides (a /dev,/proc console target is a dump; a file or dynamic target is not
-    a confirmed dump, so it ASKS) and any shell redirect or pipe is a decoy. Otherwise stdout governs. Used
-    only to choose DENY over ASK; its absence never establishes an ALLOW."""
+    --output/-o among the subcommand's own arguments (_subcommand_output_diversion), THAT target decides (a
+    /dev,/proc console target is a dump; a file or dynamic target is not a confirmed dump, so it ASKS) and
+    any shell redirect or pipe is a decoy. Otherwise stdout governs, so a --output-shaped value of a git
+    global option (git --namespace --output=x diff) is a console dump. Used only to choose DENY over ASK;
+    its absence never establishes an ALLOW."""
     if _command_word(seg.argv) != "git":
         return False  # an opaque/wrapped command word is not a proven git dump -> ASK, never DENY
     if not _is_diff_producer(seg.argv):
         return False
     if _diff_emits_only_summary(seg.argv):
         return False
-    diverted, out_target = _diff_output_diversion(seg.argv)
+    diverted, out_target = _subcommand_output_diversion(seg.argv)
     if diverted:
         # the diff is written to the --output target, not stdout; the shell redirect/pipe is a decoy
         return out_target is not None and _target_class(out_target, False) == "file-dev"
