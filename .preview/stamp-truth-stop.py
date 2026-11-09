@@ -39,9 +39,11 @@ RULES, against the message's reference time REF:
   1. AHEAD: every timestamp claim outside exempt text must be no more than 1 minute after REF, except the
      message's HEADER stamp (see 2), which CLAIMS the current time and must not be after REF at all: a stamp
      read from the clock and truncated to its precision never is, so one rounded up or composed ahead is
-     refused, and the block reason then says "truncate to the minute; never round up". A HEADER stamp whose
-     letter abbreviation cannot be matched to the local zone is not checked (see 2), but a Stop that passes
-     says so in a non-blocking "not checked" note instead of passing silently.
+     refused while it is still later than REF (one whose minute REF has already reached, after a long
+     generation, passes), and the block reason then says "truncate to the minute; never round up". A HEADER
+     stamp whose letter abbreviation cannot be matched to the local zone is not checked (see 2), but a Stop
+     that passes with no violation says so in a non-blocking "not checked" note instead of passing silently
+     (an allow that carries a cap, fail-open, or busy warning shows that warning instead, one line per Stop).
   2. BEHIND: a STATUS STAMP is a claim that is the first token of its line (after optional whitespace, `*` or
      `_` emphasis, `[`, and one list bullet `-`, `+`, `*`, or `N.`/`N)` followed by whitespace), outside code
      and blockquotes. The message's HEADER stamp, its FIRST status stamp, CLAIMS the current time only when it
@@ -399,18 +401,18 @@ first, in line order with its elapsed footer last, then earlier messages oldest 
 timestamp, a status stamp, or an elapsed footer, as its literal WHOLE in a code span (never cut, no ellipsis;
 a timestamp or status stamp VERBATIM; an elapsed-footer literal verbatim except that each internal whitespace
 run is collapsed to one space (round 37), which keeps a padded footer to one short line), and its compact
-offset (+Nm: N minutes AHEAD of the true value; -Nm: N minutes BEHIND), and for a footer also the true
-elapsed, as in `Session elapsed 09:00` +333m, true 03:27; then "; +K more" (the other unresolved
-violations) whenever K > 0. Then extras in this order, each added only while the whole line stays within a
-soft cap of MSG_CAP (200) characters (an extra that does not fit is SKIPPED, never cut, and the later,
-shorter ones are still tried): the remedy "; run `date`, `date -u`" (or "; run `date -u`" when only that
-fits); when a violation is a time AHEAD of the clock, the future-fact hint "; a genuine future time: put it
-in a `code span` or after 'due'" (or a shorter form), except that when the claim shown is a HEADER stamp
-AHEAD, "; truncate to the minute; never round up" takes the hint's place (the header claims the current
-time, so no future-fact remedy applies to it); when the true elapsed is known and an elapsed-footer
-violation is not the claim shown (it is behind "+K more"), "; elapsed now HH:MM" (round 36: the true session
-elapsed, which `date` does not give, so the footer can be corrected in the same cycle); and "; UTC now ...".
-A core longer than the soft cap
+offset (+Nm: N minutes AHEAD of the true value; +<1m: 30 s or less AHEAD, which only a header stamp can be,
+never shown as "0 min"; -Nm: N minutes BEHIND), and for a footer also the true elapsed, as in
+`Session elapsed 09:00` +333m, true 03:27; then "; +K more" (the other unresolved violations) whenever K > 0.
+Then extras in this order, each added only while the whole line stays within a soft cap of MSG_CAP (200)
+characters (an extra that does not fit is SKIPPED, never cut, and the later, shorter ones are still tried):
+the remedy "; run `date`, `date -u`" (or "; run `date -u`" when only that fits); when a violation is a time
+AHEAD of the clock, the future-fact hint "; a genuine future time: put it in a `code span` or after 'due'"
+(or a shorter form), except that when the claim shown is a HEADER stamp AHEAD, "; truncate to the minute;
+never round up" takes the hint's place (the header claims the current time, so no future-fact remedy applies
+to it); when the true elapsed is known and an elapsed-footer violation is not the claim shown (it is behind
+"+K more"), "; elapsed now HH:MM" (round 36: the true session elapsed, which `date` does not give, so the
+footer can be corrected in the same cycle); and "; UTC now ...". A core longer than the soft cap
 is sent whole, with no extras. Every systemMessage is one line: a capped or fail-open allow counts the
 unresolved claims and names the first the same way, its literal whole; the busy note is fixed text; the "not
 checked" note names the first unchecked header stamp, its literal whole, and counts any others. stderr
@@ -468,9 +470,9 @@ abbreviation or an invalid date is not checked anywhere, a line-leading status s
 fails open, so a fabricated `[2026-09-24 09:00 PDT]` header in an Eastern-zone process is a MISS, though a
 pass then carries the non-blocking "not checked" note of rule 1; stamp in UTC or a numeric offset, or run
 the hook under the TZ the stamps use). A header stamp read from ANOTHER clock that runs ahead of this host's
-(a remote or container `date`) is refused, since the header gets no AHEAD slack (a FALSE POSITIVE; put it in
-a `code span`); so is a correct header if the host ever dates a transcript entry before a clock reading it
-contains, an ordering not yet checked against a live transcript.
+(a remote or container `date`) is refused while it is still later than REF, since the header gets no AHEAD
+slack (a FALSE POSITIVE; put it in a `code span`); so is a correct header if the host ever dates a transcript
+entry before a clock reading it contains, an ordering not yet checked against a live transcript.
 Genuine-user detection is heuristic on entry shape and a fixed list of
 notification prefixes. The recovery boundary lives in volatile per-user storage: it is lost on reboot (the
 state is then absent and the whole current turn is evaluated once more). READABLE-BRANCH RESIDUAL:
@@ -1183,7 +1185,9 @@ def _in_spans(spans, pos):
 def _minutes(off_us):
     mins = round(off_us / MINUTE)
     if off_us > 0 and mins == 0:
-        return "<1 min AHEAD"  # a header stamp under 30 s ahead: never shown as "0 min BEHIND"
+        # a header stamp 30 s or less ahead (round() takes an exact half to even, so 30 s gives 0 too): never
+        # shown as "0 min BEHIND"
+        return "<1 min AHEAD"
     return f"{abs(mins)} min {'AHEAD' if mins > 0 else 'BEHIND'}"
 
 
@@ -1207,8 +1211,9 @@ def _check_claim(m, status, sched, ref, behind, where, cache=None, header=None):
         return None
     diff = got - ref
     # the bracketed header CLAIMS the current time, so it gets no AHEAD slack: a stamp read from the clock and
-    # truncated to its precision is never later than when the message was written, while one rounded up or
-    # composed a minute ahead is (other prose times keep AHEAD_US)
+    # truncated to its precision is never later than when the message was written; one rounded up or composed
+    # ahead is refused only while it is still later than `ref`, so one whose minute `ref` has already reached
+    # (a long generation) passes (other prose times keep AHEAD_US)
     if diff > (0 if header else AHEAD_US) and (status or not sched):
         return f"timestamp {literal} in {where}: {_minutes(diff)} of when it was written ({fmt_us(ref)})"
     if status and header and -diff > behind:

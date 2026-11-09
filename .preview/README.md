@@ -194,7 +194,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `0ec9642ea95bac4ea13c71ec31ff5239ab01c0ceff94f9922a42de1458f0757f` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
-| `stamp-truth-stop.py` | `5cde27870cc4867912c19482c4fc9b84225e0039b740634db3501c086a366c21` | [stamp-truth-stop.py](stamp-truth-stop.py) |
+| `stamp-truth-stop.py` | `f717eff666ee348da56d5235f4fbd8a3dd75f5f179b2902a147f90212d7d68cd` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
 
@@ -527,7 +527,10 @@ section of its opening docstring. Read that section before relying on a hook; in
   scheduling word before it is blocked; the remedy is to add the word or put the time in a code span.
   An opening stamp in another zone's abbreviation is not checked (only noted); stamp in UTC or a numeric
   offset, or run the hook under the same `TZ`. An opening stamp read from a different clock that runs ahead
-  of this host's (a remote or container `date`) is refused; put it in a code span.
+  of this host's (a remote or container `date`) is refused while it is still later than the time the hook
+  compares it with (when the message was recorded, else when the hook runs); put it in a code span. A stamp
+  rounded up or composed ahead is likewise refused only while it is later than that time: one whose minute
+  that time has already reached, as after a long generation, passes.
   Its refusals are capped: within one continuous run of turn ends with no observed new turn it refuses at
   most three times, after which each violating stop is allowed with a cap warning; a stop that carries
   neither `stop_hook_active` nor a `transcript_path` is outside the cap (nothing can key a counter to
