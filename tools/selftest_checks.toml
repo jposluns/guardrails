@@ -5428,6 +5428,8 @@ expected-check-ids = [
   "hist/forged-commit-graph-merge-base-flip-hides",
   "hist/forged-commit-graph-parent-operator-ignored",
   "hist/forged-commit-graph-parent-operator-flip-hides",
+  "hist/forged-commit-graph-default-base-ignored",
+  "hist/forged-commit-graph-default-base-flip-hides",
   "hist/short-parent-id-cannot-evaluate",
   "hist/short-parent-id-flip-accepts",
   "hist/sha256-forty-char-parent-cannot-evaluate",
