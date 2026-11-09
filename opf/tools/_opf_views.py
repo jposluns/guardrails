@@ -68,10 +68,15 @@ module-type mirror can be rendered regardless). Every record source is read from
 `<type>.index.toml` (_source_relpath), with one addition: the two decision outputs, DECISIONS.md and
 DECISIONS.toml, also read the pending decisions rotated to the archive, through the doctor's own archive
 walk (_archived_decisions over _opf_check.archive_read, never a second reader), so a decision supersession
-chain is evaluated there over the decisions the doctor's decision-chain check reads. An archive whose
-population the walk could not read or confirm in full refuses both outputs, and every archive file the
-walk parsed enters their source-set digest. Every other view, the PENDING_DECISION-INDEX.md mirror
-included, reads the active index alone.
+chain is evaluated there over the decisions the doctor's decision-chain check reads (join_resolution
+states which of the doctor's chains the views then refuse, and which they do not). When either decision
+output is declared, an archive whose population the walk could not read or confirm in full, or that
+_archived_decisions otherwise refuses, refuses the whole plan: plan_views raises before it returns any
+view, so every declared view is refused, not only the two decision outputs. Every archive file the walk
+parsed enters the two decision outputs' source-set digest. The archive is walked once per plan; a doctor
+run walks it twice, once for its own archive and decision-chain checks and once inside the plan_views call
+of its C-VIEW-DRIFT check, so those checks judge two separate reads of the archive. Every other view, the
+PENDING_DECISION-INDEX.md mirror included, reads the active index alone.
 
 The write path (spec 5.7/5.8/11): a mutating render gates on the `_opf_check.validate_store`
 store-integrity layer (cross-record uniqueness, coverage, reconciliation, view drift, changelog/version
@@ -802,10 +807,18 @@ def join_resolution(decisions):
     edges as before, so a chain the doctor connects only through a link from a non-decided decision or a
     proposal is more than one chain here, each with its own head. The join sees only the decisions it is
     given. The two decision outputs hand it the active pending decisions together with the ones rotated to
-    the archive (plan_views, _archived_decisions), the population the doctor's decision_chains reads, so
-    two non-importer current resolutions that only an archived decision joins into one chain are refused
-    here as the doctor refuses them. A direct caller that passes the active decisions alone gets the
-    narrower answer: a `supersedes` link to a decision it did not pass links nothing."""
+    the archive (plan_views, _archived_decisions), the population the doctor's decision_chains reads, so an
+    archived decision takes part in a chain here exactly as an active one does. The views therefore refuse a
+    chain the doctor refuses through an archived decision only where this join connects that chain as well:
+    through edges from decided decisions (a fork or a cycle among those edges raises as above, an archived
+    decision's edges included), or as a chain an importer-authored link joins (two non-importer current
+    resolutions that only an archived importer-authored decision joins into one chain are refused here as
+    the doctor refuses them). Disclosed residual, which predates the archive read: outside a chain an
+    importer-authored link joins, this join builds edges from decided decisions only, so a chain the doctor
+    joins only through a withdrawn or otherwise non-decided decision, archived or active, is not refused
+    here even where the doctor reports that chain as a finding: its parts render, each with its own head. A
+    direct caller that passes the active decisions alone gets the narrower answer: a `supersedes` link to a
+    decision it did not pass links nothing."""
     mixed = _mixed_provenance_chains(decisions)
     decisions = t_filter(t_filter(decisions, "not_importer_authored"), "not_proposed")
     supersedes_map = {}
@@ -1745,11 +1758,13 @@ _ARCHIVE_DECISION_VIEWS = frozenset(("DECISIONS.md", "DECISIONS.toml"))
 
 def _archived_decisions(store_root_fd, machine_rel, manifest, registered_vendors, active_decisions):
     """The archived pending decisions the two decision outputs join beside the active ones, read through
-    the doctor's own archive walk (_opf_check.archive_read, one _validate_archive walk, never a second
-    read of the archive). Returns (records, source_bytes): the pending_decision bodies the walk seated, in
-    walk order, and the walk's map of each archive file it parsed to the exact bytes of that parse, every
-    archive.toml, index and worklog among them, so the caller's source-set digest accounts for every input
-    a successful walk depends on. The walk takes the manifest-derived arguments opf record passes it.
+    the doctor's own archive walk (_opf_check.archive_read, one _validate_archive walk per call, so never a
+    second read of the archive within one plan; a doctor run still walks the archive twice, once for its own
+    checks and once through this function in its C-VIEW-DRIFT plan). Returns (records, source_bytes): the
+    pending_decision bodies the walk seated, in walk order, and the walk's map of each archive file it
+    parsed to the exact bytes of that parse, every archive.toml, index and worklog among them, so the
+    caller's source-set digest accounts for every input a successful walk depends on. The walk takes the
+    manifest-derived arguments opf record passes it.
 
     Refuses (ViewsError, a cannot-evaluate) rather than render over a partial population: when the walk
     reports any problem (a missing, unreadable or malformed archive input, a C-ROTATION message, an
@@ -2094,9 +2109,11 @@ def plan_views(store_root_fd, machine_rel, *, on_legacy_conflict=None, supported
     (view_name, scope, dest_relpath, text) WITHOUT writing anything. Raises ViewsError (a cannot-evaluate)
     on an unreadable manifest or source, a `per-record` store (deferred), a view/kind/target mismatch,
     or a byte-canon-invalid render, exactly as the render path does; _render_resolved calls it and performs
-    the writes. When DECISIONS.md or DECISIONS.toml is declared it also reads the archived pending
-    decisions through one archive walk (_archived_decisions), refusing an archive it could not read in
-    full. It makes no state-changing or outbound side effect (a planner is a preview)."""
+    the writes. When DECISIONS.md or DECISIONS.toml is declared it also reads the archived pending decisions
+    through one archive walk per plan (_archived_decisions); an archive refusal there, or an archive input
+    read with bytes other than its declared active source's, raises out of the whole plan, so every view is
+    refused, not only the two decision outputs. It makes no state-changing or outbound side effect (a
+    planner is a preview)."""
     if manifest_model is None:
         manifest_model = _with_worklog_diagnostics(
             lambda: _opf_worklog.read_manifest_model_at(
