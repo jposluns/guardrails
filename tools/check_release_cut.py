@@ -2529,30 +2529,49 @@ runpy.run_path(path, run_name="__main__")
 # drain-reaped row 130 s (its wrapper waits up to 60 s for the leader's exit before the drain runs), the
 # construction row 135 s (drain, exit-or-record wait, grandchild check), the sigchld row and the two kernel
 # sigchld rows about 0 s (nothing is launched), the two exit-outlived rows 25 s each (their 10 s bound,
-# both post-kill waits and the grandchild check), the two exit-at-bound rows 40 s each (their TIMEOUT s
-# pause, which spans their 3 s bound, and both post-kill waits) and the record publication row 40 s (its
-# TIMEOUT s bound and both post-kill waits): about 825 s together. The revert flips, run only under
-# --red-on-revert, cost at worst 60 s (interrupt), 70 s (exit code), 75 s (reaped exit), 130 s (drain
-# reaped), 135 s (construction), 70 s (sigchld), 60 s and 70 s (the two kernel sigchld flips, which
-# launch), 25 s each (the two exit-outlived flips), 40 s each (the two exit-at-bound flips) and 40 s (the
-# record publication flip): about 840 s together. A plain --self-test run took 283.5 s on 2026-11-08 at a
-# 1-minute load of 25 to 33, before the kernel sigchld, exit-outlived, exit-at-bound and record publication
-# rows were added, the seven entries about 113 s of it (their second measured runs above), so the rest (the
-# fixture cases, close checks and entry-restore) about 171 s. The replays (the close-sweep reverts and the
-# mutation replays after entry-restore) run only under --red-on-revert and no bound covers them: one
+# both post-kill waits and the grandchild check), the two exit-at-bound rows and the three full-pipe
+# exit-at-bound rows 40 s each (their TIMEOUT s pause, which spans their 3 s bound, and both post-kill
+# waits) and the record publication row 40 s (its TIMEOUT s bound and both post-kill waits): about 945 s
+# together. The revert flips, run only under --red-on-revert, cost at worst 60 s (interrupt), 70 s (exit
+# code), 75 s (reaped exit), 130 s (drain reaped), 135 s (construction), 70 s (sigchld), 60 s and 70 s (the
+# two kernel sigchld flips, which launch), 25 s each (the two exit-outlived flips), 40 s each (the two
+# exit-at-bound flips and the full-pipe flip) and 40 s (the record publication flip): about 880 s together.
+# Outside the census, the fixture cases and the mutation replays run their children through observe, each
+# call under subprocess.run's TIMEOUT = 30 s bound: the 242 fixture cases of test_cases() make 243 observe
+# calls (one each, and push-protected's push-bare call), at most 243 * 30 = 7290 s, and the 29 mutation
+# replays, run only under --red-on-revert, make one observe call each, at most 29 * 30 = 870 s. A call that
+# reaches its bound raises and ends the run, so each call can spend at most just under its bound.
+# Not summed here, each with no bound summed above: the fixture builds' git calls (each under its own
+# TIMEOUT s bound, several per case, so their bounds would add thousands of seconds), observe's own git
+# reads, the close checks, entry-restore and the close-sweep reverts (in process). They are taken as
+# MEASURED: a plain --self-test run took 283.5 s on 2026-11-08 at a 1-minute load of 25 to 33, before the
+# kernel sigchld, exit-outlived, exit-at-bound and record publication rows were added, the seven entries
+# about 113 s of it (their second measured runs above), so the rest (the fixture cases, close checks and
+# entry-restore, the observe calls' own time included, so counted twice here) about 171 s; and one
 # --self-test --red-on-revert run on 2026-11-09 from 12:06:49 to 12:12:56 UTC, on 80 CPUs at a 1-minute load
-# of 23.9 at its start and 29.6 at its end, took 367.0 s wall and passed, its replays 12.1 s of it (from its
-# entry-restore line to its last line). With every census bound above spent in full, a --self-test run ends
-# by about 680 + 825 + 171 = 1676 s and a --red-on-revert run by about 1676 + 840 + 12.1 = 2528.1 s. Both
-# exceed the 1200 s default member bound, so the member carries its own 2700 s entry in
-# tools/selftest_git_fixture_env.py, about 172 s above that worst case: that margin lets the parts no bound
-# covers (the 171 s rest and the 12.1 s replays, about 183 s as measured) take up to 355 s, about 1.9 times
-# as long, before the entry would cut a run whose census bounds all ran out. Measured runs stay far under it
-# (the entry's own comment records them).
+# of 23.9 at its start and 29.6 at its end, took 367.0 s wall and passed, its replays (the close-sweep
+# reverts and the mutation replays) 12.1 s of it (from its entry-restore line to its last line).
+# The worst case over those terms: a --self-test run ends by at most 680 (table) + 945 (census rows) + 7290
+# (fixture observe calls) = 8915 s (BOUND) plus the parts not summed (about 171 s, MEASURED), about 9086 s;
+# a --red-on-revert run by at most 8915 + 880 (flips) + 870 (mutation replays) = 10665 s (BOUND) plus the
+# parts not summed (about 171 + 12.1 = 183.1 s, MEASURED), about 10848.1 s. Both exceed the 1200 s default
+# member bound, as do the census bounds alone (680 + 945 + 880 = 2505 s), so the member carries its own
+# 2700 s entry in tools/selftest_git_fixture_env.py. That entry is BELOW the worst case ON PURPOSE, a
+# deliberate shorter deadline under the kill-timeout rule: the 30 s observe bounds summed are a ceiling no
+# run approaches, and a bound near it would let a hung run hold the config lane for over three hours. It is
+# sized from measured runs with a stated margin: about 7.4 times the slowest (367.0 s, --red-on-revert, the
+# entry's own comment records the runs), and it still covers every census bound above spent in full plus
+# the measured rest (2505 + 183.1 = 2688.1 s). A run that reaches it is killed at its bound and reported as
+# that lane's deadline (cannot evaluate, attributed to the bound), never as a failure of this self-test.
 _CENSUS_BOUND_CAP = 600
 _CENSUS_TOTAL_CAP = 720
 # The most a killed entry waits after its group kill, once for its pipes and once more for its group to empty.
 _CENSUS_KILL_WAIT = 5
+# The most _census_run reads from one pipe on the last pass after the leader's exit before it takes a pipe
+# still not at its end of file as held by a descendant: 16 MiB, 16 times the default fs.pipe-max-size of
+# 1 MiB (the most an unprivileged process can raise its pipe to unless that limit is raised), so a pipe an
+# exited leader left full is read to its end of file unless its size was raised above 16 MiB.
+_CENSUS_LAST_READ_CAP = 16 * 1024 * 1024
 
 # Every self-test that maps a descriptor census error (_StCensusError) to cannot-evaluate, each with the census
 # caller that reaches its clause: (path, census caller, self-test arguments, kill bound in seconds).
@@ -2574,10 +2593,10 @@ def _census_table_failures(mappings):
     row passes, the bounds plus 2 * _CENSUS_KILL_WAIT s for every entry (the most a killed entry spends after
     its kill) must together be at most _CENSUS_TOTAL_CAP s, which bounds what the entries spend in their drain
     and post-kill waits; the fork and exec of each entry's leader before its wait begins, and each wait's poll
-    overshoot, lie outside that arithmetic and are not bounded by it. A
-    refused bound of ordinary size is shown as itself (-1000000000 included); only one whose text would be huge
-    (conversion of such an int to text raises) is summarised as below -1000000000. Returns [] when the table
-    may run."""
+    overshoot, lie outside that arithmetic and are not bounded by it. A refused bound of -1000000000 or
+    above is shown as itself (-1000000000 included); every bound below -1000000000 (-1000000001 as much as
+    one whose conversion to text would raise) is shown as below -1000000000. Returns [] when the table may
+    run."""
     failures = []
     if not mappings:
         failures.append("census-mapping table: it is empty")
@@ -2631,9 +2650,9 @@ def _census_run(args, bound):
     the code taken from that reap itself, even when that state is first seen on the pass where the deadline
     has already run out or on the one last pass the drain makes once it has: that pass runs the same
     os.waitid again and, when the leader has exited, reads each pipe still registered without blocking
-    until its end of file or until it is empty (at most 16 reads each), all before the group kill is
-    decided; nothing is killed on that path (a descendant that had released the output pipes can outlive
-    the run, and one that left the group is never reached). Whenever something other than this function
+    until its end of file, until it is empty, or until it has given more than _CENSUS_LAST_READ_CAP bytes
+    on that pass, all before the group kill is decided; nothing is killed on that path (a descendant that
+    had released the output pipes can outlive the run, and one that left the group is never reached). Whenever something other than this function
     reaps the leader first (the kernel, with SIGCHLD ignored at that point despite the checks above, so
     SA_NOCLDWAIT or a SIG_IGN set after them, or another reaper in this same process), whichever of the
     drain's os.waitid or that final os.waitpid runs next raises ChildProcessError: that run fails closed as
@@ -2643,10 +2662,11 @@ def _census_run(args, bound):
     On every other path out of the drain (the bound spent, or an exception such as
     an interrupt raised inside it) the leader is, barring the undetected reapers above, an unreaped
     child, so the group id still names this group:
-    the cleanup sends the whole group SIGKILL and the leader is reaped only after that (on an exception, by
-    the Popen exit as the exception propagates; on a KeyboardInterrupt that exit waits for it only up to
-    0.25 s and leaves a leader not yet gone by then to the subprocess module's later cleanup, which reaps it
-    once). That kill is a best effort with two residuals this function does not close: a raising handler for
+    the cleanup sends the whole group SIGKILL and the leader is reaped only after that (after a bound-spent
+    kill, by communicate's wait below, or by the Popen exit's wait only when communicate times out on a
+    pipe still held; on an exception, by the Popen exit as the exception propagates; on a KeyboardInterrupt
+    that exit waits for it only up to 0.25 s and leaves a leader not yet gone by then to the subprocess
+    module's later cleanup, which reaps it once). That kill is a best effort with two residuals this function does not close: a raising handler for
     a second pending signal (a second interrupt among them) can fire at the kill call itself and skip it, and
     a raising handler for a signal other than SIGINT can fire between the leader's construction and the
     drain, before the cleanup is armed; either leaves the group running with no kill. Only after a bound-spent
@@ -2655,19 +2675,22 @@ def _census_run(args, bound):
     is polled with signal 0 every 0.05 s until no member is left, for up to _CENSUS_KILL_WAIT s (an orphaned
     member is reaped by whatever adopted it), and it returns (None, b"", note), note naming what was still
     there, or "". The bound can also run out after the leader has exited, while a descendant still holds a
-    pipe (the last pass found a pipe empty but not at its end of file, or still not at it after 16 reads):
-    the drain observed that exit with WNOWAIT by that last pass, so the leader is still an unreaped zombie
+    pipe (the last pass found a pipe empty but not at its end of file, or still not at it after more than
+    _CENSUS_LAST_READ_CAP bytes): the drain observed that exit with WNOWAIT by that last pass, so the leader is still an unreaped zombie
     when the group is killed, and the kill cannot change its status. It is reaped with os.waitpid only after
     the kill, and after the same pipe drain and group poll the run returns (exit code, stderr bytes, note),
     the code the leader's own, the stderr everything read including that drain, and the note opening with
     "a descendant still held its output pipes" (then what was still there), so a caller reports the callee's
     own outcome and the descendant. What this guarantees: a leader whose exit the last pass's os.waitid
     sees is never reported as a bound kill, and the descendant note is added only when a pipe was still
-    open on that pass. One window stays open, a disclosed residual: a leader that exits after the last
-    pass's os.waitid and before the group kill is reported as killed at its bound, (None, b"", note). The
-    kill cannot change that leader's status, and the reap after the kill (the Popen exit's wait) reads it,
-    but this function returns no code for it; a status of -9 could not be told from the group kill's
-    SIGKILL in any case. Should the post-kill os.waitpid find the leader already reaped (an undetected
+    open on that pass: empty with its write end still held, or still giving data after more than
+    _CENSUS_LAST_READ_CAP bytes (so a pipe an exited leader left holding more than that, possible only
+    where its size was raised above that cap, also gets the note with no descendant). One window stays
+    open, a disclosed residual: a leader that exits after the last pass's os.waitid and before the group
+    kill is reported as killed at its bound, (None, b"", note). The kill cannot change that leader's
+    status, and the reap after the kill reads it (communicate's wait, or the Popen exit's wait only when
+    communicate times out on a pipe still held), but this function returns no code for it; a status of -9
+    could not be told from the group kill's SIGKILL in any case. Should the post-kill os.waitpid find the leader already reaped (an undetected
     reaper), its status is gone and the run returns (None, b"", note) with the note opening with "cannot
     evaluate:". SIGINT is blocked in this thread from before the leader's construction until the drain is
     entered, so a KeyboardInterrupt from SIGINT cannot land between the fork and the cleanup that kills the
@@ -2739,9 +2762,12 @@ def _census_run(args, bound):
                         # The leader has exited and the bound is spent: read each pipe still registered
                         # without blocking, until its end of file or until it is empty, so a pipe whose
                         # end of file was not read yet is not taken for one a descendant still holds.
-                        # The 16 reads bound this pass when something keeps writing.
+                        # The byte cap bounds this pass when something keeps writing: a pipe that gave
+                        # more than _CENSUS_LAST_READ_CAP bytes here without its end of file stays
+                        # registered, so one holding at most that much is always read to its end.
                         for key in list(pipes.get_map().values()):
-                            for _ in range(16):
+                            taken = 0
+                            while taken <= _CENSUS_LAST_READ_CAP:
                                 try:
                                     chunk = os.read(key.fd, 65536)
                                 except BlockingIOError:   # empty but still open: something holds it
@@ -2749,6 +2775,7 @@ def _census_run(args, bound):
                                 if not chunk:
                                     pipes.unregister(key.fileobj)
                                     break
+                                taken += len(chunk)
                                 if key.fileobj is proc.stderr:
                                     err += chunk
                     if exited and not pipes.get_map():
@@ -3506,11 +3533,10 @@ def _census_exit_outlived_row(parent, exit_code):
 
 def _census_exit_at_bound_row(parent, race):
     """A callee that ends on its own, with no descendant, while its bound runs out: the stand-in sleeps 1 s
-    and exits 2 with its cannot-evaluate report, under a 3 s bound. os.waitid is wrapped (and restored in a
-    finally, with subprocess.Popen, wrapped to record the leader's pid and construction time) so that the
-    drain's first os.waitid on the leader, which finds it still running, pauses once until the leader has
-    exited (seen with WNOWAIT, reaping nothing) and at least 2 s past the bound after its construction, so
-    past the drain's deadline, for at most TIMEOUT s. Race "stale": the wrapper then hands back the result
+    and exits 2 with its cannot-evaluate report, under a 3 s bound, through _census_paused_run: the drain's
+    first os.waitid on the leader, which finds it still running, pauses once until the leader has exited
+    (seen with WNOWAIT, reaping nothing) and at least 2 s past the bound after its construction, so past
+    the drain's deadline, for at most TIMEOUT s. Race "stale": the wrapper then hands back the result
     read before the pause (still running), the leader's exit landing between the drain's os.waitid and its
     deadline check. Race "unread": the wrapper hands back a fresh read (exited), the exit landing after the
     drain's last select, so both pipes are still registered with their end of file unread. Either way
@@ -3520,6 +3546,81 @@ def _census_exit_at_bound_row(parent, race):
     parent.mkdir()
     (parent / "standin.py").write_text(_CENSUS_STANDIN, encoding="utf-8")
     label = "census exit at bound %s row" % race
+    code, err, note, paused = _census_paused_run([str(parent / "standin.py"), "*", "1"], race == "stale")
+    if paused != ["exited past the deadline"]:
+        return ["%s: the pause did not reproduce the race (%r); nothing was reproduced" % (label, paused)]
+    err = err.decode("utf-8", "replace")
+    if code != 2 or note or "SELF-TEST ERROR: descriptor census cannot evaluate descriptor" not in err:
+        return ["%s: expected exit 2 with no note and the stand-in's report, got %r with note %r and stderr "
+                "%r" % (label, code, note, err.strip()[-200:])]
+    return []
+
+
+# The stand-in of _census_exit_at_bound_full_row: it raises its stdout pipe to 1 MiB (exit 3 with a line
+# naming the refusal when that is refused or grants less than argv[1] bytes), writes argv[1] bytes to it,
+# which then fit without a reader, prints a cannot-evaluate report on stderr and exits 2. It starts no
+# descendant, so once it has exited nothing else holds either pipe.
+_CENSUS_FULL_STANDIN = """import fcntl, os, sys
+size = int(sys.argv[1])
+try:
+    granted = fcntl.fcntl(1, getattr(fcntl, "F_SETPIPE_SZ", 1031), 1048576)
+except OSError as exc:
+    granted = exc
+if type(granted) is not int or granted < size:
+    print("pipe size not granted: %r" % (granted,), file=sys.stderr)
+    sys.exit(3)
+view = memoryview(b"x" * size)
+while view:
+    view = view[os.write(1, view):]
+print("SELF-TEST ERROR: descriptor census cannot evaluate descriptor 3: stand-in report", file=sys.stderr)
+sys.exit(2)
+"""
+
+
+def _census_exit_at_bound_full_row(parent, size, cap=None):
+    """A callee that ends on its own, with no descendant, while its bound runs out, leaving `size` bytes in
+    a stdout pipe it raised to 1 MiB (_CENSUS_FULL_STANDIN), under the same pause as the "unread" race of
+    _census_exit_at_bound_row (_census_paused_run with a fresh read), so the last pass finds the leader
+    exited and those bytes still ahead of the pipe's end of file. With cap given, _CENSUS_LAST_READ_CAP is
+    set to it for the run in the module the _census_run in use reads it from (restored in a finally). A pipe holding at most the cap must be read to its end of
+    file: _census_run must return exit 2, no note and the stand-in's report. A pipe holding more than the
+    cap must be taken as held: exit 2, the stand-in's report and the note opening with "a descendant still
+    held its output pipes". A pause that never saw the leader exit past the deadline reproduced nothing and
+    is a failure. Returns (failures, outcome): outcome "ran", or the skip reason when the stand-in was
+    refused the larger pipe (exit 3; the host's pipe limits, not the drain), with no failures."""
+    parent.mkdir()
+    (parent / "standin.py").write_text(_CENSUS_FULL_STANDIN, encoding="utf-8")
+    label = "census exit at bound full row (%d bytes, cap %s)" % (size, "default" if cap is None else cap)
+    scope = _census_run.__globals__    # the module the _census_run in use reads its cap from (a flip's copy)
+    real_cap = scope["_CENSUS_LAST_READ_CAP"]
+    if cap is not None:
+        scope["_CENSUS_LAST_READ_CAP"] = cap
+    try:
+        code, err, note, paused = _census_paused_run([str(parent / "standin.py"), "*", str(size)], False)
+    finally:
+        scope["_CENSUS_LAST_READ_CAP"] = real_cap
+    err = err.decode("utf-8", "replace")
+    if code == 3 and "pipe size not granted" in err:
+        return [], "the stand-in's stdout pipe could not be raised to 1 MiB: " + err.strip()[-200:]
+    if paused != ["exited past the deadline"]:
+        return (["%s: the pause did not reproduce the race (%r); nothing was reproduced" % (label, paused)],
+                "ran")
+    held = cap is not None and size > cap
+    noted = note.startswith("a descendant still held its output pipes") if held else note == ""
+    if code != 2 or not noted or "SELF-TEST ERROR: descriptor census cannot evaluate descriptor" not in err:
+        return ["%s: expected exit 2 with %s and the stand-in's report, got %r with note %r and stderr %r"
+                % (label, "the descendant note" if held else "no note", code, note, err.strip()[-200:])], "ran"
+    return [], "ran"
+
+
+def _census_paused_run(argv, stale):
+    """_census_run on argv under a 3 s bound with os.waitid wrapped (and restored in a finally, with
+    subprocess.Popen, wrapped to record the leader's pid and construction time) so that the drain's first
+    os.waitid on the leader, which finds it still running, pauses once until the leader has exited (seen
+    with WNOWAIT, reaping nothing) and at least 2 s past the bound after its construction, so past the
+    drain's deadline, for at most TIMEOUT s. With stale true the wrapper then hands back the result read
+    before the pause (still running); otherwise a fresh read (exited). Returns (code, err, note, paused),
+    paused ["exited past the deadline"] when the pause reproduced that state."""
     bound = 3
     real_popen = subprocess.Popen
     real_waitid = os.waitid
@@ -3548,20 +3649,14 @@ def _census_exit_at_bound_row(parent, race):
                 paused.append("the leader had not exited past the deadline %d s into the pause" % TIMEOUT)
                 break
             time.sleep(0.05)
-        return result if race == "stale" else real_waitid(idtype, pid, flags)
+        return result if stale else real_waitid(idtype, pid, flags)
 
     subprocess.Popen, os.waitid = capturing, pausing
     try:
-        code, err, note = _census_run([str(parent / "standin.py"), "*", "1"], bound)
+        code, err, note = _census_run(argv, bound)
     finally:
         subprocess.Popen, os.waitid = real_popen, real_waitid
-    if paused != ["exited past the deadline"]:
-        return ["%s: the pause did not reproduce the race (%r); nothing was reproduced" % (label, paused)]
-    err = err.decode("utf-8", "replace")
-    if code != 2 or note or "SELF-TEST ERROR: descriptor census cannot evaluate descriptor" not in err:
-        return ["%s: expected exit 2 with no note and the stand-in's report, got %r with note %r and stderr "
-                "%r" % (label, code, note, err.strip()[-200:])]
-    return []
+    return code, err, note, paused
 
 
 # The driver appended to the flipped _census_run copy: the interrupt row of _census_interrupt_row, run in a
@@ -3633,6 +3728,7 @@ def _census_interrupt_flip_red(parent, script):
         "import os, selectors, signal, subprocess, sys, time\n"
         + "CENSUS_DRIVER = " + repr(CENSUS_DRIVER) + "\n"
         + "_CENSUS_KILL_WAIT = " + repr(_CENSUS_KILL_WAIT) + "\n"
+        + "_CENSUS_LAST_READ_CAP = " + repr(_CENSUS_LAST_READ_CAP) + "\n"
         + body.replace(anchor, "if not ended and proc.poll() is None:", 1)
         + _CENSUS_FLIP_DRIVER, encoding="utf-8")
     try:
@@ -3668,6 +3764,7 @@ def _census_run_flipped(parent, script, name, old, new):
         "import os, selectors, signal, subprocess, sys, time\n"
         + "CENSUS_DRIVER = " + repr(CENSUS_DRIVER) + "\n"
         + "_CENSUS_KILL_WAIT = " + repr(_CENSUS_KILL_WAIT) + "\n"
+        + "_CENSUS_LAST_READ_CAP = " + repr(_CENSUS_LAST_READ_CAP) + "\n"
         + body.replace(old, new, 1), encoding="utf-8")
     spec = importlib.util.spec_from_file_location("check_release_cut_" + name.replace(" ", "_"), location)
     module = importlib.util.module_from_spec(spec)
@@ -3887,6 +3984,31 @@ def _census_exit_at_bound_flip_red(parent, script, race):
     if not any(want in failure for failure in got):
         return ["census exit at bound flip (%s): expected the row to report %r, got %r" % (race, want, got)]
     return []
+
+
+def _census_exit_at_bound_full_flip_red(parent, script):
+    """The full-pipe row at 983041 bytes against a copy of _census_run whose last-pass reads are put back to
+    at most 16 reads of 65536 bytes per pipe: the byte-capped loop's header replaced by `for _ in range(16):`,
+    this file's own text otherwise untouched. The 16 reads then stop one byte short of the end of file and
+    the copy adds the descendant note with no descendant, and the real _census_exit_at_bound_full_row, run
+    with this module's _census_run swapped for the copy (restored in a finally), must report that note.
+    Returns (failures, outcome): ([], "ran") when the row turned red, a named failure when it did not, and
+    the row's skip reason with no failures when the stand-in's pipe could not be raised."""
+    this = sys.modules[__name__]
+    flipped = _census_run_flipped(parent, script, "census exit at bound full flip",
+                                  "while taken <= _CENSUS_LAST_READ_CAP:", "for _ in range(16):")
+    real = this._census_run
+    this._census_run = flipped
+    try:
+        got, outcome = _census_exit_at_bound_full_row(parent / "row", 983041)
+    finally:
+        this._census_run = real
+    if outcome != "ran":
+        return [], outcome
+    if not any("with note 'a descendant still held its output pipes" in failure for failure in got):
+        return ["census exit at bound full flip: expected the row to report the descendant note, got %r"
+                % (got,)], outcome
+    return [], outcome
 
 
 def _close_harness_checks(parent, script):
@@ -4175,7 +4297,34 @@ def _self_test_isolated(red_on_revert):
                 print("FAIL " + failure, file=sys.stderr)
             check("census-exit-at-bound-" + race, not race_failures)
             print("PASS census-exit-at-bound-" + race)
+        # A pipe an exited leader left holding more than 16 reads' worth (983041 bytes, no descendant) is
+        # read to its end of file; at the cap set to 983040 bytes, 983040 bytes are read to the end and
+        # 983041 bytes are taken as held.
+        for name, size, cap in (("full", 983041, None), ("cap-at", 983040, 983040),
+                                ("cap-over", 983041, 983040)):
+            full_failures, full_outcome = _census_exit_at_bound_full_row(
+                parent / ("census-exit-at-bound-" + name), size, cap)
+            for failure in full_failures:
+                print("FAIL " + failure, file=sys.stderr)
+            # a skipped row is reported as a skip, never recorded as a passed check id
+            if full_outcome == "ran":
+                check("census-exit-at-bound-" + name, not full_failures)
+                print("PASS census-exit-at-bound-" + name)
+            else:
+                skips.append("census-exit-at-bound-" + name)
+                print("SKIP census-exit-at-bound-" + name + " (" + full_outcome + ")")
         if red_on_revert:
+            flip_failures, flip_outcome = _census_exit_at_bound_full_flip_red(
+                parent / "census-exit-at-bound-full-flip", script)
+            for failure in flip_failures:
+                print("FAIL " + failure, file=sys.stderr)
+            # a skipped flip is reported as a skip, never recorded as a passed check id
+            if flip_outcome == "ran":
+                check("census-exit-at-bound-full-red", not flip_failures)
+                print("RED census-exit-at-bound-full at the last pass's 16-read loop")
+            else:
+                skips.append("census-exit-at-bound-full-red")
+                print("SKIP census-exit-at-bound-full-red (" + flip_outcome + ")")
             for mode in ("libc", "unreadable"):
                 flip_failures = _census_kernel_sigchld_flip_red(parent / ("census-sigchld-flip-" + mode),
                                                                 script, mode)
