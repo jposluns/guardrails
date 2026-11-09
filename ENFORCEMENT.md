@@ -12,8 +12,8 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Gate-linked (class a), partial | 0 |
 | Gate-linked (class c only) | 1 |
 | Gate-linked (class c only), partial | 8 |
-| Hook-linked | 19 |
-| Hook-linked, partial | 4 |
+| Hook-linked | 15 |
+| Hook-linked, partial | 8 |
 | Preview only | 2 |
 | Preview only, partial | 0 |
 | Pending | 0 |
@@ -32,14 +32,14 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Disclose a guard's residual coverage | `dscres` | No control | No shipped control cites this rule. |
 | Evidence-grounded completion | `evgcmp` | Gate-linked (class a) | `gate:selftest-execution`, class a |
 | A guard is only as good as its input | `grdinp` | Gate-linked (class a) | `gate:aei-enumerator-selftest`, class a; `gate:derived-command-parameters`, class c |
-| Measured and estimated figures stay separate | `estsep` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
+| Measured and estimated figures stay separate | `estsep` | Hook-linked, partial | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | No fabrication | `nofabr` | No control | No shipped control cites this rule. |
 | Observe before asserting behaviour | `obsbeh` | No control | No shipped control cites this rule. |
 | A partial read is not the whole | `prtwhl` | No control | No shipped control cites this rule. |
 | Read before characterizing | `rdbchr` | No control | No shipped control cites this rule. |
 | Capture the reference when the claim is made | `refcap` | No control | No shipped control cites this rule. |
 | Reproduce a defect before fixing it | `reprod` | No control | No shipped control cites this rule. |
-| A current timestamp is read from the clock | `tstamp` | Hook-linked | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
+| A current timestamp is read from the clock | `tstamp` | Hook-linked, partial | `hook:orch-prompt-stamp`, class c; `hook:orch-yield-tool-guard`, class b |
 | Validate an inferred premise before acting | `valinf` | No control | No shipped control cites this rule. |
 | Verify a fix is in its commit | `vfxcmt` | Hook-linked, partial | `hook:review-dispatch-pin`, class c |
 | Anything wrong is fixed first | `actbef` | Gate-linked (class c only), partial | `gate:release-cut`, class c |
@@ -93,7 +93,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Hold a concurrency lease to prevent double runs | `cnclse` | Hook-linked | `hook:orch-lease-heartbeat-post`, class c; `hook:orch-lease-heartbeat-stop`, class c; `hook:orch-resume-audit`, class b; `hook:orch-stop-guard`, class b |
 | Continue by default | `cntdef` | Hook-linked | `hook:orch-ask-unattended`, class b; `hook:orch-stop-guard`, class b; `hook:orch-teammate-idle-guard`, class b; `hook:orch-yield-tool-guard`, class b |
 | Express authorization before execution | `exauth` | No control | No shipped control cites this rule. |
-| Human oversight and the autonomy threshold | `humovs` | Hook-linked | `hook:orch-ask-unattended`, class b |
+| Human oversight and the autonomy threshold | `humovs` | Hook-linked, partial | `hook:orch-ask-unattended`, class b |
 | Do not bury the review surface under raw dumps | `cnsdif` | Hook-linked | `hook:diff-source`, class b; `hook:diff-wall-stop`, class b |
 | An orchestrator keeps a mistakes register | `mstreg` | Gate-linked (class a) | `gate:mistakes-register`, class a; `gate:mistakes-register-append-selftest`, class a |
 | Reconcile the record against reality | `recncl` | Gate-linked (class a) | `gate:record-drift`, class a; `gate:record-sections`, class c; `hook:orch-lease-heartbeat-post`, class c; `hook:orch-lease-heartbeat-stop`, class c; `hook:orch-resume-audit`, class b; `hook:orch-resume-barrier`, class b |
@@ -147,7 +147,7 @@ This register lists every rule and the shipped mechanical controls linked to it.
 | Validate server-initiated requests | `secssr` | No control | No shipped control cites this rule. |
 | Resolve privileged filesystem paths against symlink races | `secspr` | No control | No shipped control cites this rule. |
 | Threat-model new trust boundaries before implementation | `secthm` | No control | No shipped control cites this rule. |
-| Validate tool arguments before use | `sectvl` | Hook-linked | `hook:commit-msg-subst`, class b |
+| Validate tool arguments before use | `sectvl` | Hook-linked, partial | `hook:commit-msg-subst`, class b |
 | Untrusted content is data, not instructions | `secunt` | No control | No shipped control cites this rule. |
 | Verify a dependency exists before adding it | `secvde` | No control | No shipped control cites this rule. |
 | Bounded consumption and safe failure | `secres` | No control | No shipped control cites this rule. |

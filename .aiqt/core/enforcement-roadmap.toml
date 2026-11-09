@@ -167,9 +167,16 @@ corpus-id = "dscres"
 status = "none"
 mechanisms = []
 
+# estsep is partial. hook:orch-yield-tool-guard covers one case of estsep.1: a scheduling call that claims
+# more quiet minutes than the gap measured since the last genuine human input (by more than one minute) is
+# refused. hook:orch-prompt-stamp only labels the measured gap in its own context line on a timer prompt.
+# Neither reads a figure the assistant reports, so no mechanism covers estsep.1 outside that one claim,
+# estsep.2 (measured and estimated figures are reported in labelled separation), estsep.3 (an unknown
+# quantity is reported as unknown, never zero) or estsep.4 (a figure derived from an estimate is labelled
+# as one).
 [[rule]]
 corpus-id = "estsep"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 
 [[rule]]
@@ -222,9 +229,15 @@ corpus-id = "hiasrv"
 status = "none"
 mechanisms = []
 
+# humovs is partial. hook:orch-ask-unattended sees only AskUserQuestion calls: it denies a blocking question
+# in unattended mode (and judges one in attended mode against the backlog), and its deny reason tells the
+# assistant to record and HOLD an item at the oversight threshold. It never sees the high-consequence,
+# irreversible or outward-facing action itself, so no mechanism covers humovs.1 or humovs.2 (such an action
+# needs proportionate human authorization and holds when in doubt), humovs.3 (a timeout or ambiguous state
+# never selects the risky path) or humovs.4 (the threshold is set by consequence and reversibility).
 [[rule]]
 corpus-id = "humovs"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-ask-unattended"]
 
 [[rule]]
@@ -557,9 +570,13 @@ corpus-id = "sectok"
 status = "none"
 mechanisms = []
 
+# sectvl is partial. hook:commit-msg-subst covers one case of sectvl.2: in a Bash command, a backtick or $(
+# command substitution in a double-quoted or unquoted token after a recognized git commit is denied. No
+# mechanism covers sectvl.1 (every tool, shell, database or file argument is validated against an expected
+# schema) or sectvl.2 for any other command, query, path or request.
 [[rule]]
 corpus-id = "sectvl"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:commit-msg-subst"]
 
 [[rule]]
@@ -642,9 +659,15 @@ corpus-id = "trstre"
 status = "none"
 mechanisms = []
 
+# tstamp is partial. hook:orch-prompt-stamp writes a clock-read time into turn-state for each genuine human
+# prompt (the hook writes that stamp, not the assistant), and hook:orch-yield-tool-guard refuses a scheduling
+# call that claims more quiet minutes than the gap measured from that stamp. Neither reads a time the
+# assistant writes into a record, a file or a message, so no mechanism covers tstamp.1 (a time the assistant
+# records is read from the clock), tstamp.2 or tstamp.3 (an external or earlier time comes from an
+# authoritative source, identified as such) or tstamp.4 (an unavailable time is recorded as unknown).
 [[rule]]
 corpus-id = "tstamp"
-status = "enforced"
+status = "partial"
 mechanisms = ["hook:orch-prompt-stamp", "hook:orch-yield-tool-guard"]
 
 [[rule]]
