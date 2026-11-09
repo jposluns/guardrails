@@ -2,7 +2,7 @@
 """Brief carry lint: a derived brief carries every active row of its carry ledger, word for word.
 
   check_brief_carry.py --ledger ABS_LEDGER BRIEF   exit 0 match, 1 finding, 2 cannot evaluate
-  check_brief_carry.py --self-test                 synthetic fixtures for every refusal and control
+  check_brief_carry.py --self-test                 fixtures for the cases its PASS line names
   check_brief_carry.py --self-test --execution-report ABS_PATH
   any other argument list is refused with exit 2
 
@@ -182,14 +182,34 @@ def _key_problems(row, n):
     return problems
 
 
+# Each field has its own predicate, so the self-test can switch off one field rule at a time and
+# show that its case alone turns green.
+
+def _id_ok(rid):
+    return (isinstance(rid, str) and rid != "" and rid.isprintable()
+            and not any(ch.isspace() for ch in rid))
+
+
 def _gate_ok(gate):
     return (isinstance(gate, str) and gate != "" and gate[0] in GATE_FIRST
             and all(ch in GATE_REST for ch in gate))
 
 
+def _plain_line(value):
+    return isinstance(value, str) and not any(
+        unicodedata.category(ch) in BAD_TEXT_CATEGORIES for ch in value)
+
+
 def _text_ok(text):
-    return isinstance(text, str) and not any(
-        unicodedata.category(ch) in BAD_TEXT_CATEGORIES for ch in text)
+    return _plain_line(text)
+
+
+def _reason_ok(reason):
+    return _plain_line(reason)
+
+
+def _status_ok(status):
+    return status in STATUSES
 
 
 def _ts_ok(ts):
@@ -205,8 +225,7 @@ def _ts_ok(ts):
 def _field_problems(row, n):
     problems = []
     rid = row.get("id")
-    if not isinstance(rid, str) or rid == "" or not rid.isprintable() or any(
-            ch.isspace() for ch in rid):
+    if not _id_ok(rid):
         problems.append("ledger line {}: id {} is not a non-empty printable word".format(
             n, _shown(rid)))
     if "ts" in row and not _ts_ok(row["ts"]):
@@ -218,9 +237,9 @@ def _field_problems(row, n):
     if "text" in row and not _text_ok(row["text"]):
         problems.append("ledger line {}: text {} is not one line of plain text".format(
             n, _shown(row["text"])))
-    if "status" in row and row["status"] not in STATUSES:
+    if "status" in row and not _status_ok(row["status"]):
         problems.append("ledger line {}: unknown status {}".format(n, _shown(row["status"])))
-    if "reason" in row and not _text_ok(row["reason"]):
+    if "reason" in row and not _reason_ok(row["reason"]):
         problems.append("ledger line {}: reason {} is not one line of plain text".format(
             n, _shown(row["reason"])))
     return problems
@@ -518,6 +537,10 @@ def _nothing(*_args):
     return []
 
 
+def _always_true(*_args):
+    return True
+
+
 def _every_status_active(rows):
     return {rid: (pair, "active") for rid, (pair, _status) in _real_current_pairs(rows).items()}
 
@@ -627,8 +650,6 @@ def _self_test():
              "_key_problems", _nothing),
             ("ledger/missing-key", _ledger([_row("CC-1", A_GATE, A_TEXT, _override={"ts": None})])
              .replace('"ts": null, ', ""), one_brief, "_key_problems", _nothing),
-            ("ledger/control-in-text", _ledger([_row("CC-1", A_GATE, "a" + chr(0x200B) + "b")]),
-             _brief([_carry(A_GATE, "a" + chr(0x200B) + "b")]), "_field_problems", _nothing),
             ("ledger/id-rebinds-pair",
              _ledger(one + [_row("CC-1", A_GATE, A_TEXT + " now", "retired", reason="reworded")]),
              one_brief, "_rebind_problems", _nothing)):
@@ -636,6 +657,29 @@ def _self_test():
         flipped = _flipped(flip_name, flip, ledger, brief)
         check(name, code == 2 and findings == [] and len(errors) >= 1 and flipped != 2,
               (code, errors, flipped))
+
+    # ---------- ledger: one bad field per ledger, and its own predicate's flip passes it ----------
+    zwsp = "a" + chr(0x200B) + "b"
+    for name, ledger, brief, flip_name, needle in (
+            ("ledger/bad-id", _ledger([_row("CC 1", A_GATE, A_TEXT)]), one_brief, "_id_ok",
+             "is not a non-empty printable word"),
+            ("ledger/bad-ts", _ledger([_row("CC-1", A_GATE, A_TEXT, ts="2026-11-01 00:00:00Z")]),
+             one_brief, "_ts_ok", "is not YYYY-MM-DDTHH:MM:SSZ"),
+            ("ledger/bad-gate", _ledger([_row("CC-1", "_leaks", A_TEXT)]),
+             _brief([_carry("_leaks", A_TEXT)]), "_gate_ok", "is not a roster gate name"),
+            ("ledger/control-in-text", _ledger([_row("CC-1", A_GATE, zwsp)]),
+             _brief([_carry(A_GATE, zwsp)]), "_text_ok", "text "),
+            ("ledger/bad-status",
+             _ledger([_row("CC-1", A_GATE, A_TEXT), _row("CC-2", B_GATE, B_TEXT),
+                      _row("CC-2", B_GATE, B_TEXT, "paused")]),
+             dropped, "_status_ok", "unknown status 'paused'"),
+            ("ledger/bad-reason",
+             _ledger([_row("CC-1", A_GATE, A_TEXT, reason="first line\nsecond line")]),
+             one_brief, "_reason_ok", "reason ")):
+        code, findings, errors = _case(ledger, brief)
+        flipped = _flipped(flip_name, _always_true, ledger, brief)
+        check(name, code == 2 and findings == [] and len(errors) == 1 and needle in errors[0]
+              and flipped == 0, (code, errors, flipped))
     many = [_row("CC-1", A_GATE, A_TEXT), _row("CC-2", B_GATE, B_TEXT), _row("CC-3", "leaks", "")]
     code, findings, errors = _case(
         _ledger(many), _brief([_carry(A_GATE, A_TEXT), _carry(B_GATE, B_TEXT), "CARRY leaks:"]))
@@ -701,6 +745,22 @@ def _self_test():
         code, findings, errors = _case(_ledger(one), brief)
         check(name, code == 1 and len(findings) == 1 and needle in findings[0] and errors == [],
               (code, findings, errors))
+    # A line that ends the block, a second heading and a CARRY line with no space after the colon
+    # each keep a CARRY line of an active row out of the block, so that row is also missing.
+    b_line = _carry(B_GATE, B_TEXT)
+    for name, brief, needles in (
+            ("brief/carry-after-block-ended",
+             _brief([_carry(A_GATE, A_TEXT)], after="Prose ends the block.\n" + b_line + "\n"),
+             ("outside", "missing")),
+            ("brief/second-heading-then-carry",
+             _brief([_carry(A_GATE, A_TEXT), HEADING, b_line]), ("second", "outside", "missing")),
+            ("brief/no-space-after-colon",
+             _brief([_carry(A_GATE, A_TEXT), b_line.replace(": ", ":", 1)]),
+             ("malformed", "missing"))):
+        code, findings, errors = _case(both, brief)
+        check(name, code == 1 and errors == [] and len(findings) == len(needles)
+              and all(needle in line for needle, line in zip(needles, findings)),
+              (code, findings, errors))
     code, findings, errors = _case(_ledger(one), one_brief + "\n" + "Later prose.\n")
     check("brief/one-block-ok", (code, findings, errors) == (0, [], []), (code, findings, errors))
 
@@ -728,10 +788,18 @@ def _self_test():
         return 1
     print("SELF-TEST PASS: check_brief_carry {} checks (a dropped, reworded, retired-but-carried, "
           "reactivated-but-dropped or unlisted pair exits 1, each beside its clean control, and the "
-          "comparison and status flips turn the refusals green; every kind of ledger damage exits 2 "
-          "and its own flip moves it off 2; a missing, non-regular, non-UTF-8 or CR input exits 2; "
-          "the brief structure errors exit 1; zero, one and many rows pass when carried; an "
-          "unrecognized argument exits 2)".format(len(EXECUTED)))
+          "comparison and status flips turn the refusals green; a retired row with no reason, a "
+          "broken chain, a duplicated key, invalid JSON, a seq gap, nesting too deep, a retired "
+          "first row, a repeated status, a CR, a blank line, a duplicate active pair, a missing "
+          "final LF, an unknown or missing key and an id that changes its pair each exit 2 and a "
+          "flip of the rule that refuses it moves it off 2; a bad id, ts, gate, text, status or "
+          "reason is the only error of its ledger, exits 2, and a flip of that field's own "
+          "predicate alone passes the brief; a missing, non-regular, non-UTF-8 or CR input or a "
+          "relative ledger path exits 2; a CARRY line before the block, a repeated line, a second "
+          "heading or a malformed CARRY line exits 1 with that one finding; a CARRY line after the "
+          "block ended, after a second heading (also reported) or with no space after the colon "
+          "exits 1 with that finding and its row reported missing; zero, one and many rows pass "
+          "when carried; an unrecognized argument exits 2)".format(len(EXECUTED)))
     return 0
 
 

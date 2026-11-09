@@ -5388,8 +5388,14 @@ expected-check-ids = [
   "ledger/no-final-newline",
   "ledger/unknown-key",
   "ledger/missing-key",
-  "ledger/control-in-text",
   "ledger/id-rebinds-pair",
+  # ---------- ledger: one bad field each, and only its own predicate's flip passes it ----------
+  "ledger/bad-id",
+  "ledger/bad-ts",
+  "ledger/bad-gate",
+  "ledger/control-in-text",
+  "ledger/bad-status",
+  "ledger/bad-reason",
   "ledger/well-formed-ok",
   # ---------- input: missing, non-regular, non-UTF-8 and CR inputs exit 2 ----------
   "input/ledger-missing",
@@ -5408,6 +5414,9 @@ expected-check-ids = [
   "brief/duplicate-line",
   "brief/second-heading",
   "brief/malformed-carry-line",
+  "brief/carry-after-block-ended",
+  "brief/second-heading-then-carry",
+  "brief/no-space-after-colon",
   "brief/one-block-ok",
   # ---------- bounds and the command line ----------
   "bound/zero-one-many",
