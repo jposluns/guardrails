@@ -1411,9 +1411,10 @@ def _watchdog_window_verdict(result, elapsed, timeout_s):
 def _watchdog_timer_case(label, mode, bounded=None, clock=None):
     """Private subprocess fixture: its timers belong to this process alone.
     When every check holds but the window exercise's subject run was never
-    established on this host (_watchdog_window_verdict), the exact
-    _WATCHDOG_CANNOT_EVALUATE marker is printed on the clean exit, which
-    the launching runner maps to the distinct CANNOT-EVALUATE outcome,
+    established on this host (_watchdog_window_verdict), or the inner
+    self-test returned its cannot-evaluate status (EXIT_MALFORMED), the
+    exact _WATCHDOG_CANNOT_EVALUATE marker is printed on the clean exit,
+    which the launching runner maps to the distinct CANNOT-EVALUATE outcome,
     never a pass and never a definite failure. `bounded` and `clock` exist
     for the regression runner's scripted window vectors, which drive this
     real fixture without a live bounded run; the defaults are the real
@@ -1517,7 +1518,15 @@ def _watchdog_timer_case(label, mode, bounded=None, clock=None):
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
             rc = functions[label]()
     after = signal.getitimer(which)
-    ok = (rc == EXIT_OK and not mutations and not shields and after[1] == before[1]
+    # The inner self-test's own cannot-evaluate status (EXIT_MALFORMED, which
+    # _opf_emit._backstop also returns for any exception escaping its suite,
+    # such as a fixture start that a starved host delayed past its bound) is
+    # no verdict on this case: it is honored below only when every timer,
+    # mask, handler and mutation check also holds. A definite inner failure
+    # (EXIT_FINDING, or any other status) stays a failure.
+    inner_unevaluated = type(rc) is int and rc == EXIT_MALFORMED
+    ok = ((rc == EXIT_OK or inner_unevaluated) and not mutations and not shields
+          and after[1] == before[1]
           and signal.getsignal(signum) is handler
           and signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask)
     if mode == "expiry":
@@ -1534,12 +1543,19 @@ def _watchdog_timer_case(label, mode, bounded=None, clock=None):
         print(label, mode, rc, before, after, mutations, fired, output.getvalue())
         # No save/restore or teardown mutation: the subprocess exits with its timer.
         return EXIT_FINDING
+    if inner_unevaluated:
+        # Every check held, but the inner self-test reached no verdict: its
+        # own output (the cause) goes ahead of the marker.
+        print(output.getvalue())
+        unestablished.append("the inner " + label + " self-test returned %d (cannot "
+                             "evaluate), so it reached no verdict" % rc)
     if unestablished:
-        # Every check held, but the window subject's run was never
-        # established: the exact marker on this clean exit, never a pass
-        # (the runner maps it to the distinct CANNOT-EVALUATE) and never a
-        # definite failure; a failed check above stays one (fail closed:
-        # the marker is honored only on a clean exit).
+        # Every check held, but the window subject's run (or the inner
+        # self-test) was never established: the exact marker on this clean
+        # exit, never a pass (the runner maps it to the distinct
+        # CANNOT-EVALUATE) and never a definite failure; a failed check
+        # above stays one (fail closed: the marker is honored only on a
+        # clean exit).
         print(_WATCHDOG_CANNOT_EVALUATE + " (timer/" + label + "/" + mode + ": "
               + "; ".join(unestablished) + ")")
     # No save/restore or teardown mutation: the subprocess exits with its timer.
@@ -4405,17 +4421,42 @@ def _watchdog_launcher_case(label, disposition):
         with patch.object(_opf_emit, "_run_fixture_process", failure), \
                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             control = runner()
-            control_ok = control == EXIT_FINDING and bool(statuses) and set(statuses) == {37}
+            control_statuses = list(statuses)
             statuses.clear()
             signal.signal(signal.SIGCHLD, hostile)
             result = runner()
-        ok = (control_ok and result == EXIT_FINDING and not statuses
-              and signal.getsignal(signal.SIGCHLD) == hostile)
+        after = signal.getsignal(signal.SIGCHLD)
     finally:
         signal.signal(signal.SIGCHLD, saved)
-    print("opf watchdog launcher:", label, disposition, "PASS" if ok else "FAIL",
-          "refused", result, "launched statuses", statuses)
-    return EXIT_OK if ok else EXIT_FINDING
+    reasons = _watchdog_launcher_faults(control, control_statuses, result, statuses,
+                                        after == hostile)
+    print("opf watchdog launcher:", label, disposition, "FAIL" if reasons else "PASS",
+          "refused", result, "launched statuses", statuses,
+          *(["(failed: " + "; ".join(reasons) + ")"] if reasons else []))
+    return EXIT_FINDING if reasons else EXIT_OK
+
+
+def _watchdog_launcher_faults(control, control_statuses, result, statuses, disposition_kept):
+    """Name each condition that fails one launcher leg, empty when it passes.
+    The control run (default SIGCHLD disposition) must return EXIT_FINDING
+    after launching only the injected exit-37 subject; the hostile run must
+    refuse (EXIT_FINDING) without launching anything and leave the hostile
+    disposition in place. The control's own status and statuses are named,
+    since the hostile run's printed counts alone cannot show a control
+    fault."""
+    reasons = []
+    if control != EXIT_FINDING:
+        reasons.append("control run returned %r, want %d" % (control, EXIT_FINDING))
+    if not control_statuses or set(control_statuses) != {37}:
+        reasons.append("control run launched statuses %r, want only 37"
+                       % (sorted(set(control_statuses)),))
+    if result != EXIT_FINDING:
+        reasons.append("hostile run returned %r, want %d" % (result, EXIT_FINDING))
+    if statuses:
+        reasons.append("hostile run launched statuses %r, want none" % (list(statuses),))
+    if not disposition_kept:
+        reasons.append("hostile SIGCHLD disposition not left in place")
+    return reasons
 
 
 def _fixture_fd_census():
@@ -16803,6 +16844,71 @@ def _watchdog_regression_self_test():
         if got != want:
             flip_missed.append("window fixture %s at %s s -> %r, want %r"
                                % (result, elapsed, got, want))
+    # The inner self-test's own status inside the REAL timer fixture
+    # (red-on-revert): a scripted inner self-test stands in for the emit
+    # suite. Its cannot-evaluate status (2, what _opf_emit._backstop
+    # returns for an escaped exception) with every check holding is a
+    # CLEAN exit carrying the exact marker; a definite inner failure (1),
+    # a non-int status, and a 2 beside a re-armed real timer or a
+    # forbidden signal mutation each stay a definite failure.
+    from unittest.mock import patch
+    real_setitimer = signal.setitimer
+
+    def inner_fixture(status, violation):
+        def inner():
+            if violation == "timer":
+                real_setitimer(signal.ITIMER_REAL, 3600.0)
+            elif violation == "mutation":
+                try:
+                    signal.alarm(0)
+                except AssertionError:
+                    pass
+            print("inner cause")
+            return status
+        sigalrm = signal.getsignal(signal.SIGALRM)
+        timer = signal.getitimer(signal.ITIMER_REAL)
+        buffer = io.StringIO()
+        try:
+            with patch.object(_opf_emit, "self_test", inner), \
+                    contextlib.redirect_stdout(buffer):
+                rc = _watchdog_timer_case("emit", "inactive")
+        finally:
+            signal.signal(signal.SIGALRM, sigalrm)
+            signal.setitimer(signal.ITIMER_REAL, *timer)
+        out = buffer.getvalue()
+        return (rc, _watchdog_completion_verdict(rc, out), _WATCHDOG_CANNOT_EVALUATE in out)
+
+    for status, violation, want in (
+            (EXIT_OK, None, (EXIT_OK, "pass", False)),
+            (EXIT_MALFORMED, None, (EXIT_OK, "cannot-evaluate", True)),
+            (EXIT_FINDING, None, (EXIT_FINDING, "fail", False)),
+            (3, None, (EXIT_FINDING, "fail", False)),
+            (2.0, None, (EXIT_FINDING, "fail", False)),
+            (EXIT_MALFORMED, "timer", (EXIT_FINDING, "fail", False)),
+            (EXIT_MALFORMED, "mutation", (EXIT_FINDING, "fail", False)),
+            (EXIT_FINDING, "timer", (EXIT_FINDING, "fail", False))):
+        got = inner_fixture(status, violation)
+        if got != want:
+            flip_missed.append("timer fixture inner status %r with violation %r -> %r, want %r"
+                               % (status, violation, got, want))
+    # The launcher leg's FAIL line names the condition that decided it
+    # (red-on-revert): the hostile run's counts alone read the same on a
+    # pass and on a control fault.
+    for args, want in (
+            ((EXIT_FINDING, [37, 37], EXIT_FINDING, [], True), []),
+            ((EXIT_MALFORMED, [37], EXIT_FINDING, [], True),
+             ["control run returned 2, want 1"]),
+            ((EXIT_FINDING, [], EXIT_FINDING, [], True),
+             ["control run launched statuses [], want only 37"]),
+            ((EXIT_FINDING, [37, -9], EXIT_FINDING, [], True),
+             ["control run launched statuses [-9, 37], want only 37"]),
+            ((EXIT_FINDING, [37], EXIT_OK, [37], True),
+             ["hostile run returned 0, want 1", "hostile run launched statuses [37], want none"]),
+            ((EXIT_FINDING, [37], EXIT_FINDING, [], False),
+             ["hostile SIGCHLD disposition not left in place"])):
+        got = _watchdog_launcher_faults(*args)
+        if got != want:
+            flip_missed.append("launcher faults %r -> %r, want %r" % (args, got, want))
     # The close-out allowance derivation: the real close-out code, run along
     # each derived path under a virtual clock, must fit that path's total
     # and reach each of its waits.
