@@ -4944,13 +4944,14 @@ def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0):
     """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls).
 
     bin_dir is the shared stub directory from _prepare_stubs; nothing this writes is
-    executed. PATH is bin_dir, then os.defpath: python3 and gitleaks resolve to the
-    fixtures, and the real executables these launches reach are /bin/sh, the
-    interpreter every fixture runs, and dirname, the one other external command the
-    live runner reaches, which runs from os.defpath. dirname reads only what the
-    dynamic loader and its startup read, opens no connection, and writes only its
-    result to the pipe bash captures; the environment carries no credential (HOME is
-    the scratch tree).
+    executed. PATH is bin_dir, then os.defpath, so python3 and gitleaks resolve to
+    the fixtures. The real executables these launches reach are bash, found by
+    shutil.which on the calling process's PATH, which runs the runner text; /bin/sh,
+    the interpreter every fixture runs; and dirname, the one other external command
+    the live runner reaches, from os.defpath. What these system executables read at
+    startup depends on the host's builds and is not asserted here. The environment
+    passed to them is an explicit mapping that carries no credential, and HOME is the
+    scratch tree.
     """
     import os
     import shutil
