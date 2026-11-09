@@ -467,6 +467,7 @@ ALLOWLIST = (
      _MUTANT + " (each _CLOSE_SWEEP_REVERTS sweep revert, matched exactly once)"),
     ("tools/check_release_cut.py", "_census_construction_interrupt_row", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_sigchld_ignored_row", "shell", 1, _SAVED),
+    ("tools/check_release_cut.py", "_census_kernel_sigchld_row", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_reaped_exit_row", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_drain_reaped_row", "shell", 1, _SAVED),
     ("tools/check_release_cut.py", "_census_run_flipped", "code", 1,
