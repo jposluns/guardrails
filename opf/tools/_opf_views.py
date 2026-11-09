@@ -2604,6 +2604,28 @@ def self_test():
     return _self_test()
 
 
+def _fifo_probe_verdict(probe_result, run_control):
+    """Classify the FIFO probe's run_bounded result: "pass" for the probe's own "True"; for the TIMEOUT
+    sentinel, run_control() runs a trivial thunk under the same bound, and only when that control ALSO
+    times out was the host too starved for the bound to mean anything ("unevaluated": no verdict, never
+    a pass); a control that returns (or ends in any other sentinel) leaves the TIMEOUT a real hang, the
+    regression the probe exists to catch ("fail"). Every other result is "fail" without a control run."""
+    if probe_result == "True":
+        return "pass"
+    if probe_result != "TIMEOUT":
+        return "fail"
+    return "unevaluated" if run_control() == "TIMEOUT" else "fail"
+
+
+def _self_test_outcome(failures, unevaluated):
+    """The self-test's exit status: EXIT_CANNOT_EVALUATE when any check reached no verdict (it dominates
+    a failure, 2 > 1 > 0, and never reads as a pass), else EXIT_DRIFT when any check failed, else
+    EXIT_OK."""
+    if unevaluated:
+        return EXIT_CANNOT_EVALUATE
+    return EXIT_DRIFT if failures else EXIT_OK
+
+
 def _self_test():
     """Render-leg self-test over SYNTHETIC stores. Judged on returned exit codes and rendered bytes, never
     by grepping output. Exercises: INDEPENDENT expected-bytes goldens per view (a hand-authored expected
@@ -2624,7 +2646,7 @@ def _self_test():
     extra declared source refused); deeply nested TOML mapped to cannot-evaluate; a free-text field that
     cannot forge markdown structure; a per-record layout reported as a clear deferral; a missing and a
     malformed declared source failing closed (exit 2); and an empty store rendering valid empty views. The
-    tempdir is removed in a finally. Exit 0 pass, 1 fail, 2 error."""
+    tempdir is removed in a finally. Exit 0 pass, 1 fail, 2 error or a check that reached no verdict."""
     import tempfile
     import shutil
 
@@ -2635,6 +2657,9 @@ def _self_test():
         return EXIT_CANNOT_EVALUATE
 
     failures = []
+    # Checks that reached no verdict on this host (named with their cause): never a pass and never a
+    # definite failure; any entry makes the suite's outcome EXIT_CANNOT_EVALUATE (_self_test_outcome).
+    unevaluated = []
     checked = [0]
 
     def check(name, cond):
@@ -2792,7 +2817,38 @@ def _self_test():
         finally:
             _journal._read_contained = _orig_rc
             os.close(_ffd)
-        check("fifo-source-fails-closed-not-hang", fifo_result == "True")
+        _fifo_verdict = _fifo_probe_verdict(
+            fifo_result, lambda: run_bounded(lambda: "RAN", timeout_s=5))
+        if _fifo_verdict == "unevaluated":
+            unevaluated.append("fifo-source-fails-closed-not-hang (the probe and a trivial control "
+                               "thunk both reached run_bounded's 5 s bound: a starved host, no verdict)")
+        else:
+            check("fifo-source-fails-closed-not-hang", _fifo_verdict == "pass")
+        # The FIFO probe's TIMEOUT control, both directions (red-on-revert): a TIMEOUT whose control
+        # thunk also times out under the same bound is no verdict; one whose control returns is a real
+        # hang and stays a failure, as does an error sentinel from the control; a non-TIMEOUT result
+        # never runs the control.
+        def _scripted_control(value, calls):
+            def control():
+                calls.append(value)
+                return value
+            return control
+
+        for _probe, _control, _want, _want_calls in (
+                ("True", "TIMEOUT", "pass", 0), ("ACCEPTED", "TIMEOUT", "fail", 0),
+                ("False", "TIMEOUT", "fail", 0), ("CHILD-DIED", "TIMEOUT", "fail", 0),
+                ("TIMEOUT", "TIMEOUT", "unevaluated", 1), ("TIMEOUT", "RAN", "fail", 1),
+                ("TIMEOUT", "SETUP-ERROR:NoFork", "fail", 1)):
+            _calls = []
+            _got = _fifo_probe_verdict(_probe, _scripted_control(_control, _calls))
+            check("fifo-probe-control-{}-{}".format(_probe, _control),
+                  _got == _want and len(_calls) == _want_calls)
+        # The suite's own outcome over its failures and no-verdict entries (red-on-revert): a no-verdict
+        # entry is never a pass, and it dominates a failure (2 > 1 > 0), whose names are still printed.
+        for _f, _u, _want in (([], [], EXIT_OK), (["a"], [], EXIT_DRIFT),
+                              ([], ["u"], EXIT_CANNOT_EVALUATE), (["a"], ["u"], EXIT_CANNOT_EVALUATE)):
+            check("self-test-outcome-{}-{}".format(len(_f), len(_u)),
+                  _self_test_outcome(_f, _u) == _want)
         _slp = base / "symparent"; _slp.mkdir(); (_slp / "real").mkdir()
         (_slp / "real" / "x.index.toml").write_text("schema = 1\n", encoding="utf-8")
         (_slp / "toml").symlink_to("real")
@@ -5536,7 +5592,14 @@ def _self_test():
               file=sys.stderr)
         for f in failures:
             print("  - " + f, file=sys.stderr)
-        return EXIT_DRIFT
+    if unevaluated:
+        print("OPF-VIEWS SELF-TEST CANNOT EVALUATE ({} check(s) reached no verdict):".format(
+            len(unevaluated)), file=sys.stderr)
+        for u in unevaluated:
+            print("  - " + u, file=sys.stderr)
+    outcome = _self_test_outcome(failures, unevaluated)
+    if outcome != EXIT_OK:
+        return outcome
     print("opf-views self-test: PASS ({} checks) -- independent expected-bytes goldens per view, drift "
           "detection, the closed transform vocabulary (unknown filter/sort/group/project refused), the "
           "source-set-digest sensitivity, the block-actionability join with deduped numeric-order "
