@@ -5784,9 +5784,10 @@ def _context_plan(context):
 # directory holding the opf/ this module runs from (the _opf_adopt_complete._PACK_ROOT idiom, one level
 # higher), never an environment variable, a CLI argument or the network. When the opf/ being run is the
 # mirror plant rows install inside a product, _RELEASE_ROOT IS that product root, so the gather compares
-# the two directory identities and refuses when they are one directory: the release is never read from
-# the product it plants into. Only the self-test redirects the root, by patching this module attribute
-# over a fixture release tree.
+# the two directory identities and refuses when they are one directory. Only that equal case is refused:
+# a release root nested inside the product, or a product nested inside the release root, is read as any
+# other release root, and verify_pack_member still judges every byte. Only the self-test redirects the
+# root, by patching this module attribute over a fixture release tree.
 RELEASE_MANIFEST_REL = ".aiqt/manifest.toml"
 RELEASE_ROOT_TXT_REL = ".aiqt/release/root.txt"
 _RELEASE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -5824,9 +5825,9 @@ def gather_release_pack(source_members, product_root):
         if same:
             raise AdoptApplyError(
                 "the release root {!r} beside the running opf/ is the product root itself: the opf/ being "
-                "run is the copy installed inside the product, and the release a plan plants is never read "
-                "from the product it plants into; run the opf/ of the release being adopted, from outside "
-                "the product root (fail-closed)".format(str(_RELEASE_ROOT)))
+                "run is the copy installed inside the product, and the release a plan plants is not read "
+                "from the product root it plants into; run the opf/ of the release being adopted, from "
+                "outside the product root (fail-closed)".format(str(_RELEASE_ROOT)))
 
         def read(rel):
             _fst, data = _read_live(root_fd, rel)
@@ -14291,8 +14292,9 @@ def _self_test_checks():
               and _snapshot(root) == before and not (root / JOURNAL_REL).exists(), observed=err)
         # the running opf/ is the mirror inside THIS product (the release root resolves to the product
         # root): the apply refuses at the gather, naming that, with the tree byte-identical and no journal
-        # directory created (red against a gather without the identity comparison, which reads the
-        # product's decoy release and refuses later, at verify_pack_member, naming another ROOT).
+        # directory created (red against a gather without the identity comparison: the refusal text this
+        # check requires is raised only by that comparison, so the apply then refuses elsewhere or not at
+        # all).
         with plant_driver(), mock.patch.object(here, "_RELEASE_ROOT", root):
             err = refusal(run_apply, root, plant_plan, plant_approval, sheet)
         check("driver-apply-release-root-is-product-root-refused",
