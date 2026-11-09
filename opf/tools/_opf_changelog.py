@@ -152,8 +152,8 @@ class ChangelogResult:
 # --- freeze digest + CHANGELOG parsing (spec 6.3, 7.2; schemes defined here) --------------------------
 
 # Homes-rule scan exemptions (checked by check_opf_init.py): this module's self-test
-# drivers and test-only helpers. Every mention of a registered name outside registered
-# code or the module entry's recognized dispatch shapes is a finding there.
+# drivers and test-only helpers, whose bodies that gate does not scan. Registering a
+# function asserts it is test-only; the gate trusts that and does not check reachability.
 _HOMES_SELFTEST_EXEMPT = (
     "self_test",
 )
