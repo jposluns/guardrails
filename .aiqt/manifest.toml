@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "4f6698fd5ba382776347a05baefecd475cc746c168fc9c36a8afe464eecb1862"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4226,8 +4226,8 @@ sha256 = "57fe0345d8e1959e9ff8a5f22ae5271577d3485ffd8a116e68d3f2e14c2de010"
 
 [[sources]]
 path = "tools/check_internal_names.py"
-bytes = 239507
-sha256 = "fd606702f9b49af5ec849d5b0623be38231ab001fdea206a2be0ffc97eea2005"
+bytes = 285107
+sha256 = "baa248a25c061e6d1515524285f35858614db06fd855f5c5d62d13c286b6fe59"
 
 [[sources]]
 path = "tools/check_leaks.py"
@@ -4656,8 +4656,8 @@ sha256 = "edb3c19204301fc55fe73dac90dadc79315dbac235b41e9d23da0e1218384194"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 220303
-sha256 = "713d1e7990664be9a75c57e8a5597fabcc547a3435d3ca03cd87841d57d71bbb"
+bytes = 223878
+sha256 = "3bf59279d35fae6a26642ae2e3aca06d752208920b2e19ccd5a899bc043ab41c"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
