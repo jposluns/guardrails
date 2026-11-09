@@ -28204,7 +28204,7 @@ def _main_isolated(monitor):
         ]
         if len({case[0] for case in _gb_proc_cases} | {case[0] for case in _gb_cases}) != \
                 len(_gb_proc_cases) + len(_gb_cases):
-            failures.append("(gb-labels) two gb cases share a label")
+            failures.append("(gb-labels-proc) two gb cases share a label")
         _gb_here = os.getcwd()
         os.chdir(glk)
         try:
@@ -28213,7 +28213,7 @@ def _main_isolated(monitor):
         finally:
             os.chdir(_gb_here)
         # (gb-p23l) the walk itself: a path through /proc or /dev/fd, named or reached through a link, gives
-        # None, while a path through a link onto an ordinary directory gives its physical path.
+        # None, while (gb-p23m) a path through a link onto an ordinary directory gives its physical path.
         for _gb_path in ("/proc/self/cwd/a.md", "//proc/1/cwd", "/dev/fd/3", "/dev/stdin",
                          os.path.join(glk, "pc", "a.md"), os.path.join(glk, "fd", "x"),
                          os.path.join(glk, "rp", "a.md")):
@@ -28221,7 +28221,7 @@ def _main_isolated(monitor):
                 failures.append("(gb-p23l) the walk resolved the process-relative path {!r}".format(_gb_path))
         _gb_real = os.path.join(os.path.realpath(glk), "out", "n.md")
         if aiqt_hooks._gensrc_physical(os.path.join(glk, "o", "n.md")) != _gb_real:
-            failures.append("(gb-p23l) the walk did not resolve lk/o/n.md to {!r}".format(_gb_real))
+            failures.append("(gb-p23m) the walk did not resolve lk/o/n.md to {!r}".format(_gb_real))
         # (gb-p22l) the data is blanked only against an absolute working directory: with none, or a relative one,
         # the command stays whole even where the path would resolve outside every target; (gb-p22m) with gr it
         # is blanked.
