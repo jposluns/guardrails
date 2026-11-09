@@ -9,7 +9,7 @@ main, and each push to main, against the rules the gates cite, a subset of the s
 and built to be read.
 
 <!-- COUNTS-PROOF:BEGIN (generated) -->
-**133 rules. 127 CI gates that check this repository. 31 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
+**133 rules. 128 CI gates that check this repository. 31 Claude Code hooks shipped as an opt-in plugin. Mapped to 17 frameworks.**
 <!-- COUNTS-PROOF:END -->
 
 The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
@@ -27,7 +27,7 @@ The full pack and per-assistant setup guides live at [aiqt.ai](https://aiqt.ai).
 | Piece | In one breath | Tag |
 | --- | --- | --- |
 | **The standard** | 133 clear, single-behaviour rules across the four AIQT facets, plus a security floor covering confidentiality, integrity, availability, and privacy. | Rules |
-| **Technical controls** | 127 CI gates that check this repository and 31 Claude Code hooks shipped as an opt-in plugin (23 blocking, 8 warning). Today 40 of the 133 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
+| **Technical controls** | 128 CI gates that check this repository and 31 Claude Code hooks shipped as an opt-in plugin (23 blocking, 8 warning). Today 40 of the 133 rules are linked to at least one shipped gate or hook; [ENFORCEMENT.md](ENFORCEMENT.md) lists each rule's status. | Controls |
 | **Generated adapters** | The Claude, AGENTS.md, Gemini, Copilot, and Cursor surfaces are generated from one source and drift-checked in CI. | Generated |
 | **A standards crosswalk** | Mappings from the rules to 17 pinned external control catalogues, for teams that report against a framework. | Mappings |
 <!-- COUNTS-TABLE:END -->
@@ -54,9 +54,10 @@ in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
 
 ## 05. Verify your download.
 
-Each release ships a per-file manifest and a published root digest, and those same hashes are published
-independently on posluns.dev. By validating them you can confirm that the files you downloaded are the
-ones we intended you to have.
+Each release ships a per-file manifest (`.aiqt/manifest.toml`) and its root digest, ROOT
+(`.aiqt/release/root.txt`, the SHA-256 of the manifest bytes). ROOT at the release's tagged commit is
+the digest published independently on posluns.dev, alongside the SHA-256 of each download. By validating
+them you can confirm that the files you downloaded are the ones we intended you to have.
 
 ## 06. Better with every release.
 
