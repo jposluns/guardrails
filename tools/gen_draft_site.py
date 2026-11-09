@@ -1813,10 +1813,12 @@ _STATUS_LINES_UNREGISTERED = ("opf/README.md", "opf/spec/OPF-SPEC.md")
 # Each flip: (the row it must turn red, alone; the text it replaces inside the GENSRC_OUTPUTS literal, which
 # must occur there exactly once; its replacement). In order: a page that carries the rendered text loses a
 # source (under-declaration); a page that does not carry it gains one (over-declaration); the block entry
-# goes, or loses one of the 2 sources it must name; a file on _STATUS_LINES_UNREGISTERED gains an entry; a
-# page entry names a target the build does not produce; the block entry is declared twice (the upper bound
-# of exactly 1); the block entry's kind becomes "tree", a registry kind the build does not treat as a page,
-# so only the kind guard fires.
+# goes, or loses one of the 2 sources it must name; opf/README.md, on _STATUS_LINES_UNREGISTERED, gains an
+# entry; a page entry names a target the build does not produce; the block entry is declared twice (the upper
+# bound of exactly 1); the block entry's kind becomes "tree", a registry kind the build does not treat as a
+# page, so only the kind guard fires; a footer page loses changelog.toml alone, and a page without the footer
+# gains changelog.toml alone, so each of the 2 footer sources is held in both directions; and
+# opf/spec/OPF-SPEC.md, the other file on _STATUS_LINES_UNREGISTERED, gains an entry.
 _LLMS_ENTRY = ('\n    {"target": "opf/site/llms.txt", "kind": "block",\n'
                '     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n'
                '     "regenerate": "python3 tools/gen_draft_site.py"},')
@@ -1836,6 +1838,9 @@ _REGISTER_FLIPS = (
                               '     "regenerate": "python3 tools/gen_draft_site.py"},'),
     (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY),
     (_LINES_ROW, '"opf/site/llms.txt", "kind": "block"', '"opf/site/llms.txt", "kind": "tree"'),
+    (_FOOTER_ROW, 'site/draft-src/rules.toml", "VERSION", "changelog.toml"', 'site/draft-src/rules.toml", "VERSION"'),
+    (_FOOTER_ROW, '"site/draft-src/license.toml")', '"site/draft-src/license.toml", "changelog.toml")'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY.replace('"opf/site/llms.txt"', '"opf/spec/OPF-SPEC.md"')),
 )
 
 
