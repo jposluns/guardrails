@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "52a06360146bb21bb7b8825aaaebea49b82123fbb34dd8d8de25dfab9ab7cf7a"
+tree-sha256 = "3a9efb482a70575d519ca0d61ba14723e98ee8f852ea2332a5b10cfb0fc46a29"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4486,8 +4486,8 @@ sha256 = "e732c5633f7a18889d9f71af931cd2eb0131c2b51e53e81087316d976923752c"
 
 [[sources]]
 path = "tools/gen_draft_site.py"
-bytes = 188250
-sha256 = "52f85bb0a5041fa03b29bc5ac09bc8f12a01f006967b787ca7561754caf6ea75"
+bytes = 188640
+sha256 = "9aeb2505d161f3784b521a81b24421ddddda46b17754831c80e316fc91836e5d"
 
 [[sources]]
 path = "tools/gen_enforceability.py"

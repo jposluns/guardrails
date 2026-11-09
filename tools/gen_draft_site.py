@@ -113,9 +113,10 @@ SCHEME_BUTTON = (
 # (_mappings_data and the _mappings_by_* renderers): tools/gen_mappings.py (rows, registry and wording),
 # tools/gen_rules.py (the rule corpus loader), tools/_standards.py (the manifest loader) and
 # tools/gen_agents.py (the rule order). Not declared, a disclosed residual: every page's navigation (_nav)
-# shows a nav item only when that sibling page is built, so a page's bytes can change when a sibling data
-# file under the same draft-src/ folder is added or removed. Directory sources here name content inputs (as .aiqt/standards/ does),
-# and naming each sibling folder would make every page depend on every other page's data.
+# shows a nav item only when a sibling page is built at that item's path, so a page's bytes can change when a
+# sibling data file under the same draft-src/ folder is added, removed, or its path field changes. Directory
+# sources here name content inputs (as .aiqt/standards/ does), and naming each sibling folder would make
+# every page depend on every other page's data.
 GENSRC_OUTPUTS = (
     {"target": "site/index.html", "kind": "file",
      "sources": ("tools/gen_draft_site.py", "site/draft-src/home.toml"),
@@ -1813,7 +1814,9 @@ _STATUS_LINES_UNREGISTERED = ("opf/README.md", "opf/spec/OPF-SPEC.md")
 # must occur there exactly once; its replacement). In order: a page that carries the rendered text loses a
 # source (under-declaration); a page that does not carry it gains one (over-declaration); the block entry
 # goes, or loses one of the 2 sources it must name; a file on _STATUS_LINES_UNREGISTERED gains an entry; a
-# page entry names a target the build does not produce.
+# page entry names a target the build does not produce; the block entry is declared twice (the upper bound
+# of exactly 1); the block entry's kind becomes "tree", a registry kind the build does not treat as a page,
+# so only the kind guard fires.
 _LLMS_ENTRY = ('\n    {"target": "opf/site/llms.txt", "kind": "block",\n'
                '     "sources": ("tools/gen_draft_site.py", "opf/tools/opf.py"),\n'
                '     "regenerate": "python3 tools/gen_draft_site.py"},')
@@ -1831,6 +1834,8 @@ _REGISTER_FLIPS = (
     (_BUILT_ROW, _LLMS_ENTRY, _LLMS_ENTRY + '\n    {"target": "site/unbuilt/index.html", "kind": "file",\n'
                               '     "sources": ("tools/gen_draft_site.py",),\n'
                               '     "regenerate": "python3 tools/gen_draft_site.py"},'),
+    (_LINES_ROW, _LLMS_ENTRY, _LLMS_ENTRY + _LLMS_ENTRY),
+    (_LINES_ROW, '"opf/site/llms.txt", "kind": "block"', '"opf/site/llms.txt", "kind": "tree"'),
 )
 
 
