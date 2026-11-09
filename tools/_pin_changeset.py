@@ -10,13 +10,15 @@ global configuration to os.devnull, names an empty directory as HOME and XDG_CON
 disables lazy fetch and grafts, and sets GIT_CEILING_DIRECTORIES to the parent of the directory
 read, so a -C on a directory that is not itself a repository fails instead of walking up into an
 enclosing one. Caller environment and host configuration therefore cannot steer a read; the
-repository's own config is still read, and a malformed one fails the read. Parents are taken from the raw commit bytes (cat-file commit), never from a
-revision walk, and the changed set from diff-tree over resolved object ids, never from the
-working tree or the index. Every failure raises ChangesetError, which the caller maps to
-its own cannot-evaluate outcome, never to an empty set; an empty diff is a valid empty set.
-GIT_GRAFT_FILE is pinned to os.devnull as defence in depth only: the parents are read from
-the raw object bytes, which a grafts entry does not alter, and no fixture demonstrates a
-grafts entry changing these reads (untested hardening).
+repository's own config is still read, and a malformed one fails the read. Parents are taken
+from the raw commit bytes (cat-file commit), never from a revision walk, and the changed set
+from diff-tree over resolved object ids, never from the working tree or the index. Every
+failure raises ChangesetError, which the caller maps to its own cannot-evaluate outcome, never
+to an empty set or a fallback guess; an empty diff is a valid empty set. GIT_GRAFT_FILE is
+pinned to os.devnull as defence in depth only: the parents are read from the raw object bytes,
+which a grafts entry does not alter, and no fixture demonstrates a grafts entry changing these
+reads (untested hardening). Setting it makes git print a grafts deprecation hint, so an error
+message gives git's own error lines first and its hint: lines after them (error_text).
 """
 
 import atexit
@@ -75,6 +77,15 @@ def git_environment(root=None):
     return env
 
 
+def error_text(stderr):
+    """git's stderr as one message, every `hint:` line moved after the other lines, so an advisory
+    hint (the grafts deprecation one that GIT_GRAFT_FILE triggers) never leads the real error; no
+    line is dropped."""
+    lines = stderr.decode("utf-8", "replace").strip().splitlines()
+    hints = [line for line in lines if line.startswith("hint:")]
+    return "\n".join([line for line in lines if not line.startswith("hint:")] + hints)
+
+
 def git(root, *args, stdin=b""):
     """One hardened git invocation in `root`, output captured; any failure is ChangesetError."""
     try:
@@ -85,8 +96,7 @@ def git(root, *args, stdin=b""):
     except (OSError, subprocess.SubprocessError) as exc:
         raise ChangesetError("git invocation: " + str(exc)) from exc
     if result.returncode != 0:
-        raise ChangesetError("git {}: {}".format(
-            args[0], result.stderr.decode("utf-8", "replace").strip()))
+        raise ChangesetError("git {}: {}".format(args[0], error_text(result.stderr)))
     return result.stdout
 
 
@@ -172,13 +182,6 @@ def _nul_paths(raw, label):
         except UnicodeError as exc:
             raise ChangesetError(label + ": non-UTF-8 path") from exc
     return frozenset(names)
-
-
-def tracked_files(root, pin):
-    """The frozenset of paths tracked in the pinned commit's tree (ls-tree -r over the resolved id,
-    never the working tree or the index); any failure is ChangesetError."""
-    head = resolve(root, pin)
-    return _nul_paths(git(root, "ls-tree", "-r", "-z", "--name-only", "--full-tree", head), "ls-tree")
 
 
 def changed_set(root, pin):
