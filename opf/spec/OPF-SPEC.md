@@ -989,6 +989,7 @@ registered vendor extension table.
 | `status` | required | per the status grammar (section 8.4) |
 | `proposed_from` | optional | the unqualified state held before the current `/proposed` status, written by the authoring verb (section 8.8); legal only on a `/proposed` status, and only naming a legal predecessor state for the type |
 | `title` | required | one line, human-oriented |
+| `name` | optional | clean series only: a human-chosen label held beside the ID, set at creation and never changed (below) |
 | `created_at` | required | RFC 3339 UTC, read from the clock at creation |
 | `updated_at` | required | RFC 3339 UTC, read from the clock at the last transition |
 | `actor.kind` | required | `maintainer`, `assistant`, `automation`, or `importer` |
@@ -997,6 +998,28 @@ registered vendor extension table.
 | `links` | optional | array of `{rel, id}`; `rel` from the closed link vocabulary (section 8.6) |
 | `refs` | optional | array of captured references (section 8.6) |
 | `x-<vendor>` | optional | registered vendor extension tables only (section 8.7) |
+
+The ID stays a record's permanent identity: links, file names, anchors, counters and worklog
+entries MUST keep naming records by ID, and a writer MUST NOT derive a `name` from the title or
+invent one. When present, `name` MUST be a string of 3 to 64 characters matching
+`^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*\Z`: ASCII capital letters, digits and single hyphens, starting
+with a letter and ending with a letter or digit, so a lowercase letter, a non-ASCII character, a
+colon, whitespace and a line ending are each refused. A `name` MUST NOT match the clean ID shape
+`^[A-Z]{2}-[0-9]+\Z`, so `MD-7` and `MD-07` are never names, while `MDX-7` can be one. A name
+that breaks these rules MUST be refused, never corrected: no writer or check changes its case,
+trims it or rewrites it. A name MUST be unique across the whole store, across every record type
+and across the active indexes and the record archive (section 12) together. A name MUST NOT be
+reused, even after its record is superseded, refuted or archived or its work reverted, as section
+8.2 rules for IDs; separate stores MAY hold the same name. A record's `name` MUST NOT change after
+creation: only `opf record create` sets it (section 8.8), and no operation adds, alters or removes
+it later. Imported records and worklog entries MUST NOT carry `name`: on either it is an unknown
+key and fails validation. C-NAMES checks every clean record's `name` against the grammar above,
+checks uniqueness over every active index and every archived record file together, reporting each
+set of records that share a name without choosing an owner, and compares each record's `name`
+with the same record's row in the prior committed snapshot, beside the status-history comparison
+of section 8.8; an index or archived record file it cannot read MUST yield cannot-evaluate.
+C-NAMES owns every name defect exclusively, its grammar, uniqueness and no-change rules included:
+such a defect MUST be a C-NAMES finding and MUST NOT be reported again by any other check.
 
 The worklog entry uses a reduced envelope (`id`, `date`, `actor`, `kind`, `summary`, optional
 detail, `links`, `refs`); its status is fixed (section 8.5). The worklog records facts, not
@@ -1219,6 +1242,11 @@ linking back (section 8.6). Its subcommands:
   or automation author entering a gated initial state lands `/proposed`; a created-terminal factual
   or ACT type (`reference`, `autonomous_decision`, `maintainer_decision`) carries no qualifier
   (section 8.4). `done` receipts and worklog entries are not created this way.
+  `create --name <NAME>` sets the new record's optional `name` (section 8.3); without it the record
+  carries no name. `create` MUST refuse, writing nothing, a name that breaks the section 8.3 grammar, a name
+  any record in the store holds, the record archive included, and any `--name` when it cannot read
+  every index and archived record file it compares against. Operands stay IDs: no subcommand
+  accepts a name in place of an ID.
 - `transition`: a status change checked against the type's grammar (section 8.5). An assistant or
   automation author landing a terminal or gated state takes `/proposed`, and the verb MUST record
   the state the record held at that moment in the record's own `proposed_from` field (section 8.3)
@@ -1670,6 +1698,12 @@ decision-resolution link (current effective resolution through the supersession 
 beyond this vocabulary requires a specification version bump; ad hoc logic never enters a
 generator.
 
+A record's `name` (section 8.3) renders beside its ID. An index table carries a Name column, left
+empty for an unnamed record. A compact list writes the ID, one space and the name, as in
+`MD-7 INKWARM-DEFAULT`, and the ID alone when the record has no name, with no placeholder mark.
+Rendering a name changes no ordering: rows sort exactly as they would without it, with ID as the
+final tie-breaker.
+
 ### 10.3 Determinism requirements and generated headers
 
 A deterministic render is byte-reproducible: UTF-8, LF line endings, stable ordering, no
@@ -1706,14 +1740,15 @@ generator, so no model output can ever be baked into the generated bytes.
 
 The shipped projection is `DECISIONS.toml`, the machine counterpart to the composed `DECISIONS.md`
 view, projected from `pending_decision`, `autonomous_decision`, `maintainer_decision`, and
-`preference_pattern`. Its payload (projection contract v1) carries `schema = 1` (the projection
+`preference_pattern`. Its payload (projection contract v2) carries `schema = 2` (the projection
 contract's own version, bumped independently) and `projection = "decisions"`; four arrays of tables,
 one per source type, each row sorted by numeric ID and projecting the full base record (the envelope
 fields, the type's declared extra fields, and `links`/`refs` as nested arrays of tables), with
 `x-<vendor>` extension tables excluded as profile-owned data; and one `[derived]` table carrying the
 existing decision-resolution join's output (`effective` and `superseded` pending_decision IDs,
 numerically sorted) and nothing beyond the closed section-10.2 vocabulary, so no new join is
-introduced.
+introduced. Schema 2 differs from schema 1 only in the envelope field `name` (section 8.3): a row
+carries it exactly when its record has one.
 
 ## 11. Enforcement posture
 
@@ -2175,7 +2210,10 @@ this specification. The reference tooling's `opf doctor` grades a manifest decla
 `spec_version = "2.0.0"` with `homes = 2` under its 1.2.0 rules, so its VALID verdict on such a
 store says nothing about conformance to this specification, and its `opf upgrade` and `opf record`
 refuse such a store. The reference tooling defines no store upgrade: its `opf upgrade` refuses every
-invocation with exit 2, reading and writing nothing.
+invocation with exit 2, reading and writing nothing. Base 2.0.0 includes the record `name` field
+and its rules (section 8.3), `create --name` (section 8.8), the C-NAMES check and the Name rendering
+(section 10.2) and the schema 2 `DECISIONS.toml` projection (section 10.5); the reference tooling
+does not implement them yet.
 
 An implementation MUST declare, in the documentation of each release and in every report its emitter
 writes, its release identity and its supported `spec_version`, homes generation, and

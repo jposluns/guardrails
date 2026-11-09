@@ -138,6 +138,7 @@ run_gate "opf-tooling-selftest-core" python3 -I -B opf/tools/opf.py --self-test-
 run_gate "opf-tooling-selftest-adopt" python3 -I -B opf/tools/opf.py --self-test-group adopt
 run_gate "opf-tooling-selftest-watchdog" python3 -I -B opf/tools/opf.py --self-test-group watchdog
 run_gate "opf-journal-direct-selftest" python3 -I -B opf/tools/_journal.py --self-test
+run_gate "opf-names-selftest" python3 -I -B opf/tools/_opf_names.py --self-test
 run_gate "opf-observe-direct-selftest" python3 -I -B opf/tools/_opf_observe.py --self-test
 run_gate "opf-drift-selftest" python3 -I -B opf/tools/check_opf_drift.py --self-test
 run_gate "opf-drift" python3 -I -B opf/tools/check_opf_drift.py
