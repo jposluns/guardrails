@@ -351,7 +351,7 @@
     },
     {
       "kind": "block",
-      "regenerate": "python3 tools/gen_secret_patterns.py",
+      "regenerate": "python3 opf/tools/gen_ci_floor_digests.py",
       "sources": [
         "opf/enforcement/ci/github-actions.yml",
         "opf/enforcement/ci/opf-ci.sh"
