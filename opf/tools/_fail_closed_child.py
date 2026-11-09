@@ -2002,7 +2002,7 @@ VECTORS = (
     # a self-restoring fake that zeroes the handled SystemExit's own code, and one that rebinds the
     # hook local of the calling invoke_excepthook frame so the wrapper is never called, each read as
     # a pass: the disclosed replaced-reporting-machinery residual their vectors pin (they do not
-    # endorse it), so a change that closes or widens either turns this suite red
+    # endorse it), so a change that closes either turns this suite red
     ("contract/handled-code-zeroed-excepthookargs-disclosed", _EXCEPTHOOKARGS_HANDLED_CODE_ZEROED,
      None, (0, True, False, None), "record-write-broken"),
     ("contract/hook-local-rebound-excepthookargs-disclosed", _EXCEPTHOOKARGS_HOOK_LOCAL_REBOUND,
