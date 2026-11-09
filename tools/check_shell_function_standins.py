@@ -21,11 +21,15 @@ attribute whose last component contains "env" in any case (env, child_env, self.
 (plainly, annotated or by :=), updated (update, setdefault, __setitem__, |=, a subscript store),
 or when it is the value of an env= keyword argument of any call, or the mapping or keywords of a
 call named dict on an attribute (mock.patch.dict, patch.dict, also as a decorator) whose target,
-given as the first argument or as in_dict=, is a target or the string "os.environ" or
-"os.environb"; its mapping is the second argument or values=. The key of os.putenv or of a
-setenv call (monkeypatch.setenv), given as the first argument or as name=, is a store too. Both
-branches of a conditional expression, every value of an or/and and the value of a := given as
-such a mapping are read as the mapping. Inside such a mapping a store is one of these routes:
+in_dict= whenever given and else the first argument, is a target or the string "os.environ" or
+"os.environb"; its mapping is values= whenever given, and the second argument. The key of a
+setenv call (monkeypatch.setenv) is a store too: name= whenever given, else the first argument,
+or the second of an unbound MonkeyPatch.setenv(mp, KEY, v). So is the first argument of
+os.putenv, which takes positional arguments only (a name= given to it is a TypeError, never
+read). A positional argument after a starred one is not read, since its position is unknown;
+the keywords of that call still are. Both branches of a conditional expression, every value of
+an or/and and the value of a := given as such a mapping are read as the mapping. Inside such a
+mapping a store is one of these routes:
 
   dict-key          a key of a dict display, also inside a ** entry, a dict(...) argument, a
                     union (os.environ | {...}), a ChainMap(...) argument or the mapping of
@@ -33,16 +37,19 @@ such a mapping are read as the mapping. Inside such a mapping a store is one of 
                     values={...}));
   dict-comp-key     the key of a dict comprehension;
   keyword           a keyword argument of dict(...), of the target's update(...) or of
-                    patch.dict(...) other than its own in_dict, values and clear parameters
-                    (dict(BASH_ENV=path), os.environ.update(ENV=path),
+                    patch.dict(...) other than its own in_dict, values and clear parameters,
+                    which are not read as keys whether given as keywords or as literal keys
+                    of a ** mapping (dict(BASH_ENV=path), os.environ.update(ENV=path),
                     patch.dict(in_dict=os.environ, BASH_ENV=path));
   pair              the key of a literal (KEY, v) pair in a literal list or tuple given to
                     dict(...), update(...), |= or as the mapping of patch.dict(...);
   fromkeys          a literal key listed in fromkeys([KEY], v);
-  first-argument    the key of os.putenv, of setenv (also setenv(name=KEY, value=v)) or of the
-                    target's setdefault or __setitem__;
+  first-argument    the key of os.putenv, of setenv (also setenv(name=KEY, value=v) and
+                    MonkeyPatch.setenv(mp, name=KEY, value=v)) or of the target's setdefault
+                    or __setitem__;
   second-argument   the key of an unbound call whose first argument is the target
-                    (dict.setdefault(env, KEY, v), dict.__setitem__(env, KEY, v));
+                    (dict.setdefault(env, KEY, v), dict.__setitem__(env, KEY, v)) or of an
+                    unbound MonkeyPatch.setenv(mp, KEY, v);
   subscript-store   a subscript store into the target (env["BASH_ENV"] = path, an augmented or
                     annotated assignment, a for, with or unpacking target).
 
@@ -73,8 +80,13 @@ indirection; a mapping loaded from data (json.loads); an environment passed posi
 (kw = {"env": {...}} or kw["env"] = {...}, then run(c, **kw)) and a tuple target
 (env, x = {"BASH_ENV": p}, 1); a patch.dict target given as any other string; a patch.dict
 target or mapping, or a setenv name, passed through a ** mapping
-(patch.dict(**{"in_dict": os.environ, "values": m}), setenv(**{"name": "BASH_ENV", ...})); an
-environment inherited from the caller (a launch without env=, tsthrm.17); shell sources; and
+(patch.dict(**{"in_dict": os.environ, "values": m}), setenv(**{"name": "BASH_ENV", ...})); a
+setenv key, a patch.dict target or mapping, or any other key or target given positionally at
+or after a starred argument, whose position is unknown (setenv(*("BASH_ENV", p)),
+patch.dict(*[os.environ], values=m), patch.dict(os.environ, *[m])), while the keywords of such
+a call are still read; an unbound setenv through a class not named MonkeyPatch (an alias or a
+subclass), whose first argument is then read as the key; an environment inherited from the
+caller (a launch without env=, tsthrm.17); shell sources; and
 shell text a source launches (an export -f, a declare -fx, or a function or alias named after an
 executable). Those last two are planned as later parts of this lint. A name that contains "env"
 but holds no environment (environment_defaults) is still treated as a target.
@@ -116,14 +128,19 @@ FUNC_PREFIX = "BASH_FUNC_"
 FUNC_SUFFIX = "%%"
 STARTUP_KEYS = frozenset({"BASH_ENV", "ENV"})
 KEY_METHODS = frozenset({"setdefault", "__setitem__"})
-# Calls whose first argument, or name= keyword, is a key set in the process environment
-# (os.putenv, monkeypatch.setenv(name, value)).
+# Calls whose first argument is a key set in the process environment (os.putenv,
+# monkeypatch.setenv(name, value)). Only setenv also takes the key as name=; os.putenv takes
+# positional arguments only, so a name= given to it is never read.
 KEY_SETTERS = frozenset({"putenv", "setenv"})
+NAMED_KEY_SETTER = "setenv"
 KEY_SETTER_KEYWORD = "name"
+# The class whose unbound setenv(instance, name, value) takes the key as its second argument.
+UNBOUND_SETENV_CLASS = "MonkeyPatch"
 # The import-path strings mock.patch.dict accepts for the process environment.
 ENVIRON_PATHS = frozenset({"os.environ", "os.environb"})
 # mock.patch.dict(in_dict, values=(), clear=False, **kwargs): its own parameters, which are never
-# environment keys; only the remaining keywords are keys set in the target.
+# read as environment keys, given as keywords or as literal keys of a ** mapping; only the
+# remaining keywords are keys set in the target.
 PATCH_DICT_TARGET = "in_dict"
 PATCH_DICT_VALUES = "values"
 PATCH_DICT_PARAMS = frozenset({PATCH_DICT_TARGET, PATCH_DICT_VALUES, "clear"})
@@ -174,9 +191,9 @@ def _env_named(node):
 
 
 def _patched_environment(node):
-    """Whether node, the first argument of a patch.dict call, names an environment: a target
-    (os.environ, os.environb, a name containing env) or the string "os.environ" or
-    "os.environb"."""
+    """Whether node, the target of a patch.dict call (its in_dict= keyword or else its first
+    positional argument), names an environment: a target (os.environ, os.environb, a name
+    containing env) or the string "os.environ" or "os.environb"."""
     return _env_named(node) or _constant_text(node) in ENVIRON_PATHS
 
 
@@ -186,6 +203,17 @@ def _keyword_value(keywords, name):
         if keyword.arg == name:
             return keyword.value
     return None
+
+
+def _known_args(args):
+    """The positional arguments before the first starred one, the only ones whose position is
+    known (in f(*a, KEY) the position of KEY depends on the length of a)."""
+    known = []
+    for arg in args:
+        if isinstance(arg, ast.Starred):
+            break
+        known.append(arg)
+    return known
 
 
 def _call_name(func):
@@ -265,10 +293,13 @@ class _Scanner:
             self._record(key, text, route)
 
     def _keywords(self, keywords, params=frozenset()):
-        """Record each keyword argument as a key, except the call's own parameters in params."""
+        """Record each keyword argument as a key, also each literal key of a ** mapping, except
+        the call's own parameters in params."""
         for keyword in keywords:
             if keyword.arg is None:
-                self._mapping(keyword.value, False)
+                for key, text, route in _mapping_keys(keyword.value, False):
+                    if text not in params:
+                        self._record(key, text, route)
             elif keyword.arg not in params:
                 self._record(keyword, keyword.arg, "keyword")
 
@@ -306,20 +337,38 @@ class _Scanner:
                 self._mapping(keyword.value, False)
         func = node.func
         name = _call_name(func)
+        known = _known_args(node.args)
         if name in KEY_SETTERS:
-            key = node.args[0] if node.args else _keyword_value(node.keywords, KEY_SETTER_KEYWORD)
+            # setenv's name= is read whenever it is given: a bound setenv cannot also take a
+            # positional key, and in an unbound call the first argument is the instance.
+            key = None
+            if name == NAMED_KEY_SETTER:
+                key = _keyword_value(node.keywords, KEY_SETTER_KEYWORD)
             if key is not None:
                 self._record(key, _constant_text(key), "first-argument")
+                return
+            if (name == NAMED_KEY_SETTER and isinstance(func, ast.Attribute)
+                    and _call_name(func.value) == UNBOUND_SETENV_CLASS):
+                index, route = 1, "second-argument"
+            else:
+                index, route = 0, "first-argument"
+            if len(known) > index:
+                self._record(known[index], _constant_text(known[index]), route)
             return
         if name == "dict" and isinstance(func, ast.Attribute):
             # mock.patch.dict(os.environ, {...}, KEY=v) sets the keys like update, in call,
             # with and decorator form (a decorator is a Call node the walk reaches). The target
-            # may be given as in_dict= and the mapping as values=.
-            target = node.args[0] if node.args else _keyword_value(node.keywords,
-                                                                   PATCH_DICT_TARGET)
+            # may be given as in_dict= and the mapping as values=; each is read whenever given,
+            # since then no positional argument can fill that parameter.
+            target = _keyword_value(node.keywords, PATCH_DICT_TARGET)
+            mapping = None
+            if target is None and known:
+                target = known[0]
+                if len(known) > 1:
+                    mapping = known[1]
             if target is not None and _patched_environment(target):
-                if len(node.args) > 1:
-                    self._mapping(node.args[1], True)
+                if mapping is not None:
+                    self._mapping(mapping, True)
                 values = _keyword_value(node.keywords, PATCH_DICT_VALUES)
                 if values is not None:
                     self._mapping(values, True)
@@ -605,6 +654,28 @@ POSITIVE_VECTORS = (
      "first-argument"),
     ('def test(monkeypatch):\n    monkeypatch.setenv(value=p, name="BASH_FUNC_ls%%")\n',
      "env-func", "first-argument"),
+    # an unbound MonkeyPatch.setenv, and keywords read beside an empty starred argument
+    ('import pytest\npytest.MonkeyPatch.setenv(mp, name="BASH_ENV", value=p)\n', "env-startup",
+     "first-argument"),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, value=f, name="BASH_FUNC_ls%%")\n',
+     "env-func", "first-argument"),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, "BASH_ENV", p)\n', "env-startup",
+     "second-argument"),
+    ('import pytest\npytest.MonkeyPatch.setenv(mp, "BASH_FUNC_ls%%", f)\n', "env-func",
+     "second-argument"),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(*[], name="BASH_ENV", value=p)\n',
+     "env-startup", "first-argument"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(*[], in_dict=os.environ, values={"BASH_ENV": p}).start()\n',
+     "env-startup", "dict-key"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(*[], in_dict=os.environ, values=[("BASH_FUNC_ls%%", f)]).start()\n',
+     "env-func", "pair"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(*[], in_dict=os.environ, ENV=p).start()\n', "env-startup", "keyword"),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, *[], values={"BASH_ENV": p}).start()\n', "env-startup",
+     "dict-key"),
 )
 
 # Clean sources, each with a flip that is reported: mappings that never reach an environment
@@ -693,11 +764,29 @@ GATED_VECTORS = (
      'def test(monkeypatch):\n    monkeypatch.setenv(name="BASH_ENV", value="HOME")\n'),
     ('def test(monkeypatch):\n    monkeypatch.setenv(value="BASH_FUNC_ls%%", name="HOME")\n',
      'def test(monkeypatch):\n    monkeypatch.setenv(value="HOME", name="BASH_FUNC_ls%%")\n'),
+    # an unbound MonkeyPatch.setenv and the starred forms, with the key in the value, on a
+    # mapping that is not the environment, or bound so that the second argument is the value
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, name="HOME", value="BASH_ENV")\n',
+     'from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, name="BASH_ENV", value="HOME")\n'),
+    ('import pytest\npytest.MonkeyPatch.setenv(mp, "HOME", "BASH_FUNC_ls%%")\n',
+     'import pytest\npytest.MonkeyPatch.setenv(mp, "BASH_FUNC_ls%%", "HOME")\n'),
+    ('def test(monkeypatch, key):\n    monkeypatch.setenv(key, "BASH_ENV")\n',
+     'from pytest import MonkeyPatch\nMonkeyPatch.setenv(key, "BASH_ENV", p)\n'),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(*[], name="HOME", value="BASH_ENV")\n',
+     'def test(monkeypatch):\n    monkeypatch.setenv(*[], name="BASH_ENV", value="HOME")\n'),
+    ('from unittest import mock\n'
+     'mock.patch.dict(*[], in_dict=config, values={"BASH_ENV": p}).start()\n',
+     'from unittest import mock\nimport os\n'
+     'mock.patch.dict(*[], in_dict=os.environ, values={"BASH_ENV": p}).start()\n'),
+    ('from unittest import mock\nmock.patch.dict(*[], in_dict="app.settings", ENV=p).start()\n',
+     'from unittest import mock\nmock.patch.dict(*[], in_dict="os.environ", ENV=p).start()\n'),
 )
 
 # The key texts each route reads before the kind test, as sorted (text, route) pairs: patch.dict's
-# own in_dict, values and clear parameters and setenv's value= are never read as keys, while the
-# same names given to the target's update are keys.
+# own in_dict, values and clear parameters, given as keywords or as literal keys of a ** mapping,
+# setenv's value=, the instance of an unbound MonkeyPatch.setenv, a positional argument at or
+# after a starred one and a name= given to os.putenv are never read as keys, while the same
+# names given to the target's update are keys.
 RECORDED_VECTORS = (
     ('import os\nfrom unittest import mock\n'
      'mock.patch.dict(in_dict=os.environ, values={"HOME": t}, clear=True, PATH=p).start()\n',
@@ -709,6 +798,17 @@ RECORDED_VECTORS = (
      [("clear", "keyword"), ("in_dict", "keyword"), ("values", "keyword")]),
     ('def test(monkeypatch):\n    monkeypatch.setenv(value="BASH_ENV", name="HOME")\n',
      [("HOME", "first-argument")]),
+    ('import os\nfrom unittest import mock\n'
+     'mock.patch.dict(os.environ, **{"clear": True, "values": {"HOME": t}, "PATH": p}).start()\n',
+     [("PATH", "dict-key")]),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, "HOME", v)\n',
+     [("HOME", "second-argument")]),
+    ('from pytest import MonkeyPatch\nMonkeyPatch.setenv(mp, name="HOME", value=v)\n',
+     [("HOME", "first-argument")]),
+    ('def test(monkeypatch):\n    monkeypatch.setenv(*a, value=v)\n', []),
+    ('def test(monkeypatch):\n    monkeypatch.setenv("HOME", *a)\n', [("HOME", "first-argument")]),
+    ('import os\nos.putenv(name="BASH_ENV", value=p)\n', []),
+    ('import os\nos.putenv(*a)\n', []),
 )
 
 # Boundary and removal vectors that must stay clean.
