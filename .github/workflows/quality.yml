@@ -1163,6 +1163,13 @@ jobs:
         shell: bash
         run: python3 -I -B tools/gen_secret_patterns.py --check
 
+      - name: OPF CI floor digests generator self-test
+        shell: bash
+        run: python3 -I -B opf/tools/gen_ci_floor_digests.py --self-test
+      - name: OPF CI floor digests drift
+        shell: bash
+        run: python3 -I -B opf/tools/gen_ci_floor_digests.py --check
+
       - name: Hooks drift
         shell: bash
         run: python3 -I -B tools/gen_hooks.py --check
