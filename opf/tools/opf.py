@@ -1861,6 +1861,18 @@ _WATCHDOG_COMPLETION_FLAT_BUDGETS = {
 # The float-summation headroom each derived completion budget adds to its
 # derived total, as the per-thread budgets add it: not a timing allowance.
 _WATCHDOG_COMPLETION_MARGIN = 0.01
+# Each derived completion leg's total, written out as a figure and never
+# computed from _watchdog_completion_terms, so that the budget checks have a
+# reference outside that table: a term dropped from or added to the table,
+# or a changed wait constant it reads, moves the derived total off this
+# figure even when the declared budget is moved with it. A deliberate change
+# to a leg's waits updates its figure here in the same change.
+_WATCHDOG_COMPLETION_TOTALS = {
+    "launch-ownership": 65.015, "fd-hygiene-total": 112.525, "subject-receipt": 794.07,
+    "subject-ack": 827.085, "escalate-reaped": 795.07, "poll-collected": 1269.575,
+    "escalate-degraded": 791.06, "poll-masked": 2960.675, "unpinned-kill": 630.13,
+    "census-verify": 643.13, "no-signal-echild": 45.51, "cleanup-reaped": 45.51,
+}
 # Legs that run a derived completion leg's case under their own label and
 # budget, so each one's budget derives from that leg's terms: the safety leg
 # lost-cleanup returns _watchdog_completion_case("no-signal-echild"). Each row
@@ -2053,6 +2065,64 @@ def _watchdog_completion_revert_misses(budgets):
                                                   "not refused" if want else "refused"))
     if set(_WATCHDOG_COMPLETION_FLAT_BUDGETS) != set(_watchdog_completion_terms()):
         misses.append("flat-budget vectors and derived legs differ")
+    return misses
+
+
+def _watchdog_completion_total_misses(budgets, terms=None):
+    """The derived completion budgets against a reference that does not
+    share the term table: each leg of _watchdog_completion_legs must run a
+    mode whose derived total (_watchdog_path_seconds of its terms in
+    `terms`, _watchdog_completion_terms by default) equals its fixed figure
+    in _WATCHDOG_COMPLETION_TOTALS to 1e-6 s, and must declare a budget
+    between that figure and the figure plus _WATCHDOG_COMPLETION_MARGIN,
+    compared as _watchdog_completion_budget_faults compares. That checker
+    and its revert vectors read the term table itself, so a term dropped
+    from the table with its budget lowered to match passes both; here it
+    is refused. Returns the misses."""
+    terms = _watchdog_completion_terms() if terms is None else terms
+    misses = []
+    if set(terms) != set(_WATCHDOG_COMPLETION_TOTALS):
+        misses.append("fixed completion totals and derived legs differ: %s"
+                      % sorted(set(terms) ^ set(_WATCHDOG_COMPLETION_TOTALS)))
+    for label, mode, _flat in _watchdog_completion_legs():
+        fixed = _WATCHDOG_COMPLETION_TOTALS.get(mode)
+        if fixed is None or mode not in terms:
+            continue
+        derived = _watchdog_path_seconds(terms[mode])
+        if abs(derived - fixed) > 1e-6:
+            misses.append("%s: derived total %.6fs is not its fixed total %ss"
+                          % (label, derived, fixed))
+        budget = budgets.get(label)
+        if (not _watchdog_finite_seconds(budget) or budget < fixed
+                or round(budget - fixed, 6) > _WATCHDOG_COMPLETION_MARGIN):
+            misses.append("%s: budget %r is not between its fixed total %ss and that total"
+                          " plus the %ss margin" % (label, budget, fixed,
+                                                    _WATCHDOG_COMPLETION_MARGIN))
+    return misses
+
+
+def _watchdog_completion_total_vectors(budgets):
+    """Red on revert for _watchdog_completion_total_misses: for each derived
+    leg in turn, its last term is dropped from a copy of the term table and
+    its budget, and that of every alias row running it, is lowered to the
+    shrunken total plus the margin (what an edit dropping a wait from the
+    table and its budget together would declare); the fixed totals must
+    refuse each such copy, naming the leg. The unchanged table and budgets
+    must pass. Returns the misses."""
+    terms = _watchdog_completion_terms()
+    misses = ["fixed totals on the unchanged table: %s" % miss
+              for miss in _watchdog_completion_total_misses(budgets, terms)]
+    for mode in sorted(terms):
+        shrunk = dict(terms)
+        shrunk[mode] = terms[mode][:-1]
+        lowered = dict(budgets)
+        for label, row_mode, _flat in _watchdog_completion_legs():
+            if row_mode == mode:
+                lowered[label] = _watchdog_path_seconds(shrunk[mode]) + _WATCHDOG_COMPLETION_MARGIN
+        got = _watchdog_completion_total_misses(lowered, shrunk)
+        if not any(miss.startswith("completion-%s: derived total" % mode) for miss in got):
+            misses.append("fixed totals did not refuse %s with its last term dropped: %r"
+                          % (mode, got))
     return misses
 
 
@@ -2294,7 +2364,12 @@ def _watchdog_launcher_diagnostic_misses():
     returns EXIT_OK (so the control run, which must be refused, is accepted),
     _watchdog_launcher_case must fail and print the stand-in's captured
     output; and a leg that fails after a charged wait must list that wait.
-    No fixture is launched and nothing is forked. Returns the misses."""
+    The same listing is required on each other failing exit of
+    _watchdog_leg_entry: a non-finite budget (listing none), a case that
+    raises (the exception going on unchanged), an uncountable wait, a charge
+    left unlanded past a shortened closing bound, and a launcher leg whose
+    nested run raises, which must also print that run's captured output. No
+    fixture is launched and nothing is forked. Returns the misses."""
     import contextlib
     import io
     from unittest.mock import patch
@@ -2316,6 +2391,58 @@ def _watchdog_launcher_diagnostic_misses():
         rc = _watchdog_leg_entry(5, lambda: (_watchdog_deadline(1), EXIT_FINDING)[1])
     if rc != EXIT_FINDING or "charged waits of the failing leg: deadline(1.0)=1.0" not in out.getvalue():
         misses.append("failing leg's charged waits: rc %r, output %r" % (rc, out.getvalue()))
+
+    class Probe(Exception):
+        pass
+
+    def raising():
+        _watchdog_deadline(1)
+        raise Probe("leg-probe")
+
+    def uncountable():
+        _watchdog_deadline(1)
+        _watchdog_charge(float("nan"), "probe(<unknown timeout>)", suppressible=False)
+        return EXIT_OK
+
+    def unlanded():
+        _watchdog_deadline(1)
+        _WATCHDOG_LEDGERS[-1]["begun"].append(["probe-unlanded"])
+        return EXIT_OK
+
+    def raising_runner():
+        _watchdog_deadline(1)
+        print(marker)
+        raise Probe("launcher-probe")
+
+    listed = "charged waits of the failing leg: deadline(1.0)=1.0"
+    # Each failing exit of a leg, as (name, call, rc wanted or Probe for a
+    # raise, text its output must hold).
+    exits = (
+        ("a non-finite budget", lambda: _watchdog_leg_entry(float("nan"), raising), EXIT_FINDING,
+         ("charged waits of the failing leg: none",)),
+        ("a raising case", lambda: _watchdog_leg_entry(5, raising), Probe,
+         (listed + " (landed before the case raised Probe)",)),
+        ("an uncountable wait", lambda: _watchdog_leg_entry(5, uncountable), EXIT_FINDING,
+         (listed,)),
+        ("an unlanded charge", lambda: _watchdog_leg_entry(5, unlanded), EXIT_MALFORMED,
+         (listed + " (landed within the closing bound)",)),
+        ("a raising nested launcher run",
+         lambda: _watchdog_leg_entry(5, _watchdog_launcher_case, "regression", "handler"),
+         Probe, (marker, "FAIL (a nested run raised Probe)",
+                 listed + " (landed before the case raised Probe)")),
+    )
+    for name, call, want, texts in exits:
+        out = io.StringIO()
+        try:
+            with patch.dict(globals(), {"_watchdog_regression_self_test": raising_runner,
+                                        "_WATCHDOG_CLOSE_BOUND": 0.05}), \
+                    contextlib.redirect_stdout(out):
+                got = call()
+        except Probe:
+            got = Probe
+        if got != want or not all(text in out.getvalue() for text in texts):
+            misses.append("failing leg's charged waits on %s: got %r, output %r"
+                          % (name, got, out.getvalue()))
     return misses
 
 
@@ -3438,20 +3565,41 @@ def _watchdog_leg_entry(budget, case, *args):
     violation. Stated limit: a heavily loaded host that stalls a live
     conversion past the bound yields that CANNOT-EVALUATE for otherwise
     within-budget work. The report holds no lock and a forked child never
-    runs it (the ledger is pid-keyed)."""
+    runs it (the ledger is pid-keyed). Every failing exit of the leg, an
+    exception from its case included, lists the waits charged to it, so a
+    failure seen only inside a loaded group run still shows which waits it
+    reached; a forked child's return is no exit of the leg and lists
+    nothing."""
     if not _watchdog_finite_seconds(budget):
         print("opf watchdog leg: FAIL (declared budget %r is not a finite positive number)"
               % (budget,))
+        print("opf watchdog leg: charged waits of the failing leg: none (the case did not run)")
         return EXIT_FINDING
     import math
     import time
     ledger = dict(pid=os.getpid(), depth={}, ticks={}, begun=[], landed=[],
                   closed=False)
+
+    def list_charged(note):
+        # The waits landed in this ledger so far, each as label=seconds.
+        landed = [record[1:] for _token, record in list(ledger["landed"])
+                  if record is not None and record[0] == "wait"]
+        print("opf watchdog leg: charged waits of the failing leg: %s%s"
+              % (", ".join("%s=%s" % wait for wait in landed) or "none", note))
+
     if not _WATCHDOG_LEDGERS:
         _watchdog_install_charges()
     _WATCHDOG_LEDGERS.append(ledger)
     try:
         rc = case(*args)
+    except BaseException as exc:
+        # An exception from the case (an assert, or the timeout of
+        # _watchdog_await_exited) is a failing exit too: the waits landed so
+        # far are listed before it goes on unchanged. No closing wait runs
+        # on this path, so a charge still unlanded is not listed.
+        if os.getpid() == ledger["pid"]:
+            list_charged(" (landed before the case raised %s)" % type(exc).__name__)
+        raise
     finally:
         # Removal is by IDENTITY, never list.remove, which compares
         # dicts by VALUE: a nested leg whose ledger has no charges
@@ -3523,6 +3671,7 @@ def _watchdog_leg_entry(budget, case, *args):
                   "closing step, in either case without any demonstrated "
                   "budget violation)" % (
                       len(unlanded), _WATCHDOG_CLOSE_BOUND, ", ".join(unlanded)))
+            list_charged(" (landed within the closing bound)")
             return EXIT_MALFORMED
         sleep(0.005)
     # The total is summed once HERE, after every BEGIN has landed, from the
@@ -3537,21 +3686,20 @@ def _watchdog_leg_entry(budget, case, *args):
     charged = math.fsum(seconds for _label, seconds in waits)
     print("opf watchdog leg: charged %ss of a %ss declared budget in %d waits" % (
         round(charged, 3), budget, len(waits)))
-    if rc != EXIT_OK:
-        # A failing leg lists what it was charged, so a failure seen only
-        # inside a loaded group run still shows which waits it reached.
-        print("opf watchdog leg: charged waits of the failing leg: %s"
-              % (", ".join("%s=%s" % wait for wait in waits) or "none"))
+    verdict = rc
     if uncountable:
         print("opf watchdog leg: FAIL (waits with no finite timeout: %s)"
               % ", ".join(uncountable))
-        return EXIT_FINDING
-    if charged > budget:
+        verdict = EXIT_FINDING
+    elif charged > budget:
         print("opf watchdog leg: FAIL (charged waits %ss exceed the declared budget %ss: %s)" % (
             round(charged, 3), budget,
             ", ".join("%s=%s" % wait for wait in waits)))
-        return EXIT_FINDING
-    return rc
+        verdict = EXIT_FINDING
+    if verdict != EXIT_OK:
+        # Whether the case failed or the ledger refused it.
+        list_charged("")
+    return verdict
 
 
 def _watchdog_ledger_case(mode, budget):
@@ -4957,6 +5105,17 @@ def _watchdog_launcher_case(label, disposition):
                 result = runner()
         ok = (control_ok and result == EXIT_FINDING and not statuses
               and signal.getsignal(signal.SIGCHLD) == hostile)
+    except BaseException as exc:
+        # A nested run that raises is a failing exit too: both captured
+        # outputs are printed (the redirections have ended) before the
+        # exception goes on unchanged.
+        print("opf watchdog launcher:", label, disposition, "FAIL (a nested run raised %s);"
+              " the control run's output:" % type(exc).__name__)
+        print(control_out.getvalue())
+        print("opf watchdog launcher: the output of the run under the %s SIGCHLD disposition:"
+              % disposition)
+        print(hostile_out.getvalue())
+        raise
     finally:
         signal.signal(signal.SIGCHLD, saved)
     print("opf watchdog launcher:", label, disposition, "PASS" if ok else "FAIL",
@@ -17397,13 +17556,18 @@ def _watchdog_regression_self_test():
     # The derived completion budgets: every derived leg's declared budget,
     # and that of each leg running a derived leg's case, lies between its
     # derived waits and those waits plus the margin; each one's earlier flat
-    # budget, put back, is refused (red on revert); the alias rows match
-    # every call of the completion case in this module; the two exit-wait
-    # branches poll the guardian's exit, and no os.waitid in this module
-    # blocks; and a failing launcher leg prints
-    # its nested runner's output and its charged waits.
+    # budget, put back, is refused (red on revert); each derived total
+    # matches its fixed figure, a reference outside the term table; the
+    # alias rows match every call of the completion case in this module
+    # outside the reviewed functions; the two exit-wait branches poll the
+    # guardian's exit, and no literal os.waitid call in this module blocks;
+    # a launcher leg prints its nested runs' output when it fails or one of
+    # them raises; and a leg lists its charged waits on every failing exit,
+    # an exception from its case included.
     flip_missed.extend(_watchdog_completion_budget_faults(budgets))
     flip_missed.extend(_watchdog_completion_revert_misses(budgets))
+    flip_missed.extend(_watchdog_completion_total_misses(budgets))
+    flip_missed.extend(_watchdog_completion_total_vectors(budgets))
     flip_missed.extend(_watchdog_completion_alias_misses())
     flip_missed.extend(_watchdog_completion_alias_vectors())
     flip_missed.extend(_watchdog_await_exited_misses())
