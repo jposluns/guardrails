@@ -27542,6 +27542,11 @@ def _main_isolated(monitor):
             os.symlink(os.path.join(gr, "GEN.md"), os.path.join(gr, "lk", "f"))
             os.symlink(os.path.join(gr, "gen"), os.path.join(gr, "lk", "t"))
             os.symlink(os.path.join(gr, "lk", "out"), os.path.join(gr, "lk", "o"))
+            # Links onto process-relative paths an earlier command could have made: lk/pc onto /proc/self/cwd,
+            # lk/fd onto /dev/fd, and lk/rp onto /proc/self/cwd through a relative target that climbs to the root.
+            os.symlink("/proc/self/cwd", os.path.join(gr, "lk", "pc"))
+            os.symlink("/dev/fd", os.path.join(gr, "lk", "fd"))
+            os.symlink("../" * 64 + "proc/self/cwd", os.path.join(gr, "lk", "rp"))
             gs_reg3.write_text("{ not json", encoding="utf-8")
             gb_extra = [str(_gs_init("gbroot{}".format(n))) for n in range(1, 5)]
             # A registry repo with a git repository NESTED inside its registered gen/ tree (and one in an
@@ -28164,6 +28169,59 @@ def _main_isolated(monitor):
             failures.append("(gb-labels) two gb cases share a label")
         for _gb_label, _gb_want, _gb_cmd, _gb_cwd in _gb_cases:
             bexpect(_gb_label, _gb_want, _gb_cmd, _gb_cwd)
+        # A /proc or /dev/fd path names the WRITING process's own working directory and descriptors, which the
+        # hook cannot resolve for it, so a path whose text or whose walk passes through one keeps the data a
+        # mention. Each case runs with the hook's own working directory in lk, outside every registered target,
+        # while the session's is in the gen tree: resolved in the hook, each path would land in lk and note,
+        # while the writer, started in the gen tree, writes gen/a.md.
+        _gb_proc_cases = [
+            ("(gb-p23) a bound path under /proc/self/cwd keeps the data a mention", "deny",
+             "python3 -c \"p='/proc/self/cwd/a.md'; open(p,'w').write('see gen/a.md')\"", ggen),
+            ("(gb-p23b) a sys.argv path under /proc/self/cwd keeps the data a mention", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('see gen/a.md')\" /proc/self/cwd/a.md", ggen),
+            ("(gb-p23c) a sys.argv path under /proc/thread-self/cwd keeps the data a mention", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('see gen/a.md')\" /proc/thread-self/cwd/a.md",
+             ggen),
+            ("(gb-p23d) a sys.argv path under /proc/PID/cwd keeps the data a mention", "deny",
+             "python3 -c \"import sys; open(sys.argv[1],'w').write('see gen/a.md')\" /proc/{}/cwd/a.md".format(
+                 os.getpid()), ggen),
+            ("(gb-p23e) a bound path through /dev/fd/.. keeps the data a mention", "deny",
+             "python3 -c \"p='/dev/fd/../cwd/a.md'; open(p,'w').write('see gen/a.md')\"", ggen),
+            ("(gb-p23f) a bound path through a link onto /proc/self/cwd keeps the data a mention", "deny",
+             "python3 -c \"p='../lk/pc/a.md'; open(p,'w').write('see gen/a.md')\"", ggen),
+            ("(gb-p23g) an absolute sys.argv path through a link onto /proc/self/cwd keeps the data a mention",
+             "deny", "python3 -c \"import sys; open(sys.argv[1],'w').write('see gen/a.md')\" {gr}/lk/pc/a.md",
+             ggen),
+            ("(gb-p23h) a bound path through a link onto /dev/fd keeps the data a mention", "deny",
+             "python3 -c \"p='../lk/fd/../cwd/a.md'; open(p,'w').write('see gen/a.md')\"", ggen),
+            ("(gb-p23i) a link whose relative target climbs onto /proc keeps the data a mention", "deny",
+             "python3 -c \"p='../lk/rp/a.md'; open(p,'w').write('see gen/a.md')\"", ggen),
+            # controls under the same hook working directory: paths that resolve outside every target still note
+            ("(gb-p23j) a relative path from a working directory outside every registered target notes",
+             "allow-note", "python3 -c \"import sys; open(sys.argv[1],'w').write('see gen/a.md')\" a.md", glk),
+            ("(gb-p23k) a bound path through a link that resolves outside every registered target notes",
+             "allow-note", "python3 -c \"p='lk/o/n.md'; open(p,'w').write('GEN.md')\"", gr),
+        ]
+        if len({case[0] for case in _gb_proc_cases} | {case[0] for case in _gb_cases}) != \
+                len(_gb_proc_cases) + len(_gb_cases):
+            failures.append("(gb-labels) two gb cases share a label")
+        _gb_here = os.getcwd()
+        os.chdir(glk)
+        try:
+            for _gb_label, _gb_want, _gb_cmd, _gb_cwd in _gb_proc_cases:
+                bexpect(_gb_label, _gb_want, _gb_cmd, _gb_cwd)
+        finally:
+            os.chdir(_gb_here)
+        # (gb-p23l) the walk itself: a path through /proc or /dev/fd, named or reached through a link, gives
+        # None, while a path through a link onto an ordinary directory gives its physical path.
+        for _gb_path in ("/proc/self/cwd/a.md", "//proc/1/cwd", "/dev/fd/3", "/dev/stdin",
+                         os.path.join(glk, "pc", "a.md"), os.path.join(glk, "fd", "x"),
+                         os.path.join(glk, "rp", "a.md")):
+            if aiqt_hooks._gensrc_physical(_gb_path) is not None:
+                failures.append("(gb-p23l) the walk resolved the process-relative path {!r}".format(_gb_path))
+        _gb_real = os.path.join(os.path.realpath(glk), "out", "n.md")
+        if aiqt_hooks._gensrc_physical(os.path.join(glk, "o", "n.md")) != _gb_real:
+            failures.append("(gb-p23l) the walk did not resolve lk/o/n.md to {!r}".format(_gb_real))
         # (gb-p22l) the data is blanked only against an absolute working directory: with none, or a relative one,
         # the command stays whole even where the path would resolve outside every target; (gb-p22m) with gr it
         # is blanked.

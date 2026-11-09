@@ -20839,6 +20839,59 @@ def _gensrc_python_data_spans(code):
     return ([where], target) if where else ([], None)
 
 
+def _gensrc_physical(joined):
+    """The physical path of the absolute path joined, walked one component at a time through every link that
+    exists now, as the kernel walks it for the writer: a .. pops the physical path walked so far, after the
+    link before it, and a missing component ends the links (the rest is read as written). None where the
+    walk cannot stand in for the writer's: the text, or any path the walk reaches (a component, a link's
+    target), is process-relative (_rwh_process_relative: /proc/self/..., /proc/thread-self/...,
+    /proc/<pid>/..., /dev/fd/... and the /dev/std* aliases name the opening process's own view, so reading
+    them here would give this hook's working directory and descriptors, not the writer's), a link cannot be
+    read, a component cannot be examined for a cause other than its absence, or the walk meets more than
+    40 links (a loop). os.path.realpath is not used: it reads /proc/self/cwd as this process's."""
+    if not os.path.isabs(joined) or _rwh_process_relative(joined):
+        return None
+    pending = [comp for comp in joined.split("/") if comp not in ("", ".")]
+    pending.reverse()
+    current, links, missing = "/", 0, False
+    while pending:
+        comp = pending.pop()
+        if comp in ("", "."):
+            continue
+        if comp == "..":
+            current = os.path.dirname(current)
+            continue
+        step = os.path.join(current, comp)
+        if _rwh_process_relative(step):
+            return None
+        if missing:
+            current = step
+            continue
+        try:
+            mode = os.lstat(step).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            missing, current = True, step
+            continue
+        except OSError:
+            return None
+        if not stat.S_ISLNK(mode):
+            current = step
+            continue
+        links += 1
+        if links > 40:
+            return None
+        try:
+            dest = os.readlink(step)
+        except OSError:
+            return None
+        if not dest or "\x00" in dest:
+            return None
+        if dest.startswith("/"):
+            current = "/"
+        pending.extend(reversed([part for part in dest.split("/") if part not in ("", ".")]))
+    return current
+
+
 def _gensrc_unmention(command, code, cwd, outside):
     """command with the written-data spans of the python -c program code (_gensrc_python_data_spans) blanked,
     for the mention filter alone (_gensrc_mentions), or command unchanged. A span is blanked only where the
@@ -20850,13 +20903,15 @@ def _gensrc_unmention(command, code, cwd, outside):
     after it is plain words, all separated by spaces, with no newline anywhere, so no later step (a pipe, a
     list, a loop, a heredoc, xargs, a second program) can read the written file back. It is blanked only
     where the path the program writes resolves: the plain literal, or the argument word sys.argv[N] names
-    (sys.argv[0] being -c), joined to cwd, the absolute session working directory, and realpath'd through
-    every link that exists now, must be no directory, at most _GENSRC_MAX_TARGET bytes, and a real path that
-    outside(real) proves lies outside every registered target. With no cwd, an argument index past the
-    words, or a path that does not resolve or resolves onto or into a registered target (a relative path
-    from a working directory inside a registered tree, a link an earlier command made), the command stays
-    whole. A name the program spells anywhere else (a path built from it, an argument, another command)
-    stays in the text and still counts."""
+    (sys.argv[0] being -c), joined to cwd, the absolute session working directory, at most
+    _GENSRC_MAX_TARGET bytes, and walked through every link that exists now (_gensrc_physical), must be no
+    directory and a physical path that outside(real) proves lies outside every registered target. With no
+    cwd, an argument index past the words, or a path that does not resolve (its text or any component or
+    link target the walk reaches lies on /proc or /dev/fd, whose meaning is the writer's own and not this
+    hook's, named directly or through a link an earlier command made) or that resolves onto or into a
+    registered target (a relative path from a working directory inside a registered tree, a link an earlier
+    command made onto or into one), the command stays whole. A name the program spells anywhere else (a
+    path built from it, an argument, another command) stays in the text and still counts."""
     spans, target = _gensrc_python_data_spans(code)
     if not spans or "\n" in command or "\r" in command or not isinstance(cwd, str) or not os.path.isabs(cwd):
         return command
@@ -20895,13 +20950,12 @@ def _gensrc_unmention(command, code, cwd, outside):
         path = target[1]
     if not path or "\x00" in path:
         return command
-    # No lexical normalization: realpath reads each .. after the link before it, as the open does.
     joined = os.path.join(cwd, path)
     try:
         if len(os.fsencode(joined)) > _GENSRC_MAX_TARGET:
             return command
-        real = os.path.realpath(joined)
-        if os.path.isdir(real) or not outside(real):
+        real = _gensrc_physical(joined)
+        if real is None or os.path.isdir(real) or not outside(real):
             return command
     except (OSError, ValueError):
         return command
