@@ -9699,6 +9699,24 @@ def _segment_repo_dir(tokens, cwd):
     return base
 
 
+def _segment_appended_gitdir_base(tokens, cwd):
+    """For a git segment whose only git-dir redirect is a leading GIT_DIR+= assignment, the directory
+    _segment_repo_dir names once that assignment is set aside: the resolved -C target, or the session cwd
+    under a --work-tree or GIT_WORK_TREE= with no -C. Returns None when the segment carries no leading
+    GIT_DIR+=, or carries another git-dir redirect as well (a --git-dir option or a GIT_DIR= prefix), and
+    otherwise _segment_repo_dir's own answer for the remaining tokens (None or "opaque" included).
+    branch_root probes this directory as a floor under its cannot-pin note: git creates the branch in the
+    git dir the GIT_DIR+= yields, which this guard cannot pin, but an orphaned or unresolvable start in the
+    -C or session repository still denies, as it did before GIT_DIR+= was read as GIT_DIR=."""
+    cw = _command_word_index(tokens)
+    if not any(tok.startswith("GIT_DIR+=") for tok in tokens[:cw]):
+        return None
+    rest = [tok for k, tok in enumerate(tokens) if k >= cw or not tok.startswith("GIT_DIR+=")]
+    if _segment_has_gitdir_redirect(rest):
+        return None
+    return _segment_repo_dir(rest, cwd)
+
+
 def _segment_has_worktree_redirect(tokens):
     """True when a git segment carries a --work-tree / GIT_WORK_TREE redirect
     (a bare or '='-attached --work-tree global option, or a leading GIT_WORK_TREE= env assignment).
@@ -10453,8 +10471,9 @@ def _segment_has_gitdir_redirect(tokens):
     # variable denies first). A call that carries no cwd has no session directory, so there is no base: a
     # destructive form denies when git is asked where it lands, since with no directory to run git from
     # _segment_git_target returns None, and a non-destructive form that no earlier rule denies allows with its
-    # note and takes no snapshot. The branch-root guard allows the creation with its cannot-pin note instead
-    # of probing the -C directory.
+    # note and takes no snapshot. The branch-root guard gives the creation its cannot-pin note, but still
+    # probes the -C directory (or the session directory under a --work-tree or GIT_WORK_TREE=) as a floor
+    # and denies an orphaned or unresolvable start there (_segment_appended_gitdir_base).
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
         if tok.startswith(("GIT_DIR=", "GIT_DIR+=")):
@@ -14401,6 +14420,15 @@ def protected_line(data):
 # reproduced here so the draft is self-contained and directly runnable.
 _ASK_START = object()
 
+
+class _DetachStart(str):
+    """The commit-ish of a `git worktree add --detach|-d <path> <commit-ish>`, marked so branch_root can tell
+    it from a branch start: a detach is probed only where branch_root pins the repository, and denies where
+    it cannot pin it (the commit-ish may be orphaned, and no ancestry probe can say)."""
+
+    __slots__ = ()
+
+
 # The ONLY options tolerated inside a clean canonical creation: valueless booleans.
 # Exact match only -- git resolves an unambiguous long-option PREFIX to the full
 # option, so an abbreviated form (e.g. "--qui") is deliberately NOT matched here and
@@ -14647,8 +14675,9 @@ def _worktree_creation_start(args):
     <path> <commit-ish>` creates no branch: it checks <commit-ish> out detached, so it is probed
     the same way and allowed only on a start rooted on the protected line (an orphaned or
     unresolvable commit-ish still denies where branch_root pins the repository; under a redirect it
-    cannot pin, branch_root allows any start with a note, as for -b). The detach option may stand anywhere among the
-    options and operands, the operands may follow --, and it needs exactly one path and one
+    cannot pin, branch_root denies it, since no probe can tell an orphaned commit-ish from a rooted
+    one there). Its commit-ish comes back as a _DetachStart, so branch_root can tell the two forms
+    apart. The detach option may stand anywhere among the options and operands, the operands may follow --, and it needs exactly one path and one
     commit-ish operand and no option but the valueless -q/-f/--quiet/--force; a detach with
     -b/-B, with no commit-ish (git detaches at HEAD) or with an extra operand returns
     _ASK_START, which branch_root denies. A --detach or -d after -- is an operand to git, not
@@ -14736,7 +14765,7 @@ def _worktree_creation_start(args):
         # rooted one allows. Detach with a create trigger, or without exactly <path> <commit-ish>, ASKs.
         if created or len(operands) != 2:
             return _ASK_START
-        return operands[1]
+        return _DetachStart(operands[1])
     if not created:
         return _ASK_START                               # bare `add <path> [<commit-ish>]`: ambiguous
     if branch_name is None:
@@ -14859,6 +14888,16 @@ _BRNROT_UNCLASSIFIED = (
     "names; the CI branch-root gate remains the authoritative backstop.",
     "AIQT guardrail: denied a branch-creation form whose start point is ambiguous "
     "(rule brnrot); re-issue with an explicit start point.")
+# branch_root's (reason, banner) for a `git worktree add --detach|-d <path> <commit-ish>` under a command-local
+# option or assignment whose repository this guard cannot pin, where no probe can tell the commit-ish rooted.
+_BRNROT_DETACH_UNPINNED = (
+    "AIQT rule brnrot (branch-rooted-on-live-main): this detached worktree carries a command-local git option "
+    "or environment assignment (the repository it acts on cannot be pinned from this call), so this guard cannot "
+    "check whether its commit-ish is rooted on the protected line and it is denied fail-safe. Re-issue it as a "
+    "plain 'git worktree add --detach <path> <commit-ish>' from the target repository, or with an absolute "
+    "'-C <dir>' target and no --git-dir option or GIT_DIR prefix.",
+    "AIQT guardrail: denied a detached worktree whose repository this guard cannot pin (rule brnrot); "
+    "re-issue from the target repository or with an absolute -C target.")
 # branch_root's deny of a git command that reads as running under a git alias only through a word built at run time,
 # or a region the lexer did not read (_git_alias_built, _git_alias_unread), in place of the alias wording above.
 _BRNROT_BUILT = (
@@ -14902,11 +14941,12 @@ def branch_root(data):
     branch, so its commit-ish is probed as a -b start is, with the same -C and working-directory
     handling: where the repository is pinned (the session directory, a resolvable -C target, or the session
     directory under a --work-tree or GIT_WORK_TREE= redirect) a rooted one ALLOWS and an orphaned or
-    unresolvable one DENIES. Where it is not pinned, any start, an orphaned or unresolvable one included,
-    ALLOWS-WITH-NOTE with no ancestry probe, as the -b form does (the cannot-pin sentence below): under a
-    '--git-dir=<repo>/.git' or a separated '--git-dir <path>' option or a 'GIT_DIR=...' or 'GIT_DIR+=...'
-    prefix (with or without -C); under any -c option that defines no git alias ('git -c core.x=1 worktree add --detach
-    <path> <commit-ish>'), any other global option before the subcommand ('--no-pager', '--bare') or any
+    unresolvable one DENIES. Where it is not pinned, any start, a rooted one included, DENIES with no
+    ancestry probe (_BRNROT_DETACH_UNPINNED), unlike the -b form's note, since no probe can tell an
+    orphaned commit-ish from a rooted one there: under a '--git-dir=<repo>/.git' or a separated
+    '--git-dir <path>' option or a 'GIT_DIR=...' or 'GIT_DIR+=...' prefix (with or without -C); under any
+    -c option that defines no git alias ('git -c core.x=1 worktree add --detach <path> <commit-ish>'),
+    any other global option before the subcommand ('--no-pager', '--bare') or any
     leading environment assignment other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
     prefix, when the command carries no -C, --work-tree or GIT_WORK_TREE=; under an empty -C ("-C ''"),
     with or without a working directory, or a -C chain whose first -C is relative when the call carries no
@@ -14922,7 +14962,10 @@ def branch_root(data):
     prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty -C, a -C chain whose first -C is relative
     with no session directory, or a --work-tree/GIT_WORK_TREE= with no -C and no session directory
     (_segment_repo_dir) - ALLOWS-WITH-NOTE
-    (the CI branch-root gate remains the backstop) rather than denying. It never asks. A command carrying a '#'
+    (the CI branch-root gate remains the backstop) rather than denying. Beside a leading GIT_DIR+= the -C
+    target, or the session directory under a --work-tree or GIT_WORK_TREE= with no -C, is still probed as
+    a floor (_segment_appended_gitdir_base): an orphaned or unresolvable start there DENIES, and a rooted
+    one keeps the note. It never asks. A command carrying a '#'
     whose comment reading depends on context (the shared lexer's comment rule) is judged on the segments of
     both readings of each such '#'; one the lexer cannot judge that way whose text (_hash_doubt_scan) names
     git and a branch-capable verb (checkout, switch, branch, worktree), or holds quoting that text does not
@@ -15100,9 +15143,19 @@ def branch_root(data):
             # they actually create the branch in, not B. Every cannot-pin case listed above (_segment_repo_dir
             # returns None or "opaque") stays the cannot-pin allow-note (the CI branch-root gate remains the
             # backstop).
+            # A detached worktree (_DetachStart) under a repository this guard cannot pin DENIES instead:
+            # no probe can tell its commit-ish rooted from orphaned there. Beside a leading GIT_DIR+= the
+            # -C target, or the session directory under a --work-tree or GIT_WORK_TREE= with no -C, is
+            # probed as a floor under the note (_segment_appended_gitdir_base): an orphaned or unresolvable
+            # start there DENIES, and a rooted one keeps the note, since git creates the branch in the git
+            # dir the GIT_DIR+= yields, not there.
             rd = _segment_repo_dir(tokens, cwd0)
             if isinstance(rd, str) and rd != "opaque":
                 probe_repo = rd
+            elif isinstance(start, _DetachStart):
+                if pending_deny is None:
+                    pending_deny = _BRNROT_DETACH_UNPINNED
+                continue
             else:
                 if pending_note is None:
                     pending_note = (
@@ -15111,7 +15164,10 @@ def branch_root(data):
                         "on cannot be pinned from this call), so it cannot check the start point's ancestry "
                         "here; it is allowed and the CI branch-root gate remains the backstop. Prefer an "
                         "explicit '-C <dir>' target and start point.")
-                continue
+                floor = _segment_appended_gitdir_base(tokens, cwd0)
+                if not (isinstance(floor, str) and floor != "opaque"):
+                    continue
+                probe_repo = floor
         if probe_repo is None:
             outcome, detail = ("unknown", "the session repository directory is unavailable")
         else:

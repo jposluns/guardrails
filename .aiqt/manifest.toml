@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "ca7ddd9c1a6779be8f3024085da2f752d1d6241ec45bf5d5c9b1a91709857ae1"
+tree-sha256 = "276366de0a0213737b35ac64ef051f4cc0c1d167b06927e9d026d27e4d2f1721"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -81,8 +81,8 @@ sha256 = "d6e9ab43b1c98a9b5cf7023b7b43cfd447607673e6128bfd06c4812551d32c7e"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 482102
-sha256 = "0f94d619d1280ee8fe53b85a2b3031ad42e1de044a27800a4a67d0af2a39890f"
+bytes = 482473
+sha256 = "dc70c0f9be868cee60e246c5f2fa92b95d579de06d9013d86f4ffad03d95c7e9"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
@@ -91,8 +91,8 @@ sha256 = "4461a7f1d596cfbbf1b9300d3ad0bb8fe2c4c93f194e270bd3e37864a4a5ea48"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 2447831
-sha256 = "a9e379ce4793a5234d4b7281742f0416dcce48391c9ffbfefc10e8cabeeff340"
+bytes = 2451888
+sha256 = "220eee3194149b4ed74fdd2048e686a5b0e6796f8d8fec4cce40a5742d23502a"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -826,8 +826,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1106170
-sha256 = "121ae25f9af9bf5b2e10b6f67b6bd1bbaf632ef59a1b741831bbd99354e083b9"
+bytes = 1106541
+sha256 = "95887946e75bbddd187c5116e36eb3c6f992269e6a6a63dfcbc8df813997105b"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2391,8 +2391,8 @@ sha256 = "854403d7fd810507f024d0ff23a6db4c8bcf8978ea92210d7536a247d5c0fd28"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 644520
-sha256 = "1354c80195febcb1137b3cc14859a237af1718b3c3b748430befc829bbb97b41"
+bytes = 644891
+sha256 = "197ab90b20e0e6cc5c1472242e9e8e8d3c891eee5f0306431d4eeb2a44722a93"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3506,8 +3506,8 @@ sha256 = "4c734ec904247a0b33d0ee7a5f0c2abcb4b80de3e308ce4d04b92da5b256f6c2"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 2447831
-sha256 = "a9e379ce4793a5234d4b7281742f0416dcce48391c9ffbfefc10e8cabeeff340"
+bytes = 2451888
+sha256 = "220eee3194149b4ed74fdd2048e686a5b0e6796f8d8fec4cce40a5742d23502a"
 
 [[sources]]
 path = "roadmap.toml"
@@ -3951,8 +3951,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 704094
-sha256 = "5458e6aea21e47f1e59fc09bc87b4e8e16239bf09d2f55da5e793ecd82d7be4a"
+bytes = 704465
+sha256 = "9958deb5437f1cf01b3952947f7d96ae364e4d94d0cacce96a0ba944cfa43a07"
 
 [[sources]]
 path = "site/evidence.html"
@@ -4651,8 +4651,8 @@ sha256 = "59f6155486925ab9adea0da0203964283937c0dc7543bcfba335d4ac0820279e"
 
 [[sources]]
 path = "tools/selftest_aiqt_hooks.py"
-bytes = 2191657
-sha256 = "2f992474ab9165f029da0207794e07bd3d9dbcaf90cd00e4906aec54a17ade66"
+bytes = 2199611
+sha256 = "f0ff2cd4ba0178834a189e9244ffe180849e588fa159e389599c07c5a325c4d3"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
