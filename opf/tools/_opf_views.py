@@ -4693,6 +4693,47 @@ def _self_test():
         check("linesep-collapse-off-reaches-views",
               ls_pre and _ls_off_rc == EXIT_OK and all(ch in _ls_off_refs for ch in ls_seps))
 
+        # --- A store holding U+0085 but neither U+2028 nor U+2029 drifts in its Markdown view (spec 5.7).
+        # The U+0085 collapse kept GENERATOR_VERSION, so REFERENCES.md as a tool without that collapse
+        # rendered it (the reference locator holding a literal U+0085, the U+2028/U+2029 collapse left on)
+        # differs from the current render, and render --check reports it as drift until one re-render.
+        # With U+0085 left out of _MD_LINESEP_RE both renders are the same bytes and these checks fail.
+        nelroot = new_root()
+        write_toml(nelroot, "manifest.toml", manifest)
+        empty_indexes(nelroot)
+        write_toml(nelroot, "reference.index.toml", "\n".join([
+            "schema = 1", "", "[[record]]",
+            'id = "RF-1"', 'type = "reference"', 'status = "recorded"', 'title = "a source"',
+            'created_at = "2026-01-01T00:00:00Z"', 'updated_at = "2026-01-02T00:00:00Z"',
+            'actor = { kind = "maintainer" }',
+            'refs = [{ kind = "doc", locator = "loc\\u0085x", note = "a note" }]',
+        ]) + "\n")
+        _nel_refs = nelroot / WORKING_DIRNAME / "REFERENCES.md"
+        _nel_store = "".join(_p.read_text(encoding="utf-8")
+                             for _p in sorted((nelroot / WORKING_DIRNAME / "toml").iterdir()))
+        _nel_saved = globals()["_MD_LINESEP_RE"]
+        try:
+            globals()["_MD_LINESEP_RE"] = re.compile("[\N{LINE SEPARATOR}\N{PARAGRAPH SEPARATOR}]")
+            _nel_prior_rc = render_write(nelroot)
+        finally:
+            globals()["_MD_LINESEP_RE"] = _nel_saved
+        _nel_prior = _nel_refs.read_bytes() if _nel_refs.is_file() else b""
+        _nel_now_rc = render_write(nelroot)
+        _nel_now = _nel_refs.read_bytes() if _nel_refs.is_file() else b""
+        _nel_pre = ("\\u0085" in _nel_store
+                    and not any(_s in _nel_store for _s in ("\\u2028", "\\u2029") + ls_seps)
+                    and _nel_prior_rc == EXIT_OK and _nel_now_rc == EXIT_OK)
+        check("nel-only-store-prior-render-differs",
+              _nel_pre and "\x85".encode("utf-8") in _nel_prior
+              and "\x85".encode("utf-8") not in _nel_now and _nel_prior != _nel_now)
+        _nel_refs.write_bytes(_nel_prior)
+        check("nel-only-store-markdown-view-drifts",
+              _nel_pre and render(["--root", str(nelroot), "--check"]) == EXIT_DRIFT)
+        check("nel-only-store-one-rerender-clears",
+              _nel_pre and _nel_prior != _nel_now
+              and render_write(nelroot) == EXIT_OK and _nel_refs.read_bytes() == _nel_now
+              and render(["--root", str(nelroot), "--check"]) == EXIT_OK)
+
         # --- a per-record store is a CLEAR cannot-evaluate (deferred), not a silent inline render --------
         prroot = new_root()
         write_toml(prroot, "manifest.toml", manifest.replace('layout = "inline"', 'layout = "per-record"'))
