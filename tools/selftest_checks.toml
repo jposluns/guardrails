@@ -5087,6 +5087,7 @@ expected-check-ids = [
   "sample/release-variant",
   "sample/release-variant-tree-commit-prefix",
   "sample/release-variant-tree-commit-differs",
+  "regress/root-only-row-artifact-expectation",
   "refuse/unreadable",
   "refuse/list-absent",
   "refuse/list-not-regular",
@@ -5094,6 +5095,10 @@ expected-check-ids = [
   "tree/latest-release-differs",
   "tree/no-artifacts",
   "tree/root-malformed",
+  "tree/manifest-missing",
+  "tree/root-not-manifest-digest",
+  "tree/artifact-differs-from-manifest",
+  "tree/artifact-not-in-manifest",
   "tree/changelog-not-toml",
   "refuse/bad-arguments",
   "bound/size-under",
@@ -5106,6 +5111,8 @@ expected-check-ids = [
   "flip/commit-prefix-ignored",
   "flip/field-names-unchecked",
   "flip/lenient-row-parse",
+  "flip/root-not-bound-to-manifest",
+  "flip/artifact-not-bound-to-manifest",
 ]
 
 [[suite]]

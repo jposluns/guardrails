@@ -56,8 +56,10 @@ in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
 
 Each release ships a per-file manifest (`.aiqt/manifest.toml`) and its root digest, ROOT
 (`.aiqt/release/root.txt`, the SHA-256 of the manifest bytes). ROOT at the release's tagged commit is
-the digest published independently on posluns.dev, alongside the SHA-256 of each download. By validating
-them you can confirm that the files you downloaded are the ones we intended you to have.
+the one digest published independently on posluns.dev for each release; the downloads are covered through
+the manifest, which carries the SHA-256 of each one. Check that the SHA-256 of the manifest you downloaded
+equals the published ROOT, then that each file matches its manifest entry, and you can confirm that the
+files you downloaded are the ones we intended you to have.
 
 ## 06. Better with every release.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Release-stage gate: are a release's digests on a local copy of the published hash list?
+"""Release-stage gate: is a release's ROOT on a local copy of the published hash list?
 
   check_published_digest.py --list PATH --version X.Y.Z --project NAME --tree DIR --commit FULLSHA
   check_published_digest.py --list PATH --version X.Y.Z --project NAME --digest sha256:HEX [--digest ...]
@@ -10,12 +10,21 @@
 
 The gate never fetches anything. The maintainer fetches the published hash list outside the tool, keeps
 the fetch time and the body's SHA-256 (RELEASING.md step 6c), and passes the saved copy with --list; the
-gate prints the SHA-256 of the bytes it read so the record can be compared. The expected digests come
-either from --tree, a checkout of the tagged commit: the ROOT digest in .aiqt/release/root.txt and every
-[release.artifacts] digest of the latest [[release]] in changelog.toml, where VERSION and that release's
-version must both equal --version; or from --digest, given once per digest as sha256:<64 lowercase hex>,
-which must then name every digest handed off for the version. --project is required: it is the name the
-list gives this pack (opfiles in the copy saved on 2026-10-12), and the gate assumes no default.
+gate prints the SHA-256 of the bytes it read so the record can be compared. The list carries one digest
+for this pack's project at a version: ROOT, the SHA-256 of the raw bytes of .aiqt/manifest.toml. The
+expected digests come either from --tree, a checkout of the tagged commit, or from --digest, given once
+per digest as sha256:<64 lowercase hex>, which must then name every digest the list carries for the
+project at the version. --project is required: it is the name the list gives this pack (opfiles in the
+copy saved on 2026-10-12), and the gate assumes no default.
+
+With --tree the one digest expected on the list is ROOT, read from .aiqt/release/root.txt. The tree is
+first checked locally, and each failure here is cannot-evaluate: VERSION and the version of the latest
+[[release]] in changelog.toml must both equal --version; that release must record [release.artifacts];
+ROOT must be the SHA-256 of the tree's .aiqt/manifest.toml; and each [release.artifacts] digest must equal
+the sha256 that each [[sources]] or [[artifacts]] entry of that manifest gives for the same path, with at
+least one such entry. The artifact digests are bound to the listed ROOT through the manifest it hashes and
+are never looked for on the list. A download the list carries as a project of its own (one row per
+version of that download) is checked only when asked, through --digest with that project and version.
 
 The list format read is the one a copy saved on 2026-10-12 shows (tools/published-digest-sample-20261012.txt
 holds that copy). A line whose first character is # is a comment. Exactly one comment, before the first
@@ -38,7 +47,8 @@ commit ids cannot all name one commit (two ids conflict when neither is a prefix
 version must carry a commit id that is a prefix of it, or that row is a finding (mismatched commit). A list
 that cannot be stat'ed or read, is not a regular file, is over MAX_BYTES, is not UTF-8, holds a CR or NUL,
 or holds no row; a tree file that is missing, unreadable or malformed, or that does not bind the version;
-and a bad argument are cannot-evaluate (exit 2), never a pass.
+a tree whose manifest does not hash to ROOT or does not carry the recorded artifact digests; and a bad
+argument are cannot-evaluate (exit 2), never a pass.
 
 Not covered: the gate cannot show that the saved copy is what the list served, or when; that rests on the
 fetch record the maintainer keeps. The commit comparison shows only that the list's short id agrees with
@@ -74,6 +84,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MAX_BYTES = 1048576
 TREE_MAX_BYTES = 16777216
 ROOT_REL = ".aiqt/release/root.txt"
+MANIFEST_REL = ".aiqt/manifest.toml"
+MANIFEST_TABLES = ("sources", "artifacts")
 VERSION_REL = "VERSION"
 CHANGELOG_REL = "changelog.toml"
 SAMPLE_REL = "tools/published-digest-sample-20261012.txt"
@@ -262,14 +274,44 @@ def _toml(data, where):
         raise CannotEvaluate("{}: invalid UTF-8/TOML ({})".format(where, exc)) from None
 
 
+def _root_binds_manifest(root, manifest_bytes):
+    """True when ROOT is the SHA-256 of the exact manifest bytes."""
+    return hashlib.sha256(manifest_bytes).hexdigest() == root
+
+
+def _manifest_digests(manifest, path):
+    """The sha256 values the manifest's [[sources]] and [[artifacts]] entries give for path."""
+    found = []
+    for table in MANIFEST_TABLES:
+        entries = manifest.get(table, [])
+        if not isinstance(entries, list):
+            raise CannotEvaluate("{}: {} is not an array of tables".format(MANIFEST_REL, table))
+        found.extend(entry.get("sha256") for entry in entries
+                     if isinstance(entry, dict) and entry.get("path") == path)
+    return found
+
+
+def _artifact_bound(recorded, listed):
+    """True when the manifest has an entry for the path and every such entry carries the recorded digest."""
+    return bool(listed) and all(value == recorded for value in listed)
+
+
+def _listed_expectations(root, artifacts):
+    """The (label, hex) digests the hash list must carry for a tree: ROOT alone. The list publishes one
+    digest per project version; the artifacts are bound to ROOT through the manifest, checked locally."""
+    return [root]
+
+
 def expected_from_tree(tree, version):
-    """[(label, hex)] for the ROOT digest and the latest release's artifacts in tree, bound to version."""
+    """[(label, hex)] the list must carry for the tagged tree (ROOT alone), after checking locally that
+    the tree binds the version, that ROOT is the SHA-256 of its manifest, and that each [release.artifacts]
+    digest of the latest release equals the manifest's digest for that path."""
     tree = Path(tree)
     raw = _read_regular(tree / ROOT_REL, TREE_MAX_BYTES, ROOT_REL)
     match = re.fullmatch(rb"sha256:([0-9a-f]{64})\n", raw)
     if match is None:
         raise CannotEvaluate("{}: not exactly one sha256:<64 lowercase hex> line".format(ROOT_REL))
-    expected = [("ROOT ({})".format(ROOT_REL), match.group(1).decode("ascii"))]
+    root = ("ROOT ({})".format(ROOT_REL), match.group(1).decode("ascii"))
     raw = _read_regular(tree / VERSION_REL, TREE_MAX_BYTES, VERSION_REL)
     if raw != (version + "\n").encode("ascii"):
         raise CannotEvaluate("{}: does not hold exactly {} (holds {!r})".format(VERSION_REL, version, raw[:80]))
@@ -285,14 +327,26 @@ def expected_from_tree(tree, version):
     if not isinstance(artifacts, dict) or not artifacts:
         raise CannotEvaluate("{}: release {} records no [release.artifacts] digests (RELEASING.md step 3 "
                              "records them before the tag)".format(CHANGELOG_REL, version))
+    recorded = []
     for path in sorted(artifacts):
         value = artifacts[path]
         found = PREFIXED_RE.fullmatch(value) if isinstance(value, str) else None
         if found is None:
             raise CannotEvaluate("{}: artifact {!r} has no sha256:<64 lowercase hex> digest".format(
                 CHANGELOG_REL, path))
-        expected.append((path, found.group(1)))
-    return expected
+        recorded.append((path, found.group(1)))
+    manifest_bytes = _read_regular(tree / MANIFEST_REL, TREE_MAX_BYTES, MANIFEST_REL)
+    if not _root_binds_manifest(root[1], manifest_bytes):
+        raise CannotEvaluate("{}: holds sha256:{}, which is not the SHA-256 of {} (sha256:{})".format(
+            ROOT_REL, root[1], MANIFEST_REL, hashlib.sha256(manifest_bytes).hexdigest()))
+    manifest = _toml(manifest_bytes, MANIFEST_REL)
+    for path, want in recorded:
+        listed = _manifest_digests(manifest, path)
+        if not _artifact_bound(want, listed):
+            raise CannotEvaluate("{}: artifact {!r} records sha256:{}, but {} gives {} for that path".format(
+                CHANGELOG_REL, path, want, MANIFEST_REL,
+                ", ".join(repr(value) for value in listed) if listed else "no entry"))
+    return _listed_expectations(root, recorded)
 
 
 def parse_args(argv):
@@ -364,7 +418,8 @@ def run_gate(argv):
         return 1
     print("PASS: all {} expected digest(s) are listed on release rows of {} {}{}".format(
         len(expected), options["project"], options["version"],
-        "" if options["commit"] is None else ", each naming a prefix of commit " + options["commit"]))
+        "" if options["commit"] is None else ", each naming a prefix of commit " + options["commit"]
+        + "; the tree's ROOT is the SHA-256 of its manifest, which carries each [release.artifacts] digest"))
     return 0
 
 
@@ -386,9 +441,18 @@ def check(name, ok, detail=""):
 
 
 _V = "1.1.1"
-_ROOT_HEX = hashlib.sha256(b"fixture root").hexdigest()
 _ZIP_HEX = hashlib.sha256(b"fixture skill zip").hexdigest()
 _TXT_HEX = hashlib.sha256(b"fixture instructions").hexdigest()
+_ZIP_PATH, _TXT_PATH = "site/downloads/aiqt-skill-1.1.1.zip", "site/downloads/aiqt-instructions.txt"
+_ARTIFACTS = {_ZIP_PATH: "sha256:" + _ZIP_HEX, _TXT_PATH: "sha256:" + _TXT_HEX}
+# The fixture manifest lists both downloads under [[sources]] and the zip under [[artifacts]] as well, as
+# the real one does; the fixture ROOT is the SHA-256 of its bytes.
+_MANIFEST = ('format-version = 1\n\n[[sources]]\npath = "README.md"\nbytes = 1\nsha256 = "{0}"\n\n'
+             '[[sources]]\npath = "{1}"\nbytes = 1\nsha256 = "{2}"\n\n'
+             '[[sources]]\npath = "{3}"\nbytes = 1\nsha256 = "{4}"\n\n'
+             '[[artifacts]]\npath = "{1}"\nkind = "file"\nsha256 = "{2}"\n').format(
+                 hashlib.sha256(b"fixture readme").hexdigest(), _ZIP_PATH, _ZIP_HEX, _TXT_PATH, _TXT_HEX)
+_ROOT_HEX = hashlib.sha256(_MANIFEST.encode("utf-8")).hexdigest()
 _OLD_HEX = hashlib.sha256(b"fixture older root").hexdigest()
 _RC_HEX = hashlib.sha256(b"fixture candidate").hexdigest()
 _EXTRA_HEX = hashlib.sha256(b"fixture extra").hexdigest()
@@ -409,8 +473,8 @@ def _row(version, status, digest, commit=_SHORT, project=_P):
 
 
 def _ours(version=_V, status=RELEASE, root="sha256:" + _ROOT_HEX, commit=_SHORT):
-    return [_row(version, status, root), _row(version, status, "sha256:" + _ZIP_HEX),
-            _row(version, status, "sha256:" + _TXT_HEX, commit=commit)]
+    """This project's row for a version: the list carries ROOT alone."""
+    return [_row(version, status, root, commit=commit)]
 
 
 _PREAMBLE = "# fixture hash list\n#\n# fields:  project   version   commit    status        digest\n\n"
@@ -425,17 +489,22 @@ def _list_body(ours):
                     _row("1.2.0-rc.1", PRE_RELEASE, "sha256:" + _RC_HEX, commit=_OTHER_SHORT)] + ours)
 
 
-def _tree(tmp, version=_V, root=None, artifacts=True, version_file=None):
+def _tree(tmp, version=_V, root=None, artifacts=True, version_file=None, manifest=_MANIFEST):
+    """A fixture checkout: root.txt, VERSION, a changelog whose latest release records artifacts (True
+    for the fixture's two, False for none, or a path-to-digest dict), and the manifest (None for none)."""
     tree = Path(tmp) / "tree"
     os.makedirs(tree / ".aiqt" / "release", exist_ok=True)
     with open(tree / ROOT_REL, "w", encoding="utf-8") as handle:
         handle.write("sha256:{}\n".format(_ROOT_HEX) if root is None else root)
     with open(tree / VERSION_REL, "w", encoding="utf-8") as handle:
         handle.write(version + "\n" if version_file is None else version_file)
+    if manifest is not None:
+        with open(tree / MANIFEST_REL, "w", encoding="utf-8") as handle:
+            handle.write(manifest)
     lines = ['[[release]]\nversion = "0.9.0"\n', '[[release]]\nversion = "{}"\n'.format(version)]
     if artifacts:
-        lines.append('[release.artifacts]\n"site/downloads/aiqt-skill-{0}.zip" = "sha256:{1}"\n'
-                     '"site/downloads/aiqt-instructions.txt" = "sha256:{2}"\n'.format(version, _ZIP_HEX, _TXT_HEX))
+        lines.append("[release.artifacts]\n" + "".join('"{}" = "{}"\n'.format(path, value) for path, value in
+                                                       (_ARTIFACTS if artifacts is True else artifacts).items()))
     with open(tree / CHANGELOG_REL, "w", encoding="utf-8") as handle:
         handle.write("".join(lines))
     return str(tree)
@@ -453,7 +522,7 @@ def _gate(argv):
 
 def _case(body, mode="tree", version=_V, tree_kwargs=None, commit=_COMMIT, project=_P, digests=None):
     """The gate's (exit, output) on a list body (str or bytes) against a fixture tree (with --commit) or
-    the given digests (the fixture's three by default)."""
+    the given digests (the fixture's ROOT by default)."""
     with tempfile.TemporaryDirectory(prefix="published-digest-selftest-") as tmp:
         path = os.path.join(tmp, "hashes.txt")
         with open(path, "wb") as handle:
@@ -462,7 +531,7 @@ def _case(body, mode="tree", version=_V, tree_kwargs=None, commit=_COMMIT, proje
         if mode == "tree":
             argv += ["--tree", _tree(tmp, **(tree_kwargs or {})), "--commit", commit]
         else:
-            for hexdigest in (digests or (_ROOT_HEX, _ZIP_HEX, _TXT_HEX)):
+            for hexdigest in (digests or (_ROOT_HEX,)):
                 argv += ["--digest", "sha256:" + hexdigest]
         return _gate(argv)
 
@@ -480,13 +549,13 @@ def _self_test():
     good = _list_body(_ours())
 
     got = _case(good)
-    check("pass/match-tree", got[0] == 0 and "PASS: all 3 expected digest(s)" in got[1]
+    check("pass/match-tree", got[0] == 0 and "PASS: all 1 expected digest(s)" in got[1]
           and "prefix of commit " + _COMMIT in got[1], got)
 
     got = _case(good, mode="given")
     check("pass/match-given-digests", got[0] == 0, got)
 
-    got = _case(_list_body(_ours()[1:]))
+    got = _case(_list_body([]))
     check("refuse/missing", got[0] == 1 and "missing: ROOT (.aiqt/release/root.txt) sha256:" + _ROOT_HEX in got[1]
           and got[1].count("FAIL: ") == 1, got)
 
@@ -501,21 +570,20 @@ def _self_test():
     check("refuse/extra-digest-at-version", got[0] == 1 and "lists sha256:" + _EXTRA_HEX in got[1]
           and got[1].count("FAIL: ") == 1, got)
 
-    got = _case(_list_body(_ours(commit=_OTHER_SHORT)), mode="given")
+    got = _case(_list_body(_ours() + _ours(commit=_OTHER_SHORT)), mode="given")
     check("refuse/conflicting-commits", got[0] == 1 and "cannot all be one commit" in got[1]
           and got[1].count("FAIL: ") == 1, got)
 
     # Commit ids that are abbreviations of one commit (one a prefix of the other) do not conflict.
-    got = _case(_list_body(_ours(commit=_COMMIT[:12])))
+    got = _case(_list_body(_ours() + _ours(commit=_COMMIT[:12])))
     check("pass/commit-abbreviations-agree", got[0] == 0, got)
 
     # The tagged-commit prefix rule at its end: the full id (equal) passes, one digit longer fails, and a
     # short id of another commit fails.
-    got = _case(_list_body(_ours(commit=_COMMIT)))
+    got = _case(_list_body(_ours() + _ours(commit=_COMMIT)))
     check("pass/commit-full-id", got[0] == 0, got)
 
-    longer = _list_body([_row(_V, RELEASE, "sha256:" + hexdigest, commit=_COMMIT + "0")
-                         for hexdigest in (_ROOT_HEX, _ZIP_HEX, _TXT_HEX)])
+    longer = _list_body(_ours(commit=_COMMIT + "0"))
     got = _case(longer)
     check("refuse/commit-longer-than-tagged", got[0] == 1 and got[1].count("FAIL: mismatched commit:") == 1, got)
 
@@ -526,21 +594,21 @@ def _self_test():
 
     wrong_version = _list_body(_ours(version="1.1.2"))
     got = _case(wrong_version)
-    check("refuse/wrong-version", got[0] == 1 and got[1].count("FAIL: wrong version:") == 3
+    check("refuse/wrong-version", got[0] == 1 and got[1].count("FAIL: wrong version:") == 1
           and "under 1.1.2, not 1.1.1" in got[1], got)
 
     pre_release = _list_body(_ours(status=PRE_RELEASE))
     got = _case(pre_release)
-    check("refuse/pre-release-only", got[0] == 2 and got[1].count("pre-release only:") == 3, got)
+    check("refuse/pre-release-only", got[0] == 2 and got[1].count("pre-release only:") == 1, got)
 
     fields_line = "# fields:  project   version   commit    status        digest\n"
     for name, body in (
             ("refuse/malformed-four-fields", good + "{} {} {} {}\n".format(_P, _V, _SHORT, RELEASE)),
             ("refuse/malformed-six-fields", good + _row(_V, RELEASE, "sha256:" + _ZIP_HEX)[:-1] + " extra\n"),
             ("refuse/malformed-status", good.replace(" release ", " final ", 1)),
-            ("refuse/malformed-uppercase-hex", good.replace(_ZIP_HEX, _ZIP_HEX.upper())),
-            ("refuse/malformed-short-digest", good.replace(_ZIP_HEX, _ZIP_HEX[:-1])),
-            ("refuse/malformed-unprefixed-digest", good.replace("sha256:" + _ZIP_HEX, _ZIP_HEX)),
+            ("refuse/malformed-uppercase-hex", good.replace(_OLD_HEX, _OLD_HEX.upper())),
+            ("refuse/malformed-short-digest", good.replace(_OLD_HEX, _OLD_HEX[:-1])),
+            ("refuse/malformed-unprefixed-digest", good.replace("sha256:" + _OLD_HEX, _OLD_HEX)),
             ("refuse/malformed-version", good.replace(" 1.1.0 ", " v1.1.0 ")),
             ("refuse/malformed-commit", good.replace(" {} ".format(_SHORT), " {}g ".format(_SHORT[:-1]), 1)),
             ("refuse/malformed-bare-header", good.replace(fields_line, fields_line[2:])),
@@ -568,7 +636,11 @@ def _self_test():
 
     # The saved copy of the published list, as fetched on 2026-10-12: its one opfiles row is a pre-release
     # row, so the version it names cannot be evaluated as released (exit 2), and the release row variant
-    # (the same row with status release) passes, from a given digest and from a tree with --commit.
+    # (the same row with status release) passes from its given ROOT digest. For a tree, the variant's
+    # digest is also replaced by the fixture tree's ROOT, since a fixture cannot hold the manifest whose
+    # SHA-256 the saved row carries; no row is added, so the list still carries ROOT alone. Against a tree
+    # that records [release.artifacts], it passes when --commit begins with the row's short id and fails
+    # when it does not.
     try:
         sample = _read_regular(ROOT / SAMPLE_REL, MAX_BYTES, SAMPLE_REL).decode("utf-8")
     except (CannotEvaluate, UnicodeDecodeError) as exc:
@@ -586,15 +658,29 @@ def _self_test():
     got = _case(released, mode="given", version=_SAMPLE_VERSION, digests=(_SAMPLE_ROOT,))
     check("sample/release-variant", released != sample and got[0] == 0, got)
 
-    with_artifacts = released + "".join(_row(_SAMPLE_VERSION, RELEASE, "sha256:" + hexdigest, commit="058abd9")
-                                        for hexdigest in (_ZIP_HEX, _TXT_HEX))
-    tree_kwargs = {"version": _SAMPLE_VERSION, "root": "sha256:{}\n".format(_SAMPLE_ROOT)}
-    got = _case(with_artifacts, version=_SAMPLE_VERSION, tree_kwargs=tree_kwargs, commit=_SAMPLE_COMMIT)
-    check("sample/release-variant-tree-commit-prefix", got[0] == 0, got)
+    root_only = released.replace(_SAMPLE_ROOT, _ROOT_HEX, 1)
+    sample_tree = {"version": _SAMPLE_VERSION}
+    got = _case(root_only, version=_SAMPLE_VERSION, tree_kwargs=sample_tree, commit=_SAMPLE_COMMIT)
+    check("sample/release-variant-tree-commit-prefix", root_only != released and got[0] == 0
+          and "PASS: all 1 expected digest(s)" in got[1], got)
 
-    got = _case(with_artifacts, version=_SAMPLE_VERSION, tree_kwargs=tree_kwargs, commit=_COMMIT)
+    got = _case(root_only, version=_SAMPLE_VERSION, tree_kwargs=sample_tree, commit=_COMMIT)
     check("sample/release-variant-tree-commit-differs", got[0] == 1
           and got[1].count("FAIL: mismatched commit:") == 1 and "names commit 058abd9" in got[1], got)
+
+    # Regression: that ROOT-only release row against a tree with [release.artifacts] passes with ROOT and
+    # the commit matching, and restoring the old expectation (each artifact digest on the list as well)
+    # turns it red, naming both artifacts as missing.
+    before = _case(root_only, version=_SAMPLE_VERSION, tree_kwargs=sample_tree, commit=_SAMPLE_COMMIT)
+    original = _listed_expectations
+    globals()["_listed_expectations"] = lambda root, artifacts: [root] + list(artifacts)
+    try:
+        got = _case(root_only, version=_SAMPLE_VERSION, tree_kwargs=sample_tree, commit=_SAMPLE_COMMIT)
+    finally:
+        globals()["_listed_expectations"] = original
+    check("regress/root-only-row-artifact-expectation", before[0] == 0 and got[0] == 1
+          and got[1].count("FAIL: missing: ") == 2 and "missing: " + _ZIP_PATH in got[1]
+          and "missing: " + _TXT_PATH in got[1], (before, got))
 
     original = _read_bounded
 
@@ -616,14 +702,26 @@ def _self_test():
     check("refuse/list-absent", missing[0] == 2 and "cannot stat" in missing[1], missing)
     check("refuse/list-not-regular", directory[0] == 2 and "not a regular file" in directory[1], directory)
 
+    # A tree's local bindings: ROOT must hash its manifest, and each recorded artifact digest must be the
+    # manifest's digest for that path (one recorded digest changed, or one path the manifest lacks).
+    differs = dict(_ARTIFACTS, **{_TXT_PATH: "sha256:" + _EXTRA_HEX})
+    unlisted = dict(_ARTIFACTS, **{"site/downloads/x.zip": "sha256:" + _EXTRA_HEX})
     for name, kwargs, needle in (
             ("tree/version-file-differs", {"version_file": "1.1.0\n"}, "VERSION: does not hold exactly"),
             ("tree/latest-release-differs", {"version": "1.1.2", "version_file": _V + "\n"},
              "the latest release is '1.1.2'"),
             ("tree/no-artifacts", {"artifacts": False}, "records no [release.artifacts]"),
-            ("tree/root-malformed", {"root": "sha256:{}".format(_ROOT_HEX)}, "not exactly one sha256")):
+            ("tree/root-malformed", {"root": "sha256:{}".format(_ROOT_HEX)}, "not exactly one sha256"),
+            ("tree/manifest-missing", {"manifest": None}, MANIFEST_REL + ": cannot stat"),
+            ("tree/root-not-manifest-digest", {"manifest": _MANIFEST + "\n"}, "which is not the SHA-256 of"),
+            ("tree/artifact-differs-from-manifest", {"artifacts": differs},
+             "artifact {!r} records sha256:{}, but {} gives {!r}".format(
+                 _TXT_PATH, _EXTRA_HEX, MANIFEST_REL, _TXT_HEX)),
+            ("tree/artifact-not-in-manifest", {"artifacts": unlisted},
+             "artifact 'site/downloads/x.zip' records sha256:{}, but {} gives no entry".format(
+                 _EXTRA_HEX, MANIFEST_REL))):
         got = _case(good, tree_kwargs=kwargs)
-        check(name, got[0] == 2 and needle in got[1], got)
+        check(name, got[0] == 2 and needle in got[1] and "PASS" not in got[1], got)
 
     with tempfile.TemporaryDirectory(prefix="published-digest-selftest-") as tmp:
         tree = _tree(tmp)
@@ -635,25 +733,46 @@ def _self_test():
         got = _gate(["--list", path, "--version", _V, "--project", _P, "--tree", tree, "--commit", _COMMIT])
     check("tree/changelog-not-toml", got[0] == 2 and "invalid UTF-8/TOML" in got[1], got)
 
-    digest = "sha256:" + _ROOT_HEX
-    base = ["--list", "x", "--version", _V, "--project", _P]
-    bad = ([], ["--list"], ["--list", "x"], ["--list", "x", "--version", _V], base,
-           ["--list", "x", "--version", _V, "--digest", digest],
-           ["--list", "x", "--version", "1.1", "--project", _P, "--digest", digest],
-           ["--list", "x", "--version", "1.1.1-rc.1", "--project", _P, "--digest", digest],
-           base + ["--digest", _ROOT_HEX],
-           base + ["--digest", digest, "--tree", "t", "--commit", _COMMIT],
-           base + ["--tree", "t"],
-           base + ["--digest", digest, "--commit", _COMMIT],
-           base + ["--tree", "t", "--commit", _SHORT],
-           base + ["--tree", "t", "--commit", _COMMIT.upper()],
-           ["--list", "x", "--list", "y", "--version", _V, "--project", _P, "--digest", digest],
-           ["--list", "--version", _V, "--project", _P, "--digest", digest],
-           ["--list", "x", "--version", _V, "--project", "-bad", "--digest", digest],
-           base + ["--digest", digest, "--bogus", "z"])
-    got = [_main_exit(argv) for argv in bad]
-    got += [_main_exit(argv) for argv in (["--self-test", "--bogus"], ["--execution-report", "relative/report"])]
-    check("refuse/bad-arguments", got == [2] * (len(bad) + 2), got)
+    # Each bad argument list names a real list and a real tree that pass (the two controls), so the
+    # argument guard is all that stands between it and a gate run; a case counts only when that guard's
+    # own message is printed, so removing any one guard turns the check red.
+    with tempfile.TemporaryDirectory(prefix="published-digest-selftest-") as tmp:
+        listed = os.path.join(tmp, "hashes.txt")
+        with open(listed, "w", encoding="utf-8") as handle:
+            handle.write(good)
+        tree = _tree(tmp)
+        digest = "sha256:" + _ROOT_HEX
+        base = ["--list", listed, "--version", _V, "--project", _P]
+        required = "--list, --version and --project are required"
+        one_of = "give exactly one of --tree or --digest"
+        with_tree = "--commit is required with --tree and accepted only with it"
+        not_bare = "is not a bare X.Y.Z release version"
+        not_full = "is not a full commit id"
+        bad = (([], required), (["--list"], "--list needs a value"), (["--list", listed], required),
+               (["--list", listed, "--version", _V], required),
+               (["--list", listed, "--version", _V, "--digest", digest], required),
+               (base, one_of),
+               (["--list", listed, "--version", "1.1", "--project", _P, "--digest", digest], not_bare),
+               (["--list", listed, "--version", "1.1.1-rc.1", "--project", _P, "--digest", digest], not_bare),
+               (base + ["--digest", _ROOT_HEX], "is not sha256:<64 lowercase hex>"),
+               (base + ["--digest", digest, "--tree", tree, "--commit", _COMMIT], one_of),
+               (base + ["--tree", tree], with_tree),
+               (base + ["--digest", digest, "--commit", _COMMIT], with_tree),
+               (base + ["--tree", tree, "--commit", _SHORT], not_full),
+               (base + ["--tree", tree, "--commit", _COMMIT.upper()], not_full),
+               (["--list", listed, "--list", listed, "--version", _V, "--project", _P, "--digest", digest],
+                "--list given twice"),
+               (["--list", "--version", _V, "--project", _P, "--digest", digest], "--list needs a value"),
+               (["--list", listed, "--version", _V, "--project", "-bad", "--digest", digest],
+                "--project '-bad' is malformed"),
+               (base + ["--digest", digest, "--bogus", "z"], "unrecognized argument '--bogus'"),
+               (["--self-test", "--bogus"], "unrecognized argument '--self-test'"),
+               (["--execution-report", "relative/report"], "unrecognized argument '--execution-report'"))
+        controls = [_main_run(base + ["--tree", tree, "--commit", _COMMIT]), _main_run(base + ["--digest", digest])]
+        got = [(argv, _main_run(argv)) for argv, _needle in bad]
+    misses = [(argv, out) for (argv, (code, out)), (_argv, needle) in zip(got, bad)
+              if code != 2 or needle not in out or "PASS" in out]
+    check("refuse/bad-arguments", [code for code, _out in controls] == [0, 0] and not misses, (controls, misses))
 
     # The list size bound at its ends: one byte under, exactly at, and one byte over MAX_BYTES. Blank
     # lines are skipped, so padding with line feeds changes only the size.
@@ -663,9 +782,14 @@ def _self_test():
         got = _case(good + "\n" * padding)
         check(name, got[0] == code, (len(good) + padding, got))
 
-    # Each flip patches one guard to the broken form and shows that its fixture, red as written, then passes,
-    # so the fixture is red only through that guard. The version flip uses a list holding only this
-    # project's rows under the wrong version, so no other row can keep it red.
+    # Nine flips follow, each patching one guard to the broken form: version binding, pre-release counted
+    # as release, digest prefix compare, unexpected digests ignored, commit prefix ignored, field names
+    # unchecked, lenient row parse, ROOT not bound to the manifest, and artifact not bound to the manifest.
+    # Each shows that its fixture, red as written, then passes, so the fixture is red only through that
+    # guard. Guards outside these nine (the commit conflict rule, the field-name line's position, the
+    # digest and commit patterns, CR and NUL, and the argument guards) are covered by their own refuse,
+    # bound and pass cases above, not by a flip. The version flip uses a list holding only this project's
+    # rows under the wrong version, so no other row can keep it red.
     only_wrong_version = _PREAMBLE + "".join(_ours(version="1.1.2"))
     before = _case(only_wrong_version)
     original = _version_matches
@@ -739,33 +863,60 @@ def _self_test():
         globals()["_parse_row"] = original
     check("flip/lenient-row-parse", before[0] == 2 and got[0] == 0, (before, got))
 
+    unbound = {"manifest": _MANIFEST + "\n"}
+    before = _case(good, tree_kwargs=unbound)
+    original = _root_binds_manifest
+    globals()["_root_binds_manifest"] = lambda root, manifest_bytes: True
+    try:
+        got = _case(good, tree_kwargs=unbound)
+    finally:
+        globals()["_root_binds_manifest"] = original
+    check("flip/root-not-bound-to-manifest", before[0] == 2 and got[0] == 0, (before, got))
+
+    before = _case(good, tree_kwargs={"artifacts": differs})
+    original = _artifact_bound
+    globals()["_artifact_bound"] = lambda recorded, listed: True
+    try:
+        got = _case(good, tree_kwargs={"artifacts": differs})
+    finally:
+        globals()["_artifact_bound"] = original
+    check("flip/artifact-not-bound-to-manifest", before[0] == 2 and got[0] == 0, (before, got))
+
     if FAILURES:
         print("SELF-TEST FAIL: check_published_digest {} of {} check(s) failed".format(len(FAILURES), len(EXECUTED)))
         for failure in FAILURES:
             print("  - " + failure)
         return 1
-    print("SELF-TEST PASS: check_published_digest {} checks (a list carrying every expected digest on release "
-          "rows passes, from a tree with a matching commit prefix or from given digests; a missing digest, a "
-          "near-miss digest, an extra digest at the version, conflicting commits, a commit id that is not a "
-          "prefix of the tagged commit and a wrong version each fail; a pre-release-only row, malformed rows, "
-          "a missing, changed or misplaced field-name line, an unreadable, absent or non-regular list, a tree "
-          "that does not bind the version and a bad argument are cannot-evaluate; the saved 2026-10-12 list "
-          "exits 2 on its pre-release row and its release row variant passes; the commit length and size "
-          "bounds hold at their ends; each guard's flip turns its fixture green)".format(len(EXECUTED)))
+    print("SELF-TEST PASS: check_published_digest {} checks (a list carrying the expected digest on a release "
+          "row passes, from a tree with a matching commit prefix, where ROOT alone is expected, or from given "
+          "digests; a missing digest, a near-miss digest, an extra digest at the version, conflicting "
+          "commits, a commit id that is not a prefix of the tagged commit and a wrong version each fail; a "
+          "pre-release-only row, malformed rows, a missing, changed or misplaced field-name line, an "
+          "unreadable, absent or non-regular list, a tree that does not bind the version, a ROOT that is not "
+          "the SHA-256 of the tree's manifest, an artifact digest the manifest does not carry, and each bad "
+          "argument at its own guard are cannot-evaluate; the saved 2026-10-12 list exits 2 on its "
+          "pre-release row, and its release row variant passes with ROOT alone, also against a tree with "
+          "artifacts, and turns red when the artifact digests are expected on the list again; the commit "
+          "length and size bounds hold at their ends; nine flips each turn their red fixture green: version "
+          "binding, pre-release counted as release, digest prefix compare, unexpected digests ignored, commit "
+          "prefix ignored, field names unchecked, lenient row parse, ROOT not bound to the manifest and "
+          "artifact not bound to the manifest)".format(len(EXECUTED)))
     return 0
 
 
-def _main_exit(argv):
-    """main()'s exit code for the argument list argv, its output captured."""
+def _main_run(argv):
+    """main()'s exit code for the argument list argv and its captured stdout plus stderr."""
     import contextlib
     import io
     saved = sys.argv
     sys.argv = [saved[0]] + list(argv)
+    out = io.StringIO()
     try:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return main()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = main()
     finally:
         sys.argv = saved
+    return code, out.getvalue()
 
 
 def main():

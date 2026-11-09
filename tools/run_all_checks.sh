@@ -218,7 +218,7 @@ run_gate "rules-selftest"  python3 -I -B tools/gen_rules.py --self-test
 run_gate "artifact-checksums-selftest" python3 -I -B tools/check_artifact_checksums.py --self-test
 run_gate "artifact-checksums"          python3 -I -B tools/check_artifact_checksums.py
 run_gate "published-digest-selftest" python3 -I -B tools/check_selftest_execution.py --suite published-digest-selftest
-run_gate "published-digest" python3 -I -B tools/check_published_digest.py --self-test  # no saved published list in the repository to check
+run_gate "published-digest" python3 -I -B tools/check_published_digest.py --self-test  # no saved list for the release being checked
 run_gate "rules-drift"     python3 -I -B tools/gen_rules.py --check
 run_gate "agents-selftest" python3 -I -B tools/gen_agents.py --self-test
 run_gate "agents-drift"    python3 -I -B tools/gen_agents.py --check
