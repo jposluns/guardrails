@@ -20706,6 +20706,116 @@ def _gensrc_python_sinks(code):
     return sinks, faults
 
 
+# The node types a written-data argument may hold for _gensrc_python_data_spans: string constants, names and
+# their concatenation or formatting, so nothing in it can bind a name, call a function or reach a path.
+_GENSRC_DATA_NODES = (ast.Constant, ast.Name, ast.Load, ast.BinOp, ast.Add, ast.Mod, ast.JoinedStr,
+                      ast.FormattedValue)
+
+
+def _gensrc_python_data_spans(code):
+    """The character spans (start, end) of code that hold only the DATA a python -c program writes, or []:
+    the argument of a .write() chained straight onto the program's one write-shaped call (open(P, 'w').write(D),
+    io.open or Path(P).open alike) and the data argument of Path(P).write_text(D) or .write_bytes(D). Spans are
+    found only where the program parses, holds exactly one write-shaped call (an open with a write or computed
+    mode, a write_text or write_bytes, a shutil copy or move), so the data cannot be read back from another file
+    as a path, and D holds nothing but constants, names, + and % and f-strings, so it binds no name and calls
+    nothing. A program holding a carriage return, or text that does not encode, yields no span."""
+    if "\r" in code or len(code) > _GENSRC_MAX_PY:
+        return []
+    try:
+        tree = ast.parse(code, mode="exec")
+        lines = [line.encode("utf-8") for line in code.split("\n")]
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return []
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line.decode("utf-8")) + 1)
+
+    def write_mode(call, index):
+        mode = None
+        for keyword in call.keywords:
+            if keyword.arg == "mode":
+                mode = keyword.value
+        if mode is None and len(call.args) > index:
+            mode = call.args[index]
+        if mode is None:
+            return False
+        value = mode.value if isinstance(mode, ast.Constant) and isinstance(mode.value, str) else None
+        return value is None or any(ch in value for ch in "wax+")
+
+    def is_open(call):
+        func = call.func
+        if isinstance(func, ast.Name) and func.id == "open":
+            return write_mode(call, 1)
+        if not isinstance(func, ast.Attribute) or func.attr != "open":
+            return False
+        if isinstance(func.value, ast.Name) and func.value.id == "io":
+            return write_mode(call, 1)
+        return write_mode(call, 0)
+
+    writes, data = 0, []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if is_open(node):
+            writes += 1
+        elif isinstance(func, ast.Attribute) and func.attr in ("write_text", "write_bytes"):
+            writes += 1
+            given = [kw.value for kw in node.keywords if kw.arg == "data"] + node.args[:1]
+            if len(given) == 1:
+                data.append(given[0])
+        elif (isinstance(func, ast.Attribute) and func.attr in ("copy", "copy2", "copyfile", "move")
+              and isinstance(func.value, ast.Name) and func.value.id == "shutil"):
+            writes += 1
+        if (isinstance(func, ast.Attribute) and func.attr == "write" and isinstance(func.value, ast.Call)
+                and is_open(func.value) and len(node.args) == 1 and not node.keywords):
+            data.append(node.args[0])
+    if writes != 1:
+        return []
+    spans = []
+    try:
+        for node in data:
+            if not all(isinstance(part, _GENSRC_DATA_NODES) for part in ast.walk(node)):
+                continue
+            if isinstance(node, ast.Constant) and not isinstance(node.value, (str, bytes)):
+                continue
+            start = starts[node.lineno - 1] + len(lines[node.lineno - 1][:node.col_offset].decode("utf-8"))
+            end = starts[node.end_lineno - 1] + len(lines[node.end_lineno - 1][:node.end_col_offset].decode("utf-8"))
+            spans.append((start, end))
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return []
+    return spans
+
+
+def _gensrc_unmention(command, code):
+    """command with the written-data spans of the python -c program code (_gensrc_python_data_spans) blanked,
+    for the mention filter alone (_gensrc_mentions), or command unchanged. A span is blanked only where the
+    program is spelled in command exactly once as one plain quoted word: in single quotes when it holds no
+    single quote, or in double quotes when it holds no double quote, $, backquote or backslash, so each
+    character of the program sits at a known place in the raw text. A name the program spells anywhere else
+    (a path built from it, an argument, another command) stays in the text and still counts."""
+    spans = _gensrc_python_data_spans(code)
+    if not spans:
+        return command
+    hits = []
+    for quote, banned in (("'", "'"), ('"', '"$`\\')):
+        if any(ch in code for ch in banned):
+            continue
+        needle = quote + code + quote
+        at = command.find(needle)
+        while at >= 0 and len(hits) < 2:
+            hits.append(at + 1)
+            at = command.find(needle, at + 1)
+    if len(hits) != 1:
+        return command
+    text = list(command)
+    for start, end in spans:
+        for k in range(hits[0] + start, hits[0] + end):
+            text[k] = " "
+    return "".join(text)
+
+
 def _gensrc_git_effects(argv, pi, aop, atl, base, effects):
     """The working-tree paths of git checkout and git restore (decision b), git at argv[pi]. A global -C DIR
     re-bases the paths; --git-dir, --work-tree, a leading GIT_DIR= or GIT_WORK_TREE= word and a global option
@@ -20963,9 +21073,12 @@ def _gensrc_program_effects(prog, argv, pi, aop, atl, base, effects):
         if oa[at]:
             unclear("a python -c program formed with an expansion or substitution")
             return
-        sinks, faults = _gensrc_python_sinks(args[at] if code is None else code)
+        program = args[at] if code is None else code
+        sinks, faults = _gensrc_python_sinks(program)
         for why in faults:
-            unclear(why)
+            # The program rides on its uncleared effect, so the mention filter can tell the data it writes
+            # from the rest of the command (_gensrc_unmention); no path is judged from it.
+            effects.append(_GensrcEffect("uncleared", why, program, None))
         for dst, src in sinks:
             _gensrc_dest(effects, "a python -c write", dst, [] if src is None else [src], False,
                          src is None, False, "file", lambda _word: (False, False), base)
@@ -21219,9 +21332,10 @@ def _gensrc_bash(data):
     registered target inside that directory; a restore of a registered target notes. Uncleared effects (and
     an incomplete lex, and roots past the budget) DENY when the session repository registry is present but
     unreadable, DENY when the command text names a registered target of any consulted readable registry
-    (_gensrc_mentions, a deliberate disclosed over-denial), and NOTE otherwise (the command runs, with a
-    note that its writes were not cleared). The first deny wins, then the joined notes. A fault inside the
-    detector (OSError, ValueError, RecursionError, MemoryError) DENIES fail-closed."""
+    (_gensrc_mentions, a deliberate disclosed over-denial; the data a lone faulting python -c program writes
+    is not read as a mention, _gensrc_unmention), and NOTE otherwise (the command runs, with a note that its
+    writes were not cleared). The first deny wins, then the joined notes. A fault inside the detector
+    (OSError, ValueError, RecursionError, MemoryError) DENIES fail-closed."""
     tool_input = data.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     if not isinstance(command, str) or not command.strip():
@@ -21393,6 +21507,13 @@ def _gensrc_bash(data):
             if session_c is not None and session_c not in loaded:
                 loaded[session_c] = _load_gensrc_registry(session_c)
             session_registry = loaded.get(session_c)
+            # Where every uncleared write is a fault of one and the same python -c program, a name that
+            # stands only in the data that program writes is no mention (_gensrc_unmention); any other
+            # uncleared write, an unread tail or a budget overflow keeps the whole text.
+            mention_text = command
+            programs = {eff.path for eff in effects if eff.kind == "uncleared"}
+            if not unread and not overflow and len(programs) == 1 and None not in programs:
+                mention_text = _gensrc_unmention(command, next(iter(programs)))
             if session_registry is not None and session_registry[0] == "bad":
                 return ("deny",
                         "AIQT rule gensrc (generated-artefact-source-only): the guard could not clear every "
@@ -21406,7 +21527,7 @@ def _gensrc_bash(data):
             for root_c, (status, payload) in loaded.items():
                 if status != "ok":
                     continue
-                named = _gensrc_mentions(payload, command, root_c)
+                named = _gensrc_mentions(payload, mention_text, root_c)
                 if named is None:
                     continue
                 entry_target, sources, regenerate = named

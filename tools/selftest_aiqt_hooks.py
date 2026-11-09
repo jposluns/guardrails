@@ -27734,6 +27734,23 @@ def _main_isolated(monitor):
              "python3 -c \"import os; os.chdir('/tmp'); open('{gr}/GEN.md','w')\"", gr2),
             ("(gb-p12) a python shutil copy from a computed source naming GEN.md denies", "deny",
              "python3 -c \"import shutil,sys; shutil.copy(sys.argv[1], '.')\" GEN.md", gr),
+            # a registered name that stands only in the data a computed-path write writes is no mention, while
+            # a name the path is built from, a literal write, a read-back path and any other uncleared write
+            # still deny
+            ("(gb-p13) a computed-path write whose written text alone names GEN.md notes", "allow-note",
+             "python3 -I -c \"p='/tmp/x/notes.md'; t=open(p).read(); open(p,'w').write(t + 'see GEN.md')\"", gr),
+            ("(gb-p13b) a write_text on a computed path whose data alone names GEN.md notes", "allow-note",
+             "python3 -c \"import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('see GEN.md')\" n.txt", gr),
+            ("(gb-p14) a computed path built from the GEN.md name denies, though the data names it too", "deny",
+             "python3 -I -c \"p='GEN.md'; t=open(p).read(); open(p,'w').write(t + 'see GEN.md')\"", gr),
+            ("(gb-p15) a literal write to GEN.md whose data names it too denies", "deny",
+             "python3 -I -c \"open('GEN.md','w').write('see GEN.md')\"", gr),
+            ("(gb-p16) data written to a file a second write reads back as its path denies", "deny",
+             "python3 -c \"open('n','w').write('GEN.md'); open(open('n').read(),'w')\"", gr),
+            ("(gb-p17) data that calls a function is read as a mention, so naming GEN.md denies", "deny",
+             "python3 -c \"open(p,'w').write(str('GEN.md'))\"", gr),
+            ("(gb-p18) a second uncleared write beside the program keeps the data a mention", "deny",
+             "python3 -c \"open(p,'w').write('GEN.md')\" > \"$X\"", gr),
             # tree containment and the boundary
             ("(gb-e1) a redirect into a tree denies", "deny", "echo x > gen/new.md", gr),
             ("(gb-e2) a redirect under gen-extra allows", "allow", "echo x > gen-extra/x.md", gr),
