@@ -12238,8 +12238,20 @@ def _console_stamp_cases(tmp):
     want = {"C1": "allow", "C2": "allow", "C3": "allow", "C4": "allow", "C5": "allow", "C6": "allow",
             "C9a": "allow", "C9b": "allow", "R1": "warn", "R2": "warn", "R3": "warn", "R4": "warn",
             "R6": "warn", "R7": "warn"}
-    for key in sorted(vectors):
-        check("console-stamp/vector-" + key, verdict(vectors[key]), want[key])
+    # Each vector's check id is spelled out as a literal row, so the selftest-execution gate resolves it;
+    # the coverage check after the loop keeps the rows and the vectors from drifting apart.
+    seen = []
+    for label, key in (("console-stamp/vector-C1", "C1"), ("console-stamp/vector-C2", "C2"),
+                       ("console-stamp/vector-C3", "C3"), ("console-stamp/vector-C4", "C4"),
+                       ("console-stamp/vector-C5", "C5"), ("console-stamp/vector-C6", "C6"),
+                       ("console-stamp/vector-C9a", "C9a"), ("console-stamp/vector-C9b", "C9b"),
+                       ("console-stamp/vector-R1", "R1"), ("console-stamp/vector-R2", "R2"),
+                       ("console-stamp/vector-R3", "R3"), ("console-stamp/vector-R4", "R4"),
+                       ("console-stamp/vector-R6", "R6"), ("console-stamp/vector-R7", "R7")):
+        seen.append(key)
+        check(label, verdict(vectors[key]), want[key])
+    check("console-stamp/vector-table-covers-every-vector", (sorted(seen), sorted(want)),
+          (sorted(vectors), sorted(vectors)))
     # R5: two parallel calls after one unstamped message: both calls get the note.
     parallel = [_cs_prompt(), _cs_text("Running both."), _cs_tool("t1"), _cs_tool("t2")]
     check("console-stamp/vector-R5-parallel-both-noted",
@@ -12259,22 +12271,28 @@ def _console_stamp_cases(tmp):
     check("console-stamp/cannot-K7-not-an-object", verdict(run(unstamped)), "warn")
     _cs_registry(fx, {"grammar": "bracketed-zoned"})
 
-    # Cannot-evaluate cases that leave a guard-events row (a silent allow, never a clean read).
-    def row_case(label, payload):
+    # Cannot-evaluate cases that leave a guard-events row (a silent allow, never a clean read). row_case
+    # returns what it saw and each call site checks it under a literal id, so the selftest-execution gate
+    # resolves every id.
+    row_want = ("allow", 1, "fail-open")
+
+    def row_case(payload):
         before = len(_cs_rows(fx))
         got = verdict(payload)
         rows = _cs_rows(fx)
-        check(label, (got, len(rows) - before, rows[-1].get("decision") if rows else None),
-              ("allow", 1, "fail-open"))
-    row_case("console-stamp/cannot-K1-missing-file-row",
-             fx.payload("PreToolUse", "Bash", {"command": "true"},
-                        extra={"tool_use_id": "t1", "transcript_path": str(tdir / "absent.jsonl")}))
-    row_case("console-stamp/cannot-K6-no-tool-use-id-row",
-             fx.payload("PreToolUse", "Bash", {"command": "true"},
-                        extra={"transcript_path": str(vectors["R1"]["transcript_path"])}))
-    row_case("console-stamp/cannot-relative-transcript-path-row", run(unstamped, extra={"transcript_path": "t.jsonl"}))
+        return (got, len(rows) - before, rows[-1].get("decision") if rows else None)
+    check("console-stamp/cannot-K1-missing-file-row",
+          row_case(fx.payload("PreToolUse", "Bash", {"command": "true"},
+                              extra={"tool_use_id": "t1", "transcript_path": str(tdir / "absent.jsonl")})),
+          row_want)
+    check("console-stamp/cannot-K6-no-tool-use-id-row",
+          row_case(fx.payload("PreToolUse", "Bash", {"command": "true"},
+                              extra={"transcript_path": str(vectors["R1"]["transcript_path"])})),
+          row_want)
+    check("console-stamp/cannot-relative-transcript-path-row",
+          row_case(run(unstamped, extra={"transcript_path": "t.jsonl"})), row_want)
     filler = [_cs_text("x" * 1000, side=True)] * 2200
-    row_case("console-stamp/cannot-K4-anchor-beyond-window-row", run(unstamped + filler))
+    check("console-stamp/cannot-K4-anchor-beyond-window-row", row_case(run(unstamped + filler)), row_want)
     saved_event = aiqt_hooks._orch_guard_event
     try:
         aiqt_hooks._orch_guard_event = lambda *args: False
@@ -12369,6 +12387,10 @@ def _console_stamp_cases(tmp):
           [stop_hook._lead_end(s) for s in table])
     check("console-stamp/parity-lead-end-table-nontrivial",
           len(set(aiqt_hooks._console_lead_end(s) for s in table)) > 3, True)
+    # The bullet number is read as ASCII digits only (re.ASCII): an ASCII-digit bullet is skipped, an
+    # Arabic-Indic or fullwidth digit bullet is not a bullet, so no permitted prefix is found.
+    check("console-stamp/lead-end-bullet-digits-ascii",
+          [aiqt_hooks._console_lead_end(s) for s in ("1. [x", "١. [x", "１. [x")], [4, 0, 0])
     # Registration: note-only, PreToolUse, and the Python-floor copy names it.
     name = "orch_console_stamp_pretool"
     check("console-stamp/registered-note-only",
@@ -12398,15 +12420,17 @@ def _console_stamp_cases(tmp):
         aiqt_hooks._console_tail_records = saved_reader
     check("console-stamp/main-unstamped-exit-0-note", _cs_main(vectors["R1"])[0], 0)
 
-    # Red-on-revert mutants: each patch must turn its named vector from its pinned verdict.
-    def mutant(label, attr, replacement, key, payload=None):
+    # Red-on-revert mutants: each patch must turn its named vector from its pinned verdict. mutant returns
+    # whether it did, and each call site checks that under a literal id, so the selftest-execution gate
+    # resolves every id.
+    def mutant(attr, replacement, key, payload=None):
         saved = getattr(aiqt_hooks, attr)
         try:
             setattr(aiqt_hooks, attr, replacement)
             got = verdict(payload or vectors[key])
         finally:
             setattr(aiqt_hooks, attr, saved)
-        check("console-stamp/mutant-" + label, got != want.get(key, "allow"), True)
+        return got != want.get(key, "allow")
 
     first_line_search = lambda text, pattern: pattern.search(text) is not None  # noqa: E731
     any_lead = lambda text, pattern: pattern.search(  # noqa: E731
@@ -12430,16 +12454,21 @@ def _console_stamp_cases(tmp):
                 rec.pop("isSidechain", None)
             yield rec
 
-    mutant("always-allow-R1", "_console_stamp_decide", lambda data: ("allow", None, None), "R1")
-    mutant("search-not-match-R2", "_console_run_stamped", first_line_search, "R2")
-    mutant("lead-check-dropped-R3", "_console_run_stamped", any_lead, "R3")
-    mutant("zone-optional-R4", "_CONSOLE_GRAMMARS", loose, "R4")
-    mutant("whole-turn-scope-C5", "_console_records", whole_turn, "C5")
-    mutant("sidechain-skip-removed-C6", "_console_records", no_sidechain, "C6")
-    mutant("only-first-run-R6", "_console_runs", lambda blocks, _r=aiqt_hooks._console_runs: _r(blocks)[:1], "R6")
+    check("console-stamp/mutant-always-allow-R1",
+          mutant("_console_stamp_decide", lambda data: ("allow", None, None), "R1"), True)
+    check("console-stamp/mutant-search-not-match-R2",
+          mutant("_console_run_stamped", first_line_search, "R2"), True)
+    check("console-stamp/mutant-lead-check-dropped-R3", mutant("_console_run_stamped", any_lead, "R3"), True)
+    check("console-stamp/mutant-zone-optional-R4", mutant("_CONSOLE_GRAMMARS", loose, "R4"), True)
+    check("console-stamp/mutant-whole-turn-scope-C5", mutant("_console_records", whole_turn, "C5"), True)
+    check("console-stamp/mutant-sidechain-skip-removed-C6",
+          mutant("_console_records", no_sidechain, "C6"), True)
+    check("console-stamp/mutant-only-first-run-R6",
+          mutant("_console_runs", lambda blocks, _r=aiqt_hooks._console_runs: _r(blocks)[:1], "R6"), True)
     _cs_registry(fx, None)
-    mutant("opt-in-gate-removed-C7", "_console_stamp_config",
-           lambda reg: aiqt_hooks._CONSOLE_GRAMMARS["bracketed-zoned"], "C7", payload=run(unstamped))
+    check("console-stamp/mutant-opt-in-gate-removed-C7",
+          mutant("_console_stamp_config", lambda reg: aiqt_hooks._CONSOLE_GRAMMARS["bracketed-zoned"], "C7",
+                 payload=run(unstamped)), True)
     _cs_registry(fx, {"grammar": "bracketed-zoned"})
 
 

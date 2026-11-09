@@ -32240,10 +32240,13 @@ def orch_prompt_stamp(data):
 # The bracketed header grammar of the Stop clock-truth hook, copied VERBATIM from
 # .preview/stamp-truth-stop.py (TIME_GRAMMAR, ZONE_GRAMMAR, _BULLET_RE and _lead_end), so this presence
 # check and that truth check read one header the same way; tools/selftest_orch_hooks.py asserts the two
-# strings equal that file's copies and runs both _lead_end copies over one shared table of lines.
+# strings equal that file's copies and runs both _lead_end copies over one shared table of lines. One
+# stated difference: the bullet pattern's text is the same but compiled with re.ASCII, so a list number
+# here is ASCII digits only; a line opening with a non-ASCII digit bullet then has no permitted prefix,
+# and its message gets the note (the stricter side of a note-only check).
 _CONSOLE_TIME_GRAMMAR = r"(?<!\d)(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?"
 _CONSOLE_ZONE_GRAMMAR = r"(?:[ ]?(Z)|[ ]?([+-]\d{2}(?::?\d{2})?)|[ ](UTC|GMT|[A-Z]{2,6}))(?![A-Za-z0-9])"
-_CONSOLE_BULLET_RE = re.compile(r"(?:[-+*]|\d{1,9}[.)])(?=[ \t])")
+_CONSOLE_BULLET_RE = re.compile(r"(?:[-+*]|\d{1,9}[.)])(?=[ \t])", re.ASCII)
 # The closed set of grammar names a registry's console_stamp object may choose (never a regex).
 _CONSOLE_GRAMMARS = {"bracketed-zoned": re.compile(_CONSOLE_TIME_GRAMMAR + _CONSOLE_ZONE_GRAMMAR)}
 _CONSOLE_TAIL_BYTES = 2 << 20        # the transcript tail searched for the anchor and its segment

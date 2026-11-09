@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "75cfb46ba7059e7bcf0554d66f85df1f5eccee8a9e061841e8031e5f32e13de3"
+tree-sha256 = "493338362b8b2668946bf98da74014f153d4f62fafac20634f4a069717382cf7"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -91,8 +91,8 @@ sha256 = "4461a7f1d596cfbbf1b9300d3ad0bb8fe2c4c93f194e270bd3e37864a4a5ea48"
 
 [[sources]]
 path = ".aiqt/core/hooks/scripts/aiqt_hooks.py"
-bytes = 2502799
-sha256 = "a033579fead59c37d1d1c889679925512790a3fe76aad533add99759bcaf27cd"
+bytes = 2503095
+sha256 = "970755da29089d0b3be4e8e064e805662368dc3e730b57f69066af032a04a5ab"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
@@ -3506,8 +3506,8 @@ sha256 = "dada08f5bf4273960e2b7ccd26c2dacf13c6e4acdd114fa7d546acc19309599e"
 
 [[sources]]
 path = "plugin/aiqt-guardrails-hooks/hooks/scripts/aiqt_hooks.py"
-bytes = 2502799
-sha256 = "a033579fead59c37d1d1c889679925512790a3fe76aad533add99759bcaf27cd"
+bytes = 2503095
+sha256 = "970755da29089d0b3be4e8e064e805662368dc3e730b57f69066af032a04a5ab"
 
 [[sources]]
 path = "roadmap.toml"
@@ -4176,8 +4176,8 @@ sha256 = "0238bb4c907c358a4718a70f8630a92517444f64139b4c0517004bfdbf2321ec"
 
 [[sources]]
 path = "tools/check_dangerous_api.py"
-bytes = 198615
-sha256 = "f915239d5d3b932b86fb66074a8576b9f167658d9dbeee0c671ae18d1d7e9d9b"
+bytes = 199041
+sha256 = "87e0b3c9eaec9bcdaa11b0f260a07cbf70f994a7e4aa73679156e32b958ed150"
 
 [[sources]]
 path = "tools/check_derived_command_parameters.py"
@@ -4656,8 +4656,8 @@ sha256 = "7007b18f43e3a60800a067b4b1ded2ce538d4ba62eae668dde71691c90bb3a12"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 222459
-sha256 = "3ab759ebe828be84aa7a82d1794127c5b00763b01007b44565ffdb9fe35678db"
+bytes = 222559
+sha256 = "9e9b7a2862e02eb68f95f409210dd872b295ee210de799cfe96d4bebc920df98"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"
@@ -4696,8 +4696,8 @@ sha256 = "5db515bd671b5573e258cb3548903af302b6ac98b00f7a5ef1287cfbadf88304"
 
 [[sources]]
 path = "tools/selftest_orch_hooks.py"
-bytes = 1188190
-sha256 = "ca0004b77f93c2cf4847bd8685feb2e516b105e5c78095deca6c4d4dc534e6b0"
+bytes = 1190169
+sha256 = "30263047a7d71423d0768977a098fec54bc54b6560284bee39b6c5ff80985767"
 
 [[sources]]
 path = "tools/sized-instructions-source.sha256"
