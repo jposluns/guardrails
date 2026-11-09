@@ -598,11 +598,16 @@ median plus LINEAR_SLACK seconds, and the 64 KiB median at most 2 times the 32 K
 A cost that is a fixed launch cost plus a linear term meets both bounds with the whole fixed cost plus LINEAR_SLACK
 to spare, whatever its slope, while a pass whose time grows with the square of the input quadruples over the top
 span and so fails it once its 64 KiB squared-growth cost exceeds twice the sum of the fixed cost and LINEAR_SLACK.
-The 1 KiB median is measured and reported for diagnosis only and never judged, so no stray 1 KiB run, high or low,
-can move or loosen the verdict. A run whose parse child is killed at the reading's parse deadline fails the shape
+The 1 KiB median is measured and reported for diagnosis only and never judged, so its value, high or low, can
+neither move nor loosen the verdict; a 1 KiB run that reaches the parse deadline still fails the shape, as any run
+that reaches it does. A run whose parse child is killed at the reading's parse deadline fails the shape
 whatever CPU time it was charged (a killed child is charged only its share of the deadline), as does a child stopped
 at the timeout. Every shape carries a lead that holds "nput", so each runs through the shared parsed-document
-reading, never the ASCII fast path, and the largest size sits exactly at that reading's text ceiling; a shape the
+reading, never the ASCII fast path. The largest size, 64 KiB, is the reading's former text ceiling and sits below
+its current one (MAX_TEXT_BYTES, 102,400 bytes, 1.5625 times 64 KiB): the rule judges the shape of the growth, which
+the two spans read at any size, and a squared-growth cost at or under the top span's threshold at 64 KiB is at
+most about 2.44 times (1.5625 squared) that threshold at the ceiling, where the parse deadline holds every brief in
+any case; a shape the
 reading's own bounds refuse (the whitespace-run shapes hit the whitespace-run prescan, the markup-run shape the
 nesting prescan)
 is timed through its refusal, which is the bounded behaviour an oversized or pathological brief gets. A shape is
@@ -3915,10 +3920,13 @@ P5_CLONE_REVISION = (P5_PIN + "Use `git clone --revision={0} <url> w` and review
 LINEAR_SLACK, LINEAR_TIMEOUT = 0.25, 120
 # fresh evaluations per size whose median CPU time is judged. Wall clock measured the host, not the work:
 # with eight busy loops sharing the measuring CPU in a square wave, one 64 KiB run of "git -c " took
-# 4.185 s of wall clock against 0.191 s for 8 KiB (ratio 21.9, over the bound) while its CPU time was
-# 0.496 s against 0.190 s (ratio 2.6). CPU time alone also strayed: under the same load 2 of 50 single
-# runs were charged 1.9 s and 3.3 s against a usual 0.2 to 0.6 s, so one run is never the verdict, and
-# a median of five needs three stray runs at one size before it moves
+# 4.185 s of wall clock against 0.191 s for 8 KiB (ratio 21.9, far past the 8 times between those two
+# sizes) while its CPU time was 0.496 s against 0.190 s (ratio 2.6). CPU time alone also strayed: under
+# the same load 2 of 50 single runs were charged 1.9 s and 3.3 s against a usual 0.2 to 0.6 s, so the
+# verdict reads the median of five at each judged size, not one run's time. One or two stray runs at a
+# size can move that size's median, but only within the range of its other runs; three, a majority,
+# can carry it past them. A run that reaches the parse deadline is the exception: the child exits
+# non-zero at once and the shape is red whatever the other runs show
 LINEAR_RUNS = 5
 # the measured slack over the parse deadline for one whole read() through the killed child: the child
 # start, the kill, the reap and the result decode measured 0.04 to 0.14 s past the deadline on the two
@@ -4151,7 +4159,8 @@ def _child_commit(repo, commit):
                           check=True, capture_output=True, timeout=60, env=env)
     return made.stdout.decode("ascii").strip()
 # The child caps its address space at 1 GiB, then evaluates 1 KiB, 8 KiB, 32 KiB and 64 KiB briefs (the
-# largest exactly at the shared reading's text ceiling) in turn, LINEAR_RUNS times each, every brief built
+# largest is the shared reading's former text ceiling, below its current 102,400-byte one) in turn,
+# LINEAR_RUNS times each, every brief built
 # afresh: a lead that forces the parsed-document path (it holds "nput", so the ASCII fast path never
 # answers it), a prefix, one unit repeated, and a suffix. The verdict reads only the 8, 32 and 64 KiB
 # medians; the 1 KiB time is reported for diagnosis (it shows the fixed cost, mostly the parse child's
@@ -4161,7 +4170,7 @@ def _child_commit(repo, commit):
 # naming the size (the row is red whatever CPU time the run took). Each run is timed by _run_cpu(), CPU
 # seconds of this process and of the children it reaped during the run (the parse child among them), so
 # time the measured work spends waiting for a busy host's CPUs is not counted. One line per run: the
-# 1 KiB, the 8 KiB, then the 64 KiB CPU time.
+# 1 KiB, the 8 KiB, the 32 KiB, then the 64 KiB CPU time.
 LINEAR_CHILD = (
     "import resource, sys\n"
     "hard = resource.getrlimit(resource.RLIMIT_AS)[1]\n"
@@ -4222,8 +4231,9 @@ def _linear(unit, prefix="", suffix=""):
     seconds, and the 64 KiB median at most 2 times the 32 KiB median plus LINEAR_SLACK seconds, each
     factor exactly that span's size ratio, so a fixed-plus-linear cost passes both spans with the whole
     fixed cost plus LINEAR_SLACK as margin whatever its slope. The 1 KiB median is reported for diagnosis
-    and never judged: no measured value is subtracted from another before judging, so neither a stray
-    baseline run nor a noisy small-size excess can loosen a bound. All timed in one child capped at 1 GiB
+    and never judged: no measured value is subtracted from another before judging, so neither the 1 KiB
+    median's value nor a noisy small-size excess can loosen a bound (a 1 KiB run that reaches the parse
+    deadline still makes the child exit non-zero). All timed in one child capped at 1 GiB
     (RLIMIT_AS) and stopped after LINEAR_TIMEOUT seconds; otherwise what went wrong. The child must exit 0
     and print exactly LINEAR_RUNS lines of four finite, nonnegative times each; a child that times out, or
     that exits non-zero because a run reached the parse deadline, is what went wrong whatever it
@@ -5058,8 +5068,9 @@ def self_test(report_path=None):
     # linear shape red; a majority of over-the-bound 64 KiB runs is red; stray high 32 KiB runs short of
     # a majority do not lift the top span's bound (large 1.0 against a 0.25 median of the 32 KiB runs
     # stays red, where the mean 1.35 or the largest 3.0 of those runs would pass it); stray high 8 KiB
-    # runs do not lift the small span's bound; and stray 1 KiB runs, high or low, change nothing, since
-    # the baseline is never judged
+    # runs do not lift the small span's bound; and stray 1 KiB times, high or low, change nothing, since
+    # the 1 KiB median is never judged (a 1 KiB run that reaches the parse deadline is red, as
+    # perf/linear-deadline-not-linear shows)
     stray = LINEAR_RUNS // 2
     check("perf/linear-median-not-one-run", (
         judged(*[("0.05", "0.2", "0.4", "0.7")] * (LINEAR_RUNS - stray)
@@ -5076,9 +5087,10 @@ def self_test(report_path=None):
     # the motivating squared-growth pass measured through the fixed launch cost: 8 KiB at 0.25, 32 KiB at
     # 0.8 and 64 KiB at 2.4 CPU s more than doubles over the top span (2.4 > 2 * 0.8 + 0.25), red; so is
     # the same 64 KiB total grown from a small fixed cost (a squared-growth profile is red whatever
-    # baseline it claims); a linear shape reaching the same 64 KiB total (fixed cost 0.18 plus a steep
-    # slope) doubles at most over each span and stays green: the rule separates the growth's shape, not
-    # its size
+    # baseline it claims); a linear shape reaching the same 64 KiB total (0.18, 0.43, 1.28 and 2.4: a
+    # fixed cost near 0.15 plus about 0.035 CPU s per KiB) grows about 2.98 times over the 8-to-32 KiB
+    # span (1.28 within 4 * 0.43 + 0.25 = 1.97) and about 1.88 times over the top span (2.4 within
+    # 2 * 1.28 + 0.25 = 2.81) and stays green: the rule separates the growth's shape, not its size
     check("perf/linear-quadratic-red",
           (judged(*[("0.18", "0.25", "0.8", "2.4")] * LINEAR_RUNS) is True,
            judged(*[("0.01", "0.05", "0.61", "2.41")] * LINEAR_RUNS) is True,
@@ -5092,6 +5104,22 @@ def self_test(report_path=None):
            judged(*[("5.0", "0.3", "0.55", "0.9")] * LINEAR_RUNS),
            judged(*[("0.0", "0.21", "0.8", "2.4")] * LINEAR_RUNS) is True),
           (True, True, False))
+    # a high 1 KiB median cannot loosen the small span's bound: 32 KiB at 1.0 over 8 KiB at 0.1 is red
+    # (1.0 > 4 * 0.1 + 0.25) whatever the 1 KiB median (0.6 here), and 32 KiB at 1.26 over 8 KiB at 0.25
+    # is red just past the edge (1.26 > 1.25) with a 1 KiB median of 0.3; a bound built on the larger of
+    # the 8 KiB and 1 KiB medians would pass both (2.65 and 1.45)
+    check("perf/linear-baseline-cannot-loosen",
+          (judged(*[("0.6", "0.1", "1.0", "1.9")] * LINEAR_RUNS) is True,
+           judged(*[("0.3", "0.25", "1.26", "2.0")] * LINEAR_RUNS) is True),
+          (False, False))
+    # the 1 KiB median is not judged as a 1-to-8 KiB span either: a linear shape stays green with a
+    # 1 KiB median above its 8 KiB median (0.5 against 0.3), and with one far below it (0.002, as when
+    # a 1 KiB brief is refused before any parse child starts and the 8 KiB one is parsed), where a span
+    # bound of 8 times the 1 KiB median plus LINEAR_SLACK (0.266) would put the 8 KiB median (0.3) over
+    check("perf/linear-baseline-not-a-span",
+          (judged(*[("0.5", "0.3", "0.42", "0.58")] * LINEAR_RUNS),
+           judged(*[("0.002", "0.3", "0.42", "0.58")] * LINEAR_RUNS)),
+          (True, True))
     # each run's clock counts the CPU of the children the run reaped, the parse child among them: reaping a
     # child that burned at least 0.5 CPU s moves _run_cpu() by at least 0.45 s, which this process's own
     # time (it only waits) cannot cover; and the measuring child reads that clock around each run

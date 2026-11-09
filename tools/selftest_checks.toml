@@ -3583,6 +3583,8 @@ expected-check-ids = [
   "perf/linear-median-not-one-run",
   "perf/linear-quadratic-red",
   "perf/linear-baseline-ignored",
+  "perf/linear-baseline-cannot-loosen",
+  "perf/linear-baseline-not-a-span",
   "perf/linear-bound-edges",
   "perf/linear-small-span-edges",
   "perf/linear-cpu-counts-reaped",
