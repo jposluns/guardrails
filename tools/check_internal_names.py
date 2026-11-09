@@ -147,11 +147,12 @@ output that is not committed and is not handed to it as a tracked file (a built 
 site that is not checked in), the content of a tracked .zip's members, which the archive rule reads in
 memory to verify the archive but this rule never scans (the leak gate scans them), text drawn in a tracked
 .png's pixels or held in a chunk the PNG rule skips (see TRACKED_PNG_SUFFIX), text in a tracked .ttf
-that none of its views reads (text drawn by glyph outlines, UTF-16 or compressed text in another table,
-and, in an accepted .ttf that is not valid UTF-8, non-ASCII text outside the name table; a .ttf over its
-size bound, or refused and not valid UTF-8, is reported by its refusal alone; see TRACKED_TTF_SUFFIX), a
-staged change that differs from the working-tree copy (it reads the working tree), and the word split or
-encoded (an HTML entity, a zero-width character) so the plain pattern does not match.
+that none of its views reads (text drawn by glyph outlines, UTF-16 or compressed text anywhere but a
+decoded name record, and, in an accepted .ttf that is not valid UTF-8, non-ASCII text anywhere but a
+decoded name record; a .ttf over its size bound, valid UTF-8 or not, or refused and not valid UTF-8, is
+reported by its refusal alone; see TRACKED_TTF_SUFFIX), a staged change that differs from the working-tree
+copy (it reads the working tree), and the word split or encoded (an HTML entity, a zero-width character)
+so the plain pattern does not match.
 
 REVIEW-ROUND LABEL RULE, WHOLE TRACKED TREE. The review-round label patterns (_REVIEW_LABELS: a reviewer
 family name followed by a QA round number, and a QA round number followed by a severity grade or a finding
@@ -236,13 +237,14 @@ import check_leaks  # noqa: E402  reuse the leak gate's normalization + structur
 SKIP_DIRS = {".git", "node_modules", "__pycache__"}
 SKIP_NAMES = {"internal-name-hashes.txt", "check_internal_names.py", "check_leaks.py", "leak-hashes.txt"}
 TEXT_SUFFIXES = check_leaks.TEXT_SUFFIXES
-# The suffix of the ZIP archive, one of the two binary formats the role rule evaluates (the committed skill
+# The suffix of the ZIP archive, one of the four binary formats the role rule evaluates (the committed skill
 # archives under site/downloads/). Every tracked file under it goes through the leak gate's archive rule
 # (check_leaks.verify_archive) whether or not its bytes decode as UTF-8, so the suffix only selects the rule:
-# a file the rule refuses cannot be evaluated, and only a file it accepts can be skipped as binary. A
-# tracked file in any binary format other than these two cannot be evaluated until a rule for it is added here.
+# a file the rule refuses cannot be evaluated, and only a file it accepts can be skipped as binary. A tracked
+# file in any binary format other than these four (ZIP here, PNG, WOFF2 and TrueType below) cannot be
+# evaluated until a rule for it is added here.
 TRACKED_ARCHIVE_SUFFIX = ".zip"
-# The suffix of the PNG image, the other binary format the role rule evaluates (a site link-preview card),
+# The suffix of the PNG image, the second binary format the role rule evaluates (a site link-preview card),
 # matched exactly: ".PNG", ".gif" and every other binary suffix still cannot be evaluated. Every tracked file
 # under it goes through verify_png whether or not its bytes decode as UTF-8, and it holds the ZIP rule's
 # posture: anything the rule cannot read in full cannot be evaluated (exit 2), never skipped. The read stops
@@ -336,11 +338,13 @@ MAX_WOFF2_FILE_SIZE = 8 * 1024 * 1024  # a latin-subset web font is well under 1
 # review-round labels) and no internal-allow exemption: an upstream font has no reason to carry the marker.
 # A hit is a finding (exit 1), reported beside the refusal (exit 2) when the rule refuses the font. RESIDUAL:
 # in a font the rule accepts, text in no section is not seen: text drawn by the glyphs themselves, UTF-16 or
-# compressed text in a table other than name, and, when the file does not decode as UTF-8, text outside the
-# name table that is not plain ASCII (a label spelled with U+0131, say). A refused file is scanned only
-# through its text view, so one over the size bound or not valid UTF-8 is reported by its refusal alone
-# (exit 2), its text unread. Table checksums and the fields of every table but name are not validated. A
-# name split or encoded inside a string is not seen, as in a text file.
+# compressed text anywhere but a decoded name record (another table, name storage no record points to, a gap
+# or the bytes after the last table), and, when the file does not decode as UTF-8, non-ASCII text anywhere
+# but a decoded name record (a label spelled with U+0131, say). A refused file is scanned only through its
+# text view, so one over the size bound or not valid UTF-8 is reported by its refusal alone (exit 2), its
+# text unread; over the bound that holds even for a file whose bytes are valid UTF-8, which the plain text
+# scan of any other tracked file reads whole. Table checksums and the fields of every table but name are not
+# validated. A name split or encoded inside a string is not seen, as in a text file.
 TRACKED_TTF_SUFFIX = ".ttf"
 TTF_SIGNATURE = b"\x00\x01\x00\x00"
 MAX_TTF_FILE_SIZE = 8 * 1024 * 1024  # a variable web font is well under 1 MiB
