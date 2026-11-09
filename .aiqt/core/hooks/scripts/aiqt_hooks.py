@@ -9639,7 +9639,7 @@ def _segment_redirect_worktree(tokens, cwd):
     return None
 
 
-def _segment_repo_dir(tokens, cwd):
+def _segment_repo_dir(tokens, cwd, appended=False):
     """The directory git discovers the REPOSITORY (git-dir, index, refs,
     HEAD, stash) from for a git segment's index/ref/commit/branch/stash operation, resolving -C targets
     left-to-right against cwd but treating --work-tree / GIT_WORK_TREE as WORKTREE-ONLY. Git semantics:
@@ -9657,12 +9657,10 @@ def _segment_repo_dir(tokens, cwd):
       - "opaque"  : a -C redirect is present but unresolvable (value-less, or relative with no cwd to anchor).
     A --git-dir/GIT_DIR redirect returns None (the repo is named directly, left to the caller's cannot-pin
     path); a combined --git-dir + -C still returns None here, so the caller's --git-dir handling governs.
-    A leading GIT_DIR+= reads exactly as GIT_DIR= does, so it returns None too, with or without -C: git
-    uses the git dir that assignment yields, not the -C directory. '+=' sets the value as '=' does unless
-    GIT_DIR already holds one (an ambient GIT_DIR takes the caller's override path first; a shell variable
-    set earlier on the command line is not read here, and '+=' appends to it, a value this call cannot pin
-    either)."""
-    if _segment_has_gitdir_redirect(tokens):
+    A leading GIT_DIR+= is set aside here by default, so the -C directory is returned as before. Only a
+    caller that has established the segment with _gitdir_append_pinned passes appended=True, which reads
+    GIT_DIR+= exactly as GIT_DIR= (None)."""
+    if _segment_has_gitdir_redirect(tokens, appended=appended):
         return None
     cw = _command_word_index(tokens)
     has_worktree = any(tok.startswith("GIT_WORK_TREE=") for tok in tokens[:cw])
@@ -9699,22 +9697,68 @@ def _segment_repo_dir(tokens, cwd):
     return base
 
 
-def _segment_appended_gitdir_base(tokens, cwd):
-    """For a git segment whose only git-dir redirect is a leading GIT_DIR+= assignment, the directory
-    _segment_repo_dir names once that assignment is set aside: the resolved -C target, or the session cwd
-    under a --work-tree or GIT_WORK_TREE= with no -C. Returns None when the segment carries no leading
-    GIT_DIR+=, or carries another git-dir redirect as well (a --git-dir option or a GIT_DIR= prefix), and
-    otherwise _segment_repo_dir's own answer for the remaining tokens (None or "opaque" included).
-    branch_root probes this directory as a floor under its cannot-pin note: git creates the branch in the
-    git dir the GIT_DIR+= yields, which this guard cannot pin, but an orphaned or unresolvable start in the
-    -C or session repository still denies, as it did before GIT_DIR+= was read as GIT_DIR=."""
+def _gitdir_append_pinned(tokens, cwd, sub, args):
+    """True only when git_discard may read the leading GIT_DIR+= of its sole pristine git command `tokens`
+    as GIT_DIR=. The caller has already found the command pristine (_pristine_single_bare_git): no shell
+    metacharacter, so no earlier segment (an export, declare -x, typeset -x, set -a, set -o allexport, an
+    eval, a sourced file) and no expansion or substitution can set or export GIT_DIR before git runs, and
+    '+=' sets the value as '=' does. On top of that the command must carry exactly one leading assignment,
+    GIT_DIR+=<value>, and no global option but empty -C options (which leave the directory unchanged), the
+    session directory must hold a .git entry, and <value>, taken relative to the session directory, must
+    resolve to that same entry: git then uses the session repository's git dir with the session directory as
+    its work tree, as a plain git command run there does. A clean carrying -x or -X never qualifies, since
+    the recovery snapshot does not hold the ignored files it removes. Every other case returns False and the
+    caller keeps the reading that sets GIT_DIR+= aside."""
+    if not cwd:
+        return False
     cw = _command_word_index(tokens)
-    if not any(tok.startswith("GIT_DIR+=") for tok in tokens[:cw]):
-        return None
-    rest = [tok for k, tok in enumerate(tokens) if k >= cw or not tok.startswith("GIT_DIR+=")]
-    if _segment_has_gitdir_redirect(rest):
-        return None
-    return _segment_repo_dir(rest, cwd)
+    if cw != 1 or not tokens[0].startswith("GIT_DIR+="):
+        return False
+    value = tokens[0][len("GIT_DIR+="):]
+    if not value:
+        return False
+    i = cw + 1
+    n = len(tokens)
+    while i < n and tokens[i].startswith("-"):
+        if tokens[i] != "-C" or i + 1 >= n or tokens[i + 1] != "":
+            return False
+        i += 2
+    own = os.path.join(cwd, ".git")
+    try:
+        if not os.path.lexists(own) or os.path.realpath(os.path.join(cwd, value)) != os.path.realpath(own):
+            return False
+    except (OSError, ValueError):
+        return False
+    if sub == "clean":
+        for arg in args:
+            if arg in _EOO_TOKENS:
+                break                                   # the rest are pathspecs
+            if arg.startswith("-") and not arg.startswith("--") and ("x" in arg or "X" in arg):
+                return False                            # -x/-X (or an -e value holding x): ignored files
+    return True
+
+
+def _detach_pinned(command, segments, tokens, cwd):
+    """True only when branch_root may probe the commit-ish of a `git worktree add --detach|-d` segment
+    `tokens` rather than deny it. The whole command must be that one pristine bare git command
+    (_pristine_single_bare_git: no shell metacharacter, so no earlier segment, no export, declare -x,
+    typeset -x, set -a, set -o allexport, eval, source or '.', and no expansion or substitution can change
+    the environment git runs in), with no leading assignment, no global option but -C <dir> with a nonempty
+    value, and a repository directory that resolves to a concrete path (the session directory, or the
+    resolved -C target), the one the ancestry probe reads. git then finds its git dir and work tree from that
+    directory, as the probe does. Every other case returns False, and the detach keeps main's deny."""
+    if _pristine_single_bare_git(command, segments) != tokens:
+        return False
+    if _command_word_index(tokens) != 0:
+        return False
+    i = 1
+    n = len(tokens)
+    while i < n and tokens[i].startswith("-"):
+        if tokens[i] != "-C" or i + 1 >= n or not tokens[i + 1]:
+            return False
+        i += 2
+    repo = cwd if i == 1 else _segment_repo_dir(tokens, cwd)
+    return isinstance(repo, str) and repo != "opaque"
 
 
 def _segment_has_worktree_redirect(tokens):
@@ -10456,7 +10500,7 @@ def _deny_with_recovery(kind, snap, note=""):
     return _discard_deny(kind, recovery + note)
 
 
-def _segment_has_gitdir_redirect(tokens):
+def _segment_has_gitdir_redirect(tokens, appended=True):
     """True when a git segment carries a --git-dir or a leading GIT_DIR= / GIT_DIR+= redirect. Unlike
     --work-tree (which moves only the worktree), --git-dir/GIT_DIR names a DIFFERENT repository, so it
     changes which repo a `git stash drop`/`clear` acts on. The stash-recovery paths use this to REFUSE (deny)
@@ -10464,19 +10508,14 @@ def _segment_has_gitdir_redirect(tokens):
     invocation, rather than preserve the wrong repo's stash."""
     # A leading GIT_DIR+= names the git dir just as GIT_DIR= does (no ambient GIT_DIR reaches a caller: a
     # non-cosmetic ambient GIT_* takes the override path first), so it counts too, which only sends more
-    # segments to the session-read denies. _segment_repo_dir calls this too, so a GIT_DIR+= segment, with or
-    # without -C, names a repository it does not resolve (None), as a GIT_DIR= segment does: git_discard
-    # then reads the session directory as its base (the GIT_DIR+= is itself a path redirect, so for a
-    # destructive form it also asks git where that command lands, unless a non-cosmetic ambient GIT_*
-    # variable denies first). A call that carries no cwd has no session directory, so there is no base: a
-    # destructive form denies when git is asked where it lands, since with no directory to run git from
-    # _segment_git_target returns None, and a non-destructive form that no earlier rule denies allows with its
-    # note and takes no snapshot. The branch-root guard gives the creation its cannot-pin note, but still
-    # probes the -C directory (or the session directory under a --work-tree or GIT_WORK_TREE=) as a floor
-    # and denies an orphaned or unresolvable start there (_segment_appended_gitdir_base).
+    # segments to the session-read denies. appended=False reads the '=' spelling alone: _segment_repo_dir
+    # keeps that reading by default, so the -C directory it returns for a GIT_DIR+= segment (the snapshot
+    # base git_discard reads before asking git, and the repository the branch-root guard probes) is
+    # unchanged. Only git_discard, for a command _gitdir_append_pinned establishes, passes appended=True
+    # through _segment_repo_dir.
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
-        if tok.startswith(("GIT_DIR=", "GIT_DIR+=")):
+        if tok.startswith("GIT_DIR=") or (appended and tok.startswith("GIT_DIR+=")):
             return True
     i = cw + 1
     n = len(tokens)
@@ -12280,6 +12319,12 @@ def git_discard(data):
     # non-redirecting case), but may NOT capture a redirected tree. With NO session cwd and no resolved -C
     # target a DESTRUCTIVE form DENIES below (fail closed): no base can be probed or snapshotted.
     ambient_override = _ambient_repo_view_override()
+    # A leading GIT_DIR+= reads as GIT_DIR= (the session directory as the base read without asking git) only
+    # where _gitdir_append_pinned establishes that git uses the session repository's git dir and work tree;
+    # everywhere else it is set aside, as before, and the -C directory stays the base.
+    ao_cwd0 = data.get("cwd")
+    appended = _gitdir_append_pinned(pristine, ao_cwd0 if isinstance(ao_cwd0, str) and ao_cwd0 else None,
+                                     sub, args)
     # A reset that moves HEAD to one commit is judged against HEAD's ancestry before any snapshot or role
     # decision (_reset_ancestry_refusal); a reset with no commit operand is untouched. The probe reads the
     # repository the reset acts on: the session directory, or the -C target. Under an ambient GIT_* override,
@@ -12294,7 +12339,7 @@ def git_discard(data):
         elif _segment_has_path_redirect(pristine):
             r_cannot = ("a --git-dir, --work-tree or --bare redirect, or a leading GIT_DIR or GIT_WORK_TREE "
                         "assignment, shapes the repository it acts on")
-        r_repo = None if r_cannot is not None else _segment_repo_dir(pristine, r_cwd)
+        r_repo = None if r_cannot is not None else _segment_repo_dir(pristine, r_cwd, appended=appended)
         if r_repo == "opaque":
             r_cannot = "its -C target cannot be resolved"
         r_refusal = _reset_ancestry_refusal(args, r_cwd if r_repo is None else r_repo, r_cannot)
@@ -12321,7 +12366,7 @@ def git_discard(data):
         # (which returned the --work-tree VALUE and so landed the snapshot/stash/probe on the wrong repo). A
         # --work-tree relocates only the worktree; the WORKTREE-CONTENT-loss case it introduces is failed
         # closed just below.
-        repo_dir = None if ambient_override else _segment_repo_dir(pristine, cwd_base)
+        repo_dir = None if ambient_override else _segment_repo_dir(pristine, cwd_base, appended=appended)
         has_wt = False if ambient_override else _segment_has_worktree_redirect(pristine)
         resolved_by_git = False
         destructive = sub in _SNAPSHOTTABLE_VERBS and role != "allow"
@@ -12421,12 +12466,12 @@ def git_discard(data):
                     "index/worktree state this guard cannot snapshot (rule prsunc); run it from the target "
                     "worktree, or commit or stash first.")
         # The base read above without asking git (the -C directory, or the session directory beside a
-        # --git-dir or a leading GIT_DIR= or GIT_DIR+=) also stays a floor under git's answer: when it lies in
-        # another repository than the one git resolved, it is probed and, when not provably clean, snapshotted
-        # as well below. A failed snapshot there is allowed past, with the failure named, only when the
-        # repository git resolved, which the command acts on, was probed and is provably clean or was
-        # snapshotted successfully; otherwise it DENIES. The repository git resolved is snapshotted in either
-        # case.
+        # --git-dir, a leading GIT_DIR=, or a leading GIT_DIR+= that _gitdir_append_pinned establishes) also
+        # stays a floor under git's answer: when it lies in another repository than the one git resolved, it
+        # is probed and, when not provably clean, snapshotted as well below. A failed snapshot there is allowed
+        # past, with the failure named, only when the repository git resolved, which the command acts on, was
+        # probed and is provably clean or was snapshotted successfully; otherwise it DENIES. The repository
+        # git resolved is snapshotted in either case.
         pre_base = pre_desc = None
         if redirect_base is not None and repo_dir != "opaque":
             if _snapshot_bases_differ(repo_dir if isinstance(repo_dir, str) else cwd_base, redirect_base):
@@ -14938,34 +14983,28 @@ def branch_root(data):
     A CHECKOUT/SWITCH '--track <ref>' names a rooted real start and ALLOWS (a 'git branch --track' is an
     unclassifiable form and DENIES, not an allow). A 'git worktree add --detach|-d <path> <commit-ish>'
     (the detach option in any position before any '--', the operands optionally after it) creates no
-    branch, so its commit-ish is probed as a -b start is, with the same -C and working-directory
-    handling: where the repository is pinned (the session directory, a resolvable -C target, or the session
-    directory under a --work-tree or GIT_WORK_TREE= redirect) a rooted one ALLOWS and an orphaned or
-    unresolvable one DENIES. Where it is not pinned, any start, a rooted one included, DENIES with no
-    ancestry probe (_BRNROT_DETACH_UNPINNED), unlike the -b form's note, since no probe can tell an
-    orphaned commit-ish from a rooted one there: under a '--git-dir=<repo>/.git' or a separated
-    '--git-dir <path>' option or a 'GIT_DIR=...' or 'GIT_DIR+=...' prefix (with or without -C); under any
-    -c option that defines no git alias ('git -c core.x=1 worktree add --detach <path> <commit-ish>'),
-    any other global option before the subcommand ('--no-pager', '--bare') or any
-    leading environment assignment other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
-    prefix, when the command carries no -C, --work-tree or GIT_WORK_TREE=; under an empty -C ("-C ''"),
-    with or without a working directory, or a -C chain whose first -C is relative when the call carries no
-    working directory (an absolute first -C, as in '-C /repo -C .', pins the repository); and under a
-    --work-tree or GIT_WORK_TREE= redirect with no -C when the call carries no working directory. A detach
+    branch, so its commit-ish is probed as a -b start is, but only where _detach_pinned establishes from
+    the command alone that git acts on the repository the probe reads: the whole command is that one
+    pristine git command (no shell metacharacter, so no earlier segment such as an export, declare -x,
+    typeset -x, set -a, set -o allexport, eval or sourced file, and no expansion or substitution), with no
+    leading assignment and no global option but a -C <dir> chain that resolves (or none, in a session
+    directory). There a rooted one ALLOWS and an orphaned or unresolvable one DENIES. Anywhere else any
+    start, a rooted one included, DENIES with no ancestry probe (_BRNROT_DETACH_UNPINNED), the decision
+    the guard gave every detach before it read this form: under any --git-dir, GIT_DIR=, GIT_DIR+=,
+    GIT_COMMON_DIR=, GIT_WORK_TREE= or other leading assignment, --work-tree, -c or other global option,
+    an empty or unresolvable -C, and after or beside any other command. A detach
     with a missing or extra operand or beside -b/-B, an --orphan, and a bare 'worktree add <path>
     [<commit-ish>]' (git may create a branch there) still DENY as forms this guard cannot classify
     (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
     main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
-    ONLY a redirect whose repository this guard cannot pin at all - a --git-dir/GIT_DIR form (a leading
-    GIT_DIR+= reads as GIT_DIR=, with or without -C), a -c or other
+    ONLY a redirect whose repository this guard cannot pin at all - a --git-dir/GIT_DIR form, a -c or other
     global option or leading assignment (other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
     prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty -C, a -C chain whose first -C is relative
     with no session directory, or a --work-tree/GIT_WORK_TREE= with no -C and no session directory
     (_segment_repo_dir) - ALLOWS-WITH-NOTE
-    (the CI branch-root gate remains the backstop) rather than denying. Beside a leading GIT_DIR+= the -C
-    target, or the session directory under a --work-tree or GIT_WORK_TREE= with no -C, is still probed as
-    a floor (_segment_appended_gitdir_base): an orphaned or unresolvable start there DENIES, and a rooted
-    one keeps the note. It never asks. A command carrying a '#'
+    (the CI branch-root gate remains the backstop) rather than denying. A leading GIT_DIR+= is set aside
+    here (_segment_repo_dir's default reading), so beside -C the -C target is probed as it always was. It
+    never asks. A command carrying a '#'
     whose comment reading depends on context (the shared lexer's comment rule) is judged on the segments of
     both readings of each such '#'; one the lexer cannot judge that way whose text (_hash_doubt_scan) names
     git and a branch-capable verb (checkout, switch, branch, worktree), or holds quoting that text does not
@@ -15121,6 +15160,14 @@ def branch_root(data):
                     "AIQT guardrail: denied a branch creation whose repository this guard cannot reconcile "
                     "(rule brnrot); re-issue as a plain command from the target repo.")
             continue
+        if isinstance(start, _DetachStart) and not _detach_pinned(command, segments, tokens, cwd0):
+            # A detached worktree is probed only where _detach_pinned establishes, from the command alone,
+            # that git acts on the repository the probe reads and that nothing before it can change the
+            # environment git runs in; anywhere else it keeps the deny of a form this guard cannot classify,
+            # with a reason that names the unpinned repository.
+            if pending_deny is None:
+                pending_deny = _BRNROT_DETACH_UNPINNED
+            continue
         if not _segment_dir_simple(tokens):
             # a COMMAND-LOCAL redirect. Honour the -C fleet convention: resolve the
             # repository and check ancestry THERE. A -C target that RESOLVES to a concrete directory is
@@ -15143,12 +15190,9 @@ def branch_root(data):
             # they actually create the branch in, not B. Every cannot-pin case listed above (_segment_repo_dir
             # returns None or "opaque") stays the cannot-pin allow-note (the CI branch-root gate remains the
             # backstop).
-            # A detached worktree (_DetachStart) under a repository this guard cannot pin DENIES instead:
-            # no probe can tell its commit-ish rooted from orphaned there. Beside a leading GIT_DIR+= the
-            # -C target, or the session directory under a --work-tree or GIT_WORK_TREE= with no -C, is
-            # probed as a floor under the note (_segment_appended_gitdir_base): an orphaned or unresolvable
-            # start there DENIES, and a rooted one keeps the note, since git creates the branch in the git
-            # dir the GIT_DIR+= yields, not there.
+            # A detached worktree (_DetachStart) reaches here only with a -C chain _detach_pinned resolved;
+            # one that does not resolve still DENIES (no probe can tell its commit-ish rooted from orphaned).
+            # A leading GIT_DIR+= is set aside here, so the -C directory is probed as it always was.
             rd = _segment_repo_dir(tokens, cwd0)
             if isinstance(rd, str) and rd != "opaque":
                 probe_repo = rd
@@ -15164,10 +15208,7 @@ def branch_root(data):
                         "on cannot be pinned from this call), so it cannot check the start point's ancestry "
                         "here; it is allowed and the CI branch-root gate remains the backstop. Prefer an "
                         "explicit '-C <dir>' target and start point.")
-                floor = _segment_appended_gitdir_base(tokens, cwd0)
-                if not (isinstance(floor, str) and floor != "opaque"):
-                    continue
-                probe_repo = floor
+                continue
         if probe_repo is None:
             outcome, detail = ("unknown", "the session repository directory is unavailable")
         else:

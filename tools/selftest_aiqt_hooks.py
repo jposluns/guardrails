@@ -12463,14 +12463,15 @@ def _main_isolated(monitor):
         gdc("(gdc-env-gitdir-append-joined) two GIT_DIR+= assignments joined into one value DENY",
             "GIT_DIR+=.gi GIT_DIR+=t git restore file.txt", "deny", "clean", {"tgt": 0, "sess": 0},
             _gdc_keep_gitdir)
-        # A leading GIT_DIR+= names the git dir as GIT_DIR= does, so the repository read without asking git
-        # is the session directory, not the -C directory, and each GIT_DIR+= row below decides as its GIT_DIR=
-        # twin. Beside an empty -C the scoped discard allows with a note (read as a bare -C, the empty -C took
-        # the unresolvable -C deny); beside -C <target> --work-tree=<target> from another session repository
-        # the worktree lies outside the session repository, so the discard denies (read as a bare -C, the
-        # worktree lay inside the -C target and the discard allowed).
+        # A leading GIT_DIR+= naming the session directory's own .git beside an empty -C, in a pristine command,
+        # is read as GIT_DIR= (_gitdir_append_pinned): the base read without asking git is the session
+        # directory, so the scoped discard allows with a note, as its GIT_DIR= twin does. Beside -C <target>
+        # --work-tree=<target> the GIT_DIR+= is set aside, as it always was, so the -C target is the base and
+        # the discard allows with a note, while the GIT_DIR= twin denies (the worktree lies outside the session
+        # repository it reads).
         for _gda_op in ("+=", "="):
             _gda_tag = "append" if _gda_op == "+=" else "set"
+            _gda_wt_want = ("allow-note", None) if _gda_op == "+=" else ("deny", _gdc_keep_wt)
             gdc("(gdc-env-gitdir-{}-emptyC-own) GIT_DIR{}<session>/.git with -C '' on a scoped checkout allows "
                 "with a note".format(_gda_tag, _gda_op),
                 "GIT_DIR" + _gda_op + "{S}/.git git -C '' checkout -- file.txt", "allow-note", "clean",
@@ -12480,9 +12481,30 @@ def _main_isolated(monitor):
                 "GIT_DIR" + _gda_op + ".git git -C '' restore --staged file.txt", "allow-note", "clean",
                 {"tgt": 0, "sess": 0})
             gdc("(gdc-env-gitdir-{}-C-worktree) GIT_DIR{}.git with -C <target> --work-tree=<target> from "
-                "another session repository DENIES".format(_gda_tag, _gda_op),
-                "GIT_DIR" + _gda_op + ".git git -C {T} --work-tree={T} checkout -- file.txt", "deny", "dirty",
-                {"tgt": 1, "sess": 0}, _gdc_keep_wt)
+                "another session repository decides {}".format(_gda_tag, _gda_op, _gda_wt_want[0]),
+                "GIT_DIR" + _gda_op + ".git git -C {T} --work-tree={T} checkout -- file.txt", _gda_wt_want[0],
+                "dirty", {"tgt": 1, "sess": 0}, _gda_wt_want[1])
+        # A clean with -x or -X removes ignored files the recovery snapshot does not hold, so beside an empty -C
+        # it keeps the deny of an unresolvable -C even where GIT_DIR+= names the session's own .git. Flip: with
+        # GIT_DIR+= read as GIT_DIR= unconditionally (the gate removed), each must allow with a note instead.
+        _gdx_rows = (
+            ("(gdc-env-gitdir-append-emptyC-clean-x) GIT_DIR+=<session>/.git with -C '' on clean -fdx DENIES",
+             "GIT_DIR+={S}/.git git -C '' clean -fdx"),
+            ("(gdc-env-gitdir-append-emptyC-clean-X) GIT_DIR+=.git with -C '' on clean -fX DENIES",
+             "GIT_DIR+=.git git -C '' clean -fX"),
+            ("(gdc-env-gitdir-append-emptyC-clean-split-x) GIT_DIR+=.git with -C '' on clean -f -d -x DENIES",
+             "GIT_DIR+=.git git -C '' clean -f -d -x"),
+        )
+        for _gdx_label, _gdx_cmd in _gdx_rows:
+            gdc(_gdx_label, _gdx_cmd, "deny", "clean", {})
+        _gdx_gate = aiqt_hooks._gitdir_append_pinned
+        aiqt_hooks._gitdir_append_pinned = lambda tokens, cwd, sub, args: True
+        try:
+            for _gdx_label, _gdx_cmd in _gdx_rows:
+                gdc(_gdx_label.replace(") ", "-flip) ", 1).replace("DENIES", "allows with the gate removed"),
+                    _gdx_cmd, "allow-note", "clean", {})
+        finally:
+            aiqt_hooks._gitdir_append_pinned = _gdx_gate
         # A leading GIT_DIR+= on a stash drop/clear names the git dir just as GIT_DIR= does, so it DENIES
         # rather than preserve the -C repository's stash (here none, a silent allow on the unfixed guard)
         # while the command clears the stash of the repository GIT_DIR names.
@@ -16815,19 +16837,16 @@ def _main_isolated(monitor):
                      cwd=str(_f12_plain)) != "deny":
             failures.append("(f12-C-orphan) a -C <repo> creation from an ORPHAN start must still DENY "
                             "(the -C target's ancestry is checked, not blindly allowed)")
-        # A leading GIT_DIR+= with no GIT_DIR already set sets the value as GIT_DIR= does, so git uses the git
-        # dir it names, not the -C directory: the creation is in a repository this guard cannot pin, so a rooted
-        # start allows with the cannot-pin note. The -C target (or the session directory under a --work-tree or
-        # GIT_WORK_TREE= with no -C) is still probed as a floor, so an orphaned start there denies, as it did
-        # when GIT_DIR+= was read as a bare -C; from a working directory that is not a repository the floor
-        # cannot resolve the start and denies too. GIT_DIR+=<repo>/.git beside -C <repo> names the same
-        # repository twice, and git 2.53 creates the orphan-rooted branch there.
+        # branch_root sets a leading GIT_DIR+= aside, so the -C target (or the session directory under a
+        # --work-tree or GIT_WORK_TREE= with no -C) is probed: a rooted start there allows and an orphaned
+        # start denies; from a working directory that is not a repository the probe cannot resolve the start
+        # and denies too. GIT_DIR+=<repo>/.git beside -C <repo> names the same repository twice, and git 2.53
+        # creates the orphan-rooted branch there.
         _gda_got = _decision(brg, "GIT_DIR+=/nonexistent-brnrot/.git git -C {} checkout -b x".format(brr),
                              cwd=str(_f12_plain))
-        if _gda_got != "allow-note":
-            failures.append("(gitdir-append-C-rooted) a GIT_DIR+= prefix beside -C <repo> names a repository "
-                            "this guard cannot pin, so a rooted start must allow with a note, got {}".format(
-                                _gda_got))
+        if _gda_got != "allow":
+            failures.append("(gitdir-append-C-rooted) a GIT_DIR+= prefix beside -C <repo> is set aside, so a "
+                            "rooted start in <repo> must allow, got {}".format(_gda_got))
         gda_floor = (
             ("(gitdir-append-C-orphan) GIT_DIR+=<other> beside -C <repo> on checkout -b <orphan> denies",
              "GIT_DIR+=/nonexistent-brnrot/.git git -C {} checkout -b x orphan-start".format(brr), str(_f12_plain)),
@@ -16863,18 +16882,19 @@ def _main_isolated(monitor):
             got = _decision(brg, command, cwd=cwd)
             if got != "deny":
                 failures.append("{}: expected deny, got {}".format(label, got))
-        # Flip: with the floor probe removed (the reading that let each of these allow with a note), every
-        # floor row must turn red, so each one tests the floor and not some other deny.
-        _gda_saved = aiqt_hooks._segment_appended_gitdir_base
-        aiqt_hooks._segment_appended_gitdir_base = lambda tokens, cwd: None
+        # Flip: with GIT_DIR+= read as GIT_DIR= in branch_root (a repository it cannot pin, so the cannot-pin
+        # note with no probe), every one of these rows must turn red, so each one tests the reading that sets
+        # GIT_DIR+= aside and not some other deny.
+        _gda_saved = aiqt_hooks._segment_repo_dir
+        aiqt_hooks._segment_repo_dir = lambda tokens, cwd, appended=False: _gda_saved(tokens, cwd, True)
         try:
             for label, command, cwd in gda_floor:
                 got = _decision(brg, command, cwd=cwd)
                 if got == "deny":
-                    failures.append("{} flip: removing the GIT_DIR+= floor probe must turn it red, got "
+                    failures.append("{} flip: reading GIT_DIR+= as GIT_DIR= must turn it red, got "
                                     "{}".format(label, got))
         finally:
-            aiqt_hooks._segment_appended_gitdir_base = _gda_saved
+            aiqt_hooks._segment_repo_dir = _gda_saved
 
         # H3: origin/HEAD cannot be derived, so the guard falls back to a local
         # main/master; a MISSING protected line is not evidence a plain local branch is orphaned, so a
@@ -17177,18 +17197,19 @@ def _main_isolated(monitor):
             if _h33_got != "deny" or "this detached worktree carries a command-local" not in _h33_reason:
                 failures.append("{}: expected deny naming the cannot-pin detach reason, got {} {!r}".format(
                     label, _h33_got, _h33_reason))
-        # Flip: with the detach mark dropped and the GIT_DIR+= floor probe removed (the reading that gave each
-        # of these the -b form's note), every unpinned detach row must turn red, so each one tests the
-        # unpinned-detach deny. The floor goes too because H33x, a GIT_DIR+= beside -C <repo>, is held by both.
+        # Flip: with the detach mark dropped and GIT_DIR+= read as GIT_DIR= (the reading that gave each of these
+        # the -b form's note), every unpinned detach row must turn red, so each one tests the unpinned-detach
+        # deny. The GIT_DIR+= reading goes too because H33x, a GIT_DIR+= beside -C <repo>, is otherwise probed
+        # in <repo> and denied there as an orphan.
         _h33_mark_saved = aiqt_hooks._worktree_creation_start
-        _h33_floor_saved = aiqt_hooks._segment_appended_gitdir_base
+        _h33_repo_saved = aiqt_hooks._segment_repo_dir
 
         def _h33_unmarked(args):
             got = _h33_mark_saved(args)
             return str(got) if isinstance(got, str) else got
 
         aiqt_hooks._worktree_creation_start = _h33_unmarked
-        aiqt_hooks._segment_appended_gitdir_base = lambda tokens, cwd: None
+        aiqt_hooks._segment_repo_dir = lambda tokens, cwd, appended=False: _h33_repo_saved(tokens, cwd, True)
         try:
             for label, command, cwd in h33_unpinned:
                 got = _decision(brg, command, cwd=cwd)
@@ -17197,10 +17218,62 @@ def _main_isolated(monitor):
                         label, got))
         finally:
             aiqt_hooks._worktree_creation_start = _h33_mark_saved
-            aiqt_hooks._segment_appended_gitdir_base = _h33_floor_saved
-        # A GIT_WORK_TREE= prefix moves only the worktree, as --work-tree does, so beside a -c option or another
-        # global option it still leaves the session repository pinned: the start is probed there and an orphaned
-        # one denies, naming the probe's reason rather than allowing with the cannot-pin note.
+            aiqt_hooks._segment_repo_dir = _h33_repo_saved
+        # A detach on a ROOTED commit-ish after or beside any construct that can change the environment git runs
+        # in (an export, declare -x, typeset -x, set -a, set -o allexport, an eval, a sourced file), or beside
+        # any other command, is not one pristine git command, so it is not probed and keeps the deny, naming
+        # the cannot-pin reason: git 2.53 checks the commit out of the repository an exported GIT_DIR names,
+        # not the one the probe reads. Flip: with that gate removed (every detach probed, the reading before
+        # it), each must turn red (the session repository's rooted commit-ish allows).
+        h33_env = (
+            ("(H35a) worktree add --detach after export GIT_DIR denies",
+             "export GIT_DIR=/nonexistent-h35/.git; git worktree add --detach /tmp/wt-h35a {}".format(br_tip)),
+            ("(H35b) worktree add --detach after set -a and a GIT_DIR assignment denies",
+             "set -a; GIT_DIR=/nonexistent-h35/.git; git worktree add --detach /tmp/wt-h35b {}".format(br_tip)),
+            ("(H35c) worktree add --detach after declare -x GIT_DIR denies",
+             "declare -x GIT_DIR=/nonexistent-h35/.git; git worktree add --detach /tmp/wt-h35c {}".format(
+                 br_tip)),
+            ("(H35d) worktree add --detach after typeset -x GIT_DIR denies",
+             "typeset -x GIT_DIR=/nonexistent-h35/.git; git worktree add --detach /tmp/wt-h35d {}".format(
+                 br_tip)),
+            ("(H35e) worktree add --detach after set -o allexport and a GIT_DIR assignment denies",
+             "set -o allexport; GIT_DIR=/nonexistent-h35/.git; git worktree add -d /tmp/wt-h35e {}".format(
+                 br_tip)),
+            ("(H35f) worktree add --detach after an eval denies",
+             "eval 'export GIT_DIR=/nonexistent-h35/.git'; git worktree add --detach /tmp/wt-h35f {}".format(
+                 br_tip)),
+            ("(H35g) worktree add --detach after source of a file denies",
+             "source /dev/null; git worktree add --detach /tmp/wt-h35g {}".format(br_tip)),
+            ("(H35h) worktree add --detach after a dot-sourced file denies",
+             ". /dev/null; git worktree add --detach /tmp/wt-h35h {}".format(br_tip)),
+            ("(H35i) worktree add --detach after export GIT_DIR joined by && denies",
+             "export GIT_DIR=/nonexistent-h35/.git && git worktree add --detach /tmp/wt-h35i {}".format(br_tip)),
+            ("(H35j) worktree add --detach after export GIT_DIR on an earlier line denies",
+             "export GIT_DIR=/nonexistent-h35/.git\ngit worktree add --detach /tmp/wt-h35j {}".format(br_tip)),
+            ("(H35k) worktree add --detach after export GIT_COMMON_DIR denies",
+             "export GIT_COMMON_DIR=/nonexistent-h35/.git; git worktree add --detach /tmp/wt-h35k {}".format(
+                 br_tip)),
+        )
+        for label, command in h33_env:
+            _h33_code, _h33_out, _h33_err = brg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                 "tool_input": {"command": command}, "cwd": brr})
+            _h33_got = _reduce_result(_h33_code, _h33_out)
+            _h33_reason = ((_h33_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _h33_got != "deny" or "this detached worktree carries a command-local" not in _h33_reason:
+                failures.append("{}: expected deny naming the cannot-pin detach reason, got {} {!r}".format(
+                    label, _h33_got, _h33_reason))
+        _h33_gate_saved = aiqt_hooks._detach_pinned
+        aiqt_hooks._detach_pinned = lambda command, segments, tokens, cwd: True
+        try:
+            for label, command in h33_env:
+                got = _decision(brg, command, cwd=brr)
+                if got == "deny":
+                    failures.append("{} flip: removing the pinned-detach gate must turn it red, got {}".format(
+                        label, got))
+        finally:
+            aiqt_hooks._detach_pinned = _h33_gate_saved
+        # A GIT_WORK_TREE= prefix is a leading assignment, so a detach beside it is not probed and keeps the
+        # deny, naming the cannot-pin reason.
         for label, command in (
                 ("(H33t) worktree add --detach on an orphaned start under GIT_WORK_TREE= and -c denies",
                  "GIT_WORK_TREE=/etc git -c core.x=1 worktree add --detach /tmp/wt-h33t {}".format(br_orphan)),
@@ -17210,8 +17283,8 @@ def _main_isolated(monitor):
                                                  "tool_input": {"command": command}, "cwd": brr})
             _h33_got = _reduce_result(_h33_code, _h33_out)
             _h33_reason = ((_h33_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
-            if _h33_got != "deny" or "has no merge base with origin/HEAD" not in _h33_reason:
-                failures.append("{}: expected deny naming the missing merge base, got {} {!r}".format(
+            if _h33_got != "deny" or "this detached worktree carries a command-local" not in _h33_reason:
+                failures.append("{}: expected deny naming the cannot-pin detach reason, got {} {!r}".format(
                     label, _h33_got, _h33_reason))
         # Flip: the old classifier, which returned _ASK_START at the first detach token its walk met (so
         # every detach form denied), must turn each H33 allow vector red, so they test the detach branch
