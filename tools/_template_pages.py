@@ -1,4 +1,5 @@
-"""Which pages are generated template pages: the targets tools/gen_draft_site.py declares in its GENSRC_OUTPUTS.
+"""Which pages are generated template pages: the kind "file" targets tools/gen_draft_site.py declares in its
+GENSRC_OUTPUTS (its kind "block" entries name files it owns only a status line of, never a page).
 
 The gates that hold a template page to the template's own rules (check_site.py, check_footer.py) ask this
 module, never the name of the folder the pages sit in, so the same rule holds while the pages are staged
@@ -24,10 +25,12 @@ GENERATOR = "tools/gen_draft_site.py"
 @cache
 def _declared(root):
     # Each entry goes through gen_gensrc's validation before its target is read, so a malformed entry raises
-    # ValueError (exit 2 in each gate) rather than a KeyError or TypeError, or a non-string target.
+    # ValueError (exit 2 in each gate) rather than a KeyError or TypeError, or a non-string target. Every entry
+    # is validated; only the kind "file" ones are pages.
     seen = set()
-    return frozenset(gen_gensrc._validate_entry(raw, GENERATOR, root, seen)["target"]
-                     for raw in gen_gensrc._read_declaration(root / GENERATOR, GENERATOR))
+    entries = [gen_gensrc._validate_entry(raw, GENERATOR, root, seen)
+               for raw in gen_gensrc._read_declaration(root / GENERATOR, GENERATOR)]
+    return frozenset(entry["target"] for entry in entries if entry["kind"] == "file")
 
 
 def template_targets(root=None):

@@ -581,6 +581,11 @@ ALLOWLIST = (
     ("tools/check_entry_guard.py", "_load_mutant", "code", 1,
      "self-test mutant: exec_module of a scratch copy of this gate's own source (read from __file__)"
      " with one reviewed literal substitution from its fixed MUTANTS table; no external input"),
+    ("tools/gen_draft_site.py", "_load_register_mutant", "code", 1,
+     "self-test mutant loader: exec_module of a scratch copy of this generator's own source (read from"
+     " __file__ by its one caller, unmutated as the control or with one reviewed literal substitution"
+     " from its fixed _REGISTER_FLIPS table inside the GENSRC_OUTPUTS literal), written under the"
+     " self-test's temporary directory; no external input"),
     ("tools/check_internal_names.py", "_load_ratchet_mutant", "code", 1,
      "self-test mutant loader: exec_module of a scratch copy of this gate's own source (read from"
      " __file__ by its one caller, with one ratchet-comparison branch disabled by a reviewed literal"
