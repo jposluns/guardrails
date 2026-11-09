@@ -20329,6 +20329,45 @@ def _main_isolated(monitor):
                 "git diff -U --output=x", "allow-note")
         dexpect("(qa-b4ad) log -v takes no value, so --output= still diverts -> allows with a note",
                 "git log -p -1 -v --output=x", "allow-note")
+        # The first --output-shaped word of the whole segment is judged too, and a dump either reading confirms
+        # denies: where a global option takes --, --end-of-options or a console --output as its value, git
+        # 2.53.0 printed the patch on stdout for dg-1 to dg-3 (two --output words with the console last, and a
+        # --default that takes the later -ox as its value) and wrote it to x for dg-4, which denies as well.
+        dexpect("(dg-1) a global value -- before two --output words, console last -> denies",
+                "git --namespace -- diff HEAD~1 --output=x --output=/dev/stdout", "deny")
+        dexpect("(dg-2) a global value --end-of-options before two --output words, console last -> denies",
+                "git --namespace --end-of-options log -p -1 --output=x --output=/dev/stdout", "deny")
+        dexpect("(dg-3) a global console --output value with --default taking -ox -> denies",
+                "git --namespace --output=/dev/stdout diff HEAD~1 --default -ox", "deny")
+        dexpect("(dg-4) a global console --output value before a subcommand --output to a file -> denies",
+                "git --namespace --output=/dev/stdout diff HEAD~1 --output=x", "deny")
+        # A combined diff under diff or diff-index with a single revision: git 2.53.0 created x empty and
+        # printed the diff on stdout for each of dg-5 to dg-11, so a combined-diff option there leaves no
+        # diversion. The guard does not count revisions, so dg-12, where git wrote the diff to x, denies too.
+        # The controls show -c taken as an option's value, and diff-tree and stash show, which wrote the
+        # combined diff to x, still divert.
+        dexpect("(dg-5) diff --cc with one revision prints on stdout -> denies",
+                "git diff HEAD~1 --cc --output=x", "deny")
+        dexpect("(dg-6) diff -c with one revision prints on stdout -> denies",
+                "git diff HEAD~1 -c --output=x", "deny")
+        dexpect("(dg-7) diff --combined-all-paths -c with one revision prints on stdout -> denies",
+                "git diff HEAD~1 --combined-all-paths -c --output=x", "deny")
+        dexpect("(dg-8) diff --cc after the --output word still prints on stdout -> denies",
+                "git diff HEAD~1 --output=x --cc", "deny")
+        dexpect("(dg-9) diff --diff-merges cc, separated, prints on stdout -> denies",
+                "git diff HEAD~1 --diff-merges cc --output=x", "deny")
+        dexpect("(dg-10) diff-index --cc with one tree prints on stdout -> denies",
+                "git diff-index -p HEAD --cc --output=x", "deny")
+        dexpect("(dg-11) diff --cc after a global value -- prints on stdout -> denies",
+                "git --namespace -- diff HEAD~1 --cc --output=x", "deny")
+        dexpect("(dg-12) diff --cc with two revisions denies though git writes x (a disclosed over-deny)",
+                "git diff HEAD~1 HEAD --cc --output=x", "deny")
+        dexpect("(dg-13) -c as the value of diff --src-prefix leaves --output= a real diversion -> allows with a note",
+                "git diff HEAD~1 --src-prefix -c --output=x", "allow-note")
+        dexpect("(dg-14) diff-tree --cc writes to the --output file -> allows with a note",
+                "git diff-tree -p HEAD --cc --output=x", "allow-note")
+        dexpect("(dg-15) stash show --cc writes to the --output file -> allows with a note",
+                "git stash show -p --cc --output=x", "allow-note")
         # BLOCKER 5: a redirect target that resolves to a device via '..' or a relative path must NOT earn
         # proof C; a genuine plain-file redirect still ALLOWs.
         dexpect("(qa-b5a) '> /tmp/../dev/stdout' normalizes to a device -> denies",

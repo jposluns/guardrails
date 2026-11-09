@@ -4447,11 +4447,31 @@ _SUB_SEP_VALUE_OPTS = {
     "format-patch": (_SUB_SEP_VALUE_LONG | _FORMAT_PATCH_SEP_VALUE_LONG, _SUB_SEP_VALUE_SHORT | {"v"}),
 }
 _SUB_SEP_VALUE_DEFAULT = (_SUB_SEP_VALUE_LONG, _SUB_SEP_VALUE_SHORT | {"n"})
+# Combined-diff options (and --diff-merges, inline or separated, whose c and cc values select one). Under git
+# 2.53.0, git diff and git diff-index given one with a single revision (git diff HEAD~1 --cc --output=x, git
+# diff-index -p HEAD --cc --output=x) created the --output file empty and printed the diff on stdout, so
+# under those subcommands such an option leaves no diversion. Under log, show, stash show and diff-tree git
+# wrote the diff to the --output file, and format-patch reads --cc as a recipient.
+_COMBINED_DIFF_OPTS = frozenset(("-c", "--cc", "--combined-all-paths", "--diff-merges"))
+_COMBINED_DIFF_STDOUT_SUBS = frozenset(("diff", "diff-index"))
 
 
 def _subcommand_output_diversion(argv):
     """(present, target) for a --output/-o diversion among the arguments after a git segment's subcommand
-    (_git_subcommand_rest), the only place git reads one as the diff's destination. A --output-shaped word
+    (_subcommand_output_scan)."""
+    return _subcommand_output_scan(argv)[0]
+
+
+def _combined_diff_to_stdout(argv):
+    """True when a git diff or git diff-index segment carries a combined-diff option among its own arguments
+    (_subcommand_output_scan), so git can print the diff on stdout whatever its --output word says."""
+    return _subcommand_output_scan(argv)[1]
+
+
+def _subcommand_output_scan(argv):
+    """((present, target), combined) for the arguments after a git segment's subcommand
+    (_git_subcommand_rest), the only place git reads a --output/-o word as the diff's destination; combined
+    is True for a combined-diff option under git diff or git diff-index. A --output-shaped word
     before the subcommand is no diversion. Git runs it with the patch on stdout when it is the value of a
     global option that accepts it (git --namespace --output=x diff, git -c -oreal.txt diff); otherwise git
     refuses the command or runs it without a diff (git --output=x diff, git -C --output=x diff, git -c -ox
@@ -4459,7 +4479,12 @@ def _subcommand_output_diversion(argv):
     patch, a disclosed over-deny. Among the subcommand's arguments the separated value of a value-taking
     option (_SUB_SEP_VALUE_OPTS, git log -p --grep --output=x) is skipped, never read as a diversion; the
     first '--' or '--end-of-options' still ends the scan, as in _diff_output_diversion. The first diversion
-    found is returned, while git writes to the last of two (a disclosed under-deny and over-deny)."""
+    found is returned, while git writes to the last of two (a disclosed under-deny and over-deny). Under git
+    diff and git diff-index a combined-diff option (_COMBINED_DIFF_OPTS) anywhere before that boundary sets
+    combined: with one revision git creates the --output file empty and prints the diff on stdout (git diff
+    HEAD~1 --cc --output=x), so _is_console_dump then judges stdout as well as the target. This scan does not
+    count revisions, so the forms where git does write the file (git diff HEAD~1 HEAD --cc --output=x, git
+    diff --cc --output=x) are a disclosed over-deny."""
     sub, rest = _git_subcommand_rest(argv)
     long_opts, short_letters = _SUB_SEP_VALUE_OPTS.get(sub, _SUB_SEP_VALUE_DEFAULT)
     end = len(rest)
@@ -4467,15 +4492,28 @@ def _subcommand_output_diversion(argv):
         if word in _DIFF_END_OF_OPTIONS:
             end = j
             break
+    found = (False, None)
+    combined = False
     i = 0
     while i < end:
         word = rest[i]
+        if word in _COMBINED_DIFF_OPTS or word.startswith("--diff-merges="):
+            combined = True
         if word in ("--output", "-o"):
-            return True, (rest[i + 1] if i + 1 < len(rest) else None)
+            if not found[0]:
+                found = (True, rest[i + 1] if i + 1 < len(rest) else None)
+            i += 2  # the next word is the --output value
+            continue
         if word.startswith("--output="):
-            return True, word[len("--output="):]
+            if not found[0]:
+                found = (True, word[len("--output="):])
+            i += 1
+            continue
         if word.startswith("-o") and not word.startswith("--") and len(word) > 2:
-            return True, word[2:]
+            if not found[0]:
+                found = (True, word[2:])
+            i += 1
+            continue
         if word in long_opts:
             i += 2  # the next word is this option's value
             continue
@@ -4487,7 +4525,7 @@ def _subcommand_output_diversion(argv):
                         i += 1
                     break
         i += 1
-    return False, None
+    return found, combined and sub in _COMBINED_DIFF_STDOUT_SUBS
 
 
 def _final_stdout_dest(redirects):
@@ -4609,19 +4647,31 @@ def _is_console_dump(seg, segments, index):
     --output/-o among the subcommand's own arguments (_subcommand_output_diversion), THAT target decides (a
     /dev,/proc console target is a dump; a file or dynamic target is not a confirmed dump, so it ASKS) and
     any shell redirect or pipe is a decoy. Otherwise stdout governs, so a --output-shaped value of a git
-    global option (git --namespace --output=x diff) is a console dump. Used only to choose DENY over ASK;
-    its absence never establishes an ALLOW."""
+    global option (git --namespace --output=x diff) is a console dump. The same judgement is also made on
+    the first --output/-o-shaped word of the whole segment (_diff_output_diversion), and either reading
+    confirming a dump confirms it, so every form that reading confirms stays a dump: git --namespace
+    --output=/dev/stdout diff HEAD~1 --default -ox and git --namespace -- diff HEAD~1 --output=x
+    --output=/dev/stdout print the patch on stdout. A combined diff under git diff or git diff-index
+    (_combined_diff_to_stdout) is judged by stdout as well, since git prints it there with one revision (git
+    diff HEAD~1 --cc --output=x). Used only to choose DENY over ASK; its absence never establishes an
+    ALLOW."""
     if _command_word(seg.argv) != "git":
         return False  # an opaque/wrapped command word is not a proven git dump -> ASK, never DENY
     if not _is_diff_producer(seg.argv):
         return False
     if _diff_emits_only_summary(seg.argv):
         return False
-    diverted, out_target = _subcommand_output_diversion(seg.argv)
-    if diverted:
-        # the diff is written to the --output target, not stdout; the shell redirect/pipe is a decoy
-        return out_target is not None and _target_class(out_target, False) == "file-dev"
-    return _seg_stdout_reaches_console(seg, segments, index) == "console"
+    readings = [_subcommand_output_diversion(seg.argv), _diff_output_diversion(seg.argv)]
+    if _combined_diff_to_stdout(seg.argv):
+        readings.append((False, None))  # git can print this combined diff on stdout despite --output
+    for diverted, out_target in readings:
+        if diverted:
+            # the diff is written to the --output target, not stdout; the shell redirect/pipe is a decoy
+            if out_target is not None and _target_class(out_target, False) == "file-dev":
+                return True
+        elif _seg_stdout_reaches_console(seg, segments, index) == "console":
+            return True
+    return False
 
 
 def _diff_proof_help(command):
