@@ -13390,7 +13390,8 @@ def _main_isolated(monitor):
         # classification, not by host speed. It is also the bound on a hung probe: one probe ends after
         # at most 32 s and one evaluation after at most 112 s, as a named deadline denial of that case,
         # and _commit_run kills the probe's whole process group on every exit, so no probe child
-        # outlives its case. The whole suite needs no outer kill to end a hung probe.
+        # outlives its case. That bound is per probe: one hung probe ends within 32 s as a named failure,
+        # but many hung probes together can still run past the suite runner's own time bound.
         # (pl239-probe-timeout), where the deadline IS the property, restores the production limits
         # against a probe that sleeps far past them, (pl239-probe-closed-*) and
         # (pl239-remote-probe-timeout) run one substitute probe at the production probe limit, and
@@ -14266,7 +14267,11 @@ def _main_isolated(monitor):
         # sees end of file, so the budget runs out in the bounded wait for the probe's exit, which
         # raises subprocess.TimeoutExpired. (pl239-probe-closed-output) is a real child that closes
         # its streams; (pl239-probe-closed-forced) stands in a selector that observes no open stream,
-        # so the bounded wait is reached whatever the host load.
+        # so the bounded wait is reached whatever the host load. (pl239-probe-closed-output) stops
+        # discriminating when the child takes longer than the 2 s probe limit to start: the budget then
+        # runs out in the read loop before the child closes its outputs, a path that rendered the timeout
+        # denial even without the bounded-wait handling, so it passes against that code reverted;
+        # (pl239-probe-closed-forced) is the guard for that case.
         for _case, _script, _selectors in (
                 ("closed-output", "import os, time; os.close(1); os.close(2); time.sleep(30)",
                  _pl239_selectors),
@@ -14313,6 +14318,42 @@ def _main_isolated(monitor):
                                     _pl239_reads)
         pexpect("(pl239-remote-probe-restored)", "git commit", "deny", cwd=plr,
                 detail="would commit on protected branch")
+
+        # _repo_has_remote tells a timeout from any other probe failure by the exception's type, never by
+        # its message: a plain _CommitCannotEvaluate whose text happens to equal the deadline detail is an
+        # ordinary failure (None, remote absence unproved), while _CommitDeadlineExhausted propagates.
+        # A message comparison in place of the type test turns (pl239-remote-deadline-type) red.
+        for _case, _raised, _propagates in (
+                ("type", aiqt_hooks._CommitCannotEvaluate, False),
+                ("type-control", aiqt_hooks._CommitDeadlineExhausted, True)):
+            _pl239_reads = []
+
+            def _pl239_raising_remote_git(repo, deadline, *args):
+                if args == ("remote",):
+                    _pl239_reads.append(repo)
+                    raise _raised(aiqt_hooks._COMMIT_DEADLINE_DETAIL)
+                return _pl239_original_git(repo, deadline, *args)
+
+            aiqt_hooks._commit_git = _pl239_raising_remote_git
+            try:
+                _pl239_outcome = aiqt_hooks._repo_has_remote(
+                    str(plr), time.monotonic() + aiqt_hooks._COMMIT_SECONDS)
+            except aiqt_hooks._CommitCannotEvaluate as exc:
+                _pl239_outcome = exc
+            finally:
+                aiqt_hooks._commit_git = _pl239_original_git
+            _pl239_label = "(pl239-remote-deadline-{})".format(_case)
+            if _propagates:
+                if type(_pl239_outcome) is not aiqt_hooks._CommitDeadlineExhausted:
+                    failures.append("{}: an exhausted deadline must propagate from _repo_has_remote, got {!r}"
+                                    .format(_pl239_label, _pl239_outcome))
+            elif _pl239_outcome is not None:
+                failures.append("{}: a non-deadline failure whose message equals the deadline detail must "
+                                "read as unproved remote absence (None), got {!r}"
+                                .format(_pl239_label, _pl239_outcome))
+            if len(_pl239_reads) != 1:
+                failures.append("{}: substitute probe not reached exactly once: {!r}"
+                                .format(_pl239_label, _pl239_reads))
 
         # A deterministically exhausted evaluation budget: no probe and no host timing involved, the
         # first _commit_remaining call sees the zero budget already spent. The denial must still deny

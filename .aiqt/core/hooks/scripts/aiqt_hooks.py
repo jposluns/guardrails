@@ -13559,9 +13559,9 @@ def _push_protected(tokens, args, cwd):
 _COMMIT_SECONDS = 7.0
 _COMMIT_PROBE_SECONDS = 2.0
 _COMMIT_PROBE_BYTES = 65536
-# The one detail an exhausted time budget raises. _commit_denial renders exactly this detail as a
-# timeout denial: still a deny (fail-closed), worded as the check running out of time on this host,
-# never as a finding that the commit is on a protected branch.
+# The one detail an exhausted time budget raises, as _CommitDeadlineExhausted. _commit_denial renders
+# exactly this detail as a timeout denial: still a deny (fail-closed), worded as the check running out
+# of time on this host, never as a finding that the commit is on a protected branch.
 _COMMIT_DEADLINE_DETAIL = "commit evaluation deadline exhausted"
 
 
@@ -13569,10 +13569,15 @@ class _CommitCannotEvaluate(Exception):
     pass
 
 
+class _CommitDeadlineExhausted(_CommitCannotEvaluate):
+    """The evaluation or per-probe time budget ran out. Callers tell it apart by type, never by its
+    message, so another failure whose text happens to match is not read as a timeout."""
+
+
 def _commit_remaining(deadline):
     remaining = deadline - time.monotonic()
     if not math.isfinite(remaining) or remaining <= 0:
-        raise _CommitCannotEvaluate(_COMMIT_DEADLINE_DETAIL)
+        raise _CommitDeadlineExhausted(_COMMIT_DEADLINE_DETAIL)
     return remaining
 
 
@@ -13620,7 +13625,7 @@ def _commit_run(argv, deadline):
     except subprocess.TimeoutExpired as exc:
         # A probe that closed its output but outlived its time is the budget running out (the wait
         # above is bounded by the same deadline), so it renders as the timeout denial, still a deny.
-        raise _CommitCannotEvaluate(_COMMIT_DEADLINE_DETAIL) from exc
+        raise _CommitDeadlineExhausted(_COMMIT_DEADLINE_DETAIL) from exc
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise _CommitCannotEvaluate("commit probe failed: " + type(exc).__name__) from exc
     finally:
@@ -13806,9 +13811,9 @@ def _repo_has_remote(repo, deadline):
         result = _commit_fs(deadline, "legacy", common)
         _commit_remaining(deadline)
         return result if type(result) is bool else None
-    except _CommitCannotEvaluate as exc:
-        if str(exc) == _COMMIT_DEADLINE_DETAIL:
-            raise
+    except _CommitDeadlineExhausted:
+        raise
+    except _CommitCannotEvaluate:
         return None
 
 
