@@ -5015,7 +5015,7 @@ def _path_absent(path):
     return False
 
 
-def _dirname_guard_outcome(text, relative, scenario):
+def _dirname_guard_outcome(text, relative, scenario, trace=None):
     """Run a runner text from relative in a scratch tree under one dirname
     scenario; return (rc, no gate launched).
 
@@ -5024,7 +5024,9 @@ def _dirname_guard_outcome(text, relative, scenario):
     directory). Every stub is written before the one launch, from this thread.
     The PATH this sets names only fixture directories: the dirname fixture's
     directory (except under "missing"), then the bin directory from
-    _prepare_stubs. HOME is the scratch tree.
+    _prepare_stubs. HOME is the scratch tree. When trace is given, stub_trace
+    names it, so the python3 and gitleaks fixtures that run also append their
+    own path and arguments to that file (self-test vector 27b passes one).
     """
     import os
     import shutil
@@ -5057,6 +5059,8 @@ def _dirname_guard_outcome(text, relative, scenario):
                    HOME=tmp, LC_ALL="C", stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
                    stub_dirname_out=out, stub_dirname_rc=rc)
+        if trace is not None:
+            env["stub_trace"] = str(trace)
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", str(runner)],
             cwd=str(caller), env=env, stdin=subprocess.DEVNULL,
@@ -5124,14 +5128,17 @@ def dirname_guard_problems(text, relative):
 # The python3 executable fixture for cdpath_problems, which _cdpath_outcome passes
 # to _prepare_stubs. Each line it appends to the call log is what $PWD expands to in
 # the fixture, then python3 and its arguments; cdpath_problems reads a line that
-# names the decoy tree as a moved root.
+# names the decoy tree as a moved root. When stub_trace names a file, it also
+# appends its own path ($0) and then its arguments to that file, as _STUB_PYTHON3
+# does; self-test vector 27b reads it.
 _STUB_PYTHON3_PWD = """#!/bin/sh
 printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || exit 2
+[ -z "${stub_trace-}" ] || printf '%s\\n' "$0 $*" >> "$stub_trace" || exit 2
 exit 0
 """
 
 
-def _cdpath_outcome(text, relative):
+def _cdpath_outcome(text, relative, trace=None):
     """Run a runner text by its RELATIVE path from its scratch tree's root
     under a CDPATH naming a decoy tree that holds the same relative directory;
     return (rc, tree, decoy, logged gate lines).
@@ -5140,7 +5147,9 @@ def _cdpath_outcome(text, relative):
     before the one launch, from this thread. The PATH this sets names only
     fixture directories: the dirname fixture's directory, then the bin directory
     from _prepare_stubs, whose python3 fixture is _STUB_PYTHON3_PWD. HOME is the
-    scratch tree.
+    scratch tree. When trace is given, stub_trace names it, so the python3 and
+    gitleaks fixtures that run also append their own path and arguments to that
+    file (self-test vector 27b passes one).
     """
     import os
     import shutil
@@ -5170,6 +5179,8 @@ def _cdpath_outcome(text, relative):
                    CDPATH=str(decoy), stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
                    stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
+        if trace is not None:
+            env["stub_trace"] = str(trace)
         proc = subprocess.run(
             [bash, "--noprofile", "--norc", relative],
             cwd=str(tree), env=env, stdin=subprocess.DEVNULL,
@@ -5362,19 +5373,23 @@ def _stubs_prepared_before_pool(text, red_command):
     recorded with its path resolved against the working directory (the open audit event
     carries no dir_fd argument), so a relative path opened that way matches the stub
     only when that resolution happens to name it, and then the late-event leg counts it.
-    Otherwise no recorded event in these cases names the stub path, so only a leg that
-    checks what the snapshots list can fail: the required-stub leg when the change
-    leaves a stub missing or not executable (an os.fchmod that clears its execute bits,
-    for one), the every-executable-was-seen leg when no recorded event names a
-    stub-directory executable at all, and the scenario-tree leg when a symlink or hard
-    link to a stub is in a scenario tree when that tree's snapshot is taken, since it is
-    listed there as an executable. Because os.rename, os.link and os.symlink are
-    recorded under their destination path only, a stub renamed away is recorded under
-    its new path and that rename is not matched to the stub path. A dir_fd-relative path
-    is resolved through /proc/self/fd only for the os.chmod, os.rename, os.link and
-    os.symlink events, and only where that pseudo-filesystem exists; without it such a
-    path stays working-directory-resolved, the same residual class as the
-    descriptor-only operations.
+    Otherwise no recorded event in these cases names the stub path. An alias that is
+    itself in the stub directory (a hard link or symlink made there) is listed by the
+    snapshots as a stub-directory executable in its own right, so a recorded event on
+    the alias's own path that did not come from the main thread before pool construction
+    began is counted by the late-event leg, under the alias's name rather than the
+    stub's. In the remaining cases, only a leg that checks what the snapshots list can
+    fail: the required-stub leg when the change leaves a stub missing or not executable
+    (an os.fchmod that clears its execute bits, for one), the every-executable-was-seen
+    leg when no recorded event names a stub-directory executable at all, and the
+    scenario-tree leg when a symlink or hard link to a stub is in a scenario tree when
+    that tree's snapshot is taken, since it is listed there as an executable. Because
+    os.rename, os.link and os.symlink are recorded under their destination path only, a
+    stub renamed away is recorded under its new path and that rename is not matched to
+    the stub path. A dir_fd-relative path is resolved through /proc/self/fd only for the
+    os.chmod, os.rename, os.link and os.symlink events, and only where that
+    pseudo-filesystem exists; without it such a path stays working-directory-resolved,
+    the same residual class as the descriptor-only operations.
 
     Returns (pool constructed, scenarios observed, distinct stub directories, required
     stubs missing, stub-directory executables that no recorded event names, executables
@@ -5472,30 +5487,46 @@ def _stubs_prepared_before_pool(text, red_command):
     )
 
 
-def _stub_launch_evidence(text):
-    """Return the evidence that one runner copy ran its stubbed commands as fixtures.
+def _stub_launch_evidence(text, launcher="runner"):
+    """Return the evidence that one launch of text ran its stubbed commands as fixtures.
 
-    Self-test vector 27b runs text once through _run_runner_copy against a fresh bin
-    directory from _prepare_stubs, with a trace file named by stub_trace. Each python3
-    or gitleaks fixture that runs appends its own $0 and then its arguments to the
-    trace; bash sets $0 to the path it found on PATH, so a fixture run names its file
-    in the bin directory. A shell function, alias or exported function standing in for
-    a fixture writes no trace line. A recorder on the CPython subprocess.Popen audit
-    event keeps the environment of every launch whose stub_trace names this trace (the
-    calling process's environment where the launch passes none); that is the
-    environment the bash child starts with, after any wrapper around subprocess.run
-    has changed it. This checks the python3 and gitleaks fixtures of _prepare_stubs
-    only, not _STUB_PYTHON3_PWD or the dirname fixture, and not bash or /bin/sh.
+    Self-test vector 27b runs text once through each launcher that starts bash with
+    the bin directory of _prepare_stubs on PATH, with a trace file named by
+    stub_trace: "runner" is _run_runner_copy against a fresh bin directory, "dirname"
+    is _dirname_guard_outcome under its "control" scenario, and "cdpath" is
+    _cdpath_outcome, whose python3 fixture is _STUB_PYTHON3_PWD; the last two run
+    text as tools/run_all_checks.sh in a scratch tree of their own, with their own
+    bin directory. Each python3 or gitleaks fixture that runs appends its own $0 and
+    then its arguments to the trace. bash passes execve the path where it found the
+    fixture on PATH, and /bin/sh, reading the fixture as its script, sets $0 to that
+    path, so a fixture run names its file in the bin directory. A shell function,
+    alias or exported function standing in for a fixture writes no trace line. In
+    the trace lines returned, a $0 whose directory is entry n of the PATH in the one
+    recorded launch environment is shown as <PATH n> and its file name; the bin
+    directory of _prepare_stubs is entry 1 for the "runner" launcher and entry 2,
+    after the dirname fixture's directory, for the other two.
 
-    Returns (exit status, call log lines, trace lines with the bin directory path
-    shown as <bin>, launches recorded, and sorted BASH_ENV or BASH_FUNC_ keys found in
-    any recorded launch environment).
+    A recorder on the CPython subprocess.Popen audit event keeps the environment of
+    every launch whose stub_trace names this trace (the calling process's
+    environment where the launch passes none). That is the environment of the
+    executable the launch starts, after any wrapper around subprocess.run has
+    changed it; it is the environment bash starts with only when that executable is
+    bash itself. A launch that runs bash through a wrapper such as env, which can
+    set BASH_ENV from its own arguments, is not seen by this leg; only the trace leg
+    can then catch a stand-in. This checks the python3 and gitleaks fixtures only,
+    not the dirname fixture, and not bash or /bin/sh.
+
+    Returns (exit status, call log lines, trace lines, launches recorded, and sorted
+    BASH_ENV or BASH_FUNC_ keys found in any recorded launch environment). The call
+    log lines are None for the "dirname" launcher, which does not return them; for
+    "cdpath", a line that begins with the scratch tree's path shows it as <tree>.
     """
     import os
     import tempfile
 
     global _WRITE_AUDIT_INSTALLED
     launches = []
+    relative = "tools/run_all_checks.sh"
 
     with tempfile.TemporaryDirectory(prefix="ci-parity-exec-") as tmp:
         root = Path(tmp)
@@ -5508,25 +5539,41 @@ def _stub_launch_evidence(text):
             env = os.environ if args[3] is None else args[3]
             names = {os.fsdecode(name): value for name, value in env.items()}
             if os.fsdecode(names.get("stub_trace", "")) == str(trace):
-                launches.append(sorted(names))
+                launches.append((sorted(names), os.fsdecode(names.get("PATH", ""))))
 
-        bin_dir = _prepare_stubs(root)
+        bin_dir = _prepare_stubs(root) if launcher == "runner" else None
         try:
             if not _WRITE_AUDIT_INSTALLED:
                 sys.addaudithook(_dispatch_write_audit)
                 _WRITE_AUDIT_INSTALLED = True
             _WRITE_RECORDERS.append(record)
             try:
-                rc, _lines, calls = _run_runner_copy(text, bin_dir, trace=trace)
+                if launcher == "runner":
+                    rc, _lines, calls = _run_runner_copy(text, bin_dir, trace=trace)
+                elif launcher == "dirname":
+                    rc, _absent = _dirname_guard_outcome(
+                        text, relative, "control", trace=trace)
+                    calls = None
+                else:
+                    rc, tree, _decoy, calls = _cdpath_outcome(text, relative, trace=trace)
+                    calls = ["<tree>" + call[len(tree):] if call.startswith(tree + " ")
+                             else call for call in calls]
             finally:
                 _WRITE_RECORDERS.remove(record)
         finally:
-            bin_dir.chmod(0o700)  # so the scratch tree can be removed
-        prefix = str(bin_dir) + os.sep
-        traced = ["<bin>" + os.sep + line[len(prefix):] if line.startswith(prefix)
-                  else line
-                  for line in trace.read_text(encoding="utf-8").splitlines()]
-    forbidden = sorted({name for names in launches for name in names
+            if bin_dir is not None:
+                bin_dir.chmod(0o700)  # so the scratch tree can be removed
+        entries = launches[0][1].split(os.pathsep) if len(launches) == 1 else []
+        traced = []
+        for line in trace.read_text(encoding="utf-8").splitlines():
+            for number, entry in enumerate(entries, 1):
+                rest = line[len(entry) + 1:]
+                if (entry and line.startswith(entry + os.sep)
+                        and os.sep not in rest.split(" ", 1)[0]):
+                    line = "<PATH {}>{}{}".format(number, os.sep, rest)
+                    break
+            traced.append(line)
+    forbidden = sorted({name for names, _path in launches for name in names
                         if name == "BASH_ENV" or name.startswith("BASH_FUNC_")})
     return rc, calls, traced, len(launches), forbidden
 
@@ -7227,23 +7274,32 @@ def self_test():
             "27 executable stubs prepared before the pool: got {!r}, expected {!r}".format(
                 ordering, want))
 
-    # Executable fixtures, not stand-ins: one runner copy must run each stubbed command
-    # as its fixture file in the stub directory (the trace line's $0), and bash must
-    # start with no BASH_ENV and no BASH_FUNC_ entry in its environment. A python3 shell
-    # function restored through BASH_ENV, or exported to bash, still writes the call log
-    # but no trace line, and puts its key in the launch environment, so it fails this
-    # vector; the _stub_launch_evidence docstring states what it records.
+    # Executable fixtures, not stand-ins: one launch through each of _run_runner_copy,
+    # _dirname_guard_outcome (its control scenario) and _cdpath_outcome must run each
+    # stubbed command as its fixture file in the stub directory (the trace line's $0),
+    # and the launch environment must hold no BASH_ENV and no BASH_FUNC_ entry. A
+    # python3 shell function restored through BASH_ENV, or exported to bash, in any of
+    # the three still writes the call log but no trace line, and puts its key in the
+    # launch environment, so it fails this vector; the _stub_launch_evidence docstring
+    # states what it records and what it does not.
     count += 1
-    launch = _stub_launch_evidence(local_fixture(
+    stubbed = local_fixture(
         ("python3 -I -B tools/clean.py",),
-        ("if gitleaks dir . --no-banner; then :; else failed=1; fi",)))
-    want = (0, ["python3 -I -B tools/clean.py", "gitleaks dir . --no-banner"],
-            ["<bin>/python3 -I -B tools/clean.py", "<bin>/gitleaks dir . --no-banner"],
-            1, [])
-    if launch != want:
-        failures.append(
-            "27b stubbed commands ran as executable fixtures: got {!r}, expected {!r}".format(
-                launch, want))
+        ("if gitleaks dir . --no-banner; then :; else failed=1; fi",))
+    for launcher, stub_entry, want_calls in (
+            ("runner", 1, ["python3 -I -B tools/clean.py", "gitleaks dir . --no-banner"]),
+            ("dirname", 2, None),
+            ("cdpath", 2, ["<tree> python3 -I -B tools/clean.py",
+                           "gitleaks dir . --no-banner"])):
+        launch = _stub_launch_evidence(stubbed, launcher)
+        want = (0, want_calls,
+                ["<PATH {}>/python3 -I -B tools/clean.py".format(stub_entry),
+                 "<PATH {}>/gitleaks dir . --no-banner".format(stub_entry)],
+                1, [])
+        if launch != want:
+            failures.append(
+                "27b stubbed commands ran as executable fixtures ({} launcher): got {!r}, "
+                "expected {!r}".format(launcher, launch, want))
 
     # Byte-level reader: Path.read_text() translates a carriage return
     # into a newline (universal newlines) BEFORE any text screen can run,
