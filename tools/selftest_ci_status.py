@@ -197,8 +197,9 @@ if tree_served is not None:
 # repeating; the --wait probe's reads of that number take the same sequence), "statuses" and "status"
 # (the replies to each read of commits/SHA/statuses and commits/SHA/status with per_page=100 and
 # --paginate --slurp, in order, the last repeating) and "ref" (the reply to every read of
-# git/ref/heads/BRANCH). Each reply is {"body": JSON} or {"raw": text} or {"error": diagnostic}. A read's
-# position is counted from the argv log, which already holds this read.
+# git/ref/heads/BRANCH). Each reply is {"body": JSON} or {"raw": text} or {"error": diagnostic}; a body or
+# raw reply may add "stderr", text written to stderr before the reply on a read that still succeeds. A
+# read's position is counted from the argv log, which already holds this read.
 with open(os.environ["MOCK_GH_RESPONSE"], "r", encoding="utf-8") as handle:
     local_served = json.load(handle).get("local")
 if local_served is not None:
@@ -223,12 +224,15 @@ if local_served is not None:
         if "error" in entry:
             print(entry["error"], file=sys.stderr)
             sys.exit(1)
+        if "stderr" in entry:
+            sys.stderr.write(entry["stderr"])
+            sys.stderr.flush()
         if "raw" in entry:
             sys.stdout.write(entry["raw"])
         else:
             print(json.dumps(entry["body"]))
         sys.exit(0)
-listing = "repos/" + os.environ["MOCK_GH_REPO"] + "/actions/runs"
+listing ="repos/" + os.environ["MOCK_GH_REPO"] + "/actions/runs"
 scan_prefix = listing + "?per_page=100&page="
 pulls = "repos/" + os.environ["MOCK_GH_REPO"] + "/pulls"
 commits = "repos/" + os.environ["MOCK_GH_REPO"] + "/commits/"
@@ -3387,9 +3391,44 @@ def _run_checks():
             malformed.append((rc, "MERGE-SHA" in output))
         check("ci/local-status-malformed-exit2", malformed, [(2, False)] * 6)
 
+        # Each statuses reply must be exactly one JSON document before the two are combined: both
+        # documents in one reply beside an empty one (either way round, with or without a final
+        # newline), a reply of none and a reply of three are all cannot-evaluate.
+        listing_text = json.dumps(status_listing(ok_status)["body"])
+        combined_text = json.dumps(combined_status(head_sha, ok_status)["body"])
+        both = listing_text + "\n" + combined_text
+        documents = []
+        for listing_reply, combined_reply in (({"raw": both + "\n"}, {"raw": ""}),
+                                              ({"raw": ""}, {"raw": both + "\n"}),
+                                              ({"raw": both}, {"raw": ""}),
+                                              ({"raw": ""}, combined_status(head_sha, ok_status)),
+                                              ({"raw": listing_text + "\n" + both + "\n"}, {"raw": ""})):
+            rc, output, _calls = run_status(local([listing_reply], [combined_reply]))
+            documents.append((rc, "MERGE-SHA" in output))
+        check("ci/local-status-one-document-per-reply-exit2", documents, [(2, False)] * 5)
+
+        # A read that succeeds but writes to stderr is refused, and its stderr is never parsed as part
+        # of the reply: a status row, a pull-request record or a branch reference written to stderr
+        # beside an empty or harmless reply, a warning beside a green reply, and a stderr of one newline.
+        ref_body = {"ref": "refs/heads/main", "object": {"type": "commit", "sha": head_sha}}
+        green_reads = served_status(ok_status)
+        stderr_cases = []
+        for served in (local([dict(status_listing(), stderr="entry\tsuccess\t31\n")],
+                             [combined_status(head_sha)]),
+                       dict(green_reads, pulls=[{"raw": "", "stderr": json.dumps(open_pull) + "\n"}]),
+                       dict(green_reads, ref={"raw": "", "stderr": json.dumps(ref_body) + "\n"}),
+                       local([dict(status_listing(ok_status), stderr="warning: fixture notice\n")],
+                             [combined_status(head_sha, ok_status)]),
+                       dict(green_reads, pulls=[{"body": open_pull, "stderr": "\n"}])):
+            rc, output, _calls = run_status(served)
+            stderr_cases.append((rc, "gh wrote to stderr on a read that succeeded" in output,
+                                 "MERGE-SHA" in output))
+        check("ci/local-status-stderr-refused-exit2", stderr_cases, [(2, True, False)] * 5)
+
         option_cases = []
         for extra in (("--pr", "7"), ("--require-status", STATUS_CONTEXT),
-                      status_args + ("--pr", "7"), ("--pr", "07", "--require-status", STATUS_CONTEXT),
+                      status_args + ("--pr", "7"), status_args + ("--require-status", STATUS_CONTEXT),
+                      ("--pr", "07", "--require-status", STATUS_CONTEXT),
                       ("--pr", "1234567890", "--require-status", STATUS_CONTEXT)):
             rc, _output, _calls = fixture.invoke(green, extra_args=extra, local=served_status(ok_status),
                                                  creator=STATUS_CREATOR)
@@ -3397,7 +3436,7 @@ def _run_checks():
         rc, _output, _calls = fixture.invoke([], rev=None, extra_args=("--match-tree",) + status_args,
                                              local=served_status(ok_status), creator=STATUS_CREATOR)
         option_cases.append((rc, fixture.gh_argv))
-        check("ci/local-status-option-refusals", option_cases, [(2, [])] * 6)
+        check("ci/local-status-option-refusals", option_cases, [(2, [])] * 7)
 
     # Round 7: main() must print every collected failure and map the exit code by the module docstring's
     # rule on every path. Each case runs a nested main() on seeded state and restores the real state.

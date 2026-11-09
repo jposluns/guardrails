@@ -2031,6 +2031,8 @@ expected-check-ids = [
   "ci/local-status-behind-base-exit1",
   "ci/local-status-unknown-state-exit2",
   "ci/local-status-malformed-exit2",
+  "ci/local-status-one-document-per-reply-exit2",
+  "ci/local-status-stderr-refused-exit2",
   "ci/local-status-option-refusals",
   "ci/finalise-harness-error-keeps-failures",
 ]

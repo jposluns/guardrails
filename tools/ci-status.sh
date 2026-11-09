@@ -1575,7 +1575,8 @@ fi
 #      does not hold exits 2 (fetch it first).
 #   6. Pull request N is read again, as in step 1; a head that moved, or any other change, exits 2.
 #   7. On success the last line is "MERGE-SHA: " and this commit's full id, for the merge command.
-# Exit 2 also covers a failed read, and a malformed or unparsable response, at once in every mode.
+# Exit 2 also covers a failed read, a read that succeeds but writes to stderr, a reply that is not
+# exactly one JSON document, and a malformed or unparsable response, at once in every mode.
 # NOT CLOSED (disclosed): a status posted after these reads, or a head pushed after the last pull read,
 # is not seen; the merge command's own head pin and branch protection requiring CONTEXT are the
 # backstop. GitHub's semantics for these endpoints are taken from its REST documentation, not verified
@@ -1646,6 +1647,32 @@ status_jq() {
     "$CI_STATUS_LOCAL_JQ"
 }
 
+# One gh api read for the status requirement ($@ its arguments). Only gh's stdout is printed, so
+# nothing gh writes to stderr is ever parsed as part of a reply. A failed read prints its stderr to
+# stderr and returns gh's status. A read that succeeds but writes any byte to stderr is refused the
+# same way (it returns 1): a reply with text beside it that this script cannot account for is
+# cannot-evaluate, as a reply jq cannot parse is.
+status_gh() {
+  local diagnostic rc
+  { diagnostic="$(gh api "$@" 2>&1 1>&3 3>&-; rc=$?; printf '.'; exit "$rc")"; rc=$?; } 3>&1
+  diagnostic="${diagnostic%.}"
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$diagnostic" >&2
+    return "$rc"
+  fi
+  if [ -n "$diagnostic" ]; then
+    printf 'gh wrote to stderr on a read that succeeded: %s\n' "$diagnostic" >&2
+    return 1
+  fi
+}
+
+# Prints the one JSON document read on stdin, compacted onto one line, or fails naming the reply ($1)
+# when stdin holds no document or more than one. Each statuses reply is checked on its own before the
+# two are combined, so one reply holding both documents beside an empty one can never pass as two.
+status_one_document() {
+  jq -s -c --arg reply "$1" 'if length == 1 then .[0] else error($reply + " is not exactly one JSON document") end'
+}
+
 status_error() {
   echo "ERROR: cannot evaluate the ${REQUIRE_STATUS} status of ${SHA} in ${REPO} (pull request #${PR_NUMBER}): $1"
   echo "  raw: $2"
@@ -1655,7 +1682,7 @@ status_error() {
 # Step 1 and step 6: $1 names which read this is, for the message.
 status_pull_check() {
   local raw verdict
-  raw="$(gh api "repos/$REPO/pulls/$PR_NUMBER" 2>&1)" ||
+  raw="$(status_gh "repos/$REPO/pulls/$PR_NUMBER" 2>&1)" ||
     status_error "the ${1} read of the pull request failed" "$raw"
   verdict="$(printf '%s\n' "$raw" | status_jq pull 2>&1)" ||
     status_error "the ${1} read of the pull request was refused" "$verdict"
@@ -1673,8 +1700,10 @@ status_pull_check() {
 status_read() {
   local listing combined
   {
-    listing="$(gh api "repos/$REPO/commits/$SHA/statuses?per_page=100" --paginate --slurp)" || return 1
-    combined="$(gh api "repos/$REPO/commits/$SHA/status?per_page=100" --paginate --slurp)" || return 1
+    listing="$(status_gh "repos/$REPO/commits/$SHA/statuses?per_page=100" --paginate --slurp)" || return 1
+    combined="$(status_gh "repos/$REPO/commits/$SHA/status?per_page=100" --paginate --slurp)" || return 1
+    listing="$(printf '%s\n' "$listing" | status_one_document "the status listing")" || return 1
+    combined="$(printf '%s\n' "$combined" | status_one_document "the combined status")" || return 1
     printf '%s\n%s\n' "$listing" "$combined" | status_jq statuses
   } 2>&1
 }
@@ -1736,7 +1765,7 @@ status_requirement() {
         ;;
     esac
   done
-  raw="$(gh api "repos/$REPO/git/ref/heads/$PR_BASE" 2>&1)" ||
+  raw="$(status_gh "repos/$REPO/git/ref/heads/$PR_BASE" 2>&1)" ||
     status_error "the tip of ${PR_BASE} could not be read" "$raw"
   tip="$(printf '%s\n' "$raw" | status_jq ref 2>&1)" ||
     status_error "the reference of ${PR_BASE} was refused" "$tip"
