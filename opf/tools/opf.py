@@ -2887,6 +2887,13 @@ def _watchdog_install_charges():
     charged(time, "sleep", argument(0, "secs"))
 
 
+# The completion legs that raise a real SIGINT (signal.raise_signal or a
+# process-directed os.kill) and require it to arrive as a KeyboardInterrupt:
+# _watchdog_completion_case installs Python's handler for these itself.
+_WATCHDOG_REAL_SIGINT_MODES = frozenset(("launch-cancel", "close-cancel", "poll-masked",
+                                         "census-exception"))
+
+
 def _watchdog_leg_entry(budget, case, *args):
     """Run one watchdog leg against its declared budget: its charged bounded waits
     must stay within the budget, or the leg fails (never a silent pass). The
@@ -5492,6 +5499,25 @@ def _watchdog_completion_case(mode, tree=None):
     from unittest.mock import patch
     import _opf_emit as emit
     import _optlevel
+
+    if (mode in _WATCHDOG_REAL_SIGINT_MODES
+            and signal.getsignal(signal.SIGINT) is not signal.default_int_handler):
+        # These legs raise a real SIGINT and need it to arrive as a
+        # KeyboardInterrupt, which only Python's own handler makes of it. A
+        # process started with SIGINT ignored (a background job of a
+        # noninteractive shell, some launchers) keeps it ignored, so the
+        # kernel would discard the signal and the leg would read a swallowed
+        # cancellation. The leg installs the handler in its own process
+        # before relying on it, so its verdict never depends on what the
+        # process inherited, and puts the prior disposition back on return.
+        prior = signal.getsignal(signal.SIGINT)
+        assert prior is not None, (
+            "SIGINT carries a handler Python did not install and cannot restore: " + mode)
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            return _watchdog_completion_case(mode, tree)
+        finally:
+            signal.signal(signal.SIGINT, prior)
 
     command = [sys.executable, "-I", "-B", "-c", "return 0"]
 
@@ -15961,6 +15987,7 @@ def _watchdog_regression_self_test():
                        + len(safety_modes)
                        + len(launcher_labels) * len(launcher_dispositions)
                        + len(completion_modes) + 1  # + blocked-isolation
+                       + 1  # + launch-cancel with SIGINT ignored
                        + len(ledger_expected)   # one fixture per ledger
                        + len(ledger_controls)),  # vector and control
         "shared": 1,             # a single patched run_status_owned launch
@@ -16080,6 +16107,9 @@ def _watchdog_regression_self_test():
         ("poll-collected", 1266), ("close-cancel", 1014), ("escalate-degraded", 784),
         ("poll-masked", 2954), ("unpinned-kill", 600), ("census-verify", 630),
         ("census-exception", 780), ("receipt-high-fd", 10)))
+    # The same leg, run with SIGINT ignored before it starts, declares the
+    # same waits.
+    budgets["completion-launch-cancel-sigint-ignored"] = budgets["completion-launch-cancel"]
     # The isolation matrix in this leg: 31 timer cases, each one 180 s
     # fixture call, charged its allowance by the leg's ledger. A call that
     # overruns that allowance overruns the leg, which its process bound then
@@ -16113,6 +16143,16 @@ def _watchdog_regression_self_test():
                 + ", opf." + case + "".join(", " + repr(arg) for arg in args) + ")")
 
     cases = [(label, entry(label, case, args), bound(label)) for label, case, args in entries]
+    # The launch-cancel leg again with SIGINT ignored before the leg starts,
+    # the state a process inherits from a parent that ignores it: the leg must
+    # install the KeyboardInterrupt handler it relies on, or its real SIGINT is
+    # discarded and it reads a swallowed cancellation.
+    cases.append(("completion-launch-cancel-sigint-ignored", prefix
+                  + "import signal; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+                  + "return opf._watchdog_leg_entry("
+                  + repr(budgets.get("completion-launch-cancel-sigint-ignored"))
+                  + ", opf._watchdog_completion_case, 'launch-cancel')",
+                  bound("completion-launch-cancel-sigint-ignored")))
     # Resolve the real registration, without recursively invoking this regression runner.
     # Both inherited disposition and mask are hostile; the outer runner's state is untouched.
     cases.append(("blocked-isolation", prefix
