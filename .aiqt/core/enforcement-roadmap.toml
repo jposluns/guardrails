@@ -14,13 +14,13 @@
 #   same linkage invariant as enforced, and the linked mechanisms are
 #   known to cover only part of the rule (their residues name what each does not catch, not every
 #   uncovered clause of every linked rule). A partial row may carry `coverage`: one single-line statement,
-#   rendered verbatim in that rule's register row, in one fixed form: "Checks: <the specific case the
-#   linked code checks, naming the mechanism>. Not checked: <the rest of the rule>, by no linked
-#   mechanism." A case is stated only where the deciding code line has been read and quoted; a partial
-#   row with no such case carries no note. none: enforcement is
-#   not built yet. pending: not built yet, and `description` states the intended build. This file records
-#   the DECISION only; the linkage itself is authored in the gate and hook manifests and rendered into
-#   .aiqt/enforceability.json, never re-authored here.
+#   rendered in that rule's register row (the Markdown view escapes each backslash and pipe), in one fixed
+#   form: "Checks: <the specific case the linked code checks, naming the mechanism>. Not checked: <the rest
+#   of the rule>, by no linked mechanism." A case is stated only where the deciding code line has been read;
+#   a partial row with no such case carries no note. none: enforcement is not built yet. pending: not built
+#   yet, and `description` states the intended build. This file records the DECISION only; the linkage itself
+#   is authored in the gate and hook manifests and rendered into .aiqt/enforceability.json, never re-authored
+#   here.
 # Verified by tools/gen_enforcement_register.py (schema and ledger contradictions are fail-closed exit 2).
 
 version = 1

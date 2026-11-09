@@ -1161,9 +1161,10 @@ def _page_bound_sources(root):
     automatically. This closes the round-8/round-10 class where the former hand-maintained list here
     (residue/id/description) drifted from the generator (the rule TITLE and the hook MATCHER shipped
     unscanned). Covers the rule title, corpus id, mechanism reference id, the metadata fields the page
-    emits verbatim (platform, default, entry point incl. the hook matcher, class), the ledger residue, and
-    each pending rule's roadmap description. gen_enforcement_register raises ValueError/OSError on a
-    malformed or unreadable input, which the caller maps to a fail-closed exit 2."""
+    emits verbatim (platform, default, entry point incl. the hook matcher, class), the ledger residue,
+    each pending rule's roadmap description, and each partial rule's roadmap coverage note.
+    gen_enforcement_register raises ValueError/OSError on a malformed or unreadable input, which the
+    caller maps to a fail-closed exit 2."""
     return gen_enforcement_register.page_content_strings(root)
 
 
@@ -1590,13 +1591,13 @@ def _scan_page_bound_sources(sources):
     """Source-side cleanliness leg (GER-1). Every page-bound verbatim source string page_content_strings
     reports must (a) carry NO character outside the printable-plus-ASCII-whitespace allowlist and (b) pass
     the PLAIN marketing patterns. ONE shared reject runs over EVERY channel (title, corpus-id, mech-id, the
-    metadata fields, residue, description), so no page-bound channel can be missed or diverge: each is held
-    to the identical bar, and the id/class/metadata channels that stay ASCII-constrained upstream are still
-    run through the reject here (removing the 'constrained upstream' assumption). The invisible/allowlist
-    reject runs on the RAW string, BEFORE any whitespace collapse, so the exact bytes the page ships are
-    judged; the marketing scan runs on a whitespace-collapsed copy for phrase robustness (guards honoured,
-    NO bound-allowance heuristic, so an 'honestly bounded' categorical or guarantee shape flags at source).
-    For the mech-id channel a claim-bearing kebab id renders on the page with hyphens
+    metadata fields, residue, description, coverage), so no page-bound channel can be missed or diverge:
+    each is held to the identical bar, and the id/class/metadata channels that stay ASCII-constrained
+    upstream are still run through the reject here (removing the 'constrained upstream' assumption). The
+    invisible/allowlist reject runs on the RAW string, BEFORE any whitespace collapse, so the exact bytes
+    the page ships are judged; the marketing scan runs on a whitespace-collapsed copy for phrase robustness
+    (guards honoured, NO bound-allowance heuristic, so an 'honestly bounded' categorical or guarantee shape
+    flags at source). For the mech-id channel a claim-bearing kebab id renders on the page with hyphens
     (gate:catch-all-secrets), which a space-requiring marketing pattern would not match, so that channel is
     ALSO scanned hyphens-as-spaces so a marketing id fails at source even though the page render carries the
     literal hyphens."""

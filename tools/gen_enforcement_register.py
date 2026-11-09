@@ -159,8 +159,8 @@ EXPLAINER = (
     "runs for it unless it is installed. A status ending in partial records the same linkage and states "
     "that the "
     "linked mechanisms are known to cover only part of the rule. Where the roadmap records a coverage "
-    "note for such a rule, the note is shown verbatim in that rule's row and names what the linked "
-    "mechanisms cover and what they do not; each mechanism's residual names what that mechanism itself "
+    "note for such a rule, the note is shown in that rule's row and names what the linked mechanisms "
+    "cover and what they do not; each mechanism's residual names what that mechanism itself "
     "does not catch, not every uncovered clause of every rule it is linked "
     "to. No control means no shipped control cites the rule yet; pending means the "
     "same, and its description states the intended build. Each mechanism's class and residual describe the "
@@ -388,8 +388,9 @@ def load_roadmap(path, ledger_cids, linkage):
             desc = _req_str(row, "description", where)
             _no_ctrl(desc, "{}: description".format(where))
         # A coverage note is accepted ONLY on a partial row: it states what the linked mechanisms cover
-        # and what they do not, and both views render it verbatim in that rule's row, so it is validated
-        # as a single-line table-cell display string (_no_ctrl), fail-closed like every other field.
+        # and what they do not, and both views render it in that rule's row (the Markdown cell escapes
+        # each backslash and pipe, _md_cell), so it is validated as a single-line table-cell display
+        # string (_no_ctrl), fail-closed like every other field.
         has_cov = "coverage" in row
         if has_cov:
             if status != "partial":
@@ -872,7 +873,8 @@ def page_content_strings(root):
         ("<event> on <matcher>") and the gate script path.
       - "residue"     each enforced mechanism's ledger residue (rendered verbatim in both views)
       - "description" each pending rule's roadmap description (the How cell for a pending row)
-      - "coverage"    each partial rule's roadmap coverage note (rendered verbatim in that rule's row)
+      - "coverage"    each partial rule's roadmap coverage note (rendered in that rule's row; the Markdown
+                      cell escapes each backslash and pipe)
     Every value is the RAW string (NOT whitespace-collapsed) so a downstream invisible/non-ASCII reject
     judges the exact bytes the page ships. Scoped to what the page RENDERS: only mechanisms that appear in
     an enforced row (enforced_union) contribute mechanism channels, exactly as render_md / render_html
@@ -1547,7 +1549,8 @@ def self_test_main():
         # (m7) FLIPS for (m6): with one class's _NO_CTRL_CLASSES test replaced by one that answers False, a
         # note holding a character only that class catches is accepted (not exit 2), so each class's row
         # fails without its own leg. CR, VT, FF, U+001C to U+001E and NEL (U+0085) are each both a line break
-        # and Cc: refused while either leg stands, accepted only with both disabled.
+        # and Cc: refused while either leg stands, accepted only with both disabled. LF is both as well; it
+        # has no flip here, and roadmap-coverage-newline (m4) checks only that it is refused.
         def accepted_with(disabled, escape):
             saved = dict(_NO_CTRL_CLASSES)
             try:
@@ -1739,7 +1742,7 @@ def self_test_main():
           "unknown roadmap top-level or row key, a missing or extra roadmap row, an enforced/partial/none/"
           "mechanism mismatch against the ledger linkage, a none row with a description, a pending row missing its "
           "description or carrying a mechanism or carrying only whitespace, a partial row's coverage note "
-          "rendered verbatim in its own row in both views while a coverage note on an enforced or none row, "
+          "rendered in its own row in both views while a coverage note on an enforced or none row, "
           "a newline inside one, any other character str.splitlines() splits on, a Cc control character, a Cf "
           "format character (each class also flipped: accepted once its own test is disabled), or a "
           "whitespace-only one fails closed (exit 2), a NEWLINE in a table-cell "
