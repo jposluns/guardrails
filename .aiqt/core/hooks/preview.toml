@@ -66,6 +66,13 @@ rules = []
 id = "record-remove-check"
 rules = []
 
+# stamp-append is a writer helper published in the same channel, not a hook: it registers on no event. It
+# appends a record whose @@NOW_UTC@@ slot it fills from one clock read taken after it holds the file's lock,
+# and refuses (exit 2, nothing written) when the clock read fails, reads before its floor, or steps back.
+[[preview]]
+id = "stamp-append"
+rules = ["tstamp"]
+
 [[preview]]
 id = "stamp-truth-stop"
 rules = ["clmobs", "tstamp"]

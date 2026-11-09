@@ -7,6 +7,9 @@ install a hook for you: every step below is a command it can run, and every chec
 
 Ten hooks are published here, each listed with its checksum and link in the integrity table below.
 A hook without a row in that table is not available here, and the install steps do not apply to it.
+`stamp-append.py`, also listed in that table, is a writer helper, not a hook: it registers on no event,
+and you or your assistant run it to append a record stamped from the clock (see Configuration). Every
+count of hooks on this page leaves it out.
 
 One document linked from this page is not a hook: [the OPF implementation prompt](../opf/spec/OPF-IMPLEMENTATION-PROMPT.md)
 is a prompt you can give to an AI coding assistant so that it implements OPFiles natively in its own
@@ -176,7 +179,8 @@ the authority, and the summary further down this page only points to it.
 
 ## Integrity
 
-Every published hook file is listed below with its SHA-256 checksum and a link to the file itself. The
+Every published file, the ten hooks and the writer helper `stamp-append.py`, is listed below with its
+SHA-256 checksum and a link to the file itself. The
 files are served from this repository's main branch; for a raw download, use
 `https://raw.githubusercontent.com/jposluns/guardrails/main/.preview/<file>`. The same values are in
 [SHA256SUMS](SHA256SUMS), which lists bare file names in the format `sha256sum -c` reads.
@@ -190,6 +194,7 @@ files are served from this repository's main branch; for a raw download, use
 | `pattern-self-match.py` | `b70287e2aab2b08b0cd240c6c9150feb65141f2e3612adad63e402221dfcbb2f` | [pattern-self-match.py](pattern-self-match.py) |
 | `record-remove-check.py` | `0ec9642ea95bac4ea13c71ec31ff5239ab01c0ceff94f9922a42de1458f0757f` | [record-remove-check.py](record-remove-check.py) |
 | `rerun-pass-check.py` | `ab5fe8567f34444474d5e58acd61fde9490254e86d38578dae4b5ade7a21da86` | [rerun-pass-check.py](rerun-pass-check.py) |
+| `stamp-append.py` | `7d838af484d421e04e4067a3e6c6a722b59f41ce292e731ab02f7e246961765b` | [stamp-append.py](stamp-append.py) |
 | `stamp-truth-stop.py` | `5d3b5d716cdbe6255c750aec4bb44f17a583f167c055cdb26a17a27d5ccfc715` | [stamp-truth-stop.py](stamp-truth-stop.py) |
 | `unbounded-wait.py` | `9d2a8f9c26693cc87d058284427d40554e5ff0c3f2eca3df46f4369669a43859` | [unbounded-wait.py](unbounded-wait.py) |
 | `ungated-record.py` | `35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394` | [ungated-record.py](ungated-record.py) |
@@ -214,7 +219,8 @@ SHA256SUMS, and the files agree.
 
 These steps are for an AI coding assistant to carry out, one hook at a time. Replace `<file>` and
 `<checksum>` with the values from that hook's row in the integrity table. Stop at the first step that
-fails and report it; do not work around a failed check.
+fails and report it; do not work around a failed check. For the writer helper `stamp-append.py`, carry
+out steps 1 to 3 only: it has no `settings.json` entry, and Configuration below shows how to use it.
 
 1. Create the hooks directory and download the hook from the main branch:
 
@@ -465,6 +471,30 @@ unset, so "unset" below means both spellings are unset. The worker skip likewise
   does not opt out of an append denial. Helper-session calls are judged like any other. Interpreter,
   editor, `Write` and `Edit` tool writes, `bash -c` strings, `eval`, and scripts stay uncovered, and
   the mode trusts the environment it reads: whoever can set or clear either variable turns it on or off.
+  Example: route store appends to the writer helper `stamp-append.py`, so a denied append names the
+  command that stamps the record from the clock:
+
+  ```sh
+  export AIQT_STORE_ROOT=/ABSOLUTE/PATH/TO/records
+  export AIQT_STORE_WRITE_ROUTE='python3 -I -S -B /ABSOLUTE/PATH/TO/stamp-append.py --file <ABSOLUTE record file> [--format jsonl] < record; write @@NOW_UTC@@ where the time goes'
+  ```
+- **`stamp-append.py`** is the writer helper, not a hook, and needs no setting. It reads one record on
+  standard input and appends it to the file `--file` names (an absolute path to an existing regular file;
+  `--create` allows a new one). The caller writes the placeholder `@@NOW_UTC@@` where the current time
+  goes, and the helper fills it from one clock read taken after it holds the file's lock, as UTC to the
+  second (`2026-11-09T14:03:07Z`), then prints that time. In text mode the placeholder goes once in the
+  heading (the first line that is not blank), which may hold no other date and time; every other line is
+  copied unchanged and may quote earlier times. With `--format jsonl` the record is one JSON object whose
+  `ts` field (or the field `--field` names) is absent or `@@NOW_UTC@@`. It refuses, with exit 2 and the
+  file unchanged, a time supplied by the caller, a clock read that fails, a reading before 2026 (an unset
+  clock), and a reading earlier than the file's last stamp; with `--on-clock-failure unknown` a clock
+  failure writes `unknown (clock unavailable)` in the slot instead. A file that `--create` made for a run
+  that then refuses is removed only when cleanup can proceed safely; otherwise the empty file is left in
+  place and the one-line refusal says so and why. For example:
+
+  ```sh
+  printf '## @@NOW_UTC@@ deploy finished\nChecked against the run started 2026-11-09 09:50 UTC.\n' | python3 -I -S -B /ABSOLUTE/PATH/TO/stamp-append.py --file /ABSOLUTE/PATH/TO/records/log.md
+  ```
 - **`char-policy-write.py`** uses `AIQT_CHAR_POLICY_ROOT`, which has no older spelling and no default:
   unset or empty, the hook does nothing, and with no policy file under that root it allows every
   well-formed file write silently (a malformed call still gets a note).
@@ -775,6 +805,12 @@ give it. It writes nothing when
 standard input is a directory (its launch line exits before Python starts), for another tool or event,
 for an empty command, and for a command it allows without a note. It skips verification worker processes
 and checks helper-session calls.
+
+The writer helper `stamp-append.py` states what it does not cover in the `RESIDUAL COVERAGE` section of
+its own docstring. In outline: it protects only the writes made through it, so a time composed by hand and
+written by another route (a `Write` or `Edit` tool write, an interpreter, a script) is still not caught;
+the host clock is trusted apart from the floor and step-back checks; its lock is advisory, so a writer that
+does not take it is not ordered; and stamps are to the second.
 
 ## Status and retirement
 

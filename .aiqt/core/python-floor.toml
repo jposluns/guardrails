@@ -44,6 +44,7 @@ guarded-surfaces = [
     ".preview/pattern-self-match.py",
     ".preview/record-remove-check.py",
     ".preview/rerun-pass-check.py",
+    ".preview/stamp-append.py",
     ".preview/stamp-truth-stop.py",
     ".preview/unbounded-wait.py",
     ".preview/ungated-record.py",
