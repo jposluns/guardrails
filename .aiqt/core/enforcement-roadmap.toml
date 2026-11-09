@@ -293,6 +293,11 @@ status = "none"
 mechanisms = []
 
 [[rule]]
+corpus-id = "pubref"
+status = "partial"
+mechanisms = ["gate:leaks"]
+
+[[rule]]
 corpus-id = "rdbchr"
 status = "none"
 mechanisms = []

@@ -108,6 +108,7 @@ Generated from `.aiqt/core/rules/` by `tools/gen_claude.py` and drift-gated in C
 - [Retrieval enforces the requester's authorization](rules/security/SECC-least-privilege-retrieval.md)
 - [No cross-context bleed](rules/security/SECC-no-cross-context-bleed.md)
 - [No disclosure of secrets or hidden context](rules/security/SECC-no-hidden-context-disclosure.md)
+- [Keep internal paths out of published artefacts](rules/security/SECC-published-no-internal-refs.md)
 - [Rotate a leaked secret](rules/security/SECC-rotate-leaked-secret.md)
 - [Strong authentication](rules/security/SECI-authentication.md)
 - [Least-privilege authorization](rules/security/SECI-authorization.md)
