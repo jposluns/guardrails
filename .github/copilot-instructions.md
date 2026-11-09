@@ -400,10 +400,10 @@ or broad operation takes its scope from the specific thing under change, an enum
 rather than from ambient whole-tree state; a breadth selector that stages, commits, or discards
 whatever the tree currently holds can sweep in unrelated work, and where committed state is needed
 for a fixture or test, an isolated checkout provides it rather than reshaping the shared working
-tree in place. A check that depends on another checkout records that checkout's commit when it
-starts and reads that commit, not its working tree, because that tree can change mid-run and leave
-the check judging a state it never started from; where a step can only use a working tree, it uses
-an isolated checkout of that commit.
+tree in place. A check whose subject is another checkout's committed state records that commit's
+object id at start and reads that commit, not the working tree, which can change mid-run; a step
+needing files uses an isolated checkout made fresh from the object store, not a copy of the tree; a
+check whose subject is a working tree is governed by review-in-flight-pins-its-artefact.
 
 The preference is to remove the ambient dependency, not merely to check it: a confirmed ambient
 binding is correct only until the surrounding state next shifts. This applies prefer-removing-a-path
