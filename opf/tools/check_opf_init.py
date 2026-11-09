@@ -686,6 +686,23 @@ _HOMES_WRITER_NAMES = frozenset(["setattr", "delattr", "globals", "locals", "var
 _HOMES_READ_CONSUMERS = frozenset(["dict", "list", "tuple", "sorted", "len", "set", "frozenset",
                                    "iter", "repr"])
 _HOMES_READ_METHODS = frozenset(["get", "keys", "values", "items", "copy"])
+# The namespace-reach arm: in a guarded module each of these spellings is a finding wherever it
+# appears, read or write, because each one hands out a live namespace or a namespace writer under
+# a name the binding checks above do not read.
+_HOMES_REACH_NAMES = frozenset(["builtins", "__builtins__"])
+_HOMES_REACH_ATTRS = frozenset(["__globals__", "f_globals", "f_locals", "f_builtins", "__dict__",
+                                "__builtins__"])
+_HOMES_REACH_ATTR_CALLS = frozenset(["globals", "locals", "vars"])
+_HOMES_REACH_STRINGS = frozenset(["setattr", "delattr", "globals", "locals", "vars", "__dict__",
+                                  "__globals__", "f_globals", "modules"])
+_HOMES_REACH_MODULES = frozenset(["builtins", "ctypes", "inspect", "operator"])
+# The gc names that hand out live objects (and so any namespace dict or function among them):
+# get_objects, get_referrers and get_referents return lists of live objects, garbage is a list of
+# live objects the collector kept, and callbacks is a list of live callables. Every other gc name
+# (enable, disable, isenabled, collect, freeze, unfreeze, the count, threshold, debug, stats and
+# tracking queries, and the DEBUG_ constants) returns None, a bool, an int or plain statistics.
+_HOMES_REACH_GC_NAMES = frozenset(["get_objects", "get_referrers", "get_referents", "garbage",
+                                   "callbacks"])
 
 
 def _write_chain_ids(target):
@@ -819,7 +836,8 @@ def _homes_dynamic_binding_findings(fname, label, walked, lines, protected, stor
     any reference to __setattr__ or __delattr__; (6) an import form the rule does not resolve:
     `import sys as <other name>`, `from sys import modules`, an import of a submodule of
     _opf_store or _opf_init_operation, and an `import _opf_store` anywhere but a module-level
-    statement (a function-local import binds a store handle the rule does not track)."""
+    statement (a function-local import binds a store handle the rule does not track); (7) every
+    spelling the namespace-reach arm lists (_homes_namespace_reach_findings)."""
     found = []
     for node in walked:
         if isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names):
@@ -921,7 +939,196 @@ def _homes_dynamic_binding_findings(fname, label, walked, lines, protected, stor
                              "only an item read, a copy, a read method, a membership test or "
                              "an iteration is accepted{}".format(
                                  fname, label, line, _HOMES_ACCEPTED_FORM))
+    found.extend(_homes_namespace_reach_findings(fname, label, walked, lines))
     return found
+
+
+def _homes_namespace_reach_findings(fname, label, walked, lines):
+    """Findings for the namespace-reach arm, over one guarded unit's nodes `walked`: each
+    spelling below is reported wherever it appears, read or write, so no spelling in this
+    bounded list reaches a namespace unreported. (1) any Name builtins or __builtins__ and any
+    attribute __builtins__; (2) any attribute __globals__, f_globals, f_locals, f_builtins or
+    __dict__; (3) any attribute named globals, locals or vars (a call through an attribute);
+    (4) any call whose callee is itself a call of getattr (getattr(obj, name)(...)); (5) any
+    string constant equal to setattr, delattr, globals, locals, vars, __dict__, __globals__,
+    f_globals or modules; (6) any import, plain or from, of builtins, ctypes, inspect or operator
+    (or a submodule of one); (7) any gc name that hands out live objects (get_objects,
+    get_referrers, get_referents, garbage, callbacks), however it is reached: as an attribute of
+    any object (gc.get_referrers, an alias's attribute), as a name a from-import of gc binds
+    (with or without an alias), or as a string constant (getattr(gc, 'get_objects')). Every
+    other gc name, and an import of gc itself, is accepted."""
+    found = []
+    for node in walked:
+        line = lines[id(node)]
+        what = None
+        if isinstance(node, ast.Name) and node.id in _HOMES_REACH_NAMES:
+            what = "references {}".format(node.id)
+        elif isinstance(node, ast.Attribute) and node.attr in _HOMES_REACH_ATTRS:
+            what = "reads the attribute {}".format(node.attr)
+        elif isinstance(node, ast.Attribute) and node.attr in _HOMES_REACH_ATTR_CALLS:
+            what = "reaches {} through an attribute".format(node.attr)
+        elif isinstance(node, ast.Attribute) and node.attr in _HOMES_REACH_GC_NAMES:
+            what = "reads the gc live-object accessor {}".format(node.attr)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Call)
+              and (isinstance(node.func.func, ast.Name) and node.func.func.id == "getattr"
+                   or isinstance(node.func.func, ast.Attribute)
+                   and node.func.func.attr == "getattr")):
+            what = "calls the result of getattr"
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and node.value in _HOMES_REACH_STRINGS):
+            what = "carries the string {!r}".format(node.value)
+        elif (isinstance(node, ast.Constant) and isinstance(node.value, str)
+              and node.value in _HOMES_REACH_GC_NAMES):
+            what = "carries the string {!r}, a gc live-object accessor".format(node.value)
+        elif isinstance(node, ast.Import):
+            hits = sorted(alias.name for alias in node.names
+                          if alias.name.split(".")[0] in _HOMES_REACH_MODULES)
+            if hits:
+                what = "imports {}".format(", ".join(hits))
+        elif (isinstance(node, ast.ImportFrom) and node.level == 0
+              and (node.module or "").split(".")[0] in _HOMES_REACH_MODULES):
+            what = "imports from {}".format(node.module)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "gc":
+            hits = sorted(alias.name for alias in node.names
+                          if alias.name in _HOMES_REACH_GC_NAMES)
+            if hits:
+                what = "imports the gc live-object accessor {}".format(", ".join(hits))
+        if what is not None:
+            found.append("{}: {} {} (line {}), a spelling that reaches a live namespace or a "
+                         "namespace writer, which the homes rule reports wherever it appears in "
+                         "a module that calls the seam{}".format(
+                             fname, label, what, line, _HOMES_ACCEPTED_FORM))
+    return found
+
+
+def _homes_reach_rows(alias_store, init_import, alias_call):
+    """Self-test rows for the namespace-reach arm and for the binding-arm findings no other row
+    names: (label, module source, expected finding text or None for a flip that must scan
+    clean). Each namespace-reach form sits in a guarded module beside a compliant call and is
+    paired with a flip, its nearest compliant neighbour."""
+    fake = "types.SimpleNamespace(init_writes_homes2=lambda: True)"
+    head = "import sys\nimport types\n\n" + init_import + alias_store
+
+    def module(before, after=""):
+        return head + before.replace("FAKE", fake) + "\n\n\n" + alias_call + after.replace(
+            "FAKE", fake)
+
+    rows = [
+        ("builtins.globals() item write",
+         module("import builtins\nbuiltins.globals()['_opf_store'] = FAKE\n"),
+         "module-level code references builtins"),
+        ("a sorted copy of globals() (flip)", module("_names = sorted(globals())\n"), None),
+        ("from builtins import globals under an alias",
+         module("from builtins import globals as _g\n_g()['_opf_store'] = FAKE\n"),
+         "module-level code imports from builtins"),
+        ("an aliased from-import of another module (flip)",
+         module("from os.path import join as _g\n_p = _g('a', 'b')\n"), None),
+        ("from builtins import setattr under an alias",
+         module("from builtins import setattr as _s\n"
+                "_s(sys.modules[__name__], '_opf_store', FAKE)\n"),
+         "module-level code imports from builtins"),
+        ("a literal setattr of an unprotected name (flip)",
+         module("setattr(types.SimpleNamespace(), 'x', 1)\n"), None),
+        ("a getattr of setattr whose result is called",
+         module("import builtins\n"
+                "getattr(builtins, 'setattr')(sys.modules[__name__], '_opf_store', FAKE)\n"),
+         "module-level code calls the result of getattr"),
+        ("a getattr whose result is not called (flip)",
+         module("_v = getattr(sys, 'version')\n"), None),
+        ("a module-level item write through a function's __globals__",
+         module("", "\n_init_ok.__globals__['_opf_store'] = FAKE\n"),
+         "module-level code reads the attribute __globals__"),
+        ("a module-level read of a function's __name__ (flip)",
+         module("", "\n_name = _init_ok.__name__\n"), None),
+        ("an item write through __globals__ in a unit that never calls the seam",
+         module("", "\n\ndef _swap(fake):\n    _init_ok.__globals__['_opf_store'] = fake\n"),
+         "_swap reads the attribute __globals__"),
+        ("a read of __qualname__ in a unit that never calls the seam (flip)",
+         module("", "\n\ndef _swap(fake):\n    return _init_ok.__qualname__, fake\n"), None),
+        ("a getattr string naming __dict__",
+         module("getattr(sys.modules[__name__], '__dict__')['_opf_store'] = FAKE\n"),
+         "module-level code carries the string '__dict__'"),
+        ("a getattr string naming __name__ (flip)",
+         module("_v = getattr(sys.modules[__name__], '__name__')\n"), None),
+        ("operator.setitem into a getattr __dict__",
+         module("import operator\noperator.setitem(getattr(sys.modules[__name__], '__dict__'), "
+                "'_opf_store', FAKE)\n"),
+         "module-level code imports operator"),
+        ("a call into an unlisted module (flip)",
+         module("import math\n_v = math.floor(getattr(sys, 'maxsize'))\n"), None),
+        ("an item write through a frame's f_globals",
+         module("sys._getframe().f_globals['_opf_store'] = FAKE\n"),
+         "module-level code reads the attribute f_globals"),
+        ("a frame's f_lineno (flip)", module("_line = sys._getframe().f_lineno\n"), None),
+        ("__builtins__ item lookup of globals",
+         module("__builtins__['globals']()['_opf_store'] = FAKE\n"),
+         "module-level code references __builtins__"),
+        ("the same item chain on a plain dict (flip)",
+         module("_table = {'make': dict}\n_table['make']()['_opf_store'] = 1\n"), None),
+        ("builtins.vars() of the module object",
+         module("import builtins\nbuiltins.vars(sys.modules[__name__])['_opf_store'] = FAKE\n"),
+         "module-level code reaches vars through an attribute"),
+        ("len of vars() of another object (flip)",
+         module("_n = len(vars(types.SimpleNamespace()))\n"), None),
+        ("an update through a function's __globals__",
+         module("", "\n_init_ok.__globals__.update(_opf_store=FAKE)\n"),
+         "module-level code reads the attribute __globals__"),
+        ("an update through a function's __annotations__ (flip)",
+         module("", "\n_init_ok.__annotations__.update(root=str)\n"), None),
+        ("inspect.currentframe().f_globals item write",
+         module("import inspect\ninspect.currentframe().f_globals['_opf_store'] = FAKE\n"),
+         "module-level code imports inspect"),
+        ("a frame's f_back (flip)", module("_back = sys._getframe().f_back\n"), None),
+        ("gc.get_referrers of the store module",
+         module("import gc\nfor _ref in gc.get_referrers(_opf_store):\n"
+                "    if isinstance(_ref, dict) and '_opf_store' in _ref:\n"
+                "        _ref['_opf_store'] = FAKE\n"),
+         "module-level code reads the gc live-object accessor get_referrers"),
+        ("gc.disable and gc.collect under an alias (flip)",
+         module("import gc as _gc\n_gc.disable()\n_freed = _gc.collect()\n"), None),
+        ("from gc import get_objects under an alias",
+         module("from gc import get_objects as _objs\nfor _ref in _objs():\n"
+                "    if isinstance(_ref, dict) and '_opf_store' in _ref:\n"
+                "        _ref['_opf_store'] = FAKE\n"),
+         "module-level code imports the gc live-object accessor get_objects"),
+        ("from gc import collect under an alias (flip)",
+         module("from gc import collect as _collect\n_freed = _collect()\n"), None),
+        ("a getattr string naming get_referents",
+         module("import gc\n_walk = getattr(gc, 'get_referents')\n"),
+         "module-level code carries the string 'get_referents', a gc live-object accessor"),
+        ("a getattr string naming isenabled (flip)",
+         module("import gc\n_on = getattr(gc, 'isenabled')\n"), None),
+        ("builtins.globals().update",
+         module("import builtins\nbuiltins.globals().update(_opf_store=FAKE)\n"),
+         "module-level code reaches globals through an attribute"),
+        ("a sorted read of globals().keys() (flip)",
+         module("_names = sorted(globals().keys())\n"), None),
+        ("globals().update by keyword",
+         module("globals().update(_opf_store=FAKE)\n"),
+         "module-level code writes through, binds or passes a live namespace mapping"),
+        ("setattr bound to a name",
+         module("_w = setattr\n"),
+         "module-level code references setattr other than as the direct callee"),
+        ("a setattr whose name argument is a parameter",
+         module("", "\n\ndef _swap(fake, name):\n    setattr(sys.modules[__name__], name, fake)\n"),
+         "_swap calls setattr with a name argument the rule cannot resolve"),
+        ("sys imported under another name",
+         module("import sys as _system\n"),
+         "module-level code imports sys under the name _system"),
+        ("sys.modules imported by name",
+         module("from sys import modules\n"),
+         "module-level code imports sys.modules by name"),
+        ("a from-import of a store submodule",
+         module("from _opf_store.sub import x\n"),
+         "module-level code imports from a submodule of _opf_store"),
+        ("an import of a store submodule",
+         module("import _opf_store.sub\n"),
+         "module-level code imports the submodule _opf_store.sub"),
+        ("a function-local store import",
+         module("", "\n\ndef _local():\n    import _opf_store\n    return _opf_store\n"),
+         "_local imports _opf_store other than by a module-level statement"),
+    ]
+    return rows
 
 
 def _rebind_finding(fname, label, name, line, store_aliases):
@@ -1188,7 +1395,9 @@ def _homes_rule_violations(sources):
     name in a calling unit, and the exact rule-name strings. Every binding check reads names
     through the one binding-name function (_route_binding_names), so a match capture, a with
     target, a type alias or an annotated assignment counts like a plain assignment. An internal
-    error inside the rule is a cannot-evaluate finding that names it, never a traceback.
+    error raised while one source is scanned (its parse, its registry and roster summary, its
+    alias and callee spellings, and every unit's findings) is a cannot-evaluate finding that
+    names it, never a traceback.
 
     Disclosed residual, the registry's trust: a registered function is trusted to be test-only
     code. This check does NOT verify that registered code is unreachable from production: a
@@ -1209,27 +1418,53 @@ def _homes_rule_violations(sources):
     rule ACCEPTS only these binding forms of them: the module-level imports named above (a store
     import may sit in a module-level try), the defining module's own def run_init_operation, a
     function-local binding in a unit that does not call the seam and declares no global, a class
-    body binding, and a parameter of a unit that does not call the seam. Every other form is a
-    finding whose text says to rewrite the binding in an accepted form: an attribute write or
+    body binding, and a parameter of a unit that does not call the seam. These forms are
+    findings whose text says to rewrite the binding in an accepted form: an attribute write or
     delete of a protected name on any object; a setattr or delattr naming a protected name, or
     with a name argument other than one string constant unless its first argument is a name
-    bound only by imports of another module; a write through globals(), locals(), vars(), any
+    bound only by imports of another module; a write through globals(), locals(), vars(),
     __dict__ or sys.modules (an item or attribute assigned or deleted, a mutating method, the
     mapping bound, passed or returned; only an item read, a copy, a read method, a membership
-    test or an iteration is accepted, and a sys.modules item assignment whose key resolves to
-    string constants naming no protected module and not this module); a reference to setattr,
-    delattr, globals, locals, vars or __import__ other than as a callee, or to __setattr__ or
-    __delattr__; `import sys as <other>`, `from sys import modules`, an import of a submodule of
-    the store or init module, and a function-local `import _opf_store`. A star import is a
-    finding in every module.
+    test or an iteration of globals(), locals(), vars() or sys.modules is accepted, and a
+    sys.modules item assignment whose key resolves to string constants naming no protected
+    module and not this module); a reference to setattr, delattr, globals, locals, vars or
+    __import__ other than as a callee, or to __setattr__ or __delattr__; `import sys as
+    <other>`, `from sys import modules`, an import of a submodule of the store or init module,
+    and a function-local `import _opf_store`. A star import is a finding in every module.
 
-    What it also CANNOT see, forms outside the scanned module: a write made by another module
-    (other_module.store = fake, or another module writing init_writes_homes2 or SUPPORTED_HOMES
-    through a handle it holds); a replacement of the store module in sys.modules by code that is
-    not scanned, before a module imports it; code never handed to the scan; and the bodies and
-    annotations of registered defs. Each of these can change init_writes_homes2() for every
-    fresh init, so this check guards against an accidental non-compliant call, not a deliberate
-    rewrite from outside the module.
+    Namespace-reach arm (_homes_namespace_reach_findings). In a guarded module each of these
+    spellings is a finding wherever it appears, read or write: any reference to builtins or
+    __builtins__ and any import from builtins; any attribute __globals__, f_globals, f_locals,
+    f_builtins or __dict__; globals, locals or vars reached through any attribute; any call of
+    the result of a getattr call; any string constant equal to setattr, delattr, globals,
+    locals, vars, __dict__, __globals__, f_globals or modules; any import of builtins, ctypes,
+    inspect or operator; and the gc names that hand out live objects (get_objects,
+    get_referrers, get_referents, garbage and callbacks) as an attribute of any object, as a
+    name a from-import of gc binds, or as a string constant. An import of gc and every other gc
+    name (enable, disable, isenabled, collect, freeze, unfreeze, the count, threshold, debug,
+    stats and tracking queries, the DEBUG_ constants) are accepted: none returns a live object.
+    The list is bounded on purpose: the ways to reach a namespace are open-ended, so this arm
+    bounds what is checked, and the residual below is what is left.
+
+    Exact residual. In a guarded module a protected name can still be rebound with no finding
+    through a namespace or a namespace writer reached by a spelling neither arm lists. Its
+    categories: (1) an attribute or method the arms do not name, of a function, frame, code,
+    type or module object, or a descriptor, metaclass or __class__ hook (for example a frame's
+    other attributes or a type's own methods); (2) a module other than builtins, ctypes, inspect
+    and operator that hands out a namespace or a writer (for example importlib, types,
+    functools, pickle or copyreg), or a listed module imported by a call (__import__ or
+    importlib) rather than an import statement; (3) a name or attribute string assembled at
+    runtime (built from pieces, by formatting, or read from data) and handed to getattr whose
+    result is not called, to a sys.modules or globals() lookup, or to an import call, a gc
+    live-object accessor taken this way included, and a gc live-object accessor taken from the
+    gc module's namespace without its name being spelled (an iteration or read method of
+    vars(gc), or a value of dir(gc) handed to getattr); (4) code outside the scanned module: a
+    write made by another module (other_module.store = fake, or another module writing
+    init_writes_homes2 or SUPPORTED_HOMES through a handle it holds), a replacement of the store
+    module in sys.modules by code that is not scanned before a module imports it, code never
+    handed to the scan, and the bodies and annotations of registered defs. Each of these can
+    change init_writes_homes2() for every fresh init, so this check guards against an accidental
+    non-compliant call, not a deliberate rewrite.
     """
     found = []
     summaries = {}
@@ -1300,24 +1535,26 @@ def _homes_rule_violations(sources):
             except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
                 found.append("{}: cannot evaluate ({})".format(fname, type(exc).__name__))
                 continue
-            store_aliases = set(_store_import_aliases(tree))
-            direct_names, init_aliases = _init_callee_spellings(tree)
-            # Decorator expressions and argument defaults run at import, so EVERY
-            # module-top-level def's definition-time expressions scan with the module-level
-            # unit, an exempt function's included; an exempt function's body (and only its
-            # body) is skipped.
-            module_nodes = [node for node in tree.body
-                            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-            module_nodes += [expr for node in tree.body
-                             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                             for expr in _definition_time_exprs(node)]
-            units = [(None, module_nodes)]
-            units += [(node.name, [node]) for node in tree.body
-                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                      and node.name not in registered]
-            # Every binding that lands in the module namespace (a module-top-level def,
-            # registered or not, included) is read once, over the whole module scope.
+            # Everything from the alias and callee spellings to the last unit's findings runs
+            # inside one catch, so an internal error anywhere in it is a named finding.
             try:
+                store_aliases = set(_store_import_aliases(tree))
+                direct_names, init_aliases = _init_callee_spellings(tree)
+                # Decorator expressions and argument defaults run at import, so EVERY
+                # module-top-level def's definition-time expressions scan with the module-level
+                # unit, an exempt function's included; an exempt function's body (and only its
+                # body) is skipped.
+                module_nodes = [node for node in tree.body
+                                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                module_nodes += [expr for node in tree.body
+                                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                 for expr in _definition_time_exprs(node)]
+                units = [(None, module_nodes)]
+                units += [(node.name, [node]) for node in tree.body
+                          if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                          and node.name not in registered]
+                # Every binding that lands in the module namespace (a module-top-level def,
+                # registered or not, included) is read once, over the whole module scope.
                 cached = _homes_module_binding_findings(
                     fname, tree, store_aliases, direct_names, init_aliases)
                 # The fail-closed binding arm runs over every unit of a module that holds a
@@ -5603,29 +5840,50 @@ def _suite_isolated(invoke):
                     else:
                         check("homes rule aliases: " + mutant_label,
                               mutated and any(expect in row for row in mutant_rows))
+                # The namespace-reach arm, one row and one flip per form, and the binding-arm
+                # findings no row above names.
+                for mutant_label, new, expect in _homes_reach_rows(
+                        alias_store, exempt_import.replace("\n\n", "\n"), alias_call):
+                    mutated_sources = dict(rule_sources)
+                    mutated = zz not in rule_sources
+                    mutated_sources[zz] = new
+                    mutant_rows = _homes_rule_violations(mutated_sources)
+                    if expect is None:
+                        check("homes rule namespace reach: " + mutant_label,
+                              mutated and mutant_rows == [])
+                    else:
+                        check("homes rule namespace reach: " + mutant_label,
+                              mutated and any(expect in row for row in mutant_rows))
                 # An internal error inside the rule fails closed as a named cannot-evaluate
-                # finding, never a traceback: the binding-name function is replaced for one scan
-                # of a source no earlier row used (so no memoized result answers it).
+                # finding, never a traceback: one helper at a time is replaced for one scan of
+                # a source no earlier row used (so no memoized result answers it). The binding-
+                # name function faults in the per-source summary; the alias and callee
+                # spellings and the foreign-name helper fault in the findings phase, so each
+                # catch has a row.
                 this_module = sys.modules[__name__]
-                real_binding_names = this_module._route_binding_names
+                for probe, helper in enumerate(("_route_binding_names", "_store_import_aliases",
+                                                "_init_callee_spellings",
+                                                "_homes_foreign_module_names")):
+                    real_helper = getattr(this_module, helper)
 
-                def _raising_binding_names(node):
-                    raise RuntimeError("seeded fault")
+                    def _raising_helper(*args):
+                        raise RuntimeError("seeded fault")
 
-                this_module._route_binding_names = _raising_binding_names
-                try:
-                    fault_sources = dict(rule_sources)
-                    fault_sources[zz] = alias_store + "\n_FAULT_PROBE = 1\n"
-                    fault_rows = _homes_rule_violations(fault_sources)
-                except Exception:  # noqa: BLE001 -- a traceback is this row's failure
-                    fault_rows = None
-                finally:
-                    this_module._route_binding_names = real_binding_names
-                check("homes rule: an internal error is a named cannot-evaluate finding",
-                      fault_rows is not None and any(
-                          row.startswith(zz + ": cannot evaluate (internal error in the homes "
-                                         "rule: RuntimeError: seeded fault)")
-                          for row in fault_rows))
+                    setattr(this_module, helper, _raising_helper)
+                    try:
+                        fault_sources = dict(rule_sources)
+                        fault_sources[zz] = alias_store + "\n_FAULT_PROBE = {}\n".format(probe)
+                        fault_rows = _homes_rule_violations(fault_sources)
+                    except Exception:  # noqa: BLE001 -- a traceback is this row's failure
+                        fault_rows = None
+                    finally:
+                        setattr(this_module, helper, real_helper)
+                    check("homes rule: an internal error in " + helper + " is a named "
+                          "cannot-evaluate finding",
+                          fault_rows is not None and any(
+                              row.startswith(zz + ": cannot evaluate (internal error in the "
+                                             "homes rule: RuntimeError: seeded fault)")
+                              for row in fault_rows))
                 gate_anchor = '    stage = "preflight"'
                 check("route gate: the mutation anchor is present once",
                       gate_source.count(gate_anchor) == 1)
