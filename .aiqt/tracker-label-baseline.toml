@@ -28,8 +28,8 @@ fix-id = 11
 
 [[path]]
 path = ".github/check_cited_standards_contract.py"
-review-round = 11
-reviewer-source = 11
+review-round = 10
+reviewer-source = 10
 
 [[path]]
 path = ".preview/char-policy-write.py"

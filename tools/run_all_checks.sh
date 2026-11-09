@@ -316,8 +316,9 @@ run_gate "applies"         python3 -I -B tools/check_applies.py
 run_gate "mappings-selftest" python3 -I -B tools/check_selftest_execution.py --suite mappings-selftest
 run_gate "mappings"       python3 -I -B tools/check_mappings.py
 # Repository-only assertion lives outside the shipped tooling: it pins the corpus below and the whole permitted
-# gate invocation in both runners (--config .aiqt/cited-standards.toml and nothing else, so an appended --root
-# is a finding), and validates pack.toml with its owning validator (opf/tools/check_opf_prompt_pack.py).
+# gate invocation in this runner, the only one it reads (--config .aiqt/cited-standards.toml and nothing else,
+# so an appended --root is a finding), and validates pack.toml with its owning validator
+# (opf/tools/check_opf_prompt_pack.py).
 run_gate "cited-standards-repo-contract-selftest" python3 -I -B .github/check_cited_standards_contract.py --self-test
 run_gate "cited-standards-repo-contract" python3 -I -B .github/check_cited_standards_contract.py
 run_gate "cited-standards-selftest" python3 -I -B tools/check_cited_standards.py --self-test

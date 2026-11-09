@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "775425336d9d5d3c39666e82d34f58b51177dbee5369a989faf6827b9eb3e739"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -71,8 +71,8 @@ sha256 = "5892ef59df4562bda84d7060f77447801648e2ecdf78eee08e027585498dd768"
 
 [[sources]]
 path = ".aiqt/core/gates/manifest.toml"
-bytes = 584824
-sha256 = "4035e0f915b34d490ccfb08bc5c72fa988e581a14984233e96b7d1e9ea163df9"
+bytes = 584921
+sha256 = "f73ba14ad13cc112c8f89bdd12dfc4c22a8a7b75c0c9eb1b35df711d614dd045"
 
 [[sources]]
 path = ".aiqt/core/hooks/ORCHESTRATION.md"
@@ -121,8 +121,8 @@ sha256 = "f1625261cc219e8a08ac893874d74d2f1e435683d9e552d877fefcdde6880f9d"
 
 [[sources]]
 path = ".aiqt/core/ownership.toml"
-bytes = 26024
-sha256 = "6ffa35254702ce448df2d072db8895dea7154d4c50f2fd183774db0c3921b723"
+bytes = 26035
+sha256 = "af4a966ca099662510b8bbf7331ed13319d065cb28727a17bdd22578ace884e5"
 
 [[sources]]
 path = ".aiqt/core/profiles/worker-pack.md"
@@ -851,8 +851,8 @@ sha256 = "142b4ac57f326c4d30a677e45e6c4daddf3661259b0714f1747db59c3f8ff7dd"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
-bytes = 10986
-sha256 = "3e812ebb5e7183d5358d2a7588189ed4a66a66f61237afb6c7dd2737b6ad9e8f"
+bytes = 11106
+sha256 = "ce143791554930f8e5c87adaecb7aa295afb1d17bddf9defaa3c7131f1a63f8a"
 
 [[sources]]
 path = ".aiqt/standards/atlas.toml"
@@ -942,7 +942,7 @@ sha256 = "592f6c7648751c99981f2bb90cdd9c8859030e4444328d8893e3d98a8cbf9088"
 [[sources]]
 path = ".aiqt/tracker-label-baseline.toml"
 bytes = 5110
-sha256 = "8f9bb8beb339fe2d4df69ff816c0741546ab78c6c303dc376d2a02488e439264"
+sha256 = "6fad18d936e8d1e250ceaf7de87f41a2ac8188e188fcbcfc9063cd06c62cf742"
 
 [[sources]]
 path = ".baseline/check_palette.py"
@@ -3441,8 +3441,8 @@ sha256 = "2be7bd6f3d7861c5e9a89a3b0853afc7433e78aa39e940a45db0b782c05cac69"
 
 [[sources]]
 path = "opf/tools/check_opf_init_contract.py"
-bytes = 111742
-sha256 = "f06bd22891dedae1ae8df8108028e538fb48acba8d2701393e6307aebe8809c2"
+bytes = 117326
+sha256 = "5751d52fc95e2299c5da9be990c0fd2e980d68a8e0f066193b3f69c1cefe08a7"
 
 [[sources]]
 path = "opf/tools/check_opf_init_observe.py"
@@ -4641,8 +4641,8 @@ sha256 = "2b1d57119dd5e8849a0b28d9c58e35f2cfb900742b738b787e68b28650b39c22"
 
 [[sources]]
 path = "tools/run_all_checks.sh"
-bytes = 29542
-sha256 = "9f3beed56449e18e981340c045b03c72f9436abf5ef526ba9aca94a8a58aa29e"
+bytes = 29566
+sha256 = "838c941d14519528ff3ec309136ed365ba5a8df474f3e61600a04444d846a387"
 
 [[sources]]
 path = "tools/selftest_aiqt_corpus.py"

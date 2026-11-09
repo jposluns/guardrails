@@ -51,9 +51,10 @@ residual are in the docstring of `tools/check_cited_standards.py`.
   `--config .aiqt/cited-standards.toml` (tracked, not shipped), which adds the OPF prompt-pack Markdown
   members (`opf/prompt-pack/**/*.md`) and import examples (`opf/prompt-pack/import/examples/*.batch.toml`), and the repository-only `.github/check_cited_standards_contract.py`
   fails if that corpus stops covering the rule files or a member `opf/prompt-pack/pack.toml` lists (the
-  pack manifest is validated by its owning validator, `opf/tools/check_opf_prompt_pack.py`), or if either
-  runner's gate line is not exactly `--config .aiqt/cited-standards.toml` with nothing added; without
-  `--config` the gate scans the rule files alone. The config and the two repository-only `.github`
+  pack manifest is validated by its owning validator, `opf/tools/check_opf_prompt_pack.py`), or if the
+  gate line of `tools/run_all_checks.sh` is not exactly `--config .aiqt/cited-standards.toml` with nothing
+  added (the workflow is not read; `tools/check_ci_parity.py` reconciles its gate lines against that
+  runner); without `--config` the gate scans the rule files alone. The config and the two repository-only `.github`
   contract scripts (`check_cited_standards_contract.py` and `check_newtab_contract.py`) are tracked, not
   shipped: in a tree without them the cited-standards gate line and the three contract gate lines (one
   newtab, plus the cited-standards contract and its self-test) exit 2 (cannot evaluate) and the shipped
