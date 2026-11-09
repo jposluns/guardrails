@@ -9,11 +9,14 @@
 # and no permission change fixes it. Only a GitHub App, or a classic token with the
 # `repo` scope, can read Checks.
 #
-# DO NOT substitute `commits/<sha>/status`. GitHub Actions publishes through Check
-# Runs, not the older Statuses API, so that endpoint returns `state: pending` with
-# `total_count: 0` FOREVER, even on a commit whose workflow succeeded. Verified on
-# 2026-08-08 against commit 7666cff, whose Quality run had concluded `success`.
-# Anything treating it as the green signal hangs; anything inverting it merges on a lie.
+# DO NOT read the combined `state` of `commits/<sha>/status` as a green signal. GitHub
+# Actions publishes through Check Runs, not the older Statuses API, so for Actions that
+# endpoint returns `state: pending` with `total_count: 0` FOREVER, even on a commit whose
+# workflow succeeded (verified on 2026-08-08 against commit 7666cff, whose Quality run had
+# concluded `success`), and the combined state mixes every context into one value. Anything
+# treating it as the green signal hangs; anything inverting it merges on a lie. Reading ONE
+# context's own entries is a different read and is allowed: --require-status (THE STATUS
+# REQUIREMENT below) reads only the named context's entries, never the combined state.
 #
 # This reads every paginated run from `actions/runs?head_sha=` AND the newest pages of the unfiltered
 # `actions/runs` listing back to a lower bound derived from the commit's committer date, keeping the
@@ -46,6 +49,13 @@
 #                                                   # THE BASE-BRANCH REQUIREMENT below)
 #   ... --require-base main --require-workflow PATH # the same, requiring the workflow whose file
 #                                                   # is PATH instead of the default quality.yml
+#   tools/ci-status.sh <sha> --pr N --require-status local-quality
+#                                                   # additionally require pull request N open at
+#                                                   # this head into the base, the newest
+#                                                   # local-quality status on this commit success
+#                                                   # and posted by the pinned creator, and this
+#                                                   # commit to contain the base's tip; prints
+#                                                   # MERGE-SHA (THE STATUS REQUIREMENT below)
 #   tools/ci-status.sh --match-tree [--head REV] [--require-job-success NAME]...
 #                                                   # succeed only on a completed successful run of
 #                                                   # .github/workflows/quality.yml whose head commit
@@ -62,7 +72,8 @@
 #                                                   # successful run listed after the first such run
 #                                                   # is accepted (THE TREE MATCH)
 #
-# Exit codes (--match-tree has its own, stated at THE TREE MATCH below): 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
+# Exit codes (--match-tree has its own, stated at THE TREE MATCH below; --require-status adds those
+# stated at THE STATUS REQUIREMENT below): 0 success, 1 failed / timed out / not-yet-terminal on a one-shot check, a run that
 # does not satisfy --require-base, or no completed successful run of the required workflow file
 # (a conforming one under --require-base; report-once refuses at once; --wait refuses after its
 # settle window), a --wait whose head, with no merge into the base shown in its associated pull
@@ -109,8 +120,12 @@ set -uo pipefail
 # repeated, and so is a --require-job-success naming a job already named. --head and
 # --require-job-success are accepted only with --match-tree, and --match-tree refuses a positional rev
 # (its rev is taken through --head only), --wait, --require-base and --require-workflow, so no option
-# is ever silently ignored.
+# is ever silently ignored. --pr and --require-status take a value the same way, are refused when
+# repeated, are accepted only together, and are refused with --match-tree; a --pr value must be a
+# decimal pull-request number with no leading zero.
 SHA_IN="HEAD"
+PR_NUMBER=""
+REQUIRE_STATUS=""
 SHA_IN_SET=0
 WAIT=""
 REQUIRE_BASE=""
@@ -135,6 +150,8 @@ for arg in "$@"; do
       --require-workflow) label="workflow path" ;;
       --head) label="rev" ;;
       --require-job-success) label="job name" ;;
+      --pr) label="pull-request number" ;;
+      --require-status) label="status context" ;;
     esac
     case "$arg" in
       -*)
@@ -168,6 +185,22 @@ for arg in "$@"; do
       fi
       SHA_IN="$arg"
       HEAD_SET=1
+    elif [ "$option" = "--pr" ]; then
+      if [ -n "$PR_NUMBER" ]; then
+        printf 'ERROR: --pr is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      if ! [[ "$arg" =~ ^[123456789][0123456789]{0,8}$ ]]; then
+        printf 'ERROR: --pr needs a pull-request number (decimal digits, no leading zero, at most 9 digits).\n' >&2
+        exit 2
+      fi
+      PR_NUMBER="$arg"
+    elif [ "$option" = "--require-status" ]; then
+      if [ -n "$REQUIRE_STATUS" ]; then
+        printf 'ERROR: --require-status is given more than once; a repeated option is refused rather than read last-wins.\n' >&2
+        exit 2
+      fi
+      REQUIRE_STATUS="$arg"
     else
       for job in "${REQUIRE_JOBS[@]}"; do
         if [ "$job" = "$arg" ]; then
@@ -192,7 +225,9 @@ for arg in "$@"; do
       ;;
     --head) EXPECT_VALUE="--head" ;;
     --require-job-success) EXPECT_VALUE="--require-job-success" ;;
-    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH, --require-workflow PATH, --match-tree, --head REV and --require-job-success NAME are supported).\n' "$arg" >&2; exit 2 ;;
+    --pr) EXPECT_VALUE="--pr" ;;
+    --require-status) EXPECT_VALUE="--require-status" ;;
+    -*) printf 'ERROR: unknown option %s (only --wait, --require-base BRANCH, --require-workflow PATH, --match-tree, --head REV, --require-job-success NAME, --pr N and --require-status CONTEXT are supported).\n' "$arg" >&2; exit 2 ;;
     *)
       if [ "$SHA_IN_SET" -eq 1 ]; then
         printf 'ERROR: more than one rev was given; a repeated rev is refused rather than read last-wins.\n' >&2
@@ -209,9 +244,32 @@ if [ -n "$EXPECT_VALUE" ]; then
     --require-workflow) label="workflow path" ;;
     --head) label="rev" ;;
     --require-job-success) label="job name" ;;
+    --pr) label="pull-request number" ;;
+    --require-status) label="status context" ;;
   esac
   printf 'ERROR: %s needs a %s and none was given.\n' "$EXPECT_VALUE" "$label" >&2
   exit 2
+fi
+if { [ -n "$PR_NUMBER" ] || [ -n "$REQUIRE_STATUS" ]; } && { [ -z "$PR_NUMBER" ] || [ -z "$REQUIRE_STATUS" ]; }; then
+  printf 'ERROR: --pr and --require-status are accepted only together.\n' >&2
+  exit 2
+fi
+if [ -n "$REQUIRE_STATUS" ] && [ "$MATCH_TREE" -eq 1 ]; then
+  printf 'ERROR: --match-tree is a separate read; --pr and --require-status are refused with it.\n' >&2
+  exit 2
+fi
+# THE STATUS CREATOR (see THE STATUS REQUIREMENT): the account whose status alone counts is named by
+# the caller's environment, never by this repository. Unset, empty or holding white space is refused
+# before any read; its value is never echoed.
+STATUS_CREATOR=""
+if [ -n "$REQUIRE_STATUS" ]; then
+  STATUS_CREATOR="${CI_STATUS_STATUS_CREATOR:-}"
+  case "$STATUS_CREATOR" in
+    ""|*[[:space:]]*)
+      printf 'ERROR: cannot evaluate: --require-status needs CI_STATUS_STATUS_CREATOR set to the account that posts that status (nonempty, no white space); it is unset or unusable.\n' >&2
+      exit 2
+      ;;
+  esac
 fi
 if [ "$MATCH_TREE" -eq 1 ]; then
   if [ "$SHA_IN_SET" -eq 1 ]; then
@@ -1497,6 +1555,247 @@ if [ "$MATCH_TREE" -eq 1 ]; then
   match_tree
 fi
 
+# THE STATUS REQUIREMENT (--pr N --require-status CONTEXT). An option, off unless both are given; every
+# other rule above still holds, so the runs must first read green as they would without it. Then:
+#   1. Before the runs are read, pull request N is read (`pulls/N`): it must be open, its head SHA must
+#      be this commit and its base PR_BASE (the --require-base value, else main); otherwise exit 2.
+#   2. Where the runs read green, this commit's statuses are read twice over: the paginated listing
+#      (`commits/<sha>/statuses`) and the combined record (`commits/<sha>/status`, every page of which
+#      must name this commit). The combined .state is never read (see the header). From the listing the
+#      newest CONTEXT entry is taken (greatest created_at, then greatest id); the combined record holds
+#      at most one CONTEXT entry. Both reads must agree on that entry's id and state, or both show none;
+#      a disagreement is re-read once, after RETRY_SECONDS, and exits 2 if it persists.
+#   3. The entry's creator.login must equal CI_STATUS_STATUS_CREATOR (exit 2 otherwise), because anyone
+#      who can write statuses can post any context name.
+#   4. State: success passes on; missing or pending exits 1 (under --wait each is re-read every
+#      POLL_SECONDS until the deadline, then exits 1); failure or error exits 1 at once; any other
+#      state exits 2.
+#   5. This commit must contain the current tip of PR_BASE, read from `git/ref/heads/PR_BASE` and
+#      tested locally with git merge-base --is-ancestor: not contained exits 1; a tip this checkout
+#      does not hold exits 2 (fetch it first).
+#   6. Pull request N is read again, as in step 1; a head that moved, or any other change, exits 2.
+#   7. On success the last line is "MERGE-SHA: " and this commit's full id, for the merge command.
+# Exit 2 also covers a failed read, a read that succeeds but writes to stderr, a reply that is not
+# exactly one JSON document, and a malformed or unparsable response, at once in every mode.
+# NOT CLOSED (disclosed): a status posted after these reads, or a head pushed after the last pull read,
+# is not seen; the merge command's own head pin and branch protection requiring CONTEXT are the
+# backstop. GitHub's semantics for these endpoints are taken from its REST documentation, not verified
+# live here.
+CI_STATUS_LOCAL_JQ='
+def object_name:
+  (type == "string") and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+def stamp:
+  (type == "string")
+  and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\z")
+  and ((try (fromdate | todate) catch null) == .);
+def malformed_entry:
+  (type != "object") or ((.context | type) != "string")
+  or ((.context == $context)
+      and (((.id | type) != "number") or (.id <= 0) or ((.id | floor) != .id)
+           or ((.state | type) != "string") or ((.state | length) == 0)
+           or ((.created_at | stamp) | not)
+           or ((.creator | type) != "object")
+           or ((.creator.login | type) != "string") or ((.creator.login | length) == 0)));
+if $mode == "pull" then
+  if (length != 1) or ((.[0] | type) != "object") or (.[0].number != $number)
+    or ((.[0].state | type) != "string") or ((.[0].head | type) != "object")
+    or ((.[0].head.sha | type) != "string") or ((.[0].base | type) != "object")
+    or ((.[0].base.ref | type) != "string") then
+    error("malformed pull-request record")
+  elif (.[0].state == "open") and (.[0].head.sha == $requested_sha) and (.[0].base.ref == $base) then
+    ["ok", "-"] | @tsv
+  else
+    ["mismatch", "state " + .[0].state + ", head " + .[0].head.sha + ", base " + .[0].base.ref] | @tsv
+  end
+elif $mode == "ref" then
+  if (length != 1) or ((.[0] | type) != "object") or (.[0].ref != ("refs/heads/" + $base))
+    or ((.[0].object | type) != "object") or (.[0].object.type != "commit")
+    or ((.[0].object.sha | object_name) | not) then
+    error("malformed branch reference")
+  else
+    .[0].object.sha
+  end
+elif $mode == "statuses" then
+  if (length != 2) or ((.[0] | type) != "array") or ((.[1] | type) != "array")
+    or ((.[1] | length) == 0) or any(.[0][]; type != "array")
+    or any(.[0][][]; malformed_entry)
+    or any(.[1][]; (type != "object") or ((.statuses | type) != "array") or any(.statuses[]; malformed_entry)) then
+    error("malformed status response")
+  elif any(.[1][]; .sha != $requested_sha) then
+    error("malformed status response: the combined status names another commit")
+  else
+    ([.[0][][] | select(.context == $context)] | sort_by(.created_at, .id) | last) as $newest
+    | [.[1][] | .statuses[] | select(.context == $context)] as $combined
+    | if ($combined | length) > 1 then
+        error("malformed status response: the combined status lists the context more than once")
+      elif ($newest == null) and (($combined | length) == 0) then ["missing", "-", "-"]
+      elif ($newest == null) or (($combined | length) == 0)
+        or ($newest.id != $combined[0].id) or ($newest.state != $combined[0].state) then
+        ["disagree", "-", "-"]
+      elif $newest.creator.login != $creator then ["creator", $newest.state, ($newest.id | tostring)]
+      else ["entry", $newest.state, ($newest.id | tostring)]
+      end
+    | @tsv
+  end
+else
+  error("unknown mode")
+end'
+
+status_jq() {
+  jq -s -r --arg mode "$1" --argjson number "$PR_NUMBER" --arg requested_sha "$SHA" \
+    --arg base "$PR_BASE" --arg context "$REQUIRE_STATUS" --arg creator "$STATUS_CREATOR" \
+    "$CI_STATUS_LOCAL_JQ"
+}
+
+# One gh api read for the status requirement ($@ its arguments). Only gh's stdout is printed, so
+# nothing gh writes to stderr is ever parsed as part of a reply. A failed read prints its stderr to
+# stderr and returns gh's status. A read that succeeds but writes any byte to stderr is refused the
+# same way (it returns 1): a reply with text beside it that this script cannot account for is
+# cannot-evaluate, as a reply jq cannot parse is.
+status_gh() {
+  local diagnostic rc
+  { diagnostic="$(gh api "$@" 2>&1 1>&3 3>&-; rc=$?; printf '.'; exit "$rc")"; rc=$?; } 3>&1
+  diagnostic="${diagnostic%.}"
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$diagnostic" >&2
+    return "$rc"
+  fi
+  if [ -n "$diagnostic" ]; then
+    printf 'gh wrote to stderr on a read that succeeded: %s\n' "$diagnostic" >&2
+    return 1
+  fi
+}
+
+# Prints the one JSON document read on stdin, compacted onto one line, or fails naming the reply ($1)
+# when stdin holds no document or more than one. Each statuses reply is checked on its own before the
+# two are combined, so one reply holding both documents beside an empty one can never pass as two.
+status_one_document() {
+  jq -s -c --arg reply "$1" 'if length == 1 then .[0] else error($reply + " is not exactly one JSON document") end'
+}
+
+status_error() {
+  echo "ERROR: cannot evaluate the ${REQUIRE_STATUS} status of ${SHA} in ${REPO} (pull request #${PR_NUMBER}): $1"
+  echo "  raw: $2"
+  exit 2
+}
+
+# Step 1 and step 6: $1 names which read this is, for the message.
+status_pull_check() {
+  local raw verdict
+  raw="$(status_gh "repos/$REPO/pulls/$PR_NUMBER" 2>&1)" ||
+    status_error "the ${1} read of the pull request failed" "$raw"
+  verdict="$(printf '%s\n' "$raw" | status_jq pull 2>&1)" ||
+    status_error "the ${1} read of the pull request was refused" "$verdict"
+  case "${verdict%%$'\t'*}" in
+    ok) ;;
+    mismatch)
+      echo "ERROR: cannot evaluate: at the ${1} read, pull request #${PR_NUMBER} is not open at ${SHA} into ${PR_BASE} (${verdict#*$'\t'}); refusing."
+      exit 2
+      ;;
+    *) status_error "unexpected pull-request output" "$verdict" ;;
+  esac
+}
+
+# Step 2: prints one TSV row (kind, state, id) from CI_STATUS_LOCAL_JQ, or returns 1 with the diagnostic.
+status_read() {
+  local listing combined
+  {
+    listing="$(status_gh "repos/$REPO/commits/$SHA/statuses?per_page=100" --paginate --slurp)" || return 1
+    combined="$(status_gh "repos/$REPO/commits/$SHA/status?per_page=100" --paginate --slurp)" || return 1
+    listing="$(printf '%s\n' "$listing" | status_one_document "the status listing")" || return 1
+    combined="$(printf '%s\n' "$combined" | status_one_document "the combined status")" || return 1
+    printf '%s\n%s\n' "$listing" "$combined" | status_jq statuses
+  } 2>&1
+}
+
+# Steps 2 to 7; every outcome exits here.
+status_requirement() {
+  local row kind rest state status_id raw tip ancestor_rc disagreed=0
+  while :; do
+    row="$(status_read)" || status_error "the status read failed or was refused" "$row"
+    kind="${row%%$'\t'*}"
+    rest="${row#*$'\t'}"
+    state="${rest%%$'\t'*}"
+    status_id="${rest#*$'\t'}"
+    case "$kind" in
+      disagree)
+        if [ "$disagreed" -eq 0 ]; then
+          disagreed=1
+          echo "NOTE: the status listing and the combined status disagree about the newest ${REQUIRE_STATUS} entry; re-reading once."
+          sleep "$RETRY_SECONDS"
+          continue
+        fi
+        echo "ERROR: cannot evaluate: the status listing and the combined status still disagree about the newest ${REQUIRE_STATUS} entry of ${SHA} after one re-read; refusing."
+        exit 2
+        ;;
+      creator)
+        echo "ERROR: cannot evaluate: the newest ${REQUIRE_STATUS} status of ${SHA} (id ${status_id}) was not posted by the account CI_STATUS_STATUS_CREATOR names; refusing."
+        exit 2
+        ;;
+      missing|entry) disagreed=0 ;;
+      *) status_error "unexpected status output" "$row" ;;
+    esac
+    if [ "$kind" = "missing" ] || [ "$state" = "pending" ]; then
+      if [ "$kind" = "missing" ]; then
+        last_summary="no ${REQUIRE_STATUS} status on ${SHA}"
+      else
+        last_summary="the ${REQUIRE_STATUS} status of ${SHA} is pending (id ${status_id})"
+      fi
+      if [ "$WAIT" != "--wait" ]; then
+        echo "RESULT: ${last_summary}, so it is not green; use --wait to wait for it."
+        exit 1
+      fi
+      if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+        echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
+        exit 1
+      fi
+      echo "RESULT: ${last_summary}; waiting."
+      sleep "$POLL_SECONDS"
+      continue
+    fi
+    case "$state" in
+      success) break ;;
+      failure|error)
+        echo "RESULT: the ${REQUIRE_STATUS} status of ${SHA} is ${state} (id ${status_id})."
+        exit 1
+        ;;
+      *)
+        echo "ERROR: cannot evaluate: the ${REQUIRE_STATUS} status of ${SHA} has the unrecognized state '${state}' (id ${status_id}); refusing."
+        exit 2
+        ;;
+    esac
+  done
+  raw="$(status_gh "repos/$REPO/git/ref/heads/$PR_BASE" 2>&1)" ||
+    status_error "the tip of ${PR_BASE} could not be read" "$raw"
+  tip="$(printf '%s\n' "$raw" | status_jq ref 2>&1)" ||
+    status_error "the reference of ${PR_BASE} was refused" "$tip"
+  git merge-base --is-ancestor "$tip" "$SHA" 2>/dev/null
+  ancestor_rc=$?
+  if [ "$ancestor_rc" -eq 1 ]; then
+    echo "RESULT: ${SHA} does not contain ${tip}, the current tip of ${PR_BASE}, so the tree it tested is not the tree a merge would make; update the branch."
+    exit 1
+  elif [ "$ancestor_rc" -ne 0 ]; then
+    echo "ERROR: cannot evaluate: whether ${SHA} contains ${tip}, the current tip of ${PR_BASE}, could not be read in this checkout (fetch ${PR_BASE} first)."
+    exit 2
+  fi
+  status_pull_check "second"
+  echo "RESULT: the ${REQUIRE_STATUS} status of ${SHA} is success (id ${status_id}), posted by the pinned creator; pull request #${PR_NUMBER} is still open at this head into ${PR_BASE}, which this head contains."
+  echo "MERGE-SHA: ${SHA}"
+  exit 0
+}
+
+# Every green verdict of the runs ends here.
+runs_green() {
+  if [ -n "$REQUIRE_STATUS" ]; then
+    status_requirement
+  fi
+  exit 0
+}
+
+if [ -n "$REQUIRE_STATUS" ]; then
+  status_pull_check "first"
+fi
+
 SETTLE_FINGERPRINT=""
 SETTLE_COUNT=0
 last_summary="no workflow run registered"
@@ -1712,7 +2011,7 @@ while :; do
         echo "$missing_message"
         exit 1
       fi
-      exit 0
+      runs_green
     fi
     fingerprint="$(IFS=,; printf '%s' "${run_ids[*]}")"
     if [ "$fingerprint" = "$SETTLE_FINGERPRINT" ]; then
@@ -1744,6 +2043,6 @@ while :; do
     echo "RESULT: TIMEOUT after ${CI_STATUS_TIMEOUT:-900}s; ${last_summary}."
     exit 1
   fi
-  [ "$settled" -eq 1 ] && exit 0
+  [ "$settled" -eq 1 ] && runs_green
   sleep "$POLL_SECONDS"
 done
