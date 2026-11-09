@@ -16,7 +16,13 @@ ships it, never to an installed copy and never taking a field from the documenta
      supported spec_version, homes and worklog generations of _opf_store);
   2. its bytes equal SHIPPED_DECLARATION_BYTES and their SHA-256 digest equals SHIPPED_DECLARATION_SHA256,
      the shipped-file digest the implementation carries;
-  3. RELEASE_IDENTITY equals the pack release version in VERSION (the release identity is that version);
+  3. RELEASE_IDENTITY equals OPF's own release version in opf/VERSION (the release identity is that version,
+     which moves independently of the pack release version in the root VERSION, no input of this gate);
+     opf/VERSION is read as exactly one nonempty line ended by a line feed, with no other line ending: the
+     line feed and the carriage return are the only characters read as line endings here, so a missing final
+     line feed, a line feed anywhere before the final one or a carriage return anywhere is a cannot-evaluate,
+     and any other character (a BOM, surrounding whitespace, a NUL, a NEL or a line separator included) is
+     compared as part of the value, a finding where the result differs from RELEASE_IDENTITY;
   4. each documentation surface (DOC_SURFACES) restates that declaration byte-equal to the file: a restatement
      that gives another value, omits a field or states a field the file does not carry is malformed and a
      finding, so the release cannot be cut, and so is a missing restatement;
@@ -92,8 +98,10 @@ code, a bare sys.exit() and an exception whose MRO leaves out BaseException are 
 (exit 2), never a finding or a clean exit: tools/_selftest_exit_report.py and tools/check_selftest_execution.py,
 opf/tools/_opf_declaration.py and opf/tools/_opf_store.py, and, for the self-test, opf/tools/opf.py and each
 opf/tools helper its _bootstrap() imports (one that _bootstrap() itself maps to its exit 2 included). So is a
-declaration file, VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES bytes,
-cannot be read or (but for the declaration file) is not UTF-8, and a directory rule 6 cannot list, and any other
+declaration file, opf/VERSION, surface or rule 6 document that is not a regular file of at most MAX_READ_BYTES
+bytes, cannot be read or (but for the declaration file) is not UTF-8, an opf/VERSION that is not exactly one
+nonempty line ended by a line feed (an empty file, a lone line feed, a second line, a missing final line feed or a
+carriage return), and a directory rule 6 cannot list, and any other
 exception (a KeyboardInterrupt aside) raised while these inputs are read. So, last, is any escape from the gate
 body: any exception other than a KeyboardInterrupt (re-raised unchanged) that leaves run() or the self-test,
 whatever its type or MRO, a SystemExit of any code or an error raised by a helper the gate calls included, ends
@@ -184,7 +192,7 @@ SUITE_ID = "opf-declaration-selftest"
 REGISTRY_REL = "tools/selftest_checks.toml"
 DECLARATION_REL = "opf/tools/opf-declaration.toml"
 MODULE_REL = "opf/tools/_opf_declaration.py"
-VERSION_REL = "VERSION"
+VERSION_REL = "opf/VERSION"   # OPF's own release version, apart from the pack's root VERSION
 DOC_SURFACES = ("opf/spec/OPF-QUICKSTART.md", "RELEASING.md")
 DIGEST_LOCATION = (MODULE_REL, "SHIPPED_DECLARATION_SHA256")
 _HTML_OPEN = '<div class="tree"><pre id="opf-declaration">'
@@ -444,8 +452,22 @@ def _restatement_problem(rel, block, fields):
     return None
 
 
+def read_opf_version(text):
+    """OPF's own release version from the text of opf/VERSION: its one line, where the text is exactly one
+    nonempty line ended by a line feed with no other line ending. Only the line feed and the carriage return
+    are read as line endings: a text that does not end with a line feed, an empty line, a line feed anywhere
+    before the final one or a carriage return anywhere raises CannotEvaluate; any other character (a BOM,
+    surrounding whitespace, a NUL, a NEL or a line separator included) is kept and compared as part of the
+    value."""
+    line = text[:-1]
+    if not text.endswith("\n") or not line or "\n" in line or "\r" in line:
+        raise CannotEvaluate("{} is not exactly one nonempty line ended by a line feed".format(VERSION_REL))
+    return line
+
+
 def file_problems(data, version):
-    """The findings of rules 1 to 3 over the declaration file's bytes as shipped and the VERSION text."""
+    """The findings of rules 1 to 3 over the declaration file's bytes as shipped and OPF's own release version
+    (the one line of opf/VERSION, read_opf_version)."""
     problems = []
     fields, problem = _opf_declaration.parse_declaration(data)
     if problem is not None:
@@ -464,9 +486,9 @@ def file_problems(data, version):
             _opf_declaration.SHIPPED_DECLARATION_SHA256:
         problems.append("{}: SHIPPED_DECLARATION_SHA256 is not the digest of SHIPPED_DECLARATION_BYTES".format(
             MODULE_REL))
-    if version.rstrip("\n") != _opf_declaration.RELEASE_IDENTITY:
-        problems.append("{}: RELEASE_IDENTITY {!r} is not the pack release version {!r} in {}".format(
-            MODULE_REL, _opf_declaration.RELEASE_IDENTITY, version.rstrip("\n"), VERSION_REL))
+    if version != _opf_declaration.RELEASE_IDENTITY:
+        problems.append("{}: RELEASE_IDENTITY {!r} is not OPF's own release version {!r} in {}".format(
+            MODULE_REL, _opf_declaration.RELEASE_IDENTITY, version, VERSION_REL))
     return problems
 
 
@@ -524,7 +546,7 @@ def run(root):
         return _cannot_evaluate("a helper module cannot be loaded", exc)
     try:
         data = _read_regular(Path(root) / DECLARATION_REL, DECLARATION_REL)
-        version = _read_regular(Path(root) / VERSION_REL, VERSION_REL).decode("utf-8")
+        version = read_opf_version(_read_regular(Path(root) / VERSION_REL, VERSION_REL).decode("utf-8"))
         surfaces = dict((rel, _read_regular(Path(root) / rel, rel).decode("utf-8")) for rel in DOC_SURFACES)
         documents = restating_documents(root)
     except:   # a CannotEvaluate, a UnicodeDecodeError, an OSError, or any other exception while the inputs are read
@@ -855,7 +877,7 @@ def self_test(report_path=None):
     # 4. this gate's own rules over synthetic documentation and files
     homes2 = shipped.replace(b"homes = 1", b"homes = 2")
     no_worklog = b"".join(line for line in shipped.splitlines(keepends=True) if not line.startswith(b"worklog"))
-    version = _opf_declaration.RELEASE_IDENTITY + "\n"
+    version = _opf_declaration.RELEASE_IDENTITY
     check("doc/equal-passes", doc_problems(shipped, _sample_surfaces(shipped, shipped)) == [],
           doc_problems(shipped, _sample_surfaces(shipped, shipped)))
     found = doc_problems(shipped, _sample_surfaces(homes2, shipped))
@@ -874,8 +896,9 @@ def self_test(report_path=None):
     found = file_problems(shipped.replace(b"\n", b"\r\n"), version)
     check("doc/file-crlf-red", any("malformed" in problem for problem in found)
           and any("shipped-file digest" in problem for problem in found), found)
-    found = file_problems(shipped, "1.0.99\n")
-    check("doc/release-not-version-red", len(found) == 1 and "pack release version" in found[0], found)
+    found = file_problems(shipped, _opf_declaration.RELEASE_IDENTITY + "-other")
+    check("doc/release-not-version-red", len(found) == 1 and "OPF's own release version" in found[0]
+          and VERSION_REL in found[0], found)
     with patch.object(sys.modules[__name__], "_restatement_problem", lambda rel, block, fields: None):
         found = doc_problems(shipped, _sample_surfaces(homes2, no_worklog))
     check("revert/doc-restatement-compare-dropped-red", found == [], found)
@@ -998,6 +1021,172 @@ def self_test(report_path=None):
             finally:
                 sys.modules.pop(module, None)
             check(check_id, found == [], found)
+    finally:
+        shutil.rmtree(tmp)
+
+    # rule 3 over scratch trees, through run(): RELEASE_IDENTITY equals OPF's own release version, the one line of
+    # opf/VERSION (a regular file of at most MAX_READ_BYTES bytes, exactly one nonempty line ended by a line feed),
+    # and the root VERSION is no input of it; each row red under its revert
+    identity = _opf_declaration.RELEASE_IDENTITY.encode("ascii")
+
+    def make_symlink(path):
+        path.with_name("VERSION.target").write_bytes(identity + b"\n")
+        os.symlink("VERSION.target", path)
+
+    version_cases = {
+        "equal": (identity + b"\n", identity + b"\n"),
+        "different": (identity + b"-other\n", identity + b"\n"),
+        "missing": (None, identity + b"\n"),
+        "empty": (b"", identity + b"\n"),
+        "lone-line-feed": (b"\n", identity + b"\n"),
+        "two-lines": (identity + b"\n" + identity + b"\n", identity + b"\n"),
+        "trailing-blank-line": (identity + b"\n\n", identity + b"\n"),
+        "unterminated": (identity, identity + b"\n"),
+        "crlf": (identity + b"\r\n", identity + b"\n"),
+        "bom": (b"\xef\xbb\xbf" + identity + b"\n", identity + b"\n"),
+        "trailing-space": (identity + b" \n", identity + b"\n"),
+        "non-utf-8": (identity + b"\xff\n", identity + b"\n"),
+        "directory": (lambda path: path.mkdir(), identity + b"\n"),
+        "symlink": (make_symlink, identity + b"\n"),
+        "at-size-bound": (b"9" * (MAX_READ_BYTES - 1) + b"\n", identity + b"\n"),
+        "over-size-bound": (b"9" * MAX_READ_BYTES + b"\n", identity + b"\n"),
+        "root-version-changed": (identity + b"\n", identity + b"-root\n"),
+        "root-version-missing": (identity + b"\n", None),
+    }
+    fifo_readers = []
+
+    def make_fifo_with_data(path):
+        """A FIFO with the version line waiting to be read: the write end is closed once the line is written,
+        and the read end stays open so the bytes survive until the gate opens the FIFO; version_runs closes it."""
+        os.mkfifo(path)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            wfd = os.open(path, os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                os.write(wfd, identity + b"\n")
+            finally:
+                os.close(wfd)
+        except:   # the fixture could not be filled: close the held read end, then let the error surface
+            os.close(fd)
+            raise
+        fifo_readers.append(fd)
+
+    if hasattr(os, "mkfifo"):
+        version_cases["fifo"] = (lambda path: os.mkfifo(path), identity + b"\n")
+        version_cases["fifo-with-data"] = (make_fifo_with_data, identity + b"\n")
+
+    def version_runs(names, gate=None):
+        """name -> (run()'s exit status, its stderr) of `gate` (this module unless given) over a scratch tree of
+        the shipped declaration file and documentation surfaces with opf/VERSION and the root VERSION as the
+        version case `name` makes them (bytes, a callable that makes the path, or None for none)."""
+        gate = gate or here
+        tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+        try:
+            runs = {}
+            for name in names:
+                home = Path(tmp, name)
+                for rel in (DECLARATION_REL,) + DOC_SURFACES:
+                    os.makedirs(Path(home, rel).parent, exist_ok=True)
+                    Path(home, rel).write_bytes((ROOT / rel).read_bytes())
+                for rel, made in zip(("opf/VERSION", "VERSION"), version_cases[name]):
+                    if callable(made):
+                        made(Path(home, rel))
+                    elif made is not None:
+                        Path(home, rel).write_bytes(made)
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                    runs[name] = (gate.run(home), err.getvalue())
+            return runs
+        finally:
+            for reader in fifo_readers:
+                os.close(reader)
+            fifo_readers.clear()
+            shutil.rmtree(tmp)
+
+    def statuses(runs):
+        return dict((name, rc) for name, (rc, _err) in runs.items())
+
+    unreadable = "CANNOT EVALUATE: an input the gate needs cannot be read"
+    not_one_line = "opf/VERSION is not exactly one nonempty line ended by a line feed"
+    not_regular_file = "opf/VERSION is not a regular file"
+    live = version_runs(version_cases)
+    non_regular = ["directory"] + [name for name in ("fifo", "fifo-with-data") if name in version_cases]
+    check("doc/opf-version-equal-passes", VERSION_REL == "opf/VERSION" and live["equal"][0] == 0, live["equal"])
+    check("doc/opf-version-different-red", live["different"][0] == 1 and "is not OPF's own release version {!r} in "
+          "opf/VERSION".format(identity.decode("ascii") + "-other") in live["different"][1], live["different"])
+    check("doc/opf-version-missing-cannot-evaluate", live["missing"][0] == 2 and unreadable in live["missing"][1]
+          and "opf/VERSION cannot be opened" in live["missing"][1], live["missing"])
+    for check_id, names in (
+        ("doc/opf-version-empty-cannot-evaluate", ("empty", "lone-line-feed")),
+        ("doc/opf-version-two-line-cannot-evaluate", ("two-lines", "trailing-blank-line")),
+        ("doc/opf-version-unterminated-or-crlf-cannot-evaluate", ("unterminated", "crlf")),
+    ):
+        check(check_id, all(live[name][0] == 2 and unreadable in live[name][1] and not_one_line in live[name][1]
+                            for name in names), dict((name, live[name]) for name in names))
+    check("doc/opf-version-non-regular-cannot-evaluate", all(
+        live[name][0] == 2 and unreadable in live[name][1] and not_regular_file in live[name][1]
+        for name in non_regular) and live["symlink"][0] == 2 and unreadable in live["symlink"][1]
+          and "opf/VERSION cannot be opened" in live["symlink"][1],
+          dict((name, live[name]) for name in non_regular + ["symlink"]))
+    check("doc/opf-version-bom-is-finding", live["bom"][0] == 1
+          and "is not OPF's own release version" in live["bom"][1], live["bom"])
+    check("doc/opf-version-trailing-space-is-finding", live["trailing-space"][0] == 1
+          and "is not OPF's own release version" in live["trailing-space"][1], live["trailing-space"])
+    check("doc/opf-version-non-utf-8-cannot-evaluate", live["non-utf-8"][0] == 2
+          and unreadable in live["non-utf-8"][1] and "UnicodeDecodeError" in live["non-utf-8"][1],
+          live["non-utf-8"])
+    check("doc/opf-version-size-bound", live["at-size-bound"][0] == 1 and live["over-size-bound"][0] == 2
+          and "not a regular file of at most" in live["over-size-bound"][1],
+          statuses(dict((name, live[name]) for name in ("at-size-bound", "over-size-bound"))))
+    check("doc/opf-version-root-version-alone-ignored",
+          live["root-version-changed"][0] == 0 and live["root-version-missing"][0] == 0,
+          dict((name, live[name]) for name in ("root-version-changed", "root-version-missing")))
+    # the reverts: rule 3 reading the root VERSION again, reading opf/VERSION leniently (the whole text, or with its
+    # trailing line feeds stripped), following a symlink, with its comparison dropped, with the size bound off by
+    # one, or with the regular-file check alone removed
+    with patch.object(here, "VERSION_REL", "VERSION"):
+        from_root = statuses(version_runs(("missing", "root-version-changed", "root-version-missing")))
+    check("revert/opf-version-missing-read-from-root-version-red", from_root["missing"] == 0, from_root)
+    check("revert/opf-version-root-version-alone-read-from-root-version-red",
+          from_root["root-version-changed"] == 1 and from_root["root-version-missing"] == 2, from_root)
+    with patch.object(here, "read_opf_version", lambda text: text):
+        whole = statuses(version_runs(("equal",)))
+    check("revert/opf-version-line-not-extracted-red", whole == {"equal": 1}, whole)
+    with patch.object(here, "read_opf_version", lambda text: text.rstrip("\n")):
+        lenient = statuses(version_runs(("empty", "lone-line-feed", "two-lines", "trailing-blank-line",
+                                         "unterminated", "crlf")))
+    for check_id, names in (
+        ("revert/opf-version-empty-read-leniently-red", ("empty", "lone-line-feed")),
+        ("revert/opf-version-two-line-read-leniently-red", ("two-lines", "trailing-blank-line")),
+        ("revert/opf-version-unterminated-or-crlf-read-leniently-red", ("unterminated", "crlf")),
+    ):
+        check(check_id, all(lenient[name] != 2 for name in names), dict((name, lenient[name]) for name in names))
+    with patch.object(here, "_read_regular", lambda path, rel: Path(path).read_bytes()):
+        followed = statuses(version_runs(("symlink",)))
+    check("revert/opf-version-symlink-followed-red", followed == {"symlink": 0}, followed)
+    tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
+    try:
+        for check_id, name, old, new, expected in (
+            ("revert/opf-version-compare-dropped-red", "different",
+             "    if version != _opf_declaration." "RELEASE_IDENTITY:\n", "    if False:\n", 0),
+            ("revert/opf-version-size-bound-off-by-one-red", "at-size-bound",
+             "or st.st_size > " "MAX_READ_BYTES:", "or st.st_size >= MAX_READ_BYTES:", 2),
+            # the regular-file check alone removed (the size check kept): the waiting FIFO bytes then read as
+            # the version and the gate passes a FIFO at opf/VERSION with exit 0
+            ("revert/opf-version-regular-file-check-dropped-red", "fifo-with-data",
+             "        if not stat.S_ISREG(st.st_mode) or st.st_size > " "MAX_READ_BYTES:",
+             "        if st.st_size > " "MAX_READ_BYTES:", 0),
+        ):
+            module = "opf_declaration_version_mutant_" + name.replace("-", "_")
+            try:
+                if name in version_cases:
+                    rc = version_runs((name,), _copy_mutant(tmp, Path(__file__).resolve(), module, old, new))[name][0]
+                else:
+                    rc = expected = "skipped: os.mkfifo is unavailable"
+            except AssertionError as exc:
+                rc = str(exc)
+            finally:
+                sys.modules.pop(module, None)
+            check(check_id, rc == expected, rc)
     finally:
         shutil.rmtree(tmp)
 
@@ -1301,7 +1490,8 @@ def self_test(report_path=None):
     # stub helpers, one helper function raising a SystemExit(0) or a RuntimeError when the gate calls it during
     # run() or the self-test, exits 2; with the guard in main() removed the SystemExit escapes and the gate exits 0,
     # and the RuntimeError escapes and it exits 1
-    tree = dict(stubs, **dict((rel, "") for rel in (DECLARATION_REL, VERSION_REL) + DOC_SURFACES))
+    # opf/VERSION holds one line, as rule 3 reads it, so the read succeeds and the helper call is what escapes
+    tree = dict(stubs, **dict((rel, "") for rel in (DECLARATION_REL,) + DOC_SURFACES), **{VERSION_REL: "0.0.0\n"})
     with_vectors = dict(stubs, **{"opf/tools/opf.py": "def _bootstrap():\n    return 0\n"})
     tmp = tempfile.mkdtemp(prefix="opf-declaration-selftest-")
     try:
@@ -2002,7 +2192,9 @@ def self_test(report_path=None):
           "under its revert; the documentation and file rules red on a changed, omitted or added field, a byte "
           "variant, a missing or commented-out restatement or digest location, a Markdown comment behind a fence "
           "or HTML block the reader cannot place, a surface dropped from the list, a CRLF file and a release "
-          "other than VERSION; a missing or broken helper module, tools-side or opf-side, a cannot-evaluate)".format(
+          "other than OPF's own version in opf/VERSION, which the root VERSION does not affect; an opf/VERSION "
+          "that is missing, empty, not exactly one line or not a regular file, and a missing or broken helper "
+          "module, tools-side or opf-side, a cannot-evaluate)".format(
               len(results), len(covered), len(cli_covered)))
     return 0
 
