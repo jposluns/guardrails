@@ -89,6 +89,9 @@ def _empty_prior():
 _HELD_OMITTED = ("the ids the prior commit held are omitted (the reserved-number exemption is then "
                  "cannot-evaluate)")
 
+# The note suffix when the whole prior committed snapshot is omitted.
+_PRIOR_OMITTED = "the prior committed snapshot is omitted"
+
 
 _GitOutcome = namedtuple("_GitOutcome", "completed rc out err")
 
@@ -868,15 +871,15 @@ def _link_phrase(kind):
     return "a {}".format(kind) if kind not in ("blob", "tree") else ""
 
 
-def _ls_tree(git, store_root, treeish, notes, recursive=False):
+def _ls_tree(git, store_root, treeish, notes, recursive=False, omitted=_HELD_OMITTED):
     """The entries of one committed tree, `git ls-tree -z [-r] <treeish>`, as (mode, object type, name)
     triples; a recursive listing names each blob by its path within the tree. The mode is kept because the
     object type alone lists a symlink as a blob. Returns None (+ note) on any git error or an entry that
-    does not parse. `-z` names each entry unquoted, NUL-terminated."""
+    does not parse. `-z` names each entry unquoted, NUL-terminated. `omitted` names what the caller omits."""
     out = _run_git(git, store_root, ["ls-tree", "-z"] + (["-r"] if recursive else []) + [treeish])
     if not out.completed or out.rc != 0:
         notes.append("prior: could not list {} ({}); {}".format(
-            treeish, out.err.strip() if not out.completed else "git ls-tree rc {}".format(out.rc), _HELD_OMITTED))
+            treeish, out.err.strip() if not out.completed else "git ls-tree rc {}".format(out.rc), omitted))
         return None
     entries = []
     for row in out.out.split(b"\0"):
@@ -890,26 +893,43 @@ def _ls_tree(git, store_root, treeish, notes, recursive=False):
         except UnicodeDecodeError:
             name = mode = otype = ""
         if not tab or not mode or not otype or not name:
-            notes.append("prior: an entry of {} does not parse; {}".format(treeish, _HELD_OMITTED))
+            notes.append("prior: an entry of {} does not parse; {}".format(treeish, omitted))
             return None
         entries.append((mode, otype, name))
     return entries
 
 
-def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
+def _show_listed(git, store_root, prefix, machine_rel, top, name, notes):
+    """Read one top-level machine-store file of the prior through _show_toml, after refusing it by its
+    listed kind in `top` (the (kind, name) pairs of the one HEAD machine-tree listing). A symlink lists as a
+    blob and git show returns its link target text, which can parse as TOML; a gitlink or a directory at
+    the name is no file either. Each omits the whole prior (+ note naming the name and kind, a link's mode
+    included), never a prior read from link text. A regular file of either mode (100644 or 100755) is read;
+    a name absent from `top` is left to _show_toml, which names it absent."""
+    found = sorted({kind for kind, entry in top if entry == name and kind != "blob"})
+    if found:
+        notes.append("prior: HEAD {} is a {}, not a blob; {}".format(name, " and a ".join(found), _PRIOR_OMITTED))
+        return None
+    return _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, name), name, notes)
+
+
+def _held_ids(git, store_root, machine_rel, prefix, manifest, records, top, notes):
     """`held`: every clean-series id the prior commit held, active or archived, worklog included, as
     {namespace: [[lo, hi], ...]} sorted, merged inclusive intervals, for the reserved-number exemption (a
     reserved number is skipped as an orphaned reservation's only where the prior commit held no record with
-    that id). The active type-index ids come from `records`; the active worklog is read in the shape the
-    HEAD manifest selects (worklog.toml, or the worklog/ entry names); the archive is every file of every
-    archive/<bucket>/ at HEAD: the archive.toml moved ids and worklog_moved spans, the bucket worklog
-    entries and the type-index rows. An id outside the clean grammar, the roster namespaces or TOML's
-    integer range is no clean number a reservation can hold, so it is left out. Returns the table, or None
-    (+ note) when any of these cannot be read, is committed as another entry type (a worklog/ or archive/
-    that is a file, a worklog.toml that is a directory, a symlink or gitlink at any source name, its mode
-    named) or an archive entry is not a bucket file; only
-    `held` is then omitted, so the exemption is cannot-evaluate and the rest of the prior stands. A source
-    absent at HEAD holds nothing. A span is kept as an interval, never expanded (F15)."""
+    that id). The active type-index ids come from `records`, which _reconstruct_prior builds only from
+    indices committed as regular files: a symlinked or gitlinked index omits the whole prior there, so
+    `held` is never built from a partial `records`. `top` is that function's one listing of the HEAD
+    machine tree, as (kind, name) pairs. The active worklog is read in the shape the HEAD manifest selects
+    (worklog.toml, or the worklog/ entry names); the archive is every file of every archive/<bucket>/ at
+    HEAD: the archive.toml moved ids and worklog_moved spans, the bucket worklog entries and the type-index
+    rows. An id outside the clean grammar, the roster namespaces or TOML's integer range is no clean number
+    a reservation can hold, so it is left out. Returns the table, or None (+ note) when a worklog or archive
+    source cannot be read, is committed as another entry type (a worklog/ or archive/ that is a file, a
+    worklog.toml that is a directory, a symlink or gitlink at any worklog or archive name, its mode named)
+    or an archive entry is not a bucket file; only `held` is then omitted, so the exemption is
+    cannot-evaluate and the rest of the prior stands. A worklog or archive source absent at HEAD holds
+    nothing. A span is kept as an interval, never expanded (F15)."""
     import _opf_worklog
     ceiling = (1 << 63) - 1
     spans = []
@@ -938,10 +958,6 @@ def _held_ids(git, store_root, machine_rel, prefix, manifest, records, notes):
     for rid in records:
         add_id(rid)
     base = "HEAD:{}{}".format(prefix, machine_rel)
-    listed = _ls_tree(git, store_root, base, notes)
-    if listed is None:
-        return None
-    top = [(_entry_kind(mode, otype), entry) for mode, otype, entry in listed]
 
     # A source committed as another entry type (a worklog/ or archive/ that is a file, a worklog.toml that
     # is a directory, any of them a symlink or a gitlink) is not absent: skipping it, or reading a symlink's
@@ -1045,9 +1061,15 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
     prior would falsely accuse the store); the note names what could not be read. `held` (_held_ids) is the
     one exception: it only narrows the reserved-number exemption, so when it cannot be read it alone is
     omitted (+ note), which makes that exemption cannot-evaluate and leaves the rest of the prior whole.
-    Returns the dict or None."""
-    manifest = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _MANIFEST_NAME),
-                         _MANIFEST_NAME, notes)
+    The HEAD machine tree is listed once, before any file is read: a manifest, version, counters, type-index
+    or imported-leaf file committed as a symlink, a gitlink or a directory omits the whole prior with a note
+    naming the file and its kind (_show_listed), and the same listing feeds _held_ids and the imported
+    baseline. Returns the dict or None."""
+    listed = _ls_tree(git, store_root, "HEAD:{}{}".format(prefix, machine_rel), notes, omitted=_PRIOR_OMITTED)
+    if listed is None:
+        return None
+    top = [(_entry_kind(mode, otype), entry) for mode, otype, entry in listed]
+    manifest = _show_listed(git, store_root, prefix, machine_rel, top, _MANIFEST_NAME, notes)
     if manifest is None:
         return None
     base = manifest.get(_opf_store.STANDARD_TOKEN)
@@ -1061,8 +1083,7 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
         notes.append("prior: HEAD manifest carries no [types] table; the prior committed snapshot is omitted")
         return None
 
-    version = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _VERSION_NAME),
-                        _VERSION_NAME, notes)
+    version = _show_listed(git, store_root, prefix, machine_rel, top, _VERSION_NAME, notes)
     if version is None:
         return None
     releases = version.get("release", [])
@@ -1071,8 +1092,7 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                      "omitted")
         return None
 
-    counters = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, _COUNTERS_NAME),
-                         _COUNTERS_NAME, notes)
+    counters = _show_listed(git, store_root, prefix, machine_rel, top, _COUNTERS_NAME, notes)
     if counters is None:
         return None
     counters_high = counters.get("counters", {})
@@ -1087,7 +1107,7 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
         if tname == "worklog":
             continue      # the worklog is a ledger (worklog.toml), never a type index; it carries no records
         idx_name = "{}{}".format(tname, _INDEX_SUFFIX)
-        idx = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, idx_name), idx_name, notes)
+        idx = _show_listed(git, store_root, prefix, machine_rel, top, idx_name, notes)
         if idx is None:
             return None
         rows = idx.get("record", [])
@@ -1126,7 +1146,7 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
                 records[rid] = (tname, state)
                 digests[rid] = digest
     prior = {"releases": releases, "counters_high": counters_high, "records": records, "digests": digests}
-    held = _held_ids(git, store_root, machine_rel, prefix, {"opf": base}, records, notes)
+    held = _held_ids(git, store_root, machine_rel, prefix, {"opf": base}, records, top, notes)
     if held is not None:
         prior["held"] = held
     # The imported baseline joins the prior only where the HEAD manifest ACTIVATES the series
@@ -1138,34 +1158,30 @@ def _reconstruct_prior(git, store_root, machine_rel, prefix, notes):
     # no-baseline CANNOT-EVALUATE instead. (An unborn HEAD keeps the empty-prior {} member: nothing
     # was committed at all, so the empty baseline is exact.)
     if _opf_check.imported_series_active(manifest):
-        imported = _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes)
+        imported = _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, top, notes)
         if imported is None:
             return None
         prior["imported"] = imported
     return prior
 
 
-def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, notes):
+def _reconstruct_imported(git, store_root, machine_rel, prefix, manifest, types_tbl, top, notes):
     """The prior imported baseline {imported id: canonical body digest} for the across-time immutability of
     the imported leaves (spec 8.3). The caller gates it on the HEAD manifest's activation flag. The leaf
     roster derives from the SAME authoritative type set the doctor grades (_opf_check._authoritative_types
     over the enabled modules and the declared [types]), so a HEAD manifest that omits a baseline type or
-    lists a disabled module type cannot shrink the baseline below the doctor's managed set. A leaf absent
-    from the HEAD machine-store tree contributes no
-    rows; a listed leaf that cannot be read or parsed, a non-array row list, or a row with no string id omits
-    the WHOLE prior, as for the clean files. Returns the dict, or None (omit + note)."""
-    listing = _run_git(git, store_root, ["ls-tree", "--name-only", "HEAD:{}{}".format(prefix, machine_rel)])
-    if not listing.completed or listing.rc != 0:
-        notes.append("prior: the machine store tree {} cannot be listed at HEAD; the prior committed snapshot "
-                     "is omitted".format(machine_rel))
-        return None
-    present = set(listing.out.decode("utf-8", "replace").splitlines())
+    lists a disabled module type cannot shrink the baseline below the doctor's managed set. `top` is the
+    caller's one listing of the HEAD machine-store tree, as (kind, name) pairs; a leaf absent from it
+    contributes no rows. A listed leaf committed as a symlink, a gitlink or a directory (_show_listed), a
+    leaf that cannot be read or parsed, a non-array row list, or a row with no string id omits the WHOLE
+    prior, as for the clean files. Returns the dict, or None (omit + note)."""
+    present = {entry for _kind, entry in top}
     enabled = _opf_check._authoritative_types(_opf_check._enabled_modules(manifest), types_tbl)
     imported = {}
     for name in sorted(_opf_store.imported_leaf_names(enabled)):
         if name not in present:
             continue
-        data = _show_toml(git, store_root, prefix, "{}/{}".format(machine_rel, name), name, notes)
+        data = _show_listed(git, store_root, prefix, machine_rel, top, name, notes)
         if data is None:
             return None
         member = "entry" if name == _opf_store.IMPORTED_WORKLOG_NAME else "record"
@@ -1288,19 +1304,21 @@ def self_test_isolated():
     toggle (the member absent while the series is inactive, the committed leaf rows, worklog entries
     included, under the engine's digest once it is active, every authoritative type's leaf read even where
     the HEAD manifest omits the type, and the whole prior omitted on a row with no id, a leaf that does not
-    read or parse, a row list that is not an array, a row that cannot be canonicalized, or a machine tree
-    that cannot be listed); and the prior's
-    `held` ids, the active worklog (both generations) and every archive bucket
-    file included, omitted alone with a note when an archive entry is not a bucket file, when a bucket file
-    or the active worklog.toml does not parse or holds a row table that is not an array, when the active
-    worklog.toml or the archive/ listing cannot be read, when the HEAD manifest's worklog generation is
-    unreadable, when the archive/, the active worklog.toml or, at generation 2, the worklog/ is committed as
-    another entry type, when a source is a symlink or a gitlink (regular-file controls beside them), and, at
-    generation 2, when the worklog/ listing cannot be read or holds a file or a directory that is not a
-    worklog entry; and the bounded capture feeding 128 KiB of stdin to a child that first writes 128 KiB,
-    without deadlock, run in a separate interpreter under a 30 s deadline so a deadlocking transport is red
-    rather than a hang. Judged ONLY on gather's RETURNED structure (never by grepping git's stdout for
-    verdicts).
+    read or parse, a row list that is not an array, a row that cannot be canonicalized, a leaf committed as
+    a symlink, or a machine tree that cannot be listed); and the prior's `held` ids, the active worklog
+    (both generations) and every archive bucket file included, omitted alone with a note when an archive
+    entry is not a bucket file, when a bucket file or the active worklog.toml does not parse or holds a row
+    table that is not an array, when the active worklog.toml or the archive/ listing cannot be read, when
+    the HEAD manifest's worklog generation is unreadable, when the archive/, the active worklog.toml or, at
+    generation 2, the worklog/ is committed as another entry type, when a worklog or archive source is a
+    symlink or a gitlink (regular-file controls beside them), and, at generation 2, when the worklog/
+    listing cannot be read or holds a file or a directory that is not a worklog entry; the whole prior
+    omitted with a note naming the mode when the manifest, version or counters ledger or an active type
+    index is a symlink, or the index a gitlink; a regular file of mode 100755 at a worklog, archive,
+    manifest or index name read whole; and the bounded capture feeding 128 KiB of stdin to a child that
+    first writes 128 KiB, without deadlock, run in a separate interpreter under a 30 s deadline so a
+    deadlocking transport is red rather than a hang. Judged ONLY on gather's RETURNED structure (never by
+    grepping git's stdout for verdicts).
     Returns 0 clean, 1 on a failed check, 2 on a harness error or when git is not on PATH: every vector
     gathers from a git fixture, so without git none of them runs, which is cannot-evaluate, never a
     clean exit a gate would read as the vectors having passed."""
@@ -1693,16 +1711,17 @@ def self_test_isolated():
                   and obs["prior"].get("imported") == {"imported:BI-1": leaf_digest,
                                                        "imported:WL-1": wl_digest}
                   and obs["prior"].get("held", {}).get("BI") == [[1, 1]])
-            # A failed imported-tree ENUMERATION omits the whole prior too, never reads as an empty tree:
-            # only the baseline's --name-only listing is forced to fail (every other git read, the held
-            # ids' ls-tree -z included, still succeeds), so the omission is attributable to that one leg
-            # (red when a failed listing leaves the committed leaves silently out of the baseline).
+            # A failed ENUMERATION of the machine tree the imported baseline reads omits the whole prior
+            # too, never reads as an empty tree: only the one listing of that tree is forced to fail (every
+            # other git read, the archive and worklog listings included, still succeeds), so the omission
+            # is attributable to that one leg (red when a failed listing leaves the committed leaves
+            # silently out of the baseline).
             _saved_run_git = globals()["_run_git"]
 
             def _fail_name_listing(git_bin, store_root, args, **kwargs):
-                if args[:2] == ["ls-tree", "--name-only"]:
+                if args == ["ls-tree", "-z", "HEAD:" + machine_rel]:
                     return _saved_run_git(git_bin, store_root,
-                                          ["ls-tree", "--name-only", "HEAD:no-such-tree"], **kwargs)
+                                          ["ls-tree", "-z", "HEAD:no-such-tree"], **kwargs)
                 return _saved_run_git(git_bin, store_root, args, **kwargs)
 
             globals()["_run_git"] = _fail_name_listing
@@ -1711,7 +1730,26 @@ def self_test_isolated():
             finally:
                 globals()["_run_git"] = _saved_run_git
             check("homes2-prior-imported-unlistable-tree-omitted",
-                  "prior" not in obs and any("cannot be listed at HEAD" in n for n in notes))
+                  "prior" not in obs and any(n.startswith("prior: could not list HEAD:{} (git ls-tree rc".format(
+                      machine_rel)) and n.endswith(_PRIOR_OMITTED) for n in notes))
+            # An imported leaf committed as a symlink lists as a blob and git show returns its link text,
+            # which parses as TOML with no rows: it omits the whole prior with a note naming the leaf and
+            # its mode, never a baseline that silently lacks the leaf's rows (red when the leaf's listed
+            # kind is not checked before it is read).
+            os.unlink(str(homes2_repo / leaf_rel))
+            os.symlink("schema = 1", str(homes2_repo / leaf_rel))
+            _git_setup(homes2_repo, home, "add", "-A")
+            _git_setup(homes2_repo, home, "commit", "-m", "an imported leaf committed as a symlink")
+            obs, notes = gather(_Res(homes2_repo, machine_rel))
+            check("homes2-prior-imported-symlinked-leaf-omitted",
+                  "prior" not in obs and any(
+                      "prior: HEAD backlog_item.imported.index.toml is a symlink (mode 120000), not a blob" in n
+                      and n.endswith(_PRIOR_OMITTED) for n in notes))
+            os.unlink(str(homes2_repo / leaf_rel))
+            _write(homes2_repo, leaf_rel, 'schema = 1\n\n' + leaf_row.replace(
+                '[[record]]\n', '[[record]]\nid = "imported:BI-1"\n'))
+            _git_setup(homes2_repo, home, "add", "-A")
+            _git_setup(homes2_repo, home, "commit", "-m", "restore the imported leaf as a regular file")
             # The imported leaf roster derives from the SAME authoritative type set the doctor
             # grades, never the raw [types] table alone: a HEAD manifest that (non-conformingly) omits
             # the baseline backlog_item type still contributes its committed imported leaf to the
@@ -1798,7 +1836,8 @@ def self_test_isolated():
         gen2_files = tuple((rel, body) for rel, body in held_files if rel != _WORKLOG_NAME) + (
             ("worklog/WL-3.toml", 'id = "WL-3"\n'), ("worklog/WL-4.toml", 'id = "WL-4"\n'))
 
-        def held_case(label, relpath=None, text=None, worklog=None, remove=None, symlink=None, gitlink=None):
+        def held_case(label, relpath=None, text=None, worklog=None, remove=None, symlink=None, gitlink=None,
+                      relink=None, executable=None):
             repo = base / ("held-" + label)
             repo.mkdir()
             _git_setup(repo, home, "init")
@@ -1823,7 +1862,14 @@ def self_test_isolated():
                 link = repo / machine_rel / symlink[0]
                 link.parent.mkdir(parents=True, exist_ok=True)
                 os.symlink(symlink[1], str(link))
+            if relink is not None:
+                link = repo / machine_rel / relink
+                body = link.read_text(encoding="utf-8")
+                link.unlink()
+                os.symlink(body, str(link))
             _git_setup(repo, home, "add", "-A")
+            if executable is not None:
+                _git_setup(repo, home, "update-index", "--chmod=+x", "{}/{}".format(machine_rel, executable))
             if gitlink is not None:
                 _git_setup(repo, home, "update-index", "--add", "--cacheinfo",
                            "160000,{},{}/{}".format("1" * 40, machine_rel, gitlink))
@@ -1902,6 +1948,39 @@ def self_test_isolated():
             obs, notes = held_case("regular-file-" + label, rel, dict(held_files)[rel], remove=rel)
             check("prior-held-case-regular-file-" + label, (obs.get("prior") or {}).get("held") == held_all
                   and not any("(mode " in n for n in notes))
+        # A top-level file of the prior (the manifest, version and counters ledgers, an active type index)
+        # committed as a symlink lists as a blob too, and git show returns its link text. Each omits the
+        # WHOLE prior with a note naming the file and its mode, never a prior read from the link text and
+        # never `held` built from a partial `records`. The link text is the file's own regular content, so
+        # a reader that took it would rebuild the very prior the regular file gives: the omission is the
+        # mode's alone. A gitlinked index (git show already fails on it) is named by its mode too.
+        index_name = "backlog_item" + _INDEX_SUFFIX
+        for label, relink, sub, needle in (
+                ("symlink-manifest", _MANIFEST_NAME, None,
+                 "prior: HEAD {} is a symlink (mode 120000), not a blob".format(_MANIFEST_NAME)),
+                ("symlink-version", _VERSION_NAME, None,
+                 "prior: HEAD {} is a symlink (mode 120000), not a blob".format(_VERSION_NAME)),
+                ("symlink-counters", _COUNTERS_NAME, None,
+                 "prior: HEAD {} is a symlink (mode 120000), not a blob".format(_COUNTERS_NAME)),
+                ("symlink-type-index", index_name, None,
+                 "prior: HEAD {} is a symlink (mode 120000), not a blob".format(index_name)),
+                ("gitlink-type-index", None, index_name,
+                 "prior: HEAD {} is a gitlink (mode 160000), not a blob".format(index_name))):
+            obs, notes = held_case(label, remove=sub, gitlink=sub, relink=relink)
+            check("prior-omitted-" + label, "prior" not in obs
+                  and any(needle in n and n.endswith(_PRIOR_OMITTED) for n in notes))
+        # The executable bit is no other entry type: a source committed as a regular file of mode 100755
+        # (the mode read back from HEAD, so the control cannot pass on a 100644 commit) is read like any
+        # regular file, and the prior and `held` stay whole.
+        for label, rel in (("active-worklog", _WORKLOG_NAME), ("bucket-worklog", bucket + "worklog.toml"),
+                           ("manifest", _MANIFEST_NAME), ("type-index", index_name)):
+            obs, notes = held_case("executable-" + label, executable=rel)
+            mode = _run_git(git, str(base / ("held-executable-" + label)),
+                            ["ls-tree", "HEAD", "{}/{}".format(machine_rel, rel)])
+            check("prior-held-case-executable-" + label, mode.completed and mode.rc == 0
+                  and mode.out.startswith(b"100755 blob ")
+                  and (obs.get("prior") or {}).get("records", {}).get("BI-1") == ("backlog_item", "open")
+                  and (obs.get("prior") or {}).get("held") == held_all and not any("(mode " in n for n in notes))
         for label, relpath, text, needle in (
                 ("unparseable-bucket-archive", bucket + "archive.toml", "not toml [\n",
                  "prior: archive/2026/archive.toml at HEAD is not valid TOML"),
@@ -1946,6 +2025,7 @@ def self_test_isolated():
           "included, and an unreadable leaf or tree omitting the whole prior; an inactive HEAD carries no "
           "baseline member; the ids HEAD held, worklog "
           "and archive included, and an unreadable or malformed archive or worklog omitting them alone; "
+          "a symlinked or gitlinked manifest, ledger, index or imported leaf omitting the whole prior; "
           "bounded stdin transport)")
     return 0
 
