@@ -4,8 +4,9 @@ alwaysApply: true
 
 # Keep internal paths out of published artefacts
 
-A published artefact names or links no path the project declares internal, that is, not part of what it
-publishes. Naming a published file, such as a generator that is itself published, is not a breach. The
-project declares which paths it publishes and which are internal, and keeps a deterministic gate that fails a
+A published artefact names or links no path that the project's declaration lists as internal. Naming a
+published path, such as a generator or a folder that is itself published, is not a breach. The project
+declares which paths it publishes and which are internal, and keeps a deterministic gate that fails a
 published artefact naming an internal path; a reference that must appear is carried by a reviewed allowlist
-entry that names its reason.
+entry that names its reason. A path on neither list is not a breach until the declaration lists it as
+internal. The project keeps the declaration current as paths are added, moved or removed.

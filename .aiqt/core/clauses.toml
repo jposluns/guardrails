@@ -6034,9 +6034,9 @@ clause-id = "pubref.1"
 corpus-id = "pubref"
 source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
 start-line = 12
-end-line = 13
-canonical-text = "A published artefact names or links no path the project declares internal, that is, not part of what it\npublishes."
-source-digest = "8880a61f486f063a2f761955f08f85fb49ab368ab39077b56c593d0a8cf32738"
+end-line = 12
+canonical-text = "A published artefact names or links no path that the project's declaration lists as internal."
+source-digest = "787958b1226c7f28064d4b6394a76bb86782a5507deddf97f1517f1dea78e733"
 
 [[clause]]
 clause-id = "pubref.2"
@@ -6044,8 +6044,8 @@ corpus-id = "pubref"
 source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
 start-line = 13
 end-line = 15
-canonical-text = "The\nproject declares which paths it publishes and which are internal, and keeps a deterministic gate that fails a\npublished artefact naming an internal path;"
-source-digest = "8880a61f486f063a2f761955f08f85fb49ab368ab39077b56c593d0a8cf32738"
+canonical-text = "The project\ndeclares which paths it publishes and which are internal, and keeps a deterministic gate that fails a\npublished artefact naming an internal path;"
+source-digest = "787958b1226c7f28064d4b6394a76bb86782a5507deddf97f1517f1dea78e733"
 
 [[clause]]
 clause-id = "pubref.3"
@@ -6054,13 +6054,31 @@ source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
 start-line = 15
 end-line = 16
 canonical-text = "a reference that must appear is carried by a reviewed allowlist\nentry that names its reason."
-source-digest = "8880a61f486f063a2f761955f08f85fb49ab368ab39077b56c593d0a8cf32738"
+source-digest = "787958b1226c7f28064d4b6394a76bb86782a5507deddf97f1517f1dea78e733"
 
 [[clause]]
 clause-id = "pubref.4"
 corpus-id = "pubref"
 source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
-start-line = 13
+start-line = 12
 end-line = 13
-canonical-text = "Naming a published file, such as a generator that is itself published, is not a breach."
-source-digest = "8880a61f486f063a2f761955f08f85fb49ab368ab39077b56c593d0a8cf32738"
+canonical-text = "Naming a\npublished path, such as a generator or a folder that is itself published, is not a breach."
+source-digest = "787958b1226c7f28064d4b6394a76bb86782a5507deddf97f1517f1dea78e733"
+
+[[clause]]
+clause-id = "pubref.5"
+corpus-id = "pubref"
+source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
+start-line = 16
+end-line = 17
+canonical-text = "A path on neither list is not a breach until the declaration lists it as\ninternal."
+source-digest = "787958b1226c7f28064d4b6394a76bb86782a5507deddf97f1517f1dea78e733"
+
+[[clause]]
+clause-id = "pubref.6"
+corpus-id = "pubref"
+source-path = ".aiqt/core/rules/security-secc-published-no-internal-refs.md"
+start-line = 17
+end-line = 17
+canonical-text = "The project keeps the declaration current as paths are added, moved or removed."
+source-digest = "787958b1226c7f28064d4b6394a76bb86782a5507deddf97f1517f1dea78e733"

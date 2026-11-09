@@ -1,0 +1,33 @@
+# .aiqt/core/published-paths.toml
+#
+# This repository's declaration of published and internal paths, which the rule
+# security-secc-published-no-internal-refs (pubref) requires. The published set is every path in the
+# [[sources]] array of .aiqt/manifest.toml. A path on neither list is not a breach until this file
+# declares it internal. Keep this file current whenever a tracked path is added, moved or removed, the
+# manifest's [[sources]] change, or the leak gate's host-path pattern changes.
+#
+# Internal here means a location that must never appear in this public repository at all: the private
+# record store, this host's own directories, and operator and worker scratch locations. A tracked file
+# outside [[sources]] is not internal; it may be named. The internal set is declared by reference to the
+# leak gate (tools/check_leaks.py): every location its structural pattern labelled "absolute host path"
+# matches, that is, an absolute path under one of this host's roots. The roots are not restated here,
+# because the leak gate scans this file and would fail on them.
+#
+# Only that one pattern serves as the internal list. The gate's hashed denylist (tools/leak-hashes.txt)
+# holds hashes of internal terms, not paths, and its other structural patterns match private network
+# addresses, token shapes and account id shapes, not locations. A host location outside the pattern's
+# roots is not declared internal by this file.
+#
+# The leak gate fails any file in the working tree, published or not, that names such a location on a
+# line without the gate's leak-allow marker. That marker exempts a line without stating a reason, so it is
+# not the reviewed allowlist entry the rule asks for.
+
+version = 1
+
+[published]
+manifest = ".aiqt/manifest.toml"
+array = "sources"
+
+[internal]
+gate = "tools/check_leaks.py"
+structural-patterns = ["absolute host path"]
