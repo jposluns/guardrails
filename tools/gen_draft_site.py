@@ -3075,21 +3075,12 @@ def _self_test():
     # One row per layer of hook_count's read, each failing when only its layer is removed. The race each
     # layer guards is driven in process: os.lstat, os.open or os.close is replaced, for 1 call, by a
     # stand-in that acts on the manifest path (or the descriptor opened for it) and calls the real function
-    # for every other path or descriptor.
+    # for every other path or descriptor. Each stand-in is patched under its literal attribute name, and the
+    # patch restores the real function when its with statement ends.
     import contextlib
+    from unittest import mock
     real_lstat, real_open, real_close = os.lstat, os.open, os.close
     one_hook = '[[hook]]\nplatform = "claude-code"\n'
-
-    @contextlib.contextmanager
-    def os_replaced(**stand_ins):
-        saved = {name: getattr(os, name) for name in stand_ins}
-        for name, stand_in in stand_ins.items():
-            setattr(os, name, stand_in)
-        try:
-            yield
-        finally:
-            for name, real in saved.items():
-                setattr(os, name, real)
 
     def hooks_tree(tmp):
         """The manifest path under tmp (its parent directories made) and a valid manifest beside it."""
@@ -3118,7 +3109,7 @@ def _self_test():
                 if os.fspath(path) == os.fspath(target):
                     opened.append(os.fspath(path))
                 return real_open(path, *args, **kwargs)
-            with os_replaced(open=open_recorder):
+            with mock.patch.object(os, "open", open_recorder):
                 message = refused("hooks/lstat-refuses-before-open", hook_count, tmp)
         expect("hooks/lstat-refuses-before-open", not opened and "not a regular file" in message,
                (opened, message))
@@ -3129,7 +3120,7 @@ def _self_test():
         with tempfile.TemporaryDirectory(prefix="gen-draft-site-hooks-") as tmp:
             target, real = hooks_tree(tmp)
             os.symlink(real, target)
-            with os_replaced(lstat=lstat_says_regular(target, real)):
+            with mock.patch.object(os, "lstat", lstat_says_regular(target, real)):
                 refused("hooks/nofollow-refuses-swapped-symlink", hook_count, tmp)
 
     def row_nonblock_opens_swapped_fifo():
@@ -3164,7 +3155,7 @@ def _self_test():
             helper = threading.Thread(target=unblock, daemon=True)
             helper.start()
             try:
-                with os_replaced(lstat=lstat_says_regular(target, real)):
+                with mock.patch.object(os, "lstat", lstat_says_regular(target, real)):
                     message = refused("hooks/nonblock-opens-swapped-fifo", hook_count, tmp)
             finally:
                 done.set()
@@ -3199,7 +3190,7 @@ def _self_test():
             def close_recorder(fd):
                 closes.append(fd)
                 real_close(fd)
-            with os_replaced(open=open_fifo_instead, close=close_recorder):
+            with mock.patch.object(os, "open", open_fifo_instead), mock.patch.object(os, "close", close_recorder):
                 message = refused("hooks/fstat-refuses-opened-fifo", hook_count, tmp)
         expect("hooks/fstat-refuses-opened-fifo", len(opened) == 1 and "the opened entry" in message,
                (opened, message))
@@ -3224,7 +3215,7 @@ def _self_test():
             def close_recorder(fd):
                 closes.append(fd)
                 real_close(fd)
-            with os_replaced(open=open_recorder, close=close_recorder):
+            with mock.patch.object(os, "open", open_recorder), mock.patch.object(os, "close", close_recorder):
                 got = hook_count(tmp)
         expect("hooks/descriptor-closed-once-on-success",
                got == 1 and len(opened) == 1 and [fd for fd in closes if fd in opened] == opened,
