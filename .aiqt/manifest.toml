@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "fcb16dcde90077b4478a8d5443e5f227ad6dae45596dbf76da2c02b814bfed13"
+tree-sha256 = "39df472431ac5d00882f713d0bf6dc3accdcd52096637ac778ccaf2fe33a8b2b"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -81,8 +81,8 @@ sha256 = "d6e9ab43b1c98a9b5cf7023b7b43cfd447607673e6128bfd06c4812551d32c7e"
 
 [[sources]]
 path = ".aiqt/core/hooks/manifest.toml"
-bytes = 498333
-sha256 = "eadd7b9ce01ea01a711f8176703247ef4f3aae4ce4a4b4df0999ff7d205906b2"
+bytes = 498876
+sha256 = "59f11d3f6e7b25a5431cc387a1f27eaa5823a349b35633e3b77f2fdfa7eea1dc"
 
 [[sources]]
 path = ".aiqt/core/hooks/preview.toml"
@@ -826,8 +826,8 @@ sha256 = "0b38d8d8ebf794ff90d1966dd4032ceb40562575431b9dac1507e41f899aa16f"
 
 [[sources]]
 path = ".aiqt/enforceability.json"
-bytes = 1125728
-sha256 = "d69cb533796d003d362b6d5511ee14cdf28e92a95c71dbb2e27960f577999e1d"
+bytes = 1126271
+sha256 = "08c3b3db8fd64494c08764e8526537bb792fd26b72ee0b2612a3d1c508adbbf0"
 
 [[sources]]
 path = ".aiqt/frozen.json"
@@ -2391,8 +2391,8 @@ sha256 = "854403d7fd810507f024d0ff23a6db4c8bcf8978ea92210d7536a247d5c0fd28"
 
 [[sources]]
 path = "ENFORCEMENT.md"
-bytes = 660694
-sha256 = "e19a8faed85c619030fc3ca577a50484c7c5dbc5d3b2e5bd7e85326eecfde7ad"
+bytes = 661237
+sha256 = "5b14c5ce986c3337c9e5b2c5abed2ecb1ccc2997f0ef0945221b3c29a11b4d45"
 
 [[sources]]
 path = "GEMINI.md"
@@ -3951,8 +3951,8 @@ sha256 = "dd0e5f2a6402329e70ad8e81e5cd63557683e24044cd3eb16686a60eaf81cae6"
 
 [[sources]]
 path = "site/enforcement.html"
-bytes = 721504
-sha256 = "42c2eb6c1b9c506f71240454c58844bf2ffc49259e2dbae7a51ba75f73960db5"
+bytes = 722047
+sha256 = "078b8df42168fdb643f45967343e1f96bb5013fbed5d216729ce672a965bf330"
 
 [[sources]]
 path = "site/evidence.html"
