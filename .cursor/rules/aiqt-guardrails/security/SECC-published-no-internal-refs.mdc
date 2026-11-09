@@ -9,4 +9,6 @@ published path, such as a generator or a folder that is itself published, is not
 declares which paths it publishes and which are internal, and keeps a deterministic gate that fails a
 published artefact naming an internal path; a reference that must appear is carried by a reviewed allowlist
 entry that names its reason. A path on neither list is not a breach until the declaration lists it as
-internal. The project keeps the declaration current as paths are added, moved or removed.
+internal. The declaration keeps the two lists disjoint; where a path is on both, the internal listing
+governs, so naming it is a breach. The project keeps the declaration current as paths are added, moved or
+removed.

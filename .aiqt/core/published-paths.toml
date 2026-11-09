@@ -18,9 +18,14 @@
 # addresses, token shapes and account id shapes, not locations. A host location outside the pattern's
 # roots is not declared internal by this file.
 #
-# The leak gate fails any file in the working tree, published or not, that names such a location on a
-# line without the gate's leak-allow marker. That marker exempts a line without stating a reason, so it is
-# not the reviewed allowlist entry the rule asks for.
+# The two lists are kept disjoint: every [[sources]] path is relative to the repository root, and none
+# matches the pattern that defines the internal set. Where a reference could be read as both, such as an
+# absolute host path to a published file, the internal listing governs and naming it is a breach.
+#
+# The leak gate's scope is every file the gate scans: the working tree except the .git, node_modules and
+# __pycache__ subtrees. It fails any such file, published or not, that names such a location on a line
+# without the gate's leak-allow marker; a file inside those subtrees is not scanned. That marker exempts a
+# line without stating a reason, so it is not the reviewed allowlist entry the rule asks for.
 
 version = 1
 

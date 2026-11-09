@@ -94,11 +94,11 @@
 #                        files 117926 -> 118464; managed block 360 and file headers 16136 unchanged. This queued
 #                        seed fold measured 538 units against the 559-unit estimate. The ratchet rises by the
 #                        measured delta, 134991 + 538 = 135529, rather than drawing on the estimate.
-#                        Raised 135529 -> 136311 when the rule security-secc-published-no-internal-refs (pubref,
-#                        applies writes-code) was added: measured PACK 135159 at the base 189a280e -> 135941
-#                        (+782 units); rule files 118536 -> 119194 (+658), file headers 16263 -> 16387 (+124, one
+#                        Raised 135529 -> 136438 when the rule security-secc-published-no-internal-refs (pubref,
+#                        applies writes-code) was added: measured PACK 135159 at the base 189a280e -> 136068
+#                        (+909 units); rule files 118536 -> 119321 (+785), file headers 16263 -> 16387 (+124, one
 #                        more loaded file, 134 -> 135); managed block 360 unchanged. The ratchet rises by exactly
-#                        that measured delta, 135529 + 782 = 136311, so the 370 units PACK had under the ratchet
+#                        that measured delta, 135529 + 909 = 136438, so the 370 units PACK had under the ratchet
 #                        at the base are kept. Recorded approval: the maintainer, 2026-11-08, a standing approval
 #                        to raise the ratchet by exactly the measured delta of a change.
 #   ceiling              a reported PACK figure; not enforced, and PACK currently exceeds it. Its value
@@ -106,7 +106,7 @@
 #                        128358 ratchet raise; it was not raised with it.
 #   claude-code-version  the Claude Code build whose loading behaviour the gate models.
 #   binary-sha256        the SHA-256 of that build's binary.
-ratchet = 136311
+ratchet = 136438
 ceiling = 90000
 claude-code-version = "2.1.287"
 binary-sha256 = "3920489a5109cff5786a1a392c25277408ff22bc796d5edb9c16a60e5a1718f0"
