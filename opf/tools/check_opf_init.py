@@ -77,10 +77,12 @@ _PATH_LIMIT = ("the scan checks the root's current path only (a store committed 
 # test-only, which this gate trusts and does not check.
 _HOMES_SELFTEST_EXEMPT = (
     "_gen2_cli_vectors",
+    "_homes_module_binding_findings",
     "_homes_module_summary",
     "_homes_rule_call",
     "_homes_rule_unit_findings",
     "_homes_rule_violations",
+    "_init_binding_allowed",
     "_init_callee_spellings",
     "_is_run_init_call",
     "_self_test",
@@ -361,26 +363,29 @@ _ROUTE_EXTERNAL_IMPORTS = dict(
 # DISCOVERS every REFERENCE to run_init_operation in the sources it is given (every module-level
 # statement and every module-level function, nested functions and lambdas included; the only
 # unscanned bodies are the functions a module's own _HOMES_SELFTEST_EXEMPT registry declares,
-# trusted to be test-only and never checked for reachability) and is fail-closed over FORM:
-# a reference that is not the callee of a direct call of the imported name (an alias, a getattr
+# trusted to be test-only and never checked for reachability) and is fail-closed over FORM: a
+# reference that is not the callee of a direct call of the imported name (an alias, a getattr
 # string, a functools.partial, a __call__ spelling, a rebinding, a passed value) is a finding, and
 # each direct call must pass homes2 as exactly <alias>.init_writes_homes2() with no arguments and
-# no * or ** splat, where <alias> is a name the module binds with a module-level `import
-# _opf_store [as alias]` (in the module body or a module-level try). A module-level binding of
-# that alias other than its import, or a global declaration of it, is a finding in any unit, and
-# so is a parameter or local of that name in the calling unit; a rebinding by a spelling this
-# scan does not read (listed in _homes_rule_violations' docstring) is a disclosed residual. The
-# production unit holding such a call must name SUPPORTED_HOMES nowhere -- not as a name, not as
-# an attribute, and not as the string "SUPPORTED_HOMES" (which a getattr read would carry). No
-# production code in any scanned module may bind init_writes_homes2 or SUPPORTED_HOMES
-# (assignment to a name or an attribute, a del, an import alias, a def, a class, a parameter, a
-# loop or with or except target), write any attribute of a store alias, reach a store alias's
-# namespace through setattr, delattr, vars(<alias>) or <alias>.__dict__, or carry the exact
-# string "init_writes_homes2" (a dynamic rebinding would ride it); the one allowed binding is the
-# store module's own module-level definition. The rows below are the minimum PRESENCE
-# roster: each named function must still exist exactly once at module level and call
-# run_init_operation exactly once, so a required entry renamed or dropped stays a finding even
-# though discovery holds whatever replaced it. Rows are (file in this directory, function).
+# no * or ** splat, where <alias> is a name the module binds with a module-level `import _opf_store
+# [as alias]` (in the module body or a module-level try). The module-level import of
+# run_init_operation must be unaliased, so no string other than "run_init_operation" reaches the
+# callee. A module-level binding of the store alias or of the callee's name other than its one
+# import (a match capture, a with target, a type alias, a later def or import, any form the one
+# binding-name function reads), or a global declaration of either, is a finding in any unit, and so
+# is any binding of either name in the calling unit; a rebinding by a spelling this scan does not
+# read (listed in _homes_rule_violations' docstring) is a disclosed residual. The production unit
+# holding such a call must name SUPPORTED_HOMES nowhere -- not as a name, not as an attribute, and
+# not as the string "SUPPORTED_HOMES" (which a getattr read would carry). No production code in any
+# scanned module may bind init_writes_homes2 or SUPPORTED_HOMES (assignment to a name or an
+# attribute, a del, an import alias, a def, a class, a parameter, a loop, with, except or match
+# target, a type alias), write any attribute of a store alias, reach a store alias's namespace
+# through setattr, delattr, vars(<alias>) or <alias>.__dict__, or carry the exact string
+# "init_writes_homes2" (a dynamic rebinding would ride it); the one allowed binding is the store
+# module's own module-level definition. The rows below are the minimum PRESENCE roster: each named
+# function must still exist exactly once at module level and call run_init_operation exactly once,
+# so a required entry renamed or dropped stays a finding even though discovery holds whatever
+# replaced it. Rows are (file in this directory, function).
 _HOMES_RULE_SITES = (
     ("_opf_adopt_apply.py", "_init_store_run"),
     ("_opf_init_operation.py", "init_operation"),
@@ -432,14 +437,15 @@ def _homes_exempt_registry(tree):
     other_binds = [node for node in ast.walk(tree)
                    if _binds_name(node, _HOMES_EXEMPT_NAME)
                    and not any(node is stmt for stmt in statements)]
+    lines = _line_map([tree]) if other_binds else {}
     if not statements:
         if other_binds:
             return None, "bound outside a single module-level registry assignment (line {})".format(
-                other_binds[0].lineno)
+                lines[id(other_binds[0])])
         return (), None
     if other_binds:
         return None, "bound again outside the registry statement (line {})".format(
-            other_binds[0].lineno)
+            lines[id(other_binds[0])])
     if len(statements) > 1:
         return None, "declared more than once (lines {})".format(
             ", ".join(str(stmt.lineno) for stmt in statements))
@@ -574,18 +580,21 @@ def _write_positions(target):
 
 
 def _binds_name(node, name):
-    """True when `node` BINDS `name`: an assignment (plain, augmented, annotated or walrus) or a
-    del whose write position is that Name or that Attribute of anything, an import alias, a def,
-    class or parameter of that name, a loop, with or except target, or a global/nonlocal
-    declaration. Reading or calling it is not a binding."""
+    """True when `node` BINDS `name`. The names a statement or clause binds come from the one
+    complete binding-name function, _route_binding_names (every assignment form, loop, with,
+    except and comprehension targets, import aliases, def and class names, type aliases and type
+    parameters, match captures, a match star and a mapping rest, global and nonlocal), so this
+    rule never keeps a second, shorter list. Two writes that bind no NAME are added here because
+    the rule's names must not be written through them either: a parameter of that name (a def's
+    or a lambda's), and an assignment or del whose write position is that Attribute of anything
+    or whose subscript container is that Name. Reading or calling it is not a binding."""
+    if name in _route_binding_names(node):
+        return True
     for target in _bind_targets(node):
         for sub in _write_positions(target):
             if ((isinstance(sub, ast.Name) and sub.id == name)
                     or (isinstance(sub, ast.Attribute) and sub.attr == name)):
                 return True
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        if node.name == name:
-            return True
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         args = node.args
         for arg in (args.posonlyargs + args.args + args.kwonlyargs
@@ -593,14 +602,21 @@ def _binds_name(node, name):
                     + ([args.kwarg] if args.kwarg else [])):
             if arg.arg == name:
                 return True
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-        return any((alias.asname or alias.name).split(".")[0] == name
-                   for alias in node.names)
-    if isinstance(node, (ast.Global, ast.Nonlocal)):
-        return name in node.names
-    if isinstance(node, ast.ExceptHandler):
-        return node.name == name
     return False
+
+
+def _line_map(roots):
+    """Line numbers for every node under `roots`, keyed by id: a node without its own lineno (a
+    with item, a comprehension, a match case, an argument list) takes the line of the nearest
+    enclosing node that has one, so no finding can fail on a node the parser left unnumbered."""
+    lines = {}
+    stack = [(root, getattr(root, "lineno", 0)) for root in roots]
+    while stack:
+        node, inherited = stack.pop()
+        line = getattr(node, "lineno", None) or inherited
+        lines[id(node)] = line
+        stack.extend((child, line) for child in ast.iter_child_nodes(node))
+    return lines
 
 
 def _protected_bind_allowed(fname, unit_name, node, name):
@@ -626,27 +642,29 @@ def _is_store_namespace_handle(node, store_aliases):
             and isinstance(node.value, ast.Name) and node.value.id in store_aliases)
 
 
-def _store_write_findings(fname, label, node, store_aliases):
-    """Findings for one node that writes THROUGH the store module object: an assignment or del
-    whose write position is an attribute of a store alias or an item of vars(<alias>) or
-    <alias>.__dict__, a setattr or delattr on a store alias or with a rule-name string, or a raw
-    namespace handle bound to a name (which a later write would ride). A read-only use such as
-    dict(vars(<alias>)) or a handle passed into a callee is not a finding here; the callee's own
-    writes are scanned where its source is handed in."""
+def _store_write_findings(fname, label, node, store_aliases, line):
+    """Findings for one node, at `line`, that writes THROUGH the store module object: an
+    assignment or del whose write position is an attribute of a store alias or an item of
+    vars(<alias>) or <alias>.__dict__, a setattr or delattr on a store alias or with a rule-name
+    string, or a raw namespace handle bound to a name by a plain, annotated or walrus assignment
+    (which a later write would ride). A read-only use such as dict(vars(<alias>)) or a handle
+    passed into a callee is not a finding here; the callee's own writes are scanned where its
+    source is handed in."""
     found = []
     for target in _bind_targets(node):
         for sub in _write_positions(target):
             if (isinstance(sub, ast.Attribute) and sub.attr != "__dict__"
                     and isinstance(sub.value, ast.Name) and sub.value.id in store_aliases):
                 found.append("{}: {} writes an attribute of the store module (line {})".format(
-                    fname, label, node.lineno))
+                    fname, label, line))
             elif _is_store_namespace_handle(sub, store_aliases):
                 via = "vars()" if isinstance(sub, ast.Call) else "__dict__"
                 found.append("{}: {} writes into the store module's namespace through {} "
-                             "(line {})".format(fname, label, via, node.lineno))
-    if isinstance(node, ast.Assign) and _is_store_namespace_handle(node.value, store_aliases):
+                             "(line {})".format(fname, label, via, line))
+    if (isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None
+            and _is_store_namespace_handle(node.value, store_aliases)):
         found.append("{}: {} binds a raw handle on the store module's namespace (line {})"
-                     .format(fname, label, node.lineno))
+                     .format(fname, label, line))
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
         if node.func.id in ("setattr", "delattr"):
             hit = (node.args and isinstance(node.args[0], ast.Name)
@@ -655,12 +673,92 @@ def _store_write_findings(fname, label, node, store_aliases):
                           and node.args[1].value in ("init_writes_homes2", "SUPPORTED_HOMES"))
             if hit:
                 found.append("{}: {} rebinds a store module attribute through {} (line {})"
-                             .format(fname, label, node.func.id, node.lineno))
+                             .format(fname, label, node.func.id, line))
     return found
 
 
-def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_names, init_aliases,
-                              store_imports=frozenset()):
+def _rebind_finding(fname, label, name, line, store_aliases):
+    """The finding for a rebinding of a store alias or of a name the module's run_init_operation
+    import binds, at module level or through a global declaration."""
+    if name in store_aliases:
+        return ("{}: {} rebinds the store module alias {} at module level or through a global "
+                "declaration (line {}); the rule must be read through the module-level "
+                "import".format(fname, label, name, line))
+    return ("{}: {} rebinds the run_init_operation import {} at module level or through a "
+            "global declaration (line {}); a direct call is recognized only through the one "
+            "module-level import".format(fname, label, name, line))
+
+
+def _init_binding_allowed(node, name, direct_names, init_aliases):
+    """True when the module-top-level `node` binds `name` only by the one form the rule reads
+    as the callee's spelling: an unaliased or aliased `from _opf_init_operation import
+    run_init_operation` (the alias itself is reported separately), a `def run_init_operation`
+    (the defining module), or an `import _opf_init_operation [as name]`."""
+    if isinstance(node, ast.ImportFrom):
+        bound = [alias for alias in node.names if (alias.asname or alias.name) == name]
+        return (name in direct_names and node.module == "_opf_init_operation"
+                and node.level == 0 and bool(bound)
+                and all(alias.name == "run_init_operation" for alias in bound))
+    if isinstance(node, ast.Import):
+        bound = [alias for alias in node.names
+                 if (alias.asname or alias.name.split(".")[0]) == name]
+        return (name in init_aliases and bool(bound)
+                and all(alias.name == "_opf_init_operation" for alias in bound))
+    return (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and name == "run_init_operation" == node.name and name in direct_names)
+
+
+def _homes_module_binding_findings(fname, tree, store_aliases, direct_names, init_aliases):
+    """Findings for the module namespace as a whole: every node whose bindings land there (the
+    module body, module-level compound statements, module-top-level def and class statements and
+    their definition-time expressions; _module_scope_nodes) is read with the one complete
+    binding-name function, so a match capture, a with target, a type alias, an annotated
+    assignment, a def, an import or any other binding of a store alias other than its import
+    statement is a finding, and so is any binding of a name the run_init_operation import binds
+    other than the first module-top-level statement that binds it in the form the rule reads (a
+    later def or import of that name rebinds the callee every call site then reaches). A
+    module-level `from _opf_init_operation import run_init_operation as <alias>` is itself a
+    finding: with the import unaliased, a lookup by string (getattr on the module, globals())
+    can only spell "run_init_operation", which the reference check already reports."""
+    found = []
+    label = "module-level code"
+    lines = _line_map(tree.body)
+    for node in tree.body:
+        if (isinstance(node, ast.ImportFrom) and node.module == "_opf_init_operation"
+                and node.level == 0):
+            for alias in node.names:
+                if alias.name == "run_init_operation" and alias.asname not in (
+                        None, "run_init_operation"):
+                    found.append("{}: {} imports run_init_operation under the alias {} (line {}); "
+                                 "the module-level import must be unaliased".format(
+                                     fname, label, alias.asname, lines[id(node)]))
+    store_imports = set(map(id, _store_import_nodes(tree)))
+    top = set(map(id, tree.body))
+    init_names = sorted(set(direct_names) | set(init_aliases))
+    claimed = set()
+    scope = sorted(_module_scope_nodes(tree.body), key=lambda node: lines[id(node)])
+    for node in scope:
+        bound = set(_route_binding_names(node))
+        if id(node) in store_imports:
+            rebound = sorted(set(
+                alias.asname or alias.name.split(".")[0] for alias in node.names
+                if alias.name != "_opf_store") & set(store_aliases))
+        else:
+            rebound = sorted(bound & set(store_aliases))
+        for name in init_names:
+            if name not in bound:
+                continue
+            if (id(node) in top and name not in claimed
+                    and _init_binding_allowed(node, name, direct_names, init_aliases)):
+                claimed.add(name)
+            else:
+                rebound.append(name)
+        for name in rebound:
+            found.append(_rebind_finding(fname, label, name, lines[id(node)], store_aliases))
+    return found
+
+
+def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_names, init_aliases):
     """Findings for one production unit (a module-level function's body, or the module-level
     code), fail-closed over FORM: (a) every reference to run_init_operation or to a name the
     module's module-level `from _opf_init_operation import run_init_operation [as name]` binds
@@ -669,12 +767,14 @@ def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_nam
     every direct call must pass homes2=<alias>.init_writes_homes2() with no splat and exactly
     one homes2; (b) every write to the rule's names, or through a store alias by the spellings
     _store_write_findings reads, is a finding wherever it appears, and so is the exact string
-    "init_writes_homes2"; (c) a module-level binding of a store alias other than its import
-    statements (`store_imports`, the ids of those nodes), and a global declaration of one, is a
-    finding whether or not the unit calls the seam; (d) a unit holding such a call may not
-    rebind the store alias or the callee's spelling and names SUPPORTED_HOMES nowhere."""
+    "init_writes_homes2"; (c) a global declaration of a store alias or of the callee's spelling
+    is a finding whether or not the unit calls the seam (module-level bindings are read by
+    _homes_module_binding_findings); (d) a unit holding such a call may not bind the store alias
+    or the callee's spelling by any form and names SUPPORTED_HOMES nowhere. Every line reported
+    comes from _line_map, so a node without its own line number reports its enclosing one."""
     found = []
     label = unit_name or "module-level code"
+    lines = _line_map(nodes)
     walked = [sub for node in nodes for sub in ast.walk(node)]
     calls = []
     callee_nodes = set()
@@ -699,69 +799,69 @@ def _homes_rule_unit_findings(fname, unit_name, nodes, store_aliases, direct_nam
                 "{}: {} references run_init_operation other than as a direct call of the "
                 "imported name (line {}); an alias, a getattr string, a partial, a __call__, a "
                 "rebinding or a passed value cannot carry the homes rule".format(
-                    fname, label, node.lineno))
+                    fname, label, lines[id(node)]))
         if (isinstance(node, ast.ImportFrom) and node.module == "_opf_init_operation"
                 and any(alias.name in ("run_init_operation", "*") for alias in node.names)
                 and not (unit_name is None and any(node is stmt for stmt in nodes))):
             found.append("{}: {} imports run_init_operation other than by a module-level "
                          "statement (line {}); a direct call is recognized only through the "
-                         "module-level import".format(fname, label, node.lineno))
-    module_scope = set(map(id, _module_scope_nodes(nodes))) if unit_name is None else set()
+                         "module-level import".format(fname, label, lines[id(node)]))
+    rebind_names = set(store_aliases) | set(direct_names) | set(init_aliases)
     for node in walked:
         if isinstance(node, ast.Global):
-            rebound = sorted(set(node.names) & set(store_aliases))
-        elif id(node) not in module_scope:
-            rebound = []
-        elif id(node) in store_imports:
-            rebound = sorted(set(
-                alias.asname or alias.name.split(".")[0] for alias in node.names
-                if alias.name != "_opf_store") & set(store_aliases))
-        else:
-            rebound = sorted(name for name in store_aliases if _binds_name(node, name))
-        if rebound:
-            found.append("{}: {} rebinds the store module alias {} at module level or through "
-                         "a global declaration (line {}); the rule must be read through the "
-                         "module-level import".format(fname, label, rebound[0], node.lineno))
+            for name in sorted(set(node.names) & rebind_names):
+                found.append(_rebind_finding(fname, label, name, lines[id(node)], store_aliases))
     for node in walked:
         for name in ("init_writes_homes2", "SUPPORTED_HOMES"):
             if _binds_name(node, name) and not _protected_bind_allowed(
                     fname, unit_name, node, name):
                 found.append("{}: {} binds {} (line {}); only the store module's own "
                              "module-level definition binds the rule's names".format(
-                                 fname, label, name, node.lineno))
-        found.extend(_store_write_findings(fname, label, node, store_aliases))
+                                 fname, label, name, lines[id(node)]))
+        found.extend(_store_write_findings(fname, label, node, store_aliases, lines[id(node)]))
         if isinstance(node, ast.Constant) and node.value == "init_writes_homes2":
             found.append("{}: {} carries the string \"init_writes_homes2\" (line {}); a "
-                         "dynamic rebinding could ride it".format(fname, label, node.lineno))
+                         "dynamic rebinding could ride it".format(fname, label, lines[id(node)]))
     rule_calls = {id(node): node for node in walked if _is_run_init_call(node)}
     rule_calls.update({id(node): node for node in calls})
     if rule_calls:
-        shadow = set(store_aliases) | set(init_aliases) | set(direct_names)
+        shadow = rebind_names
         for node in walked:
             if any(_binds_name(node, name) for name in shadow) and not (
                     unit_name in direct_names and node in nodes
                     and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
                 found.append("{}: {} binds the store module alias or the callee's name "
                              "(line {}); the rule must be read through the module-level "
-                             "imports".format(fname, label, node.lineno))
+                             "imports".format(fname, label, lines[id(node)]))
             if ((isinstance(node, ast.Name) and node.id == "SUPPORTED_HOMES")
                     or (isinstance(node, ast.Attribute) and node.attr == "SUPPORTED_HOMES")
                     or (isinstance(node, ast.Constant) and node.value == "SUPPORTED_HOMES")):
                 found.append("{}: {} names SUPPORTED_HOMES (line {})".format(
-                    fname, label, node.lineno))
+                    fname, label, lines[id(node)]))
     for call in rule_calls.values():
         rule = [kw for kw in call.keywords if kw.arg == "homes2"]
         if (any(isinstance(arg, ast.Starred) for arg in call.args)
                 or any(kw.arg is None for kw in call.keywords)):
             found.append("{}: {} splats its run_init_operation arguments (line {})".format(
-                fname, label, call.lineno))
+                fname, label, lines[id(call)]))
         elif len(rule) != 1 or not _homes_rule_call(rule[0].value, store_aliases):
             found.append("{}: {} does not pass homes2=<_opf_store alias>.init_writes_homes2() "
-                         "to run_init_operation (line {})".format(fname, label, call.lineno))
+                         "to run_init_operation (line {})".format(fname, label, lines[id(call)]))
     return found
 
 
 _HOMES_SCAN_CACHE = {}
+
+
+def _homes_internal_cause(exc):
+    """The cannot-evaluate cause for an internal error in the homes rule itself: the rule fails
+    closed with a finding that names the error, never a traceback."""
+    return "internal error in the homes rule: {}: {}".format(type(exc).__name__, exc)
+
+
+def _homes_internal_error(fname, exc):
+    """The cannot-evaluate finding for one source whose scan raised inside the rule."""
+    return "{}: cannot evaluate ({})".format(fname, _homes_internal_cause(exc))
 
 
 def _homes_module_summary(text):
@@ -781,16 +881,21 @@ def _homes_module_summary(text):
         summary["error"] = type(exc).__name__
         _HOMES_SCAN_CACHE[key] = summary
         return summary
-    registry, malformed = _homes_exempt_registry(tree)
-    defcounts = {}
-    callcounts = {}
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            defcounts[node.name] = defcounts.get(node.name, 0) + 1
-            callcounts[node.name] = sum(
-                1 for sub in ast.walk(node) if _is_run_init_call(sub))
-    all_def_names = {node.name for node in ast.walk(tree)
-                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    try:
+        registry, malformed = _homes_exempt_registry(tree)
+        defcounts = {}
+        callcounts = {}
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defcounts[node.name] = defcounts.get(node.name, 0) + 1
+                callcounts[node.name] = sum(
+                    1 for sub in ast.walk(node) if _is_run_init_call(sub))
+        all_def_names = {node.name for node in ast.walk(tree)
+                         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    except Exception as exc:  # noqa: BLE001 -- fail closed with a named cause
+        summary["error"] = _homes_internal_cause(exc)
+        _HOMES_SCAN_CACHE[key] = summary
+        return summary
     summary.update(registry=registry, malformed=malformed, defcounts=defcounts,
                    callcounts=callcounts, all_def_names=all_def_names)
     _HOMES_SCAN_CACHE[key] = summary
@@ -823,9 +928,16 @@ def _homes_rule_violations(sources):
     statement, a non-rule homes2, a splat, bindings of init_writes_homes2 or SUPPORTED_HOMES
     anywhere, writes to an attribute of a store alias (assignment, del, setattr, delattr, an item
     of vars(<alias>) or <alias>.__dict__, or a raw vars(<alias>) or <alias>.__dict__ handle bound
-    to a name), a module-level binding of a store alias other than its import or a global
-    declaration of one (whether or not the unit calls the seam), any binding of the store alias
-    in a calling unit, and the exact rule-name strings.
+    to a name by a plain, annotated or walrus assignment), a module-level binding of a store alias
+    other than its import or a global declaration of one (whether or not the unit calls the
+    seam), a module-level binding of the run_init_operation import's name other than that one
+    import (a later def or import of it) or a global declaration of it, an aliased module-level
+    import of run_init_operation (so a getattr or globals() string can only spell
+    "run_init_operation", which is a finding), any binding of the store alias or the callee's
+    name in a calling unit, and the exact rule-name strings. Every binding check reads names
+    through the one binding-name function (_route_binding_names), so a match capture, a with
+    target, a type alias or an annotated assignment counts like a plain assignment. An internal
+    error inside the rule is a cannot-evaluate finding that names it, never a traceback.
 
     Disclosed residual, the registry's trust: a registered function is trusted to be test-only
     code. This check does NOT verify that registered code is unreachable from production: a
@@ -850,11 +962,15 @@ def _homes_rule_violations(sources):
     `import _opf_store [as name]`, which is not a store alias here, or through a second
     module-level name bound to the store module (st = _opf_store); a write by a method of the
     namespace on any of these or on a store alias (__dict__.update, vars(...).update,
-    setdefault, pop and the like); a rebinding of a store alias from another module
-    (other_module.store = fake) or through globals(); and the annotations of a registered def,
-    which are not scanned. Each of these can change init_writes_homes2() for every fresh init,
-    so this check guards against an accidental non-compliant call, not a deliberate dynamic
-    rewrite.
+    setdefault, pop and the like); a raw namespace handle bound other than by an assignment (a
+    loop or with target, a container element, a call argument); a rebinding of a store alias from
+    another module (other_module.store = fake) or through globals(); a replacement of the store
+    module itself in sys.modules (sys.modules["_opf_store"] = fake) before a module imports it,
+    which every later import then reads as the store; a module-level name rebound through
+    sys.modules[__name__] or globals() with a computed string; and the annotations of a
+    registered def, which are not scanned. Each of these can change init_writes_homes2() for
+    every fresh init, so this check guards against an accidental non-compliant call, not a
+    deliberate dynamic rewrite.
     """
     found = []
     summaries = {}
@@ -926,7 +1042,6 @@ def _homes_rule_violations(sources):
                 found.append("{}: cannot evaluate ({})".format(fname, type(exc).__name__))
                 continue
             store_aliases = set(_store_import_aliases(tree))
-            store_imports = frozenset(map(id, _store_import_nodes(tree)))
             direct_names, init_aliases = _init_callee_spellings(tree)
             # Decorator expressions and argument defaults run at import, so EVERY
             # module-top-level def's definition-time expressions scan with the module-level
@@ -941,18 +1056,16 @@ def _homes_rule_violations(sources):
             units += [(node.name, [node]) for node in tree.body
                       if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                       and node.name not in registered]
-            # A module-top-level def (registered or not) named like a store alias rebinds that
-            # alias in the module namespace when the def statement runs.
-            cached = ["{}: module-level code rebinds the store module alias {} at module level "
-                      "or through a global declaration (line {}); the rule must be read through "
-                      "the module-level import".format(fname, node.name, node.lineno)
-                      for node in tree.body
-                      if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                      and node.name in store_aliases]
-            for unit_name, nodes in units:
-                cached.extend(_homes_rule_unit_findings(
-                    fname, unit_name, nodes, store_aliases, direct_names, init_aliases,
-                    store_imports))
+            # Every binding that lands in the module namespace (a module-top-level def,
+            # registered or not, included) is read once, over the whole module scope.
+            try:
+                cached = _homes_module_binding_findings(
+                    fname, tree, store_aliases, direct_names, init_aliases)
+                for unit_name, nodes in units:
+                    cached.extend(_homes_rule_unit_findings(
+                        fname, unit_name, nodes, store_aliases, direct_names, init_aliases))
+            except Exception as exc:  # noqa: BLE001 -- fail closed with a named cause
+                cached = [_homes_internal_error(fname, exc)]
             summary["findings"][cache_key] = cached
         found.extend(cached)
     return found
@@ -5075,10 +5188,89 @@ def _suite_isolated(invoke):
                      "\n\n\ndef _init_indirect(root):\n    invoke = init\n"
                      "    return invoke(root, homes2=_opf_store.init_writes_homes2())\n",
                      "_init_indirect references run_init_operation"),
-                    ("the imported alias called directly with the rule (flip)",
+                    ("the imported alias called directly with the rule (an aliased import "
+                     "is itself a finding)",
                      alias_store + "from _opf_init_operation import run_init_operation as init"
                      "\n\n\ndef _init_direct(root):\n"
-                     "    return init(root, homes2=_opf_store.init_writes_homes2())\n", None),
+                     "    return init(root, homes2=_opf_store.init_writes_homes2())\n",
+                     "imports run_init_operation under the alias init"),
+                    ("a getattr string on the module object naming the imported alias",
+                     "import sys\n\n" + alias_store
+                     + "from _opf_init_operation import run_init_operation as init\n\n\n"
+                     "def _init_dyn(root):\n"
+                     "    invoke = getattr(sys.modules[__name__], \"init\")\n"
+                     "    return invoke(root)\n",
+                     "imports run_init_operation under the alias init"),
+                    ("a globals() string naming the imported alias",
+                     alias_store + "from _opf_init_operation import run_init_operation as init"
+                     "\n\n\ndef _init_dyn(root):\n    return globals()[\"init\"](root)\n",
+                     "imports run_init_operation under the alias init"),
+                    ("the same call through the unaliased import (flip of the aliased-import "
+                     "rows)",
+                     alias_store + exempt_import.replace("\n\n", "\n") + "\n\n" + alias_call,
+                     None),
+                    ("a module-level def rebinding the imported callee name",
+                     alias_store + exempt_import.replace("\n\n", "\n")
+                     + "\n\ndef run_init_operation(root, **kwargs):\n    return None\n\n\n"
+                     + alias_call,
+                     "module-level code rebinds the run_init_operation import "
+                     "run_init_operation"),
+                    ("a later module-level import rebinding the imported callee name",
+                     alias_store + exempt_import.replace("\n\n", "\n")
+                     + "from os import getcwd as run_init_operation\n\n\n" + alias_call,
+                     "module-level code rebinds the run_init_operation import "
+                     "run_init_operation"),
+                    ("a global rebinding of the callee name in a unit that never calls it",
+                     alias_store + exempt_import.replace("\n\n", "\n")
+                     + "\n\ndef _swap(fake):\n    global run_init_operation\n"
+                     "    run_init_operation = fake\n\n\n" + alias_call,
+                     "_swap rebinds the run_init_operation import run_init_operation"),
+                    ("a module-level match capture rebinding the store alias",
+                     "import types\n\n" + exempt_import.replace("\n\n", "\n") + alias_store
+                     + "\nmatch types.SimpleNamespace(init_writes_homes2=lambda: True):\n"
+                     "    case _opf_store:\n        pass\n\n\n" + alias_call,
+                     "module-level code rebinds the store module alias _opf_store"),
+                    ("a module-level match `as` capture rebinding the store alias",
+                     "import types\n\n" + exempt_import.replace("\n\n", "\n") + alias_store
+                     + "\nmatch 1:\n    case types.SimpleNamespace() as _opf_store:\n"
+                     "        pass\n\n\n" + alias_call,
+                     "module-level code rebinds the store module alias _opf_store"),
+                    ("a match capture of the store alias in the calling unit",
+                     "import types\n\n" + exempt_import.replace("\n\n", "\n") + alias_store
+                     + "\n\ndef _init_m(root):\n    match types.SimpleNamespace():\n"
+                     "        case _opf_store:\n            pass\n"
+                     "    return run_init_operation(root, "
+                     "homes2=_opf_store.init_writes_homes2())\n",
+                     "_init_m binds the store module alias or the callee's name"),
+                    ("a module-level type alias rebinding the store alias",
+                     exempt_import.replace("\n\n", "\n") + alias_store
+                     + "\ntype _opf_store = int\n\n\n" + alias_call,
+                     "module-level code rebinds the store module alias _opf_store"),
+                    ("a module-level with target rebinding the store alias",
+                     "import contextlib\n\n" + exempt_import.replace("\n\n", "\n") + alias_store
+                     + "\nwith contextlib.nullcontext(None) as _opf_store:\n    pass\n\n\n"
+                     + alias_call,
+                     "module-level code rebinds the store module alias _opf_store at module "
+                     "level or through a global declaration (line 6)"),
+                    ("a with target rebinding the store alias in the calling unit",
+                     "import contextlib\n\n" + exempt_import.replace("\n\n", "\n") + alias_store
+                     + "\n\ndef _init_w(root):\n"
+                     "    with contextlib.nullcontext(None) as _opf_store:\n        pass\n"
+                     "    return run_init_operation(root, "
+                     "homes2=_opf_store.init_writes_homes2())\n",
+                     "_init_w binds the store module alias or the callee's name (line 8)"),
+                    ("a with target named SUPPORTED_HOMES in a unit that never calls the seam",
+                     "import contextlib\n\n" + alias_store
+                     + "\n\ndef _tune():\n    with contextlib.nullcontext(2) as SUPPORTED_HOMES:"
+                     "\n        return SUPPORTED_HOMES\n",
+                     "_tune binds SUPPORTED_HOMES (line 7)"),
+                    ("an annotated raw namespace handle on the store",
+                     alias_store + "\n\ndef _tune():\n    ns: dict = vars(_opf_store)\n"
+                     "    ns[\"SUPPORTED_HOMES\"] = 2\n",
+                     "_tune binds a raw handle on the store module's namespace"),
+                    ("an annotated read-only copy of the store namespace (flip)",
+                     alias_store + "\n\ndef _tune():\n    ns: dict = dict(vars(_opf_store))\n"
+                     "    return ns\n", None),
                     ("a function-local import of run_init_operation under an alias",
                      alias_store + "\n\ndef _init_local(root):\n"
                      "    from _opf_init_operation import run_init_operation as init\n"
@@ -5124,6 +5316,29 @@ def _suite_isolated(invoke):
                     else:
                         check("homes rule aliases: " + mutant_label,
                               mutated and any(expect in row for row in mutant_rows))
+                # An internal error inside the rule fails closed as a named cannot-evaluate
+                # finding, never a traceback: the binding-name function is replaced for one scan
+                # of a source no earlier row used (so no memoized result answers it).
+                this_module = sys.modules[__name__]
+                real_binding_names = this_module._route_binding_names
+
+                def _raising_binding_names(node):
+                    raise RuntimeError("seeded fault")
+
+                this_module._route_binding_names = _raising_binding_names
+                try:
+                    fault_sources = dict(rule_sources)
+                    fault_sources[zz] = alias_store + "\n_FAULT_PROBE = 1\n"
+                    fault_rows = _homes_rule_violations(fault_sources)
+                except Exception:  # noqa: BLE001 -- a traceback is this row's failure
+                    fault_rows = None
+                finally:
+                    this_module._route_binding_names = real_binding_names
+                check("homes rule: an internal error is a named cannot-evaluate finding",
+                      fault_rows is not None and any(
+                          row.startswith(zz + ": cannot evaluate (internal error in the homes "
+                                         "rule: RuntimeError: seeded fault)")
+                          for row in fault_rows))
                 gate_anchor = '    stage = "preflight"'
                 check("route gate: the mutation anchor is present once",
                       gate_source.count(gate_anchor) == 1)
