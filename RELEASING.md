@@ -8,16 +8,18 @@ the same frozen content produce the same published artifacts and the same record
 A release's integrity rests on a SHA-256 digest published through a channel independent of the download.
 The published digest is ROOT: `.aiqt/release/root.txt` at the release's tagged commit, the SHA-256 of the
 exact bytes of `.aiqt/manifest.toml`, which lists every shipped file with its own digest. ROOT is the one
-digest the hash list README.md names carries for this pack at a version; the list publishes no digest
-per download. Each release also records its artifact digests in `changelog.toml` under
-`[release.artifacts]` (held in this GitHub repository), and the same digests appear on the evidence page;
-they reach the published ROOT only through the manifest, which carries each of them for its path. Step 6c
-hands ROOT alone to the list, and step 7 waits until `tools/check_published_digest.py` finds it there and
-finds the tagged tree's manifest carrying each recorded artifact digest. Because ROOT is published
-outside the download host, an adopter can verify that what they downloaded matches the authenticated
-reference even if the download host is compromised: the SHA-256 of the downloaded manifest must equal the
-listed ROOT, and each downloaded file must match that manifest's entry for it. Releases are not
-separately signed; the independently published ROOT is the authenticated reference.
+digest the hash list README.md names carries for this pack at a version, and the list carries no per-file
+digest for the pack. The list does carry the skill zip as a project of its own (`aiqt-skill`, one row per
+skill version, holding the zip's digest), which the step 6c check reads only when run for that project.
+Each release also records its artifact digests in `changelog.toml` under `[release.artifacts]` (held in
+this GitHub repository), and the same digests appear on the evidence page; they reach the pack's
+published ROOT through the manifest, which carries each of them for its path. Step 6c hands ROOT alone to
+the list, and step 7 waits until `tools/check_published_digest.py` finds it there and finds the tagged
+tree's manifest carrying each recorded artifact digest. Because ROOT is published outside the download
+host, an adopter can verify that what they downloaded matches the authenticated reference even if the
+download host is compromised: the SHA-256 of the downloaded manifest must equal the listed ROOT, and each
+downloaded file must match that manifest's entry for it. Releases are not separately signed; the
+independently published ROOT is the authenticated reference.
 
 ## Steps
 
@@ -208,26 +210,29 @@ pull request (CLAUDE.md, Gates and CI).
      --project <name> --tree <dir> --commit <full SHA>`, taking the full SHA of the tagged commit from
      `git rev-parse vX.Y.Z^{commit}` (the tag is annotated, so `git rev-parse vX.Y.Z` gives the tag
      object instead, and the commit comparison fails). `<name>` is the project name the list gives this
-     pack (`opfiles` in the copy saved on 2026-10-12, `aiqt` on the list as read on 2026-11-09); the check
-     assumes no default. The list carries the skill zip as a project of its own (`aiqt-skill`, one row
-     per skill version); the check looks at that row only when asked, run with `--project aiqt-skill
-     --version <skill version> --digest sha256:<zip digest>` in place of `--tree` and `--commit`. The
-     check never fetches anything itself. It reads the list format the 2026-10-12 copy shows (`#` comment
-     lines, one of them the `# fields:` line naming project, version, commit, status and digest in that
-     order, then rows of five fields) and treats any row that does not fit as cannot-evaluate. With
-     `--tree` it first checks the tree locally: ROOT must be the SHA-256 of the tree's
-     `.aiqt/manifest.toml`, and each `[release.artifacts]` digest must equal that manifest's digest for
-     the same path. It exits 0 only when ROOT sits on a release row of this project at version X.Y.Z and
-     each such row's short commit id is a prefix of the `--commit` value; it exits 1 naming each digest or
-     commit that is missing or mismatched, and 2 when it cannot evaluate (an unreadable or unparseable
-     list, ROOT listed for the version only on a pre-release row, a tree that does not bind the version,
-     a manifest that does not hash to ROOT or does not carry a recorded artifact digest, or a bad
-     argument). The commit comparison does not show that `<dir>` is a checkout of that commit, and a
-     short id can also match another commit. Step 7 is held until it exits 0; exit 1 and exit 2 both block it, and neither
-     counts as a pass. The maintainer keeps a record with the release evidence, beside the step 5b QA
-     object: the fetch time (UTC), the SHA-256 of the fetched body (the check prints it as `list sha256:`;
-     compare it with your own hash of the saved file), and the reference of the hand-off message. The
-     record stays out of `changelog.toml`, where the release-delta gate admits only the tag key (6b).
+     pack (`opfiles` in the copy saved on 2026-10-12; `aiqt` in the list fetched from
+     https://posluns.dev/hashes.txt on 2026-11-09 at 16:49Z, whose `aiqt` rows for 1.0.0 and 1.0.5 each
+     carry one ROOT); the check assumes no default. The list carries the skill zip as a project of its
+     own (`aiqt-skill`, one row per skill version holding the zip's digest, as its 1.0.4 and 1.0.6 rows
+     did in that fetch), and no per-file digest for the pack; the check looks at that row only when
+     asked, run with `--project aiqt-skill --version <skill version> --digest sha256:<zip digest>` in
+     place of `--tree` and `--commit`. The check never fetches anything itself. It reads the list format
+     the 2026-10-12 copy shows (`#` comment lines, one of them the `# fields:` line naming project,
+     version, commit, status and digest in that order, then rows of five fields) and treats any row that
+     does not fit as cannot-evaluate. With `--tree` it first checks the tree locally: ROOT must be the
+     SHA-256 of the tree's `.aiqt/manifest.toml`, and each `[release.artifacts]` digest must equal that
+     manifest's digest for the same path. It exits 0 only when ROOT sits on a release row of this project
+     at version X.Y.Z and each such row's short commit id is a prefix of the `--commit` value; it exits 1
+     naming each digest or commit that is missing or mismatched, and 2 when it cannot evaluate (an
+     unreadable or unparseable list, ROOT listed for the version only on a pre-release row, a tree that
+     does not bind the version, a manifest that does not hash to ROOT or does not carry a recorded
+     artifact digest, or a bad argument). The commit comparison does not show that `<dir>` is a checkout
+     of that commit, and a short id can also match another commit. Step 7 is held until it exits 0; exit
+     1 and exit 2 both block it, and neither counts as a pass. The maintainer keeps a record with the
+     release evidence, beside the step 5b QA object: the fetch time (UTC), the SHA-256 of the fetched
+     body (the check prints it as `list sha256:`; compare it with your own hash of the saved file), and
+     the reference of the hand-off message. The record stays out of `changelog.toml`, where the
+     release-delta gate admits only the tag key (6b).
 7. Publish. Only after the step 6c check has exited 0. The public flip is a separate, maintainer-owned
    step; nothing in steps 1 to 6c depends on it.
 

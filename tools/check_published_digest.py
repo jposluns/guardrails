@@ -17,13 +17,13 @@ per digest as sha256:<64 lowercase hex>, which must then name every digest the l
 project at the version. --project is required: it is the name the list gives this pack (opfiles in the
 copy saved on 2026-10-12), and the gate assumes no default.
 
-With --tree the one digest expected on the list is ROOT, read from .aiqt/release/root.txt. The tree is
-first checked locally, and each failure here is cannot-evaluate: VERSION and the version of the latest
-[[release]] in changelog.toml must both equal --version; that release must record [release.artifacts];
-ROOT must be the SHA-256 of the tree's .aiqt/manifest.toml; and each [release.artifacts] digest must equal
-the sha256 that each [[sources]] or [[artifacts]] entry of that manifest gives for the same path, with at
-least one such entry. The artifact digests are bound to the listed ROOT through the manifest it hashes and
-are never looked for on the list. A download the list carries as a project of its own (one row per
+With --tree the one digest expected on the list is ROOT, read from .aiqt/release/root.txt. The tree is first
+checked locally, and each failure here is cannot-evaluate: VERSION and the version of the latest [[release]]
+in changelog.toml must both equal --version; that release must record at least one [release.artifacts]
+digest; ROOT must be the SHA-256 of the tree's .aiqt/manifest.toml; and each [release.artifacts] digest must
+equal the sha256 that each [[sources]] or [[artifacts]] entry of that manifest gives for the same path, with
+at least one such entry. The artifact digests are bound to the listed ROOT through the manifest it hashes
+and are never looked for on the list. A download the list carries as a project of its own (one row per
 version of that download) is checked only when asked, through --digest with that project and version.
 
 The list format read is the one a copy saved on 2026-10-12 shows (tools/published-digest-sample-20261012.txt
@@ -445,8 +445,8 @@ _ZIP_HEX = hashlib.sha256(b"fixture skill zip").hexdigest()
 _TXT_HEX = hashlib.sha256(b"fixture instructions").hexdigest()
 _ZIP_PATH, _TXT_PATH = "site/downloads/aiqt-skill-1.1.1.zip", "site/downloads/aiqt-instructions.txt"
 _ARTIFACTS = {_ZIP_PATH: "sha256:" + _ZIP_HEX, _TXT_PATH: "sha256:" + _TXT_HEX}
-# The fixture manifest lists both downloads under [[sources]] and the zip under [[artifacts]] as well, as
-# the real one does; the fixture ROOT is the SHA-256 of its bytes.
+# The fixture manifest lists both downloads under [[sources]] and only the zip under [[artifacts]] (the
+# real one lists both downloads under [[artifacts]] as well); the fixture ROOT is the SHA-256 of its bytes.
 _MANIFEST = ('format-version = 1\n\n[[sources]]\npath = "README.md"\nbytes = 1\nsha256 = "{0}"\n\n'
              '[[sources]]\npath = "{1}"\nbytes = 1\nsha256 = "{2}"\n\n'
              '[[sources]]\npath = "{3}"\nbytes = 1\nsha256 = "{4}"\n\n'
@@ -491,7 +491,8 @@ def _list_body(ours):
 
 def _tree(tmp, version=_V, root=None, artifacts=True, version_file=None, manifest=_MANIFEST):
     """A fixture checkout: root.txt, VERSION, a changelog whose latest release records artifacts (True
-    for the fixture's two, False for none, or a path-to-digest dict), and the manifest (None for none)."""
+    for the fixture's two, False for no table, {} for an empty table, or a path-to-digest dict), and the
+    manifest (None for none)."""
     tree = Path(tmp) / "tree"
     os.makedirs(tree / ".aiqt" / "release", exist_ok=True)
     with open(tree / ROOT_REL, "w", encoding="utf-8") as handle:
@@ -502,7 +503,7 @@ def _tree(tmp, version=_V, root=None, artifacts=True, version_file=None, manifes
         with open(tree / MANIFEST_REL, "w", encoding="utf-8") as handle:
             handle.write(manifest)
     lines = ['[[release]]\nversion = "0.9.0"\n', '[[release]]\nversion = "{}"\n'.format(version)]
-    if artifacts:
+    if artifacts is not False:
         lines.append("[release.artifacts]\n" + "".join('"{}" = "{}"\n'.format(path, value) for path, value in
                                                        (_ARTIFACTS if artifacts is True else artifacts).items()))
     with open(tree / CHANGELOG_REL, "w", encoding="utf-8") as handle:
@@ -702,8 +703,9 @@ def _self_test():
     check("refuse/list-absent", missing[0] == 2 and "cannot stat" in missing[1], missing)
     check("refuse/list-not-regular", directory[0] == 2 and "not a regular file" in directory[1], directory)
 
-    # A tree's local bindings: ROOT must hash its manifest, and each recorded artifact digest must be the
-    # manifest's digest for that path (one recorded digest changed, or one path the manifest lacks).
+    # A tree's local bindings: the release must record at least one artifact digest (no table, or an empty
+    # one), ROOT must hash its manifest, and each recorded artifact digest must be the manifest's digest for
+    # that path (one recorded digest changed, or one path the manifest lacks).
     differs = dict(_ARTIFACTS, **{_TXT_PATH: "sha256:" + _EXTRA_HEX})
     unlisted = dict(_ARTIFACTS, **{"site/downloads/x.zip": "sha256:" + _EXTRA_HEX})
     for name, kwargs, needle in (
@@ -711,6 +713,7 @@ def _self_test():
             ("tree/latest-release-differs", {"version": "1.1.2", "version_file": _V + "\n"},
              "the latest release is '1.1.2'"),
             ("tree/no-artifacts", {"artifacts": False}, "records no [release.artifacts]"),
+            ("tree/empty-artifacts-table", {"artifacts": {}}, "records no [release.artifacts]"),
             ("tree/root-malformed", {"root": "sha256:{}".format(_ROOT_HEX)}, "not exactly one sha256"),
             ("tree/manifest-missing", {"manifest": None}, MANIFEST_REL + ": cannot stat"),
             ("tree/root-not-manifest-digest", {"manifest": _MANIFEST + "\n"}, "which is not the SHA-256 of"),
@@ -722,6 +725,21 @@ def _self_test():
                  _EXTRA_HEX, MANIFEST_REL))):
         got = _case(good, tree_kwargs=kwargs)
         check(name, got[0] == 2 and needle in got[1] and "PASS" not in got[1], got)
+
+    # Every manifest entry for a recorded path must carry its digest, in both tables: here the zip's
+    # [[artifacts]] entry disagrees with its [[sources]] entry. The tree's ROOT is that manifest's SHA-256
+    # and the list carries that ROOT, so the run passes unless the artifact binding reads every entry of
+    # both tables and requires each to agree.
+    head, mark, tail = _MANIFEST.rpartition('[[artifacts]]\npath = "{}"\nkind = "file"\nsha256 = "{}"\n'.format(
+        _ZIP_PATH, _ZIP_HEX))
+    split = head + mark.replace(_ZIP_HEX, _EXTRA_HEX) + tail
+    split_hex = hashlib.sha256(split.encode("utf-8")).hexdigest()
+    got = _case(_list_body(_ours(root="sha256:" + split_hex)),
+                tree_kwargs={"manifest": split, "root": "sha256:{}\n".format(split_hex)})
+    check("tree/artifacts-entry-disagrees-with-sources", mark in _MANIFEST and split.count(_ZIP_HEX) == 1
+          and got[0] == 2 and "PASS" not in got[1]
+          and "artifact {!r} records sha256:{}, but {} gives {!r}, {!r}".format(
+              _ZIP_PATH, _ZIP_HEX, MANIFEST_REL, _ZIP_HEX, _EXTRA_HEX) in got[1], got)
 
     with tempfile.TemporaryDirectory(prefix="published-digest-selftest-") as tmp:
         tree = _tree(tmp)
@@ -892,9 +910,10 @@ def _self_test():
           "digests; a missing digest, a near-miss digest, an extra digest at the version, conflicting "
           "commits, a commit id that is not a prefix of the tagged commit and a wrong version each fail; a "
           "pre-release-only row, malformed rows, a missing, changed or misplaced field-name line, an "
-          "unreadable, absent or non-regular list, a tree that does not bind the version, a ROOT that is not "
-          "the SHA-256 of the tree's manifest, an artifact digest the manifest does not carry, and each bad "
-          "argument at its own guard are cannot-evaluate; the saved 2026-10-12 list exits 2 on its "
+          "unreadable, absent or non-regular list, a tree that does not bind the version, a release with no "
+          "or an empty [release.artifacts] table, a ROOT that is not the SHA-256 of the tree's manifest, an "
+          "artifact digest the manifest does not carry or whose [[artifacts]] entry disagrees with its "
+          "[[sources]] entry, and each bad argument at its own guard are cannot-evaluate; the saved 2026-10-12 list exits 2 on its "
           "pre-release row, and its release row variant passes with ROOT alone, also against a tree with "
           "artifacts, and turns red when the artifact digests are expected on the list again; the commit "
           "length and size bounds hold at their ends; nine flips each turn their red fixture green: version "

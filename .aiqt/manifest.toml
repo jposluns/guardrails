@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "282635ec8e4d90da1f8dca4a6de6b7b22d4932c8f95381bfbba2d386ffeb2fde"
+tree-sha256 = "86b87162c83d682caacd28433c3a561b595a01ba2171780a86a0810d9b8dda56"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -2416,13 +2416,13 @@ sha256 = "4e25f91d723d0b329a2af16a82abcc891ce6a506ff2874a149e6c4bf58d353db"
 
 [[sources]]
 path = "README.md"
-bytes = 5545
-sha256 = "a8ecd8eeb62347284124e6dc176aca309abfb076dc0dd44fbdf613b89da58b29"
+bytes = 5606
+sha256 = "5f73b2c6ca9098e429ac3297e68fa1815c182d1dac6f314f3e9707b35fd94143"
 
 [[sources]]
 path = "RELEASING.md"
-bytes = 20918
-sha256 = "eeab42db2784b769275e5a12973a6f93f13f81e75257bbb6dccdace1a8c29d66"
+bytes = 21349
+sha256 = "da9a40fa254dfae3f2dcd175844fdc1b5ca957de9768f11c6d4de950ab6ba72e"
 
 [[sources]]
 path = "ROADMAP.md"
@@ -4311,8 +4311,8 @@ sha256 = "ec1cf77885f467ad74e94587104a53d2460b907802225a47ba5e6991f9701a79"
 
 [[sources]]
 path = "tools/check_published_digest.py"
-bytes = 50882
-sha256 = "bac16cbeef051770ca5f15cd85b8c848cf6f3eeea27f9d3416874cb06c305edc"
+bytes = 52414
+sha256 = "6f33094c5d6a3f181e511fe5e99de40d10ba9431dc452ad3ec0bab6f88ee7e19"
 
 [[sources]]
 path = "tools/check_python_floor.py"
@@ -4666,8 +4666,8 @@ sha256 = "edb3c19204301fc55fe73dac90dadc79315dbac235b41e9d23da0e1218384194"
 
 [[sources]]
 path = "tools/selftest_checks.toml"
-bytes = 222527
-sha256 = "7c4bb6d23cdf2f2774ac37315d6c9ce029aa264033d98dbb27af33db3b9ba3dc"
+bytes = 222608
+sha256 = "dac0a9ea8b54d54ce4b580ec6a488c33f80e199fedd869de6958b82aaaa0d24e"
 
 [[sources]]
 path = "tools/selftest_ci_status.py"

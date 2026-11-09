@@ -55,11 +55,12 @@ in [Keep the always loaded instructions small](INSTRUCTION-BUDGET.md).
 ## 05. Verify your download.
 
 Each release ships a per-file manifest (`.aiqt/manifest.toml`) and its root digest, ROOT
-(`.aiqt/release/root.txt`, the SHA-256 of the manifest bytes). ROOT at the release's tagged commit is
-the one digest published independently on posluns.dev for each release; the downloads are covered through
-the manifest, which carries the SHA-256 of each one. Check that the SHA-256 of the manifest you downloaded
-equals the published ROOT, then that each file matches its manifest entry, and you can confirm that the
-files you downloaded are the ones we intended you to have.
+(`.aiqt/release/root.txt`, the SHA-256 of the manifest bytes). ROOT at the release's tagged commit is the
+one digest for the pack published independently on posluns.dev for each release (the skill zip also has a
+row of its own there); the downloads are covered through the manifest, which carries the SHA-256 of each
+one. Check that the SHA-256 of the manifest you downloaded equals the published ROOT, then that each file
+matches its manifest entry, and you can confirm that the files you downloaded are the ones we intended
+you to have.
 
 ## 06. Better with every release.
 
