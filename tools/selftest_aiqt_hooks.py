@@ -23917,31 +23917,35 @@ def _main_isolated(monitor):
         for _ct_label, _ct_cmd, _ct_want in _ct_r5:
             gexpect(_ct_label, _ct_cmd, _ct_want)
         # The status tier (_gate_status_masked): a known verification run piped into ANY stage, pass-through
-        # stages included, and joined by '&&', ';' or a newline to a gated git action (commit, push, merge, tag,
-        # am) denies, since the pipeline's status is its last stage's and a failing check would not stop the
-        # action; with pipefail or another command set before it, or a '||' join before it, the shape only
-        # notes. The a-rows are controls and residual R5 pins; the k-rows keep the sink tier's verdicts.
+        # stages included, and joined by '&&' to a gated git action (commit, push, merge, tag, am in a form
+        # that records, marks or sends) denies, since the pipeline's status is its last stage's and a failing
+        # check would not stop the action; with pipefail or another command set before it, or a '||' join
+        # before it, the shape only notes. A ';' or newline join runs the action whatever the status, piped or
+        # not, so it is left to the other tiers, and a command between the pipeline and the action that may
+        # gate it on its own status (test, '[', a verification run, PIPESTATUS, git diff --quiet, grep -q) ends
+        # the walk. The a-rows are controls, over-denial pins and residual R5 pins; the k-rows keep the sink
+        # tier's verdicts. Each shape's meaning was checked in bash with false for the check, echo for the git.
         _ct_sm = [
             ('(gw-sm-d1) a check piped into tee, then && git commit, denies',
              'pytest | tee /abs/check.log && git commit -m x', 'deny'),
-            ('(gw-sm-d2) a check piped into tee, then ; git commit, denies',
-             'pytest | tee /abs/check.log; git commit -m x', 'deny'),
+            ('(gw-sm-a12) a check piped into tee, then ; git commit, is left to the other tiers, allows',
+             'pytest | tee /abs/check.log; git commit -m x', 'allow'),
             ('(gw-sm-d3) a check piped into plain cat, then && git commit, denies',
              'pytest | cat && git commit -m x', 'deny'),
-            ('(gw-sm-d4) a check piped into cat, then ; git push, denies',
-             'pytest | cat; git push origin main', 'deny'),
+            ('(gw-sm-a13) a check piped into cat, then ; git push, allows',
+             'pytest | cat; git push origin main', 'allow'),
             ('(gw-sm-d5) a check piped into tee, then && git merge, denies',
              'pytest | tee /abs/check.log && git merge topic', 'deny'),
             ('(gw-sm-d6) a check piped into tee, then && git tag, denies',
              'pytest | tee /abs/check.log && git tag v1', 'deny'),
-            ('(gw-sm-d7) a check piped into tee, then ; git am, denies',
-             'pytest | tee /abs/check.log; git am fix.patch', 'deny'),
+            ('(gw-sm-a14) a check piped into tee, then ; git am, allows',
+             'pytest | tee /abs/check.log; git am fix.patch', 'allow'),
             ('(gw-sm-d8) a check piped into a grep filter, then && git commit, denies',
              'pytest | grep -v DEBUG && git commit -m x', 'deny'),
             ('(gw-sm-d9) a check piped into a second filter after a first, then && git commit, denies',
              'pytest | sort | uniq && git commit -m x', 'deny'),
-            ('(gw-sm-d10) a newline joins like ;, denies',
-             'pytest | tee /abs/check.log\ngit commit -m x', 'deny'),
+            ('(gw-sm-a15) a newline join runs the action whatever the status, allows',
+             'pytest | tee /abs/check.log\ngit commit -m x', 'allow'),
             ('(gw-sm-d11) a newline after && continues the list, denies',
              'pytest | tee /abs/check.log &&\ngit push origin main', 'deny'),
             ('(gw-sm-d12) a benign command between the pipeline and the git action, denies',
@@ -23950,8 +23954,8 @@ def _main_isolated(monitor):
              'cd /abs && pytest | tee /abs/check.log && git push origin main', 'deny'),
             ('(gw-sm-d14) a python self-test piped into tee, then && git commit, denies',
              'python3 -I -B tools/selftest_x.py | tee /abs/check.log && git commit -m x', 'deny'),
-            ('(gw-sm-d15) make check piped into cat, then ; git tag, denies',
-             'make check | cat; git tag v2', 'deny'),
+            ('(gw-sm-a16) make check piped into cat, then ; git tag, allows',
+             'make check | cat; git tag v2', 'allow'),
             ('(gw-sm-d16) a |& pipe into tee, then && git commit, denies',
              'pytest |& tee /abs/check.log && git commit -m x', 'deny'),
             ('(gw-sm-d17) a git action behind a peeled wrapper, denies',
@@ -23960,8 +23964,10 @@ def _main_isolated(monitor):
              'pytest | tee /abs/check.log && git commit -m x; cat <<<y', 'deny'),
             ('(gw-sm-n1) set -o pipefail before it, notes',
              'set -o pipefail; pytest | tee /abs/check.log && git commit -m x', 'allow-note'),
-            ('(gw-sm-n2) set -euo pipefail before it, notes',
-             'set -euo pipefail; pytest | cat; git push origin main', 'allow-note'),
+            ('(gw-sm-a17) set -euo pipefail before a ; join, allows',
+             'set -euo pipefail; pytest | cat; git push origin main', 'allow'),
+            ('(gw-sm-n2) set -euo pipefail before an && join, notes',
+             'set -euo pipefail; pytest | cat && git push origin main', 'allow-note'),
             ('(gw-sm-n3) another command that may set the environment before it, notes',
              'export A=1; pytest | tee /abs/check.log && git commit -m x', 'allow-note'),
             ('(gw-sm-n4) a pipeline joined by || to the command before it, notes',
@@ -23994,6 +24000,106 @@ def _main_isolated(monitor):
              'pytest | tail -5 && git commit -m x', 'deny'),
             ('(gw-sm-k2) a tee with no gated action keeps its allow',
              'pytest | tee /abs/check.log', 'allow'),
+            # commands between the pipeline and the action that cannot gate it keep the deny
+            ('(gw-sm-d19) a plain echo between the pipeline and the git action, denies',
+             'pytest | tee /abs/l && echo done && git commit -m x', 'deny'),
+            ('(gw-sm-d20) git add between the pipeline and the git action, denies',
+             'pytest | tee /abs/l && git add -A && git commit -m x', 'deny'),
+            ('(gw-sm-d21) git status between the pipeline and the git action, denies',
+             'pytest | tee /abs/l && git status && git commit -m x', 'deny'),
+            ('(gw-sm-d22) two newlines after && continue the list, denies',
+             'pytest | tee /abs/l &&\n\ngit commit -m x', 'deny'),
+            ('(gw-sm-d23) git tag -d deletes a tag, still gated, denies',
+             'pytest | tee /abs/l && git tag -d v1', 'deny'),
+            ('(gw-sm-d24) --dry-run after -- is a pathspec, not an option, denies',
+             'pytest | tee /abs/l && git commit -m x -- --dry-run', 'deny'),
+            ('(gw-sm-d25) merge --continue records the merge, denies',
+             'pytest | tee /abs/l && git merge --continue', 'deny'),
+            ('(gw-sm-d26) the uncertain-# path reads the recovered && join, denies',
+             'pytest | tee /abs/l && git push origin main; echo `#`', 'deny'),
+            ('(gw-sm-n6) the uncertain-# path with a ; join keeps its doubt note',
+             'pytest | tee /abs/l; git push origin main; echo `#`', 'allow-note'),
+            # a command that gates the action on its own exit status ends the walk
+            ('(gw-sm-a18) ; test of PIPESTATUS gates the commit, allows',
+             'pytest | tee /abs/l; test "${PIPESTATUS[0]}" -eq 0 && git commit -m x', 'allow'),
+            ('(gw-sm-a19) ; [ of PIPESTATUS gates the commit, allows',
+             'pytest | tee /abs/l; [ "${PIPESTATUS[0]}" -eq 0 ] && git commit -m x', 'allow'),
+            ('(gw-sm-a20) && test of PIPESTATUS gates the commit, allows',
+             'pytest | tee /abs/l && test "${PIPESTATUS[0]}" -eq 0 && git commit -m x', 'allow'),
+            ('(gw-sm-a21) PIPESTATUS saved then tested gates the commit, allows',
+             'pytest | tee /abs/l; rc=${PIPESTATUS[0]}; test $rc -eq 0 && git commit -m x', 'allow'),
+            ('(gw-sm-a22) ; an unpiped verification run gates the commit, allows',
+             'pytest | tee /abs/l; pytest && git commit -m x', 'allow'),
+            ('(gw-sm-a23) ; make test gates the commit, allows',
+             'make lint | tee /abs/l; make test && git commit -m x', 'allow'),
+            ('(gw-sm-a24) ; git diff --quiet gates the commit, allows',
+             'pytest | tee /abs/l; git diff --quiet && git commit -m x', 'allow'),
+            ('(gw-sm-a25) && an unpiped verification run gates the commit, allows',
+             'pytest | tee /abs/l && pytest && git commit -m x', 'allow'),
+            ('(gw-sm-a26) && git diff --quiet gates the commit, allows',
+             'pytest | tee /abs/l && git diff --quiet && git commit -m x', 'allow'),
+            ('(gw-sm-a27) && [ gates the commit, allows',
+             'pytest | tee /abs/l && [ -s /abs/l ] && git commit -m x', 'allow'),
+            ('(gw-sm-a28) && grep -q of the log gates the commit, allows',
+             'pytest | tee /abs/l && grep -q passed /abs/l && git commit -m x', 'allow'),
+            ('(gw-sm-a29) && [[ gates the commit, allows',
+             'pytest | tee /abs/l && [[ -s /abs/l ]] && git commit -m x', 'allow'),
+            # git forms that record, mark or send nothing are not gated actions
+            ('(gw-sm-a30) git tag -l lists, allows', 'pytest | tee /abs/l && git tag -l', 'allow'),
+            ('(gw-sm-a31) git tag --list lists, allows', "pytest | tee /abs/l && git tag --list 'v*'", 'allow'),
+            ('(gw-sm-a32) a bare git tag lists, allows', 'pytest | tee /abs/l && git tag', 'allow'),
+            ('(gw-sm-a33) git tag -v verifies, allows', 'pytest | tee /abs/l && git tag -v v1', 'allow'),
+            ('(gw-sm-a34) git tag --contains lists, allows', 'pytest | tee /abs/l && git tag --contains HEAD', 'allow'),
+            ('(gw-sm-a35) git tag -n5 lists, allows', 'pytest | tee /abs/l && git tag -n5', 'allow'),
+            ('(gw-sm-a36) git merge --abort recovers, allows', 'pytest | tee /abs/l && git merge --abort', 'allow'),
+            ('(gw-sm-a37) git merge --quit recovers, allows', 'pytest | tee /abs/l && git merge --quit', 'allow'),
+            ('(gw-sm-a38) git am --abort recovers, allows', 'pytest | tee /abs/l && git am --abort', 'allow'),
+            ('(gw-sm-a39) git am --quit recovers, allows', 'pytest | tee /abs/l && git am --quit', 'allow'),
+            ('(gw-sm-a40) git am --show-current-patch reads, allows',
+             'pytest | tee /abs/l && git am --show-current-patch', 'allow'),
+            ('(gw-sm-a41) git push --dry-run sends nothing, allows',
+             'pytest | tee /abs/l && git push --dry-run origin main', 'allow'),
+            ('(gw-sm-a42) git push -n sends nothing, allows', 'pytest | tee /abs/l && git push -n origin main', 'allow'),
+            ('(gw-sm-a43) git commit --dry-run records nothing, allows',
+             'pytest | tee /abs/l && git commit --dry-run', 'allow'),
+            ('(gw-sm-a44) git commit --help, allows', 'pytest | tee /abs/l && git commit --help', 'allow'),
+            ('(gw-sm-a45) git push --help, allows', 'pytest | tee /abs/l && git push --help', 'allow'),
+            ('(gw-sm-a46) git commit -h, allows', 'pytest | tee /abs/l && git commit -h', 'allow'),
+            ('(gw-sm-a47) git --help commit, allows', 'pytest | tee /abs/l && git --help commit', 'allow'),
+            # masked shapes the status tier does not read (residual R5): each still runs the action after a
+            # failing check in bash
+            ('(gw-sm-a48) a ( ) group around the pipeline (residual R5), allows',
+             '(pytest | tee /abs/l) && git commit -m x', 'allow'),
+            ('(gw-sm-a49) a { } group around the pipeline (residual R5), allows',
+             '{ pytest | tee /abs/l; } && git commit -m x', 'allow'),
+            ('(gw-sm-a50) the pipeline and action inside one { } group (residual R5), allows',
+             '{ pytest | tee /abs/l && git commit -m x; }', 'allow'),
+            ('(gw-sm-a51) || true after the pipeline runs the action whatever the status (residual R5), allows',
+             'pytest | tee /abs/l || true && git commit -m x', 'allow'),
+            ('(gw-sm-a52) an assignment prefix on the producer (residual R5), allows',
+             'A=1 pytest | tee /abs/l && git commit -m x', 'allow'),
+            ('(gw-sm-a53) an env prefix on the producer (residual R5), allows',
+             'env A=1 pytest | tee /abs/l && git commit -m x', 'allow'),
+            ('(gw-sm-a54) a here-string on the producer (residual R5), allows',
+             'pytest <<<y | tee /abs/l && git commit -m x', 'allow'),
+            ('(gw-sm-a55) a here-string on the last stage (residual R5), allows',
+             'pytest | tee /abs/l <<<y && git commit -m x', 'allow'),
+            ('(gw-sm-a56) a process substitution in the last stage (residual R5), allows',
+             'pytest | tee >(cat) && git commit -m x', 'allow'),
+            ('(gw-sm-a57) a here-string between the pipeline and the action (residual R5), allows',
+             'pytest | tee /abs/l && cat <<<done && git commit -m x', 'allow'),
+            ('(gw-sm-a58) the pipeline inside sh -c (residual R1, R5), allows',
+             "sh -c 'pytest | tee /abs/l' && git commit -m x", 'allow'),
+            ('(gw-sm-a59) the pipeline inside bash -c (residual R1, R5), allows',
+             "bash -c 'pytest | tee /abs/l' && git commit -m x", 'allow'),
+            ('(gw-sm-a60) git behind command (residual R5), allows',
+             'pytest | tee /abs/l && command git commit -m x', 'allow'),
+            ('(gw-sm-a61) git behind exec (residual R5), allows',
+             'pytest | tee /abs/l && exec git push origin main', 'allow'),
+            ('(gw-sm-a62) git behind nohup (residual R5), allows',
+             'pytest | tee /abs/l && nohup git push origin main', 'allow'),
+            ('(gw-sm-a63) a command off the pass-through list between them (residual R5), allows',
+             'pytest | tee /abs/l && make clean && git commit -m x', 'allow'),
         ]
         for _ct_label, _ct_cmd, _ct_want in _ct_sm:
             gexpect(_ct_label, _ct_cmd, _ct_want)
@@ -31037,7 +31143,10 @@ def _main_isolated(monitor):
           "denies (a disclosed over-deny of text that merely names such a command); and it denies a known "
           "verification run whose output reaches "
           "a truncating sink on its allow-list (head or tail with one positive line count, grep -m N/-q/-c/-l/-L, "
-          "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and "
+          "rg -q/-c/-l; cut, any other spelling and a sed or awk program only note), and one piped into any "
+          "stage and joined by && to a git commit, push, merge, tag or am that records, marks or sends "
+          "(directly or through cd, plain echo, true, pwd, git add or git status; a ; or newline join, or a "
+          "test, [, verification run or git diff --quiet between them, is not judged there), and "
           "ALLOWS-WITH-NOTE every other checker-shaped segment whose failure is swallowed (|| true) or "
           "truncated (| head/tail) - the broad heuristic is too broad to deny. sectvl "
           "(commit_msg_subst) DENIES-and-educates a backtick or $( command substitution in a git commit "

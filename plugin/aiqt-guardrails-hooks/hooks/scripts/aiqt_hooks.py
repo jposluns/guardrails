@@ -16919,21 +16919,51 @@ def _verification_sink_message(hit):
 
 
 # The git actions a check's verdict gates: each records work (commit, am), joins it into a line (merge), marks
-# it (tag) or sends it on (push). The separators that join a pipeline to a later command of the same list so
-# that the command runs after it: '&&' (when the pipeline's status is 0), ';' and a newline (lexed as '', as
-# the end of the command is) whatever the status. '||', '&' and a pipe are not joins here.
+# it (tag) or sends it on (push). Only a '&&' join lets the pipeline's status decide whether the action runs:
+# after ';' or a newline the action runs whatever the status, piped or not ('false; git commit' commits), so
+# the pipe is not what lets a failing check through there and the status tier does not judge it. The forms
+# that record, mark or send nothing are not gated actions: a tag listing or verify (a bare 'git tag', -l,
+# --list, -n, -v, --verify, --contains, --no-contains, --points-at, --merged, --no-merged), a merge or am
+# abort or quit, am --show-current-patch, a --dry-run (push -n too) and a --help or -h.
 _GATE_GATED_GIT = frozenset(("commit", "push", "merge", "tag", "am"))
-_GATE_GATED_JOINS = frozenset(("&&", ";", ""))
+_GATE_TAG_READS = frozenset(("-l", "--list", "-n", "-v", "--verify", "--contains", "--no-contains",
+                             "--points-at", "--merged", "--no-merged"))
+_GATE_GIT_RECOVERY = {"merge": frozenset(("--abort", "--quit")),
+                      "am": frozenset(("--abort", "--quit", "--show-current-patch"))}
 
 
 def _gate_gated_git(seg):
     """The gated git action (_GATE_GATED_GIT) a segment runs, read after its leading assignments and the env,
-    nice, timeout and time wrappers (_gate_peel), or None."""
+    nice, timeout and time wrappers (_gate_peel), or None; a form that records, marks or sends nothing (a tag
+    listing or verify, a recovery option, --dry-run, --help) is None. Options are read up to a '--'."""
     argv = _gate_peel(seg.argv) if seg.argv else None
     if not argv or _gate_word(argv[0]) != "git":
         return None
-    sub = _git_subcommand(argv)
-    return sub if sub in _GATE_GATED_GIT else None
+    sub, rest = _git_subcommand_rest(argv)
+    if sub not in _GATE_GATED_GIT:
+        return None
+    words = argv[1:]
+    opts = [tok.split("=", 1)[0] for tok in (words[:words.index("--")] if "--" in words else words)]
+    if any(tok in ("--help", "-h", "--dry-run") for tok in opts) or (sub == "push" and "-n" in opts):
+        return None
+    if sub == "tag" and (not rest or any(tok in _GATE_TAG_READS or tok.startswith("-n") for tok in opts)):
+        return None
+    if any(tok in _GATE_GIT_RECOVERY.get(sub, ()) for tok in opts):
+        return None
+    return sub
+
+
+def _gate_status_passthrough(seg):
+    """True when a command '&&'-joined between a masked pipeline and a gated git action cannot gate that action
+    on the check's outcome: a known-benign command (_gate_benign_prefix: cd DIR, plain echo, true, ':' or pwd)
+    or a plain 'git add' or 'git status' with no redirection. Any other command may gate it on its own status
+    (test, '[', a verification run, a read of PIPESTATUS, git diff --quiet, a grep of the log), so the walk
+    ends there."""
+    if _gate_benign_prefix(seg):
+        return True
+    argv = seg.argv
+    return (_gate_simple(seg) and not seg.redirects and "$" not in seg.raw and argv[0] == "git"
+            and _git_subcommand(argv) in ("add", "status"))
 
 
 def _gate_pipefail_set(seg):
@@ -16954,9 +16984,10 @@ def _gate_status_masked(records):
     stages (an empty newline segment after a pipe is skipped, as bash continues the pipeline), pass-through
     ones included, because by default the pipeline's status is its last stage's whatever that stage is: tee,
     cat or a second filter masks a failing check as a truncating sink does. The last stage must be joined by
-    '&&', ';' or a newline (_GATE_GATED_JOINS) to a gated git action (_gate_gated_git), directly or through
-    further simple commands each joined the same way (empty newline segments skipped); a '||', '&', pipe or
-    compound command on the way ends the walk. proven is True when every segment before the producer is
+    '&&' to a gated git action (_gate_gated_git), directly or through further commands that cannot gate it
+    (_gate_status_passthrough), each joined by '&&' (empty newline segments after a '&&' skipped, as bash
+    continues the list); a ';', newline, '||', '&' or pipe join, a compound command or any command that may
+    gate the action on its own status ends the walk. proven is True when every segment before the producer is
     _gate_benign_prefix and the pipeline is not joined by '||' to the command before it
     (_gate_conditional_run): the caller denies then and notes otherwise. pipefail is True when a segment
     before the producer sets pipefail (_gate_pipefail_set), so the note can say so."""
@@ -16977,11 +17008,11 @@ def _gate_status_masked(records):
             continue
         last, join = records[j], records[j].sep_after
         sep, k = join, j + 1
-        while sep in _GATE_GATED_JOINS and k < n:
+        while sep == "&&" and k < n:
             nxt = records[k]
             k += 1
             if not nxt.argv and not nxt.redirects:
-                if nxt.sep_after not in _GATE_GATED_JOINS:
+                if nxt.sep_after != "":
                     break
                 continue
             action = _gate_gated_git(nxt)
@@ -16989,7 +17020,7 @@ def _gate_status_masked(records):
                 proven = benign and not _gate_conditional_run(records, i)
                 return (_gate_word(_gate_peel(seg.argv, producer=True)[0]),
                         _gate_word(_command_word(last.argv) or last.argv[0]), join, action, proven, pipefail)
-            if not _gate_simple(nxt):
+            if not _gate_status_passthrough(nxt):
                 break
             sep = nxt.sep_after
     return None
@@ -16999,17 +17030,16 @@ def _gate_status_masked_message(hit):
     """The (reason, banner) of the deny for a proven _gate_status_masked hit: it names the check, the last
     stage whose status the pipeline takes, the join and the git action, and gives the same capture route as
     the sink deny (_verification_sink_message)."""
-    word, last, join, action, _proven, _pipefail = hit
-    joined = "a newline" if join == "" else "'{}'".format(join)
+    word, last, _join, action, _proven, _pipefail = hit
     return (
         "AIQT rule gatdis (gate-discipline): this '{}' command is on the hook's list of known verification runs, "
-        "its output is piped into '{}', and the pipeline is joined by {} to a git {}. By default a pipeline's "
+        "its output is piped into '{}', and the pipeline is joined by '&&' to a git {}. By default a pipeline's "
         "exit status is that of its final stage, here '{}', not the check's, so a failing check does not stop "
         "the git {}: a pass-through stage such as tee or cat hides the failure as surely as a truncating one. "
         "Run the check alone with its full output in a file at an absolute path and no pipe after it, for "
         "example `<command> > /abs/path/check.log 2>&1`, take the verdict from that command's own exit status, "
-        "read the file, and only then run the git {} as a separate step.".format(word, last, joined, action, last,
-                                                                                 action, action),
+        "read the file, and only then run the git {} as a separate step.".format(word, last, action, last, action,
+                                                                                 action),
         "AIQT guardrail: denied a known verification run piped into '{}' ahead of a git {}; the pipeline's status "
         "is its last stage's, so a failing check would not stop it (rule gatdis).".format(last, action))
 
@@ -18523,12 +18553,15 @@ def gate_weakening(data):
     output is still cut). The deny is held until the segment loop ends so a
     --no-verify deny keeps its own message, and it suppresses the note. STATUS tier, after that deny
     (_gate_status_masked): the same known verification invocation piped into ANY later stage, pass-through
-    stages (tee, cat) and other filters included, whose pipeline is joined by '&&', ';' or a newline to a
-    gated git action (git commit, push, merge, tag or am, directly or through further simple commands joined
-    the same way) DENIES, because by default the pipeline's status is its last stage's, so a failing check
-    does not stop the action; on a parse error the recovered complete segments are judged the same way. The
+    stages (tee, cat) and other filters included, whose pipeline is joined by '&&' to a gated git action
+    (git commit, push, merge, tag or am in a form that records, marks or sends, directly or through further
+    '&&'-joined commands that cannot gate it, _gate_status_passthrough) DENIES, because by default the
+    pipeline's status is its last stage's, so a failing check does not stop the action; on a parse error
+    the recovered complete segments, those of the uncertain-'#' path included, are judged the same way. A
+    ';' or newline join is not judged here (the action runs after it whatever the status, piped or not). The
     same shape after a command that is not known-benign (a set -o pipefail included, which the note names)
-    or joined by '||' to the command before it ALLOWS-WITH-NOTE after every other note. NOTE tier: every
+    or joined by '||' to the command before it ALLOWS-WITH-NOTE after the flow note, ahead of the
+    failed-main-reading floor's fallback decision. NOTE tier: every
     other checker-shaped segment (the broad heuristic) whose failure signal is swallowed by a following
     '|| true'/'|| :', or piped into an adjacent head/tail, ALLOWS-WITH-NOTE, and so does a shape outside the
     canonical deny that _gate_flow_note sees (an unlisted tool, mode or option, a compound or grouped stage,
@@ -18592,10 +18625,14 @@ def gate_weakening(data):
     options carry no checker part
     (tools/doctor.py, sha256sum -c, a build); R4 a plain '| grep PATTERN' filter or '| wc', which are not
     counted as truncating sinks; R5 for the status tier, a gated git action reached through a '&' join,
-    another pipeline, a compound command or a wrapper other than env, nice, timeout and time (sudo git
-    push), a producer off the verification list, pipefail set by an earlier call (invisible here), and the
-    status tier on the uncertain-'#' doubt path and the failed-main-reading floor, which it does not
-    read."""
+    another pipeline, a compound command, a command off _gate_status_passthrough that cannot gate it
+    (make clean) or a wrapper other than env, nice, timeout and time (sudo git push, command git commit), a
+    producer off the verification list or set up by an assignment or env prefix, a here-string or process
+    substitution the lexer stops at before the action, the pipeline inside a '( )' or '{ }' group, a
+    '|| true' after the pipeline (as after ';', the action then runs whatever the check's status, piped
+    or not), pipefail set by an earlier call (invisible here), and on the failed-main-reading floor the
+    segments main's partial lex recovers, which the status tier does not read (it reads this guard's own
+    readings there)."""
     if data.get("hook_event_name") != PRETOOL:
         return _hard_block("aiqt_hooks: gate_weakening wired to unexpected event {!r}; failing closed"
                            .format(data.get("hook_event_name")))
@@ -18881,9 +18918,9 @@ def gate_weakening(data):
     if hit is not None:
         reason, banner = _verification_sink_message(hit)
         return _deny(reason, banner)
-    # A known verification run piped into any stage, joined by '&&', ';' or a newline to a gated git action,
-    # denies when its shape is proven (_gate_status_masked); an unproven one (pipefail or another command set
-    # before it, or a '||' join) is kept for a note after the other notes.
+    # A known verification run piped into any stage, joined by '&&' to a gated git action, denies when its
+    # shape is proven (_gate_status_masked); an unproven one (pipefail or another command set before it, or a
+    # '||' join) is kept for a note after the flow note, ahead of the floor's fallback decision.
     masked = [found for found in (_gate_status_masked(reading) for reading in readings) if found is not None]
     proven = next((found for found in masked if found[4]), None)
     if proven is not None:
