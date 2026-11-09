@@ -130,9 +130,12 @@ name table, or a name record it cannot decode CANNOT BE EVALUATED and fails clos
 is scanned whole as binary, as a .woff2 is (every table, gap and trailing byte, each byte above 0x7F never
 part of a word), and each name-table string is also scanned in its decoded form (UTF-16BE for platform 0
 and platform 3 encodings 0, 1 and 10, MacRoman for platform 1 encoding 0), so UTF-16 text the byte view
-cannot read is seen too; both use the scoped scan's structural patterns with no internal-allow exemption.
-Text that is neither plain ASCII in the file nor in the name table is not seen (the residual is stated
-beside TRACKED_TTF_SUFFIX).
+cannot read is seen too. A .ttf within its size bound that decodes as UTF-8 is also scanned as that text,
+whether the rule accepts or refuses it (an accepted all-ASCII font excepted: its byte view reads the same
+text), so it gives at least every finding the text scan of any other UTF-8 file gives (a label spelled with
+U+0130, U+0131 or U+212A, which case-insensitive matching folds to ASCII, included). Every view uses the
+scoped scan's structural patterns with no internal-allow exemption. Text in no view is not seen (the
+residual is stated beside TRACKED_TTF_SUFFIX).
 Any other non-UTF-8 tracked file whatever its suffix (a
 malformed .csv, or a .csv that starts with the ZIP signature, say), a tracked path absent from the working
 tree, or a tracked path that is not a readable regular file CANNOT BE EVALUATED and fails closed at exit 2,
@@ -144,10 +147,11 @@ output that is not committed and is not handed to it as a tracked file (a built 
 site that is not checked in), the content of a tracked .zip's members, which the archive rule reads in
 memory to verify the archive but this rule never scans (the leak gate scans them), text drawn in a tracked
 .png's pixels or held in a chunk the PNG rule skips (see TRACKED_PNG_SUFFIX), text in a tracked .ttf
-that is neither plain ASCII in its bytes nor in its name table (text drawn by glyph outlines, UTF-16 or
-compressed text in another table; see TRACKED_TTF_SUFFIX), a staged change that differs from the
-working-tree copy (it reads the working tree), and the word split or encoded (an HTML entity, a zero-width
-character) so the plain pattern does not match.
+that none of its views reads (text drawn by glyph outlines, UTF-16 or compressed text in another table,
+and, in an accepted .ttf that is not valid UTF-8, non-ASCII text outside the name table; a .ttf over its
+size bound, or refused and not valid UTF-8, is reported by its refusal alone; see TRACKED_TTF_SUFFIX), a
+staged change that differs from the working-tree copy (it reads the working tree), and the word split or
+encoded (an HTML entity, a zero-width character) so the plain pattern does not match.
 
 REVIEW-ROUND LABEL RULE, WHOLE TRACKED TREE. The review-round label patterns (_REVIEW_LABELS: a reviewer
 family name followed by a QA round number, and a QA round number followed by a severity grade or a finding
@@ -322,13 +326,21 @@ MAX_WOFF2_FILE_SIZE = 8 * 1024 * 1024  # a latin-subset web font is well under 1
 # 0x7F replaced so it is never part of a word, which covers every table (the glyph names of a version 2 post
 # table, cmap, meta and private tables included), name storage no record points to, the gaps between tables
 # and the bytes after the last one. UTF-16 text is not readable in that view, so each decoded name string is
-# also scanned as a section of its own, named by its record. Every section is scanned with the scoped scan's
-# structural patterns (the leak gate's host path, private IP, token and account shapes, the provenance ids,
-# the role name and the review-round labels) and no internal-allow exemption: an upstream font has no reason
-# to carry the marker. A hit is a finding (exit 1). RESIDUAL: text that is neither plain ASCII in the file
-# nor in the name table is not seen (text drawn by the glyphs themselves, UTF-16 or compressed text in a
-# table other than name); table checksums and the fields of every table but name are not validated. A name
-# split or encoded inside a string is not seen, as in a text file.
+# also scanned as a section of its own, named by its record. The byte view also drops every letter above
+# 0x7F, among them U+0130, U+0131 and U+212A, which case-insensitive matching folds to "i" and "k", so a file
+# within the size bound that decodes as UTF-8 is also scanned as that text, one section, "font text"
+# (ttf_text_sections), whether the rule accepts or refuses the font; only an accepted all-ASCII font, whose
+# byte view reads the same text, has none. This gives at least every finding the plain text scan gives any
+# other UTF-8 tracked file. Every section is scanned with the scoped scan's structural patterns (the leak
+# gate's host path, private IP, token and account shapes, the provenance ids, the role name and the
+# review-round labels) and no internal-allow exemption: an upstream font has no reason to carry the marker.
+# A hit is a finding (exit 1), reported beside the refusal (exit 2) when the rule refuses the font. RESIDUAL:
+# in a font the rule accepts, text in no section is not seen: text drawn by the glyphs themselves, UTF-16 or
+# compressed text in a table other than name, and, when the file does not decode as UTF-8, text outside the
+# name table that is not plain ASCII (a label spelled with U+0131, say). A refused file is scanned only
+# through its text view, so one over the size bound or not valid UTF-8 is reported by its refusal alone
+# (exit 2), its text unread. Table checksums and the fields of every table but name are not validated. A
+# name split or encoded inside a string is not seen, as in a text file.
 TRACKED_TTF_SUFFIX = ".ttf"
 TTF_SIGNATURE = b"\x00\x01\x00\x00"
 MAX_TTF_FILE_SIZE = 8 * 1024 * 1024  # a variable web font is well under 1 MiB
@@ -1126,21 +1138,42 @@ def ttf_sections(data):
     return strings + [("font bytes", data.decode("ascii", "replace"), False)]
 
 
+def ttf_text_sections(data, accepted):
+    """The text view of a .ttf's bytes (see TRACKED_TTF_SUFFIX): [("font text", text, False)] when `data` is
+    whole (not over MAX_TTF_FILE_SIZE) and decodes as UTF-8, `text` being what the plain text scan reads for
+    any other UTF-8 tracked file; otherwise []. It keeps the letters the byte view replaces, so a label or
+    name spelled with a non-ASCII letter that case-insensitive matching folds to an ASCII one (U+0130 and
+    U+0131 to "i", U+212A to "k") is still found. A font the rule `accepted` that is all ASCII needs no text
+    view, since its byte view reads the same text; a refused file has no byte view, so it gets one."""
+    if len(data) > MAX_TTF_FILE_SIZE or (accepted and data.isascii()):
+        return []
+    try:
+        return [("font text", data.decode("utf-8"), False)]
+    except UnicodeDecodeError:
+        return []
+
+
 def verify_ttf(path):
     """The TrueType rule for a tracked file: its bytes read through one descriptor, stopping one byte past
-    MAX_TTF_FILE_SIZE, then ttf_sections. Raises CannotEvaluate or, on a read error, OSError. Like
-    verify_png it makes no stat probe: the caller classifies the path before the open."""
+    MAX_TTF_FILE_SIZE, then ttf_sections and ttf_text_sections. Returns (sections, refusal): `refusal` is
+    the CannotEvaluate ttf_sections raised (None when it accepts the font), and `sections` holds its sections
+    (none on a refusal) followed by the text view, which is returned on a refusal too. Raises OSError on a
+    read error. Like verify_png it makes no stat probe: the caller classifies the path before the open."""
     with path.open("rb") as handle:
         data = handle.read(MAX_TTF_FILE_SIZE + 1)
-    return ttf_sections(data)
+    try:
+        sections = ttf_sections(data)
+    except check_leaks.CannotEvaluate as exc:
+        return ttf_text_sections(data, accepted=False), exc
+    return sections + ttf_text_sections(data, accepted=True), None
 
 
 def scan_role_text(text, honour_marker=True, rules=_TRACKED_RULES):
     """(line, label) role-name and review-round label findings in `text`. A line carrying an `internal-allow`
     marker is exempt; the marker exempts that line only, never the rest of the file. A binary PNG chunk is
     scanned with `honour_marker` false: it has no real lines, so the marker exempts nothing in it. Every
-    TrueType section (a decoded name-table string or the font's bytes) is scanned with `rules` set to
-    STRUCTURAL, the scoped scan's patterns."""
+    TrueType section (a decoded name-table string, the font's bytes or its UTF-8 text) is scanned with
+    `rules` set to STRUCTURAL, the scoped scan's patterns."""
     found = []
     for number, line in enumerate(text.splitlines(), 1):
         if honour_marker and "internal-allow" in line:
@@ -1183,15 +1216,14 @@ def scan_tracked_roles(root, relpaths):
                     findings.append("{}:{}:{}: {}".format(rel, where, number, label))
             continue
         if path.suffix == TRACKED_TTF_SUFFIX:
-            try:
-                sections = verify_ttf(path) if _present(path) else None
-            except check_leaks.CannotEvaluate as exc:
-                unevaluable.append("{}: tracked .ttf fails the TrueType rule ({}{}){}".format(
-                    rel, "" if exc.member is None else exc.member + ": ", exc, cannot))
-                continue
-            if sections is None:
+            verdict = verify_ttf(path) if _present(path) else None
+            if verdict is None:
                 unevaluable.append("{}: tracked file is absent from the working tree{}".format(rel, cannot))
                 continue
+            sections, exc = verdict
+            if exc is not None:
+                unevaluable.append("{}: tracked .ttf fails the TrueType rule ({}{}){}".format(
+                    rel, "" if exc.member is None else exc.member + ": ", exc, cannot))
             for where, text, is_text in sections:
                 for number, label in scan_role_text(text, honour_marker=is_text, rules=STRUCTURAL):
                     findings.append("{}:{}:{}: {}".format(rel, where, number, label))
@@ -3664,6 +3696,104 @@ def _self_test(caller_env=None):
                   and png_holds("font.ttf" + ttf_rule + "table 1 name: offset 43 and length {} are outside "
                                 "the".format(len(clean_name)), ends[5]), ends)
 
+            # The text view, ttf_text_sections. The plain text scan reads a file whose bytes all decode as
+            # UTF-8 as text, where case-insensitive matching folds U+0130 and U+0131 to "i" and U+212A to "k";
+            # the byte view drops those letters. Each review-round label below is spelled with one of them and
+            # sits in the gap after the directory or in a private table (placed first, so every offset stays
+            # below 0x80) of a font that is valid UTF-8, and must be found in the "font text" section. Each
+            # vector has a flip, one scratch copy of this gate with the text view removed, which must pass the
+            # font, as a gate without it did. A UTF-8 file the rule refuses, all ASCII or not, keeps its text
+            # finding beside the refusal; the size bound is held one unit inside, at and outside; and a folded
+            # label in a font that is not valid UTF-8 is the stated residual, unseen.
+            folds = ("gemını " + qa + "3", "GEMİNİ " + qa + "3", qa + "2 MıNOR",
+                     qa + "2 MİNOR", qa + "2 MEDıUM", qa + "2 BLOCKER")
+            label = "internal review-round label"
+
+            def fold_font(text, private):
+                body = ("\n" + text + "\n").encode("utf-8")
+                tables = [(b"head", bytes(40)), (b"name", ttf_name([(1, 0, 1, b"Dancing Script")]))]
+                return ttf_font([(b"ZZZZ", body)] + tables) if private else ttf_font(tables, pad=body)
+
+            def text_hit(data):
+                lines = data.decode("utf-8").splitlines()
+                number = next((n for n, line in enumerate(lines, 1) if any(f in line for f in folds)), 0)
+                return "font.ttf:font text:{}: {}".format(number, label)
+
+            def utf8_not_ascii(data):
+                try:
+                    data.decode("utf-8")
+                except UnicodeDecodeError:
+                    return False
+                return not data.isascii()
+
+            refused = "font.ttf" + ttf_rule + "the first 4 bytes are not the TrueType signature (00 01 00 00))" \
+                + cannot_suffix
+            refused_font = ("plain text\n" + folds[2] + "\n").encode("utf-8")
+            refused_ascii = b"plain text\n" + role_text + b"\n"
+            text_anchor = "if len(data) > MAX_TTF_FILE_SIZE or " + "(accepted and data.isascii()):"
+            tdir = Path(tempfile.mkdtemp(prefix="aiqt-internal-names-ttf-text-mutant-"))
+            try:
+                unfolded, faults = None, []
+                if gate_source.count(text_anchor) != 1:
+                    faults.append("anchor {!r} occurs {} times".format(text_anchor, gate_source.count(text_anchor)))
+                else:
+                    unfolded = _load_ratchet_mutant(gate_source.replace(text_anchor, "if True:"), tdir,
+                                                    "ttf_text_view_removed")
+                for check_id, flip_id, data, expect in (
+                        ("ttf/text-view-family-dotless-i-gap", "ttf/text-view-family-dotless-i-gap-flip",
+                         fold_font(folds[0], False), None),
+                        ("ttf/text-view-family-dotless-i-private", "ttf/text-view-family-dotless-i-private-flip",
+                         fold_font(folds[0], True), None),
+                        ("ttf/text-view-family-dotted-i-gap", "ttf/text-view-family-dotted-i-gap-flip",
+                         fold_font(folds[1], False), None),
+                        ("ttf/text-view-family-dotted-i-private", "ttf/text-view-family-dotted-i-private-flip",
+                         fold_font(folds[1], True), None),
+                        ("ttf/text-view-minor-dotless-i-gap", "ttf/text-view-minor-dotless-i-gap-flip",
+                         fold_font(folds[2], False), None),
+                        ("ttf/text-view-minor-dotless-i-private", "ttf/text-view-minor-dotless-i-private-flip",
+                         fold_font(folds[2], True), None),
+                        ("ttf/text-view-minor-dotted-i-gap", "ttf/text-view-minor-dotted-i-gap-flip",
+                         fold_font(folds[3], False), None),
+                        ("ttf/text-view-minor-dotted-i-private", "ttf/text-view-minor-dotted-i-private-flip",
+                         fold_font(folds[3], True), None),
+                        ("ttf/text-view-medium-dotless-i-gap", "ttf/text-view-medium-dotless-i-gap-flip",
+                         fold_font(folds[4], False), None),
+                        ("ttf/text-view-medium-dotless-i-private", "ttf/text-view-medium-dotless-i-private-flip",
+                         fold_font(folds[4], True), None),
+                        ("ttf/text-view-blocker-kelvin-k-gap", "ttf/text-view-blocker-kelvin-k-gap-flip",
+                         fold_font(folds[5], False), None),
+                        ("ttf/text-view-blocker-kelvin-k-private", "ttf/text-view-blocker-kelvin-k-private-flip",
+                         fold_font(folds[5], True), None),
+                        ("ttf/text-view-refused-font-finding", "ttf/text-view-refused-font-finding-flip",
+                         refused_font, refused + "\nfont.ttf:font text:2: " + label),
+                        ("ttf/text-view-refused-ascii-finding", "ttf/text-view-refused-ascii-finding-flip",
+                         refused_ascii, refused + "\nfont.ttf:font text:2: " + role)):
+                    want = text_hit(data) if expect is None else expect
+                    got = tracked_verdict(this, "font.ttf", data)
+                    check(check_id, (data is refused_ascii or utf8_not_ascii(data)) and got == want, (want, got))
+                    flipped = None if unfolded is None else tracked_verdict(unfolded, "font.ttf", data)
+                    unseen = flipped == ("clean" if expect is None else expect.split("\n")[0])
+                    check(flip_id, not faults and unseen, (faults, flipped))
+            finally:
+                shutil.rmtree(tdir, ignore_errors=True)
+            bound_font = fold_font(folds[2], False)
+            saved, seen = MAX_TTF_FILE_SIZE, []
+            try:
+                for value in (len(bound_font) + 1, len(bound_font), len(bound_font) - 1):
+                    setattr(this, "MAX_TTF_FILE_SIZE", value)
+                    seen.append(tracked_verdict(this, "font.ttf", bound_font))
+            finally:
+                setattr(this, "MAX_TTF_FILE_SIZE", saved)
+            reason = "a TrueType font of more than MAX_TTF_FILE_SIZE ({}) bytes; the read stopped at {} " \
+                "bytes".format(len(bound_font) - 1, len(bound_font))
+            check("ttf/text-view-size-bound-ends",
+                  seen[:2] == [text_hit(bound_font)] * 2 and png_holds("font.ttf" + ttf_rule + reason, seen[2]),
+                  seen)
+            residual_font = ttf_font([(b"head", head_body), (b"name", clean_name),
+                                      (b"ZZZZ", ("\n" + folds[2] + "\n").encode("utf-8"))])
+            check("ttf/text-view-non-utf8-residual",
+                  tracked_verdict(this, "font.ttf", residual_font) == "clean", residual_font)
+
             ttfrepo = tmp / "ttf-repo"
             (ttfrepo / ".aiqt").mkdir(parents=True)
             (ttfrepo / ".aiqt" / "manifest.toml").write_text("format-version = 1\nsources = []\n",
@@ -3861,7 +3991,12 @@ def _self_test(caller_env=None):
           "word after a letter byte, still cannot evaluate a .TTF, .otf or .ttc, holds the file-size bound, "
           "both table-range ends and the Windows encodings it decodes one unit inside, at and outside, exits "
           "0, 1 and 2 through the real gate on a fixture repository, and each of its twenty-eight paired "
-          "checks, removed in a copy of the gate, turns its vector red.")
+          "checks, removed in a copy of the gate, turns its vector red; and its text view finds a review-round "
+          "label spelled with U+0130, U+0131 or U+212A in the gap after the directory and in a private table "
+          "of an all-UTF-8 font, and such a label or the role name beside the refusal of a refused UTF-8 file, "
+          "holds its size bound one unit inside, at and outside, leaves such a label unseen in a font that is "
+          "not valid UTF-8 (the stated residual), and a copy of the gate without it misses each of its fourteen "
+          "vectors.")
     return 0
 
 
