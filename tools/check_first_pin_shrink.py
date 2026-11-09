@@ -3,15 +3,16 @@
 to the merge base with main, unless the change carries a recorded maintainer authorization.
 
 tools/gen_first_pin_demo.py DERIVES delivered-prefix-obligations and floor-profile-obligations in
-.aiqt/release/first-pin-demonstration.toml from AGENTS.md: a rule is listed only while its whole span
-lies inside the first check_release_build.CAP_BYTES bytes. Lengthening an early rule can push a later
-rule past the cap, and regeneration then drops it from both lists while the drift gate sees a fresh
-build and check_release_build checks only that the lists are consistent. tools/check_must_deliver.py
-already catches such a shrink of any rule its own list (.aiqt/core/must-deliver.toml) names, because
-that rule then ends past the cap; it does not block a change that also removes the rule's row from
-that list. This gate is the second layer, for a shrink that also removes the must-deliver row: it
-compares the two lists at the merge base with the lists in the working tree and fails when either
-list has lost a member.
+.aiqt/release/first-pin-demonstration.toml from AGENTS.md: the delivered list holds a rule only while
+its whole span lies inside the first check_release_build.CAP_BYTES bytes, and the floor list is the
+delivered list plus the apex rule, which it holds wherever the apex lies. Lengthening an early rule can
+push a later rule past the cap, and regeneration then drops it from the delivered list, and from the
+floor list too unless it is the apex rule, while the drift gate sees a fresh build and
+check_release_build checks only that the lists are consistent. tools/check_must_deliver.py already
+catches such a shrink of any rule its own list (.aiqt/core/must-deliver.toml) names, because that rule
+then ends past the cap; it does not block a change that also removes the rule's row from that list. This
+gate is the second layer, for a shrink that also removes the must-deliver row: it compares the two lists
+at the merge base with the lists in the working tree and fails when either list has lost a member.
 
 Base. The base is the unique merge base of HEAD and the main ref (default origin/main, or --main REF),
 read from git objects only: every git call carries --no-replace-objects, so a replacement ref cannot
@@ -20,6 +21,8 @@ its environment and GIT_GRAFT_FILE pinned to os.devnull, so neither an ambient v
 file can redirect the repository or rewrite the history merge-base walks. A main ref or HEAD that does
 not resolve, more than one merge base, a demonstration absent at the base, and a base demonstration
 that does not parse to the exact key set are each cannot-evaluate (exit 2), never "nothing to compare".
+The key set is check_release_build.FIRST_PIN_DEMO_KEYS, the one source; the two list keys this gate
+compares (LIST_KEYS) plus agents-sha256 must equal it, or the run is exit 2 naming both sets.
 
 Authorization. A removal is accepted only through a [[reduction]] row in .aiqt/core/first-pin-reductions.toml,
 a reviewed in-tree file. Each row names the list, the corpus-id removed, and the agents-sha256 of the
@@ -33,13 +36,18 @@ well formed, not who wrote it; that the row is the maintainer's is established b
 change that adds it. A list member renamed is read as a removal plus an addition. A merge base equal
 to HEAD (a push to main) compares the working tree with HEAD itself, so the gate bites on the change
 that reaches main, not after it. The working-tree demonstration is trusted to be the fresh build the
-first-pin drift gate holds; this gate does not rebuild it.
+first-pin drift gate holds; this gate does not rebuild it. A change to the demonstration's key set (a
+key added to, or renamed in, FIRST_PIN_DEMO_KEYS) exits 2 on that change, and no reductions row can
+clear it: until LIST_KEYS follows, the key sets differ, and after it does, the base demonstration lacks
+the new key. The gate stays at exit 2 for such a change until its merge base carries the new key set.
 
   check_first_pin_shrink.py [--main REF]   check the working tree against the merge base with REF
   check_first_pin_shrink.py --self-test    build synthetic git trees and assert each vector
   check_first_pin_shrink.py [--self-test] --execution-report ABS_PATH
                                            the self-test, also writing its execution report, finalized
-                                           at interpreter exit (tools/_selftest_exit_report.py)
+                                           at interpreter exit (tools/_selftest_exit_report.py); only
+                                           as tools/check_selftest_execution.py launches it, since a
+                                           direct launch has no observation hooks and exits 2
 
 Exit convention: 0 no list lost a member, or every removal is authorized; 1 an unauthorized removal;
 2 an unreadable, malformed or unresolvable input (fail-closed).
@@ -187,6 +195,17 @@ def _toml(raw, where):
         raise CannotEvaluate("{} does not parse ({})".format(where, exc))
 
 
+def check_key_contract():
+    """LIST_KEYS plus agents-sha256 must be exactly check_release_build.FIRST_PIN_DEMO_KEYS, the one
+    source of the demonstration's key set; otherwise a list key renamed or added there would reach
+    parse_demo as a missing key (a KeyError, exit 1 with a traceback) or go uncompared."""
+    expected = frozenset(LIST_KEYS) | {"agents-sha256"}
+    if FIRST_PIN_DEMO_KEYS != expected:
+        raise CannotEvaluate("check_release_build.FIRST_PIN_DEMO_KEYS is {} but this gate compares {} plus "
+                             "agents-sha256; LIST_KEYS must follow the demonstration format".format(
+                                 sorted(FIRST_PIN_DEMO_KEYS), list(LIST_KEYS)))
+
+
 def parse_demo(raw, where):
     """The validated demonstration: exactly FIRST_PIN_DEMO_KEYS, a 64-hex agents-sha256, and each list
     a list of distinct well-formed corpus-ids."""
@@ -277,6 +296,7 @@ def run(root, main_ref):
     removal, 2 on an input that cannot be read or resolved. Parameterized on root so the self-test
     drives it against synthetic repositories, never the real tree."""
     try:
+        check_key_contract()
         head = parse_demo(_read_regular(root / DEMO_REL, DEMO_REL), DEMO_REL)
         granted = read_authorizations(root)
         base_commit, base = load_base(root, main_ref)
@@ -336,18 +356,30 @@ def main(argv=None):
 # _git_fixture_env.fixture_git_lifecycle (hermetic HOME, config and maintenance pins). The only external
 # executable reached is git, isolated that way: no credentials, no remote, writes inside the fixture.
 # Each fixture commits a base demonstration on main, then edits the working tree, and run() compares.
-# Vectors (each outcome-changing rule is also shown red with that rule reverted by attribute patching):
+# Vectors:
 #   shrink/unauthorized-fails       a member removed from both lists, no row: exit 1 naming both;
 #   shrink/authorized-passes        the same with one row per list bound to the head digest: exit 0;
 #   shrink/other-digest-fails       rows bound to another digest authorize nothing: exit 1;
 #   shrink/one-list-only-fails      a row for the delivered list only leaves the floor removal: exit 1;
 #   unchanged/passes, grown/passes  no member lost: exit 0;
-#   base/* cannot-evaluate          an unresolvable main ref, no merge base, a base without the
-#                                   demonstration, and a base demonstration that does not parse: exit 2;
+#   base/* cannot-evaluate          an unresolvable main ref, no merge base, two merge bases (a
+#                                   criss-cross merge), a base without the demonstration, and a base
+#                                   demonstration that does not parse or has other keys: exit 2;
 #   base/replace-ref-ignored        a replacement ref swapping the base blob for the shrunk list is not
 #                                   read, so the removal still fails (exit 1);
-#   head/*, auth/*                  an unreadable or malformed working-tree input: exit 2;
+#   base/graft-file-ignored         a .git/info/grafts entry moving the merge base onto a shrunk commit
+#                                   is not read, so the removal still fails (exit 1);
+#   env/ambient-git-dir-ignored     an ambient GIT_DIR naming a repository whose base is shrunk is not
+#                                   used, so the removal still fails (exit 1);
+#   head/*, auth/*                  an unreadable, symlinked or malformed working-tree input, or a
+#                                   list naming an id twice: exit 2;
+#   contract/*                      a list key renamed in, or a key added to, FIRST_PIN_DEMO_KEYS: exit
+#                                   2 naming both key sets, never a KeyError;
 #   argv/unrecognized               a bad argument list: exit 2.
+# A revert/* check follows nine of these vectors and shows that vector red with one rule reverted by
+# attribute patching: the removal rule, the authorization lookup, the digest binding, counting only
+# removals, the fail-closed base, --no-replace-objects, the graft-file pin, the GIT_ variable scrub and
+# the regular-file check. The other vectors have no revert/* check.
 
 SUITE_ID = "first-pin-shrink-selftest"
 EXECUTED = []
@@ -432,9 +464,10 @@ def _case(head_ids, rows=(), base_ids=None, main_ref="main", head_sha=_SHA_A):
 
 
 def _self_test_isolated():
-    # Each reverted rule is a module function or constant swapped by its constant name and restored in
-    # a finally block (attribute patching only, never generated code).
+    # Each reverted rule is a module-level function, constant or imported module swapped by its literal
+    # name and restored in a finally block (attribute patching only, never generated code).
     import tempfile
+    import types
     shrunk = ["prjint1", "ruleaa", "rulecc"]
     both = [(LIST_KEYS[0], "rulebb", _SHA_A), (LIST_KEYS[1], "rulebb", _SHA_A)]
     saved_removed, saved_authorized = removed_members, authorized
@@ -516,6 +549,33 @@ def _self_test_isolated():
     check("base/malformed-cannot-evaluate", code == 2 and "does not parse" in out, (code, out))
 
     with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp:
+        root = _repo(tmp, base_raw=_demo_text(_FULL).replace("agents-sha256", "agents-digest"))
+        _write(root, DEMO_REL, _demo_text(shrunk))
+        code, out = _quiet(run, root, "main")
+    check("base/wrong-keys-cannot-evaluate", code == 2 and "at the merge base" in out
+          and "exactly the keys" in out, (code, out))
+
+    # A criss-cross history: main and work each merge the other's tip, so HEAD and main have two merge
+    # bases, both holding the full lists.
+    with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp:
+        root = _repo(tmp, _FULL)
+        _write(root, "work.txt", "work\n")
+        _fx(root, ["add", "-A"])
+        _fx(root, ["commit", "-q", "-m", "work side"])
+        _fx(root, ["checkout", "-q", "main"])
+        _write(root, "main.txt", "main\n")
+        _fx(root, ["add", "-A"])
+        _fx(root, ["commit", "-q", "-m", "main side"])
+        _fx(root, ["merge", "-q", "--no-edit", "work"])
+        _fx(root, ["checkout", "-q", "work"])
+        _fx(root, ["merge", "-q", "--no-edit", "main~1"])
+        bases = _fx(root, ["merge-base", "--all", "HEAD", "main"]).split()
+        _write(root, DEMO_REL, _demo_text(shrunk))
+        code, out = _quiet(run, root, "main")
+    check("base/two-merge-bases-cannot-evaluate", len(bases) == 2 and code == 2
+          and "have 2 merge bases" in out, (bases, code, out))
+
+    with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp:
         root = _repo(tmp, _FULL)
         _write(root, DEMO_REL, _demo_text(shrunk))
         blob = _fx(root, ["rev-parse", "main:" + DEMO_REL])
@@ -530,6 +590,57 @@ def _self_test_isolated():
         finally:
             globals()["GIT_BASE_ARGS"] = saved_args
         check("revert/replace-objects-flag-removed-red", code == 0, (code, out))
+
+    saved_clean_env = _clean_env
+    # A graft on main's tip naming the shrunk work commit as its parent would make that commit the
+    # merge base, so a gate that read .git/info/grafts would compare shrunk with shrunk and pass.
+    with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp:
+        root = _repo(tmp, _FULL)
+        _write(root, DEMO_REL, _demo_text(shrunk))
+        _fx(root, ["add", "-A"])
+        _fx(root, ["commit", "-q", "-m", "shrunk on work"])
+        shrunk_commit = _fx(root, ["rev-parse", "HEAD"])
+        _fx(root, ["checkout", "-q", "main"])
+        _write(root, "main.txt", "main\n")
+        _fx(root, ["add", "-A"])
+        _fx(root, ["commit", "-q", "-m", "main moves on"])
+        main_tip = _fx(root, ["rev-parse", "HEAD"])
+        _fx(root, ["checkout", "-q", "work"])
+        _write(root, ".git/info/grafts", "{} {}\n".format(main_tip, shrunk_commit))
+        code, out = _quiet(run, root, "main")
+        check("base/graft-file-ignored", code == 1 and out.count("FAIL: rulebb left") == 2, (code, out))
+        globals()["_clean_env"] = lambda: {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        try:
+            code, out = _quiet(run, root, "main")
+        finally:
+            globals()["_clean_env"] = saved_clean_env
+        check("revert/graft-pin-removed-red", code == 0, (code, out))
+
+    # An ambient GIT_DIR naming another repository, whose main already holds the shrunk lists, would
+    # make every git read come from there while the working-tree demonstration is read from root.
+    with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp, \
+            tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as other_tmp:
+        root = _repo(tmp, _FULL)
+        other = _repo(other_tmp, shrunk)
+        _write(root, DEMO_REL, _demo_text(shrunk))
+        had_git_dir = "GIT_DIR" in os.environ
+        saved_git_dir = os.environ.get("GIT_DIR")
+        os.environ["GIT_DIR"] = str(other / ".git")
+        try:
+            code, out = _quiet(run, root, "main")
+            check("env/ambient-git-dir-ignored", code == 1 and out.count("FAIL: rulebb left") == 2,
+                  (code, out))
+            globals()["_clean_env"] = lambda: dict(os.environ, GIT_GRAFT_FILE=os.devnull)
+            try:
+                code, out = _quiet(run, root, "main")
+            finally:
+                globals()["_clean_env"] = saved_clean_env
+            check("revert/git-env-scrub-removed-red", code == 0, (code, out))
+        finally:
+            if had_git_dir:
+                os.environ["GIT_DIR"] = saved_git_dir
+            else:
+                os.environ.pop("GIT_DIR", None)
 
     def _deny(path):
         raise PermissionError(13, "read refused by the self-test", str(path))
@@ -546,6 +657,30 @@ def _self_test_isolated():
         _write(root, DEMO_REL, _demo_text(shrunk).replace("agents-sha256", "agents-digest"))
         code, out = _quiet(run, root, "main")
     check("head/wrong-keys-cannot-evaluate", code == 2 and "exactly the keys" in out, (code, out))
+
+    # The working-tree demonstration as a symlink to a full-list file outside the repository is refused,
+    # never followed; followed, it would read as unchanged and pass.
+    with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp:
+        root = _repo(tmp, _FULL)
+        elsewhere = Path(tmp) / "elsewhere.toml"
+        elsewhere.write_text(_demo_text(_FULL), encoding="utf-8")
+        (root / DEMO_REL).unlink()
+        (root / DEMO_REL).symlink_to(elsewhere)
+        code, out = _quiet(run, root, "main")
+        check("head/symlink-cannot-evaluate", code == 2 and "not a regular file" in out, (code, out))
+        saved_stat = stat
+        globals()["stat"] = types.SimpleNamespace(S_ISREG=lambda mode: True)
+        try:
+            code, out = _quiet(run, root, "main")
+        finally:
+            globals()["stat"] = saved_stat
+        check("revert/regular-file-check-removed-red", code == 0, (code, out))
+
+    with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp:
+        root = _repo(tmp, _FULL)
+        _write(root, DEMO_REL, _demo_text(_FULL + ["rulebb"]))
+        code, out = _quiet(run, root, "main")
+    check("head/duplicate-id-cannot-evaluate", code == 2 and "lists an id more than once" in out, (code, out))
 
     with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp:
         root = _repo(tmp, _FULL)
@@ -572,6 +707,29 @@ def _self_test_isolated():
             code, out = _quiet(run, root, "main")
         check(name, code == 2 and needle in out, (code, out))
 
+    # The consumer's key set changed under the gate: the working-tree demonstration carries the new key
+    # set, as a regenerated file would. Without the contract check the renamed key is a KeyError and the
+    # added key is never named.
+    saved_keys = FIRST_PIN_DEMO_KEYS
+    for name, keys, text in (
+            ("contract/renamed-list-key-cannot-evaluate",
+             frozenset({"agents-sha256", LIST_KEYS[0], "floor-obligations"}),
+             _demo_text(_FULL).replace(LIST_KEYS[1], "floor-obligations")),
+            ("contract/added-key-cannot-evaluate", saved_keys | {"cap-bytes"},
+             _demo_text(_FULL) + "cap-bytes = 32768\n")):
+        with tempfile.TemporaryDirectory(prefix="first-pin-shrink-selftest-") as tmp:
+            root = _repo(tmp, _FULL)
+            _write(root, DEMO_REL, text)
+            globals()["FIRST_PIN_DEMO_KEYS"] = keys
+            try:
+                code, out = _quiet(run, root, "main")
+            except KeyError as exc:
+                code, out = "KeyError", repr(exc)
+            finally:
+                globals()["FIRST_PIN_DEMO_KEYS"] = saved_keys
+        check(name, code == 2 and "FIRST_PIN_DEMO_KEYS is" in out and "LIST_KEYS must follow" in out,
+              (code, out))
+
     got = [_quiet(main, argv)[0]
            for argv in (["--bogus"], ["--main"], ["--main", "-x"], ["--self-test", "--bogus"])]
     check("argv/unrecognized", got == [2, 2, 2, 2], got)
@@ -584,9 +742,13 @@ def _self_test_isolated():
     print("SELF-TEST PASS: check_first_pin_shrink {} checks (an unauthorized removal from either list fails "
           "and the same removal authorized per list for the head digest passes; another digest or one list "
           "only does not authorize; unchanged and grown lists pass; an unresolvable main ref, no merge base, "
-          "a base without the demonstration and a malformed base are exit 2; a replacement ref is not read; "
-          "unreadable or malformed working-tree inputs and bad arguments are exit 2; each outcome-changing "
-          "rule is red with it reverted)".format(len(EXECUTED)))
+          "two merge bases, a base without the demonstration and a malformed base or one with other keys "
+          "are exit 2; a replacement ref, a graft file and an ambient GIT_DIR are not read; unreadable, "
+          "symlinked or malformed working-tree inputs, a list naming an id twice, a key set differing from "
+          "FIRST_PIN_DEMO_KEYS and bad arguments are exit 2; the removal rule, the authorization lookup, "
+          "the digest binding, counting only removals, the fail-closed base, --no-replace-objects, the "
+          "graft-file pin, the GIT_ variable scrub and the regular-file check are each red with that rule "
+          "reverted)".format(len(EXECUTED)))
     return 0
 
 
