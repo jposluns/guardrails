@@ -293,10 +293,11 @@ PREFLIGHT (the input paths a brief names; read over the whole brief, line by lin
                        the pin P3 reads) stays part of it. The value must be the full lowercase commit id at
                        the length of the repository's object format, equal character for character to the
                        commit id git resolves it to in the repository the lint is pointed at (--repo, read as
-                       P3 reads it), bare or followed by ^{commit}, closing markup (` * ), and _ after one of
-                       them, as in _`<id>`_) and at most one sentence stop (. , ; :); the rest of the line
-                       (BRIEF-PIN: <id> (main)) is not judged. An _ right after the id ends no pin (PIN_RE reads
-                       it as part of a word), so BRIEF-PIN: _<id>_ is a bad pin label, CANNOT_EVALUATE (P3).
+                       P3 reads it), bare or followed by ^{commit}, then a closing run of markup (` * _ )) and at
+                       most one sentence stop (. , ; :) in any order; the rest of the line (BRIEF-PIN: <id>
+                       (main)) is not judged. An _ closes the pin anywhere in that run but directly after the
+                       id's last digit: _`<id>`_, <id>._, <id>)_ and <id>^{commit}_ pass, but in <id>_ and _<id>_
+                       PIN_RE reads that _ as part of a word, so each is a bad pin label, CANNOT_EVALUATE (P3).
                        The first of these that holds refuses: the value is elided (it holds .., U+2026 or
                        U+22EF: 3a1b2c3d...e4f5a6b7), it is not one commit id (a ref step, path or other text
                        glued to the commit: <id>~1, <id>:docs/x, <id>@{u}), it is not lower case, it is
@@ -3757,9 +3758,10 @@ P3_PIN_ONLY = "BRIEF-PIN {}\nAnswer the question.\n"
 P3_BRIEF = "REVIEWED HEAD: {} (main).\nRead {} before you answer.\n"
 P3_MID_LINE = "Name a REVIEWED HEAD: 0123456789ab line.\nRead docs/absent.md before you answer.\n"
 # P7 briefs, each formatted with the fixture repository's full commit id ({0}): a full lowercase BRIEF-PIN value bare,
-# before one stop, in markup, peeled or before more words on its line passes; a short or elided id in prose is quiet
+# before one stop, in markup, peeled, closed by ) and one stop in either order or before more words on its line
+# passes; a short or elided id in prose is quiet
 P7_FULL_PINS = ("BRIEF-PIN {0}\n", "BRIEF-PIN: {0}.\n", "*BRIEF-PIN*: `{0}`\n", "BRIEF-PIN: {0}^{{commit}}\n",
-                "BRIEF-PIN: {0} (main)\n")
+                "BRIEF-PIN: {0} (main)\n", "BRIEF-PIN: ({0}).\n", "BRIEF-PIN: ({0}.)\n")
 P7_PROSE_SHORT = "BRIEF-PIN: {0}\nCommit {0:.7} fixed it; abcd1234...ef567890 is in the log.\n"
 # an elided BRIEF-PIN value: its first and last eight digits around each elision mark, and a trailing ..
 P7_ELIDED = ("{0:.8}...{1}", "{0:.8}…{1}", "{0:.8}⋯{1}", "{0:.8}..")
@@ -4203,17 +4205,20 @@ def _child_import_outcomes(base, source):
     return tuple(outcomes)
 
 
-# the identity and the dates, zone included, of every fixture commit and tag: with the object format git init is
-# given, the tree and the message, these are every input of a fixture object's id, so each id is the same on every run
+# the identity and the dates, zone included, of every fixture commit and tag; the rest of a fixture object's id is
+# fixed by the code that builds it (the object format git init is given; a commit's tree, parents and message; a
+# tag's target, name and message), so each id is the same on every run
 FIXTURE_IDENTITY = {"GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
                     "GIT_AUTHOR_DATE": "1700000000 +0000", "GIT_COMMITTER_NAME": "fixture",
                     "GIT_COMMITTER_EMAIL": "fixture@example.invalid", "GIT_COMMITTER_DATE": "1700000000 +0000"}
+# the commit id _preflight_repo gives in a SHA-1 repository: a fixture input left to the clock or the caller changes it
+P7_FIXTURE_HEAD = "0e0985219c787609ca72d5a4e7a7a4a8acdb511f"
 
 
 def _preflight_repo(base, object_format="sha1"):
     """(repo, full commit id) of a fixture repository under `base`, in `object_format`, whose one commit holds
     docs/present.md; its working tree also holds docs/untracked.md, which no commit has. Every input of the commit id
-    is pinned (FIXTURE_IDENTITY), so the id is the same on every run."""
+    is fixed (FIXTURE_IDENTITY and the steps here), so the id is the same on every run (P7_FIXTURE_HEAD for SHA-1)."""
     repo = base / "repo"
     os.makedirs(repo / "docs")
     with open(repo / "docs" / "present.md", "w", encoding="utf-8") as handle:
@@ -5944,13 +5949,18 @@ def self_test(report_path=None):
                                                         [p7_reasons(value) for value in trailing],
                                                         glued_upper != glued_upper.lower()),
               ([pin_refused] * 5, [[PIN_NOT_ONE]] * 5, True))
-        # an _ closes the pin only after other closing markup: right after the id, PIN_RE reads it as part of a
-        # word, so the line has no pin and stays CANNOT_EVALUATE (P3)
-        check("preflight/p7-pin-underscore-closer", (p7(head, "BRIEF-PIN: _`{0}`_\n"), p7(head, "BRIEF-PIN: _{0}_\n"),
-                                                     p7(head, "BRIEF-PIN: __{0}__\n")),
-              ((0, []), "CannotEvaluate", "CannotEvaluate"))
-        # every input of the fixture id is pinned: a second fixture repository built the same way has the same id;
-        # an annotated tag's own full id names another object, refused as such and never as abbreviated
+        # an _ closes the pin anywhere in its closing run (after a closer, a stop or ^{commit}) but directly after
+        # the id's last digit: there PIN_RE reads it as part of a word, so the line has no pin and stays
+        # CANNOT_EVALUATE (P3), the id wrapped in underscores too
+        underscore_closed = [p7(head, form) for form in ("BRIEF-PIN: _`{0}`_\n", "BRIEF-PIN: {0}._\n",
+                                                         "BRIEF-PIN: {0})_\n", "BRIEF-PIN: {0}^{{commit}}_\n")]
+        underscore_glued = [p7(head, form) for form in ("BRIEF-PIN: {0}_\n", "BRIEF-PIN: _{0}_\n",
+                                                        "BRIEF-PIN: __{0}__\n")]
+        check("preflight/p7-pin-underscore-closer", (underscore_closed, underscore_glued),
+              ([(0, [])] * 4, ["CannotEvaluate"] * 3))
+        # every input of the fixture id is pinned: the fixture id is this literal on every build, and a second
+        # fixture repository built the same way has the same id; an annotated tag's own full id names another
+        # object, refused as such and never as abbreviated
         tagged, tagged_head = _preflight_repo(base / "tagged")
         tag = _annotated_tag(tagged, tagged_head)
 
@@ -5964,7 +5974,8 @@ def self_test(report_path=None):
             return _outcome(text.format(value), "alpha", True, where), [
                 message for rule, _, _, message, _ in found if rule == "P7"]
 
-        check("preflight/p7-fixture-deterministic", (tagged_head == head, p7_in(tagged, head)), (True, ((0, []), [])))
+        check("preflight/p7-fixture-deterministic", (head, tagged_head == head, p7_in(tagged, head)),
+              (P7_FIXTURE_HEAD, True, ((0, []), [])))
         check("preflight/p7-pin-annotated-tag-refuses", (p7_in(tagged, tag), p7_in(tagged, tag + "^{commit}"),
                                                          tag != tagged_head, len(tag)),
               ((pin_refused, [PIN_OTHER]),) * 2 + (True, 40))
@@ -6007,7 +6018,7 @@ def self_test(report_path=None):
         check("preflight/p7-pin-length-boundary", [p7((head + head)[:count]) for count in (6, 7, 8, 39, 40, 41)],
               ["CannotEvaluate", pin_refused, pin_refused, pin_refused, (0, []), "CannotEvaluate"])
         check("preflight/p7-pin-full-passes", [p7(head, form) for form in P7_FULL_PINS]
-              + [p7(head, form, "gamma") for form in P7_FULL_PINS], [(0, [])] * 10)
+              + [p7(head, form, "gamma") for form in P7_FULL_PINS], [(0, [])] * 14)
         check("preflight/p7-reviewed-head-short-quiet", (p3("docs/present.md"), p3("docs/present.md", head[:7])),
               ((0, []), (0, [])))
         check("preflight/p7-prose-short-id-quiet", p7(head, P7_PROSE_SHORT), (0, []))
@@ -6467,9 +6478,12 @@ def self_test(report_path=None):
                                           brief_pin_word=lambda line, pin: pin.group(1)))
         check("revert/p7-hint-red", *flip([p7_refuse_line], [(1, False, True, True)],
                                           PREFLIGHT_RULES=PREFLIGHT_RULES - {"P7"}))
-        # with no _ among the closers, an italic code span around the pin reads as text glued to it
-        check("revert/p7-underscore-closer-red", *flip([lambda: p7(head, "BRIEF-PIN: _`{0}`_\n")], [pin_refused],
-                                                       PIN_CLOSERS=PIN_CLOSERS.replace("_", "")))
+        # with no _ among the closers, an _ that closes the pin (an italic code span around it, or after a stop, a
+        # ) or ^{commit}) reads as text glued to it
+        check("revert/p7-underscore-closer-red", *flip(
+            [lambda form=form: p7(head, form) for form in ("BRIEF-PIN: _`{0}`_\n", "BRIEF-PIN: {0}._\n",
+                                                           "BRIEF-PIN: {0})_\n", "BRIEF-PIN: {0}^{{commit}}_\n")],
+            [pin_refused] * 4, PIN_CLOSERS=PIN_CLOSERS.replace("_", "")))
         # a reason that names the resolved id puts the expanded id in the output
         check("revert/p7-expanded-id-red", *flip([p7_expanded_absent], [[(1, False)] * len(expanded)],
                                                  pin_fault=lambda word, pin, resolved: "resolves to " + resolved))
