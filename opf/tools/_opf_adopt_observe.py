@@ -3452,6 +3452,40 @@ def _interrupted_run_self_test():
         print("PASS " + identity)
 
 
+def _collect_rows(steps, executed):
+    """Call each step and add the rows it returns to executed as it returns,
+    so a step that raises leaves every earlier step's rows, an INVALID one
+    too, for the setup-or-teardown report to count. Returns the rows."""
+    collected = []
+    for step in steps:
+        rows = step()
+        collected.extend(rows)
+        executed.extend(rows)
+    return collected
+
+
+def _collect_rows_self_test():
+    # An INVALID row from one guard function, then an exception from the
+    # next, still fails the run (exit 1) and keeps that row in the roster.
+    import io
+    identity = "self-test/guard-rows-kept-after-raise"
+    invalid = {"id": "TG-forced/guard-invalid", "test_status": INVALID}
+
+    def raising():
+        raise RuntimeError("forced guard exception")
+    executed = [{"id": "positive/forced", "test_status": VALID}]
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            _collect_rows((lambda: [invalid], raising), executed)
+            code = None
+        except RuntimeError as exc:
+            code = _interrupted_run(executed, exc, [], [])
+    if code != 1 or invalid not in executed:
+        raise AssertionError(identity)
+    print("PASS " + identity)
+
+
 def _resolver_stub_bound(function):
     # A resolver worker reads _lookup only when it runs. One that outlives
     # settle_resolvers' bound can run after its case has unwound the fixture
@@ -3778,15 +3812,19 @@ def self_test(vectors_only=False, steady_only=False):
         # blocked in recv for up to the socket timeout, longer than close()
         # used to join it. close() must make that thread return at once.
         # Returns (outcome, reason, detail). A close() that raises any
-        # exception (in the cleanup after an unmet precondition too), or a
-        # thread still alive after it, fails. A server that never reached
-        # its blocking recv within reach_seconds (or a client that could not
-        # get there) is a precondition this run did not establish: cannot
-        # evaluate. Only the close() call is timed, from clock(), so a delay
-        # before it (pause, the seam a test uses to stand for one) is never
-        # charged to it; a close() that still took the socket timeout is
-        # cannot evaluate too, since timing alone cannot tell one that
-        # waited the timeout out from a host that stalled it.
+        # exception (in the cleanup after an unmet precondition too) fails.
+        # A server that never reached its blocking recv within reach_seconds
+        # (or a client that could not get there) is a precondition this run
+        # did not establish: cannot evaluate, returned before the thread is
+        # looked at. Once the precondition was met, a thread still alive
+        # after close() returned fails. An exception after close() raised,
+        # or after it returned with the thread still alive, does not hide
+        # that failure: it is returned and the exception is dropped; any
+        # other exception propagates. Only the close() call is timed, from
+        # clock(), so a delay before it (pause, the seam a test uses to stand
+        # for one) is never charged to it; a close() that still took the
+        # socket timeout is cannot evaluate too, since timing alone cannot
+        # tell one that waited the timeout out from a host that stalled it.
         def raised_text(exc):
             # The message alone for the fixture's own AssertionError, which
             # names what failed; the type too for any other exception.
@@ -3798,6 +3836,7 @@ def self_test(vectors_only=False, steady_only=False):
         closed = False
         raised = None
         unmet = None
+        pending = None
         try:
             with socket.create_connection(("127.0.0.1", server.port),
                                           timeout=reach_seconds) as raw:
@@ -3818,13 +3857,15 @@ def self_test(vectors_only=False, steady_only=False):
                     else:
                         unmet = ("the server did not reach its blocking recv within "
                                  "{} s".format(reach_seconds))
-        except OSError as exc:
+        except Exception as exc:
             # ssl.SSLError is an OSError. One raised before close() is the
-            # client failing to establish the precondition.
-            if closed:
-                raise
-            unmet = "the client could not reach the server: {}: {}".format(
-                type(exc).__name__, _exception_text(exc))
+            # client failing to establish the precondition. Any other
+            # exception is held until a failure already shown is returned.
+            if closed or not isinstance(exc, OSError):
+                pending = exc
+            else:
+                unmet = "the client could not reach the server: {}: {}".format(
+                    type(exc).__name__, _exception_text(exc))
         finally:
             if not closed:
                 try:
@@ -3833,6 +3874,8 @@ def self_test(vectors_only=False, steady_only=False):
                     raised = raised_text(exc)
         if raised is not None:
             return STOP_FAIL, "raised", "close() raised: " + raised
+        if pending is not None and not (closed and server.thread.is_alive()):
+            raise pending
         if unmet is not None:
             return STOP_UNEVALUATED, "precondition", unmet
         if server.thread.is_alive():
@@ -3895,7 +3938,32 @@ def self_test(vectors_only=False, steady_only=False):
               check(context, cadata, server_class=RaisingServer, mode="quiet",
                     reach_seconds=0.5),
               (STOP_FAIL, "raised"))
-        # A server thread still alive after close() returned fails.
+
+        def failing_after_close():
+            # A clock whose second reading, the one just after close(),
+            # raises an OSError: an error after close() that must not hide
+            # a failure close() already showed.
+            readings = []
+
+            def clock():
+                readings.append(None)
+                if len(readings) > 1:
+                    raise OSError("forced error after close()")
+                return time.monotonic()
+            return clock
+
+        def failing_before_close():
+            raise RuntimeError("forced error before close()")
+        # A close() that raised still fails when an error follows it, and
+        # when the cleanup close() raises after an error before close().
+        judge("self-test/tls-fixture-stop-raised-then-error",
+              check(context, cadata, server_class=RaisingServer, clock=failing_after_close()),
+              (STOP_FAIL, "raised"))
+        judge("self-test/tls-fixture-stop-error-then-cleanup-raised",
+              check(context, cadata, server_class=RaisingServer, pause=failing_before_close),
+              (STOP_FAIL, "raised"))
+        # A server thread still alive after close() returned fails, and
+        # still fails when an error follows close().
         lingering = []
 
         def lingering_server(*args, **kwargs):
@@ -3904,6 +3972,10 @@ def self_test(vectors_only=False, steady_only=False):
         try:
             judge("self-test/tls-fixture-stop-thread-alive",
                   check(context, cadata, server_class=lingering_server),
+                  (STOP_FAIL, "alive"))
+            judge("self-test/tls-fixture-stop-alive-then-error",
+                  check(context, cadata, server_class=lingering_server,
+                        clock=failing_after_close()),
                   (STOP_FAIL, "alive"))
         finally:
             for server in lingering:
@@ -4320,7 +4392,10 @@ def self_test(vectors_only=False, steady_only=False):
     BLOCKED_SWEEP = "not evaluated: not run while a resolver straggler was alive, started by "
     LEAKED = "resolver slot held with no live resolver worker"
 
-    def run_case(base, contexts, case, mutated):
+    def run_case(base, contexts, case, mutated, ended=None):
+        # ended, when given, receives this run's result once it is judged:
+        # on return, and also when the teardown then raises, so the caller
+        # can still report a failure the run had already shown.
         identifier, expected, mutation, config = case
         label = identifier + (" (mutant)" if mutated else "")
         # No earlier run's resolver worker may reach this case. Each place a
@@ -4354,7 +4429,8 @@ def self_test(vectors_only=False, steady_only=False):
             "anchors": [config.get("anchor_url", ANCHOR_URL)],
         }
         archive_body = config.get("archive", baseline_archive)
-        server = Server(
+        judged = False
+        server = config.get("server_class", Server)(
             contexts[bool(config.get("wrong_hostname"))],
             archive_body, config.get("response", reply(baseline_anchor)),
             config.get("mode", "normal"),
@@ -4924,22 +5000,31 @@ def self_test(vectors_only=False, steady_only=False):
                      lambda: "fetch_bound" not in config or bounded()),
                 ) if not check()]
                 passed = not unmet
+            judged = True
         finally:
-            if resolver_sockets is not None:
-                resolver_sockets[1].close()
-                resolver_sockets[0].close()
-            for client in backlog_clients:
-                client.close()
-            if backlog is not None:
-                backlog.close()
-            server.close()
-            alive, leaked = settle_resolvers(2.0)
-            if leaked:
-                leaks.append("teardown")
-            if alive - inherited:
-                stragglers.append("teardown")
-                for thread in alive - inherited:
-                    straggler_runs.setdefault(thread, label)
+            try:
+                if resolver_sockets is not None:
+                    resolver_sockets[1].close()
+                    resolver_sockets[0].close()
+                for client in backlog_clients:
+                    client.close()
+                if backlog is not None:
+                    backlog.close()
+                server.close()
+                alive, leaked = settle_resolvers(2.0)
+                if leaked:
+                    leaks.append("teardown")
+                if alive - inherited:
+                    stragglers.append("teardown")
+                    for thread in alive - inherited:
+                        straggler_runs.setdefault(thread, label)
+            except Exception:
+                # The teardown raised after the run was judged: the result
+                # so far goes to the caller before the exception does.
+                if judged and ended is not None:
+                    ended.append((passed, status, elapsed, fetch_guards, leaks, stragglers,
+                                  blocked, retained, unmet))
+                raise
         # passed is main's verdict on this run, leaks the resolver slots found
         # leaked, stragglers where a worker this run started outlived the
         # join, blocked the runs whose live straggler refused this run the
@@ -4952,8 +5037,11 @@ def self_test(vectors_only=False, steady_only=False):
         # it records a blocked unmutated run as not evaluated, or INVALID when
         # it failed a check, and a blocked mutant run as not evaluated (its
         # result is ignored); none of them counts as the mutant's detection.
-        return (passed, status, elapsed, fetch_guards, leaks, stragglers, blocked,
-                retained, unmet)
+        result = (passed, status, elapsed, fetch_guards, leaks, stragglers, blocked,
+                  retained, unmet)
+        if ended is not None:
+            ended.append(result)
+        return result
 
     def add_detail(row, text):
         # Append, so a row keeps any detail it already has.
@@ -5036,6 +5124,126 @@ def self_test(vectors_only=False, steady_only=False):
             add_detail(row, RETAINED)
         return row
 
+    def positive_row(case, run):
+        # The positive control's row: INVALID when the run failed its own
+        # checks, or on a leak, straggler, blocked run or retained slot.
+        (passed, status, elapsed, _, leaks, stragglers, blocked, retained, _) = run
+        passed = (passed and not leaks and not stragglers and not blocked
+                  and not retained)
+        row = {
+            "id": case[0], "expected": VALID, "observed": status,
+            "test_status": VALID if passed else INVALID,
+            "elapsed_seconds": elapsed,
+        }
+        if leaks:
+            row["resolver_slot_leaked"] = leaks
+            add_detail(row, LEAKED)
+        if retained:
+            row["resolver_slot_retained"] = retained
+            add_detail(row, RETAINED)
+        if stragglers:
+            row["resolver_straggler"] = stragglers
+            add_detail(row, STRAGGLER)
+        return row
+
+    INTERRUPTED = "not completed: a run of this row raised after the runs recorded here were judged"
+
+    def interrupted_row(case, ended, control=False):
+        # The row of a case whose run raised after the runs in ended were
+        # judged: their verdict, so a failure they already showed stays
+        # INVALID. A mutant run that was not judged is not a detection. A
+        # row they show no failure for is CANNOT-EVALUATE, not VALID, since
+        # the run that raised was not judged to its end.
+        if control:
+            row = positive_row(case, ended[0])
+        else:
+            row = record_row(case, ended[0], ended[1] if len(ended) > 1 else detected)
+            if len(ended) < 2:
+                row.update(mutant_observed="NOT-JUDGED", mutant_test_status=CANNOT_EVALUATE,
+                           mutation_detected=False, mutant_elapsed_seconds=None)
+        if row["test_status"] == VALID:
+            row["test_status"] = CANNOT_EVALUATE
+        add_detail(row, INTERRUPTED)
+        return row
+
+    def control_row(base, contexts, case, rows, runner=None):
+        # Runs the positive control and adds its row to rows; returns
+        # whether the run failed its own checks. A run that raises after it
+        # was judged still adds its row, then the exception propagates.
+        ended = []
+        try:
+            run = (runner or run_case)(base, contexts, case, False, ended)
+        except Exception:
+            if ended:
+                rows.append(interrupted_row(case, ended, control=True))
+            raise
+        rows.append(positive_row(case, run))
+        return not run[0]
+
+    def case_row(base, contexts, case, rows, runner=None):
+        # Runs a case and its mutant and adds main's row to rows. When the
+        # mutant run, or either run's teardown, raises, the row from the
+        # runs judged so far is added first, so a failed normal run stays
+        # INVALID, then the exception propagates.
+        ended = []
+        try:
+            run = (runner or run_case)(base, contexts, case, False, ended)
+            mutant_run = (runner or run_case)(base, contexts, case, True, ended)
+        except Exception:
+            if ended:
+                rows.append(interrupted_row(case, ended))
+            raise
+        rows.append(record_row(case, run, mutant_run))
+
+    def kept_runs_self_test(base, contexts, failures):
+        # A run judged failed, then an exception, still leaves its row
+        # INVALID in the roster: a case whose mutant run raises, a positive
+        # control whose teardown raises, and run_case handing over the
+        # verdict of a run whose real fixture's close() raised.
+        failed = (False, "fixture: failed", 0.0, [], [], [], [], [], [])
+
+        def mutant_raises(base, contexts, case, mutated, ended):
+            if mutated:
+                raise RuntimeError("forced mutant run exception")
+            ended.append(failed)
+            return failed
+
+        def teardown_raises(base, contexts, case, mutated, ended):
+            ended.append(failed)
+            raise RuntimeError("forced teardown exception")
+        for identity, call, case in (
+                ("self-test/case-row-kept-after-mutant-raised", case_row,
+                 ("self-test/forced-case", VALID, "archive", {})),
+                ("self-test/control-row-kept-after-teardown-raised", control_row,
+                 ("self-test/forced-control", VALID, "archive", {}))):
+            rows = []
+            try:
+                call(base, contexts, case, rows,
+                     mutant_raises if call is case_row else teardown_raises)
+            except RuntimeError:
+                pass
+            if [(row.get("id"), row.get("test_status")) for row in rows] != [(case[0], INVALID)]:
+                failures.append("FAIL " + identity + ": a failed run's row was lost to a later "
+                                "exception")
+            else:
+                print("PASS " + identity)
+        identity = "self-test/run-case-hands-over-before-teardown-raised"
+        # Expecting INVALID of a run that is VALID fails it; the fixture's
+        # close() then raises in the teardown.
+        ended = []
+        try:
+            run_case(base, contexts, ("self-test/forced-teardown", INVALID, "archive",
+                                      {"server_class": RaisingServer}), False, ended)
+            outcome = "no exception"
+        except Exception as exc:
+            outcome = type(exc).__name__ + ": " + _exception_text(exc)
+        if (outcome != "RuntimeError: forced close failure"
+                or [run[0] for run in ended] != [False]):
+            failures.append("FAIL " + identity + ": the run's verdict was not handed over "
+                            "before its teardown exception ({})".format(outcome))
+        else:
+            print("PASS " + identity)
+
     def cancellation_rows(sweep):
         # The cancellation sweep runs the production resolver worker against
         # the real _RESOLVER_SLOT, so it depends on the resolver as a case run
@@ -5108,7 +5316,7 @@ def self_test(vectors_only=False, steady_only=False):
         source = ("vector/straggler", CANNOT_EVALUATE, "resolver-deadline",
                   {"hold_lookup": gate})
         try:
-            failures = []
+            failures = vector_failures(VECTOR_NAMES[0])
             run = run_case(base, contexts, source, False)
             row = record_row(source, run, detected)
             if (run[:2] != (True, CANNOT_EVALUATE)
@@ -5137,7 +5345,7 @@ def self_test(vectors_only=False, steady_only=False):
                     raise AssertionError("the load-sensitive vectors depart from the timing configs")
                 if steady_only and name in _LOAD_SENSITIVE_VECTORS:
                     continue
-                failures = []
+                failures = vector_failures(name)
                 case = (name.replace("resolver-vector/", "vector/"), VALID, "archive", config)
                 run = run_case(base, contexts, case, False)
                 blocked_runs.append(run)
@@ -5157,7 +5365,7 @@ def self_test(vectors_only=False, steady_only=False):
                 results.append((name, failures))
             # A blocked mutant run, with or without a failed check, is not a
             # detection: the row is CANNOT-EVALUATE beside an evaluated run.
-            failures = []
+            failures = vector_failures(VECTOR_NAMES[7])
             if len(blocked_runs) < 2:
                 failures.append("cannot evaluate: fewer than two blocked runs")
             case = ("vector/blocked-mutant", VALID, "archive", dict())
@@ -5182,7 +5390,7 @@ def self_test(vectors_only=False, steady_only=False):
         case = ("vector/retained-slot", CANNOT_EVALUATE, "resolver-deadline",
                 {"stalled_resolver": True, "hold_lookup": gate})
         try:
-            failures = []
+            failures = vector_failures(VECTOR_NAMES[8])
             with mock.patch.object(module, "_RESOLVER_SLOT", SlotProbe(_RESOLVER_SLOT, gate)):
                 run = run_case(base, contexts, case, False)
             row = record_row(case, run, detected)
@@ -5221,7 +5429,7 @@ def self_test(vectors_only=False, steady_only=False):
         # the slot, so the run is CANNOT-EVALUATE as expected and the leak
         # alone fails the row.
         case = ("vector/leaked-slot", CANNOT_EVALUATE, "resolver-deadline", {})
-        failures = []
+        failures = vector_failures(VECTOR_NAMES[9])
         probe = LeakProbe(_RESOLVER_SLOT)
         with mock.patch.object(module, "_RESOLVER_SLOT", probe):
             run = run_case(base, contexts, case, False)
@@ -5250,7 +5458,7 @@ def self_test(vectors_only=False, steady_only=False):
         # also covers a host that stalls it for several seconds.
         gate = threading.Event()
         case = ("vector/positive-held-slot", VALID, "archive", {"hold_after_publish": gate})
-        failures = []
+        failures = vector_failures(VECTOR_NAMES[10])
         try:
             run = run_case(base, contexts, case, False)
             if run[:2] != (True, VALID) or run[4:] != ([], ["after", "teardown"], [], [], []):
@@ -5293,7 +5501,7 @@ def self_test(vectors_only=False, steady_only=False):
             if swept[0]:
                 _RESOLVER_SLOT.release()
             return [{"id": _CANCELLATION_ROW, "test_status": VALID}]
-        failures = []
+        failures = vector_failures(VECTOR_NAMES[11])
         try:
             rows = cancellation_rows(sweep)
         finally:
@@ -5307,53 +5515,79 @@ def self_test(vectors_only=False, steady_only=False):
             failures.append("the leaked slot did not fail the sweep's row INVALID")
         results.append((VECTOR_NAMES[11], failures))
 
+    # Each vector's failure list from when the vector starts filling it, by
+    # name, so a vector that raises before it reports that list still has
+    # the failures it recorded reported.
+    vectors_started = {}
+
+    def vector_failures(name):
+        vectors_started[name] = []
+        return vectors_started[name]
+
     def run_vector(vector, names, base, contexts, results):
         # A vector that raises reports each of its names not yet reported as
         # "cannot evaluate", naming the exception and its message, so the
-        # report says what could not be evaluated.
+        # report says what could not be evaluated, after any failure the
+        # vector had already recorded for that name, so that failure still
+        # fails the run.
         try:
             vector(base, contexts, results)
         except Exception as exc:
             done = {name for name, _ in results}
             text = _exception_text(exc)
             reason = type(exc).__name__ + (": " + text if text else "")
-            results.extend((name, ["cannot evaluate: " + reason])
+            results.extend((name, vectors_started.get(name, []) + ["cannot evaluate: " + reason])
                            for name in names if name not in done)
 
     def resolver_vectors(base, contexts, results):
         # Appends (name, failures) per vector to results as each ends, so an
         # exception here keeps the earlier vectors' results for the caller;
-        # a vector that raises reports "cannot evaluate". Every vector
-        # releases its hold, then all workers are joined, and the cleanup
-        # vector requires none alive, the self-test lookup and the real slot
-        # still bound, the slot free, and a raising vector's report to carry
-        # its exception's message.
+        # a vector that raises reports "cannot evaluate", after the failures
+        # it had recorded. Every vector releases its hold, then all workers
+        # are joined, and the cleanup vector requires none alive, the
+        # self-test lookup and the real slot still bound, the slot free, and
+        # a raising vector's report to carry its exception's message and
+        # the failure it recorded before it raised.
         lookup_before = module._lookup
         slot_before = module._RESOLVER_SLOT
+
+        def cleanup(base, contexts, results):
+            failures = vector_failures(VECTOR_NAMES[12])
+
+            def raising(base, contexts, results):
+                raise AssertionError("the probe precondition does not hold")
+            probe = []
+            run_vector(raising, ("vector/raising",), base, contexts, probe)
+            if probe != [("vector/raising", ["cannot evaluate: AssertionError: "
+                                             "the probe precondition does not hold"])]:
+                failures.append("a raising vector's report did not name what it could not "
+                                "evaluate")
+
+            def failing_then_raising(base, contexts, results):
+                vector_failures("vector/failing-then-raising").append("the forced failure")
+                raise AssertionError("the forced exception")
+            probe = []
+            run_vector(failing_then_raising, ("vector/failing-then-raising",), base, contexts,
+                       probe)
+            if probe != [("vector/failing-then-raising", [
+                    "the forced failure", "cannot evaluate: AssertionError: the forced exception"])]:
+                failures.append("a vector that raised lost the failure it had recorded")
+            if join_resolvers(5.0):
+                failures.append("a resolver worker outlived the vectors")
+            if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
+                failures.append("the vectors left a fixture bound")
+            elif not _RESOLVER_SLOT.acquire(blocking=False):
+                failures.append("the vectors left the resolver slot held")
+            else:
+                _RESOLVER_SLOT.release()
+            results.append((VECTOR_NAMES[12], failures))
         for vector, names in ((straggler_vectors, VECTOR_NAMES[:8]),
                               (retained_vector, VECTOR_NAMES[8:9]),
                               (leaked_vector, VECTOR_NAMES[9:10]),
                               (held_slot_vector, VECTOR_NAMES[10:11]),
-                              (sweep_leaked_vector, VECTOR_NAMES[11:12])):
+                              (sweep_leaked_vector, VECTOR_NAMES[11:12]),
+                              (cleanup, VECTOR_NAMES[12:])):
             run_vector(vector, names, base, contexts, results)
-        failures = []
-
-        def raising(base, contexts, results):
-            raise AssertionError("the probe precondition does not hold")
-        probe = []
-        run_vector(raising, ("vector/raising",), base, contexts, probe)
-        if probe != [("vector/raising", ["cannot evaluate: AssertionError: "
-                                         "the probe precondition does not hold"])]:
-            failures.append("a raising vector's report did not name what it could not evaluate")
-        if join_resolvers(5.0):
-            failures.append("a resolver worker outlived the vectors")
-        if module._lookup is not lookup_before or module._RESOLVER_SLOT is not slot_before:
-            failures.append("the vectors left a fixture bound")
-        elif not _RESOLVER_SLOT.acquire(blocking=False):
-            failures.append("the vectors left the resolver slot held")
-        else:
-            _RESOLVER_SLOT.release()
-        results.append((VECTOR_NAMES[12], failures))
 
     try:
         if tuple(case[0] for case in cases if "fetch_bound" in case[3]) != _LOAD_SENSITIVE_ROWS:
@@ -5416,25 +5650,7 @@ def self_test(vectors_only=False, steady_only=False):
                 raise AssertionError("resolver worker alive before any case")
             # Establish an actual positive TLS/quarantine fixture before negatives.
             positive = ("positive/local-tls-quarantine", VALID, "archive", {})
-            (passed, status, elapsed, _, leaks, stragglers, blocked, retained,
-             _) = run_case(base, contexts, positive, False)
-            main_failed = not passed
-            passed = (passed and not leaks and not stragglers and not blocked
-                      and not retained)
-            executed.append({
-                "id": positive[0], "expected": VALID, "observed": status,
-                "test_status": VALID if passed else INVALID,
-                "elapsed_seconds": elapsed,
-            })
-            if leaks:
-                executed[-1]["resolver_slot_leaked"] = leaks
-                add_detail(executed[-1], LEAKED)
-            if retained:
-                executed[-1]["resolver_slot_retained"] = retained
-                add_detail(executed[-1], RETAINED)
-            if stragglers:
-                executed[-1]["resolver_straggler"] = stragglers
-                add_detail(executed[-1], STRAGGLER)
+            main_failed = control_row(base, contexts, positive, executed)
             # Main returned here when the positive run failed its own checks,
             # and so does this. A leak, straggler or retained slot fails only
             # this row: it stays INVALID and the run continues. While its
@@ -5450,12 +5666,15 @@ def self_test(vectors_only=False, steady_only=False):
                                 + fixture_failures + fixture_unevaluated)
                 return 1
 
-            guard_rows = (_guard_self_test() + _ownership_self_test()
-                          + cancellation_rows(_cancellation_self_test))
-            executed.extend(guard_rows)
+            kept_runs_self_test(base, contexts, fixture_failures)
+            # Each guard function's rows are recorded as it returns, and each
+            # case's row as its runs end (or as soon as a run of it raises),
+            # so an exception leaves every row that already failed.
+            guard_rows = _collect_rows((
+                _guard_self_test, _ownership_self_test,
+                functools.partial(cancellation_rows, _cancellation_self_test)), executed)
             for case in cases:
-                run = run_case(base, contexts, case, False)
-                executed.append(record_row(case, run, run_case(base, contexts, case, True)))
+                case_row(base, contexts, case, executed)
             resolver_vectors(base, contexts, vector_results)
     except Exception as exc:
         # Exit 1 when a definite failure was recorded before exc, else 2
@@ -5496,6 +5715,10 @@ def self_test(vectors_only=False, steady_only=False):
     #   that run beside the live worker.
     # - A resolver worker alive before the first case is a setup
     #   CANNOT-EVALUATE: exit 2. Main had no such check.
+    # - A case whose normal run failed, then whose mutant run (or either
+    #   run's teardown) raises, keeps its row INVALID: exit 1. Main lost
+    #   that row and exited 2. So does a guard function's INVALID row when
+    #   a later guard function raises.
     # - _resolver_stub_bound turns exit 0 into 2 when a resolver worker
     #   outlives the self-test. Main had no such check.
     # - A resolver vector that fails exits 1, or 2 when every failure is a
@@ -5521,6 +5744,7 @@ def self_test(vectors_only=False, steady_only=False):
         _failure_lines_self_test()
         _setup_row_self_test()
         _interrupted_run_self_test()
+        _collect_rows_self_test()
         red_failure = None
     except AssertionError as exc:
         red_failure = "FAIL " + str(exc)
@@ -5541,7 +5765,8 @@ def self_test(vectors_only=False, steady_only=False):
             return 1
         except Exception as exc:
             _print_failures(["FAIL runner/adopt-observe-registration: registration cannot "
-                             "evaluate: {}: {}".format(type(exc).__name__, exc)]
+                             "evaluate: {}: {}".format(type(exc).__name__,
+                                                       _exception_text(exc))]
                             + fixture_unevaluated)
             return 2
     # A stop check that could not be evaluated is neither a pass nor a
