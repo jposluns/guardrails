@@ -14917,6 +14917,17 @@ def _branch_root_probe(repo, start):
     return ("unknown", "git merge-base returned status {}".format(merge.returncode))
 
 
+def _branch_root_detach_outcome(start, outcome, detail):
+    """The probe outcome branch_root acts on. For a detached worktree (_DetachStart) a 'no-protected-ref'
+    outcome reads as 'unknown': with no protected line to root against no probe can show its commit-ish
+    rooted, so it keeps the deny every detach had before this guard read the form. A -b creation there
+    keeps its allow (_branch_root_probe)."""
+    if isinstance(start, _DetachStart) and outcome == "no-protected-ref":
+        return ("unknown", "no protected line (origin/HEAD or a local main/master) resolves, so the "
+                           "detached worktree's commit-ish {!r} cannot be shown rooted".format(str(start)))
+    return (outcome, detail)
+
+
 # git and then a verb that can create a branch anywhere in a command's text: branch_root's subject test when
 # a '#' whose comment reading the lexer cannot judge under both readings stops it (_hash_doubt_names). A
 # _RawSequence, so the test is linear in the command's length.
@@ -14996,7 +15007,8 @@ def branch_root(data):
     with a missing or extra operand or beside -b/-B, an --orphan, and a bare 'worktree add <path>
     [<commit-ish>]' (git may create a branch there) still DENY as forms this guard cannot classify
     (_worktree_creation_start). A MISSING protected line (no origin/HEAD and no local
-    main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS.
+    main/master) is NOT evidence a plain local branch is orphaned, so a resolvable-start creation ALLOWS;
+    a detached worktree there DENIES, as no probe can show its commit-ish rooted (_branch_root_detach_outcome).
     ONLY a redirect whose repository this guard cannot pin at all - a --git-dir/GIT_DIR form, a -c or other
     global option or leading assignment (other than GIT_WORK_TREE= and the removed GUARDRAIL_ALLOW_DISCARD
     prefix) with no -C, --work-tree or GIT_WORK_TREE=, an empty -C, a -C chain whose first -C is relative
@@ -15212,7 +15224,7 @@ def branch_root(data):
         if probe_repo is None:
             outcome, detail = ("unknown", "the session repository directory is unavailable")
         else:
-            outcome, detail = _branch_root_probe(probe_repo, start)
+            outcome, detail = _branch_root_detach_outcome(start, *_branch_root_probe(probe_repo, start))
         if outcome == "orphaned":
             return _deny(
                 "AIQT rule brnrot (branch-rooted-on-live-main): start point {!r} has no merge base "

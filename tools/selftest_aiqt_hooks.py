@@ -17272,6 +17272,40 @@ def _main_isolated(monitor):
                         label, got))
         finally:
             aiqt_hooks._detach_pinned = _h33_gate_saved
+        # In a repository where no protected line resolves (no origin/HEAD and no local main/master) a -b
+        # creation from a resolvable start allows, but a pinned detach DENIES naming the missing protected
+        # line, the deny every detach had before this guard read the form: no probe can show its commit-ish
+        # rooted there. Flip: with _branch_root_detach_outcome passing the probe outcome through, each deny
+        # row must turn red (the resolvable commit-ish allows), while the -b row keeps its allow.
+        h36_repo = _init_repo(tmp / "h36-no-protected-line")
+        _git(h36_repo, "branch", "-m", "main", "trunk")
+        h36r = str(h36_repo)
+        h36_deny = (
+            ("(H36a) worktree add --detach in a repository with no protected line denies",
+             "git worktree add --detach /tmp/wt-h36a HEAD", h36r),
+            ("(H36b) worktree add -d through -C <repo> with no protected line denies",
+             "git -C {} worktree add -d /tmp/wt-h36b trunk".format(h36r), str(_f12_plain)),
+        )
+        for label, command, cwd in h36_deny:
+            _h36_code, _h36_out, _h36_err = brg({"hook_event_name": "PreToolUse", "tool_name": "Bash",
+                                                 "tool_input": {"command": command}, "cwd": cwd})
+            _h36_got = _reduce_result(_h36_code, _h36_out)
+            _h36_reason = ((_h36_out or {}).get("hookSpecificOutput") or {}).get("permissionDecisionReason", "")
+            if _h36_got != "deny" or "no protected line" not in _h36_reason:
+                failures.append("{}: expected deny naming the missing protected line, got {} {!r}".format(
+                    label, _h36_got, _h36_reason))
+        if _decision(brg, "git worktree add -b h36c /tmp/wt-h36c HEAD", cwd=h36r) != "allow":
+            failures.append("(H36c) worktree add -b in a repository with no protected line must still allow")
+        _h36_saved = aiqt_hooks._branch_root_detach_outcome
+        aiqt_hooks._branch_root_detach_outcome = lambda start, outcome, detail: (outcome, detail)
+        try:
+            for label, command, cwd in h36_deny:
+                got = _decision(brg, command, cwd=cwd)
+                if got == "deny":
+                    failures.append("{} flip: passing the no-protected-line outcome through must turn it red, "
+                                    "got {}".format(label, got))
+        finally:
+            aiqt_hooks._branch_root_detach_outcome = _h36_saved
         # A GIT_WORK_TREE= prefix is a leading assignment, so a detach beside it is not probed and keeps the
         # deny, naming the cannot-pin reason.
         for label, command in (
