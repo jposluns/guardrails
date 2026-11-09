@@ -4945,10 +4945,12 @@ def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0):
 
     bin_dir is the shared stub directory from _prepare_stubs; nothing this writes is
     executed. PATH is bin_dir, then os.defpath: python3 and gitleaks resolve to the
-    fixtures, and the one other external command the live runner reaches, dirname,
-    runs for real from os.defpath. dirname only computes a string from its argument:
-    it reads no file, opens no connection and writes nothing, and the environment
-    carries no credential (HOME is the scratch tree).
+    fixtures, and the real executables these launches reach are /bin/sh, the
+    interpreter every fixture runs, and dirname, the one other external command the
+    live runner reaches, which runs from os.defpath. dirname reads only what the
+    dynamic loader and its startup read, opens no connection, and writes only its
+    result to the pipe bash captures; the environment carries no credential (HOME is
+    the scratch tree).
     """
     import os
     import shutil
