@@ -26,9 +26,18 @@ name the characters in its own source without flagging itself; it writes them on
   check_no_dashes.py --default-parity  this repository only: DEFAULT_POLICY equals .aiqt/char-policy.json
 
 Exit: 0 clean; 1 a finding; 2 cannot evaluate (an unreadable tree, a scoped tree that is there but is not a
-directory or a symlink to a directory inside the repository, a scoped file that is not valid UTF-8, a malformed
-policy, a bad argument). A scoped file that is not valid UTF-8 is named with the offset of its first bad byte;
-the other files are still scanned and their findings printed, and the exit is 2 whatever they hold.
+directory or a symlink to a directory inside the repository, a scoped file that is not valid UTF-8 or cannot be
+read, a malformed policy, a bad argument). A scoped file that is not valid UTF-8 is named with the offset of its
+first bad byte, and one that cannot be read with the reason; the other files are still scanned and their
+findings printed, and the exit is 2 whatever they hold. Every file name printed is relative to the repository
+root, with a backslash doubled, a byte that is not UTF-8 written \\xNN and any other character that is not
+printable (a newline, another control or format character, a line or paragraph separator) written \\uNNNN or
+\\UNNNNNNNN, so each name stays on its own line and a crafted name cannot pass for another file.
+
+Residual: a directory symlink BELOW a scoped tree's top is not followed (the shared walk never follows one), so
+the files behind it are outside the scope and are not scanned; only a scoped tree's own top may be a symlink,
+which is walked when its target is a directory inside the repository. The gate names each such symlink on
+stderr in a note, whatever the exit; listing it in the entry's skip list silences the note.
 --default-parity exits 0 when the two are equal, and also, saying SKIP, when the file is absent; 1 when they
 differ; 2 when the file cannot be used. An adopter's own policy differs from this repository's by design, so
 only this repository's check roster runs that mode; the self-test never reads the repository's policy file.
@@ -272,12 +281,14 @@ def load_policy(root):
     return parse_policy(raw)
 
 
-def scope_paths(root, policy):
+def scope_paths(root, policy, unfollowed=None):
     """The files the policy scopes under root, in scope-entry order, each entry's files sorted, a path listed
     by an earlier entry kept there only. Raises OSError on a tree that cannot be walked or a file entry that
     cannot be examined, or a tree that is there but cannot be read as a directory (fail-closed); an absent
-    tree or file is skipped."""
+    tree or file is skipped. A directory symlink below a tree's top is not followed, so no file behind it is
+    listed; unfollowed, when given as a list, receives each such symlink once, in the order met."""
     root = Path(root)
+    links = []
     paths, seen = [], set()
     for entry in policy["scope"]:
         if "file" in entry:
@@ -303,12 +314,49 @@ def scope_paths(root, policy):
                     raise NotADirectoryError(f"the scoped tree {tree} {problem}")
                 if not dir_present(base, root=root):
                     continue
-            found = sorted(walk_files(base, frozenset(entry.get("skip", ())), suffixes=set(entry["suffixes"])))
+            found = sorted(walk_files(base, frozenset(entry.get("skip", ())), suffixes=set(entry["suffixes"]),
+                                      symlink_dirs=links))
         for path in found:
             if path not in seen:
                 seen.add(path)
                 paths.append(path)
+    if unfollowed is not None:
+        for link in links:
+            if link not in unfollowed:
+                unfollowed.append(link)
     return paths
+
+
+def _shown(name):
+    """A file name as printed: a backslash doubled, a byte that is not UTF-8 (which Python holds as a
+    surrogate escape, U+DC80 to U+DCFF) written \\xNN, and every other character that is not printable
+    (str.isprintable: a control, format, surrogate, private-use or unassigned character, or a separator but
+    the space) written \\uNNNN or \\UNNNNNNNN. Distinct names print distinctly, on one line each."""
+    out = []
+    for char in str(name):
+        code = ord(char)
+        if 0xDC80 <= code <= 0xDCFF:
+            out.append(f"\\x{code - 0xDC00:02x}")
+        elif char == "\\":
+            out.append("\\\\")
+        elif char.isprintable():
+            out.append(char)
+        elif code <= 0xFFFF:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(f"\\U{code:08x}")
+    return "".join(out)
+
+
+def _reason(exc):
+    """An OSError's message with its file names printed by _shown, never raw."""
+    if not isinstance(exc, OSError) or exc.filename is None:
+        return str(exc)
+    text = f"[Errno {exc.errno}] {exc.strerror}" if exc.errno is not None else str(exc.strerror)
+    text += f": {_shown(os.fsdecode(exc.filename))}"
+    if exc.filename2 is not None:
+        text += f" -> {_shown(os.fsdecode(exc.filename2))}"
+    return text
 
 
 def run(root):
@@ -317,28 +365,41 @@ def run(root):
     try:
         policy = load_policy(root)
     except (PolicyError, OSError) as exc:
-        print(f"error: the character policy {POLICY_PATH} cannot be used ({exc}); fail-closed", file=sys.stderr)
+        print(f"error: the character policy {POLICY_PATH} cannot be used ({_reason(exc)}); fail-closed",
+              file=sys.stderr)
         return 2
     chars = list(policy["chars"].items())
-    findings, undecodable = [], []
+    findings, undecodable, unreadable, unfollowed = [], [], [], []
     try:
-        for path in scope_paths(root, policy):
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError as exc:
-                # A scoped file that is not valid UTF-8 cannot be scanned, so whether it holds a policy character
-                # is unknown: a cannot-evaluate (exit 2) naming the file, never skipped into a PASS. The other
-                # files are still scanned, so their findings are reported too.
-                undecodable.append(f"{path.relative_to(root)} (byte {exc.start}: {exc.reason})")
-                continue
-            for number, line in enumerate(lines, 1):
-                for char, name in chars:
-                    if char in line:
-                        column = line.index(char) + 1
-                        findings.append(f"{path.relative_to(root)}:{number}:{column}: {name}")
+        paths = scope_paths(root, policy, unfollowed)
     except OSError as exc:
-        print(f"error: cannot scan the tree ({exc}); fail-closed", file=sys.stderr)
+        print(f"error: cannot scan the tree ({_reason(exc)}); fail-closed", file=sys.stderr)
         return 2
+    for path in paths:
+        shown = _shown(path.relative_to(root))
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            # A scoped file that is not valid UTF-8 cannot be scanned, so whether it holds a policy character
+            # is unknown: a cannot-evaluate (exit 2) naming the file, never skipped into a PASS. The other
+            # files are still scanned, so their findings are reported too.
+            undecodable.append(f"{shown} (byte {exc.start}: {exc.reason})")
+            continue
+        except OSError as exc:
+            # Likewise a scoped file that cannot be read: it is named and the scan goes on, so the diagnostics
+            # and findings already collected, and those of the files after it, are all printed.
+            unreadable.append(f"{shown} ({exc.strerror or type(exc).__name__})")
+            continue
+        for number, line in enumerate(lines, 1):
+            for char, name in chars:
+                if char in line:
+                    column = line.index(char) + 1
+                    findings.append(f"{shown}:{number}:{column}: {name}")
+    if unfollowed:
+        print(f"note: {len(unfollowed)} directory symlink(s) below a scoped tree's top not followed, so the files "
+              "behind them are outside the scope and were not scanned", file=sys.stderr)
+        for link in unfollowed:
+            print(f"  {_shown(link.relative_to(root))}", file=sys.stderr)
     if findings:
         print(f'FAIL: {len(findings)} character(s) forbidden by the "{policy["id"]}" character policy found')
         for finding in findings:
@@ -348,6 +409,12 @@ def run(root):
               file=sys.stderr)
         for item in undecodable:
             print(f"  {item}", file=sys.stderr)
+    if unreadable:
+        print(f"error: {len(unreadable)} scoped file(s) cannot be read, so not scanned; fail-closed",
+              file=sys.stderr)
+        for item in unreadable:
+            print(f"  {item}", file=sys.stderr)
+    if undecodable or unreadable:
         return 2
     if findings:
         return 1
@@ -363,7 +430,8 @@ def default_parity(root):
     try:
         policy = load_policy(Path(root))
     except (PolicyError, OSError) as exc:
-        print(f"error: the character policy {POLICY_PATH} cannot be used ({exc}); fail-closed", file=sys.stderr)
+        print(f"error: the character policy {POLICY_PATH} cannot be used ({_reason(exc)}); fail-closed",
+              file=sys.stderr)
         return 2
     if policy is DEFAULT_POLICY:
         print(f"SKIP: {POLICY_PATH} is absent, so the built-in default applies and there is nothing to compare")
@@ -416,7 +484,7 @@ def _self_test():
         rc, out, err = scan(root, check)
         if rc != want or (needle is not None and needle not in out + err):
             failures.append(f"{label}: want exit {want}" + (f" and {needle!r}" if needle else "")
-                            + f", got {rc}: {out.strip()[:200]!r}")
+                            + f", got {rc}: stdout {out.strip()[:200]!r}, stderr {err.strip()[:200]!r}")
 
     def policy(**changes):
         data = {"version": 1, "id": "fixture", "chars": {quote: "left double quotation mark"},
@@ -585,6 +653,62 @@ def _self_test():
         expect("G8L not UTF-8 under an unlisted suffix", tree({"d/a.txt": b"x\xff\n"}), 0, "PASS")
         expect("G8M not UTF-8 in a skipped directory", tree({"t/node_modules/a.md": b"x\xff\n"}, policy(
             scope=[{"tree": "t", "suffixes": [".md"], "skip": ["node_modules"]}])), 0, "PASS")
+        # G8N a scoped file that cannot be read (a dangling symlink, which fails to open even for root) does not
+        # drop what was collected before it or stop the scan: the undecodable file before it, the finding
+        # before it and the finding after it are all printed beside its own diagnostic, and the exit is 2.
+        unread = "scoped file(s) cannot be read, so not scanned; fail-closed"
+        broken = tree({"d/a.md": b"x\xff\n", "d/b.md": em, "d/d.md": en})
+        os.symlink("absent", os.path.join(broken, "d", "c.md"))
+        rc, out, err = scan(broken)
+        if (rc != 2 or not_utf8 not in err or "  d/a.md (byte 1: invalid start byte)" not in err.splitlines()
+                or out.splitlines()[1:] != ["  d/b.md:1:1: em dash", "  d/d.md:1:1: en dash"]
+                or unread not in err or "  d/c.md (No such file or directory)" not in err.splitlines()
+                or "PASS" in out):
+            failures.append(f"G8N unreadable file after other diagnostics: want exit 2 and all four named, got "
+                            f"{rc}: stdout {out.strip()[:300]!r}, stderr {err.strip()[:300]!r}")
+        # G8O a policy that forbids U+FEFF finds a leading byte order mark: the file is decoded as strict
+        # UTF-8, which keeps it, never as utf-8-sig, which would strip it unseen.
+        expect("G8O byte order mark as a policy character", tree({"d/a.md": f"{bom}x\n"}, policy(
+            chars={bom: "byte order mark"})), 1, "d/a.md:1:1: byte order mark")
+        # G8P a failing vector's message carries stderr too, where the cannot-evaluate diagnostics go.
+        before = len(failures)
+        expect("probe", tree({"d/a.md": b"x\xff\n"}), 0)
+        probe = failures[before:]
+        del failures[before:]
+        if len(probe) != 1 or "d/a.md (byte 1: invalid start byte)" not in probe[0]:
+            failures.append(f"G8P a failing vector's message omits stderr: {probe!r}")
+        # G18 a directory symlink below a scoped tree's top is not followed (the residual the docstring
+        # states), and the gate names it in a note on stderr whatever the exit; the skip list silences it.
+        nested_policy = policy(chars={em: "em dash"}, scope=[{"tree": "t", "suffixes": [".md"]}])
+        nested = tree({"shared/a.md": em, "t/x.md": "x\n"}, nested_policy)
+        os.symlink(os.path.join("..", "shared"), os.path.join(nested, "t", "sub"))
+        rc, out, err = scan(nested)
+        if (rc != 0 or "PASS" not in out
+                or "directory symlink(s) below a scoped tree's top not followed" not in err
+                or "  t/sub" not in err.splitlines()):
+            failures.append(f"G18A nested directory symlink: want exit 0 and a note naming t/sub, got {rc}: "
+                            f"stdout {out.strip()[:200]!r}, stderr {err.strip()[:200]!r}")
+        nested = tree({"shared/a.md": em, "t/x.md": "x\n"}, policy(
+            chars={em: "em dash"}, scope=[{"tree": "t", "suffixes": [".md"], "skip": ["sub"]}]))
+        os.symlink(os.path.join("..", "shared"), os.path.join(nested, "t", "sub"))
+        expect("G18B nested directory symlink in the skip list", nested, 0, "PASS")
+        if scan(nested)[2]:
+            failures.append("G18B nested directory symlink in the skip list: want no note on stderr")
+        # G19 file names print one per line and distinctly: a newline, a backslash, a C1 control character
+        # (U+0085) beside the byte 0x85 that is not UTF-8, a format character (U+202E) and an escape (U+001B)
+        # are each escaped, in a finding, an undecodable-file diagnostic and an unreadable-file diagnostic.
+        right_to_left = chr(0x202E)  # built with chr so no invisible character is in this source
+        crafted = tree({"d/a\nb.md": em, "d/c\\nd.md": em, f"d/{right_to_left}.md": em, "d/\x85.md": b"x\xff\n",
+                        os.fsdecode(b"d/\x85.md"): b"\xffx\n"})
+        os.symlink("absent", os.path.join(crafted, "d", "e\x1b.md"))
+        rc, out, err = scan(crafted)
+        want_out = {"  d/a\\u000ab.md:1:1: em dash", "  d/c\\\\nd.md:1:1: em dash", "  d/\\u202e.md:1:1: em dash"}
+        want_err = {"  d/\\u0085.md (byte 1: invalid start byte)", "  d/\\x85.md (byte 0: invalid start byte)",
+                    "  d/e\\u001b.md (No such file or directory)"}
+        if (rc != 2 or len(out.splitlines()) != 4 or set(out.splitlines()[1:]) != want_out
+                or len(err.splitlines()) != 5 or not want_err <= set(err.splitlines())):
+            failures.append(f"G19 crafted file names: want each escaped on its own line, got {rc}: stdout "
+                            f"{out!r}, stderr {err!r}")
         # G9 order and duplicates: overlapping entries report a file once, in its first entry's place.
         overlap = policy(scope=[{"tree": "b", "suffixes": [".md"]}, {"tree": ".", "suffixes": [".md"]}])
         rc, out, _ = scan(tree({"a.md": quote, "b/c.md": quote}, overlap))
@@ -610,6 +734,14 @@ def _self_test():
                 expect("G12 unsearchable file entry", hidden, 2, "cannot scan the tree")
             finally:
                 os.chmod(os.path.join(hidden, "d"), 0o700)
+            # G12B a scoped file without read permission is named, and the finding after it is still printed.
+            denied = tree({"d/a.md": "x\n", "d/b.md": em})
+            os.chmod(os.path.join(denied, "d", "a.md"), 0)
+            rc, out, err = scan(denied)
+            if (rc != 2 or "  d/a.md (Permission denied)" not in err.splitlines()
+                    or "  d/b.md:1:1: em dash" not in out.splitlines() or "PASS" in out):
+                failures.append(f"G12B unreadable scoped file: want exit 2, it named and the finding listed, "
+                                f"got {rc}: stdout {out.strip()[:200]!r}, stderr {err.strip()[:200]!r}")
         # G13 arguments: an unknown argument is exit 2 with the usage line, never a scan.
         for argv in (["check_no_dashes.py", "--bogus"], ["check_no_dashes.py", "--self-test", "x"],
                      ["check_no_dashes.py", "--default-parity", "x"]):
