@@ -416,6 +416,15 @@ class = "c"
 residue = "It checks that site/.well-known/security.txt and opf/site/.well-known/security.txt each exist as a regular file whose lines are exactly the 6 owner fields (Contact, Expires, Encryption, Policy, Preferred-Languages, Canonical) in that order, each once, with the owner's values and the Canonical URL of that root's own domain; a missing, unreadable, oversized, non-UTF-8 or not field-shaped file fails closed. It covers a recognizable SUBSET (class c, partial): it reads the repository only, so it does not show that Cloudflare serves the file, at that path, with a text/plain type, nor that the Contact, Encryption and Policy targets resolve, nor that the Expires date is still in the future at serving time. Its linkage to a single corpus rule is arguable, so none is claimed here."
 
 [[gate]]
+id = "record-readers"
+script = "tools/check_record_readers.py"
+rules = []
+platform = "ci"
+default = "block"
+class = "c"
+residue = "It reads every .py and .sh file under tools/ (skipping _vendor) and requires each one that names a record file, a registry key for a record, a command-line flag that takes a record path, or a record-reading module, as .aiqt/opf-consumer-switch.toml declares them, to be on that list with a disposition; an unlisted reader, a listed file that is gone, and a listed file no longer detected each fail, and a missing or malformed list or an unreadable, non-regular, symlinked, non-UTF-8 or unparseable source fails closed. It covers a recognizable SUBSET (class c, partial): the scan is static, so it does not see a path built at run time from parts, a path given only on a command line under a flag the list does not declare, record paths kept in the untracked orchestration registry, or a reader outside tools/ (opf/tools/ and the hook library are not scanned; the hook library is seen only when a tool imports it), and it does not see a read that names no declared file, key, flag or module. It does not check that a disposition is right, only that one is recorded. Its linkage to a single corpus rule is arguable, so none is claimed here."
+
+[[gate]]
 id = "sitemap"
 script = "tools/check_sitemap.py"
 rules = []
