@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "f40449e2613e81df4e2aa7c551651260ffb593473a8e06107bf18cfa606bde04"
+tree-sha256 = "31547e77ed10594085882dc477b7d36bd895a5a39b29563fea5f9518563d7702"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -41,8 +41,8 @@ sha256 = "15d8d9d85050558c0be30c9b5b591818f94d9a2aca057db681aa3ff0ba069c75"
 
 [[sources]]
 path = ".aiqt/core/clauses.toml"
-bytes = 313958
-sha256 = "b7e2d7fe1e1298d19b246e40b1a7b75e92e2a77dd2234d4df91c5cf25026fddf"
+bytes = 314205
+sha256 = "f7782fdb04a7f510a2cd30f3ebb6b0b6d9fa4aaadf3a497aff632b5b575fe3ea"
 
 [[sources]]
 path = ".aiqt/core/conformance/behaviour-checklist.md"
@@ -96,8 +96,8 @@ sha256 = "b8d02451c808defefad5462a05f78e04409408b238883d8384fe68badd05497f"
 
 [[sources]]
 path = ".aiqt/core/id-history.toml"
-bytes = 39163
-sha256 = "c9a92dd42cfcb033e26bd075c93481b0b51eb502ec4b3f7cd0ad361b0689cf59"
+bytes = 39213
+sha256 = "5da1da0502e1319733072963bacb8b27cfe824658e698f3441f206cd98415f84"
 
 [[sources]]
 path = ".aiqt/core/instruction-budget.toml"
@@ -241,8 +241,8 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 
 [[sources]]
 path = ".aiqt/core/rules/accur-verify-fix-in-commit.md"
-bytes = 6685
-sha256 = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
+bytes = 6689
+sha256 = "be54c0bf48a72d432409a9220b70d9aa05cd20e79bdef7c1679b900e07f42c22"
 
 [[sources]]
 path = ".aiqt/core/rules/cost-tier.md"
@@ -847,7 +847,7 @@ sha256 = "0fca72838333bd7d207d0430cbd416691e3dcd23dd71cb9fe9d0eed0da7d6608"
 [[sources]]
 path = ".aiqt/release/first-pin-demonstration.toml"
 bytes = 1104
-sha256 = "142b4ac57f326c4d30a677e45e6c4daddf3661259b0714f1747db59c3f8ff7dd"
+sha256 = "6f6f680c560503d2299107a1ed2e8ff90a8dabd8d9e6778923e31bb52ef599a3"
 
 [[sources]]
 path = ".aiqt/standards/README.md"
@@ -1061,8 +1061,8 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
-bytes = 6685
-sha256 = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
+bytes = 6689
+sha256 = "be54c0bf48a72d432409a9220b70d9aa05cd20e79bdef7c1679b900e07f42c22"
 
 [[sources]]
 path = ".claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
@@ -1731,8 +1731,8 @@ sha256 = "39450a642d366c83c20ca4e9d345afb163a2e76742bf758cbf11285f4866464d"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
-bytes = 6591
-sha256 = "b6a7eb197c245c08294d318df231ca38472891f91266cf844d2577f1c8208602"
+bytes = 6595
+sha256 = "393d67c3e9349db929809a22ed5049c2ed8f202ea365dfa050e1df05f222fc93"
 
 [[sources]]
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-INTEG-anything-wrong-fixed-first.mdc"
@@ -2311,8 +2311,8 @@ sha256 = "21fde9319bf20547792d6aa11a8d14c6cd93eb26b686ec0ea03035802ec0278a"
 
 [[sources]]
 path = ".github/copilot-instructions.md"
-bytes = 118344
-sha256 = "691af95f3c9d4027588d596789171785f5946b2fec5bf8df820a4c2e2dba16b1"
+bytes = 118348
+sha256 = "240cbe6565727f0c36aaaaab396f4006a4c925e62fa9b9adf33d422de9b3506e"
 
 [[sources]]
 path = ".preview/README.md"
@@ -2376,8 +2376,8 @@ sha256 = "35c65369b1609683e09b784681a23fab80a05e047c5f36abe5311f100b4f9394"
 
 [[sources]]
 path = "AGENTS.md"
-bytes = 118305
-sha256 = "4bf8d8ab972164cd9a26d3ac433eb1e7ccc834d1319c82e8e15b69a52311ab7b"
+bytes = 118309
+sha256 = "3555e6ef2dafc629e679942f83c8a1c31c1a029de204f4c72dcbe1380dd4022b"
 
 [[sources]]
 path = "CHANGELOG.md"
@@ -2396,8 +2396,8 @@ sha256 = "54aadb9a15178324e33a8100f5895861b022c643d0345fd00840a8cb1c3f59b0"
 
 [[sources]]
 path = "GEMINI.md"
-bytes = 118340
-sha256 = "1727df6305d9d62224d8c9c1836adbc02874a02e3f5cf8458d26947a150ae593"
+bytes = 118344
+sha256 = "5818253515c3a93a9cada6626d095d34356e02725f7d9e59d930579e25f8266d"
 
 [[sources]]
 path = "INSTRUCTION-BUDGET.md"
@@ -4827,7 +4827,7 @@ sha256 = "2981271ce9624a67f855d224b29fa51021e550b2a650b22c25223f3a70c91d3b"
 artifact-id = "rules:.claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
 path = ".claude/rules/aiqt/10-ACCUR-verify-fix-in-commit.md"
 kind = "file"
-sha256 = "a73ae1d01a49980fb063db638bab9b2b123d5dc64956d6d8b1ed27648c406d6d"
+sha256 = "be54c0bf48a72d432409a9220b70d9aa05cd20e79bdef7c1679b900e07f42c22"
 
 [[artifacts]]
 artifact-id = "rules:.claude/rules/aiqt/10-INTEG-anything-wrong-fixed-first.md"
@@ -5631,7 +5631,7 @@ sha256 = "39450a642d366c83c20ca4e9d345afb163a2e76742bf758cbf11285f4866464d"
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
 path = ".cursor/rules/aiqt-guardrails/aiqt/10-ACCUR-verify-fix-in-commit.mdc"
 kind = "file"
-sha256 = "b6a7eb197c245c08294d318df231ca38472891f91266cf844d2577f1c8208602"
+sha256 = "393d67c3e9349db929809a22ed5049c2ed8f202ea365dfa050e1df05f222fc93"
 
 [[artifacts]]
 artifact-id = "cursor:.cursor/rules/aiqt-guardrails/aiqt/10-INTEG-anything-wrong-fixed-first.mdc"
@@ -6321,13 +6321,13 @@ sha256 = "9e0e365fb1e2813246c724267ec062310de3be1c5ca4ad9cba37fa0ce5691af4"
 artifact-id = "adapters:.github/copilot-instructions.md"
 path = ".github/copilot-instructions.md"
 kind = "file"
-sha256 = "691af95f3c9d4027588d596789171785f5946b2fec5bf8df820a4c2e2dba16b1"
+sha256 = "240cbe6565727f0c36aaaaab396f4006a4c925e62fa9b9adf33d422de9b3506e"
 
 [[artifacts]]
 artifact-id = "agents:AGENTS.md"
 path = "AGENTS.md"
 kind = "file"
-sha256 = "4bf8d8ab972164cd9a26d3ac433eb1e7ccc834d1319c82e8e15b69a52311ab7b"
+sha256 = "3555e6ef2dafc629e679942f83c8a1c31c1a029de204f4c72dcbe1380dd4022b"
 
 [[artifacts]]
 artifact-id = "claude:CLAUDE.md#RULES-INDEX"
@@ -6340,7 +6340,7 @@ sha256 = "69fa723a2b2d476a15abfc4466eba99040bfaed3f0d990b265ca60d8fe184013"
 artifact-id = "adapters:GEMINI.md"
 path = "GEMINI.md"
 kind = "file"
-sha256 = "1727df6305d9d62224d8c9c1836adbc02874a02e3f5cf8458d26947a150ae593"
+sha256 = "5818253515c3a93a9cada6626d095d34356e02725f7d9e59d930579e25f8266d"
 
 [[artifacts]]
 artifact-id = "skill:site/downloads/aiqt-instructions.txt"
