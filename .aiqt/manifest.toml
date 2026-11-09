@@ -2,7 +2,7 @@
 format-version = 1
 release-version = "1.0.5"
 genesis = true
-tree-sha256 = "8eda585981ad6f32daa2d8c35811dc491cb6cda93ed21f8a905ff6d1f6030a14"
+tree-sha256 = "0def062ff4a8dd47d7e9ad5069f14fbd6c2852a06ee730c5bf0c8db5bf3384e9"
 
 [[sources]]
 path = ".aiqt/assurance-schema.md"
@@ -4381,8 +4381,8 @@ sha256 = "cd4f9e05ec6d743a5551448ec44141ef51ca0b5c42334ddebf41fe699e9093d5"
 
 [[sources]]
 path = "tools/check_shell_function_standins.py"
-bytes = 57111
-sha256 = "190c8c0353fe2b0eec1ca66d84b2d53adae97bf9426a56ae991b243d37a67a0f"
+bytes = 64423
+sha256 = "42eb81ecd53676246cedc4af69cf540d463f1aa44d162c28750e05bfb6cf4073"
 
 [[sources]]
 path = "tools/check_site.py"
