@@ -10451,9 +10451,10 @@ def _segment_has_gitdir_redirect(tokens):
     # then reads the session directory as its base (the GIT_DIR+= is itself a path redirect, so for a
     # destructive form it also asks git where that command lands, unless a non-cosmetic ambient GIT_*
     # variable denies first). A call that carries no cwd has no session directory, so there is no base: a
-    # destructive form denies (the GIT_DIR value cannot be shown to name the session repository's git dir),
-    # and a non-destructive form that no earlier rule denies allows with its note and takes no snapshot. The
-    # branch-root guard allows the creation with its cannot-pin note instead of probing the -C directory.
+    # destructive form denies when git is asked where it lands, since with no directory to run git from
+    # _segment_git_target returns None, and a non-destructive form that no earlier rule denies allows with its
+    # note and takes no snapshot. The branch-root guard allows the creation with its cannot-pin note instead
+    # of probing the -C directory.
     cw = _command_word_index(tokens)
     for tok in tokens[:cw]:
         if tok.startswith(("GIT_DIR=", "GIT_DIR+=")):
@@ -12403,9 +12404,10 @@ def git_discard(data):
         # The base read above without asking git (the -C directory, or the session directory beside a
         # --git-dir or a leading GIT_DIR= or GIT_DIR+=) also stays a floor under git's answer: when it lies in
         # another repository than the one git resolved, it is probed and, when not provably clean, snapshotted
-        # as well below. A failed snapshot there is allowed past, with the failure named, only when the repository git
-        # resolved, which the command acts on, was probed and is provably clean or was snapshotted
-        # successfully; otherwise it DENIES. The repository git resolved is snapshotted in either case.
+        # as well below. A failed snapshot there is allowed past, with the failure named, only when the
+        # repository git resolved, which the command acts on, was probed and is provably clean or was
+        # snapshotted successfully; otherwise it DENIES. The repository git resolved is snapshotted in either
+        # case.
         pre_base = pre_desc = None
         if redirect_base is not None and repo_dir != "opaque":
             if _snapshot_bases_differ(repo_dir if isinstance(repo_dir, str) else cwd_base, redirect_base):
