@@ -348,6 +348,12 @@ run_gate "git-option-table" python3 -I -B tools/check_git_option_table.py
 run_gate "dangerous-api-selftest" python3 -I -B tools/check_dangerous_api.py --self-test
 run_gate "dangerous-api" python3 -I -B tools/check_dangerous_api.py
 
+# Residue wording: a gate residue states what its suite checks, never how many checks it runs. A count
+# phrase (a numeral followed by a check-type noun) in a gates-manifest residue fails unless a reasoned
+# per-residue allowlist entry names it; an unreadable or unparseable manifest is cannot-evaluate.
+run_gate "residue-counts-selftest" python3 -I -B tools/check_residue_counts.py --self-test
+run_gate "residue-counts" python3 -I -B tools/check_residue_counts.py
+
 # QA-suite foundation: the discovery-seam / result-contract adapter, the trivial reference audit that
 # proves the harness end to end, and the internal-name leak gate. Their self-tests are gating (a broken
 # harness is a real failure); the internal-name scan is gating too.
