@@ -24,9 +24,10 @@
 #
 # The leak gate's scope is every file the gate scans: every file in the working tree except the .git,
 # node_modules and __pycache__ subtrees and any file named .git, node_modules or __pycache__. It fails
-# any such file, published or not, that names such a location on a line without the gate's leak-allow
-# marker; a file so named or inside those subtrees is not scanned. That marker exempts a line without
-# stating a reason, so it is not the reviewed allowlist entry the rule asks for.
+# any such file, published or not, that names such a location on a line without the gate's per-line
+# allow marker (defined by scan_text in tools/check_leaks.py); a file so named or inside those subtrees
+# is not scanned. That marker exempts a line without stating a reason, so it is not the reviewed
+# allowlist entry the rule asks for.
 
 version = 1
 
