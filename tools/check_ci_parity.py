@@ -512,7 +512,7 @@ thread inherits every descriptor still open at that moment, and an exec of a stu
 that any process holds open for writing fails ETXTBSY, exactly as _prepare_stubs
 states. That catches a reset or early exit that fires
 unconditionally or on one gate's failure in the stub environment. Residual masks
-include harness detection (stub_* variables, BASH_ENV, or SECONDS), environments the
+include harness detection (stub_* variables or SECONDS), environments the
 stubs do not produce (including gitleaks absent and the NOT RUN branch), and untested
 combinations of failing gates. Harness detection can hide even a single-gate reset;
 it does not require a combination of failures or the gitleaks NOT RUN branch.
@@ -4898,11 +4898,13 @@ SILENT_RUNNER_REVERT = (
     ('  echo "FAILED GATES: ${failed_names}"\n', ""),
 )
 
-# Stub gates for runner_naming_problems. Both record their calls; python3 fails only
-# the selected command, and gitleaks exits with the requested status. python3 is also a
-# shell function that bash loads through BASH_ENV before the runner starts; it shadows
-# the executable, saving a process per gate, and the executable remains the fallback.
-# _prepare_stubs writes them once, before the scenario pool starts; vector 27 pins that.
+# Stub gates for runner_naming_problems. Both are executable fixtures in the bin
+# directory at the head of PATH, and both record every call in the call log the
+# scenario checks against the declared roster; python3 fails only the selected
+# command, and gitleaks exits with the requested status. No shell function, alias or
+# BASH_ENV file stands in for either: every gate the runner launches by name execs the
+# fixture, one process per gate. _prepare_stubs writes them once, before the scenario
+# pool starts; vector 27 pins that.
 _STUB_PYTHON3 = """#!/bin/sh
 printf '%s\\n' "python3 $*" >> "$stub_log" || exit 2
 if [ "$*" = "$stub_fail_command" ]; then
@@ -4910,48 +4912,43 @@ if [ "$*" = "$stub_fail_command" ]; then
 fi
 exit 0
 """
-_STUB_PYTHON3_FUNCTION = """python3() {
-  printf '%s\\n' "python3 $*" >> "$stub_log" || return 2
-  if [ "$*" = "$stub_fail_command" ]; then
-    return 3
-  fi
-  return 0
-}
-"""
 _STUB_GITLEAKS = """#!/bin/sh
 printf '%s\\n' "gitleaks $*" >> "$stub_log" || exit 2
 exit "$stub_gitleaks_rc"
 """
 
 
-def _prepare_stubs(root):
-    """Write the stub gates once under root; return (bin directory, BASH_ENV file).
+def _prepare_stubs(root, python3=_STUB_PYTHON3):
+    """Write the stub gates once under root; return the bin directory that holds them.
 
-    Call this before any scenario thread starts and share the result read-only. execve
+    python3 is the body of the python3 fixture (cdpath_problems passes one that also
+    records the working directory). Call this before any scenario thread starts and
+    share the result read-only. execve
     of a file that any process holds open for writing fails ETXTBSY (bash reports exit
     126), and a child forked on another thread holds every descriptor open at that
     moment until it execs, so a stub written while scenarios run can be caught open by
     a sibling's fork. Scenario trees therefore hold only data that is never executed:
     the runner, which bash reads as its script argument, and the call log.
     """
-    functions = root / "stubs.bash"
-    functions.write_text(_STUB_PYTHON3_FUNCTION, encoding="utf-8")
-    functions.chmod(0o400)
     bin_dir = root / "bin"
     bin_dir.mkdir()
-    for name, body in (("python3", _STUB_PYTHON3), ("gitleaks", _STUB_GITLEAKS)):
+    for name, body in (("python3", python3), ("gitleaks", _STUB_GITLEAKS)):
         stub = bin_dir / name
         stub.write_text(body, encoding="utf-8")
         stub.chmod(0o500)
     bin_dir.chmod(0o500)
-    return bin_dir, functions
+    return bin_dir
 
 
-def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
+def _run_runner_copy(text, bin_dir, fail_command="", gitleaks_rc=0):
     """Run text as tools/run_all_checks.sh in a scratch tree; return (rc, stdout lines, calls).
 
-    stubs is the shared (bin directory, BASH_ENV file) pair from _prepare_stubs; nothing
-    this writes is executed.
+    bin_dir is the shared stub directory from _prepare_stubs; nothing this writes is
+    executed. PATH is bin_dir, then os.defpath: python3 and gitleaks resolve to the
+    fixtures, and the one other external command the live runner reaches, dirname,
+    runs for real from os.defpath. dirname only computes a string from its argument:
+    it reads no file, opens no connection and writes nothing, and the environment
+    carries no credential (HOME is the scratch tree).
     """
     import os
     import shutil
@@ -4961,7 +4958,6 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
     bash = shutil.which("bash")
     if bash is None:
         raise RuntimeError("bash not found")
-    bin_dir, functions = stubs
     with tempfile.TemporaryDirectory(prefix="ci-parity-runner-") as tmp:
         root = Path(tmp)
         (root / "tools").mkdir()
@@ -4971,7 +4967,6 @@ def _run_runner_copy(text, stubs, fail_command="", gitleaks_rc=0):
         log.write_text("", encoding="utf-8")
         env = dict(
             PATH=str(bin_dir) + os.pathsep + os.defpath,
-            BASH_ENV=str(functions),
             HOME=tmp,
             LC_ALL="C",
             stub_log=str(log),
@@ -5011,6 +5006,8 @@ def _dirname_guard_outcome(text, relative, scenario):
     Scenarios: "missing" (no dirname on PATH), "failed" (prints . and exits 7),
     "empty" (prints nothing and exits 0) and "control" (prints the runner's true
     directory). Every stub is written before the one launch, from this thread.
+    PATH names only fixture directories, so every command the runner looks up by
+    name reaches a fixture or is not found.
     """
     import os
     import shutil
@@ -5022,7 +5019,7 @@ def _dirname_guard_outcome(text, relative, scenario):
         raise RuntimeError("bash not found")
     with tempfile.TemporaryDirectory(prefix="ci-parity-dirname-") as tmp:
         root = Path(tmp)
-        bin_dir, functions = _prepare_stubs(root)
+        bin_dir = _prepare_stubs(root)
         runner = root / "tree" / relative
         runner.parent.mkdir(parents=True)
         runner.write_text(text, encoding="utf-8")
@@ -5039,7 +5036,7 @@ def _dirname_guard_outcome(text, relative, scenario):
             stub.chmod(0o500)
             path.insert(0, str(dirname_dir))
         log = root / "calls.log"
-        env = dict(PATH=os.pathsep.join(path), BASH_ENV=str(functions),
+        env = dict(PATH=os.pathsep.join(path),
                    HOME=tmp, LC_ALL="C", stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
                    stub_dirname_out=out, stub_dirname_rc=rc)
@@ -5107,12 +5104,12 @@ def dirname_guard_problems(text, relative):
     return problems
 
 
-# The python3 shell function for cdpath_problems: it also records the working
-# directory each gate launches from, so a moved root shows in the log.
-_STUB_PYTHON3_PWD_FUNCTION = """python3() {
-  printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || return 2
-  return 0
-}
+# The python3 executable fixture for cdpath_problems: it also records the working
+# directory each gate launches from ($PWD, which bash exports to the child), so a
+# moved root shows in the log.
+_STUB_PYTHON3_PWD = """#!/bin/sh
+printf '%s\\n' "$PWD python3 $*" >> "$stub_log" || exit 2
+exit 0
 """
 
 
@@ -5122,7 +5119,9 @@ def _cdpath_outcome(text, relative):
     return (rc, tree, decoy, logged gate lines).
 
     dirname prints the relative directory, as the real one does for a relative
-    $0. Every stub is written before the one launch, from this thread.
+    $0. Every stub is written before the one launch, from this thread. PATH
+    names only fixture directories, so every command the runner looks up by
+    name reaches a fixture or is not found.
     """
     import os
     import shutil
@@ -5134,10 +5133,7 @@ def _cdpath_outcome(text, relative):
         raise RuntimeError("bash not found")
     with tempfile.TemporaryDirectory(prefix="ci-parity-cdpath-") as tmp:
         root = Path(tmp)
-        bin_dir, _functions = _prepare_stubs(root)
-        functions = root / "stubs-pwd.bash"
-        functions.write_text(_STUB_PYTHON3_PWD_FUNCTION, encoding="utf-8")
-        functions.chmod(0o400)
+        bin_dir = _prepare_stubs(root, _STUB_PYTHON3_PWD)
         tree = root / "tree"
         runner = tree / relative
         runner.parent.mkdir(parents=True)
@@ -5151,7 +5147,7 @@ def _cdpath_outcome(text, relative):
         stub.chmod(0o500)
         log = root / "calls.log"
         env = dict(PATH=os.pathsep.join([str(dirname_dir), str(bin_dir)]),
-                   BASH_ENV=str(functions), HOME=tmp, LC_ALL="C",
+                   HOME=tmp, LC_ALL="C",
                    CDPATH=str(decoy), stub_log=str(log),
                    stub_fail_command="", stub_gitleaks_rc="0",
                    stub_dirname_out=str(Path(relative).parent), stub_dirname_rc="0")
@@ -5236,13 +5232,13 @@ def runner_naming_problems(text, first_only=False):
     with tempfile.TemporaryDirectory(prefix="ci-parity-stubs-") as shared:
         # Every executable exists, closed, before the pool does; see _prepare_stubs.
         try:
-            stubs = _prepare_stubs(Path(shared))
+            bin_dir = _prepare_stubs(Path(shared))
         except OSError as exc:
             return ["runner stubs could not be prepared: {!r}".format(exc)]
 
         def run(scenario):
             try:
-                return _run_runner_copy(text, stubs, scenario[1], scenario[2])
+                return _run_runner_copy(text, bin_dir, scenario[1], scenario[2])
             except Exception as exc:  # no bash, a scratch-tree error, or a timeout
                 return exc
 
@@ -5256,7 +5252,7 @@ def runner_naming_problems(text, first_only=False):
                     if first_only and problems:
                         break
         finally:
-            stubs[0].chmod(0o700)  # so the shared directory can be removed
+            bin_dir.chmod(0o700)  # so the shared directory can be removed
     return problems
 
 
