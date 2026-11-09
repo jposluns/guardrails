@@ -195,12 +195,12 @@ reason = "Names a common shape of the failure chkfcl.3 forbids and restates that
 [[exempt]]
 corpus-id = "expbnd"
 text = "Ambient context is inherited mutable state not named at the point\nof use: the current working directory, the current tree or index state, the process environment, the\nwall clock, and the order in which results arrive or complete."
-reason = "Defines the ambient context that expbnd.1 to expbnd.5 govern; no obligation of its own."
+reason = "Defines the ambient context that expbnd.1 to expbnd.6 govern; no obligation of its own."
 
 [[exempt]]
 corpus-id = "expbnd"
-text = "This manifests in three recurring forms."
-reason = "Signpost to the three forms that expbnd.2 to expbnd.4 govern; no obligation of its own."
+text = "This manifests in four recurring forms."
+reason = "Signpost to the four forms that expbnd.2 to expbnd.4 and expbnd.6 govern; no obligation of its own."
 
 [[exempt]]
 corpus-id = "expbnd"
